@@ -34,7 +34,8 @@ pub struct AppServer {
     identity: String,
     started_at: u64,
     bound_tcp: Mutex<Vec<String>>,
-    active_tcp_streams: Mutex<Vec<std::net::TcpStream>>,
+    next_tcp_conn_id: std::sync::atomic::AtomicU64,
+    active_tcp_streams: Mutex<std::collections::HashMap<u64, std::net::TcpStream>>,
     store: Mutex<Store>,
     config: RwLock<Config>,
     cli: PathBuf,
@@ -633,7 +634,8 @@ impl AppServer {
             identity,
             started_at: now(),
             bound_tcp: Mutex::new(Vec::new()),
-            active_tcp_streams: Mutex::new(Vec::new()),
+            next_tcp_conn_id: std::sync::atomic::AtomicU64::new(1),
+            active_tcp_streams: Mutex::new(std::collections::HashMap::new()),
             home,
             store: Mutex::new(store),
             config: RwLock::new(config),
@@ -760,7 +762,7 @@ impl AppServer {
         self.bound_tcp.lock().unwrap().clone()
     }
     pub(crate) fn close_active_tcp_streams(&self) {
-        for s in self.active_tcp_streams.lock().unwrap().drain(..) {
+        for (_, s) in self.active_tcp_streams.lock().unwrap().drain() {
             let _ = s.shutdown(std::net::Shutdown::Both);
         }
     }
@@ -963,7 +965,7 @@ pub fn rpc(endpoint: &Path, method: &str, params: Value) -> Result<Value> {
     }
     let mut stream = UnixStream::connect(endpoint)
         .with_context(|| format!("Canban is not running at {}", endpoint.display()))?;
-    stream.set_read_timeout(Some(Duration::from_secs(90)))?;
+    stream.set_read_timeout(Some(client::rpc_read_timeout(method)))?;
     writeln!(
         stream,
         "{}",

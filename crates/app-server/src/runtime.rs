@@ -3,6 +3,23 @@ pub(super) fn uuid_session_id() -> String {
     canban_types::uuid_v4()
 }
 
+pub(super) struct ActiveTcpStreamGuard {
+    server: std::sync::Weak<AppServer>,
+    conn_id: u64,
+}
+
+impl Drop for ActiveTcpStreamGuard {
+    fn drop(&mut self) {
+        if let Some(server) = self.server.upgrade() {
+            server
+                .active_tcp_streams
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&self.conn_id);
+        }
+    }
+}
+
 impl AppServer {
     pub fn start(self: &Arc<Self>) -> Result<Running> {
         self.start_with_listen(None)
@@ -186,12 +203,25 @@ impl AppServer {
                         }
                         match tcp_listener.accept() {
                             Ok((stream, _)) => {
-                                if let Ok(cloned) = stream.try_clone() {
-                                    server.active_tcp_streams.lock().unwrap().push(cloned);
+                                let conn_id =
+                                    server.next_tcp_conn_id.fetch_add(1, Ordering::Relaxed);
+                                {
+                                    let mut active = server.active_tcp_streams.lock().unwrap();
+                                    if server.stopped() {
+                                        let _ = stream.shutdown(std::net::Shutdown::Both);
+                                        break;
+                                    }
+                                    if let Ok(cloned) = stream.try_clone() {
+                                        active.insert(conn_id, cloned);
+                                    }
                                 }
                                 let weak_conn = Arc::downgrade(&server);
+                                let guard = ActiveTcpStreamGuard {
+                                    server: weak_conn.clone(),
+                                    conn_id,
+                                };
                                 std::thread::spawn(move || {
-                                    let _ = AppServer::serve_tcp_weak(weak_conn, stream);
+                                    let _ = AppServer::serve_tcp_weak(weak_conn, stream, guard);
                                 });
                             }
                             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -320,6 +350,7 @@ impl AppServer {
     pub(super) fn serve_tcp_weak(
         weak: std::sync::Weak<Self>,
         mut stream: std::net::TcpStream,
+        _active_guard: ActiveTcpStreamGuard,
     ) -> Result<()> {
         stream.set_nonblocking(false)?;
         let _ = stream.set_nodelay(true);
@@ -1413,5 +1444,101 @@ impl AppServer {
         })?;
         self.emit("execution", Some(card_id));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_tcp_streams_are_removed_immediately_after_client_disconnect_or_auth_rejection() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let app = AppServer::open(home.clone(), PathBuf::from("/bin/echo")).unwrap();
+        app.config.write().unwrap().hc = "/usr/bin/false".into();
+        let running = app
+            .start_with_listen(Some(ServerListenConfig {
+                tailscale: false,
+                port: 0,
+                listen: Some("127.0.0.1:0".into()),
+            }))
+            .unwrap();
+        let addr = app.bound_tcp_addrs().into_iter().next().unwrap();
+        let token = network::read_server_token(&home).unwrap();
+
+        // 1. Open an idle authenticated TCP socket and verify it is tracked while open.
+        let mut live_stream = std::net::TcpStream::connect(&addr).unwrap();
+        live_stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        writeln!(
+            live_stream,
+            "{}",
+            json!({"jsonrpc":"2.0","id":1,"method":"app.ping","params":{},"auth":token})
+        )
+        .unwrap();
+        live_stream.flush().unwrap();
+        let mut reply = String::new();
+        BufReader::new(live_stream.try_clone().unwrap())
+            .read_line(&mut reply)
+            .unwrap();
+        assert!(reply.contains("\"api_version\""));
+        assert_eq!(app.active_tcp_streams.lock().unwrap().len(), 1);
+
+        // Close the live client socket and wait for the handler thread to observe EOF.
+        drop(live_stream);
+        let wait_empty = || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            while std::time::Instant::now() < deadline {
+                if app.active_tcp_streams.lock().unwrap().is_empty() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            false
+        };
+        assert!(
+            wait_empty(),
+            "active_tcp_streams leaked after client closed TCP socket"
+        );
+
+        // 2. Churn short-lived probes, auth failures, and one-shot RPCs (simulating ApiMismatch
+        //    probing / health checks) and verify zero sockets remain in active_tcp_streams.
+        for _ in 0..15 {
+            let probe = network::probe_tcp_host(&addr, Duration::from_secs(3)).unwrap();
+            assert_eq!(probe["server_id"], app.server_id());
+
+            let bad_auth = client::rpc_tcp(&addr, Some("invalid-token"), "app.ping", json!({}));
+            assert!(bad_auth.is_err());
+
+            let ping = client::rpc_tcp(&addr, Some(&token), "app.ping", json!({})).unwrap();
+            assert_eq!(ping["server_id"], app.server_id());
+        }
+        assert!(
+            wait_empty(),
+            "active_tcp_streams accumulated leaked descriptors across short-lived TCP RPCs"
+        );
+
+        // 3. Verify shutdown still unblocks an actively open idle TCP connection cleanly.
+        let mut held = std::net::TcpStream::connect(&addr).unwrap();
+        held.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        writeln!(
+            held,
+            "{}",
+            json!({"jsonrpc":"2.0","id":1,"method":"host.probe","params":{}})
+        )
+        .unwrap();
+        held.flush().unwrap();
+        let mut probe_line = String::new();
+        let mut held_reader = BufReader::new(held.try_clone().unwrap());
+        held_reader.read_line(&mut probe_line).unwrap();
+        assert!(!app.active_tcp_streams.lock().unwrap().is_empty());
+
+        drop(running);
+        let mut eof_line = String::new();
+        let n = held_reader.read_line(&mut eof_line).unwrap_or(0);
+        assert_eq!(n, 0);
+        assert!(wait_empty());
     }
 }

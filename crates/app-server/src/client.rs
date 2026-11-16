@@ -21,6 +21,17 @@ enum ClientStream {
     },
 }
 
+pub(crate) const DEFAULT_RPC_READ_TIMEOUT: Duration = Duration::from_secs(90);
+pub(crate) const DAEMON_UPDATE_RPC_READ_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
+pub(crate) fn rpc_read_timeout(method: &str) -> Duration {
+    if method == "update.daemon" {
+        DAEMON_UPDATE_RPC_READ_TIMEOUT
+    } else {
+        DEFAULT_RPC_READ_TIMEOUT
+    }
+}
+
 struct RpcConn {
     stream: ClientStream,
     next_id: u64,
@@ -32,8 +43,8 @@ impl RpcConn {
             ClientEndpoint::Unix(path) => {
                 let writer = UnixStream::connect(path)
                     .with_context(|| format!("Canban is not running at {}", path.display()))?;
-                writer.set_read_timeout(Some(Duration::from_secs(90)))?;
-                writer.set_write_timeout(Some(Duration::from_secs(90)))?;
+                writer.set_read_timeout(Some(DEFAULT_RPC_READ_TIMEOUT))?;
+                writer.set_write_timeout(Some(DEFAULT_RPC_READ_TIMEOUT))?;
                 let reader = BufReader::new(writer.try_clone()?);
                 Ok(Self {
                     stream: ClientStream::Unix { writer, reader },
@@ -49,8 +60,8 @@ impl RpcConn {
                 let writer = TcpStream::connect_timeout(&sock_addr, Duration::from_secs(10))
                     .with_context(|| format!("Canban is not reachable at {addr}"))?;
                 let _ = writer.set_nodelay(true);
-                writer.set_read_timeout(Some(Duration::from_secs(90)))?;
-                writer.set_write_timeout(Some(Duration::from_secs(90)))?;
+                writer.set_read_timeout(Some(DEFAULT_RPC_READ_TIMEOUT))?;
+                writer.set_write_timeout(Some(DEFAULT_RPC_READ_TIMEOUT))?;
                 let reader = BufReader::new(writer.try_clone()?);
                 Ok(Self {
                     stream: ClientStream::Tcp {
@@ -67,6 +78,8 @@ impl RpcConn {
     fn call(&mut self, method: &str, params: &Value) -> Result<Value> {
         let req_id = self.next_id;
         self.next_id += 1;
+        let read_timeout = rpc_read_timeout(method);
+        let extended_timeout = read_timeout != DEFAULT_RPC_READ_TIMEOUT;
         let mut line = String::new();
         match &mut self.stream {
             ClientStream::Unix { writer, reader } => {
@@ -76,7 +89,18 @@ impl RpcConn {
                     json!({"jsonrpc":"2.0","id":req_id,"method":method,"params":params})
                 )?;
                 writer.flush()?;
-                let n = reader.read_line(&mut line)?;
+                if extended_timeout {
+                    writer.set_read_timeout(Some(read_timeout))?;
+                    reader.get_ref().set_read_timeout(Some(read_timeout))?;
+                }
+                let read_res = reader.read_line(&mut line);
+                if extended_timeout {
+                    let _ = writer.set_read_timeout(Some(DEFAULT_RPC_READ_TIMEOUT));
+                    let _ = reader
+                        .get_ref()
+                        .set_read_timeout(Some(DEFAULT_RPC_READ_TIMEOUT));
+                }
+                let n = read_res?;
                 if n == 0 {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
@@ -102,7 +126,18 @@ impl RpcConn {
                     })
                 )?;
                 writer.flush()?;
-                let n = reader.read_line(&mut line)?;
+                if extended_timeout {
+                    writer.set_read_timeout(Some(read_timeout))?;
+                    reader.get_ref().set_read_timeout(Some(read_timeout))?;
+                }
+                let read_res = reader.read_line(&mut line);
+                if extended_timeout {
+                    let _ = writer.set_read_timeout(Some(DEFAULT_RPC_READ_TIMEOUT));
+                    let _ = reader
+                        .get_ref()
+                        .set_read_timeout(Some(DEFAULT_RPC_READ_TIMEOUT));
+                }
+                let n = read_res?;
                 if n == 0 {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
@@ -692,5 +727,71 @@ mod tests {
         assert!(canban_updater::backend_order(&json!({"api_version":API_VERSION-1}), &app).is_lt());
         assert!(canban_updater::backend_order(&json!({"api_version":API_VERSION}), &app).is_eq());
         assert!(canban_updater::backend_order(&json!({"api_version":API_VERSION+1}), &app).is_gt());
+    }
+
+    #[test]
+    fn update_daemon_extends_read_timeout_and_restores_default_after_reply() {
+        assert_eq!(
+            rpc_read_timeout("update.daemon"),
+            DAEMON_UPDATE_RPC_READ_TIMEOUT
+        );
+        assert_eq!(rpc_read_timeout("app.ping"), DEFAULT_RPC_READ_TIMEOUT);
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let (req_seen_tx, req_seen_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            req_seen_tx.send(line).unwrap();
+            release_rx.recv().unwrap();
+            writeln!(
+                stream,
+                "{}",
+                json!({"jsonrpc":"2.0","id":1,"result":{"updated":true}})
+            )
+            .unwrap();
+            stream.flush().unwrap();
+        });
+
+        let mut conn = RpcConn::connect(&ClientEndpoint::Tcp {
+            addr,
+            token: "test-token".into(),
+        })
+        .unwrap();
+        let probe_fd = match &conn.stream {
+            ClientStream::Tcp { reader, .. } => reader.get_ref().try_clone().unwrap(),
+            ClientStream::Unix { .. } => unreachable!(),
+        };
+        assert_eq!(
+            probe_fd.read_timeout().unwrap(),
+            Some(DEFAULT_RPC_READ_TIMEOUT)
+        );
+
+        let caller = std::thread::spawn(move || {
+            let res = conn.call("update.daemon", &json!({})).unwrap();
+            let after = match &conn.stream {
+                ClientStream::Tcp { reader, .. } => reader.get_ref().read_timeout().unwrap(),
+                ClientStream::Unix { .. } => unreachable!(),
+            };
+            (res, after)
+        });
+
+        let raw_req = req_seen_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(raw_req.contains("\"update.daemon\""));
+        assert_eq!(
+            probe_fd.read_timeout().unwrap(),
+            Some(DAEMON_UPDATE_RPC_READ_TIMEOUT)
+        );
+        release_tx.send(()).unwrap();
+
+        let (res, restored_timeout) = caller.join().unwrap();
+        server.join().unwrap();
+        assert_eq!(res["updated"], true);
+        assert_eq!(restored_timeout, Some(DEFAULT_RPC_READ_TIMEOUT));
     }
 }

@@ -35,11 +35,19 @@ impl AppServer {
                 let ui_pid = p["ui_pid"].as_u64().context("UI process ID required")?;
                 ensure!(ui_pid <= u32::MAX as u64, "Invalid UI process ID");
                 let process = canban_updater::worker::process(ui_pid as u32)?;
-                let ui = self.cli.with_file_name("canban-ui");
+                let active_cli = resolve_active_cli_path(&self.home, &self.cli);
+                let ui_raw = self.cli.with_file_name("canban-ui");
+                let ui_active = canban_updater::worker::bundle_root(&active_cli)
+                    .map(|b| canban_updater::bundle_ui(&b))
+                    .unwrap_or_else(|_| active_cli.with_file_name("canban-ui"));
+                let matches_raw = ui_raw
+                    .to_str()
+                    .is_some_and(|s| process.identity.contains(s));
+                let matches_active = ui_active
+                    .to_str()
+                    .is_some_and(|s| process.identity.contains(s));
                 ensure!(
-                    process
-                        .identity
-                        .contains(ui.to_str().context("Invalid UI path")?),
+                    matches_raw || matches_active,
                     "Only this AppServer's packaged UI can install an update"
                 );
                 let operation = canban_updater::lock(&self.home, "operation.lock")?;
@@ -51,7 +59,7 @@ impl AppServer {
                 state.progress = 0;
                 canban_updater::save_state(&self.home, &state)?;
                 let home = self.home.clone();
-                let cli = self.cli.clone();
+                let cli = active_cli;
                 let github = self.github.clone();
                 let app_id = p["app_id"]
                     .as_str()
@@ -284,9 +292,12 @@ fn is_local_ui_running(bundle: &Path, home: &Path) -> bool {
             let exe_matches = std::fs::read_link(format!("/proc/{pid_str}/exe"))
                 .ok()
                 .is_some_and(|exe| {
-                    let raw = exe.to_string_lossy();
-                    let clean = Path::new(raw.strip_suffix(" (deleted)").unwrap_or(&raw));
-                    clean == ui_bin || clean == ui_canon
+                    let clean = strip_deleted_suffix(&exe);
+                    let mapped = map_retired_bundle_binary(&clean);
+                    clean == ui_bin
+                        || clean == ui_canon
+                        || mapped.as_deref() == Some(ui_bin.as_path())
+                        || mapped.as_deref() == Some(ui_canon.as_path())
                 });
             let cmdline_matches = !exe_matches
                 && std::fs::read(format!("/proc/{pid_str}/cmdline"))
@@ -374,6 +385,220 @@ fn is_local_ui_running(bundle: &Path, home: &Path) -> bool {
     }
 }
 
+fn strip_deleted_suffix(path: &Path) -> PathBuf {
+    if let Some(s) = path.to_str()
+        && let Some(stripped) = s.strip_suffix(" (deleted)")
+    {
+        return PathBuf::from(stripped);
+    }
+    let lossy = path.to_string_lossy();
+    if let Some(stripped) = lossy.strip_suffix(" (deleted)") {
+        return PathBuf::from(stripped);
+    }
+    path.to_path_buf()
+}
+
+/// If `path` points inside a retired/staged backup bundle directory created by an earlier
+/// in-place installation swap (e.g. `.canban-install-*/canban-previous/bin/canban` or
+/// `.canban-previous-*/bin/canban`), map it to the corresponding binary inside sibling `canban/`
+/// (or `Canban.app`).
+fn map_retired_bundle_binary(path: &Path) -> Option<PathBuf> {
+    let clean = strip_deleted_suffix(path);
+    let comps: Vec<std::path::Component<'_>> = clean.components().collect();
+    let mut prefix = PathBuf::new();
+    for (idx, comp) in comps.iter().enumerate() {
+        let std::path::Component::Normal(os) = comp else {
+            prefix.push(comp.as_os_str());
+            continue;
+        };
+        if let Some(name) = os.to_str() {
+            if name.starts_with(".canban-install-") {
+                let rest = &comps[idx + 1..];
+                let Some(std::path::Component::Normal(inner_os)) = rest.first() else {
+                    return None;
+                };
+                let inner_name = inner_os.to_str()?;
+                let tail: PathBuf = rest[1..].iter().map(|c| c.as_os_str()).collect();
+                if tail.as_os_str().is_empty() {
+                    return None;
+                }
+                if inner_name.ends_with(".app") {
+                    return Some(prefix.join("Canban.app").join(tail));
+                }
+                if matches!(inner_name, "canban-previous" | "canban" | "stage") {
+                    return Some(prefix.join("canban").join(tail));
+                }
+            }
+            let is_linux_retired = (name.starts_with(".canban-previous-")
+                || name.starts_with(".canban-prev-")
+                || name.starts_with(".canban-failed-")
+                || name.starts_with(".canban-next-")
+                || name == "canban-previous")
+                && !name.ends_with(".app");
+            if is_linux_retired {
+                let tail: PathBuf = comps[idx + 1..].iter().map(|c| c.as_os_str()).collect();
+                if tail.as_os_str().is_empty() {
+                    return None;
+                }
+                return Some(prefix.join("canban").join(tail));
+            }
+            let is_macos_retired = (name.starts_with(".Canban-previous-")
+                || name.starts_with(".Canban-failed-")
+                || name.starts_with(".Canban-next-")
+                || name == "Canban-previous.app")
+                && name.ends_with(".app");
+            if is_macos_retired {
+                let tail: PathBuf = comps[idx + 1..].iter().map(|c| c.as_os_str()).collect();
+                if tail.as_os_str().is_empty() {
+                    return None;
+                }
+                return Some(prefix.join("Canban.app").join(tail));
+            }
+        }
+        prefix.push(os);
+    }
+    None
+}
+
+fn first_systemd_token(raw: &str) -> Option<String> {
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            } else if c == '\\' && q == '"' {
+                if let Some(next) = chars.next() {
+                    cur.push(next);
+                }
+            } else {
+                cur.push(c);
+            }
+        } else if c == '"' || c == '\'' {
+            quote = Some(c);
+        } else if c == '\\' {
+            if let Some(next) = chars.next() {
+                cur.push(next);
+            }
+        } else if c.is_whitespace() {
+            if !cur.is_empty() {
+                return Some(cur);
+            }
+        } else {
+            cur.push(c);
+        }
+    }
+    (!cur.is_empty()).then_some(cur)
+}
+
+fn parse_systemd_exec_start_binary(unit_body: &str) -> Option<PathBuf> {
+    let mut exec_bin: Option<PathBuf> = None;
+    for raw_line in unit_body.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("ExecStart=") else {
+            continue;
+        };
+        let rest = rest.trim();
+        if rest.is_empty() {
+            exec_bin = None;
+            continue;
+        }
+        let rest = rest
+            .trim_start_matches(['@', '-', ':', '+', '!'])
+            .trim_start();
+        if let Some(first) = first_systemd_token(rest)
+            && !first.is_empty()
+        {
+            exec_bin = Some(PathBuf::from(first));
+        }
+    }
+    exec_bin
+}
+
+fn systemd_exec_start_cli(home: &Path) -> Option<PathBuf> {
+    if !canban_updater::worker::systemd_manages_home(home) {
+        return None;
+    }
+    let user_home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut candidates = Vec::new();
+    if let Some(uh) = &user_home {
+        let config_root = std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| uh.join(".config"));
+        candidates.push(config_root.join("systemd/user/canban.service"));
+    }
+    if let Some(p) = network::service_status(home)["unit_path"].as_str() {
+        let pb = PathBuf::from(p);
+        if !candidates.contains(&pb) {
+            candidates.push(pb);
+        }
+    }
+    for unit_path in candidates {
+        if let Ok(unit_body) = std::fs::read_to_string(&unit_path)
+            && let Some(bin) = parse_systemd_exec_start_binary(&unit_body)
+        {
+            return Some(bin);
+        }
+    }
+    None
+}
+
+fn resolve_active_cli_path(home: &Path, cli_path: &Path) -> PathBuf {
+    let symlink_target = std::fs::symlink_metadata(cli_path)
+        .ok()
+        .filter(|m| m.file_type().is_symlink())
+        .and_then(|_| std::fs::read_link(cli_path).ok())
+        .map(|target| {
+            if target.is_absolute() {
+                target
+            } else {
+                cli_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(target)
+            }
+        });
+
+    let retired_sibling = map_retired_bundle_binary(cli_path).or_else(|| {
+        symlink_target
+            .as_deref()
+            .and_then(map_retired_bundle_binary)
+    });
+
+    if retired_sibling.is_none() && cli_path.exists() {
+        return cli_path.to_path_buf();
+    }
+
+    if let Some(systemd_cli) = systemd_exec_start_cli(home) {
+        if let Some(mapped) = map_retired_bundle_binary(&systemd_cli)
+            && mapped.exists()
+        {
+            return mapped;
+        }
+        if systemd_cli.exists() {
+            return systemd_cli;
+        }
+    }
+
+    if let Some(sibling) = retired_sibling
+        && sibling.exists()
+    {
+        return sibling;
+    }
+
+    let clean = strip_deleted_suffix(cli_path);
+    if clean != cli_path && clean.exists() {
+        return clean;
+    }
+
+    cli_path.to_path_buf()
+}
+
 fn apply_daemon_update(
     home: &Path,
     cli_path: &Path,
@@ -381,11 +606,13 @@ fn apply_daemon_update(
     target_version: Option<&str>,
     gh_client: Option<&canban_github::Client>,
 ) -> Result<Option<(String, u32, PathBuf)>> {
-    // Coexistence guard: if `cli_path` (which resolves `/proc/self/exe` through `~/.local/bin/canban`
-    // symlinks!) belongs to a full Canban desktop bundle (`~/.local/opt/canban` or `Canban.app`),
-    // NEVER overwrite `bin/canban` alone with a CLI-only tarball, which would break DESKTOP_API
-    // parity with sibling `canban-ui` and `canban-updater`.
-    if let Ok(target_bundle) = canban_updater::worker::bundle_root(cli_path) {
+    let active_cli = resolve_active_cli_path(home, cli_path);
+    // Coexistence guard: if `active_cli` (which resolves `/proc/self/exe` through `~/.local/bin/canban`
+    // symlinks and recovers from deleted/moved `canban-previous` paths!) belongs to a full Canban
+    // desktop bundle (`~/.local/opt/canban` or `Canban.app`), NEVER overwrite `bin/canban` alone
+    // with a CLI-only tarball, which would break DESKTOP_API parity with sibling `canban-ui` and
+    // `canban-updater`.
+    if let Ok(target_bundle) = canban_updater::worker::bundle_root(&active_cli) {
         ensure!(
             !is_local_ui_running(&target_bundle, home),
             "A Canban desktop window is currently open on this host ({}). Install the update from the desktop app or close Canban before updating the daemon remotely.",
@@ -414,13 +641,13 @@ fn apply_daemon_update(
         )));
     }
 
-    let resolved_cli = if std::fs::symlink_metadata(cli_path)
+    let resolved_cli = if std::fs::symlink_metadata(&active_cli)
         .map(|m| m.file_type().is_symlink())
         .unwrap_or(false)
     {
-        std::fs::canonicalize(cli_path).unwrap_or_else(|_| cli_path.to_path_buf())
+        std::fs::canonicalize(&active_cli).unwrap_or_else(|_| active_cli.clone())
     } else {
-        cli_path.to_path_buf()
+        active_cli
     };
     ensure!(
         !resolved_cli.with_file_name("canban-ui").is_file(),
@@ -702,5 +929,210 @@ mod tests {
         );
         let symlink_target = std::fs::read_to_string(bin_links.join("canban")).unwrap();
         assert!(symlink_target.contains("v2-cli"));
+    }
+
+    #[test]
+    fn daemon_update_recovers_live_bundle_when_proc_self_exe_points_to_deleted_or_moved_previous() {
+        let _env = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let opt = dir.path().join(".local/opt");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(opt.join("canban/bin")).unwrap();
+
+        std::fs::write(
+            opt.join("canban/bundle.json"),
+            b"{\"app_id\":\"com.canban.desktop\",\"version\":\"20261115-1\"}\n",
+        )
+        .unwrap();
+        std::fs::write(opt.join("canban/bin/canban"), b"#!/bin/sh\nprintf 'v1'\n").unwrap();
+        std::fs::write(opt.join("canban/bin/canban-ui"), b"#!/bin/sh\n# v1-ui\n").unwrap();
+        std::fs::write(
+            opt.join("canban/bin/canban-updater"),
+            b"#!/bin/sh\n# v1-updater\n",
+        )
+        .unwrap();
+        for name in ["canban", "canban-ui", "canban-updater"] {
+            std::fs::set_permissions(
+                opt.join("canban/bin").join(name),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+
+        // Verify direct path resolution for:
+        // 1) Linux `/proc/self/exe` deleted install staging path (`.../.canban-install-xxx/canban-previous/bin/canban (deleted)`)
+        let deleted_install_cli =
+            opt.join(".canban-install-9a8b7c/canban-previous/bin/canban (deleted)");
+        assert_eq!(
+            resolve_active_cli_path(&home, &deleted_install_cli),
+            opt.join("canban/bin/canban")
+        );
+
+        // 2) Moved `.canban-previous-<tok>/bin/canban` even when the backup directory still exists on disk!
+        let moved_prev_dir = opt.join(".canban-previous-oldtok");
+        std::fs::create_dir_all(moved_prev_dir.join("bin")).unwrap();
+        std::fs::write(moved_prev_dir.join("bundle.json"), b"{}\n").unwrap();
+        std::fs::write(moved_prev_dir.join("bin/canban"), b"#!/bin/sh\n# old\n").unwrap();
+        assert_eq!(
+            resolve_active_cli_path(&home, &moved_prev_dir.join("bin/canban")),
+            opt.join("canban/bin/canban")
+        );
+
+        // 3) Standalone CLI binary replaced in-place (`.../canban (deleted)`)
+        let standalone_dir = dir.path().join("standalone");
+        std::fs::create_dir_all(&standalone_dir).unwrap();
+        std::fs::write(standalone_dir.join("canban"), b"#!/bin/sh\n").unwrap();
+        assert_eq!(
+            resolve_active_cli_path(&home, &standalone_dir.join("canban (deleted)")),
+            standalone_dir.join("canban")
+        );
+
+        // 4) systemd `ExecStart=` parser handles quotes, prefixes, and empty resets.
+        assert_eq!(
+            parse_systemd_exec_start_binary(
+                "[Service]\nExecStart=/old/path\nExecStart=\nExecStart=-@\"/home/u/.local/bin/canban\" --home \"/home/u/.canban\" serve\n"
+            ),
+            Some(PathBuf::from("/home/u/.local/bin/canban"))
+        );
+
+        // 5) Full end-to-end `apply_daemon_update` when `cli_path` is an unlinked
+        //    `.canban-install-xxx/canban-previous/bin/canban (deleted)` path!
+        let current = canban_updater::Build {
+            version: "20261115-1".into(),
+            commit: "1111111111111111111111111111111111111111".into(),
+            schema: canban_storage::migrations::CURRENT,
+            api: API_VERSION,
+            platform: "linux-x86_64".into(),
+        };
+        let next_build = canban_updater::Build {
+            version: "20261116-9".into(),
+            commit: "3333333333333333333333333333333333333333".into(),
+            schema: canban_storage::migrations::CURRENT,
+            api: API_VERSION + 1,
+            platform: "linux-x86_64".into(),
+        };
+
+        let cand_src = dir.path().join("cand-src-prev");
+        std::fs::create_dir_all(cand_src.join("bin")).unwrap();
+        std::fs::write(
+            cand_src.join("bundle.json"),
+            serde_json::to_vec_pretty(&json!({
+                "app_id": "com.canban.desktop",
+                "version": next_build.version,
+                "commit": next_build.commit,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let next_cli_script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"build-info\" ]; then printf '%s\\n' '{}'; exit 0; fi\nprintf 'v3-cli'\n",
+            serde_json::to_string(&next_build).unwrap()
+        );
+        std::fs::write(cand_src.join("bin/canban"), next_cli_script.as_bytes()).unwrap();
+        std::fs::write(cand_src.join("bin/canban-ui"), b"#!/bin/sh\n# v3-ui\n").unwrap();
+        std::fs::write(
+            cand_src.join("bin/canban-updater"),
+            b"#!/bin/sh\n# v3-updater\n",
+        )
+        .unwrap();
+        for name in ["canban", "canban-ui", "canban-updater"] {
+            std::fs::set_permissions(
+                cand_src.join("bin").join(name),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+        let zst_path = dir.path().join("Canban-linux-x86_64.tar.zst");
+        canban_updater::feed::pack(&cand_src, &zst_path).unwrap();
+        let zst_bytes = std::fs::read(&zst_path).unwrap();
+        let zst_sha = canban_updater::feed::sha256_hex(&zst_bytes);
+        let zst_size = zst_bytes.len() as u64;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let manifest_json = serde_json::to_vec(&json!({
+            "version": next_build.version,
+            "commit": next_build.commit,
+            "platform": "linux-x86_64",
+            "api": next_build.api,
+            "schema": next_build.schema,
+            "rollback_floor": 8,
+            "asset": "Canban-linux-x86_64.tar.zst",
+            "size": zst_size,
+            "sha256": zst_sha,
+        }))
+        .unwrap();
+        let releases_json = serde_json::to_vec(&json!([{
+            "draft": false,
+            "tag_name": next_build.version,
+            "body": "notes",
+            "assets": [
+                {
+                    "name": "Canban-linux-x86_64.tar.zst",
+                    "size": zst_size,
+                    "browser_download_url": format!("http://{addr}/Canban-linux-x86_64.tar.zst"),
+                },
+                {
+                    "name": "manifest-linux-x86_64.json",
+                    "size": manifest_json.len(),
+                    "browser_download_url": format!("http://{addr}/manifest-linux-x86_64.json"),
+                }
+            ]
+        }]))
+        .unwrap();
+
+        let server_thread = std::thread::spawn(move || {
+            for _ in 0..3 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let body: &[u8] = if req.contains("manifest-linux-x86_64.json") {
+                    &manifest_json
+                } else if req.contains("Canban-linux-x86_64.tar.zst") {
+                    &zst_bytes
+                } else {
+                    &releases_json
+                };
+                let hdr = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(hdr.as_bytes());
+                let _ = stream.write_all(body);
+            }
+        });
+
+        let prev_api = std::env::var_os("CANBAN_UPDATE_API");
+        unsafe {
+            std::env::set_var("CANBAN_UPDATE_API", format!("http://{addr}"));
+        }
+        let outcome = apply_daemon_update(&home, &deleted_install_cli, &current, None, None);
+        match prev_api {
+            Some(v) => unsafe { std::env::set_var("CANBAN_UPDATE_API", v) },
+            None => unsafe { std::env::remove_var("CANBAN_UPDATE_API") },
+        }
+        let _ = server_thread.join();
+
+        let (ver, api, restart_cli) = outcome.unwrap().unwrap();
+        assert_eq!(ver, "20261116-9");
+        assert_eq!(api, API_VERSION + 1);
+        assert_eq!(restart_cli, opt.join("canban/bin/canban"));
+        assert_eq!(
+            std::fs::read(opt.join("canban/bin/canban-ui")).unwrap(),
+            b"#!/bin/sh\n# v3-ui\n"
+        );
+        assert_eq!(
+            std::fs::read(opt.join("canban/bin/canban-updater")).unwrap(),
+            b"#!/bin/sh\n# v3-updater\n"
+        );
+        // Moved backup bundle was untouched while live `canban/` bundle was upgraded!
+        assert_eq!(
+            std::fs::read(moved_prev_dir.join("bin/canban")).unwrap(),
+            b"#!/bin/sh\n# old\n"
+        );
     }
 }
