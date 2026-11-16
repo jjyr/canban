@@ -24,7 +24,7 @@ pub fn prepare(
     let cli = cli.canonicalize()?;
     let target = bundle(&cli)?;
     ensure!(
-        !target.join("Contents/Resources/dev-instance.json").exists(),
+        !crate::bundle_dev_instance(&target).exists(),
         "Use mise run dev to restart a development instance"
     );
     let output = Command::new(&cli)
@@ -64,8 +64,7 @@ pub fn prepare(
     let ui = process(ui_pid)?;
     ensure!(
         ui.identity.contains(
-            target
-                .join("Contents/MacOS/canban-ui")
+            crate::bundle_ui(&target)
                 .to_str()
                 .context("Invalid UI path")?
         ),
@@ -80,7 +79,7 @@ pub fn prepare(
     let job = home.join("updates/jobs").join(&token);
     std::fs::create_dir_all(&job)?;
     let helper = job.join("canban-updater");
-    std::fs::copy(cli.with_file_name("canban-updater"), &helper)?;
+    std::fs::copy(crate::bundle_updater(&target), &helper)?;
     let j = Journal {
         local: Some(Handoff {
             peer: old_server,
@@ -101,6 +100,7 @@ pub fn prepare(
         server: None,
         candidate_ui: None,
         recovery_ui: None,
+        systemd_managed: false,
     };
     j.save()?;
     state(&j, "installing")?;
@@ -132,7 +132,12 @@ fn install(j: &mut Journal) -> Result<()> {
     if let Some(ui) = &j.ui {
         stop_process(ui)?;
     }
-    let old = &j.local.as_ref().context("Missing local handoff")?.peer;
+    let old = j
+        .local
+        .as_ref()
+        .context("Missing local handoff")?
+        .peer
+        .clone();
     match handoff::rpc(&j.home.join("app.sock"), "app.ping", json!({})) {
         Ok(ping) => {
             ensure!(
@@ -140,11 +145,24 @@ fn install(j: &mut Journal) -> Result<()> {
                     && process(old.pid)?.identity == old.identity,
                 "Backend changed; refusing to stop another process"
             );
-            handoff::rpc(
-                &j.home.join("app.sock"),
-                "app.shutdown",
-                json!({"expected_pid":old.pid}),
-            )?;
+            if !j.systemd_managed && super::systemd_manages_home(&j.home) {
+                j.systemd_managed = true;
+                j.save()?;
+            }
+            if j.systemd_managed {
+                super::stop_systemd_service()?;
+                let _ = handoff::rpc(
+                    &j.home.join("app.sock"),
+                    "app.shutdown",
+                    json!({"expected_pid":old.pid}),
+                );
+            } else {
+                handoff::rpc(
+                    &j.home.join("app.sock"),
+                    "app.shutdown",
+                    json!({"expected_pid":old.pid}),
+                )?;
+            }
         }
         Err(error) => ensure!(
             !process(old.pid).is_ok_and(|p| p.identity == old.identity),

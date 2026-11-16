@@ -118,6 +118,13 @@ pub fn discover(
     current: &Build,
     client: Option<&canban_github::Client>,
 ) -> Result<Option<Available>> {
+    discover_version(current, None, client)
+}
+pub fn discover_version(
+    current: &Build,
+    target_version: Option<&str>,
+    client: Option<&canban_github::Client>,
+) -> Result<Option<Available>> {
     // Explicit/daily release checks must revalidate GitHub's disposable cache.
     let fresh = client.cloned().map(canban_github::Client::refreshing);
     let client = fresh.as_ref();
@@ -150,7 +157,11 @@ pub fn discover(
             let Ok(version) = Version::parse(tag) else {
                 continue;
             };
-            if Version::parse(&current.version)
+            if let Some(target) = target_version.map(str::trim).filter(|s| !s.is_empty()) {
+                if tag != target {
+                    continue;
+                }
+            } else if Version::parse(&current.version)
                 .ok()
                 .is_some_and(|v| version <= v)
             {
@@ -331,20 +342,103 @@ pub fn stage(
             && format!("{:x}", digest.finalize()) == release.manifest.sha256.to_lowercase(),
         "Update size/checksum mismatch"
     );
-    extract(&archive, &job)?;
-    let bundle = job.join("Canban.app");
+    let bundle = extract(&archive, &job)?;
     validate_candidate(&bundle, &release.manifest)?;
     Ok(bundle)
 }
-fn validate_candidate(bundle: &Path, manifest: &Manifest) -> Result<()> {
-    for binary in ["canban", "canban-ui", "canban-updater"] {
+pub(crate) fn verify_bundle_tree(path: &Path) -> Result<()> {
+    let kind = std::fs::symlink_metadata(path)
+        .with_context(|| format!("Could not inspect candidate {}", path.display()))?
+        .file_type();
+    ensure!(
+        kind.is_file() || kind.is_dir(),
+        "Candidate contains a link or special file: {}",
+        path.display()
+    );
+    if kind.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            verify_bundle_tree(&entry?.path())?;
+        }
+    }
+    Ok(())
+}
+/// Pack a desktop bundle (`Canban.app` on macOS or `canban/` directory on Linux)
+/// into a zstd-compressed tarball after verifying it contains no links or special files.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+pub fn pack(source: &Path, output: &Path) -> Result<()> {
+    ensure!(
+        std::fs::symlink_metadata(source)
+            .map(|m| m.is_dir())
+            .unwrap_or(false),
+        "Desktop bundle directory missing: {}",
+        source.display()
+    );
+    verify_bundle_tree(source)?;
+    let root_name = if crate::is_app_bundle(source) {
+        "Canban.app"
+    } else {
+        "canban"
+    };
+    let encoder = zstd::Encoder::new(File::create(output)?, 9)?;
+    let mut tar = tar::Builder::new(encoder);
+    tar.follow_symlinks(false);
+    tar.append_dir_all(root_name, source)?;
+    let encoder = tar.into_inner()?;
+    encoder.finish()?.sync_all()?;
+    Ok(())
+}
+pub(crate) fn validate_candidate(bundle: &Path, manifest: &Manifest) -> Result<()> {
+    if manifest.platform.starts_with("macos-") {
         ensure!(
-            bundle.join("Contents/MacOS").join(binary).is_file(),
-            "Incomplete App bundle: {binary}"
+            crate::is_app_bundle(bundle),
+            "macOS update archive must contain Canban.app"
+        );
+    } else if manifest.platform.starts_with("linux-") {
+        ensure!(
+            !crate::is_app_bundle(bundle),
+            "Linux update archive must contain canban/ directory bundle"
         );
     }
-    crate::quarantine::prepare(bundle)?;
-    let output = std::process::Command::new(bundle.join("Contents/MacOS/canban"))
+    if crate::is_app_bundle(bundle) {
+        for binary in ["canban", "canban-ui", "canban-updater"] {
+            ensure!(
+                bundle.join("Contents/MacOS").join(binary).is_file(),
+                "Incomplete App bundle: {binary}"
+            );
+        }
+        crate::quarantine::prepare(bundle)?;
+    } else {
+        verify_bundle_tree(bundle)?;
+        ensure!(
+            !bundle.join("share/dev-instance.json").exists(),
+            "Candidate Linux bundle cannot include a development instance binding"
+        );
+        let meta_path = bundle.join("bundle.json");
+        ensure!(
+            meta_path.is_file(),
+            "Incomplete Linux bundle: bundle.json missing"
+        );
+        let meta: Value = serde_json::from_slice(&std::fs::read(&meta_path)?)
+            .context("Invalid bundle.json in candidate Linux bundle")?;
+        ensure!(
+            meta["app_id"]
+                .as_str()
+                .is_some_and(|s| !s.trim().is_empty()),
+            "Linux bundle.json is missing app_id"
+        );
+        for binary in ["canban", "canban-ui", "canban-updater"] {
+            let path = bundle.join("bin").join(binary);
+            ensure!(path.is_file(), "Incomplete App bundle: {binary}");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+            }
+        }
+    }
+    let output = std::process::Command::new(crate::bundle_cli(bundle))
         .arg("build-info")
         .output()?;
     ensure!(
@@ -362,21 +456,33 @@ fn validate_candidate(bundle: &Path, manifest: &Manifest) -> Result<()> {
     );
     Ok(())
 }
-fn extract(archive: &Path, job: &Path) -> Result<()> {
+fn extract(archive: &Path, job: &Path) -> Result<PathBuf> {
     let decoder = zstd::Decoder::new(File::open(archive)?)?;
     let mut tar = tar::Archive::new(decoder);
     let mut expanded = 0u64;
+    let mut archive_root: Option<std::ffi::OsString> = None;
     for entry in tar.entries()? {
         let mut entry = entry?;
         let path = entry.path()?.into_owned();
         ensure!(
-            path.components().all(|c| matches!(c, Component::Normal(_)))
-                && path
-                    .components()
-                    .next()
-                    .is_some_and(|c| c.as_os_str() == "Canban.app"),
+            path.components().all(|c| matches!(c, Component::Normal(_))),
             "Unsafe update archive path"
         );
+        let Some(Component::Normal(first)) = path.components().next() else {
+            anyhow::bail!("Unsafe update archive path");
+        };
+        ensure!(
+            first == "Canban.app" || first == "canban",
+            "Unsafe update archive path"
+        );
+        if let Some(expected_root) = &archive_root {
+            ensure!(
+                expected_root == first,
+                "Update archive mixes multiple top-level bundle directories"
+            );
+        } else {
+            archive_root = Some(first.to_os_string());
+        }
         ensure!(
             entry.header().entry_type().is_file() || entry.header().entry_type().is_dir(),
             "Update archive contains a link or special file"
@@ -390,7 +496,8 @@ fn extract(archive: &Path, job: &Path) -> Result<()> {
         );
         ensure!(entry.unpack_in(job)?, "Archive entry escaped staging");
     }
-    Ok(())
+    let root = archive_root.context("Empty update archive")?;
+    Ok(job.join(root))
 }
 
 /// Discover the newest published headless CLI release archive (`canban-<platform>.tar.gz` +
@@ -785,5 +892,119 @@ mod archive_tests {
         assert!(stage_cli(dir.path(), &bad, None).is_err());
 
         let _ = handle.join();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linux_desktop_bundle_packs_stages_and_validates_all_binaries_and_metadata() {
+        use std::{io::Write, os::unix::fs::PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("canban-src");
+        std::fs::create_dir_all(source.join("bin")).unwrap();
+        std::fs::create_dir_all(source.join("share/applications")).unwrap();
+        std::fs::create_dir_all(source.join("share/icons/hicolor/scalable/apps")).unwrap();
+
+        let candidate = Build {
+            version: "20261116-12".into(),
+            commit: "abcdef0123456789abcdef0123456789abcdef01".into(),
+            schema: canban_storage::migrations::CURRENT,
+            api: DESKTOP_API,
+            platform: "linux-x86_64".into(),
+        };
+        std::fs::write(
+            source.join("bundle.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "app_id": "com.canban.desktop",
+                "name": "Canban",
+                "executable": "canban-ui",
+                "version": candidate.version,
+                "commit": candidate.commit,
+                "sequence": "1",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            source.join("share/applications/com.canban.desktop.desktop"),
+            b"[Desktop Entry]\nName=Canban\nExec=canban-ui\n",
+        )
+        .unwrap();
+        let cli_script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"build-info\" ]; then printf '%s\\n' '{}'; exit 0; fi\nexit 1\n",
+            serde_json::to_string(&candidate).unwrap()
+        );
+        std::fs::write(source.join("bin/canban"), cli_script.as_bytes()).unwrap();
+        std::fs::write(source.join("bin/canban-ui"), b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(source.join("bin/canban-updater"), b"#!/bin/sh\nexit 0\n").unwrap();
+        for name in ["canban", "canban-ui", "canban-updater"] {
+            std::fs::set_permissions(
+                source.join("bin").join(name),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+
+        let archive = dir.path().join("Canban-linux-x86_64.tar.zst");
+        pack(&source, &archive).unwrap();
+        let archive_bytes = std::fs::read(&archive).unwrap();
+        let sha = format!("{:x}", Sha256::digest(&archive_bytes));
+        let size = archive_bytes.len() as u64;
+
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let served = archive_bytes.clone();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = server.accept() {
+                let mut req = [0u8; 1024];
+                let _ = stream.read(&mut req);
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
+                    served.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&served);
+            }
+        });
+
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let avail = Available {
+            manifest: Manifest {
+                version: candidate.version.clone(),
+                commit: candidate.commit.clone(),
+                platform: candidate.platform.clone(),
+                api: candidate.api,
+                schema: candidate.schema,
+                rollback_floor: 8,
+                asset: "Canban-linux-x86_64.tar.zst".into(),
+                size,
+                sha256: sha,
+            },
+            url: format!("http://{addr}/Canban-linux-x86_64.tar.zst"),
+            notes: "Linux desktop release".into(),
+        };
+
+        let staged_bundle = stage(&home, &avail, None).unwrap();
+        assert_eq!(
+            staged_bundle.file_name().and_then(|s| s.to_str()),
+            Some("canban")
+        );
+        assert!(staged_bundle.join("bundle.json").is_file());
+        assert!(staged_bundle.join("bin/canban").is_file());
+        assert!(staged_bundle.join("bin/canban-ui").is_file());
+        assert!(staged_bundle.join("bin/canban-updater").is_file());
+        let _ = handle.join();
+
+        // Missing bundle.json or dev-instance.json in a Linux candidate is rejected.
+        std::fs::write(staged_bundle.join("share/dev-instance.json"), b"{}").unwrap();
+        assert!(validate_candidate(&staged_bundle, &avail.manifest).is_err());
+        std::fs::remove_file(staged_bundle.join("share/dev-instance.json")).unwrap();
+        std::fs::remove_file(staged_bundle.join("bundle.json")).unwrap();
+        assert!(validate_candidate(&staged_bundle, &avail.manifest).is_err());
+
+        // Platform mismatch (macos manifest against Linux directory bundle) is rejected.
+        let mut mac_manifest = avail.manifest.clone();
+        mac_manifest.platform = "macos-aarch64".into();
+        assert!(validate_candidate(&source, &mac_manifest).is_err());
     }
 }

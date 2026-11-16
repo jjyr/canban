@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs::{File, OpenOptions},
     io::Write,
-    path::Path,
+    path::{Path, PathBuf},
 };
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Build {
@@ -134,6 +134,64 @@ pub fn service_lock(home: &Path) -> Result<File> {
     f.try_lock()
         .context("Another Canban AppServer owns this home")?;
     Ok(f)
+}
+
+/// Returns `true` when `bundle` uses macOS `.app` directory layout (`Contents/MacOS/...`),
+/// and `false` for Linux desktop directory bundles (`bin/...`, `bundle.json`, `share/...`).
+pub fn is_app_bundle(bundle: &Path) -> bool {
+    bundle.extension().and_then(|s| s.to_str()) == Some("app")
+}
+
+pub fn bundle_bin_dir(bundle: &Path) -> PathBuf {
+    if is_app_bundle(bundle) {
+        bundle.join("Contents/MacOS")
+    } else {
+        bundle.join("bin")
+    }
+}
+
+pub fn bundle_cli(bundle: &Path) -> PathBuf {
+    bundle_bin_dir(bundle).join("canban")
+}
+
+pub fn bundle_ui(bundle: &Path) -> PathBuf {
+    bundle_bin_dir(bundle).join("canban-ui")
+}
+
+pub fn bundle_updater(bundle: &Path) -> PathBuf {
+    bundle_bin_dir(bundle).join("canban-updater")
+}
+
+pub fn bundle_dev_instance(bundle: &Path) -> PathBuf {
+    if is_app_bundle(bundle) {
+        bundle.join("Contents/Resources/dev-instance.json")
+    } else {
+        bundle.join("share/dev-instance.json")
+    }
+}
+
+pub fn next_bundle_name(bundle: &Path, token: &str) -> String {
+    if is_app_bundle(bundle) {
+        format!(".Canban-next-{token}.app")
+    } else {
+        format!(".canban-next-{token}")
+    }
+}
+
+pub fn previous_bundle_name(bundle: &Path, token: &str) -> String {
+    if is_app_bundle(bundle) {
+        format!(".Canban-previous-{token}.app")
+    } else {
+        format!(".canban-previous-{token}")
+    }
+}
+
+pub fn failed_bundle_name(bundle: &Path, token: &str) -> String {
+    if is_app_bundle(bundle) {
+        format!(".Canban-failed-{token}.app")
+    } else {
+        format!(".canban-failed-{token}")
+    }
 }
 
 #[cfg(test)]

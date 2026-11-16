@@ -282,6 +282,7 @@ mod journal_tests {
             server: None,
             candidate_ui: None,
             recovery_ui: None,
+            systemd_managed: false,
         }
     }
 

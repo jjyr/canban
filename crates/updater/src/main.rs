@@ -14,12 +14,10 @@ fn run() -> anyhow::Result<()> {
         let output = args
             .next()
             .ok_or_else(|| anyhow::anyhow!("Archive path missing"))?;
-        let encoder = zstd::Encoder::new(std::fs::File::create(output)?, 9)?;
-        let mut tar = tar::Builder::new(encoder);
-        tar.append_dir_all("Canban.app", source)?;
-        let encoder = tar.into_inner()?;
-        encoder.finish()?.sync_all()?;
-        return Ok(());
+        return canban_updater::feed::pack(
+            std::path::Path::new(&source),
+            std::path::Path::new(&output),
+        );
     }
     anyhow::ensure!(
         command.as_deref() == Some("--home"),
