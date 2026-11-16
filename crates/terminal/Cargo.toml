@@ -11,9 +11,12 @@ anyhow.workspace = true
 png.workspace = true
 serde_json.workspace = true
 nsh-core.workspace = true
-nsh-platform-macos.workspace = true
+nsh-base.workspace = true
 canban-herdr.workspace = true
 canban-types.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nsh-platform-macos.workspace = true
 
 [dev-dependencies]
 base64.workspace = true

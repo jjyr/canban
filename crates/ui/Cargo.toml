@@ -19,7 +19,6 @@ signal-hook = { version = "0.3", default-features = false }
 base64.workspace = true
 nsh-core.workspace = true
 nsh-base.workspace = true
-nsh-platform-macos.workspace = true
 canban-types.workspace = true
 canban-profiles.workspace = true
 canban-context.workspace = true
@@ -28,6 +27,12 @@ canban-notifications.workspace = true
 canban-terminal.workspace = true
 canban-ui-kit.workspace = true
 canban-app-server.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nsh-platform-macos.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nsh-platform-linux.workspace = true
 
 [[bin]]
 name = "canban-ui"

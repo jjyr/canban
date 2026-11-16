@@ -9,10 +9,11 @@
 pub mod ffi {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
+pub mod linux;
 pub mod model;
-
 #[cfg(target_os = "macos")]
 pub mod native;
+pub mod session;
 
 /// Installed font family catalog discovered from the host OS.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -23,14 +24,7 @@ pub struct InstalledFonts {
 
 /// Evicts any cached live PTY attachment session for the given `(core_id, terminal)` pair.
 pub fn evict_session(core_id: &str, terminal: &str) {
-    #[cfg(target_os = "macos")]
-    {
-        native::evict_session(core_id, terminal);
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (core_id, terminal);
-    }
+    session::evict_session(core_id, terminal);
 }
 
 /// Formats local filesystem paths as a POSIX shell-escaped paste payload with a trailing space.
@@ -130,7 +124,11 @@ pub fn installed_fonts() -> InstalledFonts {
     {
         native::installed_fonts()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::installed_fonts()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         InstalledFonts::default()
     }

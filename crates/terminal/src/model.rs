@@ -192,6 +192,7 @@ struct Shared {
     state: GhosttyRenderState,
     replies: Vec<u8>,
     clipboard: Option<String>,
+    title: Option<String>,
     bell: bool,
     size: GhosttySizeReportSize,
     render_held: bool,
@@ -408,6 +409,35 @@ unsafe extern "C" fn bell(_: GhosttyTerminal, ud: *mut c_void) {
     shared.bell = true;
 }
 
+unsafe extern "C" fn title_changed(term: GhosttyTerminal, ud: *mut c_void) {
+    let shared = unsafe { &mut *(ud as *mut Shared) };
+    let mut raw = GhosttyString {
+        ptr: std::ptr::null(),
+        len: 0,
+    };
+    if unsafe {
+        ghostty_terminal_get(
+            term,
+            GHOSTTY_TERMINAL_DATA_TITLE,
+            &mut raw as *mut _ as *mut c_void,
+        )
+    } == GHOSTTY_SUCCESS
+    {
+        let text = if raw.ptr.is_null() || raw.len == 0 {
+            String::new()
+        } else {
+            String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(raw.ptr, raw.len) })
+                .into_owned()
+        };
+        shared.title = Some(text);
+    }
+}
+
+unsafe extern "C" fn reset_terminal(_: GhosttyTerminal, ud: *mut c_void) {
+    let shared = unsafe { &mut *(ud as *mut Shared) };
+    shared.title = Some(String::new());
+}
+
 unsafe extern "C" fn render_hold(term: GhosttyTerminal, ud: *mut c_void, held: bool) {
     let shared = unsafe { &mut *(ud as *mut Shared) };
     if held {
@@ -584,6 +614,7 @@ impl Model {
                 state,
                 replies: Vec::new(),
                 clipboard: None,
+                title: None,
                 bell: false,
                 size: GhosttySizeReportSize {
                     rows,
@@ -617,6 +648,18 @@ impl Model {
                 term,
                 GHOSTTY_TERMINAL_OPT_BELL,
                 std::mem::transmute::<GhosttyTerminalBellFn, *const c_void>(bell_cb),
+            );
+            let title_cb: GhosttyTerminalTitleChangedFn = Some(title_changed);
+            ghostty_terminal_set(
+                term,
+                GHOSTTY_TERMINAL_OPT_TITLE_CHANGED,
+                std::mem::transmute::<GhosttyTerminalTitleChangedFn, *const c_void>(title_cb),
+            );
+            let reset_cb: GhosttyTerminalResetFn = Some(reset_terminal);
+            ghostty_terminal_set(
+                term,
+                GHOSTTY_TERMINAL_OPT_RESET,
+                std::mem::transmute::<GhosttyTerminalResetFn, *const c_void>(reset_cb),
             );
             let clip_cb: GhosttyTerminalClipboardWriteFn = Some(clipboard_write);
             ghostty_terminal_set(
@@ -1020,6 +1063,27 @@ impl Model {
 
     pub fn take_bell(&mut self) -> bool {
         std::mem::take(&mut self.shared.bell)
+    }
+
+    pub fn take_title(&mut self) -> Option<String> {
+        self.shared.title.take()
+    }
+
+    pub fn set_scrollback_lines(&mut self, scrollback_lines: usize) {
+        let max_bytes: usize = if scrollback_lines == 0 {
+            0
+        } else {
+            scrollback_lines
+                .saturating_mul(512)
+                .clamp(64 * 1024, 20_000_000)
+        };
+        unsafe {
+            ghostty_terminal_set(
+                self.term,
+                GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
+                &max_bytes as *const _ as *const c_void,
+            );
+        }
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
@@ -2779,6 +2843,376 @@ impl Model {
             background: snap.background,
             cursor_color: snap.cursor.color,
         }
+    }
+
+    /// Number of scrollback history rows currently retained above the active screen.
+    pub fn scrollback_rows(&self) -> usize {
+        let mut sb_rows: usize = 0;
+        unsafe {
+            let _ = ghostty_terminal_get(
+                self.term,
+                GHOSTTY_TERMINAL_DATA_SCROLLBACK_ROWS,
+                &mut sb_rows as *mut _ as *mut c_void,
+            );
+        }
+        sb_rows
+    }
+
+    /// Total number of lines (scrollback + active screen height) exposed to `nsh_base::Terminal`.
+    pub fn total_line_count(&self) -> usize {
+        self.scrollback_rows() + usize::from(self.height.max(1))
+    }
+
+    /// Effective 24-bit RGB cursor color from the terminal's active theme/OSC state.
+    pub fn cursor_rgb(&self) -> [u8; 3] {
+        unsafe {
+            let mut cur = GhosttyColorRgb::default();
+            if ghostty_terminal_get(
+                self.term,
+                GHOSTTY_TERMINAL_DATA_COLOR_CURSOR,
+                &mut cur as *mut _ as *mut c_void,
+            ) == GHOSTTY_SUCCESS
+            {
+                return [cur.r, cur.g, cur.b];
+            }
+            let mut fg = GhosttyColorRgb::default();
+            if ghostty_terminal_get(
+                self.term,
+                GHOSTTY_TERMINAL_DATA_COLOR_FOREGROUND,
+                &mut fg as *mut _ as *mut c_void,
+            ) == GHOSTTY_SUCCESS
+            {
+                return [fg.r, fg.g, fg.b];
+            }
+        }
+        self.snap.cursor.color
+    }
+
+    /// Active cursor position in the active screen area, or `None` when hidden (DEC mode 25 off).
+    pub fn active_cursor(&self) -> Option<nsh_base::TerminalCursor> {
+        let mut visible = true;
+        unsafe {
+            let _ = ghostty_terminal_get(
+                self.term,
+                GHOSTTY_TERMINAL_DATA_CURSOR_VISIBLE,
+                &mut visible as *mut _ as *mut c_void,
+            );
+        }
+        if !visible {
+            return None;
+        }
+        let mut cx = 0u16;
+        let mut cy = 0u16;
+        unsafe {
+            let _ = ghostty_terminal_get(
+                self.term,
+                GHOSTTY_TERMINAL_DATA_CURSOR_X,
+                &mut cx as *mut _ as *mut c_void,
+            );
+            let _ = ghostty_terminal_get(
+                self.term,
+                GHOSTTY_TERMINAL_DATA_CURSOR_Y,
+                &mut cy as *mut _ as *mut c_void,
+            );
+        }
+        let mut cursor = nsh_base::TerminalCursor::default();
+        cursor.col = cx.min(self.cols.saturating_sub(1));
+        cursor.row = cy.min(self.height.saturating_sub(1));
+        Some(cursor)
+    }
+
+    /// Input encoding modes (`DECCKM` application cursor + DEC mode 2004 bracketed paste).
+    pub fn terminal_modes(&self) -> nsh_base::TerminalModes {
+        let mut modes = nsh_base::TerminalModes::default();
+        modes.application_cursor = self.mode(dec_mode(1));
+        modes.bracketed_paste = self.mode(dec_mode(2004));
+        modes
+    }
+
+    /// Reads line `index` (`0..scrollback_rows` in history, `scrollback_rows..total` on active screen)
+    /// as styled 24-bit `TerminalColor::Rgb` runs using Canban's active terminal theme palette.
+    pub fn terminal_line(&self, index: usize) -> nsh_base::TerminalLine {
+        use nsh_base::{TerminalColor, TerminalLine, TerminalRun, TerminalStyle};
+
+        let cols = self.cols;
+        let rows = self.height;
+        if cols == 0 || rows == 0 {
+            return TerminalLine::default();
+        }
+        let sb_rows = self.scrollback_rows();
+        let (tag, row_y) = if index < sb_rows {
+            (GHOSTTY_POINT_TAG_HISTORY, index as u32)
+        } else if index < sb_rows + usize::from(rows) {
+            (GHOSTTY_POINT_TAG_ACTIVE, (index - sb_rows) as u32)
+        } else {
+            return TerminalLine::default();
+        };
+
+        let mut palette = [GhosttyColorRgb::default(); 256];
+        let mut def_fg = GhosttyColorRgb {
+            r: self.snap.foreground[0],
+            g: self.snap.foreground[1],
+            b: self.snap.foreground[2],
+        };
+        let mut def_bg = GhosttyColorRgb {
+            r: self.snap.background[0],
+            g: self.snap.background[1],
+            b: self.snap.background[2],
+        };
+        unsafe {
+            let _ = ghostty_terminal_get(
+                self.term,
+                GHOSTTY_TERMINAL_DATA_COLOR_PALETTE,
+                palette.as_mut_ptr().cast(),
+            );
+            let _ = ghostty_terminal_get(
+                self.term,
+                GHOSTTY_TERMINAL_DATA_COLOR_FOREGROUND,
+                &mut def_fg as *mut _ as *mut c_void,
+            );
+            let _ = ghostty_terminal_get(
+                self.term,
+                GHOSTTY_TERMINAL_DATA_COLOR_BACKGROUND,
+                &mut def_bg as *mut _ as *mut c_void,
+            );
+        }
+
+        let default_fg_color = TerminalColor::Rgb(def_fg.r, def_fg.g, def_fg.b);
+        let default_bg_color = TerminalColor::Rgb(def_bg.r, def_bg.g, def_bg.b);
+
+        struct ParsedCell {
+            text: String,
+            style: TerminalStyle,
+            trailing_blank: bool,
+        }
+
+        let mut parsed: Vec<ParsedCell> = Vec::with_capacity(usize::from(cols));
+        let mut stack = [0u32; 16];
+        let mut heap_cp: Vec<u32> = Vec::new();
+
+        for x in 0..cols {
+            let point = GhosttyPoint {
+                tag,
+                value: GhosttyPointValue {
+                    coordinate: GhosttyPointCoordinate { x, y: row_y },
+                },
+            };
+            let mut grid_ref = GhosttyGridRef {
+                node: std::ptr::null_mut(),
+                x: 0,
+                y: 0,
+            };
+            if unsafe { ghostty_terminal_grid_ref(self.term, point, &mut grid_ref) }
+                != GHOSTTY_SUCCESS
+            {
+                let mut st = TerminalStyle::default();
+                st.fg = Some(default_fg_color);
+                parsed.push(ParsedCell {
+                    text: " ".into(),
+                    style: st,
+                    trailing_blank: true,
+                });
+                continue;
+            }
+
+            unsafe {
+                let mut cell = GhosttyCell::default();
+                if ghostty_grid_ref_cell(&grid_ref, &mut cell) != GHOSTTY_SUCCESS {
+                    let mut st = TerminalStyle::default();
+                    st.fg = Some(default_fg_color);
+                    parsed.push(ParsedCell {
+                        text: " ".into(),
+                        style: st,
+                        trailing_blank: true,
+                    });
+                    continue;
+                }
+
+                let mut wide = GHOSTTY_CELL_WIDE_NARROW;
+                let _ = ghostty_cell_get(
+                    cell,
+                    GHOSTTY_CELL_DATA_WIDE,
+                    &mut wide as *mut _ as *mut c_void,
+                );
+                if wide == GHOSTTY_CELL_WIDE_SPACER_TAIL {
+                    // Wide glyph in preceding cell already occupies 2 columns.
+                    continue;
+                }
+
+                let mut content_tag = GHOSTTY_CELL_CONTENT_CODEPOINT;
+                let _ = ghostty_cell_get(
+                    cell,
+                    GHOSTTY_CELL_DATA_CONTENT_TAG,
+                    &mut content_tag as *mut _ as *mut c_void,
+                );
+                let mut has_styling = false;
+                let _ = ghostty_cell_get(
+                    cell,
+                    GHOSTTY_CELL_DATA_HAS_STYLING,
+                    &mut has_styling as *mut _ as *mut c_void,
+                );
+                let mut style = GhosttyStyle::default();
+                if has_styling {
+                    let _ = ghostty_grid_ref_style(&grid_ref, &mut style);
+                }
+
+                let fg_color = match GhosttyStyleColorTag::from(style.fg_color.tag) {
+                    GHOSTTY_STYLE_COLOR_PALETTE => {
+                        let c = palette[usize::from(style.fg_color.value.palette)];
+                        TerminalColor::Rgb(c.r, c.g, c.b)
+                    }
+                    GHOSTTY_STYLE_COLOR_RGB => {
+                        let c = style.fg_color.value.rgb;
+                        TerminalColor::Rgb(c.r, c.g, c.b)
+                    }
+                    _ => default_fg_color,
+                };
+
+                let explicit_bg = match GhosttyStyleColorTag::from(style.bg_color.tag) {
+                    GHOSTTY_STYLE_COLOR_PALETTE => {
+                        let c = palette[usize::from(style.bg_color.value.palette)];
+                        Some(TerminalColor::Rgb(c.r, c.g, c.b))
+                    }
+                    GHOSTTY_STYLE_COLOR_RGB => {
+                        let c = style.bg_color.value.rgb;
+                        Some(TerminalColor::Rgb(c.r, c.g, c.b))
+                    }
+                    _ => match content_tag {
+                        GHOSTTY_CELL_CONTENT_BG_COLOR_PALETTE => {
+                            let mut idx: GhosttyColorPaletteIndex = 0;
+                            if ghostty_cell_get(
+                                cell,
+                                GHOSTTY_CELL_DATA_COLOR_PALETTE,
+                                &mut idx as *mut _ as *mut c_void,
+                            ) == GHOSTTY_SUCCESS
+                            {
+                                let c = palette[usize::from(idx)];
+                                Some(TerminalColor::Rgb(c.r, c.g, c.b))
+                            } else {
+                                None
+                            }
+                        }
+                        GHOSTTY_CELL_CONTENT_BG_COLOR_RGB => {
+                            let mut c = GhosttyColorRgb::default();
+                            if ghostty_cell_get(
+                                cell,
+                                GHOSTTY_CELL_DATA_COLOR_RGB,
+                                &mut c as *mut _ as *mut c_void,
+                            ) == GHOSTTY_SUCCESS
+                            {
+                                Some(TerminalColor::Rgb(c.r, c.g, c.b))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    },
+                };
+
+                let inverse = style.flags & CANBAN_STYLE_INVERSE != 0;
+                let bg_opt = if inverse {
+                    Some(explicit_bg.unwrap_or(default_bg_color))
+                } else {
+                    explicit_bg
+                };
+
+                let mut is_kitty_placeholder = false;
+                let cell_text = if wide == GHOSTTY_CELL_WIDE_SPACER_HEAD {
+                    " ".to_owned()
+                } else {
+                    let mut count = 0usize;
+                    let mut res = ghostty_grid_ref_graphemes(
+                        &grid_ref,
+                        stack.as_mut_ptr(),
+                        stack.len(),
+                        &mut count,
+                    );
+                    let cps: &[u32] = if res == GHOSTTY_OUT_OF_SPACE && count > 0 {
+                        heap_cp.resize(count, 0);
+                        res = ghostty_grid_ref_graphemes(
+                            &grid_ref,
+                            heap_cp.as_mut_ptr(),
+                            heap_cp.len(),
+                            &mut count,
+                        );
+                        if res == GHOSTTY_SUCCESS {
+                            &heap_cp[..count]
+                        } else {
+                            &[]
+                        }
+                    } else if res == GHOSTTY_SUCCESS {
+                        &stack[..count]
+                    } else {
+                        &[]
+                    };
+
+                    if cps.is_empty() || cps[0] == 0 {
+                        " ".to_owned()
+                    } else if cps[0] == KITTY_UNICODE_PLACEHOLDER {
+                        is_kitty_placeholder = true;
+                        " ".to_owned()
+                    } else {
+                        let mut s = String::with_capacity(cps.len() * 4);
+                        for &cp in cps {
+                            if let Some(ch) = char::from_u32(cp) {
+                                if ch < ' ' || ch == '\x7f' {
+                                    s.push(' ');
+                                } else {
+                                    s.push(ch);
+                                }
+                            }
+                        }
+                        if s.is_empty() { " ".to_owned() } else { s }
+                    }
+                };
+
+                let bold = style.flags & CANBAN_STYLE_BOLD != 0;
+                let dim = style.flags & CANBAN_STYLE_FAINT != 0;
+                let italic = style.flags & CANBAN_STYLE_ITALIC != 0;
+                let underline =
+                    !is_kitty_placeholder && (style.flags & CANBAN_STYLE_UNDERLINE != 0);
+                let strikethrough =
+                    !is_kitty_placeholder && (style.flags & CANBAN_STYLE_STRIKETHROUGH != 0);
+                let hidden = style.flags & CANBAN_STYLE_INVISIBLE != 0;
+
+                let mut term_style = TerminalStyle::default();
+                term_style.fg = Some(fg_color);
+                term_style.bg = bg_opt;
+                term_style.bold = bold;
+                term_style.dim = dim;
+                term_style.italic = italic;
+                term_style.underline = underline;
+                term_style.strikethrough = strikethrough;
+                term_style.inverse = inverse;
+                term_style.hidden = hidden;
+
+                let trailing_blank = cell_text == " "
+                    && bg_opt.is_none()
+                    && !underline
+                    && !strikethrough
+                    && !inverse
+                    && !hidden;
+
+                parsed.push(ParsedCell {
+                    text: cell_text,
+                    style: term_style,
+                    trailing_blank,
+                });
+            }
+        }
+
+        let end = parsed
+            .iter()
+            .rposition(|c| !c.trailing_blank)
+            .map_or(0, |i| i + 1);
+        let mut runs: Vec<TerminalRun> = Vec::new();
+        for cell in parsed.into_iter().take(end) {
+            match runs.last_mut() {
+                Some(last) if last.style == cell.style => last.text.push_str(&cell.text),
+                _ => runs.push(TerminalRun::new(cell.text, cell.style)),
+            }
+        }
+        TerminalLine::new(runs)
     }
 }
 
