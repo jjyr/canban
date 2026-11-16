@@ -39,27 +39,27 @@ Caffeine holds a system-idle sleep assertion while allowing display sleep; its d
 
 The later real-use failure was an older persistent AppServer returning `Unknown operation: utilities.state` to a new UI. Desktop startup checks the API level before opening the workspace and now shows startup failures in a native window. `mise run dev` (also `mise run run`) replaces only its selected isolated development instance; it does not repair an older installed-home service. See [development startup and upgrade acceptance](development-startup.md). Earlier fresh-service tests did not cover this upgrade scenario.
 
-Report issue opens the repository's **Bug report** Issue Form directly, with public version/OS/architecture metadata prefilled in its editable Environment field. It does not submit an issue or require the Canban GitHub connection. Settings also offers Copy diagnostics with the same public metadata. Tokens, Terminal output and logs are not appended to the URL.
+Report issue opens the repository's **Bug report** Markdown template directly, with public version/OS/architecture metadata prefilled under Canban version. It does not submit an issue or require the Canban GitHub connection. Settings also offers Copy diagnostics with the same public metadata. Tokens, Terminal output and logs are not appended to the URL.
 
-## Repository Issue Forms
+## Repository Issue Templates
 
-The App and GitHub entry points share the same form instead of maintaining separate Markdown bodies:
+The App and GitHub entry points share the same Markdown templates:
 
 ```text
-App Report issue ----> Bug report + prefilled Environment
+App Report issue ----> Bug report + prefilled Canban version
                               |
-GitHub New issue -----+-------+----> user completes form --> Submit
+GitHub New issue -----+-------+----> user edits Markdown --> Submit
                       |
                       +-- Feature request ----------------> Submit
 ```
 
-`.github/ISSUE_TEMPLATE/bug_report.yml` requires **What happened?** and **Steps or triggering context**. Expected behavior, Environment and screenshots/additional context are optional. Intermittent problems can describe their triggering context rather than requiring reliable reproduction. GitHub supplies the normal Issue title field.
+Both repository templates use one Markdown body editor alongside GitHub's normal title field. `.github/ISSUE_TEMPLATE/bug_report.md` contains What happened?, Steps to reproduce, Canban version, and Additional context. The version instructions explicitly require the version in use; Markdown templates do not enforce field validation. Additional context is optional. Intermittent problems can describe their triggering context.
 
-`.github/ISSUE_TEMPLATE/feature_request.yml` requires the problem the feature would solve, with optional desired behavior and additional context. Neither form inserts a title prefix, assignee or submission checklist. GitHub's blank-Issue option remains available.
+`.github/ISSUE_TEMPLATE/feature_request.md` contains Problem and Proposed solution, with examples or screenshots included inline as needed.
 
-The App URL uses `template=bug_report.yml&environment=<URL-encoded diagnostics>`. `environment` is the Bug form field ID; preserve this ID and filename when editing the form, or update `ui/utilities/report.rs` in the same change. Other form contents remain owned by the repository template. This follows GitHub's documented [Issue URL query parameters](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/creating-an-issue#creating-an-issue-from-a-url-query) and [field ID prefill contract](https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/syntax-for-githubs-form-schema#keys).
+The App URL uses `template=bug_report.md&body=<URL-encoded Markdown>`. The App embeds the repository template body and replaces the version instruction with public diagnostics, keeping the other sections available for editing. Update `ui/utilities/report.rs` together with changes to the template filename or version placeholder.
 
-Both form schemas and required fields were checked locally, including the URL-to-template/field mapping. The report-link regression test, application build and UI/all-target Clippy passed. The form files take effect on GitHub after they reach the default branch.
+Historical form acceptance (before the Markdown simplification): both form schemas and required fields were checked locally, including the URL-to-template/field mapping. The report-link regression test, application build and UI/all-target Clippy passed. The form files take effect on GitHub after they reach the default branch.
 
 ## Ownership and API
 

@@ -19,10 +19,22 @@ fn encode(s: &str) -> String {
         })
         .collect()
 }
+fn body() -> String {
+    let template = include_str!("../../../../.github/ISSUE_TEMPLATE/bug_report.md");
+    let (_, body) = template
+        .strip_prefix("---\n")
+        .expect("issue template front matter")
+        .split_once("\n---\n")
+        .expect("issue template body");
+    body.trim_start().replace(
+        "<!-- Required: enter the Canban version you are using (Settings -> Copy diagnostics). -->",
+        &diagnostics(),
+    )
+}
 pub fn url() -> String {
     format!(
-        "https://github.com/jjyr/canban/issues/new?template=bug_report.yml&environment={}",
-        encode(&diagnostics())
+        "https://github.com/jjyr/canban/issues/new?template=bug_report.md&body={}",
+        encode(&body())
     )
 }
 pub fn open(ui: Ui) {
@@ -32,10 +44,10 @@ pub fn open(ui: Ui) {
 mod tests {
     use super::*;
     #[test]
-    fn report_opens_bug_form_and_only_prefills_public_environment() {
+    fn report_opens_markdown_template_and_prefills_public_version() {
         let u = url();
         assert!(u.starts_with(
-            "https://github.com/jjyr/canban/issues/new?template=bug_report.yml&environment="
+            "https://github.com/jjyr/canban/issues/new?template=bug_report.md&body="
         ));
         assert!(!u.contains('\n'));
         assert!(u.contains(&format!(
@@ -43,14 +55,14 @@ mod tests {
             canban_updater::Build::current().version
         )));
         assert!(u.contains("%0APlatform%3A%20"));
-        assert!(u.ends_with(&format!(
-            "{}%20{}",
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        )));
-        assert!(!u.contains("&body="));
+        assert!(body().contains("## Canban version\n\nCanban "));
+        for heading in ["What happened?", "Steps to reproduce", "Additional context"] {
+            assert!(body().contains(&format!("## {heading}")));
+        }
+        assert!(!body().contains("Required: enter"));
+        assert!(!body().starts_with("---"));
         assert!(!u.contains("&title="));
         assert!(!u.contains("token"));
-        assert!(u.len() < 1024);
+        assert!(u.len() < 2048);
     }
 }
