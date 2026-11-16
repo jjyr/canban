@@ -25,7 +25,61 @@ config/agents.json                 Workflow YAML in SQLite
                        generic invocation -> Herdr terminal
 ```
 
-`canban-profiles` resolves JSON presets and whole-field overrides. Scheduler/Workflow Engine/AppServer invoke a common interface; runtime code does not select Codex/Claude branches. Herdr supplies status, turn tracking, PTY input, attachment and interruption. Canban owns explicit reports/replies and the opaque provider-history binding.
+`canban-profiles` resolves JSON presets, whole-field overrides, and provider-specific launch adaptation. Scheduler/Workflow Engine/AppServer invoke a common interface; business orchestration and Herdr transport do not select Codex/Claude branches. Herdr supplies status, turn tracking, PTY input, attachment and interruption. Canban owns explicit reports/replies and the opaque provider-history binding.
+
+## Per-invocation launch adaptation
+
+All Agent launch paths (Card/comment, independent Terminal, scheduled task,
+merge batch, configuration conversation, and Review) call
+`canban_profiles::prepare_launch` after command rendering and execution-host
+path resolution. It accepts the resolved Profile, argv, cwd, and explicit
+invocation environment, returning a transport-ready `LaunchSpec`.
+Plain shell/setup launches use the same boundary without a Profile.
+
+```text
+AppServer: business context + command rendering + host path resolution
+                              |
+                  profiles::prepare_launch
+                    /                   \
+          preset = codex             other / no Profile
+          Codex adapter                 pass-through
+          per-thread env config
+                    \                   /
+                     LaunchSpec { argv, env, cwd }
+                              |
+                   Herdr local/remote PTY
+```
+
+Only an explicitly declared `preset: "codex"` opts into Codex CLI adaptation,
+including wrappers that accept Codex CLI arguments. Role IDs and executable
+basenames do not select the adapter. Untyped commands, other providers, and
+opaque `herdr:*` templates retain their existing argv/env.
+
+The Codex adapter retains process env and appends individual
+`-c shell_environment_policy.set.KEY=<TOML string>` overrides. First launch and
+Resume both use current invocation values, overriding earlier command-line
+values. Overrides precede an explicit `--` terminator. No shell interpolation,
+user configuration writes, daemon restarts, or prompt changes are involved.
+Only explicit invocation overrides are forwarded, not the AppServer's entire
+environment or its authentication variables.
+
+The adapter changes only supplied environment values. It preserves user
+inheritance, exclusion, and include-filter policies, including legacy Codex
+filter configuration. An include allowlist must permit required context.
+An omitted key is not cleared: old daemon environment values can still be
+inherited, including Card context in a cardless session. Sanitizing old context
+is explicitly outside this change and needs a separate compatibility design.
+The adapter rejects environment keys containing dots, equals, or NUL because
+Codex CLI config-path splitting cannot represent those keys unambiguously.
+
+The built-in preset still defaults to `--no-daemon`; custom Codex commands can
+use a shared daemon with this adaptation. Shell configuration does not claim to
+set provider-specific MCP server or hook environments, which require separate
+provider contracts.
+
+Run `mise run acceptance-agent-launch` for real Codex config parsing and
+concurrent/resumed thread shell checks in isolated temporary homes without model
+requests. `CANBAN_CODEX_BIN` selects the Codex executable under test. See [dated validation and limits](../agent-launch-acceptance-20261116.md).
 
 ## Profile schema
 

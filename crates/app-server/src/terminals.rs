@@ -600,7 +600,14 @@ impl AppServer {
                     vec![shell, "-l".into()]
                 }
             };
-            let receipt = client.launch_on(&runtime.machine, argv, &cwd, env, labels)?;
+            let spec = canban_profiles::prepare_launch(canban_profiles::LaunchRequest {
+                profile: agent_profile.as_ref(),
+                argv,
+                env,
+                cwd: cwd.clone(),
+            })?;
+            let receipt =
+                client.launch_on(&runtime.machine, spec.argv, &spec.cwd, spec.env, labels)?;
             let address = receipt["address"]
                 .as_str()
                 .context("Terminal launch receipt has no address")?

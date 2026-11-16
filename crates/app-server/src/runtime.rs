@@ -1306,7 +1306,14 @@ impl AppServer {
                 argv[0] = program.as_str().context("No remote executable")?.into();
             }
         }
-        let terminal = client.launch_on(&location.machine, argv, &run.cwd, env, labels)?;
+        let spec = canban_profiles::prepare_launch(canban_profiles::LaunchRequest {
+            profile: Some(&att.profile),
+            argv,
+            env,
+            cwd: run.cwd.clone(),
+        })?;
+        let terminal =
+            client.launch_on(&location.machine, spec.argv, &spec.cwd, spec.env, labels)?;
         let core_id = strp(&core["core"], "id")?.to_owned();
         let terminal_address = strp(&terminal, "address")?.to_owned();
         run.owner_core_id = if remote {

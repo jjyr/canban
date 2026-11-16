@@ -1085,7 +1085,13 @@ impl AppServer {
             observed_agent: None,
             waiting: None,
         };
-        match client.launch_on("local", argv, &batch.worktree, env, labels) {
+        let spec = canban_profiles::prepare_launch(canban_profiles::LaunchRequest {
+            profile: Some(&profile),
+            argv,
+            env,
+            cwd: batch.worktree.clone(),
+        })?;
+        match client.launch_on("local", spec.argv, &spec.cwd, spec.env, labels) {
             Ok(receipt) => {
                 let address = strp(&receipt, "address")?.to_owned();
                 runtime.terminal = Some(address.clone());

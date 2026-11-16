@@ -1,4 +1,7 @@
-//! Resolve editable presets and explicit overrides; no provider dispatch at runtime.
+//! Resolve editable presets and prepare provider-adapted process launches.
+mod adapters;
+pub mod launch;
+pub use launch::{LaunchRequest, LaunchSpec, prepare_launch};
 pub mod catalog;
 pub use catalog::{
     CatalogEntry, ModelOption, annotate_agy_model_efforts, builtin_catalog,

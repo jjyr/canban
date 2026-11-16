@@ -1,6 +1,6 @@
 # Agent CLI and extension boundary
 
-Status: implemented 2026-11-07; current lifecycle/API description reconciled 2026-11-10. [Profile schema](agent-profiles.md) and [MVP acceptance](../mvp-acceptance.md) are the current references. The earlier provider-specific Rust adapters and mandatory notify/Stop callbacks were removed.
+Status: implemented 2026-11-07; current lifecycle/API description reconciled 2026-11-10. [Profile schema](agent-profiles.md) and [MVP acceptance](../mvp-acceptance.md) are the current references. The earlier provider lifecycle adapters and mandatory notify/Stop callbacks were removed. Per-invocation command/environment adaptation now lives in canban-profiles; see [launch adaptation](agent-profiles.md#per-invocation-launch-adaptation). It does not interpret provider lifecycle or install hooks.
 
 ## CLI capability surface
 

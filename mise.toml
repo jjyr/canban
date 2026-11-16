@@ -166,3 +166,7 @@ run = "python3 scripts/acceptance-editor.py"
 [tasks.acceptance-workflows]
 depends = ["build"]
 run = "python3 scripts/acceptance-workflows.py"
+
+[tasks.acceptance-agent-launch]
+depends = ["terminal-deps"]
+run = "cargo nextest run --workspace --locked --run-ignored only -E 'package(canban-profiles) & test(real_codex_thread_environment_isolation)'"

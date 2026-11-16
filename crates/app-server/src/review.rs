@@ -1290,11 +1290,17 @@ impl AppServer {
                 ),
                 ("CANBAN_CLI".into(), self.cli.to_string_lossy().into_owned()),
             ]);
+            let spec = canban_profiles::prepare_launch(canban_profiles::LaunchRequest {
+                profile: Some(&profile),
+                argv,
+                env,
+                cwd: cwd.clone(),
+            })?;
             let receipt = client.launch_on(
                 &machine,
-                argv,
-                &cwd,
-                env,
+                spec.argv,
+                &spec.cwd,
+                spec.env,
                 std::collections::BTreeMap::from([
                     ("canban.terminal".into(), item.id.clone()),
                     ("canban.project".into(), project.id.clone()),

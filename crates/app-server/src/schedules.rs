@@ -1410,8 +1410,14 @@ impl AppServer {
             ("canban.schedule_run".into(), run.id.clone()),
             ("canban.terminal".into(), run.id.clone()),
         ]);
+        let spec = canban_profiles::prepare_launch(canban_profiles::LaunchRequest {
+            profile: Some(&prof),
+            argv,
+            env,
+            cwd: location.directory.clone(),
+        })?;
         let receipt =
-            client.launch_on(&location.machine, argv, &location.directory, env, labels)?;
+            client.launch_on(&location.machine, spec.argv, &spec.cwd, spec.env, labels)?;
         let terminal_address = strp(&receipt, "address")?.to_owned();
         {
             let mut inv = self.inventory.lock().unwrap();

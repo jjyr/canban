@@ -899,6 +899,30 @@ fn opening_card_shell_and_agent_terminals_immediately_creates_card_worktree_and_
     assert_eq!(agent_launch["env"]["CANBAN_CARD"], c.number.to_string());
     assert_eq!(agent_launch["env"]["CARD_ID"], c.id);
     assert_eq!(agent_launch["env"]["CANBAN_PROJECT"], p.id);
+    // Shared-daemon tools must receive the same Card identity as the client.
+    let argv = agent_launch["argv"].as_array().unwrap();
+    for key in [
+        "CANBAN_CARD",
+        "CARD_ID",
+        "CANBAN_PROJECT",
+        "CANBAN_CLI",
+        "CANBAN_ENDPOINT",
+        "CANBAN_RUN_DIR",
+    ] {
+        let expected = format!(
+            "shell_environment_policy.set.{key}={}",
+            serde_json::to_string(&agent_launch["env"][key]).unwrap()
+        );
+        assert!(
+            argv.iter().any(|arg| arg.as_str() == Some(&expected)),
+            "{key}"
+        );
+    }
+    assert!(!shell_launch["argv"].as_array().unwrap().iter().any(|arg| {
+        arg.as_str()
+            .is_some_and(|s| s.contains("shell_environment_policy"))
+    }));
+
     assert!(agent_launch["env"].get("CANBAN_REQUEST_ID").is_none());
     assert!(agent_launch["env"].get("CANBAN_ATTEMPT").is_none());
     assert_eq!(

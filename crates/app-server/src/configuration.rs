@@ -220,11 +220,17 @@ impl AppServer {
                         session.provider_session_id.clone().unwrap_or_default(),
                     ),
                 ]);
+                let spec = canban_profiles::prepare_launch(canban_profiles::LaunchRequest {
+                    profile: Some(&profile),
+                    argv,
+                    env,
+                    cwd: cwd_str.clone(),
+                })?;
                 let receipt = client.launch_on(
                     "local",
-                    argv,
-                    &cwd_str,
-                    env,
+                    spec.argv,
+                    &spec.cwd,
+                    spec.env,
                     std::collections::BTreeMap::from([
                         ("canban.configuration".into(), session.id.clone()),
                         ("canban.project".into(), session.project_id.clone()),
