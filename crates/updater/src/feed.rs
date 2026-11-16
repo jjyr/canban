@@ -88,9 +88,22 @@ fn validate_url(url: &str) -> Result<()> {
     );
     Ok(())
 }
-fn agent() -> ureq::Agent {
+fn metadata_agent() -> ureq::Agent {
     ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(60)))
+        .timeout_connect(Some(Duration::from_secs(20)))
+        .timeout_send_request(Some(Duration::from_secs(20)))
+        .timeout_recv_response(Some(Duration::from_secs(30)))
+        .timeout_recv_body(Some(Duration::from_secs(60)))
+        .max_redirects(5)
+        .build()
+        .into()
+}
+fn download_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(20)))
+        .timeout_send_request(Some(Duration::from_secs(20)))
+        .timeout_recv_response(Some(Duration::from_secs(30)))
+        .timeout_recv_body(Some(Duration::from_secs(20 * 60)))
         .max_redirects(5)
         .build()
         .into()
@@ -101,7 +114,7 @@ fn bytes(url: &str, limit: u64, client: Option<&canban_github::Client>) -> Resul
     {
         c.release_response(url)?
     } else {
-        agent()
+        metadata_agent()
             .get(url)
             .header("User-Agent", "Canban updater")
             .call()?
@@ -288,6 +301,20 @@ fn check_inner(home: &Path, client: Option<canban_github::Client>, automatic: bo
     }
     save_state(home, &state)
 }
+fn clear_stale_staging(home: &Path) {
+    let staging = home.join("updates/staging");
+    if let Ok(entries) = std::fs::read_dir(staging) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let _ = std::fs::remove_dir_all(path);
+            } else {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+}
+
 /// Stream and verify before extraction; never overwrite the installed bundle.
 pub fn stage(
     home: &Path,
@@ -295,56 +322,69 @@ pub fn stage(
     client: Option<&canban_github::Client>,
 ) -> Result<PathBuf> {
     validate_url(&release.url)?;
+    clear_stale_staging(home);
     let job = home.join("updates/staging").join(canban_types::id());
     std::fs::create_dir_all(&job)?;
-    let archive = job.join("download.tar.zst");
-    let mut output = File::create(&archive)?;
-    let mut response = if let Some(c) =
-        client.filter(|_| release.url.starts_with("https://api.github.com/repos/"))
-    {
-        c.release_response(&release.url)?
-    } else {
-        agent()
-            .get(&release.url)
-            .header("User-Agent", "Canban updater")
-            .call()?
-    };
-    let mut reader = response.body_mut().as_reader();
-    let mut total = 0u64;
-    let mut digest = Sha256::new();
-    let mut buffer = [0u8; 65536];
     let mut state = load_state(home);
     state.phase = "downloading".into();
     state.error = None;
     state.progress = 0;
-    save_state(home, &state)?;
-    loop {
-        let n = reader.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        total += n as u64;
-        ensure!(
-            total <= release.manifest.size,
-            "Downloaded update exceeds declared size"
-        );
-        digest.update(&buffer[..n]);
-        output.write_all(&buffer[..n])?;
-        let progress = (total * 100 / release.manifest.size) as u8;
-        if progress != state.progress {
-            state.progress = progress;
-            save_state(home, &state)?;
-        }
+    if let Err(err) = save_state(home, &state) {
+        let _ = std::fs::remove_dir_all(&job);
+        return Err(err);
     }
-    output.sync_all()?;
-    ensure!(
-        total == release.manifest.size
-            && format!("{:x}", digest.finalize()) == release.manifest.sha256.to_lowercase(),
-        "Update size/checksum mismatch"
-    );
-    let bundle = extract(&archive, &job)?;
-    validate_candidate(&bundle, &release.manifest)?;
-    Ok(bundle)
+    let result = (|| -> Result<PathBuf> {
+        let archive = job.join("download.tar.zst");
+        let mut output = File::create(&archive)?;
+        let mut response = if let Some(c) =
+            client.filter(|_| release.url.starts_with("https://api.github.com/repos/"))
+        {
+            c.release_response(&release.url)?
+        } else {
+            download_agent()
+                .get(&release.url)
+                .header("User-Agent", "Canban updater")
+                .call()?
+        };
+        let mut reader = response.body_mut().as_reader();
+        let mut total = 0u64;
+        let mut digest = Sha256::new();
+        let mut buffer = [0u8; 65536];
+        loop {
+            let n = reader.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            total += n as u64;
+            ensure!(
+                total <= release.manifest.size,
+                "Downloaded update exceeds declared size"
+            );
+            digest.update(&buffer[..n]);
+            output.write_all(&buffer[..n])?;
+            let progress = (total * 100 / release.manifest.size) as u8;
+            if progress != state.progress {
+                state.progress = progress;
+                save_state(home, &state)?;
+            }
+        }
+        output.sync_all()?;
+        ensure!(
+            total == release.manifest.size
+                && format!("{:x}", digest.finalize()) == release.manifest.sha256.to_lowercase(),
+            "Update size/checksum mismatch"
+        );
+        let bundle = extract(&archive, &job)?;
+        validate_candidate(&bundle, &release.manifest)?;
+        Ok(bundle)
+    })();
+    if let Err(err) = &result {
+        let _ = std::fs::remove_dir_all(&job);
+        state.phase = "error".into();
+        state.error = Some(format!("{err:#}"));
+        let _ = save_state(home, &state);
+    }
+    result
 }
 pub(crate) fn verify_bundle_tree(path: &Path) -> Result<()> {
     let kind = std::fs::symlink_metadata(path)
@@ -635,92 +675,99 @@ pub fn stage_cli(
     client: Option<&canban_github::Client>,
 ) -> Result<PathBuf> {
     validate_url(&release.url)?;
+    clear_stale_staging(home);
     let job = home.join("updates/staging").join(canban_types::id());
     std::fs::create_dir_all(&job)?;
-    let archive = job.join("canban.tar.gz");
-    let mut output = File::create(&archive)?;
-    let mut response = if let Some(c) =
-        client.filter(|_| release.url.starts_with("https://api.github.com/repos/"))
-    {
-        c.release_response(&release.url)?
-    } else {
-        agent()
-            .get(&release.url)
-            .header("User-Agent", "Canban updater")
-            .call()?
-    };
-    let mut reader = response.body_mut().as_reader();
-    let mut total = 0u64;
-    let mut digest = Sha256::new();
-    let mut buffer = [0u8; 65536];
-    loop {
-        let n = reader.read(&mut buffer)?;
-        if n == 0 {
-            break;
+    let result = (|| -> Result<PathBuf> {
+        let archive = job.join("canban.tar.gz");
+        let mut output = File::create(&archive)?;
+        let mut response = if let Some(c) =
+            client.filter(|_| release.url.starts_with("https://api.github.com/repos/"))
+        {
+            c.release_response(&release.url)?
+        } else {
+            download_agent()
+                .get(&release.url)
+                .header("User-Agent", "Canban updater")
+                .call()?
+        };
+        let mut reader = response.body_mut().as_reader();
+        let mut total = 0u64;
+        let mut digest = Sha256::new();
+        let mut buffer = [0u8; 65536];
+        loop {
+            let n = reader.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            total += n as u64;
+            ensure!(
+                total <= release.manifest.size,
+                "Downloaded CLI update exceeds declared size"
+            );
+            digest.update(&buffer[..n]);
+            output.write_all(&buffer[..n])?;
         }
-        total += n as u64;
+        output.sync_all()?;
         ensure!(
-            total <= release.manifest.size,
-            "Downloaded CLI update exceeds declared size"
+            total == release.manifest.size
+                && format!("{:x}", digest.finalize()) == release.manifest.sha256.to_lowercase(),
+            "CLI update size/checksum mismatch"
         );
-        digest.update(&buffer[..n]);
-        output.write_all(&buffer[..n])?;
+        let decoder = flate2::read::GzDecoder::new(File::open(&archive)?);
+        let mut tar = tar::Archive::new(decoder);
+        let mut expanded = 0u64;
+        for entry in tar.entries()? {
+            let mut entry = entry?;
+            let path = entry.path()?.into_owned();
+            ensure!(
+                path.components().count() == 1
+                    && path
+                        .components()
+                        .next()
+                        .is_some_and(|c| c.as_os_str() == "canban"),
+                "Unsafe CLI update archive path"
+            );
+            ensure!(
+                entry.header().entry_type().is_file(),
+                "CLI update archive contains a non-file entry"
+            );
+            expanded = expanded
+                .checked_add(entry.size())
+                .context("CLI archive size overflow")?;
+            ensure!(
+                expanded <= 512 * 1024 * 1024,
+                "Expanded CLI binary exceeds limit"
+            );
+            ensure!(entry.unpack_in(&job)?, "CLI archive entry escaped staging");
+        }
+        let staged_bin = job.join("canban");
+        ensure!(staged_bin.is_file(), "CLI archive did not contain `canban`");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&staged_bin, std::fs::Permissions::from_mode(0o755))?;
+        }
+        let out = std::process::Command::new(&staged_bin)
+            .arg("build-info")
+            .output()
+            .context("Failed to execute staged CLI `build-info`")?;
+        ensure!(out.status.success(), "Staged CLI `build-info` failed");
+        let build: Build = serde_json::from_slice(&out.stdout)?;
+        ensure!(
+            build.version == release.manifest.version
+                && build.commit == release.manifest.commit
+                && build.platform == release.manifest.platform
+                && build.schema == release.manifest.schema
+                && build.api == release.manifest.api,
+            "Staged CLI binary does not match manifest"
+        );
+        Ok(staged_bin)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&job);
     }
-    output.sync_all()?;
-    ensure!(
-        total == release.manifest.size
-            && format!("{:x}", digest.finalize()) == release.manifest.sha256.to_lowercase(),
-        "CLI update size/checksum mismatch"
-    );
-    let decoder = flate2::read::GzDecoder::new(File::open(&archive)?);
-    let mut tar = tar::Archive::new(decoder);
-    let mut expanded = 0u64;
-    for entry in tar.entries()? {
-        let mut entry = entry?;
-        let path = entry.path()?.into_owned();
-        ensure!(
-            path.components().count() == 1
-                && path
-                    .components()
-                    .next()
-                    .is_some_and(|c| c.as_os_str() == "canban"),
-            "Unsafe CLI update archive path"
-        );
-        ensure!(
-            entry.header().entry_type().is_file(),
-            "CLI update archive contains a non-file entry"
-        );
-        expanded = expanded
-            .checked_add(entry.size())
-            .context("CLI archive size overflow")?;
-        ensure!(
-            expanded <= 512 * 1024 * 1024,
-            "Expanded CLI binary exceeds limit"
-        );
-        ensure!(entry.unpack_in(&job)?, "CLI archive entry escaped staging");
-    }
-    let staged_bin = job.join("canban");
-    ensure!(staged_bin.is_file(), "CLI archive did not contain `canban`");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&staged_bin, std::fs::Permissions::from_mode(0o755))?;
-    }
-    let out = std::process::Command::new(&staged_bin)
-        .arg("build-info")
-        .output()
-        .context("Failed to execute staged CLI `build-info`")?;
-    ensure!(out.status.success(), "Staged CLI `build-info` failed");
-    let build: Build = serde_json::from_slice(&out.stdout)?;
-    ensure!(
-        build.version == release.manifest.version
-            && build.commit == release.manifest.commit
-            && build.platform == release.manifest.platform
-            && build.schema == release.manifest.schema
-            && build.api == release.manifest.api,
-        "Staged CLI binary does not match manifest"
-    );
-    Ok(staged_bin)
+    result
 }
 #[cfg(test)]
 mod tests {
@@ -1006,5 +1053,185 @@ mod archive_tests {
         let mut mac_manifest = avail.manifest.clone();
         mac_manifest.platform = "macos-aarch64".into();
         assert!(validate_candidate(&source, &mac_manifest).is_err());
+    }
+
+    #[test]
+    fn stage_failure_cleans_up_staging_dir_and_sets_error_state() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        // Seed a stale staging leftover to verify stale directories are also cleared.
+        std::fs::create_dir_all(home.join("updates/staging/stale-leftover")).unwrap();
+        std::fs::write(
+            home.join("updates/staging/stale-leftover/download.tar.zst"),
+            b"stale",
+        )
+        .unwrap();
+
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+
+        let handle = std::thread::spawn(move || {
+            // Case 1: Dropped connection / truncated body mid-stream after partial progress.
+            if let Ok((mut stream, _)) = server.accept() {
+                let mut req = [0u8; 1024];
+                let _ = stream.read(&mut req);
+                let header = "HTTP/1.1 200 OK\r\nContent-Length: 200000\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n";
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&vec![0xABu8; 100_000]);
+                // Close early before sending all 200_000 bytes!
+            }
+            // Case 2: Full body delivered, but SHA256 checksum mismatches manifest.
+            if let Ok((mut stream, _)) = server.accept() {
+                let mut req = [0u8; 1024];
+                let _ = stream.read(&mut req);
+                let payload = vec![0xCDu8; 1024];
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
+                    payload.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&payload);
+            }
+        });
+
+        let truncated_avail = Available {
+            manifest: Manifest {
+                version: "20261116-20".into(),
+                commit: "0123456789abcdef0123456789abcdef01234567".into(),
+                platform: "linux-x86_64".into(),
+                api: DESKTOP_API,
+                schema: canban_storage::migrations::CURRENT,
+                rollback_floor: 8,
+                asset: "Canban-linux-x86_64.tar.zst".into(),
+                size: 200_000,
+                sha256: "f".repeat(64),
+            },
+            url: format!("http://{addr}/truncated.tar.zst"),
+            notes: String::new(),
+        };
+
+        let err1 = stage(&home, &truncated_avail, None).unwrap_err();
+        let saved1 = load_state(&home);
+        assert_eq!(saved1.phase, "error", "state must not stay in downloading");
+        assert!(
+            saved1.error.as_deref().is_some_and(|e| !e.is_empty()),
+            "expected error message in state.json after truncated stream ({err1:#})"
+        );
+        assert_eq!(
+            std::fs::read_dir(home.join("updates/staging"))
+                .unwrap()
+                .count(),
+            0,
+            "staging directory must be empty after truncated stream failure"
+        );
+
+        let mismatch_avail = Available {
+            manifest: Manifest {
+                size: 1024,
+                ..truncated_avail.manifest
+            },
+            url: format!("http://{addr}/mismatch.tar.zst"),
+            notes: String::new(),
+        };
+
+        let err2 = stage(&home, &mismatch_avail, None).unwrap_err();
+        assert!(err2.to_string().contains("checksum mismatch"), "{err2:#}");
+        let saved2 = load_state(&home);
+        assert_eq!(saved2.phase, "error");
+        assert!(
+            saved2
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("checksum mismatch")),
+            "unexpected state error: {:?}",
+            saved2.error
+        );
+        assert_eq!(
+            std::fs::read_dir(home.join("updates/staging"))
+                .unwrap()
+                .count(),
+            0,
+            "staging directory must be empty after checksum mismatch"
+        );
+
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn stage_cli_failure_cleans_up_staging_dir() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(home.join("updates/staging/old-cli-job")).unwrap();
+        std::fs::write(
+            home.join("updates/staging/old-cli-job/canban.tar.gz"),
+            b"leftover",
+        )
+        .unwrap();
+
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            // Case 1: Truncated stream.
+            if let Ok((mut stream, _)) = server.accept() {
+                let mut req = [0u8; 1024];
+                let _ = stream.read(&mut req);
+                let header = "HTTP/1.1 200 OK\r\nContent-Length: 50000\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n";
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&vec![0x11u8; 4096]);
+            }
+            // Case 2: Checksum mismatch.
+            if let Ok((mut stream, _)) = server.accept() {
+                let mut req = [0u8; 1024];
+                let _ = stream.read(&mut req);
+                let payload = vec![0x22u8; 512];
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
+                    payload.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&payload);
+            }
+        });
+
+        let mut avail = Available {
+            manifest: Manifest {
+                version: "20261116-21".into(),
+                commit: "0123456789abcdef0123456789abcdef01234567".into(),
+                platform: "linux-x86_64".into(),
+                api: DESKTOP_API,
+                schema: canban_storage::migrations::CURRENT,
+                rollback_floor: 0,
+                asset: "canban-cli-linux-x86_64.tar.gz".into(),
+                size: 50_000,
+                sha256: "a".repeat(64),
+            },
+            url: format!("http://{addr}/cli-truncated.tar.gz"),
+            notes: String::new(),
+        };
+
+        assert!(stage_cli(&home, &avail, None).is_err());
+        assert_eq!(
+            std::fs::read_dir(home.join("updates/staging"))
+                .unwrap()
+                .count(),
+            0,
+            "staging directory must be empty after truncated stage_cli"
+        );
+
+        avail.manifest.size = 512;
+        avail.url = format!("http://{addr}/cli-mismatch.tar.gz");
+        let err = stage_cli(&home, &avail, None).unwrap_err();
+        assert!(err.to_string().contains("checksum mismatch"), "{err:#}");
+        assert_eq!(
+            std::fs::read_dir(home.join("updates/staging"))
+                .unwrap()
+                .count(),
+            0,
+            "staging directory must be empty after checksum mismatch in stage_cli"
+        );
+
+        let _ = handle.join();
     }
 }

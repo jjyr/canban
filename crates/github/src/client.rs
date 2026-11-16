@@ -625,6 +625,39 @@ mod tests {
     }
 }
 
+fn redact_release_download_error(err: ureq::Error) -> anyhow::Error {
+    match err {
+        ureq::Error::StatusCode(code) => {
+            anyhow::anyhow!("Release asset download failed: HTTP {code}")
+        }
+        ureq::Error::Timeout(kind) => {
+            anyhow::anyhow!("Release asset download timed out ({kind})")
+        }
+        ureq::Error::Io(io_err) => {
+            anyhow::anyhow!("Release asset download I/O error ({})", io_err.kind())
+        }
+        ureq::Error::Protocol(_) => {
+            anyhow::anyhow!("Release asset download failed: HTTP protocol error")
+        }
+        ureq::Error::HostNotFound => {
+            anyhow::anyhow!("Release asset download failed: host not found")
+        }
+        ureq::Error::ConnectionFailed => {
+            anyhow::anyhow!("Release asset download failed: connection failed")
+        }
+        ureq::Error::TooManyRedirects => {
+            anyhow::anyhow!("Release asset download failed: too many redirects")
+        }
+        ureq::Error::RedirectFailed => {
+            anyhow::anyhow!("Release asset download failed: redirect failed")
+        }
+        ureq::Error::BodyStalled => {
+            anyhow::anyhow!("Release asset download failed: body data reading stalled")
+        }
+        _ => anyhow::anyhow!("Release asset download failed"),
+    }
+}
+
 impl Client {
     /// Private release assets use the API octet-stream route. Never forward the
     /// GitHub credential when following its signed storage redirect.
@@ -654,7 +687,10 @@ impl Client {
                 "Release download redirect requires HTTPS"
             );
             let public: ureq::Agent = ureq::Agent::config_builder()
-                .timeout_global(Some(std::time::Duration::from_secs(120)))
+                .timeout_connect(Some(Duration::from_secs(20)))
+                .timeout_send_request(Some(Duration::from_secs(20)))
+                .timeout_recv_response(Some(Duration::from_secs(30)))
+                .timeout_recv_body(Some(Duration::from_secs(20 * 60)))
                 .max_redirects(5)
                 .build()
                 .into();
@@ -662,7 +698,7 @@ impl Client {
                 .get(location)
                 .header("User-Agent", "Canban updater")
                 .call()
-                .map_err(|_| anyhow::anyhow!("Release asset download failed"));
+                .map_err(redact_release_download_error);
         }
         ensure!(
             response.status().is_success(),
@@ -723,6 +759,57 @@ mod release_tests {
             .read_to_string(&mut bytes)
             .unwrap();
         assert_eq!(bytes, "fixture");
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn release_redirect_error_surfaces_reason_without_leaking_signed_query_tokens() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let redirect = base.clone();
+        let secret_sig = "X-Amz-Signature=super-secret-signed-token-998877";
+        let thread = std::thread::spawn(move || {
+            for i in 0..2 {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut input = BufReader::new(socket.try_clone().unwrap());
+                loop {
+                    let mut line = String::new();
+                    input.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                let reply = if i == 0 {
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: {redirect}/signed/asset?{secret_sig}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                } else {
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 18\r\nConnection: close\r\n\r\nstorage-overloaded"
+                        .into()
+                };
+                socket.write_all(reply.as_bytes()).unwrap();
+            }
+        });
+        let mut client = Client::new(SecretString::from("gh-bearer-secret"));
+        client.api = base.clone();
+        let err = client
+            .release_response(&format!("{base}/repos/test/app/releases/assets/42"))
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("HTTP 503"), "unexpected error: {msg}");
+        assert!(
+            !msg.contains("super-secret-signed-token"),
+            "leaked signed query: {msg}"
+        );
+        assert!(!msg.contains("X-Amz-Signature"), "leaked query key: {msg}");
+        assert!(
+            !msg.contains("gh-bearer-secret"),
+            "leaked bearer token: {msg}"
+        );
+        assert!(
+            !msg.contains("storage-overloaded"),
+            "leaked remote body: {msg}"
+        );
         thread.join().unwrap();
     }
 }
