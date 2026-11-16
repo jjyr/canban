@@ -1028,6 +1028,49 @@ pub fn overview() -> canban_types::Snapshot {
     recovery.human_gate = None;
     recovery.attention = Some("Execution machine unavailable; reconnect before retrying".into());
     s.cards.push(recovery);
+
+    let number = s.terminals.iter().map(|t| t.number).max().unwrap_or(0) + 1;
+    s.terminals.push(TerminalEntry {
+        id: "overview-manual-agent".into(),
+        conversation_id: None,
+        number,
+        name: Some("Terminal 2".into()),
+        origin_project_id: Some("second-project".into()),
+        origin_card_id: None,
+        agent_engine: None,
+        runtime: Some(TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: None,
+            core_id: Some("gallery-core".into()),
+            terminal: Some("manual-pty-2".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: Some("working".into()),
+            agent_turn: Some(1),
+            observed_agent: Some("claude".into()),
+            waiting: None,
+        }),
+        agent: None,
+        created_at: now() - 60_000,
+    });
+    s.terminal_contexts.push(TerminalContext {
+        machine: "local".into(),
+        terminal_id: "overview-manual-agent".into(),
+        core_id: "gallery-core".into(),
+        terminal: "manual-pty-2".into(),
+        cwd: Some("/preview/tools".into()),
+        directory_root: Some("/preview/tools".into()),
+        project_id: Some("second-project".into()),
+        card_id: None,
+        worktree_id: None,
+        branch: Some("main".into()),
+        dirty: false,
+        additions: 0,
+        deletions: 0,
+        ahead: 0,
+        behind: 0,
+    });
     s
 }
 

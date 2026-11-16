@@ -98,7 +98,7 @@ This contract defines how one native `Canban.app` client connects simultaneously
 
 ### 3.1 Top-chrome `Hosts` status pill and quick popover
 
-Adjacent to the top-right `Activity & Notifications` pill (`⚡ N · ● active/max`) in the 42-point window chrome:
+Adjacent to the top-right `Activity & Notifications` pill (`⚡ N · ● running`) in the 42-point window chrome:
 
 - **Status pill:** Shows `🟢 N Hosts` when remote hosts are configured (or a subtle single-host/add-host icon button when only `This Mac` is active; turns `🟡` on reconnect/API mismatch and `⚪` when a remote host is offline).
 - **Quick popover:**

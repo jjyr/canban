@@ -123,22 +123,58 @@ fn standalone_terminal_is_running(s: &canban_types::Snapshot, e: &crate::termina
             ))
 }
 
-fn attention_summary(ui: Ui) -> (usize, usize, usize, usize) {
+fn running_agents_count_from(
+    s: &canban_types::Snapshot,
+    rows: &[OverviewRow],
+    entries: &[crate::terminals::Entry],
+    scope: Option<&str>,
+) -> usize {
+    let card_running = rows
+        .iter()
+        .filter(|r| {
+            scope.is_none_or(|pid| r.card.project_id == pid)
+                && r.group == "Working"
+                && !r.actionable()
+        })
+        .count();
+    let standalone_running = entries
+        .iter()
+        .filter(|e| {
+            scope.is_none_or(|pid| e.project_id.as_deref() == Some(pid))
+                && standalone_terminal_is_running(s, e)
+        })
+        .count();
+    card_running + standalone_running
+}
+
+fn attention_summary(ui: Ui) -> (usize, usize, usize) {
     let all_rows = ui.overview_rows.get();
     let actionable_cards: std::collections::BTreeSet<&str> = all_rows
         .iter()
         .filter(|r| r.actionable())
         .map(|r| r.card.id.as_str())
         .collect();
-    let terminal_alerts = ui.terminal_entries.with(|entries| {
-        entries
-            .iter()
-            .filter(|e| standalone_terminal_needs_you(e))
-            .count()
+    let (terminal_alerts, standalone_running) = ui.snapshot.with(|s| {
+        ui.terminal_entries.with(|entries| {
+            let alerts = entries
+                .iter()
+                .filter(|e| standalone_terminal_needs_you(e))
+                .count();
+            let running = entries
+                .iter()
+                .filter(|e| standalone_terminal_is_running(s, e))
+                .count();
+            (alerts, running)
+        })
     });
     let actionable = actionable_cards.len() + terminal_alerts;
-    let (unread_cards, active_slots) = ui.snapshot.with(|s| {
-        let unread = ui.reminder_counts.with(|counts| {
+    let card_running = all_rows
+        .iter()
+        .filter(|r| r.group == "Working" && !r.actionable())
+        .count();
+    let running = card_running + standalone_running;
+    let unread_cards = ui.snapshot.with(|s| {
+        ui.reminder_counts.with(|counts| {
             s.cards
                 .iter()
                 .filter(|c| {
@@ -146,11 +182,9 @@ fn attention_summary(ui: Ui) -> (usize, usize, usize, usize) {
                         && !actionable_cards.contains(c.id.as_str())
                 })
                 .count()
-        });
-        (unread, canban_scheduler::active_count(s))
+        })
     });
-    let max_slots = ui.max_agents.get();
-    (actionable, unread_cards, active_slots, max_slots)
+    (actionable, unread_cards, running)
 }
 
 pub fn trigger_pill(ui: Ui) -> impl IntoElement {
@@ -161,20 +195,19 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
         .window_drag(false)
         .tooltip(
             hint_tooltip(move || {
-                let (actionable, unread, active, max) = stats.get();
+                let (actionable, unread, running) = stats.get();
                 format!(
-                    "Activity & Notifications · {}\n{} needs you · {} unread · {} / {} running",
+                    "Activity & Notifications · {}\n{} needs you · {} unread · {} running",
                     crate::commands::shortcuts::NOTIFICATIONS_DISPLAY,
                     actionable,
                     unread,
-                    active,
-                    max
+                    running
                 )
             })
             .placement(Placement::Bottom),
         )
         .child(dynamic(move || {
-            let (actionable, unread, active, max) = stats.get();
+            let (actionable, unread, running) = stats.get();
             let total_alerts = actionable + unread;
             let open = is_open.get();
             let has_urgent = actionable > 0;
@@ -207,8 +240,8 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                 .accessibility_label(move || {
                     Some(
                         format!(
-                            "Activity & Notifications, {} alerts, {} of {} running",
-                            total_alerts, active, max
+                            "Activity & Notifications, {} alerts, {} running",
+                            total_alerts, running
                         )
                         .into(),
                     )
@@ -239,13 +272,15 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                     .child(muted("·").text_size(px(11.)));
             }
             btn = btn
-                .child(view().w(px(6.)).h(px(6.)).rounded_full().bg(if active > 0 {
-                    SUCCESS
-                } else {
-                    MUTED
-                }))
                 .child(
-                    muted(format!("{active}/{max}"))
+                    view()
+                        .w(px(6.))
+                        .h(px(6.))
+                        .rounded_full()
+                        .bg(if running > 0 { SUCCESS } else { MUTED }),
+                )
+                .child(
+                    muted(running.to_string())
                         .text_size(px(11.5))
                         .font_family(canban_ui_kit::tokens::MONO_FONT),
                 );
@@ -298,17 +333,8 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                 .child(dynamic(move || {
                                     let s = ui.snapshot.get();
                                     let counts = ui.reminder_counts.get();
-                                    let active_slots = canban_scheduler::active_count(&s);
-                                    let max_slots = ui.max_agents.get();
-                                    let queued_count = s
-                                        .terminals
-                                        .iter()
-                                        .filter(|t| {
-                                            t.agent.as_ref().is_some_and(|a| {
-                                                a.state == "queued" || a.pending.is_some()
-                                            })
-                                        })
-                                        .count();
+                                    let all_rows = ui.overview_rows.get();
+                                    let entries = ui.terminal_entries.get();
                                     let scope = project_scope.get();
                                     let valid_scope = if !scope.is_empty()
                                         && s.projects.iter().any(|p| p.id == scope)
@@ -317,6 +343,24 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                     } else {
                                         None
                                     };
+                                    let running_count = running_agents_count_from(
+                                        &s,
+                                        &all_rows,
+                                        &entries,
+                                        valid_scope.as_deref(),
+                                    );
+                                    let queued_count = s
+                                        .terminals
+                                        .iter()
+                                        .filter(|t| {
+                                            t.agent.as_ref().is_some_and(|a| {
+                                                valid_scope
+                                                    .as_deref()
+                                                    .is_none_or(|pid| a.project_id == pid)
+                                                    && (a.state == "queued" || a.pending.is_some())
+                                            })
+                                        })
+                                        .count();
                                     let has_unread = s.cards.iter().any(|c| {
                                         valid_scope.as_deref().is_none_or(|pid| c.project_id == pid)
                                             && counts.get(&c.id).is_some_and(|n| n.unread > 0)
@@ -338,8 +382,8 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                                         .font_weight(FontWeight::SEMIBOLD),
                                                 )
                                                 .child(status(
-                                                    format!("{active_slots}/{max_slots} running"),
-                                                    if active_slots > 0 {
+                                                    format!("{running_count} running"),
+                                                    if running_count > 0 {
                                                         Tone::Info
                                                     } else {
                                                         Tone::Neutral
@@ -366,8 +410,6 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                     top = top.child(right);
 
                                     if s.projects.len() > 1 {
-                                        let all_rows = overview(&s);
-                                        let entries = crate::terminals::entries(&s);
                                         let all_selected = valid_scope.is_none();
                                         let mut filter_seg = segmented().child(compact_segment(
                                             "All",
@@ -1132,29 +1174,37 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         .gap_4()
         .child(dynamic(move || {
             let s = ui.snapshot.get();
-            let all_rows = overview(&s);
-            let actionable_count = all_rows.iter().filter(|r| r.actionable()).count()
-                + crate::terminals::entries(&s)
-                    .into_iter()
-                    .filter(standalone_terminal_needs_you)
-                    .count();
-            let active_slots = canban_scheduler::active_count(&s);
-            let max_slots = ui.max_agents.get();
-            let queued_count = s
-                .terminals
-                .iter()
-                .filter(|t| {
-                    t.agent
-                        .as_ref()
-                        .is_some_and(|a| a.state == "queued" || a.pending.is_some())
-                })
-                .count();
+            let all_rows = ui.overview_rows.get();
+            let entries = ui.terminal_entries.get();
             let scope = project_scope.get();
             let valid_scope = if !scope.is_empty() && !s.projects.iter().any(|p| p.id == scope) {
                 String::new()
             } else {
                 scope
             };
+            let scope_opt = (!valid_scope.is_empty()).then_some(valid_scope.as_str());
+            let actionable_count = all_rows
+                .iter()
+                .filter(|r| scope_opt.is_none_or(|pid| r.card.project_id == pid) && r.actionable())
+                .count()
+                + entries
+                    .iter()
+                    .filter(|e| {
+                        scope_opt.is_none_or(|pid| e.project_id.as_deref() == Some(pid))
+                            && standalone_terminal_needs_you(e)
+                    })
+                    .count();
+            let running_count = running_agents_count_from(&s, &all_rows, &entries, scope_opt);
+            let queued_count = s
+                .terminals
+                .iter()
+                .filter(|t| {
+                    t.agent.as_ref().is_some_and(|a| {
+                        scope_opt.is_none_or(|pid| a.project_id == pid)
+                            && (a.state == "queued" || a.pending.is_some())
+                    })
+                })
+                .count();
 
             let mut pills = view().flex_row().flex_wrap().items_center().gap_2();
             if actionable_count > 0 {
@@ -1164,8 +1214,8 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 ));
             }
             pills = pills.child(status(
-                format!("Running {active_slots} / {max_slots}"),
-                if active_slots > 0 {
+                format!("{running_count} running"),
+                if running_count > 0 {
                     Tone::Info
                 } else {
                     Tone::Neutral
@@ -2324,6 +2374,181 @@ mod tests {
         assert_eq!(
             blocked_ev.detail.as_deref(),
             Some("Allow command? · git status")
+        );
+    }
+
+    #[test]
+    fn trigger_pill_and_popover_count_all_running_agents_without_slot_denominator() {
+        use nsh_core::{ApproxTextEngine, Core, MountItem, geometry::size};
+
+        fn collect_mounted_texts(batch: nsh_core::MountBatch) -> Vec<String> {
+            batch
+                .items
+                .into_iter()
+                .filter_map(|item| match item {
+                    MountItem::Text { text, .. } => Some(text.text.to_string()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        #[component]
+        fn ProbeRunningCount() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let mut s = canban_types::Snapshot::default();
+            s.projects.push(
+                serde_json::from_value(json!({
+                    "id": "p1",
+                    "name": "Canban",
+                    "directory": "/tmp/canban",
+                    "workflow": canban_types::Workflow::default(),
+                    "created_at": 1
+                }))
+                .unwrap(),
+            );
+            s.cards.push(base_card());
+
+            // 1. Managed Card Agent actively working (1 Scheduler slot).
+            let mut managed = canban_scheduler::agent_run(
+                "p1",
+                "c1",
+                1,
+                "develop",
+                "stage_entry",
+                canban_types::Config::default().profiles[0].clone(),
+                "implement".into(),
+                None,
+            );
+            managed.state = "running".into();
+            managed.terminal = Some("pty-card".into());
+            managed.connection_state = "connected".into();
+            managed.observed =
+                Some(json!({"state": "live", "turn": 1, "status": {"state": "working"}}));
+            managed.lifecycle.observed_at = Some(u64::MAX);
+            s.terminals.push(canban_types::TerminalEntry {
+                id: "c1:developer".into(),
+                conversation_id: Some("c1:developer".into()),
+                number: 1,
+                name: None,
+                origin_project_id: None,
+                origin_card_id: Some("c1".into()),
+                agent_engine: None,
+                runtime: None,
+                agent: Some(managed),
+                created_at: 1,
+            });
+
+            // 2. Manual shell running `claude` (0 Scheduler slots, 1 running Agent).
+            s.terminals.push(canban_types::TerminalEntry {
+                id: "manual-claude".into(),
+                conversation_id: None,
+                number: 2,
+                name: Some("Terminal 2".into()),
+                origin_project_id: Some("p1".into()),
+                origin_card_id: None,
+                agent_engine: None,
+                runtime: Some(canban_types::TerminalRuntime {
+                    machine: "local".into(),
+                    owner_core_id: None,
+                    core_id: Some("core".into()),
+                    terminal: Some("pty-2".into()),
+                    state: "running".into(),
+                    connection: "connected".into(),
+                    error: None,
+                    agent_status: Some("working".into()),
+                    agent_turn: Some(1),
+                    observed_agent: Some("claude".into()),
+                    waiting: None,
+                }),
+                agent: None,
+                created_at: 2,
+            });
+
+            // 3. Ephemeral CLI Agent launched by user (0 Scheduler slots, 1 running Agent).
+            s.terminals.push(canban_types::TerminalEntry {
+                id: "ephemeral-agy".into(),
+                conversation_id: None,
+                number: 3,
+                name: Some("Antigravity 1".into()),
+                origin_project_id: Some("p1".into()),
+                origin_card_id: None,
+                agent_engine: Some("agy".into()),
+                runtime: Some(canban_types::TerminalRuntime {
+                    machine: "local".into(),
+                    owner_core_id: None,
+                    core_id: Some("core".into()),
+                    terminal: Some("pty-3".into()),
+                    state: "running".into(),
+                    connection: "connected".into(),
+                    error: None,
+                    agent_status: Some("working".into()),
+                    agent_turn: Some(1),
+                    observed_agent: Some("agy".into()),
+                    waiting: None,
+                }),
+                agent: None,
+                created_at: 3,
+            });
+
+            // 4. Plain interactive shell (neither Scheduler slot nor running Agent).
+            s.terminals.push(canban_types::TerminalEntry {
+                id: "plain-shell".into(),
+                conversation_id: None,
+                number: 4,
+                name: Some("Terminal 3".into()),
+                origin_project_id: Some("p1".into()),
+                origin_card_id: None,
+                agent_engine: None,
+                runtime: Some(canban_types::TerminalRuntime {
+                    machine: "local".into(),
+                    owner_core_id: None,
+                    core_id: Some("core".into()),
+                    terminal: Some("pty-4".into()),
+                    state: "running".into(),
+                    connection: "connected".into(),
+                    error: None,
+                    agent_status: None,
+                    agent_turn: None,
+                    observed_agent: None,
+                    waiting: None,
+                }),
+                agent: None,
+                created_at: 4,
+            });
+
+            assert_eq!(canban_scheduler::active_count(&s), 1);
+            ui.max_agents.set(8);
+            ui.snapshot.set(s);
+            ui.utility_popup.set("notifications".into());
+
+            assert_eq!(attention_summary(ui), (0, 0, 3));
+
+            view()
+                .w(px(1200.))
+                .h(px(900.))
+                .child(trigger_pill(ui))
+                .child(popover(ui))
+                .child(screen(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1200.), px(900.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<ProbeRunningCount>());
+        let texts = collect_mounted_texts(core.commit().expect("mount batch"));
+
+        assert!(
+            texts.iter().any(|t| t == "3"),
+            "expected trigger pill running count `3` (1 managed + 2 user-launched), got {texts:?}"
+        );
+        let running_badges = texts.iter().filter(|t| *t == "3 running").count();
+        assert!(
+            running_badges >= 2,
+            "expected `3 running` status badge in both popover and overview screen, got {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.contains("/8") || t.contains("/ 8")),
+            "did not expect `/8` Scheduler slot denominator in Activity & Notifications, got {texts:?}"
         );
     }
 }

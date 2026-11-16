@@ -8,11 +8,11 @@ Board remains the management workspace; Card is the unified side-by-side discuss
 
 ```text
 Window top chrome (42 pt, right end on every screen):
-  ... [page actions]   [ ⚡ 2 · ● 3/8 ]
+  ... [page actions]   [ ⚡ 2 · ● 3 ]
                               |
                               v
   +------------------------------------------------------------------+
-  | Activity & Notifications  [3/8 running]          [✓ Read all] [✕]|
+  | Activity & Notifications  [3 running]            [✓ Read all] [✕]|
   | [ All ]  [ canban · 2 ]  [ tools · 1 ]                           |
   +------------------------------------------------------------------+
   | NEEDS YOU · 2                                                    |
@@ -36,10 +36,10 @@ Window top chrome (42 pt, right end on every screen):
   +------------------------------------------------------------------+
 ```
 
-- **Persistent top-right status pill:** Anchored at the far right of the 42-point window chrome on every screen (`Board`, `Card`, `Terminals`, `Diff & Review`, `GitHub`, `Settings`, and sub-pages). It displays actionable/unread count (`⚡ N` when `Needs you` + unread `Updates` > 0) alongside Scheduler execution usage (`● active/max`). Clicking the pill or pressing `Command+I` toggles the right-anchored popover.
+- **Persistent top-right status pill:** Anchored at the far right of the 42-point window chrome on every screen (`Board`, `Card`, `Terminals`, `Diff & Review`, `GitHub`, `Settings`, and sub-pages). It displays actionable/unread count (`⚡ N` when `Needs you` + unread `Updates` > 0) alongside the total count of currently running Agents (`● N`, matching `RUNNING · N` across Canban-managed Card/Workflow/Merge/Scheduled Agents and user-launched CLI Agents in Terminals, without showing the Scheduler `max_agents` denominator). Clicking the pill or pressing `Command+I` toggles the right-anchored popover.
 - **Event-first visual hierarchy & semantic icon badges:** Each row leads with a 28×28 tinted semantic icon tile (`ui-kit::tone_icon_badge`: `ShieldAlert` for permission waits, `CircleHelp` for terminal input/sign-in/answer prompts, `CirclePause` for blocked task decisions, `Eye` for human review gates, `GitMerge` for paused/conflicted merges, `TriangleAlert` for failures/recovery, `MessageSquare` for `@agent` replies, `Check` for completed stage reports, `Undo` for Backlog returns, and provider/workflow marks with a live corner indicator for active sessions). Line 1 highlights **what happened** (`Semibold` semantic headline + cleaned single-line summary without raw prefixes like `completed:` or `permission: tool —`), while Line 2 quietly provides **where it happened** (`#number title · project · @profile`, omitting the repeated Project name when filtered to a single Project).
 - **Dismissal and input gating:** Escape, clicking outside the popover, or activating a navigation destination closes the popover cleanly and restores focus. While open, underlying native `canban/terminal` keyboard input is gated so shortcuts and navigation keys never leak to a live PTY.
-- **Sections and scoping:** Optional Project filter (`All` by default, or scoped to a specific Project with per-Project alert counts). Sections are `Needs you`, `Updates`, `Running`, `Queued`, and collapsible `Idle` / `Closed` groups. Empty groups are omitted. `Running` includes Project-owned Workflow configuration Agents as well as Card Agents; manual Shells remain in `Terminals`.
+- **Sections and scoping:** Optional Project filter (`All` by default, or scoped to a specific Project with per-Project alert counts). Sections are `Needs you`, `Updates`, `Running`, `Queued`, and collapsible `Idle` / `Closed` groups. Empty groups are omitted. `Running` includes Canban-managed Card/Workflow/Merge/Scheduled Agents as well as user-launched CLI Agents running in Terminals; plain Shells without an active Agent remain in `Terminals`.
 - **Inline handling & 1-step direct destinations:**
   - `Needs you` combines human Review gates, runtime permission/input waits, and task/recovery decisions while preserving each source's independent resolution. Runtime permission/question items offer **Card & Terminal →**, which opens the Card workspace with its right-hand live Terminal split already expanded and focused on that exact Agent PTY—eliminating multi-hop navigation. Review gates expose **Review →** (and quick **Merge** when local quick-merge is eligible).
   - `Updates` displays unread Card reply/report excerpts (excluding Cards already shown in `Needs you`, which carry their unread count inline). Users can mark individual items read (**✓ Read** via `notifications.read`), mark all unread updates read (**✓ Read all** via `notifications.read_all`), or jump directly to the Card Timeline event (**Card →**). Opening the popover alone never marks items read or approves a human gate.

@@ -38,7 +38,7 @@ Use package canban-ui-kit in crates/ui-kit, separate from canban-ui in crates/ui
 Unified 42-point Window Chrome (all pages)
   +-- Left: traffic-light clearance + stable Back/Forward (< >) + page context/breadcrumbs
   +-- Center: window drag region
-  +-- Right: page primary actions + global Activity & Notifications trigger [⚡ N · ● active/max]
+  +-- Right: page primary actions + global Activity & Notifications trigger [⚡ N · ● running]
              |
              +--> Right-side Activity & Notifications Popover (Command+I, global across pages)
                     Needs you / Updates / Running & Queued -> inline read/merge or 1-step jump
