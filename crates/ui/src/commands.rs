@@ -17,11 +17,65 @@ pub struct Command {
     pub keywords: &'static str,
 }
 
+macro_rules! platform_str {
+    ($mac:expr, $other:expr) => {{
+        #[cfg(target_os = "macos")]
+        {
+            $mac
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            $other
+        }
+    }};
+}
+
+pub mod shortcuts {
+    pub const SUBMIT_KEY: &str = platform_str!("mod+enter", "ctrl+enter");
+    pub const SUBMIT_DISPLAY: &str = platform_str!("⌘Enter", "Ctrl+Enter");
+
+    pub const SAVE_WORKFLOW_KEY: &str = platform_str!("mod+s", "ctrl+s");
+    pub const SAVE_WORKFLOW_DISPLAY: &str = platform_str!("⌘S", "Ctrl+S");
+
+    pub const NOTIFICATIONS_KEY: &str = platform_str!("mod+i", "ctrl+shift+i");
+    pub const NOTIFICATIONS_DISPLAY: &str = platform_str!("⌘I", "Ctrl+Shift+I");
+
+    pub const NEW_CARD_KEY: &str = platform_str!("mod+n", "ctrl+shift+n");
+    pub const NEW_CARD_DISPLAY: &str = platform_str!("⌘N", "Ctrl+Shift+N");
+
+    pub const QUICK_OPEN_KEY: &str = platform_str!("mod+o", "ctrl+shift+o");
+    pub const QUICK_OPEN_DISPLAY: &str = platform_str!("⌘O", "Ctrl+Shift+O");
+
+    pub const COMMANDS_KEY: &str = platform_str!("mod+/", "ctrl+shift+/");
+    pub const COMMANDS_DISPLAY: &str = platform_str!("⌘/", "Ctrl+Shift+/");
+
+    pub const CARD_TERMINAL_KEY: &str = platform_str!("mod+j", "ctrl+shift+j");
+    pub const CARD_TERMINAL_DISPLAY: &str = platform_str!("⌘J", "Ctrl+Shift+J");
+
+    pub const NEW_TERMINAL_KEY: &str = platform_str!("mod+t", "ctrl+shift+t");
+    pub const NEW_TERMINAL_DISPLAY: &str = platform_str!("⌘T", "Ctrl+Shift+T");
+
+    pub const CLOSE_TERMINAL_KEY: &str = platform_str!("mod+w", "ctrl+shift+w");
+    pub const CLOSE_TERMINAL_DISPLAY: &str = platform_str!("⌘W", "Ctrl+Shift+W");
+
+    pub const NEXT_TAB_KEY: &str = platform_str!("mod+shift+]", "ctrl+shift+]");
+    pub const NEXT_TAB_DISPLAY: &str = platform_str!("⌘⇧]", "Ctrl+Shift+]");
+
+    pub const PREV_TAB_KEY: &str = platform_str!("mod+shift+[", "ctrl+shift+[");
+    pub const PREV_TAB_DISPLAY: &str = platform_str!("⌘⇧[", "Ctrl+Shift+[");
+
+    pub const BACK_KEY: &str = platform_str!("mod+[", "ctrl+alt+[");
+    pub const BACK_DISPLAY: &str = platform_str!("⌘[", "Ctrl+Alt+[");
+
+    pub const FORWARD_KEY: &str = platform_str!("mod+]", "ctrl+alt+]");
+    pub const FORWARD_DISPLAY: &str = platform_str!("⌘]", "Ctrl+Alt+]");
+}
+
 pub const CREATE_CARD: Command = Command {
     id: "create-card",
     title: "Create Card",
-    key: "mod+enter",
-    display: "⌘Enter",
+    key: shortcuts::SUBMIT_KEY,
+    display: shortcuts::SUBMIT_DISPLAY,
     context: "New Card",
     keywords: "submit",
 };
@@ -29,8 +83,8 @@ pub const CREATE_CARD: Command = Command {
 pub const SEND_COMMENT: Command = Command {
     id: "send-comment",
     title: "Send comment",
-    key: "mod+enter",
-    display: "⌘Enter",
+    key: shortcuts::SUBMIT_KEY,
+    display: shortcuts::SUBMIT_DISPLAY,
     context: "Card comment",
     keywords: "reply",
 };
@@ -39,8 +93,8 @@ pub const CATALOG: &[Command] = &[
     Command {
         id: "toggle-notifications",
         title: "Toggle Activity & Notifications",
-        key: "mod+i",
-        display: "⌘I",
+        key: shortcuts::NOTIFICATIONS_KEY,
+        display: shortcuts::NOTIFICATIONS_DISPLAY,
         context: "Global",
         keywords: "overview alerts unread inbox running status slots",
     },
@@ -87,40 +141,40 @@ pub const CATALOG: &[Command] = &[
     Command {
         id: "new-card",
         title: "New Card",
-        key: "mod+n",
-        display: "⌘N",
+        key: shortcuts::NEW_CARD_KEY,
+        display: shortcuts::NEW_CARD_DISPLAY,
         context: "Global",
         keywords: "task create",
     },
     Command {
         id: "quick-open",
         title: "Quick Open",
-        key: "mod+o",
-        display: "⌘O",
+        key: shortcuts::QUICK_OPEN_KEY,
+        display: shortcuts::QUICK_OPEN_DISPLAY,
         context: "Global",
         keywords: "search jump",
     },
     Command {
         id: "shortcuts",
         title: "Commands & Shortcuts",
-        key: "mod+/",
-        display: "⌘/",
+        key: shortcuts::COMMANDS_KEY,
+        display: shortcuts::COMMANDS_DISPLAY,
         context: "Global",
         keywords: "commands palette >",
     },
     Command {
         id: "toggle-card-terminal",
         title: "Toggle Card Live Terminal",
-        key: "mod+j",
-        display: "⌘J",
+        key: shortcuts::CARD_TERMINAL_KEY,
+        display: shortcuts::CARD_TERMINAL_DISPLAY,
         context: "Card",
         keywords: "split cli side-by-side discuss conversation",
     },
     Command {
         id: "new-terminal",
         title: "New Terminal",
-        key: "mod+t",
-        display: "⌘T",
+        key: shortcuts::NEW_TERMINAL_KEY,
+        display: shortcuts::NEW_TERMINAL_DISPLAY,
         context: "Global",
         keywords: "shell pty standalone",
     },
@@ -135,96 +189,96 @@ pub const CATALOG: &[Command] = &[
     Command {
         id: "close-terminal",
         title: "Close Terminal",
-        key: "mod+w",
-        display: "⌘W",
+        key: shortcuts::CLOSE_TERMINAL_KEY,
+        display: shortcuts::CLOSE_TERMINAL_DISPLAY,
         context: "Terminals",
         keywords: "tab",
     },
     Command {
         id: "next-tab",
         title: "Next Terminal tab",
-        key: "mod+shift+]",
-        display: "⌘⇧]",
+        key: shortcuts::NEXT_TAB_KEY,
+        display: shortcuts::NEXT_TAB_DISPLAY,
         context: "Terminals",
         keywords: "",
     },
     Command {
         id: "previous-tab",
         title: "Previous Terminal tab",
-        key: "mod+shift+[",
-        display: "⌘⇧[",
+        key: shortcuts::PREV_TAB_KEY,
+        display: shortcuts::PREV_TAB_DISPLAY,
         context: "Terminals",
         keywords: "",
     },
     Command {
         id: "terminal-tab-1",
         title: "Switch to Terminal Tab 1",
-        key: "mod+1",
-        display: "⌘1",
+        key: platform_str!("mod+1", "alt+1"),
+        display: platform_str!("⌘1", "Alt+1"),
         context: "Terminals",
         keywords: "tab number",
     },
     Command {
         id: "terminal-tab-2",
         title: "Switch to Terminal Tab 2",
-        key: "mod+2",
-        display: "⌘2",
+        key: platform_str!("mod+2", "alt+2"),
+        display: platform_str!("⌘2", "Alt+2"),
         context: "Terminals",
         keywords: "tab number",
     },
     Command {
         id: "terminal-tab-3",
         title: "Switch to Terminal Tab 3",
-        key: "mod+3",
-        display: "⌘3",
+        key: platform_str!("mod+3", "alt+3"),
+        display: platform_str!("⌘3", "Alt+3"),
         context: "Terminals",
         keywords: "tab number",
     },
     Command {
         id: "terminal-tab-4",
         title: "Switch to Terminal Tab 4",
-        key: "mod+4",
-        display: "⌘4",
+        key: platform_str!("mod+4", "alt+4"),
+        display: platform_str!("⌘4", "Alt+4"),
         context: "Terminals",
         keywords: "tab number",
     },
     Command {
         id: "terminal-tab-5",
         title: "Switch to Terminal Tab 5",
-        key: "mod+5",
-        display: "⌘5",
+        key: platform_str!("mod+5", "alt+5"),
+        display: platform_str!("⌘5", "Alt+5"),
         context: "Terminals",
         keywords: "tab number",
     },
     Command {
         id: "terminal-tab-6",
         title: "Switch to Terminal Tab 6",
-        key: "mod+6",
-        display: "⌘6",
+        key: platform_str!("mod+6", "alt+6"),
+        display: platform_str!("⌘6", "Alt+6"),
         context: "Terminals",
         keywords: "tab number",
     },
     Command {
         id: "terminal-tab-7",
         title: "Switch to Terminal Tab 7",
-        key: "mod+7",
-        display: "⌘7",
+        key: platform_str!("mod+7", "alt+7"),
+        display: platform_str!("⌘7", "Alt+7"),
         context: "Terminals",
         keywords: "tab number",
     },
     Command {
         id: "terminal-tab-8",
         title: "Switch to Terminal Tab 8",
-        key: "mod+8",
-        display: "⌘8",
+        key: platform_str!("mod+8", "alt+8"),
+        display: platform_str!("⌘8", "Alt+8"),
         context: "Terminals",
         keywords: "tab number",
     },
     Command {
         id: "terminal-tab-9",
         title: "Switch to Terminal Tab 9",
-        key: "mod+9",
-        display: "⌘9",
+        key: platform_str!("mod+9", "alt+9"),
+        display: platform_str!("⌘9", "Alt+9"),
         context: "Terminals",
         keywords: "tab number",
     },
@@ -233,24 +287,24 @@ pub const CATALOG: &[Command] = &[
     Command {
         id: "save-card",
         title: "Save Card changes",
-        key: "mod+enter",
-        display: "⌘Enter",
+        key: shortcuts::SUBMIT_KEY,
+        display: shortcuts::SUBMIT_DISPLAY,
         context: "Card editor",
         keywords: "",
     },
     Command {
         id: "back",
         title: "Back",
-        key: "mod+[",
-        display: "⌘[",
+        key: shortcuts::BACK_KEY,
+        display: shortcuts::BACK_DISPLAY,
         context: "Global",
         keywords: "history",
     },
     Command {
         id: "forward",
         title: "Forward",
-        key: "mod+]",
-        display: "⌘]",
+        key: shortcuts::FORWARD_KEY,
+        display: shortcuts::FORWARD_DISPLAY,
         context: "Global",
         keywords: "history",
     },
@@ -1467,7 +1521,7 @@ pub fn bindings(ui: Ui) {
             && !ui.native_modal.get()
         {
             on_key_with(
-                "mod+j",
+                shortcuts::CARD_TERMINAL_KEY,
                 KeyOptions {
                     when: When::Always,
                     ..Default::default()
@@ -1502,6 +1556,28 @@ pub fn bindings(ui: Ui) {
                 execute(ui, command.id);
             },
         );
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        for (extra_key, id) in [
+            ("ctrl+shift+p", "shortcuts"),
+            ("alt+left", "back"),
+            ("alt+right", "forward"),
+        ] {
+            let when = if extra_key.starts_with("alt+") {
+                When::NotEditing
+            } else {
+                When::Always
+            };
+            on_key_with(
+                extra_key,
+                KeyOptions {
+                    when,
+                    ..Default::default()
+                },
+                move |_| execute(ui, id),
+            );
+        }
     }
     // Plain `/` opens the command palette (`>` prefix) whenever focus is not in a text input or hosted terminal.
     on_key_with(
@@ -1550,12 +1626,25 @@ mod tests {
             .find(|c| c.id == "new-terminal")
             .expect("new-terminal registered");
         assert_eq!(new_term.context, "Global");
-        assert_eq!(new_term.key, "mod+t");
+        assert_eq!(new_term.key, shortcuts::NEW_TERMINAL_KEY);
         assert!(
             !crate::terminals::TAB_KEYS
                 .iter()
-                .any(|(k, _)| *k == "mod+t")
+                .any(|(k, _)| *k == shortcuts::NEW_TERMINAL_KEY)
         );
+        #[cfg(not(target_os = "macos"))]
+        {
+            for cmd in CATALOG {
+                assert!(
+                    !cmd.display.contains('⌘')
+                        && !cmd.display.contains('⇧')
+                        && !cmd.display.contains('⌥'),
+                    "non-macOS shortcut label must not contain Apple symbols: {} -> {}",
+                    cmd.id,
+                    cmd.display
+                );
+            }
+        }
         assert!(CATALOG.iter().any(|c| c.id == "copy-skill-command"));
         assert!(CATALOG.iter().any(|c| c.id == "edit-last-comment"));
         assert!(CATALOG.iter().any(|c| c.id == "delete-last-comment"));
@@ -1567,5 +1656,45 @@ mod tests {
         assert_eq!(go_git.title, "Go to Git");
         assert_eq!(go_git.display, "Git");
         assert!(go_git.keywords.contains("diff"));
+    }
+
+    #[test]
+    fn linux_shortcut_matrix_parses_cleanly_and_avoids_pty_control_collisions() {
+        let linux_bindings = [
+            "ctrl+enter",
+            "ctrl+s",
+            "ctrl+shift+i",
+            "ctrl+shift+n",
+            "ctrl+shift+o",
+            "ctrl+shift+/",
+            "ctrl+shift+p",
+            "ctrl+shift+j",
+            "ctrl+shift+t",
+            "ctrl+shift+w",
+            "ctrl+shift+]",
+            "ctrl+shift+[",
+            "ctrl+alt+[",
+            "ctrl+alt+]",
+            "alt+1",
+            "alt+2",
+            "alt+3",
+            "alt+4",
+            "alt+5",
+            "alt+6",
+            "alt+7",
+            "alt+8",
+            "alt+9",
+        ];
+        let pty_ctrl_hazards = [
+            "ctrl+i", "ctrl+j", "ctrl+w", "ctrl+n", "ctrl+o", "ctrl+t", "ctrl+[", "ctrl+]",
+        ];
+        for key in linux_bindings {
+            nsh_core::keymap::Keystroke::parse(key, nsh_core::platform::Os::Linux)
+                .unwrap_or_else(|e| panic!("Linux keystroke `{key}` failed to parse: {e:?}"));
+            assert!(
+                !pty_ctrl_hazards.contains(&key),
+                "Linux global/terminal binding `{key}` collides with PTY control codes or GTK window close"
+            );
+        }
     }
 }

@@ -49,7 +49,7 @@ pub fn effective_hosts(ui: Ui) -> Vec<HostSummary> {
     let projects = ui.snapshot.with(|s| s.projects.len());
     vec![HostSummary {
         id: "local".into(),
-        name: "This Mac".into(),
+        name: crate::platform::LOCAL_HOST_NAME.into(),
         is_local: true,
         transport_label: "Local socket".into(),
         endpoint_label: "~/.canban/app.sock".into(),
@@ -72,7 +72,7 @@ pub fn effective_hosts(ui: Ui) -> Vec<HostSummary> {
 /// Human-readable display name for a `canband` host (`"This Mac"` for `"local"`).
 pub fn host_name(ui: Ui, host_id: &str) -> String {
     if host_id.is_empty() || host_id == "local" {
-        return "This Mac".into();
+        return crate::platform::LOCAL_HOST_NAME.into();
     }
     if let Some(found) = ui
         .hosts
@@ -302,15 +302,20 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                 let list = hosts_memo.get();
                 let remote_count = list.iter().filter(|h| !h.is_local).count();
                 if remote_count == 0 {
-                    "Connected Hosts\nThis Mac (local) · Click to connect a remote machine".into()
+                    format!(
+                        "Connected Hosts\n{} (local) · Click to connect a remote machine",
+                        crate::platform::LOCAL_HOST_NAME
+                    )
                 } else {
                     let online = list
                         .iter()
                         .filter(|h| !h.is_local && h.is_connected())
                         .count();
                     format!(
-                        "Connected Hosts\nThis Mac + {} / {} remote online",
-                        online, remote_count
+                        "Connected Hosts\n{} + {} / {} remote online",
+                        crate::platform::LOCAL_HOST_NAME,
+                        online,
+                        remote_count
                     )
                 }
             })
@@ -368,7 +373,7 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                 .accessibility_label(move || {
                     Some(
                         if remote_count == 0 {
-                            "Connected Hosts, This Mac only".to_owned()
+                            format!("Connected Hosts, {} only", crate::platform::LOCAL_HOST_NAME)
                         } else {
                             format!(
                                 "Connected Hosts, {} of {} remote online",
@@ -648,7 +653,10 @@ pub fn new_project_host_picker(
                 .items_center()
                 .justify_between()
                 .gap_2()
-                .child(muted("Creating Project on This Mac."))
+                .child(muted(format!(
+                    "Creating Project on {}.",
+                    crate::platform::LOCAL_HOST_NAME
+                )))
                 .child(compact_action(
                     "+ Connect Remote Machine…",
                     Variant::Quiet,
@@ -1061,7 +1069,10 @@ fn connect_tailscale_tab(
     if !cat.tailscale_available && cat.tailscale_peers.is_empty() {
         body = body.child(notice(
             cat.tailscale_error.unwrap_or_else(|| {
-                "Tailscale CLI is not running on This Mac. Start Tailscale or connect via SSH / Pairing URI.".into()
+                format!(
+                    "Tailscale CLI is not running on {}. Start Tailscale or connect via SSH / Pairing URI.",
+                    crate::platform::LOCAL_HOST_NAME
+                )
             }),
             Tone::Attention,
         ));
@@ -1639,7 +1650,10 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
 
     settings_section(
         "Hosts",
-        "Connect Canban to remote Linux or macOS `canband` services over Tailscale or SSH while keeping This Mac active simultaneously.",
+        format!(
+            "Connect Canban to remote Linux or macOS `canband` services over Tailscale or SSH while keeping {} active simultaneously.",
+            crate::platform::LOCAL_HOST_NAME
+        ),
     )
     .trailing(
         view()

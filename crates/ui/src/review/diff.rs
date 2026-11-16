@@ -152,7 +152,7 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
                 )
                 .child(
                     muted(format!("+{total_add} −{total_del}"))
-                        .font_family("Menlo")
+                        .font_family(MONO_FONT)
                         .text_size(px(10.5)),
                 ),
         );
@@ -180,13 +180,13 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
             right_meta = right_meta
                 .child(
                     label(format!("+{f_add}"))
-                        .font_family("Menlo")
+                        .font_family(MONO_FONT)
                         .text_size(px(10.5))
                         .text_color(SUCCESS),
                 )
                 .child(
                     label(format!("−{f_del}"))
-                        .font_family("Menlo")
+                        .font_family(MONO_FONT)
                         .text_size(px(10.5))
                         .text_color(DANGER),
                 );
@@ -215,7 +215,7 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
                                 .min_w(px(0.))
                                 .child(
                                     label(status_char.0)
-                                        .font_family("Menlo")
+                                        .font_family(MONO_FONT)
                                         .text_size(px(10.5))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(status_char.1),
@@ -287,7 +287,7 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
                     })
                     .child(
                         label(short)
-                            .font_family("Menlo")
+                            .font_family(MONO_FONT)
                             .text_size(px(11.))
                             .text_color(ACCENT),
                     )
@@ -382,7 +382,7 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
                     .flex_1()
                     .min_w(px(0.))
                     .truncate()
-                    .font_family("Menlo")
+                    .font_family(MONO_FONT)
                     .text_size(px(12.))
                     .font_weight(FontWeight::SEMIBOLD),
             )
@@ -390,13 +390,13 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
             .child(
                 label(format!("+{additions}"))
                     .text_size(px(11.5))
-                    .font_family("Menlo")
+                    .font_family(MONO_FONT)
                     .text_color(SUCCESS),
             )
             .child(
                 label(format!("−{deletions}"))
                     .text_size(px(11.5))
-                    .font_family("Menlo")
+                    .font_family(MONO_FONT)
                     .text_color(DANGER),
             );
 
@@ -450,7 +450,7 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
                     rows = rows.child(
                         view().px_3().py_1().bg(INSET).child(
                             label(dl.text)
-                                .font_family("Menlo")
+                                .font_family(MONO_FONT)
                                 .text_size(px(11.5))
                                 .text_color(MUTED),
                         ),
@@ -513,7 +513,7 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
                             label(format!("{old_str} {new_str}"))
                                 .w(px(74.))
                                 .flex_shrink_0()
-                                .font_family("Menlo")
+                                .font_family(MONO_FONT)
                                 .text_size(px(11.))
                                 .text_color(MUTED),
                         )
@@ -521,7 +521,7 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
                             label(format!("{prefix} {}", dl.text))
                                 .flex_1()
                                 .min_w(px(0.))
-                                .font_family("Menlo")
+                                .font_family(MONO_FONT)
                                 .text_size(px(12.))
                                 .text_color(text_col),
                         ),
@@ -712,7 +712,7 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
                                             .child(status("Pending comment", Tone::Info))
                                             .child(
                                                 muted(format!("{}:{}", item.path, item.line))
-                                                    .font_family("Menlo")
+                                                    .font_family(MONO_FONT)
                                                     .text_size(px(11.)),
                                             ),
                                     )
@@ -834,7 +834,7 @@ fn inline_composer_box(ui: Ui, target: LineTarget) -> View {
                 .justify_between()
                 .child(
                     label(loc_label)
-                        .font_family("Menlo")
+                        .font_family(MONO_FONT)
                         .text_size(px(11.5))
                         .font_weight(FontWeight::SEMIBOLD),
                 )

@@ -590,14 +590,14 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .child(view().flex_1().min_w(px(220.)).child(settings_field(
                     "Executable",
                     "Used to connect to the configured runtime.",
-                    label(runtime.hc).font_family("Menlo").text_size(px(12.)),
+                    label(runtime.hc).font_family(MONO_FONT).text_size(px(12.)),
                 )))
                 .child(
                     view().flex_1().min_w(px(220.)).child(settings_field(
                         "Session",
                         "The configured Herdr runtime session.",
                         label(runtime.hc_session)
-                            .font_family("Menlo")
+                            .font_family(MONO_FONT)
                             .text_size(px(12.)),
                     )),
                 ),
@@ -623,7 +623,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .child(settings_field(
                     "Application home",
                     "Configuration, documents and execution history are stored here.",
-                    label(home_str).font_family("Menlo").text_size(px(12.)),
+                    label(home_str).font_family(MONO_FONT).text_size(px(12.)),
                 )),
             )
             .child(muted(
@@ -642,7 +642,10 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     .items_center()
                     .justify_between()
                     .gap_2()
-                    .child(muted("HOST SETTINGS · This Mac"))
+                    .child(muted(format!(
+                        "HOST SETTINGS · {}",
+                        crate::platform::LOCAL_HOST_NAME
+                    )))
                     .child(compact_action(
                         "+ Connect Remote Machine…",
                         Variant::Quiet,
@@ -706,7 +709,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                             .iter()
                             .find(|h| h.id == cur)
                             .map(|h| h.name.clone())
-                            .unwrap_or_else(|| "This Mac".into());
+                            .unwrap_or_else(|| crate::platform::LOCAL_HOST_NAME.into());
                         view()
                             .px_2()
                             .pb_1p5()

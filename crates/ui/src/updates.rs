@@ -375,7 +375,7 @@ pub fn settings(ui: Ui) -> impl IntoElement {
                             .unwrap_or("development")
                             .to_owned()
                     })
-                    .font_family("Menlo")
+                    .font_family(MONO_FONT)
                     .text_size(px(12.)),
                 ))
                 .child(
@@ -549,14 +549,10 @@ pub fn recovery_screen_auto(home: String, error: String, auto_start: bool) -> im
                             .disabled(move || retrying.get()),
                         )
                         .child(action("Open update folder", Variant::Secondary, move |_| {
-                            let path = directory.clone();
+                            let path = directory.to_string_lossy().into_owned();
                             spawn(async move {
-                                let _ = blocking(move || {
-                                    std::process::Command::new("/usr/bin/open")
-                                        .arg(path)
-                                        .status()
-                                })
-                                .await;
+                                let _ = blocking(move || crate::platform::open_external(&path))
+                                    .await;
                             });
                         }))
                         .child(action("Quit", Variant::Quiet, move |_| {

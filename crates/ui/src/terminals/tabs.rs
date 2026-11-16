@@ -481,7 +481,8 @@ pub fn header(ui: Ui) -> impl IntoElement {
         } else {
             96. + (crate::frame::chrome_left_padding() - 56.).max(0.)
         };
-        (w - (w * 0.35).min(340.) - 196. - controls).max(40.)
+        let right_controls = crate::frame::chrome_right_padding() - 10.;
+        (w - (w * 0.35).min(340.) - 196. - controls - right_controls).max(40.)
     });
     let strip = element_ref();
     let active = computed(move || ui.terminal_selection.get());
@@ -520,10 +521,10 @@ pub fn header(ui: Ui) -> impl IntoElement {
             px(if ui.terminal_sidebar.get() {
                 0.
             } else {
-                (crate::frame::chrome_left_padding() - 56.).max(0.)
+                (crate::frame::chrome_left_padding() - 56.).max(6.)
             })
         })
-        .pr(px(10.))
+        .pr(move || px(crate::frame::chrome_right_padding()))
         .child(when(
             move || !ui.terminal_sidebar.get(),
             move || super::controls(ui),
@@ -555,7 +556,10 @@ pub fn header(ui: Ui) -> impl IntoElement {
         )
         .child(chrome_button_disabled(
             Icon::Plus,
-            "New terminal in current worktree · ⌘T",
+            format!(
+                "New terminal in current worktree · {}",
+                crate::commands::shortcuts::NEW_TERMINAL_DISPLAY
+            ),
             move || ui.pending.get(),
             move |_| new_tab(ui),
         ))
@@ -763,14 +767,14 @@ pub fn header(ui: Ui) -> impl IntoElement {
                         .child(
                             label(format!("+{}", pill_git.additions))
                                 .text_size(px(11.))
-                                .font_family("Menlo")
+                                .font_family(MONO_FONT)
                                 .text_color(SUCCESS)
                                 .flex_shrink_0(),
                         )
                         .child(
                             label(format!("−{}", pill_git.deletions))
                                 .text_size(px(11.))
-                                .font_family("Menlo")
+                                .font_family(MONO_FONT)
                                 .text_color(DANGER)
                                 .flex_shrink_0(),
                         );

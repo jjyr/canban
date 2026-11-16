@@ -241,7 +241,15 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     action("Send", Variant::Primary, move |_| {
                         ui.comment_submit.update(|n| *n += 1)
                     })
-                    .accessibility_label(|| Some("Send comment · ⌘Enter".into()))
+                    .accessibility_label(|| {
+                        Some(
+                            format!(
+                                "Send comment · {}",
+                                crate::commands::shortcuts::SUBMIT_DISPLAY
+                            )
+                            .into(),
+                        )
+                    })
                     .disabled(move || !enabled.get()),
                 ),
         )

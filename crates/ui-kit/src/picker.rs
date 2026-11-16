@@ -394,7 +394,7 @@ impl IntoElement for SearchPopover {
                                     let id = opt.id.clone();
                                     let title_el = if opt.mono {
                                         label(opt.label)
-                                            .font_family("Menlo")
+                                            .font_family(MONO_FONT)
                                             .text_size(px(11.5))
                                             .truncate()
                                             .min_w(px(0.))

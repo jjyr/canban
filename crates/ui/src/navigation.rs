@@ -176,13 +176,13 @@ pub fn controls(ui: Ui) -> View {
         .gap_0()
         .child(chrome_button_disabled(
             Icon::Back,
-            "Back · ⌘[",
+            format!("Back · {}", crate::commands::shortcuts::BACK_DISPLAY),
             move || ui.history.with(|h| h.index == 0),
             move |_| go(ui, false),
         ))
         .child(chrome_button_disabled(
             Icon::Forward,
-            "Forward · ⌘]",
+            format!("Forward · {}", crate::commands::shortcuts::FORWARD_DISPLAY),
             move || ui.history.with(|h| h.index + 1 >= h.entries.len()),
             move |_| go(ui, true),
         ))

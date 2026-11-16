@@ -861,7 +861,11 @@ mod tests {
                 MountItem::ViewProps { id, props } => {
                     if let Some(label) = &props.accessibility.label
                         && (label.starts_with("Open Terminal for Card #")
-                            || label.as_ref() == "Toggle Terminal · ⌘J")
+                            || label.as_ref()
+                                == format!(
+                                    "Toggle Terminal · {}",
+                                    crate::commands::shortcuts::CARD_TERMINAL_DISPLAY
+                                ))
                     {
                         terminal_buttons.push((label.to_string(), *id));
                     }

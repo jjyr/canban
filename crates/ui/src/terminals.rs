@@ -747,7 +747,11 @@ pub fn machine_menu(ui: Ui) {
     use nsh_core::element::desktop::{MenuItem, popup_menu};
     ui.spawn(async move {
         let mut items = vec![
-            MenuItem::new("New Terminal in Current Worktree · ⌘T").on_select(move || new_tab(ui)),
+            MenuItem::new(format!(
+                "New Terminal in Current Worktree · {}",
+                crate::commands::shortcuts::NEW_TERMINAL_DISPLAY
+            ))
+            .on_select(move || new_tab(ui)),
         ];
         let active_pid = {
             let pid = ui.project.get_untracked();
@@ -800,7 +804,11 @@ pub fn machine_menu(ui: Ui) {
         for h in crate::hosts::effective_hosts(ui) {
             if h.is_local {
                 items.push(
-                    MenuItem::new("New Terminal ($HOME · This Mac)").on_select(move || {
+                    MenuItem::new(format!(
+                        "New Terminal ($HOME · {})",
+                        crate::platform::LOCAL_HOST_NAME
+                    ))
+                    .on_select(move || {
                         launch(ui, json!({ "host_id": "local", "machine": "local" }))
                     }),
                 );
@@ -1197,6 +1205,7 @@ pub fn select_tab_index(ui: Ui, index: usize) {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) const TAB_KEYS: [(&str, u8); 12] = [
     ("mod+w", 1),
     ("mod+shift+]", 2),
@@ -1210,6 +1219,22 @@ pub(crate) const TAB_KEYS: [(&str, u8); 12] = [
     ("mod+7", 17),
     ("mod+8", 18),
     ("mod+9", 19),
+];
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) const TAB_KEYS: [(&str, u8); 12] = [
+    ("ctrl+shift+w", 1),
+    ("ctrl+shift+]", 2),
+    ("ctrl+shift+[", 3),
+    ("alt+1", 11),
+    ("alt+2", 12),
+    ("alt+3", 13),
+    ("alt+4", 14),
+    ("alt+5", 15),
+    ("alt+6", 16),
+    ("alt+7", 17),
+    ("alt+8", 18),
+    ("alt+9", 19),
 ];
 pub fn bindings(ui: Ui) {
     use nsh_core::keymap::When;
@@ -1349,7 +1374,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                                 .window_drag(true)
                                                 .pl(move || {
                                                     px((crate::frame::chrome_left_padding() - 56.)
-                                                        .max(0.))
+                                                        .max(6.))
                                                 })
                                                 .child(controls(ui)),
                                         )

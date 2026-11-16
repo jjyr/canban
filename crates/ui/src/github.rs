@@ -51,13 +51,8 @@ pub fn open_url(ui: Ui, url: String) {
         return;
     }
     ui.spawn(async move {
-        let result = blocking(move || {
-            std::process::Command::new("/usr/bin/open")
-                .arg(url)
-                .status()
-        })
-        .await;
-        if !matches!(result,Ok(Ok(s)) if s.success()) {
+        let result = blocking(move || crate::platform::open_external(&url)).await;
+        if !matches!(result, Ok(Ok(()))) {
             ui.operation_error
                 .set("Could not open GitHub in the browser".into());
         }

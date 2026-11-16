@@ -47,7 +47,7 @@ fn canban_skill_box(ui: Ui) -> View {
                 .bg(INSET)
                 .child(
                     label(command)
-                        .font_family("Menlo")
+                        .font_family(MONO_FONT)
                         .text_size(px(12.))
                         .min_w(px(0.))
                         .flex_1(),
@@ -67,16 +67,20 @@ fn canban_skill_box(ui: Ui) -> View {
                             },
                         ))
                         .child(compact_action(
-                            "Open Terminal  ⌘T",
+                            format!(
+                                "Open Terminal  {}",
+                                crate::commands::shortcuts::NEW_TERMINAL_DISPLAY
+                            ),
                             Variant::Secondary,
                             move |_| crate::commands::execute(ui, "new-terminal"),
                         )),
                 ),
         )
         .child(
-            muted(
-                "Tip: Copy the command first, then press ⌘T to open a standalone Terminal and paste it to install or update.",
-            )
+            muted(format!(
+                "Tip: Copy the command first, then press {} to open a standalone Terminal and paste it to install or update.",
+                crate::commands::shortcuts::NEW_TERMINAL_DISPLAY
+            ))
             .text_size(px(11.5)),
         )
 }
@@ -1575,7 +1579,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                 move || ui.settings_host.get() != "local",
                 move || {
                     compact_action(
-                        "Copy profiles from This Mac",
+                        format!("Copy profiles from {}", crate::platform::LOCAL_HOST_NAME),
                         Variant::Secondary,
                         move |_| {
                             let target = ui.settings_host.get_untracked();
@@ -1591,7 +1595,10 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                 }),
                                 move |_| {
                                     refresh_catalog(ui);
-                                    ui.notify("Copied Agent & @identity profiles from This Mac");
+                                    ui.notify(format!(
+                                        "Copied Agent & @identity profiles from {}",
+                                        crate::platform::LOCAL_HOST_NAME
+                                    ));
                                 },
                             );
                         },
@@ -2465,7 +2472,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
             .gap_2()
             .pt_1()
             .child(muted("Config:"))
-            .child(muted(config_path).font_family("Menlo").text_size(px(11.5)))
+            .child(muted(config_path).font_family(MONO_FONT).text_size(px(11.5)))
             .child(compact_action("Copy path", Variant::Quiet, move |_| {
                 copy_text(ui, copy_path.clone())
             })),

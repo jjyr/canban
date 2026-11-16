@@ -16,7 +16,10 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
         .border_color(BORDER)
         .child(icon_action(
             Icon::Search,
-            "Quick Open · ⌘O".into(),
+            format!(
+                "Quick Open · {}",
+                crate::commands::shortcuts::QUICK_OPEN_DISPLAY
+            ),
             move || ui.quick_open.get() && !ui.project_picker.get(),
             || 0,
             move |_| ui.show_search(false),

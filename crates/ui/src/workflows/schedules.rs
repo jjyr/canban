@@ -555,7 +555,10 @@ pub fn trigger_schedule(ui: Ui, item: &ScheduleItem) {
         .drafts
         .with_untracked(|d| d.get(&project).is_some_and(Draft::needs_apply));
     if has_unsaved || !item.published {
-        ui.notify("Save workflow changes first (⌘S) before running this schedule");
+        ui.notify(format!(
+            "Save workflow changes first ({}) before running this schedule",
+            crate::commands::shortcuts::SAVE_WORKFLOW_DISPLAY
+        ));
         return;
     }
 

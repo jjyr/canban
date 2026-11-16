@@ -35,7 +35,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             && !ui.native_modal.get()
         {
             on_key_with(
-                "mod+enter",
+                crate::commands::shortcuts::SUBMIT_KEY,
                 KeyOptions {
                     when: nsh_core::keymap::When::Always,
                     ..Default::default()

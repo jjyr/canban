@@ -2314,7 +2314,7 @@ pub fn multi_host_workspace(
 
     let local_summary = HostSummary {
         id: "local".into(),
-        name: "This Mac".into(),
+        name: canban_ui::platform::LOCAL_HOST_NAME.into(),
         is_local: true,
         transport_label: "Local socket".into(),
         endpoint_label: "~/.canban/app.sock".into(),

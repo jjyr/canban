@@ -185,7 +185,7 @@ fn contextual_commands(ui: Ui, raw_query: &str) -> Vec<(usize, SearchChoice)> {
 
 pub fn bindings(ui: Ui) {
     on_key_with(
-        "mod+o",
+        crate::commands::shortcuts::QUICK_OPEN_KEY,
         KeyOptions {
             when: When::Always,
             ..Default::default()

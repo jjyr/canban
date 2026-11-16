@@ -111,17 +111,7 @@ pub fn show(error: &anyhow::Error) {
     record_error(&detail);
     let _ = ERROR.set(detail);
     let app_id = app_id().unwrap_or_else(|_| "com.canban.startup-error".into());
-    let _ = nsh_platform_macos::run_app(
-        nsh_platform_macos::AppSource::Rust(
-            nsh_platform_macos::Root::of::<StartupError>().app_id(app_id.clone()),
-        ),
-        nsh_platform_macos::AppOptions {
-            title: "Canban could not start".into(),
-            app_id,
-            size: (800, 520),
-            ..Default::default()
-        },
-    );
+    let _ = crate::platform::run_root::<StartupError>(app_id, "Canban could not start", (800, 520));
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -716,34 +706,14 @@ pub fn Bootstrap() -> impl IntoElement {
                     });
                 },
                 move || {
-                    let text_to_copy = cmd_for_copy.clone();
-                    root_owner.run(move || {
-                        spawn(async move {
-                            let copied = blocking(move || copy_to_clipboard(&text_to_copy)).await;
-                            match copied {
-                                Ok(Ok(())) => copy_status.set("Copied".into()),
-                                _ => copy_status.set("Copy failed".into()),
-                            }
-                        });
-                    });
+                    set_clipboard(&cmd_for_copy);
+                    copy_status.set("Copied".into());
                 },
             )
             .into_element()
         }
             })
         }))
-}
-
-fn copy_to_clipboard(content: &str) -> Result<()> {
-    use std::io::Write;
-    let mut child = std::process::Command::new("/usr/bin/pbcopy")
-        .stdin(std::process::Stdio::piped())
-        .spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(content.as_bytes())?;
-    }
-    ensure!(child.wait()?.success(), "Clipboard copy failed");
-    Ok(())
 }
 
 fn startup_frame(content: impl IntoElement) -> View {
@@ -956,7 +926,7 @@ pub fn herdr_setup_screen(
                     .py_2()
                     .child(
                         read_text(log_lines)
-                            .font_family("Menlo")
+                            .font_family(MONO_FONT)
                             .text_size(px(CAPTION_SIZE))
                             .text_color(MUTED),
                     ),
@@ -984,7 +954,7 @@ pub fn herdr_setup_screen(
                         read_text(command_text)
                             .flex_1()
                             .min_w(px(0.))
-                            .font_family("Menlo")
+                            .font_family(MONO_FONT)
                             .text_size(px(CAPTION_SIZE))
                             .text_color(TEXT),
                     )

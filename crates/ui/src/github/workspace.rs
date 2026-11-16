@@ -1110,7 +1110,14 @@ fn onboarding_card(ui: Ui, missing_binary: bool, notifications_only: bool) -> Vi
         "Sign in with GitHub CLI (`gh`) to connect GitHub"
     };
     let desc = if missing_binary {
-        "Canban uses your local `gh` CLI session to power Notifications, Issues, pull requests, and repository sync without copying tokens. Install `gh` (e.g. `brew install gh`), then sign in."
+        #[cfg(target_os = "macos")]
+        {
+            "Canban uses your local `gh` CLI session to power Notifications, Issues, pull requests, and repository sync without copying tokens. Install `gh` (e.g. `brew install gh`), then sign in."
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            "Canban uses your local `gh` CLI session to power Notifications, Issues, pull requests, and repository sync without copying tokens. Install `gh` from your package manager or cli.github.com, then sign in."
+        }
     } else if notifications_only {
         "GitHub Notifications require `gh` CLI authentication. Sign in once with `gh auth login` so Notifications, Issues, and PRs share the same session."
     } else {
@@ -1124,9 +1131,11 @@ fn onboarding_card(ui: Ui, missing_binary: bool, notifications_only: bool) -> Vi
                 "Install GitHub CLI ↗",
                 Variant::Primary,
                 move |_| {
-                    let _ = std::process::Command::new("/usr/bin/open")
-                        .arg("https://cli.github.com/")
-                        .status();
+                    spawn(async {
+                        let _ =
+                            blocking(|| crate::platform::open_external("https://cli.github.com/"))
+                                .await;
+                    });
                 },
             ))
             .child(action(
@@ -1312,10 +1321,12 @@ pub fn account(ui: Ui) -> impl IntoElement {
                                                 )),
                                         );
                                 } else if state == "missing" {
+                                    #[cfg(target_os = "macos")]
+                                    let missing_msg = "GitHub CLI (`gh`) was not found in `/opt/homebrew/bin`, `/usr/local/bin`, or `PATH`. Install `gh` (for example `brew install gh`), then sign in.";
+                                    #[cfg(not(target_os = "macos"))]
+                                    let missing_msg = "GitHub CLI (`gh`) was not found in `~/.local/bin`, `/usr/local/bin`, `/usr/bin`, or `PATH`. Install `gh` from your package manager or cli.github.com, then sign in.";
                                     body = body
-                                        .child(muted(
-                                            "GitHub CLI (`gh`) was not found in `/opt/homebrew/bin`, `/usr/local/bin`, or `PATH`. Install `gh` (for example `brew install gh`), then sign in.",
-                                        ))
+                                        .child(muted(missing_msg))
                                         .child(
                                             view()
                                                 .flex_row()
@@ -1326,11 +1337,14 @@ pub fn account(ui: Ui) -> impl IntoElement {
                                                     "Install GitHub CLI ↗",
                                                     Variant::Primary,
                                                     move |_| {
-                                                        let _ = std::process::Command::new(
-                                                            "/usr/bin/open",
-                                                        )
-                                                        .arg("https://cli.github.com/")
-                                                        .status();
+                                                        spawn(async {
+                                                            let _ = blocking(|| {
+                                                                crate::platform::open_external(
+                                                                    "https://cli.github.com/",
+                                                                )
+                                                            })
+                                                            .await;
+                                                        });
                                                     },
                                                 ))
                                                 .child(action(

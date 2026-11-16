@@ -163,8 +163,12 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
             hint_tooltip(move || {
                 let (actionable, unread, active, max) = stats.get();
                 format!(
-                    "Activity & Notifications · ⌘I\n{} needs you · {} unread · {} / {} running",
-                    actionable, unread, active, max
+                    "Activity & Notifications · {}\n{} needs you · {} unread · {} / {} running",
+                    crate::commands::shortcuts::NOTIFICATIONS_DISPLAY,
+                    actionable,
+                    unread,
+                    active,
+                    max
                 )
             })
             .placement(Placement::Bottom),
@@ -243,7 +247,7 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                 .child(
                     muted(format!("{active}/{max}"))
                         .text_size(px(11.5))
-                        .font_family("Menlo"),
+                        .font_family(canban_ui_kit::tokens::MONO_FONT),
                 );
             btn
         }))

@@ -22,7 +22,13 @@ fn terminal_button(ui: Ui) -> View {
     view()
         .flex_shrink_0()
         .window_drag(false)
-        .tooltip(hint_tooltip("Toggle Terminal · ⌘J").placement(Placement::Bottom))
+        .tooltip(
+            hint_tooltip(format!(
+                "Toggle Terminal · {}",
+                crate::commands::shortcuts::CARD_TERMINAL_DISPLAY
+            ))
+            .placement(Placement::Bottom),
+        )
         .child(
             canban_ui_kit::press_target()
                 .disabled_style(|s| s.opacity(0.4))
@@ -43,7 +49,15 @@ fn terminal_button(ui: Ui) -> View {
                                 && !has_live.get()
                         })
                 })
-                .accessibility_label(|| Some("Toggle Terminal · ⌘J".into()))
+                .accessibility_label(|| {
+                    Some(
+                        format!(
+                            "Toggle Terminal · {}",
+                            crate::commands::shortcuts::CARD_TERMINAL_DISPLAY
+                        )
+                        .into(),
+                    )
+                })
                 .child(
                     icon_tinted(Icon::Terminal, move || icon_tint.get().resolve())
                         .w(px(16.))

@@ -1266,7 +1266,7 @@ pub fn open_resource(ui: Ui, card_id: String, path: String) {
                     .ok_or_else(|| anyhow::anyhow!("Attachment path is missing"))?
                     .to_owned()
             } else {
-                // Materialize remote attachment bytes into local scratch cache before opening on macOS.
+                // Materialize remote attachment bytes into local scratch cache before opening locally.
                 let value = crate::routed_call(
                     "resource.read",
                     json!({"card_id": card_id, "path": path, "host_id": host_id}),
@@ -1294,10 +1294,7 @@ pub fn open_resource(ui: Ui, card_id: String, path: String) {
                 }
                 dest.to_string_lossy().into_owned()
             };
-            let result = std::process::Command::new("/usr/bin/open")
-                .arg(&local_open_path)
-                .status()?;
-            anyhow::ensure!(result.success(), "macOS could not open this attachment");
+            crate::platform::open_external(&local_open_path)?;
             Ok::<_, anyhow::Error>(())
         })
         .await
@@ -1312,23 +1309,8 @@ pub fn open_resource(ui: Ui, card_id: String, path: String) {
 }
 
 pub fn copy_text(ui: Ui, value: String) {
-    ui.spawn(async move {
-        let result = blocking(move || -> anyhow::Result<()> {
-            use std::io::Write;
-            let mut command = std::process::Command::new("/usr/bin/pbcopy")
-                .stdin(std::process::Stdio::piped())
-                .spawn()?;
-            command.stdin.take().unwrap().write_all(value.as_bytes())?;
-            anyhow::ensure!(command.wait()?.success(), "Clipboard copy failed");
-            Ok(())
-        })
-        .await;
-        match result {
-            Ok(Ok(())) => ui.notify("Copied to clipboard"),
-            Ok(Err(e)) => ui.operation_error.set(e.to_string()),
-            Err(e) => ui.operation_error.set(e.to_string()),
-        }
-    });
+    set_clipboard(&value);
+    ui.notify("Copied to clipboard");
 }
 /// New Card form submissions remain on a fresh New Card draft for consecutive
 /// creation; other active surfaces (e.g. GitHub `+ Add to Board`) open the Card.

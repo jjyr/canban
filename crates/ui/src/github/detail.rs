@@ -467,7 +467,11 @@ fn checks_section(data: &Value, loading: bool) -> AnyElement {
                         .child(status(raw_state.replace('_', " "), tone));
                     if let Some(u) = url {
                         row = row.child(compact_action("Details ↗", Variant::Quiet, move |_| {
-                            let _ = std::process::Command::new("/usr/bin/open").arg(&u).status();
+                            let url = u.clone();
+                            spawn(async move {
+                                let _ =
+                                    blocking(move || crate::platform::open_external(&url)).await;
+                            });
                         }));
                     }
                     row.into_element()
@@ -1103,7 +1107,7 @@ fn files(ui: Ui, d: Signal<Draft>, data: &Value, loading: bool) -> AnyElement {
                     .flex_1()
                     .min_w(px(0.))
                     .truncate()
-                    .font_family("Menlo")
+                    .font_family(MONO_FONT)
                     .text_size(px(12.))
                     .font_weight(FontWeight::SEMIBOLD),
             )
@@ -1111,13 +1115,13 @@ fn files(ui: Ui, d: Signal<Draft>, data: &Value, loading: bool) -> AnyElement {
             .child(
                 label(format!("+{additions}"))
                     .text_size(px(11.5))
-                    .font_family("Menlo")
+                    .font_family(MONO_FONT)
                     .text_color(SUCCESS),
             )
             .child(
                 label(format!("−{deletions}"))
                     .text_size(px(11.5))
-                    .font_family("Menlo")
+                    .font_family(MONO_FONT)
                     .text_color(DANGER),
             )
             .child(compact_action("+ Comment", Variant::Quiet, move |_| {
@@ -1135,7 +1139,7 @@ fn files(ui: Ui, d: Signal<Draft>, data: &Value, loading: bool) -> AnyElement {
                     rows = rows.child(
                         view().px_3().py_1().bg(INSET).child(
                             label(dl.text)
-                                .font_family("Menlo")
+                                .font_family(MONO_FONT)
                                 .text_size(px(11.5))
                                 .text_color(MUTED),
                         ),
@@ -1187,7 +1191,7 @@ fn files(ui: Ui, d: Signal<Draft>, data: &Value, loading: bool) -> AnyElement {
                             label(format!("{old_str} {new_str}"))
                                 .w(px(74.))
                                 .flex_shrink_0()
-                                .font_family("Menlo")
+                                .font_family(MONO_FONT)
                                 .text_size(px(11.))
                                 .text_color(MUTED),
                         )
@@ -1195,7 +1199,7 @@ fn files(ui: Ui, d: Signal<Draft>, data: &Value, loading: bool) -> AnyElement {
                             label(format!("{prefix} {}", dl.text))
                                 .flex_1()
                                 .min_w(px(0.))
-                                .font_family("Menlo")
+                                .font_family(MONO_FONT)
                                 .text_size(px(12.))
                                 .text_color(text_col),
                         ),

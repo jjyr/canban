@@ -263,7 +263,7 @@ fn render_sidebar_sections(ui: Ui, st: State) -> AnyElement {
             } else {
                 log_branch.clone()
             })
-            .font_family("Menlo")
+            .font_family(MONO_FONT)
             .text_size(px(10.5)),
         )
         .child(icon(Icon::ChevronDown).w(px(10.)).h(px(10.)));
@@ -445,7 +445,7 @@ fn sidebar_commit_row(
                 .on_press(move |_: &()| on_click())
                 .child(
                     label(short_sha)
-                        .font_family("Menlo")
+                        .font_family(MONO_FONT)
                         .text_size(px(11.))
                         .text_color(ACCENT)
                         .flex_shrink_0(),
@@ -711,7 +711,7 @@ fn render_ref_picker(ui: Ui, is_base: bool) -> impl IntoElement {
                     }
                 }
             })
-            .font_family("Menlo")
+            .font_family(MONO_FONT)
             .text_size(px(11.5))
             .font_weight(FontWeight::MEDIUM),
         )

@@ -237,7 +237,10 @@ pub fn set_default_workflow(ui: Ui) {
         .drafts
         .with_untracked(|d| d.get(&project).is_some_and(Draft::needs_apply));
     if has_unsaved {
-        ui.notify("Save workflow changes first (⌘S) before setting as default");
+        ui.notify(format!(
+            "Save workflow changes first ({}) before setting as default",
+            crate::commands::shortcuts::SAVE_WORKFLOW_DISPLAY
+        ));
         return;
     }
     if crate::APP.get().is_none() {
@@ -559,22 +562,8 @@ fn launch(ui: Ui, fresh: bool) {
 fn copy_prompt(ui: Ui) {
     let state = ui.workflows;
     let prompt = state.prompt.get_untracked();
-    ui.spawn(async move {
-        let result = blocking(move || -> anyhow::Result<()> {
-            use std::io::Write;
-            let mut child = std::process::Command::new("/usr/bin/pbcopy")
-                .stdin(std::process::Stdio::piped())
-                .spawn()?;
-            child.stdin.take().unwrap().write_all(prompt.as_bytes())?;
-            anyhow::ensure!(child.wait()?.success(), "Clipboard copy failed");
-            Ok(())
-        })
-        .await;
-        state.copy_status.set(match result {
-            Ok(Ok(())) => "Copied".into(),
-            _ => "Copy failed. Select the Prompt below and copy it manually.".into(),
-        });
-    });
+    set_clipboard(&prompt);
+    state.copy_status.set("Copied".into());
 }
 pub fn screen(ui: Ui) -> impl IntoElement {
     let state = ui.workflows;
@@ -695,7 +684,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         })
     });
     on_key_with(
-        "mod+s",
+        crate::commands::shortcuts::SAVE_WORKFLOW_KEY,
         KeyOptions {
             when: nsh_core::keymap::When::Always,
             ..Default::default()
@@ -729,11 +718,14 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     .gap_2()
                     .child(muted(move || {
                         if apply.get() {
-                            "Unsaved workflow changes · Press Save or ⌘S to apply"
+                            format!(
+                                "Unsaved workflow changes · Press Save or {} to apply",
+                                crate::commands::shortcuts::SAVE_WORKFLOW_DISPLAY
+                            )
                         } else if default_state.get().1 {
-                            "All workflow changes saved · Default for new Projects"
+                            "All workflow changes saved · Default for new Projects".into()
                         } else {
-                            "All workflow changes saved"
+                            "All workflow changes saved".into()
                         }
                     }))
                     .child(when(
@@ -800,13 +792,19 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         },
                     ))
                     .child(
-                        action("Save · ⌘S", Variant::Primary, move |_| save(ui)).disabled(
-                            move || {
-                                ui.is_method_pending("workflow.apply")
-                                    || state.loading.get()
-                                    || !apply.get()
-                            },
-                        ),
+                        action(
+                            format!(
+                                "Save · {}",
+                                crate::commands::shortcuts::SAVE_WORKFLOW_DISPLAY
+                            ),
+                            Variant::Primary,
+                            move |_| save(ui),
+                        )
+                        .disabled(move || {
+                            ui.is_method_pending("workflow.apply")
+                                || state.loading.get()
+                                || !apply.get()
+                        }),
                     ),
             )
     };

@@ -4,9 +4,34 @@ use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
 
 pub const CHROME_LEFT_OFFSET: f32 = 10.0;
+pub const CHROME_RIGHT_OFFSET: f32 = 10.0;
+
+pub(crate) fn compute_chrome_padding(
+    left_controls: f32,
+    right_controls: f32,
+    macos: bool,
+) -> (f32, f32) {
+    let left = if macos {
+        left_controls.max(78.) + CHROME_LEFT_OFFSET
+    } else {
+        left_controls + CHROME_LEFT_OFFSET
+    };
+    let right = if macos {
+        CHROME_RIGHT_OFFSET
+    } else {
+        right_controls + CHROME_RIGHT_OFFSET
+    };
+    (left, right)
+}
 
 pub fn chrome_left_padding() -> f32 {
-    nsh_core::element::desktop::title_bar().left.0.max(78.) + CHROME_LEFT_OFFSET
+    let tb = nsh_core::element::desktop::title_bar();
+    compute_chrome_padding(tb.left.0, tb.right.0, cfg!(target_os = "macos")).0
+}
+
+pub fn chrome_right_padding() -> f32 {
+    let tb = nsh_core::element::desktop::title_bar();
+    compute_chrome_padding(tb.left.0, tb.right.0, cfg!(target_os = "macos")).1
 }
 
 /// Keep production and Gallery custom chrome on the same native window API.
@@ -305,7 +330,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                             .border_color(canban_ui_kit::tokens::BORDER)
                             .window_drag(true)
                             .pl(move || px(chrome_left_padding()))
-                            .pr(px(10.))
+                            .pr(move || px(chrome_right_padding()))
                             .child(crate::navigation::controls(ui))
                             .child(route_chrome(ui))
                             .child(crate::hosts::trigger_pill(ui))
@@ -696,8 +721,19 @@ mod tests {
         let initial_chrome_agents = tree
             .mounted_node_for_text("Agents")
             .expect("Board chrome bar `Agents` action mounted");
+        #[cfg(target_os = "macos")]
+        let mounted_terminals = |tree: &TreeTracker| tree.mounted_custom_count("canban/terminal");
+        #[cfg(not(target_os = "macos"))]
+        let mounted_terminals = |tree: &TreeTracker| {
+            usize::from(
+                tree.texts
+                    .iter()
+                    .any(|(id, t)| t.contains("Canban native Terminal") && tree.is_mounted(*id)),
+            )
+        };
+
         assert_eq!(
-            tree.mounted_custom_count("canban/terminal"),
+            mounted_terminals(&tree),
             0,
             "native terminal must not be mounted while on Board"
         );
@@ -730,7 +766,7 @@ mod tests {
         assert!(core.component_event(go_terminals, EventKind::Press, &EventPayload::None));
         pump(&mut core, &mut tree);
         assert_eq!(
-            tree.mounted_custom_count("canban/terminal"),
+            mounted_terminals(&tree),
             1,
             "Terminals route must mount its active native PTY viewer"
         );
@@ -745,7 +781,7 @@ mod tests {
         assert!(core.component_event(go_board, EventKind::Press, &EventPayload::None));
         pump(&mut core, &mut tree);
         assert_eq!(
-            tree.mounted_custom_count("canban/terminal"),
+            mounted_terminals(&tree),
             0,
             "leaving Terminals must unmount its native PTY viewer immediately"
         );
@@ -766,5 +802,15 @@ mod tests {
             !tree.is_mounted(initial_tile_node),
             "switching Projects must replace the previous Project's workspace"
         );
+    }
+
+    #[test]
+    fn chrome_padding_preserves_macos_traffic_lights_and_clears_linux_right_csd_buttons() {
+        assert_eq!(compute_chrome_padding(0., 0., true), (88., 10.));
+        assert_eq!(compute_chrome_padding(84., 0., true), (94., 10.));
+        // GNOME / KDE right-side window buttons: no 78pt phantom left gap, full right inset.
+        assert_eq!(compute_chrome_padding(0., 92., false), (10., 102.));
+        // Linux left-side window buttons (custom gtk-decoration-layout): left inset grows cleanly.
+        assert_eq!(compute_chrome_padding(76., 0., false), (86., 10.));
     }
 }

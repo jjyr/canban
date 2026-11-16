@@ -6,13 +6,19 @@ use nsh_core::prelude::*;
 use serde_json::json;
 
 fn gallery_herdr_setup_fixture(ui: Ui, mode: &str) -> impl IntoElement {
+    let detected_platform = format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH);
+    #[cfg(target_os = "macos")]
+    let missing_hint = "Herdr Core (`hc`) was not found in ~/.local/bin, /opt/homebrew/bin, /usr/local/bin, or PATH.";
+    #[cfg(not(target_os = "macos"))]
+    let missing_hint =
+        "Herdr Core (`hc`) was not found in ~/.local/bin, /usr/local/bin, /usr/bin, or PATH.";
     let initial = match mode {
         "herdr-installing" => canban_ui::startup::HerdrSetupView {
             home: "/preview/.canban".into(),
             installing: true,
             logs: vec![
                 "Downloading installer from https://releases.herdr.dev/core/install.sh".into(),
-                "detected macos/aarch64".into(),
+                format!("detected {detected_platform}"),
                 "downloading herdr-core 0.1.18…".into(),
             ],
             ..Default::default()
@@ -30,9 +36,7 @@ fn gallery_herdr_setup_fixture(ui: Ui, mode: &str) -> impl IntoElement {
         },
         _ => canban_ui::startup::HerdrSetupView {
             home: "/preview/.canban".into(),
-            error: Some(
-                "Herdr Core (`hc`) was not found in ~/.local/bin, /opt/homebrew/bin, /usr/local/bin, or PATH.".into(),
-            ),
+            error: Some(missing_hint.into()),
             ..Default::default()
         },
     };
@@ -50,6 +54,7 @@ fn gallery_herdr_setup_fixture(ui: Ui, mode: &str) -> impl IntoElement {
                 return canban_ui::frame::screen(ui).into_element();
             }
             let current = state.get();
+            let detected_platform = detected_platform.clone();
             canban_ui::startup::herdr_setup_screen(
                 current,
                 copy_status,
@@ -60,7 +65,7 @@ fn gallery_herdr_setup_fixture(ui: Ui, mode: &str) -> impl IntoElement {
                         s.error = None;
                         s.logs = vec![
                             "Starting Herdr Core installer…".into(),
-                            "detected macos/aarch64".into(),
+                            format!("detected {detected_platform}"),
                             "installed ~/.local/bin/hc (0.1.18)".into(),
                         ];
                     });
@@ -499,7 +504,7 @@ fn controls() -> impl IntoElement {
                                             .child(icon(Icon::Branch).w(px(12.)).h(px(12.)))
                                             .child(
                                                 label(move || chosen_ref.get())
-                                                    .font_family("Menlo")
+                                                    .font_family(MONO_FONT)
                                                     .text_size(px(11.5)),
                                             )
                                             .child(icon(Icon::ChevronDown).w(px(11.)).h(px(11.))),
@@ -604,15 +609,29 @@ fn controls() -> impl IntoElement {
                 )
                 .child(canban_ui::settings::acknowledgements_section(ui))
                 .child(
-                    panel().child(label("Native libghostty terminal")).child(
-                        native("canban/terminal")
-                            .prop("theme", canban_ui::utilities::terminal_theme)
-                            .prop("font", move || canban_ui::utilities::terminal_font(ui))
-                            .prop("content", json!(fixtures::TERMINAL))
-                            .prop("read_only", json!(true))
+                    panel().child(label("Native libghostty terminal")).child({
+                        #[cfg(target_os = "macos")]
+                        {
+                            native("canban/terminal")
+                                .prop("theme", canban_ui::utilities::terminal_theme)
+                                .prop("font", move || canban_ui::utilities::terminal_font(ui))
+                                .prop("content", json!(fixtures::TERMINAL))
+                                .prop("read_only", json!(true))
+                                .w_full()
+                                .h(px(320.0))
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            canban_terminal::linux::preview_terminal(
+                                fixtures::TERMINAL,
+                                canban_ui::utilities::terminal_theme,
+                                move || canban_ui::utilities::terminal_font(ui),
+                                || canban_terminal::linux::FocusRequest::default(),
+                            )
                             .w_full()
-                            .h(px(320.0)),
-                    ),
+                            .h(px(320.0))
+                        }
+                    }),
                 ),
         ),
     )
@@ -2279,31 +2298,17 @@ pub fn Gallery() -> impl IntoElement {
 fn main() {
     let app_id =
         std::env::var("CANBAN_GALLERY_APP_ID").unwrap_or_else(|_| "com.canban.gallery".into());
-    nsh_platform_macos::set_components(canban_terminal::native::register);
-    nsh_platform_macos::set_ui_sets(vec![nsh_base::registry()]);
-    let result = nsh_platform_macos::run_app(
-        nsh_platform_macos::AppSource::Rust(
-            nsh_platform_macos::Root::of::<Gallery>().app_id(app_id.clone()),
-        ),
-        nsh_platform_macos::AppOptions {
-            title: "Canban Gallery".into(),
-            app_id,
-            size: (
-                std::env::var("CANBAN_GALLERY_WIDTH")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(1440),
-                std::env::var("CANBAN_GALLERY_HEIGHT")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(960),
-            ),
-            ..Default::default()
-        },
+    canban_ui::platform::init_host(vec![nsh_base::registry()]);
+    let size = (
+        std::env::var("CANBAN_GALLERY_WIDTH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1440),
+        std::env::var("CANBAN_GALLERY_HEIGHT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(960),
     );
-    std::process::exit(if result == std::process::ExitCode::SUCCESS {
-        0
-    } else {
-        1
-    });
+    let ok = canban_ui::platform::run_root::<Gallery>(app_id, "Canban Gallery", size);
+    std::process::exit(if ok { 0 } else { 1 });
 }

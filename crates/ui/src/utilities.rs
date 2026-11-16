@@ -175,7 +175,8 @@ pub fn terminal_settings(ui: Ui) -> impl IntoElement {
     .child(settings_field(
         "Font family",
         &format!(
-            "Choose from {mono_count} installed monospaced font families on this Mac (or System Mono)."
+            "Choose from {mono_count} installed monospaced font families {} (or System Mono).",
+            crate::platform::ON_THIS_MACHINE
         ),
         view()
             .flex_row()
@@ -384,7 +385,10 @@ pub fn bar(ui: Ui) -> impl IntoElement {
         ))
         .child(utility_button(
             Icon::Keyboard,
-            "Commands & Shortcuts · / or ⌘/",
+            format!(
+                "Commands & Shortcuts · / or {}",
+                crate::commands::shortcuts::COMMANDS_DISPLAY
+            ),
             move || {
                 ui.quick_open.get() && crate::quick_open::is_command_query(&ui.search_query.get())
             },
@@ -581,7 +585,10 @@ pub fn settings(ui: Ui) -> impl IntoElement {
                 open(ui, "theme")
             }))
             .child(action(
-                "Commands & Shortcuts · ⌘/",
+                format!(
+                    "Commands & Shortcuts · {}",
+                    crate::commands::shortcuts::COMMANDS_DISPLAY
+                ),
                 Variant::Secondary,
                 move |_| crate::commands::execute(ui, "shortcuts"),
             ))

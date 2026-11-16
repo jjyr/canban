@@ -586,7 +586,7 @@ pub fn path_combobox(
                 .child(
                     field(value, "~/Workspace/my-project or /absolute/path")
                         .element_ref(&input_ref)
-                        .font_family("Menlo, PingFang SC")
+                        .font_family(MONO_FONT)
                         .pr_8()
                         .label("Directory")
                         .role(AccessibilityRole::Combobox)
@@ -722,7 +722,7 @@ pub fn path_combobox(
                                                         .min_w(px(0.))
                                                         .child(
                                                             label(cand.label)
-                                                                .font_family("Menlo, PingFang SC")
+                                                                .font_family(MONO_FONT)
                                                                 .text_size(px(12.))
                                                                 .truncate()
                                                                 .min_w(px(0.)),

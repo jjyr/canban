@@ -799,7 +799,15 @@ fn render_narrative(
                                 compact_action("Save", Variant::Primary, move |_| {
                                     submit_ticket.update(|n| *n += 1)
                                 })
-                                .accessibility_label(|| Some("Save comment · ⌘Enter".into()))
+                                .accessibility_label(|| {
+                                    Some(
+                                        format!(
+                                            "Save comment · {}",
+                                            crate::commands::shortcuts::SUBMIT_DISPLAY
+                                        )
+                                        .into(),
+                                    )
+                                })
                                 .disabled(move || !can_save.get()),
                             ),
                     )

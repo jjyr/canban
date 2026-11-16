@@ -108,8 +108,13 @@ pub const BODY_SIZE: f32 = 13.0;
 pub const CAPTION_SIZE: f32 = 12.0;
 /// Explicit Latin + CJK fixed-advance cascade for NSH rope editors.
 /// Avoids macOS `.AppleSystemUIFontMonospaced` synthetic CJK-Latin inter-script
-/// spacing so per-grapheme caret X measurement matches CoreText line rendering.
-pub const MONO_FONT: &str = "Menlo, PingFang SC";
+/// spacing so per-grapheme caret X measurement matches CoreText line rendering,
+/// and provides a crisp Linux Pango/Fontconfig monospaced + CJK fallback cascade.
+#[cfg(target_os = "macos")]
+pub const MONO_FONT: &str = "SF Mono, Menlo, PingFang SC";
+
+#[cfg(not(target_os = "macos"))]
+pub const MONO_FONT: &str = "JetBrains Mono, DejaVu Sans Mono, Liberation Mono, Noto Sans Mono, Noto Sans CJK SC, monospace";
 
 #[cfg(test)]
 mod tests {
@@ -118,11 +123,25 @@ mod tests {
     #[test]
     fn mono_font_uses_named_latin_and_cjk_families_without_system_ui_monospace() {
         let families: Vec<_> = nsh_core::font_families(MONO_FONT).collect();
+        #[cfg(target_os = "macos")]
         assert_eq!(
             families,
             vec![
+                nsh_core::FamilyName::Named("SF Mono"),
                 nsh_core::FamilyName::Named("Menlo"),
                 nsh_core::FamilyName::Named("PingFang SC"),
+            ]
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            families,
+            vec![
+                nsh_core::FamilyName::Named("JetBrains Mono"),
+                nsh_core::FamilyName::Named("DejaVu Sans Mono"),
+                nsh_core::FamilyName::Named("Liberation Mono"),
+                nsh_core::FamilyName::Named("Noto Sans Mono"),
+                nsh_core::FamilyName::Named("Noto Sans CJK SC"),
+                nsh_core::FamilyName::Monospace,
             ]
         );
     }

@@ -519,7 +519,7 @@ pub fn render_checkout_picker(ui: Ui) -> impl IntoElement {
                 };
                 format!("{shown}{tag}")
             })
-            .font_family("Menlo")
+            .font_family(MONO_FONT)
             .text_size(px(11.5))
             .font_weight(FontWeight::MEDIUM),
         )
@@ -834,7 +834,7 @@ pub fn render_commit_detail_card(ui: Ui, detail: &Value) -> AnyElement {
                         .child(icon(Icon::History).w(px(13.)).h(px(13.)))
                         .child(
                             label(format!("Commit {short}"))
-                                .font_family("Menlo")
+                                .font_family(MONO_FONT)
                                 .text_size(px(12.))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(ACCENT),
@@ -861,7 +861,7 @@ pub fn render_commit_detail_card(ui: Ui, detail: &Value) -> AnyElement {
                 .p_2()
                 .rounded(px(5.))
                 .bg(INSET)
-                .child(label(body).font_family("Menlo").text_size(px(11.5))),
+                .child(label(body).font_family(MONO_FONT).text_size(px(11.5))),
         );
     }
 
@@ -874,7 +874,7 @@ pub fn render_commit_detail_card(ui: Ui, detail: &Value) -> AnyElement {
         .child(muted(author_line).text_size(px(11.5)));
 
     if !date_iso.is_empty() {
-        meta_row = meta_row.child(muted(date_iso).font_family("Menlo").text_size(px(10.5)));
+        meta_row = meta_row.child(muted(date_iso).font_family(MONO_FONT).text_size(px(10.5)));
     }
     card = card.child(meta_row);
 
@@ -978,7 +978,7 @@ pub fn render_working_tree_pane(ui: Ui, data: &Value) -> AnyElement {
             )
             .child(
                 muted(format!("+{total_add} −{total_del}"))
-                    .font_family("Menlo")
+                    .font_family(MONO_FONT)
                     .text_size(px(10.5)),
             ),
     );
@@ -1167,7 +1167,7 @@ fn working_file_row(
                 .on_press(move |_: &()| st.selected_file.set(click_path.clone()))
                 .child(
                     label(code)
-                        .font_family("Menlo")
+                        .font_family(MONO_FONT)
                         .text_size(px(10.5))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(badge_col),

@@ -14,13 +14,13 @@ fn git_status_chips(git: &super::worktrees::ScopeGitSummary) -> View {
             .child(
                 label(format!("+{}", git.additions))
                     .text_size(px(11.))
-                    .font_family("Menlo")
+                    .font_family(MONO_FONT)
                     .text_color(SUCCESS),
             )
             .child(
                 label(format!("−{}", git.deletions))
                     .text_size(px(11.))
-                    .font_family("Menlo")
+                    .font_family(MONO_FONT)
                     .text_color(DANGER),
             );
     }

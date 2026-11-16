@@ -247,13 +247,8 @@ pub fn open(ui: Ui, url: &str) {
                 return;
             }
             ui.spawn(async move {
-                let result = blocking(move || {
-                    std::process::Command::new("/usr/bin/open")
-                        .arg(url)
-                        .status()
-                })
-                .await;
-                if !matches!(result,Ok(Ok(status)) if status.success()) {
+                let result = blocking(move || crate::platform::open_external(&url)).await;
+                if !matches!(result, Ok(Ok(()))) {
                     ui.operation_error
                         .try_set("Could not open the link in your browser".into());
                 }

@@ -20,6 +20,7 @@ pub mod insights;
 pub mod links;
 pub mod navigation;
 pub mod overview;
+pub mod platform;
 pub mod presenter;
 pub mod profiles;
 pub mod projects;
@@ -216,8 +217,7 @@ pub(crate) fn workspace_root() -> impl IntoElement {
 }
 
 pub fn run() -> Result<()> {
-    nsh_platform_macos::set_components(canban_terminal::native::register);
-    nsh_platform_macos::set_ui_sets(vec![nsh_base::registry(), registry()]);
+    platform::init_host(vec![nsh_base::registry(), registry()]);
     let mut session = None;
     let mut ran_window = false;
     let result = (|| {
@@ -241,33 +241,21 @@ fn run_application(ran_window: &mut bool) -> Result<()> {
         "Build the Agent CLI first: mise exec -- cargo build -p canban-cli"
     );
     let app_id = startup::app_id()?;
-    let source = if canban_updater::handoff::journal(&home).map_or_else(
+    let manual_recovery = canban_updater::handoff::journal(&home).map_or_else(
         |_| home.join("updates/install.json").exists(),
         |j| j.phase == "manual_recovery",
-    ) {
-        nsh_platform_macos::AppSource::Rust(
-            nsh_platform_macos::Root::of::<updates::Recovery>().app_id(app_id.clone()),
-        )
-    } else {
-        nsh_platform_macos::AppSource::Rust(
-            nsh_platform_macos::Root::of::<startup::Bootstrap>().app_id(app_id.clone()),
-        )
-    };
-    *ran_window = true;
-    let result = nsh_platform_macos::run_app(
-        source,
-        nsh_platform_macos::AppOptions {
-            title: "Canban — Human Context".into(),
-            app_id,
-            size: (1360, 900),
-            ..Default::default()
-        },
     );
+    *ran_window = true;
+    let ok = if manual_recovery {
+        platform::run_root::<updates::Recovery>(app_id, "Canban — Human Context", (1360, 900))
+    } else {
+        platform::run_root::<startup::Bootstrap>(app_id, "Canban — Human Context", (1360, 900))
+    };
     drafts::persistence::flush();
     if startup::fatal_exit() {
         anyhow::bail!("Canban startup failed");
     }
-    if result != std::process::ExitCode::SUCCESS {
+    if !ok {
         anyhow::bail!("Native application exited with an error");
     }
     Ok(())
