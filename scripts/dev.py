@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -36,6 +37,13 @@ def git(*args):
     return subprocess.check_output(['git', '-C', str(REPO), *args], text=True).strip()
 
 
+def bundle_bin(directory):
+    directory = Path(directory)
+    if sys.platform == 'darwin':
+        return directory / 'CanbanDev.app/Contents/MacOS'
+    return directory / 'CanbanDev/bin'
+
+
 def select(branch=None, home=None):
     branch = branch or git('branch', '--show-current') or 'detached-' + git('rev-parse', '--short=12', 'HEAD')
     home = home or os.environ.get('CANBAN_HOME')
@@ -51,8 +59,10 @@ def select(branch=None, home=None):
     home = home or directory / 'home'
     if home == (Path.home() / '.canban').resolve():
         raise RuntimeError('Development commands do not manage the installed ~/.canban; choose a development home')
-    if len(os.fsencode(home / 'app.sock')) >= 104:
-        raise RuntimeError('Development socket path is too long for macOS; set CANBAN_HOME to a shorter absolute path')
+    sock_limit = 104 if sys.platform == 'darwin' else 108
+    if len(os.fsencode(home / 'app.sock')) >= sock_limit:
+        platform_label = 'macOS' if sys.platform == 'darwin' else 'Unix domain sockets'
+        raise RuntimeError(f'Development socket path is too long for {platform_label}; set CANBAN_HOME to a shorter absolute path')
     return dict(checkout=str(REPO), branch=branch, key=key, directory=str(directory),
                 home=str(home), app_id='com.canban.dev.' + key)
 
@@ -95,12 +105,25 @@ def ping(home):
 
 
 def identity(pid):
+    ps_bin = '/bin/ps' if sys.platform == 'darwin' else (shutil.which('ps') or '/bin/ps')
+
     def ps(field):
-        result = subprocess.run(['/bin/ps', '-ww', '-p', str(pid), '-o', field + '='], capture_output=True, text=True)
+        result = subprocess.run([ps_bin, '-ww', '-p', str(pid), '-o', field + '='], capture_output=True, text=True)
         return result.stdout.strip() if result.returncode == 0 else ''
-    if not ps('stat') or ps('stat').startswith('Z'):
+
+    stat = ps('stat')
+    if not stat or stat.startswith('Z'):
         return None
-    return dict(start=ps('lstart'), command=ps('command'), executable=ps('comm'))
+    if sys.platform.startswith('linux'):
+        try:
+            executable = os.readlink(f'/proc/{pid}/exe')
+        except OSError:
+            return None
+        if executable.endswith(' (deleted)'):
+            executable = executable[:-10]
+    else:
+        executable = ps('comm')
+    return dict(start=ps('lstart'), command=ps('command'), executable=executable)
 
 
 def live(record, executable):
@@ -135,25 +158,25 @@ def assert_owner(instance):
 def stop_locked(instance):
     directory, home = Path(instance['directory']), Path(instance['home'])
     assert_owner(instance)
-    macos = directory / 'CanbanDev.app/Contents/MacOS'
+    bins = bundle_bin(directory)
     server = read(directory / 'server.json')
     current = ping(home)
-    if current and (not live(server, macos / 'canban') or current.get('pid') != server['pid']
+    if current and (not live(server, bins / 'canban') or current.get('pid') != server['pid']
                     or Path(current['home']).resolve() != home):
         raise RuntimeError('Another or unrecorded AppServer owns this home; refusing to stop it')
     ui = read(directory / 'ui.json')
-    if live(ui, macos / 'canban-ui'):
-        # The desktop translates SIGTERM into normal AppKit quit and flushes drafts.
+    if live(ui, bins / 'canban-ui'):
+        # The desktop translates SIGTERM into normal quit and flushes drafts.
         os.kill(ui['pid'], signal.SIGTERM)
         deadline = time.monotonic() + 20
-        while live(ui, macos / 'canban-ui'):
+        while live(ui, bins / 'canban-ui'):
             if time.monotonic() >= deadline:
                 raise RuntimeError('Development UI did not quit; AppServer remains running')
             time.sleep(.1)
     wait_free(directory / 'ui.lock', 'Development UI')
     if current:
         rpc(home / 'app.sock', 'app.shutdown', {'expected_pid': server['pid']})
-    elif live(server, macos / 'canban'):
+    elif live(server, bins / 'canban'):
         raise RuntimeError('Recorded AppServer is not responding; refusing to force-kill it')
     wait_free(home / 'server.lock', 'AppServer')
     for name in ('ui.json', 'server.json'):
@@ -192,12 +215,12 @@ def start(instance, no_ui=False):
         descriptor = directory / 'instance.json'
         atomic(descriptor, instance)
         subprocess.run([sys.executable, str(REPO / 'scripts/package.py'), '--dev', '--dev-instance', str(descriptor)], cwd=REPO, check=True)
-        macos = directory / 'CanbanDev.app/Contents/MacOS'
+        bins = bundle_bin(directory)
         env = environment(instance)
-        build = json.loads(subprocess.check_output([str(macos / 'canban'), 'build-info'], env=env, text=True))
+        build = json.loads(subprocess.check_output([str(bins / 'canban'), 'build-info'], env=env, text=True))
         try:
             with (home / 'server.log').open('ab') as log:
-                server = subprocess.Popen([str(macos / 'canban'), '--home', str(home), 'serve'], env=env,
+                server = subprocess.Popen([str(bins / 'canban'), '--home', str(home), 'serve'], env=env,
                                           stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
             atomic(directory / 'server.json', dict(pid=server.pid, identity=identity(server.pid)))
             deadline = time.monotonic() + 30
@@ -215,7 +238,7 @@ def start(instance, no_ui=False):
                 time.sleep(.1)
             if not no_ui:
                 with (home / 'ui.log').open('ab') as log:
-                    ui = subprocess.Popen([str(macos / 'canban-ui')], env=env, stdin=subprocess.DEVNULL,
+                    ui = subprocess.Popen([str(bins / 'canban-ui')], env=env, stdin=subprocess.DEVNULL,
                                           stdout=log, stderr=log, start_new_session=True)
                 deadline = time.monotonic() + 30
                 while True:

@@ -76,7 +76,7 @@ jobs:
   linux:
     needs: macos
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 25
+    timeout-minutes: 30
     strategy:
       fail-fast: true
       matrix:
@@ -95,10 +95,36 @@ jobs:
           ref: ${{ github.sha }}
       - uses: jdx/mise-action@v5
       - uses: Swatinem/rust-cache@v2
-      - name: Build headless Linux daemon CLI
-        run: cargo build --release --locked -p canban-cli
-      - name: Package verified Linux daemon artifact
-        run: python3 scripts/release.py package-cli
+        with:
+          cache-directories: ~/.cache/canban
+      - name: Install Linux desktop build and test dependencies
+        env:
+          HC_VERSION: '0.1.21'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libgtk-4-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            librsvg2-bin \
+            zstd
+          mkdir -p "$HOME/.local/bin"
+          curl --retry 3 --retry-all-errors -fsSL https://releases.herdr.dev/core/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Run Linux script and packaging tests
+        run: |
+          mise run test-release
+          mise run test-package
+          mise run test-dev
+      - name: Build Linux desktop release bundle and headless CLI
+        run: mise run build-release
+      - name: Run Linux installer regression tests
+        run: python3 scripts/test-install.py --bundle .local/canban
+      - name: Package verified Linux desktop and CLI artifacts
+        run: |
+          python3 scripts/release.py package --directory dist
+          python3 scripts/release.py package-cli --directory dist/cli
       - uses: actions/upload-artifact@v7
         with:
           name: canban-linux-${{ matrix.arch }}-${{ needs.macos.outputs.version }}
@@ -120,6 +146,10 @@ jobs:
           pattern: canban-*-${{ needs.macos.outputs.version }}
           path: dist/
           merge-multiple: true
+      - name: Verify release scripts and multi-platform manifests
+        run: |
+          python3 scripts/test-release.py
+          python3 scripts/release.py verify-dist --directory dist
       - uses: actions/upload-artifact@v7
         with:
           name: canban-${{ needs.macos.outputs.version }}
@@ -127,4 +157,4 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/release.py publish
+        run: python3 scripts/release.py publish --require-all-platforms

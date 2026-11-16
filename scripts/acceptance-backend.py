@@ -4,12 +4,16 @@
 against a newer reported backend. Native modes wait for the printed marker.
 """
 import argparse, fcntl, hashlib, http.server, json, os, plistlib, shutil, signal, socket
-import sqlite3, subprocess, tempfile, threading, time
+import sqlite3, subprocess, sys, tempfile, threading, time
 from pathlib import Path as P
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--native',action='store_true');parser.add_argument('--newer-native',action='store_true')
 args=parser.parse_args();repo=P(__file__).resolve().parents[1]
-base=P(tempfile.mkdtemp(prefix='cbb-',dir='/private/tmp'))
+is_macos=(sys.platform=='darwin')
+ps_bin='/bin/ps' if is_macos else (shutil.which('ps') or '/bin/ps')
+bin_sub=P('Contents/MacOS' if is_macos else 'bin')
+tmp_root='/private/tmp' if is_macos and P('/private/tmp').is_dir() else None
+base=P(tempfile.mkdtemp(prefix='cbb-',dir=tmp_root))
 env={k:v for k,v in os.environ.items() if not k.startswith(('CANBAN_','HC_'))}
 build=json.loads(subprocess.check_output([str(repo/'target/debug/canban'),'build-info'],env=env))
 current_schema=build['schema']
@@ -52,14 +56,18 @@ def bootstrap(name, quiet=True):
  (home/'config/agents.json').write_text(json.dumps({'hc':shutil.which('hc'),'hc_session':core['HC_SESSION'],'hc_env':core,'default_agent':'developer','profiles':[{'id':'developer','preset':'codex'},{'id':'reviewer','preset':'codex'}]}))
  if quiet:
   (home/'updates').mkdir();(home/'updates/state.json').write_text(json.dumps({'phase':'current','available':None,'progress':0,'error':None,'checked_at':int(time.time()),'last_check_started_at':int(time.time())}))
- bundle=root/'Canban.app';shutil.copytree(repo/'.local/Canban.app',bundle)
  app_id='com.canban.backend.'+root.name
- p=bundle/'Contents/Info.plist';v=plistlib.loads(p.read_bytes());v.update(CFBundleIdentifier=app_id,CFBundleName='Canban Backend Acceptance');p.write_bytes(plistlib.dumps(v))
+ if is_macos:
+  bundle=root/'Canban.app';shutil.copytree(repo/'.local/Canban.app',bundle)
+  p=bundle/'Contents/Info.plist';v=plistlib.loads(p.read_bytes());v.update(CFBundleIdentifier=app_id,CFBundleName='Canban Backend Acceptance');p.write_bytes(plistlib.dumps(v))
+ else:
+  bundle=root/'canban';shutil.copytree(repo/'.local/canban',bundle)
+  p=bundle/'bundle.json';v=json.loads(p.read_text());v.update(app_id=app_id,name='Canban Backend Acceptance');p.write_text(json.dumps(v,indent=2)+'\n')
  environment={**env,**core,'CANBAN_HOME':str(home),'CANBAN_APP_ID':app_id,'CANBAN_UPDATE_API':api}
  return root,home,bundle,environment,core
 
 def serve(bundle,environment,log):
- return subprocess.Popen([str(bundle/'Contents/MacOS/canban'),'serve'],env=environment,stdout=log,stderr=log)
+ return subprocess.Popen([str(bundle/bin_sub/'canban'),'serve'],env=environment,stdout=log,stderr=log)
 
 def stop(home,process):
  if process and process.poll() is None:
@@ -77,7 +85,7 @@ def cleanup(home,bundle,environment,core,processes):
   for field in ('candidate_ui','server','recovery_ui'):
    p=saved.get(field)
    if p:
-    actual=run(['/bin/ps','-p',p['pid'],'-o','lstart=,command='],env,False).stdout.strip()
+    actual=run([ps_bin,'-p',p['pid'],'-o','lstart=,command='],env,False).stdout.strip()
     if actual==p['identity']:
      if field=='server':
       try:rpc(home/'app.sock','app.shutdown')
@@ -88,9 +96,11 @@ def cleanup(home,bundle,environment,core,processes):
  # A script UI can exec Python after the worker records its launch identity.
  # Recovery can also replace that journal entry. Match only this disposable
  # bundle's exact UI command, including earlier fixture attempts.
- expected=str(bundle/'Contents/MacOS/canban-ui')
- for line in run(['/bin/ps','-axo','pid=,command='],env).stdout.splitlines():
-  pid,command=line.strip().split(None,1)
+ expected=str(bundle/bin_sub/'canban-ui')
+ for line in run([ps_bin,'-axo','pid=,command='],env).stdout.splitlines():
+  parts=line.strip().split(None,1)
+  if len(parts)!=2:continue
+  pid,command=parts
   if command==expected or command.endswith(' '+expected):
    try:os.kill(int(pid),signal.SIGTERM)
    except ProcessLookupError:pass
@@ -126,7 +136,7 @@ with (h/'server.lock').open('a') as lock:
 
 def local_case(name,schema,native=False):
  root,home,bundle,environment,core=bootstrap(name);log=(root/'run.log').open('w')
- cli=bundle/'Contents/MacOS/canban';ui=None;old=None;seed=None;before_http=len(requests)
+ cli=bundle/bin_sub/'canban';ui=None;old=None;seed=None;before_http=len(requests)
  try:
   seed=serve(bundle,environment,log);wait(lambda:rpc(home/'app.sock','app.ping'),'seed')
   terminal=rpc(home/'app.sock','terminal.create',{'cwd':str(root)})
@@ -147,21 +157,21 @@ if 'database' in sys.argv:
  if (home/'fail-up').exists():raise SystemExit(31)
 os.execv(str(Path(__file__).with_name('canban-real')),[str(Path(__file__).with_name('canban-real')),*sys.argv[1:]])
 ''');cli.chmod(0o755)
-  if not native:fake_ui(bundle/'Contents/MacOS/canban-ui')
-  else:run(['/usr/bin/codesign','--force','--deep','--sign','-','--timestamp=none',bundle],environment)
+  if not native:fake_ui(bundle/bin_sub/'canban-ui')
+  elif is_macos:run(['/usr/bin/codesign','--force','--deep','--sign','-','--timestamp=none',bundle],environment)
   if name=='up-failure':(home/'fail-up').touch()
   if name=='boot-failure':(home/'fail-boot').touch()
   hashes={str(p.relative_to(bundle)):hashlib.sha256(p.read_bytes()).hexdigest() for p in bundle.rglob('*') if p.is_file()}
   old=old_service(home,environment,log);peer=wait(lambda:rpc(home/'app.sock','app.ping'),'legacy',old=old)
   if native:
-   ui=subprocess.Popen([str(bundle/'Contents/MacOS/canban-ui')],env=environment,stdout=log,stderr=log)
+   ui=subprocess.Popen([str(bundle/bin_sub/'canban-ui')],env=environment,stdout=log,stderr=log)
    metadata=dict(base=str(base),root=str(root),home=str(home),bundle=str(bundle),app_id=environment['CANBAN_APP_ID'],core=core)
    (root/'native.json').write_text(json.dumps(metadata,indent=2));print('BACKEND_NATIVE_READY='+str(root),flush=True)
   else:
    token='local-fixture';job=home/'updates/jobs'/token;job.mkdir(parents=True)
-   shutil.copy2(bundle/'Contents/MacOS/canban-updater',job/'canban-updater')
+   shutil.copy2(bundle/bin_sub/'canban-updater',job/'canban-updater')
    build=json.loads(run([cli,'build-info'],environment).stdout)
-   identity=run(['/bin/ps','-p',old.pid,'-o','lstart=,command='],environment).stdout.strip()
+   identity=run([ps_bin,'-p',old.pid,'-o','lstart=,command='],environment).stdout.strip()
    j=dict(local={'peer':{'pid':old.pid,'identity':identity},'backup':str(job/'database-before.sqlite')},token=token,phase='prepared',home=str(home),target=str(bundle),staged=str(bundle),previous=str(job/'unused-app-backup'),build=build,schema_before=schema,before=None,ui=None,app_id=environment['CANBAN_APP_ID'],error=None,server=None,candidate_ui=None,recovery_ui=None)
    (home/'updates/install.json').write_text(json.dumps(j))
    helper=subprocess.Popen([str(job/'canban-updater'),'--home',str(home)],env=environment,stdout=log,stderr=log)
@@ -221,7 +231,7 @@ def daily_case():
 
 def newer_native():
  root,home,bundle,environment,core=bootstrap('newer');log=(root/'run.log').open('w')
- run(['/usr/bin/codesign','--force','--deep','--sign','-','--timestamp=none',bundle],environment)
+ if is_macos:run(['/usr/bin/codesign','--force','--deep','--sign','-','--timestamp=none',bundle],environment)
  server=serve(bundle,environment,log);ui=None;proxy=None;done=threading.Event()
  try:
   wait(lambda:rpc(home/'app.sock','app.ping'),'newer seed')
@@ -240,7 +250,7 @@ def newer_native():
      if request['method']=='app.ping':result['api_version']+=1
      client.sendall((json.dumps({'jsonrpc':'2.0','id':request['id'],'result':result})+'\n').encode())
   worker=threading.Thread(target=relay,daemon=True);worker.start()
-  ui=subprocess.Popen([str(bundle/'Contents/MacOS/canban-ui')],env=environment,stdout=log,stderr=log)
+  ui=subprocess.Popen([str(bundle/bin_sub/'canban-ui')],env=environment,stdout=log,stderr=log)
   (root/'native.json').write_text(json.dumps(dict(root=str(root),home=str(home),bundle=str(bundle),app_id=environment['CANBAN_APP_ID']),indent=2))
   print('NEWER_BACKEND_NATIVE_READY='+str(root),flush=True)
   wait(lambda:(root/'native-done').exists(),'newer native inspection',timeout=1800)

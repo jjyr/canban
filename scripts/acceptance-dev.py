@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -17,7 +18,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--native', action='store_true')
 args = parser.parse_args()
 repo = Path(__file__).resolve().parents[1]
-base = Path(tempfile.mkdtemp(prefix='cbd-', dir='/private/tmp'))
+tmp_root = '/private/tmp' if sys.platform == 'darwin' and Path('/private/tmp').is_dir() else None
+base = Path(tempfile.mkdtemp(prefix='cbd-', dir=tmp_root))
 env = {k:v for k,v in os.environ.items() if not k.startswith(('CANBAN_','HC_','GIT_'))}
 core = {'HC_SESSION':'dev-acceptance','HC_SOCKET':str(base/'hc.sock'),
         'XDG_STATE_HOME':str(base/'state'),'XDG_CONFIG_HOME':str(base/'config')}
@@ -53,7 +55,7 @@ def checkout(name):
 
 
 def dev(path, *argv, check=True, extra=None):
-    r=command(['/usr/bin/python3',path/'scripts/dev.py',*argv],check=check,env={**env,**(extra or {})})
+    r=command([sys.executable,path/'scripts/dev.py',*argv],check=check,env={**env,**(extra or {})})
     log.write(r.stdout+r.stderr);log.flush()
     return r
 
@@ -122,7 +124,8 @@ try:
     assert dev(other_repo,'start','--no-ui',check=False,extra={'CANBAN_HOME':a['home']}).returncode!=0
     assert call(a,'app.ping')['pid']==a_ping['pid']
     # No inherited shell home: the packaged Agent CLI resolves its own binding.
-    packaged=Path(a['directory'])/'CanbanDev.app/Contents/MacOS/canban'
+    dev_bin_rel = 'CanbanDev.app/Contents/MacOS' if sys.platform == 'darwin' else 'CanbanDev/bin'
+    packaged=Path(a['directory'])/dev_bin_rel/'canban'
     assert json.loads(command([packaged,'call','app.ping','{}']).stdout)['home']==a['home']
     metadata=dict(base=str(base),checkout=str(a_repo),instances=[a,b],other=other,core=core)
     (base/'native.json').write_text(json.dumps(metadata,indent=2))
@@ -133,9 +136,13 @@ try:
     dev(a_repo,'stop')
     stopped(b)
     if args.native:
-        # Finder/LaunchServices supplies no CANBAN_HOME: both UI and auto-started
-        # server must resolve the signed bundle binding and register for dev-stop.
-        command(['/usr/bin/open','-n',Path(b['directory'])/'CanbanDev.app'])
+        # Finder/LaunchServices or direct bundle launch supplies no CANBAN_HOME: both UI
+        # and auto-started server must resolve the bundle binding and register for dev-stop.
+        if sys.platform == 'darwin':
+            command(['/usr/bin/open','-n',Path(b['directory'])/'CanbanDev.app'])
+        else:
+            subprocess.Popen([str(Path(b['directory'])/'CanbanDev/bin/canban-ui')],
+                             stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True)
         ready(b)
         deadline=time.monotonic()+15
         while True:
@@ -171,13 +178,24 @@ try:
     dev(a_repo,'stop','--all')
     stopped(a);stopped(b)
     assert call(other,'app.ping')['pid']==other_ping['pid']
-    launches=[subprocess.Popen(['/usr/bin/python3',str(a_repo/'scripts/dev.py'),'start','--no-ui'],
+    launches=[subprocess.Popen([sys.executable,str(a_repo/'scripts/dev.py'),'start','--no-ui'],
               env=env,stdout=log,stderr=log) for _ in range(2)]
     for launch in launches:assert launch.wait(timeout=60)==0
     ready(b)
-    executable=str(Path(b['directory'])/'CanbanDev.app/Contents/MacOS/canban')
-    processes=command(['/bin/ps','-ww','-axo','comm=']).stdout.splitlines()
-    assert sum(line.strip()==executable for line in processes)==1
+    executable=str(Path(b['directory'])/dev_bin_rel/'canban')
+    if sys.platform.startswith('linux'):
+        running=[]
+        for entry in os.listdir('/proc'):
+            if entry.isdigit():
+                try:
+                    exe=os.readlink(f'/proc/{entry}/exe')
+                    running.append(exe[:-10] if exe.endswith(' (deleted)') else exe)
+                except OSError:
+                    pass
+        assert sum(line==executable for line in running)==1
+    else:
+        processes=command(['/bin/ps','-ww','-axo','comm=']).stdout.splitlines()
+        assert sum(line.strip()==executable for line in processes)==1
     dev(a_repo,'stop');stopped(b)
     # Refuse an unrecorded server even if it uses a previously managed home.
     foreign_env={**env,'CANBAN_HOME':b['home']}

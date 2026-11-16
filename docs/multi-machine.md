@@ -1,7 +1,7 @@
 # Multi-machine execution
 
 > [!NOTE]
-> **2026-11-15 architecture update:** User-facing multi-machine orchestration now centers on [Multi-host Canban daemons, Tailscale/SSH connections and Diagnostics](multi-host.md), where `Canban.app` connects simultaneously to local and remote `canband` services (each managing its own SQLite database, Workflow Engine, Scheduler and local `herdr-core` so workflows keep advancing while the client laptop is offline). The single-server remote-Herdr `WorkLocation` protocol documented below remains supported for compatibility.
+> **2026-11-16 architecture update:** User-facing multi-machine orchestration centers on [Multi-host Canban daemons, Tailscale/SSH connections and Diagnostics](multi-host.md), where the native macOS (`Canban.app`) and Linux (`~/.local/opt/canban`) desktop apps connect simultaneously to local and remote `canband` services (each managing its own SQLite database, Workflow Engine, Scheduler and local `herdr-core` so workflows keep advancing while the client machine is offline). Remote Linux servers without a desktop session can run standalone `canband` via `install.sh --headless` while remaining upgrade-compatible with full desktop bundles. The single-server remote-Herdr `WorkLocation` protocol documented below remains supported for compatibility.
 
 Implementation: 2026-11-09. See [acceptance](multi-machine-acceptance.md) for
 executed checks and remaining boundaries. The earlier [research](research/multi-machine.md)

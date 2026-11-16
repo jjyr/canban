@@ -1,6 +1,6 @@
 # Development instances and startup
 
-Status: implemented on macOS, 2026-11-11. Branch-scoped development startup
+Status: implemented on macOS and Linux, updated 2026-11-16. Branch-scoped development startup
 supersedes the earlier default reuse of the installed `~/.canban` home.
 
 ## Start and stop
@@ -29,7 +29,8 @@ Different checkouts/worktrees also get different application identities.
   control.lock              serializes start/stop for this instance
   ui.json / server.json     PID, launch time, command and executable records
   ui.lock                   one UI process per instance
-  CanbanDev.app/            unique signed bundle and macOS application ID
+  CanbanDev.app/            macOS: unique signed bundle and application ID
+  CanbanDev/                Linux: bundle directory (`bin/`, `bundle.json`, `share/dev-instance.json`)
   home/
     canban.sqlite
     app.sock
@@ -42,12 +43,13 @@ Different checkouts/worktrees also get different application identities.
 ```
 
 Application display names include the branch. The generated bundle contains
-`Contents/Resources/dev-instance.json`, binding both its UI and CLI to its home
-and application identity. Opening that Dev App directly through Finder does not
+`Contents/Resources/dev-instance.json` on macOS or `share/dev-instance.json` on
+Linux, binding both its UI and CLI to its home
+and application identity. Launching that Dev bundle directly does not
 require shell environment variables. A missing or relocated development binding
 is rejected rather than falling back to the installed home; start the instance
-again to regenerate the correct bundle. Normal `.local/Canban.app` builds remain
-installation artifacts and are not branch-bound Dev Apps.
+again to regenerate the correct bundle. Normal `.local/Canban.app` (macOS) and
+`.local/canban` (Linux) builds remain installation artifacts and are not branch-bound Dev Apps.
 
 ## Switching branches and selecting another home
 
@@ -83,9 +85,11 @@ commands. They do not adopt an already running, unrecorded AppServer.
 
 Detached HEAD uses `detached-<commit>` as its branch label. Renaming a branch or
 moving a checkout changes its automatic instance selection; old data is retained,
-never automatically moved/deleted. The macOS Unix socket path must fit its native
-length limit; a long checkout path produces an actionable error asking for a
-shorter explicit home.
+never automatically moved/deleted. The Unix domain socket path must fit its native
+`sun_path` limit (`104` bytes on macOS, `108` bytes on Linux); a long checkout path produces an actionable error asking for a
+shorter explicit home. On Linux, process executable identity in `server.json` and
+`ui.json` resolves `/proc/<pid>/exe` (stripping any `" (deleted)"` suffix) rather
+than `ps -o comm=`, avoiding Linux `procps` 15-character basename truncation.
 
 ## Ownership and shutdown
 

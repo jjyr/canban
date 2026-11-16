@@ -3,14 +3,18 @@
 import argparse, datetime, hashlib, json, os, pathlib, shutil, subprocess, sys, tarfile, time, urllib.error, urllib.parse, urllib.request
 from zoneinfo import ZoneInfo
 
+DESKTOP_PLATFORMS = ('macos-aarch64', 'linux-x86_64', 'linux-aarch64')
+CLI_PLATFORMS = ('linux-x86_64', 'linux-aarch64')
+
 def pack_tar_gz(source, output):
     source=pathlib.Path(source)
+    root_name='Canban.app' if source.suffix=='.app' else 'canban'
     with tarfile.open(output,'w:gz') as archive:
-        archive.add(source,arcname='Canban.app',recursive=False)
+        archive.add(source,arcname=root_name,recursive=False)
         for entry in sorted(source.rglob('*')):
             if entry.is_symlink() or not (entry.is_file() or entry.is_dir()):
                 raise RuntimeError(f'App bundle contains unsafe link or special file: {entry}')
-            archive.add(entry,arcname=str(pathlib.Path('Canban.app')/entry.relative_to(source)),recursive=False)
+            archive.add(entry,arcname=str(pathlib.Path(root_name)/entry.relative_to(source)),recursive=False)
 
 def pack_cli_tar_gz(binary, output):
     binary=pathlib.Path(binary)
@@ -22,6 +26,56 @@ def pack_cli_tar_gz(binary, output):
         info.uid=0;info.gid=0;info.uname='';info.gname=''
         with binary.open('rb') as stream:
             archive.addfile(info,stream)
+
+def collect_dist_files(directory):
+    directory=pathlib.Path(directory)
+    by_name={}
+    if not directory.exists():return by_name
+    for path in sorted(directory.rglob('*')):
+        if not path.is_file():continue
+        if path.name in by_name:
+            raise RuntimeError(f'Duplicate release asset name {path.name}: {by_name[path.name]} and {path}')
+        by_name[path.name]=path
+    return by_name
+
+def verify_dist_directory(directory, version, commit):
+    files=collect_dist_files(directory)
+    for platform in DESKTOP_PLATFORMS:
+        manifest_name=f'manifest-{platform}.json'
+        manifest_path=files.get(manifest_name)
+        if manifest_path is None:
+            raise RuntimeError(f'Missing desktop release manifest: {manifest_name}')
+        manifest=json.loads(manifest_path.read_text())
+        if manifest.get('version')!=version or manifest.get('commit')!=commit or manifest.get('platform')!=platform:
+            raise RuntimeError(f'Desktop manifest identity mismatch in {manifest_path}')
+        zst_name=f'Canban-{platform}.tar.zst'
+        gz_name=f'Canban-{platform}.tar.gz'
+        if manifest.get('asset')!=zst_name or manifest.get('tar_gz')!=gz_name:
+            raise RuntimeError(f'Desktop manifest asset name mismatch in {manifest_path}')
+        for archive_name,size_key,sha_key in ((zst_name,'size','sha256'),(gz_name,'tar_gz_size','tar_gz_sha256')):
+            archive_path=files.get(archive_name)
+            if archive_path is None:
+                raise RuntimeError(f'Missing desktop release archive: {archive_name}')
+            data=archive_path.read_bytes()
+            if len(data)!=manifest.get(size_key) or hashlib.sha256(data).hexdigest()!=str(manifest.get(sha_key,'')).lower():
+                raise RuntimeError(f'Desktop archive digest/size mismatch for {archive_path}')
+    for platform in CLI_PLATFORMS:
+        manifest_name=f'manifest-cli-{platform}.json'
+        manifest_path=files.get(manifest_name)
+        if manifest_path is None:
+            raise RuntimeError(f'Missing CLI release manifest: {manifest_name}')
+        manifest=json.loads(manifest_path.read_text())
+        if manifest.get('version')!=version or manifest.get('commit')!=commit or manifest.get('platform')!=platform:
+            raise RuntimeError(f'CLI manifest identity mismatch in {manifest_path}')
+        gz_name=f'canban-{platform}.tar.gz'
+        if manifest.get('asset')!=gz_name:
+            raise RuntimeError(f'CLI manifest asset name mismatch in {manifest_path}')
+        archive_path=files.get(gz_name)
+        if archive_path is None:
+            raise RuntimeError(f'Missing CLI release archive: {gz_name}')
+        data=archive_path.read_bytes()
+        if len(data)!=manifest.get('size') or hashlib.sha256(data).hexdigest()!=str(manifest.get('sha256','')).lower():
+            raise RuntimeError(f'CLI archive digest/size mismatch for {archive_path}')
 
 def resolve_gh_token():
     token=os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
@@ -182,11 +236,12 @@ def dispatch(repo,ref='main',workflow='release.yml',watch=False,poll_interval=2.
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command',choices=['dispatch','reserve','package','package-cli','publish'])
+    parser.add_argument('command',choices=['dispatch','reserve','package','package-cli','verify-dist','publish'])
     parser.add_argument('--directory',type=pathlib.Path,default=pathlib.Path('dist'))
     parser.add_argument('--ref',default='main',help='Branch or tag ref to release (dispatch only, default: main)')
     parser.add_argument('--repo',default=None,help='GitHub owner/repo override (default: GITHUB_REPOSITORY or jjyr/canban)')
     parser.add_argument('--watch',action='store_true',help='Watch the dispatched workflow run until completion (dispatch only)')
+    parser.add_argument('--require-all-platforms',action='store_true',help='Verify macOS + Linux (x86_64 & aarch64) desktop and CLI manifests/archives before publishing')
     args=parser.parse_args()
     repo=args.repo or os.environ.get('GITHUB_REPOSITORY','jjyr/canban')
     if args.command=='dispatch':
@@ -202,14 +257,20 @@ def main():
             notes=build_release_notes(repo,version,commit)
             api('POST',f'/repos/{repo}/releases',{'tag_name':version,'target_commitish':commit,'name':version,'body':notes,'draft':True,'prerelease':False,'generate_release_notes':False})
         print(version);return
+    if args.command=='verify-dist':
+        verify_dist_directory(args.directory,version,commit)
+        print('Verified dist artifacts for '+version)
+        return
     args.directory.mkdir(parents=True,exist_ok=True)
     if args.command=='package':
         helper=pathlib.Path('target/release/canban-updater');cli=pathlib.Path('target/release/canban')
         build=json.loads(subprocess.check_output([str(cli),'build-info'],text=True));assert build['version']==version and build['commit']==commit
+        bundle=pathlib.Path('.local/Canban.app') if build['platform'].startswith('macos-') else pathlib.Path('.local/canban')
+        if not bundle.is_dir():raise RuntimeError(f'Packaged desktop bundle is missing: {bundle}')
         name='Canban-'+build['platform']+'.tar.zst';asset=args.directory/name
         gz_name='Canban-'+build['platform']+'.tar.gz';gz_asset=args.directory/gz_name
-        subprocess.run([str(helper),'pack','.local/Canban.app',str(asset)],check=True)
-        pack_tar_gz('.local/Canban.app',gz_asset)
+        subprocess.run([str(helper),'pack',str(bundle),str(asset)],check=True)
+        pack_tar_gz(bundle,gz_asset)
         manifest={**build,'rollback_floor':8,'asset':name,'size':asset.stat().st_size,'sha256':hashlib.sha256(asset.read_bytes()).hexdigest(),'tar_gz':gz_name,'tar_gz_size':gz_asset.stat().st_size,'tar_gz_sha256':hashlib.sha256(gz_asset.read_bytes()).hexdigest()}
         (args.directory/('manifest-'+build['platform']+'.json')).write_text(json.dumps(manifest,indent=2)+'\n');return
     if args.command=='package-cli':
@@ -223,10 +284,13 @@ def main():
     if release is None:raise RuntimeError('Reserved release is missing: '+version)
     if not release['draft']:
         print('Already published; immutable release unchanged');return
+    if args.require_all_platforms:
+        verify_dist_directory(args.directory,version,commit)
+    dist_files=collect_dist_files(args.directory)
     # Draft retries may replace incomplete assets; published assets are immutable.
     for asset in release['assets']:api('DELETE',f'/repos/{repo}/releases/assets/{asset["id"]}')
-    for path in sorted(args.directory.iterdir()):
-        if path.is_file():api('POST',f'/upload/repos/{repo}/releases/{release["id"]}/assets?name={path.name}',raw=path.read_bytes(),content_type='application/octet-stream')
+    for name,path in sorted(dist_files.items()):
+        api('POST',f'/upload/repos/{repo}/releases/{release["id"]}/assets?name={name}',raw=path.read_bytes(),content_type='application/octet-stream')
     notes=build_release_notes(repo,version,commit)
     api('PATCH',f'/repos/{repo}/releases/{release["id"]}',{'draft':False,'prerelease':False,'body':notes})
     print('Published '+version)

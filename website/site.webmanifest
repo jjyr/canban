@@ -1,7 +1,7 @@
 {
   "name": "Canban",
   "short_name": "Canban",
-  "description": "Canban is an open-source native macOS Kanban workbench that combines Kanban human context, automated Git worktree workflows, and Herdr persistent PTY terminals for coding agents.",
+  "description": "Canban is an open-source native macOS and Linux Kanban workbench that combines Kanban human context, automated Git worktree workflows, and Herdr persistent PTY terminals for coding agents.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0d0e0b",

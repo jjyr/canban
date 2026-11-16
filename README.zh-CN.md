@@ -40,7 +40,7 @@
 
 ### 面向人机协作的 Kanban 看板
 
-Card 沿 `Backlog → Develop → Review`（或自定义列）流转，卡片上实时展示 `@developer`、`@reviewer`、`@merger` 运行状态胶囊；内置 Markdown 编辑预览、剪贴板粘贴图片、`#Card` / `#tag` 引用补全、`Cmd+O` 快速跳转，以及 GitHub Issues / PR 同步与外部 PR 审批门禁。
+Card 沿 `Backlog → Develop → Review`（或自定义列）流转，卡片上实时展示 `@developer`、`@reviewer`、`@merger` 运行状态胶囊；内置 Markdown 编辑预览、剪贴板粘贴图片、`#Card` / `#tag` 引用补全、`Cmd+O`（Linux 下 `Ctrl+Shift+O`）快速跳转，以及 GitHub Issues / PR 同步与外部 PR 审批门禁。
 
 ### 类 GitHub Actions 的声明式 Workflow
 
@@ -52,7 +52,7 @@ Card 沿 `Backlog → Develop → Review`（或自定义列）流转，卡片上
 
 ### 原生 Herdr Terminal
 
-在任意 Card 中按 `Cmd+J` 即可并排打开终端分栏，或切到独立的 **Terminals** 工作区管理多分支会话。基于 Rust、`longbridge/nsh`（原生 AppKit / Metal）与 `libghostty-vt` 构建，支持本地与远程 SSH `herdr-core`，重启或升级应用不会中断运行中的 Agent PTY，并内置 17 款暗色主题。
+在任意 Card 中按 `Cmd+J`（Linux 下 `Ctrl+Shift+J`）即可并排打开终端分栏，或切到独立的 **Terminals** 工作区管理多分支会话。基于 Rust、`longbridge/nsh`（macOS 原生 AppKit / Metal，Linux 原生 GTK4）与 `libghostty-vt` 构建，支持同时连接本地与远程 SSH / Tailscale `canband` + `herdr-core`，重启或升级应用不会中断运行中的 Agent PTY，并内置 17 款暗色主题。
 
 <p align="center">
   <img src="docs/assets/readme-card-terminal.png" width="840" alt="Monokai 主题下的 Card 详情与 Herdr Terminal 分栏视图" />
@@ -62,13 +62,31 @@ Card 沿 `Backlog → Develop → Review`（或自定义列）流转，卡片上
 
 ## 安装
 
-**前置要求**：macOS 13.0+（Apple Silicon）、`git`、至少一个原生 Agent CLI（如 `claude`、`codex`、`agy`、`cursor-agent`），以及 **Herdr Core (`hc`)**（首次启动时若缺失会引导一键安装）。
+**前置要求**：
+- **macOS**：macOS 13.0+（Apple Silicon / `arm64`）
+- **Linux 桌面版**：`x86_64` 或 `aarch64` (`arm64`)，已安装 GTK4 与 GStreamer 运行库（`libgtk-4-1` / `gtk4` + `gstreamer`）
+- **通用**：`git`、至少一个原生 Agent CLI（如 `claude`、`codex`、`agy`、`cursor-agent`），以及 **Herdr Core (`hc`)**（首次启动时若缺失会引导一键安装）。
 
 ```bash
 curl -fsSL https://canban.dev/install.sh | bash
 ```
 
-一键安装或热升级 `/Applications/Canban.app`（保留运行中的 `herdr-core` 会话），并在 macOS 上自动清理 Gatekeeper 隔离属性与完成本地签名处理。
+- **macOS**：安装或热升级 `/Applications/Canban.app`，自动清理 Gatekeeper 隔离属性并完成本地签名处理。
+- **Linux 桌面版**：安装或热升级 `~/.local/opt/canban`，自动创建 `~/.local/bin/{canban,canban-ui}` 符号链接并注册 XDG `.desktop` 启动器与图标（`~/.local/share/applications` 与 `icons/hicolor`）。
+- **Linux 无头服务端 (`canband`)**：在无图形环境的远程主机上可传入 `--headless`（`curl -fsSL https://canban.dev/install.sh | bash -s -- --headless`），仅安装独立的 `~/.local/bin/canban` 守护进程，无需 GTK4 依赖；升级时保留运行中的 `herdr-core` 会话并自动协调 `systemd --user` `canban.service`。
+
+### 从源码构建
+
+安装 `mise` 与系统构建依赖后执行 `mise run install-app`：
+
+- **macOS**：`brew install librsvg`
+- **Ubuntu / Debian**：`sudo apt install pkg-config libgtk-4-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev librsvg2-bin zstd`
+- **Arch Linux**：`sudo pacman -S pkgconf gtk4 gstreamer gst-plugins-base librsvg zstd`
+- **Fedora**：`sudo dnf install pkgconf-pkg-config gtk4-devel gstreamer1-devel gstreamer1-plugins-base-devel librsvg2-tools zstd`
+
+```bash
+git clone https://github.com/jjyr/canban.git && cd canban && mise run install-app
+```
 
 ---
 
@@ -78,7 +96,7 @@ Canban 的实现离不开以下优秀开源项目与资源（完整的第三方�
 
 - **[Herdr (`herdr-core`)](https://github.com/herdrdev/herdr-core)** — 负责 PTY 会话托管、生命周期监督与 JSON-RPC 通信的底层引擎（Apache-2.0）
 - **[Sheprd](https://github.com/sheprd-labs/sheprd)** — 在终端 VT/输入封装与订阅工具契约中参考了其工程实践（Apache-2.0）
-- **[NSH (`longbridge/nsh`)](https://github.com/longbridge/nsh)** — 原生 macOS AppKit / Metal Rust 桌面 UI 框架（Apache-2.0）
+- **[NSH (`longbridge/nsh`)](https://github.com/longbridge/nsh)** — 原生 macOS（AppKit / Metal）与 Linux（GTK4）Rust 桌面 UI 框架（Apache-2.0）
 - **[Ghostty (`libghostty-vt`)](https://github.com/ghostty-org/ghostty)** — 按固定提交锁定的高性能 VT 终端解析内核（MIT）
 - **[iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes)** (MIT) — 16 套经典暗色终端配色方案（含 Monokai、Dracula、Nord、Tokyo Night、Catppuccin Mocha 等）
 - **[Lucide](https://lucide.dev)** (ISC)、**[Lobe Icons](https://github.com/lobehub/lobe-icons)** (MIT)、**[Primer Octicons](https://github.com/primer/octicons)** (MIT) — UI 图标与模型/服务商标识

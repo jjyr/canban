@@ -1,13 +1,26 @@
 #!/usr/bin/env python3
-"""Package the built native binaries as a local macOS application."""
+"""Package the built native binaries as a local macOS .app or Linux desktop bundle."""
 from pathlib import Path
 import argparse
 import json
+import os
 import plistlib
 import shutil
-import os
 import subprocess
+import sys
 import tempfile
+
+
+def atomic_write_text(path: Path, content: str):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}-", delete=False
+    ) as stream:
+        stream.write(content)
+        staged = Path(stream.name)
+    os.chmod(staged, 0o644)
+    os.replace(staged, path)
+
 
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
@@ -19,67 +32,189 @@ parser.add_argument("--dev-instance", type=Path, help="Instance descriptor gener
 args = parser.parse_args()
 if args.dev != bool(args.dev_instance):
     parser.error("Development packages require --dev --dev-instance FILE; use mise run dev")
+
+platform_override = os.environ.get("CANBAN_PACKAGE_PLATFORM", "").strip()
+if platform_override:
+    platform_kind = platform_override
+elif sys.platform == "darwin":
+    platform_kind = "darwin"
+elif sys.platform.startswith("linux"):
+    platform_kind = "linux"
+else:
+    parser.error(f"Unsupported platform for desktop packaging: {sys.platform}")
+
 instance = json.loads(args.dev_instance.read_text()) if args.dev_instance else None
-name = "CanbanGallery" if args.gallery else "CanbanDev" if args.dev else "Canban"
-app_id = "com.canban.gallery" if args.gallery else "com.canban.dev" if args.dev else "com.canban.desktop"
-executable = "gallery" if args.gallery else "canban-ui"
-app = root / ".local" / (name + ".app")
-if instance:
-    directory = Path(instance["directory"])
-    if Path(instance["checkout"]) != root or directory.parent != root / ".local/dev":
-        parser.error("Development instance belongs to a different checkout")
-    app = directory / "CanbanDev.app"
-    app_id = instance["app_id"]
-    name = "Canban Dev · " + instance["branch"]
 profile = "release" if args.release else "debug"
-binaries = {"gallery": root / "target" / profile / "examples/gallery"} if args.gallery else {
-    binary: root / "target" / profile / binary for binary in ("canban-ui", "canban", "canban-updater")
-}
+version = os.environ.get("CANBAN_RELEASE_VERSION", "0.1.0")
+commit = os.environ.get("CANBAN_RELEASE_COMMIT", "unknown")
+sequence = os.environ.get("GITHUB_RUN_NUMBER", "1")
+svg_icon = root / "crates/ui/assets/app-icon.svg"
+
 rasterizer = shutil.which("rsvg-convert")
 if rasterizer is None:
-    parser.error("App icon generation requires rsvg-convert; install it with: brew install librsvg")
-# Render the original vector at every macOS size, including Retina variants.
-# Complete conversion before replacing bundle resources or executables.
-with tempfile.TemporaryDirectory(prefix="canban-icon-") as directory:
-    iconset = Path(directory) / "AppIcon.iconset"
-    iconset.mkdir()
-    for size in (16, 32, 128, 256, 512):
-        for scale in (1, 2):
-            pixels = str(size * scale)
-            suffix = "@2x" if scale == 2 else ""
-            subprocess.run([
-                rasterizer, "--width", pixels, "--height", pixels,
-                "--output", str(iconset / f"icon_{size}x{size}{suffix}.png"),
-                str(root / "crates/ui/assets/app-icon.svg"),
-            ], check=True)
-    icon = Path(directory) / "AppIcon.icns"
-    subprocess.run(["/usr/bin/iconutil", "--convert", "icns", "--output", str(icon), str(iconset)], check=True)
-    bundle_resources = app / "Contents/Resources"
-    bundle_resources.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(icon, bundle_resources / icon.name)
-macos = app / "Contents/MacOS"
-macos.mkdir(parents=True, exist_ok=True)
-for binary, source_binary in binaries.items():
-    with tempfile.NamedTemporaryFile(dir=macos, prefix=f".{binary}-", delete=False) as staging:
-        staged = Path(staging.name)
-    shutil.copy2(source_binary, staged)
-    os.replace(staged, macos / binary)
-version = os.environ.get("CANBAN_RELEASE_VERSION", "0.1.0")
-sequence = os.environ.get("GITHUB_RUN_NUMBER", "1")
-with (app / "Contents/Info.plist").open("wb") as file:
-    plistlib.dump({"CFBundleIdentifier": app_id, "CFBundleName": name, "CFBundleDisplayName": name, "CFBundleExecutable": executable, "CFBundlePackageType": "APPL", "CFBundleIconFile": "AppIcon.icns", "CFBundleVersion": sequence, "CFBundleShortVersionString": version, "NSHighResolutionCapable": True, "LSMinimumSystemVersion": "13.0"}, file)
-resources=app/"Contents/Resources/licenses"
-resources.mkdir(parents=True,exist_ok=True)
-for source in (root/"third_party").glob("*-LICENSE.txt"):
-    shutil.copy2(source,resources/source.name)
-shutil.copy2(root/"THIRD_PARTY_NOTICES.md",resources/"THIRD_PARTY_NOTICES.md")
-if instance:
-    (app / "Contents/Resources/dev-instance.json").write_text(json.dumps(instance, indent=2) + "\n")
+    hint = (
+        "brew install librsvg"
+        if platform_kind == "darwin"
+        else "apt install librsvg2-bin / pacman -S librsvg / dnf install librsvg2-tools"
+    )
+    parser.error(f"App icon generation requires rsvg-convert; install it with: {hint}")
 
-# Every variant can be opened or moved through Finder. Replacing a linker-signed
-# executable invalidates an existing bundle seal, including after Release -> Debug.
-# Sign only after all binaries, plist and resources have reached their final paths.
-subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none", str(app)], check=True)
-subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)], check=True)
-os.utime(app, None)
-print(app)
+if platform_kind == "darwin":
+    name = "CanbanGallery" if args.gallery else "CanbanDev" if args.dev else "Canban"
+    app_id = "com.canban.gallery" if args.gallery else "com.canban.dev" if args.dev else "com.canban.desktop"
+    executable = "gallery" if args.gallery else "canban-ui"
+    app = root / ".local" / (name + ".app")
+    if instance:
+        directory = Path(instance["directory"])
+        if Path(instance["checkout"]) != root or directory.parent != root / ".local/dev":
+            parser.error("Development instance belongs to a different checkout")
+        app = directory / "CanbanDev.app"
+        app_id = instance["app_id"]
+        name = "Canban Dev · " + instance["branch"]
+    binaries = {"gallery": root / "target" / profile / "examples/gallery"} if args.gallery else {
+        binary: root / "target" / profile / binary for binary in ("canban-ui", "canban", "canban-updater")
+    }
+    # Render the original vector at every macOS size, including Retina variants.
+    # Complete conversion before replacing bundle resources or executables.
+    with tempfile.TemporaryDirectory(prefix="canban-icon-") as directory:
+        iconset = Path(directory) / "AppIcon.iconset"
+        iconset.mkdir()
+        for size in (16, 32, 128, 256, 512):
+            for scale in (1, 2):
+                pixels = str(size * scale)
+                suffix = "@2x" if scale == 2 else ""
+                subprocess.run([
+                    rasterizer, "--width", pixels, "--height", pixels,
+                    "--output", str(iconset / f"icon_{size}x{size}{suffix}.png"),
+                    str(svg_icon),
+                ], check=True)
+        icon = Path(directory) / "AppIcon.icns"
+        subprocess.run(["/usr/bin/iconutil", "--convert", "icns", "--output", str(icon), str(iconset)], check=True)
+        bundle_resources = app / "Contents/Resources"
+        bundle_resources.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(icon, bundle_resources / icon.name)
+    macos = app / "Contents/MacOS"
+    macos.mkdir(parents=True, exist_ok=True)
+    for binary, source_binary in binaries.items():
+        with tempfile.NamedTemporaryFile(dir=macos, prefix=f".{binary}-", delete=False) as staging:
+            staged = Path(staging.name)
+        shutil.copy2(source_binary, staged)
+        os.replace(staged, macos / binary)
+    with (app / "Contents/Info.plist").open("wb") as file:
+        plistlib.dump({
+            "CFBundleIdentifier": app_id,
+            "CFBundleName": name,
+            "CFBundleDisplayName": name,
+            "CFBundleExecutable": executable,
+            "CFBundlePackageType": "APPL",
+            "CFBundleIconFile": "AppIcon.icns",
+            "CFBundleVersion": sequence,
+            "CFBundleShortVersionString": version,
+            "NSHighResolutionCapable": True,
+            "LSMinimumSystemVersion": "13.0",
+        }, file)
+    resources = app / "Contents/Resources/licenses"
+    resources.mkdir(parents=True, exist_ok=True)
+    for source in (root / "third_party").glob("*-LICENSE.txt"):
+        shutil.copy2(source, resources / source.name)
+    shutil.copy2(root / "THIRD_PARTY_NOTICES.md", resources / "THIRD_PARTY_NOTICES.md")
+    if instance:
+        (app / "Contents/Resources/dev-instance.json").write_text(json.dumps(instance, indent=2) + "\n")
+
+    # Every variant can be opened or moved through Finder. Replacing a linker-signed
+    # executable invalidates an existing bundle seal, including after Release -> Debug.
+    # Sign only after all binaries, plist and resources have reached their final paths.
+    subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none", str(app)], check=True)
+    subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)], check=True)
+    os.utime(app, None)
+    print(app)
+elif platform_kind == "linux":
+    if args.gallery:
+        name = "CanbanGallery"
+        app_id = "com.canban.gallery"
+        executable = "canban-gallery"
+        app = root / ".local/canban-gallery"
+    elif args.dev:
+        directory = Path(instance["directory"])
+        if Path(instance["checkout"]) != root or directory.parent != root / ".local/dev":
+            parser.error("Development instance belongs to a different checkout")
+        app = directory / "CanbanDev"
+        app_id = instance["app_id"]
+        name = "Canban Dev · " + instance["branch"]
+        executable = "canban-ui"
+    else:
+        name = "Canban"
+        app_id = "com.canban.desktop"
+        executable = "canban-ui"
+        app = root / ".local/canban"
+
+    binaries = {"canban-gallery": root / "target" / profile / "examples/gallery"} if args.gallery else {
+        binary: root / "target" / profile / binary for binary in ("canban-ui", "canban", "canban-updater")
+    }
+
+    with tempfile.TemporaryDirectory(prefix="canban-icon-") as directory:
+        rendered = {}
+        for size in (256, 512):
+            png = Path(directory) / f"icon-{size}.png"
+            subprocess.run([
+                rasterizer, "--width", str(size), "--height", str(size),
+                "--output", str(png), str(svg_icon),
+            ], check=True)
+            rendered[size] = png
+        hicolor = app / "share/icons/hicolor"
+        scalable = hicolor / "scalable/apps"
+        scalable.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(svg_icon, scalable / f"{app_id}.svg")
+        for size, png in rendered.items():
+            target_dir = hicolor / f"{size}x{size}/apps"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(png, target_dir / f"{app_id}.png")
+
+    bin_dir = app / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    for binary, source_binary in binaries.items():
+        with tempfile.NamedTemporaryFile(dir=bin_dir, prefix=f".{binary}-", delete=False) as staging:
+            staged = Path(staging.name)
+        shutil.copy2(source_binary, staged)
+        os.chmod(staged, 0o755)
+        os.replace(staged, bin_dir / binary)
+
+    desktop_entry = "\n".join([
+        "[Desktop Entry]",
+        "Type=Application",
+        f"Name={name}",
+        "Comment=AI-native Kanban workbench with Git worktree workflows and Herdr PTY terminals",
+        f"Exec={executable}",
+        f"Icon={app_id}",
+        "Terminal=false",
+        "Categories=Development;",
+        f"StartupWMClass={app_id}",
+        "",
+    ])
+    atomic_write_text(app / "share/applications" / f"{app_id}.desktop", desktop_entry)
+
+    licenses = app / "share/licenses"
+    licenses.mkdir(parents=True, exist_ok=True)
+    for source in (root / "third_party").glob("*-LICENSE.txt"):
+        shutil.copy2(source, licenses / source.name)
+    shutil.copy2(root / "THIRD_PARTY_NOTICES.md", licenses / "THIRD_PARTY_NOTICES.md")
+
+    dev_descriptor = app / "share/dev-instance.json"
+    if instance:
+        atomic_write_text(dev_descriptor, json.dumps(instance, indent=2) + "\n")
+    else:
+        dev_descriptor.unlink(missing_ok=True)
+
+    bundle_meta = {
+        "app_id": app_id,
+        "name": name,
+        "executable": executable,
+        "version": version,
+        "commit": commit,
+        "sequence": sequence,
+    }
+    atomic_write_text(app / "bundle.json", json.dumps(bundle_meta, indent=2) + "\n")
+    os.utime(app, None)
+    print(app)
+else:
+    parser.error(f"Unsupported platform for desktop packaging: {platform_kind}")

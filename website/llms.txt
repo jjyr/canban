@@ -1,19 +1,25 @@
 # Canban
 
-> Canban (`canban.dev`) is an open-source native macOS Kanban workbench for AI coding agents. Formula: `Canban = Kanban + Workflow + Herdr`.
+> Canban (`canban.dev`) is an open-source native macOS and Linux Kanban workbench for AI coding agents. Formula: `Canban = Kanban + Workflow + Herdr`.
 
-Canban (distinct from generic "Kanban" boards) organizes human task context on Kanban cards, automates isolated Git worktrees and FIFO Queue Merge via declarative workflows, and drives native Agent CLIs (`claude`, `codex`, `agy`, `cursor-agent`) directly inside persistent Herdr PTY terminals.
+Canban (distinct from generic "Kanban" boards) organizes human task context on Kanban cards, automates isolated Git worktrees and FIFO Queue Merge via declarative workflows, and drives native Agent CLIs (`claude`, `codex`, `agy`, `cursor-agent`) directly inside persistent Herdr PTY terminals across local and remote `canband` hosts.
 
 ## Key Capabilities
 
 - **Kanban for Human Context**: Keep Markdown specs, pasted screenshots, `#Card` / `#tag` references, `@Agent` discussions, structured reports, and GitHub Issue/PR sync together on each Card across customizable stages (`Backlog -> Develop -> Review`).
 - **Declarative Workflows & Queue Merge**: GitHub Actions-style workflows authored in Visual Workflow Studio, YAML, or with an agent. Automatically creates isolated per-Card Git worktrees, schedules `@planner` / `@developer` / `@reviewer` / `@merger` agents, enforces external PR approval gates, and runs serialized FIFO rebase Queue Merge.
-- **Herdr Persistent PTY Terminal**: Built in Rust with `longbridge/nsh` (AppKit/Metal) and `libghostty-vt` over local or remote SSH `herdr-core`. Running Agent CLI sessions survive app restarts and live upgrades across 17 built-in dark themes including Monokai.
+- **Herdr Persistent PTY Terminal**: Built in Rust with `longbridge/nsh` (AppKit/Metal on macOS, GTK4 on Linux) and `libghostty-vt` over local or remote SSH/Tailscale `canband` + `herdr-core`. Running Agent CLI sessions survive app restarts and live upgrades across 17 built-in dark themes including Monokai.
 
-## Installation (macOS 13.0+ Apple Silicon / Intel)
+## Installation (macOS 13.0+ Apple Silicon & Linux x86_64 / arm64)
 
 ```sh
 curl -fsSL https://canban.dev/install.sh | bash
+```
+
+For headless Linux `canband` hosts (without GTK4/GUI):
+
+```sh
+curl -fsSL https://canban.dev/install.sh | bash -s -- --headless
 ```
 
 Or build from source:

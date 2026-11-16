@@ -42,7 +42,7 @@ class Releases(unittest.TestCase):
     def test_published_release_is_never_mutated(self):
         calls=[]
         def api(method,path,body=None,**kwargs):calls.append(method);return [{'tag_name':'20261110-1','draft':False}]
-        with patch.object(release,'api',api),patch.object(sys,'argv',['release.py','publish','--directory','/private/tmp/canban-release-test-empty']),patch.dict(os.environ,{'CANBAN_RELEASE_COMMIT':'c'*40,'CANBAN_RELEASE_VERSION':'20261110-1'}):release.main()
+        with patch.object(release,'api',api),patch.object(sys,'argv',['release.py','publish','--directory','/tmp/canban-release-test-empty']),patch.dict(os.environ,{'CANBAN_RELEASE_COMMIT':'c'*40,'CANBAN_RELEASE_VERSION':'20261110-1'}):release.main()
         self.assertEqual(calls,['GET'])
     def test_reserve_and_publish_find_the_same_draft_without_release_by_tag(self):
         calls=[];releases=[{'id':10,'tag_name':'20261109-2','draft':False}]
@@ -79,7 +79,6 @@ class Releases(unittest.TestCase):
         self.assertEqual(calls[-1][:3],('PATCH','/repos/fixture/app/releases/42',{'draft':False,'prerelease':False,'body':expected_notes}))
         self.assertTrue(any(m=='POST' and p.startswith('/upload/') for m,p,_,_ in calls[:-1]))
     def test_release_notes_single_page_numeric_base_merge_filter_and_truncation(self):
-        # Single-page lookup (no pagination walk), skips drafts & newer/equal versions, and orders YYYYMMDD-N numerically (10 > 9).
         releases=[
             {'tag_name':'20261114-11','draft':True},
             {'tag_name':'20261114-12','draft':False},
@@ -111,7 +110,6 @@ class Releases(unittest.TestCase):
             "- feat: first commit (aaaaaaa)\n\n"
             "**Full Changelog**: https://github.com/fixture/app/compare/20261114-10...20261114-11"
         ))
-        # Initial release without a prior published tag falls back to commit listing (newest-first, non-merge)
         def initial_api(method,path,body=None,**kwargs):
             if '/releases?' in path:return [{'tag_name':'20261114-1','draft':True}]
             if '/commits?sha=' in path:
@@ -129,7 +127,6 @@ class Releases(unittest.TestCase):
             "- chore: initial commit (7777777)\n\n"
             "**Full Changelog**: https://github.com/fixture/app/commits/20261114-1"
         ))
-        # Truncation respects limit and accounts for omitted commits beyond the 250-commit compare window
         many=[{'sha':f'{i:07x}0000','parents':[{'sha':'p'}],'commit':{'message':f'feat: change number {i} with description'}} for i in range(20)]
         def big_api(method,path,body=None,**kwargs):
             if '/releases?' in path:return [{'tag_name':'20261114-1','draft':False}]
@@ -197,9 +194,15 @@ class Releases(unittest.TestCase):
         self.assertLess(content.index('mise run build-release'),content.index('scripts/release.py package'))
         self.assertLess(content.index('scripts/release.py package'),content.index('scripts/test-release-upgrade.py --dist dist'))
         self.assertLess(content.index('scripts/test-release-upgrade.py --dist dist'),content.index('scripts/release.py publish'))
-        self.assertIn('cargo build --release --locked -p canban-cli',content)
-        self.assertIn('scripts/release.py package-cli',content)
+        self.assertIn('ubuntu-24.04',content)
         self.assertIn('ubuntu-24.04-arm',content)
+        self.assertIn('libgtk-4-dev',content)
+        self.assertIn('libgstreamer1.0-dev',content)
+        self.assertIn('libgstreamer-plugins-base1.0-dev',content)
+        self.assertIn('librsvg2-bin',content)
+        self.assertIn('scripts/release.py package-cli',content)
+        self.assertIn('scripts/test-install.py --bundle .local/canban',content)
+        self.assertIn('scripts/release.py publish --require-all-platforms',content)
     def test_upgrade_gate_baseline_selection_and_redirect_auth_stripping(self):
         gate_spec=importlib.util.spec_from_file_location('test_release_upgrade',pathlib.Path(__file__).with_name('test-release-upgrade.py'))
         gate=importlib.util.module_from_spec(gate_spec);gate_spec.loader.exec_module(gate)
@@ -257,7 +260,7 @@ class Releases(unittest.TestCase):
             cli=root/'target/release/canban'
             cli.write_text('#!/usr/bin/env python3\nimport json\nprint(json.dumps('+repr(build)+'))\n');cli.chmod(0o755)
             helper=root/'target/release/canban-updater'
-            helper.write_text('#!/usr/bin/env python3\nimport pathlib, sys\npathlib.Path(sys.argv[3]).write_bytes(b"zst-fixture")\n');helper.chmod(0o755)
+            helper.write_text('#!/usr/bin/env python3\nimport pathlib, sys\nassert sys.argv[2] == ".local/Canban.app"\npathlib.Path(sys.argv[3]).write_bytes(b"zst-fixture")\n');helper.chmod(0o755)
             dist=root/'dist'
             cwd=os.getcwd()
             try:
@@ -282,6 +285,40 @@ class Releases(unittest.TestCase):
             self.assertIn('Canban.app',names)
             self.assertIn('Canban.app/Contents/MacOS/canban',names)
             self.assertIn('Canban.app/Contents/Info.plist',names)
+    def test_package_linux_desktop_bundle_uses_canban_root_entry(self):
+        with tempfile.TemporaryDirectory(prefix='cb-release-linux-pkg-') as directory:
+            root=pathlib.Path(directory)
+            (root/'target/release').mkdir(parents=True)
+            (root/'.local/canban/bin').mkdir(parents=True)
+            (root/'.local/canban/share/applications').mkdir(parents=True)
+            (root/'.local/canban/bundle.json').write_text('{"app_id":"com.canban.desktop"}\n')
+            for b in ('canban','canban-ui','canban-updater'):
+                p=root/'.local/canban/bin'/b
+                p.write_text('#!/bin/sh\necho ok\n');p.chmod(0o755)
+            build={'version':'20261116-1','commit':'e'*40,'schema':20,'api':58,'platform':'linux-x86_64'}
+            cli=root/'target/release/canban'
+            cli.write_text('#!/usr/bin/env python3\nimport json\nprint(json.dumps('+repr(build)+'))\n');cli.chmod(0o755)
+            helper=root/'target/release/canban-updater'
+            helper.write_text('#!/usr/bin/env python3\nimport pathlib, sys\nassert sys.argv[2] == ".local/canban"\npathlib.Path(sys.argv[3]).write_bytes(b"linux-zst")\n');helper.chmod(0o755)
+            dist=root/'dist'
+            cwd=os.getcwd()
+            try:
+                os.chdir(root)
+                with patch.dict(os.environ,{'CANBAN_RELEASE_COMMIT':'e'*40,'CANBAN_RELEASE_VERSION':'20261116-1'}),patch.object(sys,'argv',['release.py','package','--directory',str(dist)]):
+                    release.main()
+            finally:
+                os.chdir(cwd)
+            zst=dist/'Canban-linux-x86_64.tar.zst'
+            gz=dist/'Canban-linux-x86_64.tar.gz'
+            manifest_path=dist/'manifest-linux-x86_64.json'
+            self.assertTrue(zst.is_file());self.assertTrue(gz.is_file());self.assertTrue(manifest_path.is_file())
+            with tarfile.open(gz,'r:gz') as archive:
+                names=archive.getnames()
+            self.assertIn('canban',names)
+            self.assertIn('canban/bundle.json',names)
+            self.assertIn('canban/bin/canban',names)
+            self.assertIn('canban/bin/canban-ui',names)
+            self.assertIn('canban/bin/canban-updater',names)
     def test_package_cli_creates_linux_tar_gz_and_manifest(self):
         with tempfile.TemporaryDirectory(prefix='cb-release-cli-pkg-') as directory:
             root=pathlib.Path(directory)
@@ -306,4 +343,28 @@ class Releases(unittest.TestCase):
             with tarfile.open(gz,'r:gz') as archive:
                 member=archive.getmember('canban')
                 self.assertEqual(member.mode & 0o777,0o755)
+    def test_verify_dist_enforces_macos_and_multiarch_linux_desktop_plus_cli_artifacts(self):
+        ver='20261116-2';commit='f'*40
+        with tempfile.TemporaryDirectory(prefix='cb-verify-dist-') as directory:
+            dist=pathlib.Path(directory)
+            for platform in ('macos-aarch64','linux-x86_64','linux-aarch64'):
+                zst=dist/f'Canban-{platform}.tar.zst';zst.write_bytes(f'zst-{platform}'.encode())
+                gz=dist/f'Canban-{platform}.tar.gz';gz.write_bytes(f'gz-{platform}'.encode())
+                (dist/f'manifest-{platform}.json').write_text(json.dumps({
+                    'version':ver,'commit':commit,'platform':platform,'schema':20,'api':58,'rollback_floor':8,
+                    'asset':zst.name,'size':zst.stat().st_size,'sha256':hashlib.sha256(zst.read_bytes()).hexdigest(),
+                    'tar_gz':gz.name,'tar_gz_size':gz.stat().st_size,'tar_gz_sha256':hashlib.sha256(gz.read_bytes()).hexdigest(),
+                }))
+            cli_dir=dist/'cli';cli_dir.mkdir()
+            for platform in ('linux-x86_64','linux-aarch64'):
+                cli_gz=cli_dir/f'canban-{platform}.tar.gz';cli_gz.write_bytes(f'cli-{platform}'.encode())
+                (cli_dir/f'manifest-cli-{platform}.json').write_text(json.dumps({
+                    'version':ver,'commit':commit,'platform':platform,'schema':20,'api':58,
+                    'asset':cli_gz.name,'size':cli_gz.stat().st_size,'sha256':hashlib.sha256(cli_gz.read_bytes()).hexdigest(),
+                }))
+            release.verify_dist_directory(dist,ver,commit)
+            # Corrupting Linux aarch64 desktop archive or removing CLI manifest fails verification before publish
+            (dist/'Canban-linux-aarch64.tar.gz').write_bytes(b'corrupted')
+            with self.assertRaisesRegex(RuntimeError,'Desktop archive digest/size mismatch'):
+                release.verify_dist_directory(dist,ver,commit)
 if __name__=='__main__':unittest.main()

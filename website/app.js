@@ -18,7 +18,7 @@
       meta_title:
         "Canban — AI-Native Kanban Workbench for Coding Agents (Kanban + Workflow + Herdr)",
       meta_desc:
-        "Canban is an open-source native macOS Kanban workbench for coding agents. Maintain Human Context on Kanban cards, automate isolated Git worktrees & Queue Merge with custom Workflows, and run Claude Code, Codex, or Agy inside Herdr persistent PTY terminals.",
+        "Canban is an open-source native macOS and Linux Kanban workbench for coding agents. Maintain Human Context on Kanban cards, automate isolated Git worktrees & Queue Merge with custom Workflows, and run Claude Code, Codex, or Agy inside Herdr persistent PTY terminals.",
 
       ch_1: "WORKBENCH",
       ch_2: "CONTEXT",
@@ -96,7 +96,7 @@
       s_nsh: "Native UI",
       s_ghostty: "Terminal Rendering Engine",
       closing_seo_note:
-        "Canban is an open-source native macOS Kanban workbench for AI coding agents — built in Rust to run Claude Code, Codex, Antigravity (agy), and Cursor CLI in isolated Git worktrees with persistent Herdr PTY terminals.",
+        "Canban is an open-source native macOS and Linux (x86_64 & arm64) Kanban workbench for AI coding agents — built in Rust to run Claude Code, Codex, Antigravity (agy), and Cursor CLI in isolated Git worktrees with persistent Herdr PTY terminals.",
 
       footer_meta: "Apache-2.0 · © 2026 JJy",
     },
@@ -105,7 +105,7 @@
       meta_title:
         "Canban — 面向 AI 编程 Agent 的原生 Kanban 工作台 (Kanban + Workflow + Herdr)",
       meta_desc:
-        "Canban 是开源原生 macOS 编程 Agent 看板工作台：用 Kanban 卡片维护 Human Context，通过自定义 Workflow 自动隔离 Git Worktree 与 Queue Merge，并在 Herdr 持久化 PTY 终端中直接运行 Claude Code、Codex、Agy 等原生 Agent CLI。",
+        "Canban 是开源原生 macOS 与 Linux 编程 Agent 看板工作台：用 Kanban 卡片维护 Human Context，通过自定义 Workflow 自动隔离 Git Worktree 与 Queue Merge，并在 Herdr 持久化 PTY 终端中直接运行 Claude Code、Codex、Agy 等原生 Agent CLI。",
 
       ch_1: "工作台",
       ch_2: "上下文",
@@ -183,7 +183,7 @@
       s_nsh: "Native UI",
       s_ghostty: "终端渲染引擎",
       closing_seo_note:
-        "Canban 是基于 Rust 构建的开源原生 macOS 编程 Agent 看板工作台，支持在独立 Git Worktree 与 Herdr 持久 PTY 终端中运行 Claude Code、Codex、Antigravity (agy) 与 Cursor CLI。",
+        "Canban 是基于 Rust 构建的开源原生 macOS 与 Linux（x86_64 / arm64）编程 Agent 看板工作台，支持在独立 Git Worktree 与 Herdr 持久 PTY 终端中运行 Claude Code、Codex、Antigravity (agy) 与 Cursor CLI。",
 
       footer_meta: "Apache-2.0 · © 2026 JJy",
     },

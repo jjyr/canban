@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Isolated regressions for scripts/install.sh (fresh install, upgrades, Herdr PTY survival, and safety guards)."""
+"""Isolated regressions for scripts/install.sh (macOS & Linux desktop, --headless, Herdr PTY survival, systemd coordination, and safety guards)."""
+import argparse
 import hashlib
 import http.server
 import importlib.util
 import json
 import os
 import pathlib
-import plistlib
 import shutil
 import socket
 import socketserver
@@ -21,18 +21,24 @@ sys.dont_write_bytecode = True
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 INSTALL_SH = ROOT / "scripts/install.sh"
-SOURCE_APP = ROOT / ".local/Canban.app"
 
 spec = importlib.util.spec_from_file_location("release", ROOT / "scripts/release.py")
 release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
 
 
-def make_fixture_release(work_dir: pathlib.Path, version: str, commit_char: str) -> dict:
-    bundle = work_dir / "src" / "Canban.app"
-    shutil.copytree(SOURCE_APP, bundle)
-    cli = bundle / "Contents/MacOS/canban"
-    real_cli = bundle / "Contents/MacOS/canban-real"
+def bundle_cli_relpath(is_macos: bool) -> pathlib.Path:
+    return pathlib.Path("Contents/MacOS/canban" if is_macos else "bin/canban")
+
+
+def make_fixture_release(source_bundle: pathlib.Path, work_dir: pathlib.Path, version: str, commit_char: str) -> dict:
+    is_macos = source_bundle.suffix == ".app"
+    bundle_name = "Canban.app" if is_macos else "canban"
+    bundle = work_dir / "src" / bundle_name
+    shutil.copytree(source_bundle, bundle)
+    cli_rel = bundle_cli_relpath(is_macos)
+    cli = bundle / cli_rel
+    real_cli = cli.with_name("canban-real")
     cli.rename(real_cli)
 
     base_info = json.loads(subprocess.check_output([str(real_cli), "build-info"], text=True))
@@ -50,11 +56,23 @@ exec "$(dirname "$0")/canban-real" "$@"
 """
     cli.write_text(wrapper)
     cli.chmod(0o755)
-    subprocess.run(
-        ["/usr/bin/codesign", "--force", "--deep", "--sign", "-", "--timestamp=none", str(bundle)],
-        check=True,
-        capture_output=True,
-    )
+    if is_macos:
+        subprocess.run(
+            ["/usr/bin/codesign", "--force", "--deep", "--sign", "-", "--timestamp=none", str(bundle)],
+            check=True,
+            capture_output=True,
+        )
+    else:
+        meta_path = bundle / "bundle.json"
+        meta = json.loads(meta_path.read_text()) if meta_path.is_file() else {}
+        meta.update({
+            "app_id": "com.canban.desktop",
+            "name": "Canban",
+            "executable": "canban-ui",
+            "version": version,
+            "commit": commit_char * 40,
+        })
+        meta_path.write_text(json.dumps(meta, indent=2) + "\n")
 
     gz_name = f"Canban-{info['platform']}.tar.gz"
     gz_path = work_dir / gz_name
@@ -84,6 +102,273 @@ exec "$(dirname "$0")/canban-real" "$@"
     }
 
 
+def make_synthetic_linux_feed(feed_root: pathlib.Path) -> None:
+    """Build a self-contained file:// feed with Linux x86_64 + aarch64 desktop & CLI archives."""
+    assets_dir = feed_root / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    releases_json = []
+
+    for ver, commit_ch in (("20261115-1", "1"), ("20261115-2", "2")):
+        rel_assets = []
+        for arch, platform in (("x86_64", "linux-x86_64"), ("aarch64", "linux-aarch64")):
+            info = {
+                "version": ver,
+                "commit": commit_ch * 40,
+                "schema": 20,
+                "api": 58,
+                "platform": platform,
+            }
+            src_root = feed_root / f"build-{ver}-{arch}" / "canban"
+            (src_root / "bin").mkdir(parents=True)
+            (src_root / "share/applications").mkdir(parents=True)
+            for sz in ("scalable", "256x256", "512x512"):
+                (src_root / f"share/icons/hicolor/{sz}/apps").mkdir(parents=True)
+            ext = "svg" if sz == "scalable" else "png"
+            (src_root / "share/icons/hicolor/scalable/apps/com.canban.desktop.svg").write_text("<svg/>\n")
+            (src_root / "share/icons/hicolor/256x256/apps/com.canban.desktop.png").write_bytes(b"png256")
+            (src_root / "share/icons/hicolor/512x512/apps/com.canban.desktop.png").write_bytes(b"png512")
+            (src_root / "share/applications/com.canban.desktop.desktop").write_text(
+                "[Desktop Entry]\nType=Application\nName=Canban\nExec=canban-ui\nIcon=com.canban.desktop\n"
+            )
+            (src_root / "bundle.json").write_text(json.dumps({
+                "app_id": "com.canban.desktop",
+                "name": "Canban",
+                "executable": "canban-ui",
+                "version": ver,
+                "commit": commit_ch * 40,
+                "sequence": "1",
+            }, indent=2) + "\n")
+
+            cli_script = f"""#!/bin/sh
+set -eu
+HOME_ARG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    build-info)
+      printf '%s\\n' '{json.dumps(info)}'
+      exit 0
+      ;;
+    --home)
+      HOME_ARG="$2"
+      shift 2
+      ;;
+    call)
+      METHOD="$2"
+      if [ "$METHOD" = "app.ping" ] && [ -n "$HOME_ARG" ] && [ -f "$HOME_ARG/mock-server.pid" ]; then
+        PID="$(cat "$HOME_ARG/mock-server.pid")"
+        printf '{{"pid":%s,"home":"%s"}}\\n' "$PID" "$HOME_ARG"
+        exit 0
+      fi
+      exit 1
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+exit 0
+"""
+            for b in ("canban", "canban-ui", "canban-updater"):
+                p = src_root / "bin" / b
+                p.write_text(cli_script if b == "canban" else "#!/bin/sh\nexit 0\n")
+                p.chmod(0o755)
+
+            ver_dir = assets_dir / ver
+            ver_dir.mkdir(parents=True, exist_ok=True)
+            desk_gz = ver_dir / f"Canban-{platform}.tar.gz"
+            release.pack_tar_gz(src_root, desk_gz)
+            desk_zst = ver_dir / f"Canban-{platform}.tar.zst"
+            desk_zst.write_bytes(b"zst-unused")
+            desk_manifest = {
+                **info,
+                "rollback_floor": 8,
+                "asset": desk_zst.name,
+                "size": desk_zst.stat().st_size,
+                "sha256": hashlib.sha256(desk_zst.read_bytes()).hexdigest(),
+                "tar_gz": desk_gz.name,
+                "tar_gz_size": desk_gz.stat().st_size,
+                "tar_gz_sha256": hashlib.sha256(desk_gz.read_bytes()).hexdigest(),
+            }
+            desk_manifest_path = ver_dir / f"manifest-{platform}.json"
+            desk_manifest_path.write_text(json.dumps(desk_manifest, indent=2) + "\n")
+
+            cli_ver_dir = ver_dir / "cli"
+            cli_ver_dir.mkdir(parents=True, exist_ok=True)
+            cli_gz = cli_ver_dir / f"canban-{platform}.tar.gz"
+            release.pack_cli_tar_gz(src_root / "bin/canban", cli_gz)
+            cli_manifest = {
+                **info,
+                "asset": cli_gz.name,
+                "size": cli_gz.stat().st_size,
+                "sha256": hashlib.sha256(cli_gz.read_bytes()).hexdigest(),
+            }
+            cli_manifest_path = cli_ver_dir / f"manifest-cli-{platform}.json"
+            cli_manifest_path.write_text(json.dumps(cli_manifest, indent=2) + "\n")
+
+            for fpath in (desk_manifest_path, desk_gz, cli_manifest_path, cli_gz):
+                rel_assets.append({
+                    "name": fpath.name,
+                    "browser_download_url": f"file://{fpath}",
+                })
+
+        releases_json.append({
+            "tag_name": ver,
+            "draft": False,
+            "prerelease": False,
+            "assets": rel_assets,
+        })
+
+    repo_dir = feed_root / "repos/fixture/canban"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    (repo_dir / "releases.json").write_text(json.dumps(releases_json, indent=2) + "\n")
+
+
+def run_linux_mode_and_coexistence_tests():
+    base = pathlib.Path(tempfile.mkdtemp(prefix="cb-install-linux-modes-"))
+    try:
+        feed_dir = base / "feed"
+        make_synthetic_linux_feed(feed_dir)
+        clean_env = {
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith(("CANBAN_", "HC_", "XDG_"))
+        }
+
+        def invoke(args, extra_env=None, check=True):
+            env = {
+                **clean_env,
+                "HOME": str(base / "fake-home"),
+                "CANBAN_INSTALL_OS": "Linux",
+                "CANBAN_INSTALL_ARCH": "x86_64",
+                "CANBAN_INSTALL_REPO": "fixture/canban",
+                **(extra_env or {}),
+            }
+            pathlib.Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
+            bash_bin = shutil.which("bash") or "/bin/bash"
+            res = subprocess.run(
+                [bash_bin, str(INSTALL_SH), "--feed", str(feed_dir), *args],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if check and res.returncode != 0:
+                raise AssertionError(
+                    f"Linux mode install.sh failed ({res.returncode}):\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
+                )
+            return res
+
+        # A. Headless install on clean host (x86_64 -> 20261115-1 -> upgrade 20261115-2)
+        h_bin = base / "headless/bin"
+        h_home = base / "headless/home"
+        res = invoke(["--headless", "--bin-dir", str(h_bin), "--home", str(h_home), "--version", "20261115-1"])
+        assert "Installed Canban 20261115-1" in res.stdout, res.stdout
+        assert (h_bin / "canban").is_file() and not (h_bin / "canban").is_symlink()
+        assert not (h_bin / "canban-ui").exists()
+        info1 = json.loads(subprocess.check_output([str(h_bin / "canban"), "build-info"], text=True))
+        assert info1["version"] == "20261115-1" and info1["platform"] == "linux-x86_64"
+
+        res = invoke(["--headless", "--bin-dir", str(h_bin), "--home", str(h_home)])
+        assert "Installed Canban 20261115-2" in res.stdout, res.stdout
+        info2 = json.loads(subprocess.check_output([str(h_bin / "canban"), "build-info"], text=True))
+        assert info2["version"] == "20261115-2"
+
+        # B. Linux aarch64 desktop install + missing GTK4 shared library hint
+        arm_prefix = base / "arm64-local"
+        arm_dest = arm_prefix / "opt/canban"
+        arm_home = base / "arm64-home"
+        mock_tools = base / "mock-tools"
+        mock_tools.mkdir()
+        mock_ldd = mock_tools / "ldd"
+        mock_ldd.write_text("#!/bin/sh\necho '\tlibgtk-4.so.1 => not found'\n")
+        mock_ldd.chmod(0o755)
+        res = invoke(
+            ["--dest", str(arm_dest), "--home", str(arm_home), "--version", "20261115-1"],
+            extra_env={
+                "CANBAN_INSTALL_ARCH": "aarch64",
+                "PATH": f"{mock_tools}:{clean_env.get('PATH', '/usr/bin:/bin')}",
+            },
+        )
+        assert "Installed Canban 20261115-1" in res.stdout, res.stdout
+        assert "libgtk-4-1" in res.stdout and "pacman -S gtk4" in res.stdout, res.stdout
+        assert (arm_prefix / "bin/canban").is_symlink()
+        assert (arm_prefix / "bin/canban-ui").is_symlink()
+        assert (arm_prefix / "share/applications/com.canban.desktop.desktop").is_file()
+        assert (arm_prefix / "share/icons/hicolor/512x512/apps/com.canban.desktop.png").is_file()
+
+        # C. Coexistence guard: `--headless` when desktop bundle is ALREADY installed upgrades full bundle!
+        res = invoke(
+            ["--headless", "--dest", str(arm_dest), "--home", str(arm_home)],
+            extra_env={"CANBAN_INSTALL_ARCH": "aarch64"},
+        )
+        assert "Detected existing Canban desktop bundle" in res.stdout, res.stdout
+        assert "Installed Canban 20261115-2" in res.stdout, res.stdout
+        assert (arm_prefix / "bin/canban").is_symlink()
+        desk_meta = json.loads((arm_dest / "bundle.json").read_text())
+        assert desk_meta["version"] == "20261115-2", desk_meta
+
+        # D. systemd --user canban.service stop/start coordination (isolated mock systemctl)
+        sysd_dir = base / "systemd-unit"
+        sysd_dir.mkdir()
+        sysd_home = base / "sysd-home"
+        sysd_home.mkdir()
+        (sysd_dir / "canban.service").write_text(
+            f'[Service]\nExecStart="/tmp/bin/canban" --home "{sysd_home}" serve\nRestart=always\n'
+        )
+        sysd_log = base / "systemctl.log"
+        sysd_state = base / "service-active"
+        sysd_state.write_text("1")
+        mock_systemctl = mock_tools / "mock-systemctl"
+        mock_systemctl.write_text(f"""#!/bin/sh
+echo "$*" >> "{sysd_log}"
+case "$*" in
+  *is-active*canban.service*)
+    [ -f "{sysd_state}" ] && exit 0 || exit 3
+    ;;
+  *stop*canban.service*)
+    rm -f "{sysd_state}" "{sysd_home}/mock-server.pid"
+    exit 0
+    ;;
+  *start*canban.service*)
+    touch "{sysd_state}"
+    echo "99999" > "{sysd_home}/mock-server.pid"
+    exit 0
+    ;;
+esac
+exit 0
+""")
+        mock_systemctl.chmod(0o755)
+
+        # Unrelated --home must NOT stop/start canban.service
+        other_home = base / "other-home"
+        invoke(
+            ["--headless", "--bin-dir", str(base / "other-bin"), "--home", str(other_home), "--version", "20261115-1"],
+            extra_env={
+                "CANBAN_SYSTEMCTL_BIN": str(mock_systemctl),
+                "CANBAN_SYSTEMD_UNIT_DIR": str(sysd_dir),
+            },
+        )
+        assert not sysd_log.exists(), f"Unexpected systemctl call for unrelated home: {sysd_log.read_text()}"
+
+        # Matching --home stops canban.service before swap and starts it after swap!
+        sysd_prefix = base / "sysd-local"
+        res = invoke(
+            ["--dest", str(sysd_prefix / "opt/canban"), "--home", str(sysd_home)],
+            extra_env={
+                "CANBAN_SYSTEMCTL_BIN": str(mock_systemctl),
+                "CANBAN_SYSTEMD_UNIT_DIR": str(sysd_dir),
+            },
+        )
+        calls = sysd_log.read_text().splitlines()
+        assert "--user is-active --quiet canban.service" in calls, calls
+        assert "--user stop canban.service" in calls, calls
+        assert "--user start canban.service" in calls, calls
+        assert calls.index("--user stop canban.service") < calls.index("--user start canban.service"), calls
+        print("Linux desktop, --headless, coexistence, and systemd coordination tests OK", flush=True)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
 def rpc(sock_path: pathlib.Path, method: str, params=None):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
         s.settimeout(10)
@@ -110,8 +395,31 @@ def wait_until(fn, label: str, timeout: float = 30.0):
 
 
 def main():
-    if not (SOURCE_APP / "Contents/MacOS/canban").is_file():
-        raise SystemExit(f"Packaged bundle not found at {SOURCE_APP}; run `mise run build` first")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--bundle",
+        type=pathlib.Path,
+        default=ROOT / (".local/Canban.app" if sys.platform == "darwin" else ".local/canban"),
+        help="Packaged local desktop bundle (.local/Canban.app or .local/canban)",
+    )
+    parser.add_argument(
+        "--synthetic-only",
+        action="store_true",
+        help="Run only synthetic cross-platform install.sh regressions (no compiled Rust bundle required)",
+    )
+    args = parser.parse_args()
+
+    run_linux_mode_and_coexistence_tests()
+    if args.synthetic_only:
+        print("ALL_SYNTHETIC_INSTALL_TESTS_PASSED", flush=True)
+        return
+
+    source_bundle = args.bundle.resolve()
+    is_macos = source_bundle.suffix == ".app"
+    cli_rel = bundle_cli_relpath(is_macos)
+    if not (source_bundle / cli_rel).is_file():
+        raise SystemExit(f"Packaged bundle not found at {source_bundle}; run `mise run build` first")
+
     hc = shutil.which("hc") or next(
         (
             str(p)
@@ -127,7 +435,8 @@ def main():
     if not hc:
         raise SystemExit("Herdr CLI `hc` is required in PATH for test-install.py")
 
-    base = pathlib.Path(tempfile.mkdtemp(prefix="cb-install-test-", dir="/private/tmp"))
+    tmp_parent = "/private/tmp" if sys.platform == "darwin" and pathlib.Path("/private/tmp").is_dir() else None
+    base = pathlib.Path(tempfile.mkdtemp(prefix="cb-install-test-", dir=tmp_parent))
     print(f"INSTALL_TEST_BASE={base}", flush=True)
 
     releases_store = {}
@@ -195,12 +504,12 @@ def main():
     threading.Thread(target=server.serve_forever, daemon=True).start()
     api_url = f"http://127.0.0.1:{server.server_address[1]}"
 
-    rel1 = make_fixture_release(base / "rel1", "20261114-1", "a")
-    rel2 = make_fixture_release(base / "rel2", "20261114-2", "b")
-    rel3 = make_fixture_release(base / "rel3", "20261114-3", "c")
+    rel1 = make_fixture_release(source_bundle, base / "rel1", "20261114-1", "a")
+    rel2 = make_fixture_release(source_bundle, base / "rel2", "20261114-2", "b")
+    rel3 = make_fixture_release(source_bundle, base / "rel3", "20261114-3", "c")
     releases_store["20261114-1"] = rel1
 
-    dest = base / "Applications/Canban.app"
+    dest = (base / "Applications/Canban.app") if is_macos else (base / "local/opt/canban")
     home = base / "home"
     inst_env = {
         **clean_env,
@@ -209,11 +518,12 @@ def main():
         "CANBAN_INSTALL_REPO": "fixture/canban",
         "CANBAN_UPDATES_DISABLED": "1",
     }
+    bash_bin = shutil.which("bash") or "/bin/bash"
 
-    def run_install(*args, extra_env=None, check=True):
+    def run_install(*extra_args, extra_env=None, check=True):
         env = {**inst_env, **(extra_env or {})}
         res = subprocess.run(
-            ["/bin/bash", str(INSTALL_SH), "--dest", str(dest), "--home", str(home), *args],
+            [bash_bin, str(INSTALL_SH), "--dest", str(dest), "--home", str(home), *extra_args],
             env=env,
             capture_output=True,
             text=True,
@@ -228,16 +538,23 @@ def main():
         # 1. Fresh install (20261114-1)
         res = run_install()
         assert "Installed Canban 20261114-1" in res.stdout, res.stdout
-        assert (dest / "Contents/MacOS/canban").is_file()
-        installed_info = json.loads(subprocess.check_output([str(dest / "Contents/MacOS/canban"), "build-info"], text=True))
+        installed_cli = dest / cli_rel
+        assert installed_cli.is_file()
+        installed_info = json.loads(subprocess.check_output([str(installed_cli), "build-info"], text=True))
         assert installed_info["version"] == "20261114-1", installed_info
-        subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(dest)], check=True, capture_output=True)
-        q_check = subprocess.run(["/usr/bin/xattr", "-p", "com.apple.quarantine", str(dest)], capture_output=True, text=True)
-        assert q_check.returncode != 0, "Expected no com.apple.quarantine on installed bundle"
+        if is_macos:
+            subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(dest)], check=True, capture_output=True)
+            q_check = subprocess.run(["/usr/bin/xattr", "-p", "com.apple.quarantine", str(dest)], capture_output=True, text=True)
+            assert q_check.returncode != 0, "Expected no com.apple.quarantine on installed bundle"
+        else:
+            assert (base / "local/bin/canban").is_symlink()
+            assert (base / "local/bin/canban-ui").is_symlink()
+            assert (base / "local/share/applications/com.canban.desktop.desktop").is_file()
         print("1. Fresh install OK", flush=True)
 
         # 2. Idempotency & --force
-        marker = dest / "Contents/Resources/idempotent-marker"
+        marker = dest / ("Contents/Resources/idempotent-marker" if is_macos else "share/idempotent-marker")
+        marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text("keep")
         res = run_install()
         assert "already up to date" in res.stdout, res.stdout
@@ -252,7 +569,7 @@ def main():
         releases_store["20261114-2"] = rel2
         log_file = (base / "server.log").open("w")
         old_server_proc = subprocess.Popen(
-            [str(dest / "Contents/MacOS/canban"), "--home", str(home), "serve"],
+            [str(installed_cli), "--home", str(home), "serve"],
             env=inst_env,
             stdout=log_file,
             stderr=log_file,
@@ -298,7 +615,7 @@ def main():
 
         new_ping = wait_until(lambda: rpc(home / "app.sock", "app.ping"), "upgraded AppServer")
         assert new_ping["pid"] != old_ping["pid"]
-        upgraded_info = json.loads(subprocess.check_output([str(dest / "Contents/MacOS/canban"), "build-info"], text=True))
+        upgraded_info = json.loads(subprocess.check_output([str(installed_cli), "build-info"], text=True))
         assert upgraded_info["version"] == "20261114-2", upgraded_info
 
         term_pid_after = json.loads(
@@ -328,7 +645,7 @@ def main():
             db.commit()
             db.close()
             subprocess.run(
-                [str(dest / "Contents/MacOS/canban"), "--home", str(home), "database", "--target", "10"],
+                [str(installed_cli), "--home", str(home), "database", "--target", "10"],
                 env=inst_env,
                 check=True,
                 capture_output=True,

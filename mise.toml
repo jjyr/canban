@@ -4,7 +4,7 @@ zig = "0.17.1"
 "aqua:nextest-rs/nextest/cargo-nextest" = "0.9.152"
 
 [tasks.terminal-deps]
-run = "/usr/bin/python3 scripts/terminal-deps.py"
+run = "python3 scripts/terminal-deps.py"
 
 [tasks.check]
 depends = ["terminal-deps"]
@@ -17,14 +17,14 @@ run = "cargo nextest run --workspace --locked"
 
 [tasks.run]
 depends = ["build-binaries"]
-run = "/usr/bin/python3 scripts/dev.py start"
+run = "python3 scripts/dev.py start"
 
 [tasks.dev]
 depends = ["build-binaries"]
-run = "/usr/bin/python3 scripts/dev.py start"
+run = "python3 scripts/dev.py start"
 
 [tasks.dev-stop]
-run = "/usr/bin/python3 scripts/dev.py stop"
+run = "python3 scripts/dev.py stop"
 
 [tasks.build-binaries]
 depends = ["terminal-deps"]
@@ -32,137 +32,137 @@ run = "cargo build -p canban-ui -p canban-cli -p canban-updater"
 
 [tasks.build]
 depends = ["build-binaries"]
-run = "/usr/bin/python3 scripts/package.py"
+run = "python3 scripts/package.py"
 
 [tasks.build-gallery]
 depends = ["terminal-deps"]
-run = ["cargo build -p canban-ui --example gallery", "/usr/bin/python3 scripts/package.py --gallery"]
+run = ["cargo build -p canban-ui --example gallery", "python3 scripts/package.py --gallery"]
 
 [tasks.gallery]
 depends = ["build-gallery"]
-run = ".local/CanbanGallery.app/Contents/MacOS/gallery"
+run = 'if [ "$(uname -s)" = "Darwin" ]; then exec .local/CanbanGallery.app/Contents/MacOS/gallery; else exec .local/canban-gallery/bin/canban-gallery; fi'
 
 [tasks.acceptance-dev]
 depends = ["build"]
-run = "/usr/bin/python3 scripts/acceptance-dev.py"
+run = "python3 scripts/acceptance-dev.py"
 
 [tasks.acceptance-notifications]
 depends = ["build"]
-run = "/usr/bin/python3 scripts/acceptance-notifications.py"
+run = "python3 scripts/acceptance-notifications.py"
 
 [tasks.acceptance]
 depends = ["build"]
-run = "/usr/bin/python3 scripts/acceptance.py"
+run = "python3 scripts/acceptance.py"
 
 [tasks.acceptance-real]
 depends = ["build"]
-run = "/usr/bin/python3 scripts/acceptance-real.py"
+run = "python3 scripts/acceptance-real.py"
 
 [tasks.acceptance-interactive]
 depends = ["build"]
-run = "/usr/bin/python3 scripts/acceptance-interactive.py"
+run = "python3 scripts/acceptance-interactive.py"
 
 [tasks.acceptance-real-interactive]
 depends = ["build"]
-run = "/usr/bin/python3 scripts/acceptance-real-interactive.py"
+run = "python3 scripts/acceptance-real-interactive.py"
 
 [tasks.acceptance-real-claude]
 depends = ["build"]
-run = "/usr/bin/python3 scripts/acceptance-real-claude.py"
+run = "python3 scripts/acceptance-real-claude.py"
 
 [tasks.acceptance-real-workflows]
 depends = ["build"]
-run = "/usr/bin/python3 scripts/acceptance-real-workflows.py"
+run = "python3 scripts/acceptance-real-workflows.py"
 
 [tasks.acceptance-native]
 depends = ["build"]
-run = "/usr/bin/python3 scripts/acceptance-native.py"
+run = "python3 scripts/acceptance-native.py"
 
 [tasks.acceptance-scheduling]
 depends = ["build"]
-run = "/usr/bin/python3 scripts/acceptance-scheduling.py"
+run = "python3 scripts/acceptance-scheduling.py"
 
 [tasks.acceptance-overview]
 depends = ["build"]
-run = "/usr/bin/python3 scripts/acceptance-overview.py"
+run = "python3 scripts/acceptance-overview.py"
 
 [tasks.acceptance-terminals]
 depends = ["build"]
-run = "/usr/bin/python3 scripts/acceptance-terminals.py"
+run = "python3 scripts/acceptance-terminals.py"
 
 [tasks.acceptance-terminal-context]
 depends = ["build"]
-run = "/usr/bin/python3 scripts/acceptance-terminal-context.py"
+run = "python3 scripts/acceptance-terminal-context.py"
 
 [tasks.acceptance-retained]
 depends = ["build"]
-run = "/usr/bin/python3 scripts/acceptance-retained.py"
+run = "python3 scripts/acceptance-retained.py"
 
 [tasks.acceptance-events]
 depends = ["build"]
-run = "/usr/bin/python3 scripts/acceptance-events.py"
+run = "python3 scripts/acceptance-events.py"
 
 [tasks.build-release]
 depends = ["terminal-deps"]
-run = ["cargo build --release --locked -p canban-ui -p canban-cli -p canban-updater", "/usr/bin/python3 scripts/package.py --release"]
+run = ["cargo build --release --locked -p canban-ui -p canban-cli -p canban-updater", "python3 scripts/package.py --release"]
 
 [tasks.release]
-run = "/usr/bin/python3 scripts/release.py dispatch"
+run = "python3 scripts/release.py dispatch"
 
 [tasks.install-app]
 depends = ["build-release"]
-run = "/usr/bin/python3 scripts/install-app.py"
+run = "python3 scripts/install-app.py"
 
 [tasks.acceptance-updates]
-run = "/usr/bin/python3 scripts/acceptance-updates.py"
+run = "python3 scripts/acceptance-updates.py"
 
 [tasks.acceptance-backend]
 depends = ["build"]
-run = "/usr/bin/python3 scripts/acceptance-backend.py"
+run = "python3 scripts/acceptance-backend.py"
 
 [tasks.test-release]
-run = "/usr/bin/python3 scripts/test-release.py"
+run = "python3 scripts/test-release.py"
 
 [tasks.test-package]
-run = "/usr/bin/python3 scripts/test-package.py"
+run = "python3 scripts/test-package.py"
 
 [tasks.test-dev]
-run = "/usr/bin/python3 scripts/test-dev.py"
+run = "python3 scripts/test-dev.py"
 
 [tasks.test-install]
 depends = ["build"]
-run = "/usr/bin/python3 scripts/test-install.py"
+run = "python3 scripts/test-install.py"
 
 [tasks.test-release-upgrade]
 depends = ["build"]
-run = "/usr/bin/python3 scripts/test-release-upgrade.py"
+run = "python3 scripts/test-release-upgrade.py"
 
 [tasks.test-integration]
 depends = ["build"]
 run = [
-  "/usr/bin/python3 scripts/acceptance.py",
-  "/usr/bin/python3 scripts/acceptance-interactive.py",
-  "/usr/bin/python3 scripts/acceptance-workflows.py",
-  "/usr/bin/python3 scripts/acceptance-github-workspace.py",
-  "/usr/bin/python3 scripts/acceptance-notifications.py",
-  "/usr/bin/python3 scripts/acceptance-scheduling.py",
-  "/usr/bin/python3 scripts/acceptance-events.py",
-  "/usr/bin/python3 scripts/acceptance-dev.py",
-  "/usr/bin/python3 scripts/acceptance-backend.py",
+  "python3 scripts/acceptance.py",
+  "python3 scripts/acceptance-interactive.py",
+  "python3 scripts/acceptance-workflows.py",
+  "python3 scripts/acceptance-github-workspace.py",
+  "python3 scripts/acceptance-notifications.py",
+  "python3 scripts/acceptance-scheduling.py",
+  "python3 scripts/acceptance-events.py",
+  "python3 scripts/acceptance-dev.py",
+  "python3 scripts/acceptance-backend.py",
 ]
 
 [tasks.acceptance-github-workspace]
 depends = ["build"]
-run = "/usr/bin/python3 scripts/acceptance-github-workspace.py"
+run = "python3 scripts/acceptance-github-workspace.py"
 
 [tasks.acceptance-github-native]
 depends = ["build"]
-run = "/usr/bin/python3 scripts/acceptance-github-workspace.py --native"
+run = "python3 scripts/acceptance-github-workspace.py --native"
 
 [tasks.acceptance-editor]
 depends = ["build"]
-run = "/usr/bin/python3 scripts/acceptance-editor.py"
+run = "python3 scripts/acceptance-editor.py"
 
 [tasks.acceptance-workflows]
 depends = ["build"]
-run = "/usr/bin/python3 scripts/acceptance-workflows.py"
+run = "python3 scripts/acceptance-workflows.py"
