@@ -194,7 +194,7 @@ exit 0
 
             cli_ver_dir = ver_dir / "cli"
             cli_ver_dir.mkdir(parents=True, exist_ok=True)
-            cli_gz = cli_ver_dir / f"canban-{platform}.tar.gz"
+            cli_gz = cli_ver_dir / f"canban-cli-{platform}.tar.gz"
             release.pack_cli_tar_gz(src_root / "bin/canban", cli_gz)
             cli_manifest = {
                 **info,

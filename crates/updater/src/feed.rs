@@ -500,7 +500,7 @@ fn extract(archive: &Path, job: &Path) -> Result<PathBuf> {
     Ok(job.join(root))
 }
 
-/// Discover the newest published headless CLI release archive (`canban-<platform>.tar.gz` +
+/// Discover the newest published headless CLI release archive (`canban-cli-<platform>.tar.gz` +
 /// `manifest-cli-<platform>.json`) newer than `current` (or matching `target_version` when set).
 pub fn discover_cli(
     current: &Build,
@@ -555,7 +555,7 @@ pub fn discover_cli(
         }
     }
     candidates.sort_by_key(|a| std::cmp::Reverse(a.0));
-    let asset = format!("canban-{}.tar.gz", current.platform);
+    let asset = format!("canban-cli-{}.tar.gz", current.platform);
     let manifest_name = format!("manifest-cli-{}.json", current.platform);
     for (_, release) in candidates {
         let Some(assets) = release["assets"].as_array() else {
@@ -876,11 +876,11 @@ mod archive_tests {
                 api: candidate.api,
                 schema: candidate.schema,
                 rollback_floor: 0,
-                asset: format!("canban-{}.tar.gz", candidate.platform),
+                asset: format!("canban-cli-{}.tar.gz", candidate.platform),
                 size,
                 sha256: sha,
             },
-            url: format!("http://{addr}/canban.tar.gz"),
+            url: format!("http://{addr}/canban-cli.tar.gz"),
             notes: String::new(),
         };
 

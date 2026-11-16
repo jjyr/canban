@@ -558,7 +558,7 @@ case "$ARCH" in
   aarch64|arm64) ARCH="aarch64" ;;
 esac
 if [ "$OS" = "linux" ]; then
-  ASSET="canban-linux-${{ARCH}}.tar.gz"
+  ASSET="canban-cli-linux-${{ARCH}}.tar.gz"
   RELEASE_URL="https://github.com/{repo}/releases/latest/download/${{ASSET}}"
   TMP=$(mktemp -d)
   echo "    Checking latest release asset ${{ASSET}}..."

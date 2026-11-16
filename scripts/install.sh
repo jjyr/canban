@@ -455,7 +455,7 @@ select_release() {
         if (!Array.isArray(releases)) throw new Error("Unexpected releases payload");
         if (target && !parseVersion(target)) throw new Error("Invalid --version format (expected YYYYMMDD-N): " + target);
         var manifestName = mode === "headless" ? ("manifest-cli-" + platform + ".json") : ("manifest-" + platform + ".json");
-        var gzName = mode === "headless" ? ("canban-" + platform + ".tar.gz") : ("Canban-" + platform + ".tar.gz");
+        var gzName = mode === "headless" ? ("canban-cli-" + platform + ".tar.gz") : ("Canban-" + platform + ".tar.gz");
         var zstName = mode === "headless" ? "" : ("Canban-" + platform + ".tar.zst");
         var candidates = [];
         for (var i = 0; i < releases.length; i++) {
@@ -527,7 +527,7 @@ if target and not parse_version(target):
     raise SystemExit(f"Invalid --version format (expected YYYYMMDD-N): {target}")
 
 manifest_name = f"manifest-cli-{platform}.json" if mode == "headless" else f"manifest-{platform}.json"
-gz_name = f"canban-{platform}.tar.gz" if mode == "headless" else f"Canban-{platform}.tar.gz"
+gz_name = f"canban-cli-{platform}.tar.gz" if mode == "headless" else f"Canban-{platform}.tar.gz"
 zst_name = "" if mode == "headless" else f"Canban-{platform}.tar.zst"
 
 candidates = []

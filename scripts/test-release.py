@@ -334,16 +334,16 @@ class Releases(unittest.TestCase):
                     release.main()
             finally:
                 os.chdir(cwd)
-            gz=dist/'canban-linux-x86_64.tar.gz'
+            gz=dist/'canban-cli-linux-x86_64.tar.gz'
             manifest_path=dist/'manifest-cli-linux-x86_64.json'
             self.assertTrue(gz.is_file());self.assertTrue(manifest_path.is_file())
             manifest=json.loads(manifest_path.read_text())
-            self.assertEqual(manifest['asset'],'canban-linux-x86_64.tar.gz')
+            self.assertEqual(manifest['asset'],'canban-cli-linux-x86_64.tar.gz')
             self.assertEqual(manifest['sha256'],hashlib.sha256(gz.read_bytes()).hexdigest())
             with tarfile.open(gz,'r:gz') as archive:
                 member=archive.getmember('canban')
                 self.assertEqual(member.mode & 0o777,0o755)
-    def test_verify_dist_enforces_macos_and_multiarch_linux_desktop_plus_cli_artifacts(self):
+    def test_verify_dist_enforces_macos_and_multiarch_linux_desktop_plus_cli_artifacts_and_rejects_case_collisions(self):
         ver='20261116-2';commit='f'*40
         with tempfile.TemporaryDirectory(prefix='cb-verify-dist-') as directory:
             dist=pathlib.Path(directory)
@@ -351,18 +351,23 @@ class Releases(unittest.TestCase):
                 zst=dist/f'Canban-{platform}.tar.zst';zst.write_bytes(f'zst-{platform}'.encode())
                 gz=dist/f'Canban-{platform}.tar.gz';gz.write_bytes(f'gz-{platform}'.encode())
                 (dist/f'manifest-{platform}.json').write_text(json.dumps({
-                    'version':ver,'commit':commit,'platform':platform,'schema':20,'api':58,'rollback_floor':8,
+                    'version':ver,'commit':commit,'platform':platform,'schema':20,'api':59,'rollback_floor':8,
                     'asset':zst.name,'size':zst.stat().st_size,'sha256':hashlib.sha256(zst.read_bytes()).hexdigest(),
                     'tar_gz':gz.name,'tar_gz_size':gz.stat().st_size,'tar_gz_sha256':hashlib.sha256(gz.read_bytes()).hexdigest(),
                 }))
             cli_dir=dist/'cli';cli_dir.mkdir()
             for platform in ('linux-x86_64','linux-aarch64'):
-                cli_gz=cli_dir/f'canban-{platform}.tar.gz';cli_gz.write_bytes(f'cli-{platform}'.encode())
+                cli_gz=cli_dir/f'canban-cli-{platform}.tar.gz';cli_gz.write_bytes(f'cli-{platform}'.encode())
                 (cli_dir/f'manifest-cli-{platform}.json').write_text(json.dumps({
-                    'version':ver,'commit':commit,'platform':platform,'schema':20,'api':58,
+                    'version':ver,'commit':commit,'platform':platform,'schema':20,'api':59,
                     'asset':cli_gz.name,'size':cli_gz.stat().st_size,'sha256':hashlib.sha256(cli_gz.read_bytes()).hexdigest(),
                 }))
             release.verify_dist_directory(dist,ver,commit)
+            # GitHub Release assets are case-insensitive (`Canban-linux-*.tar.gz` vs `canban-linux-*.tar.gz` -> HTTP 422)
+            case_dup=cli_dir/'canban-linux-x86_64.tar.gz';case_dup.write_bytes(b'collision')
+            with self.assertRaisesRegex(RuntimeError,'case-colliding release asset name'):
+                release.collect_dist_files(dist)
+            case_dup.unlink()
             # Corrupting Linux aarch64 desktop archive or removing CLI manifest fails verification before publish
             (dist/'Canban-linux-aarch64.tar.gz').write_bytes(b'corrupted')
             with self.assertRaisesRegex(RuntimeError,'Desktop archive digest/size mismatch'):

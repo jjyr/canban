@@ -30,11 +30,14 @@ def pack_cli_tar_gz(binary, output):
 def collect_dist_files(directory):
     directory=pathlib.Path(directory)
     by_name={}
+    lower_names={}
     if not directory.exists():return by_name
     for path in sorted(directory.rglob('*')):
         if not path.is_file():continue
-        if path.name in by_name:
-            raise RuntimeError(f'Duplicate release asset name {path.name}: {by_name[path.name]} and {path}')
+        lower=path.name.lower()
+        if lower in lower_names:
+            raise RuntimeError(f'Duplicate or case-colliding release asset name {path.name}: {lower_names[lower]} and {path}')
+        lower_names[lower]=path
         by_name[path.name]=path
     return by_name
 
@@ -67,7 +70,7 @@ def verify_dist_directory(directory, version, commit):
         manifest=json.loads(manifest_path.read_text())
         if manifest.get('version')!=version or manifest.get('commit')!=commit or manifest.get('platform')!=platform:
             raise RuntimeError(f'CLI manifest identity mismatch in {manifest_path}')
-        gz_name=f'canban-{platform}.tar.gz'
+        gz_name=f'canban-cli-{platform}.tar.gz'
         if manifest.get('asset')!=gz_name:
             raise RuntimeError(f'CLI manifest asset name mismatch in {manifest_path}')
         archive_path=files.get(gz_name)
@@ -276,7 +279,7 @@ def main():
     if args.command=='package-cli':
         cli=pathlib.Path('target/release/canban')
         build=json.loads(subprocess.check_output([str(cli),'build-info'],text=True));assert build['version']==version and build['commit']==commit
-        gz_name='canban-'+build['platform']+'.tar.gz';gz_asset=args.directory/gz_name
+        gz_name='canban-cli-'+build['platform']+'.tar.gz';gz_asset=args.directory/gz_name
         pack_cli_tar_gz(cli,gz_asset)
         manifest={**build,'asset':gz_name,'size':gz_asset.stat().st_size,'sha256':hashlib.sha256(gz_asset.read_bytes()).hexdigest()}
         (args.directory/('manifest-cli-'+build['platform']+'.json')).write_text(json.dumps(manifest,indent=2)+'\n');return

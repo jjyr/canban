@@ -163,7 +163,7 @@ Dedicated diagnostic workspace for verifying and repairing multi-host setups:
    - Bump `DESKTOP_API` in `crates/updater/src/lib.rs`.
    - Add `config/server.json`, `server.token`, `host.probe`, authenticated TCP JSON-RPC + `herdr.connect` relay in `canban-app-server` and TCP relay support in `canban-herdr` / `AppClient`.
    - Add `diagnostics.status` and `diagnostics.logs` RPCs, plus Tailscale/SSH local discovery helpers.
-   - Add CLI `canban serve --tailscale / --listen`, `canban pair`, and `canban service install / status` (Linux `systemd --user` + macOS `launchd`), and extend `.github/workflows/release.yml` + `scripts/release.py` to publish headless Linux release archives (`canban-linux-x86_64.tar.gz`, `canban-linux-aarch64.tar.gz`).
+   - Add CLI `canban serve --tailscale / --listen`, `canban pair`, and `canban service install / status` (Linux `systemd --user` + macOS `launchd`), and extend `.github/workflows/release.yml` + `scripts/release.py` to publish headless Linux release archives (`canban-cli-linux-x86_64.tar.gz`, `canban-cli-linux-aarch64.tar.gz`).
 2. **Milestone 2 — Multi-Host client core (`HostRegistry`, merged snapshots, offline cache & routing):**
    - Introduce `host_id` / `host_name` metadata on snapshot entities (`canban-types`).
    - Implement `HostRegistry` (`config/hosts.json`, per-host connection state machine, SSH tunnel manager, disk snapshot cache, `server_id` duplicate guard, and multi-host event aggregation).
