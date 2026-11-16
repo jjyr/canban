@@ -30,7 +30,10 @@ Implemented user-approved direction, 2026-11-08. Native/runtime acceptance is re
 |      |   ⎇ feat/login    ↑2   [+][⋯] | <-- Active ManagedWorktree (idle ones hidden from tree)     |
 |      |   │ Terminal 2                |                                                             |
 |      |   │ ❯_ Local                  |                                                             |
-|      | 📁 Docs & Website   [⎇+] [+]  | <-- Empty projects are omitted                    |
+|      | OTHER DIRECTORIES ─────────── | <-- Shown only when non-Project terminals exist             |
+|      | 📁 ~/Workspace/scratch    [+] | <-- Local $HOME compacted to ~ (full path in tooltip)       |
+|      |  │ Terminal 5                 |                                                             |
+|      |  │ ❯_ Local                   |                                                             |
 +--------------------------------------+-------------------------------------------------------------+
 ```
 
@@ -51,9 +54,12 @@ Terminal's task identity.
   backend hosts are part of directory identity.
 - Only occupied locations and their Project ancestors appear. Empty registered
   Projects are absent; creating a Terminal and changing directory populates the
-  tree. Unknown locations are shown without inventing a launch-directory binding.
-  Transient observation/discovery loss retains the last confirmed location for
-  the same Core/Terminal binding.
+  tree. Non-Project directories and unassigned host locations sit below a subtle
+  `OTHER DIRECTORIES` eyebrow divider, left-aligned rather than indented under the
+  preceding Project, with local `$HOME` prefixes compacted to `~` (preserving full
+  paths in tooltips). Unknown locations are shown without inventing a launch-directory
+  binding. Transient observation/discovery loss retains the last confirmed location
+  for the same Core/Terminal binding.
 - Tabs and terminal cycling use the current location scope. Ordinary directories
   outside Git are separate scopes; subdirectories of one Git checkout share a scope.
 - The sidebar is a flat keyed list. Terminal IDs and machine/path directory keys

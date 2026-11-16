@@ -2,7 +2,16 @@
 //! Git status summaries, Card promotion, and guarded deletion.
 use super::*;
 use canban_types::{ManagedWorktree, Snapshot};
+use canban_ui_kit::compact_home;
 use nsh_core::element::desktop::{MenuItem, popup_menu, popup_menu_at};
+
+pub fn display_directory_path(path: &str, host: &str, machine: &str) -> String {
+    if (host.is_empty() || host == "local") && (machine.is_empty() || machine == "local") {
+        let home = std::env::var("HOME").unwrap_or_default();
+        return compact_home(path, &home);
+    }
+    path.to_owned()
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum WorktreeScope {
@@ -130,10 +139,17 @@ impl WorktreeScope {
                         .map(|w| w.branch.clone())
                 })
                 .unwrap_or_else(|| "worktree".into()),
-            Self::Directory { path, .. } => git
-                .branch
-                .map(|b| format!("{path} · {b}"))
-                .unwrap_or_else(|| path.clone()),
+            Self::Directory {
+                host,
+                machine,
+                path,
+                ..
+            } => {
+                let short = display_directory_path(path, host, machine);
+                git.branch
+                    .map(|b| format!("{short} · {b}"))
+                    .unwrap_or(short)
+            }
             Self::Unassigned(host_id) => {
                 if host_id.is_empty() || host_id == "local" {
                     "Local".into()

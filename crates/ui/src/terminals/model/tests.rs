@@ -3184,20 +3184,21 @@ fn live_directory_projection_moves_agents_without_reassigning_tasks() {
     assert!(
         matches!(entry_scope(&s,e), WorktreeScope::Directory { project: None, ref path, .. } if path == "/external")
     );
-    let before = project_tree(&s, &[e.clone()]);
+    let before = project_tree(&s, std::slice::from_ref(e));
     assert!(!before.iter().any(|n| matches!(n, TreeNode::Project(_))));
+    assert_eq!(before.first(), Some(&TreeNode::OtherHeader));
     let key = location_key(e);
     s.terminal_contexts[0].cwd = Some("/external/tests".into());
     let rows = crate::terminals::entries(&s);
     let e = rows.iter().find(|e| e.saved.id == terminal).unwrap();
     assert_eq!(location_key(e), key);
-    assert_eq!(project_tree(&s, &[e.clone()]), before);
+    assert_eq!(project_tree(&s, std::slice::from_ref(e)), before);
     s.terminal_contexts[0].directory_root = Some("/elsewhere".into());
     s.terminal_contexts[0].cwd = Some("/elsewhere".into());
     let rows = crate::terminals::entries(&s);
     let e = rows.iter().find(|e| e.saved.id == terminal).unwrap();
     assert_ne!(location_key(e), key);
-    assert!(project_tree(&s, &[e.clone()]).contains(&TreeNode::Terminal(terminal)));
+    assert!(project_tree(&s, std::slice::from_ref(e)).contains(&TreeNode::Terminal(terminal)));
     assert_eq!(e.agent.as_ref().unwrap().card.id, task_card);
     assert_eq!(project_tree(&s, &[]), vec![TreeNode::Empty]);
 }
@@ -3228,11 +3229,11 @@ fn shell_origin_does_not_override_observed_external_directory_and_status_does_no
         .unwrap()
         .clone();
     assert!(e.project_id.is_none());
-    let before = project_tree(&s, &[e.clone()]);
+    let before = project_tree(&s, std::slice::from_ref(&e));
     let mut updated = e.clone();
     updated.saved.runtime.as_mut().unwrap().agent_status = Some("working".into());
     updated.location.as_mut().unwrap().dirty = true;
-    assert_eq!(project_tree(&s, &[updated.clone()]), before);
+    assert_eq!(project_tree(&s, std::slice::from_ref(&updated)), before);
     updated.location.as_mut().unwrap().machine = "another-machine".into();
     assert_ne!(entry_scope(&s, &updated), entry_scope(&s, &e));
 }
@@ -3355,4 +3356,110 @@ fn retained_directory_rows_survive_cd_and_unrelated_status_updates() {
             );
         }
     }
+    assert!(
+        m.keys.contains_key("section:other"),
+        "expected section:other divider header after moving directory outside projects"
+    );
+}
+
+#[test]
+fn external_directories_render_under_other_section_header_and_compact_local_home_with_tilde() {
+    use crate::terminals::{
+        tree::{TreeNode, project_tree},
+        worktrees::{WorktreeScope, entry_scope},
+    };
+    let mut s = fixture();
+    observe_fixture_locations(&mut s);
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/test".into());
+    let home_trimmed = home.trim_end_matches('/');
+    let scratch_path = format!("{home_trimmed}/Workspace/scratch");
+
+    let mut local_shell = s.terminals[0].clone();
+    local_shell.id = "local-home-shell".into();
+    local_shell.agent = None;
+    local_shell.conversation_id = None;
+    local_shell.origin_card_id = None;
+    local_shell.origin_project_id = None;
+    local_shell.runtime = Some(
+        serde_json::from_value(json!({
+            "machine": "local",
+            "state": "running",
+            "connection": "connected",
+            "core_id": "core",
+            "terminal": "pty-local-home"
+        }))
+        .unwrap(),
+    );
+    s.terminals.push(local_shell);
+    s.terminal_contexts.push(TerminalContext {
+        terminal_id: "local-home-shell".into(),
+        machine: "local".into(),
+        cwd: Some(scratch_path.clone()),
+        directory_root: Some(scratch_path.clone()),
+        branch: Some("spike".into()),
+        ..Default::default()
+    });
+
+    let mut remote_shell = s.terminals[0].clone();
+    remote_shell.id = "remote-shell".into();
+    remote_shell.agent = None;
+    remote_shell.conversation_id = None;
+    remote_shell.origin_card_id = None;
+    remote_shell.origin_project_id = None;
+    remote_shell.runtime = Some(
+        serde_json::from_value(json!({
+            "machine": "devbox",
+            "state": "running",
+            "connection": "connected",
+            "core_id": "core",
+            "terminal": "devbox/pty-remote"
+        }))
+        .unwrap(),
+    );
+    s.terminals.push(remote_shell);
+    s.terminal_contexts.push(TerminalContext {
+        terminal_id: "remote-shell".into(),
+        machine: "devbox".into(),
+        cwd: Some(scratch_path.clone()),
+        directory_root: Some(scratch_path.clone()),
+        ..Default::default()
+    });
+
+    let rows = crate::terminals::entries(&s);
+    let tree = project_tree(&s, rows.iter().filter(|e| e.listed()));
+
+    // Registered projects come first, followed by OtherHeader before external scopes.
+    let other_idx = tree
+        .iter()
+        .position(|n| matches!(n, TreeNode::OtherHeader))
+        .expect("OtherHeader must separate external directories from the last project");
+    let last_proj_idx = tree
+        .iter()
+        .rposition(|n| matches!(n, TreeNode::Project(_)))
+        .expect("at least one project must precede OtherHeader");
+    assert!(other_idx > last_proj_idx);
+
+    let local_entry = rows
+        .iter()
+        .find(|e| e.saved.id == "local-home-shell")
+        .unwrap();
+    let local_scope = entry_scope(&s, local_entry);
+    assert!(matches!(
+        local_scope,
+        WorktreeScope::Directory { project: None, .. }
+    ));
+    if !home_trimmed.is_empty() {
+        assert_eq!(
+            local_scope.display_name(&s, std::slice::from_ref(local_entry), None),
+            "~/Workspace/scratch · spike"
+        );
+    }
+
+    // Remote machine paths must NOT rewrite using the local Mac's $HOME.
+    let remote_entry = rows.iter().find(|e| e.saved.id == "remote-shell").unwrap();
+    let remote_scope = entry_scope(&s, remote_entry);
+    assert_eq!(
+        remote_scope.display_name(&s, std::slice::from_ref(remote_entry), None),
+        scratch_path
+    );
 }

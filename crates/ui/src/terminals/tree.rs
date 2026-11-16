@@ -119,7 +119,17 @@ fn scope_header(
             }
             (Icon::Branch, None, tip)
         }
-        WorktreeScope::Directory { path, .. } => (Icon::Folder, None, path.clone()),
+        WorktreeScope::Directory { path, .. } => {
+            let mut tip = path.clone();
+            if let Some(ref b) = git.branch {
+                tip.push_str(&format!("\nBranch: {b}"));
+            }
+            let ind = git.tooltip_indicators();
+            if !ind.is_empty() {
+                tip.push_str(&format!(" ({})", ind.join(" · ")));
+            }
+            (Icon::Folder, None, tip)
+        }
         WorktreeScope::Unassigned(host_id) => {
             let host_label = if host_id == "local" {
                 "Local".into()
@@ -203,8 +213,15 @@ fn scope_header(
                 }
             });
 
-        let mut outer = view()
-            .ml_2()
+        let is_external = matches!(
+            scope,
+            WorktreeScope::Directory { project: None, .. } | WorktreeScope::Unassigned(_)
+        );
+        let mut outer = view();
+        if !is_external {
+            outer = outer.ml_2();
+        }
+        outer = outer
             .flex_row()
             .items_center()
             .min_w(px(0.))
@@ -360,6 +377,7 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum TreeNode {
     Project(String),
+    OtherHeader,
     Scope(String, WorktreeScope),
     Terminal(String),
     Empty,
@@ -368,6 +386,7 @@ impl TreeNode {
     fn key(&self) -> String {
         match self {
             Self::Project(id) => format!("project:{id}"),
+            Self::OtherHeader => "section:other".into(),
             Self::Scope(key, _) => key.clone(),
             Self::Terminal(id) => format!("terminal:{id}"),
             Self::Empty => "empty".into(),
@@ -376,6 +395,7 @@ impl TreeNode {
     fn height(&self) -> f32 {
         match self {
             Self::Project(_) => 40.,
+            Self::OtherHeader => 34.,
             Self::Scope(..) => 34.,
             Self::Terminal(_) => 48.,
             Self::Empty => 40.,
@@ -414,6 +434,8 @@ pub(super) fn project_tree<'a>(
         };
         if let Some(pid) = pid {
             out.push(TreeNode::Project(pid));
+        } else {
+            out.push(TreeNode::OtherHeader);
         }
         for (key, (scope, children)) in scopes {
             out.push(TreeNode::Scope(key, scope));
@@ -424,6 +446,25 @@ pub(super) fn project_tree<'a>(
         out.push(TreeNode::Empty);
     }
     out
+}
+
+fn other_heading() -> impl IntoElement {
+    view()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .h(px(34.))
+        .min_w(px(0.))
+        .px_2()
+        .pt_2()
+        .child(
+            label("OTHER DIRECTORIES")
+                .text_size(px(10.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(MUTED)
+                .flex_shrink_0(),
+        )
+        .child(view().flex_1().h(px(1.)).bg(BORDER))
 }
 
 fn project_heading(ui: Ui, id: String) -> impl IntoElement {
@@ -476,15 +517,32 @@ fn node_content(
 ) -> AnyElement {
     match node.get_untracked() {
         TreeNode::Project(id) => project_heading(ui, id).into_element(),
+        TreeNode::OtherHeader => other_heading().into_element(),
         TreeNode::Terminal(id) => {
+            let id_ext = id.clone();
             let entry = computed(move || {
                 ui.terminal_entries.with(|rows| {
                     indices.with(|map| map.get(&id).and_then(|i| rows.get(*i)).cloned())
                 })
             });
             let last = stored(entry.get_untracked());
+            let is_external = computed(move || {
+                ui.snapshot.with(|s| {
+                    ui.terminal_entries.with(|rows| {
+                        indices
+                            .with(|map| map.get(&id_ext).and_then(|i| rows.get(*i)))
+                            .is_some_and(|e| entry_scope(s, e).project_id(s).is_none())
+                    })
+                })
+            });
+            let last_ext = stored(is_external.get_untracked());
             view()
-                .ml_5()
+                .ml(move || {
+                    if entry.get().is_some() {
+                        last_ext.replace(is_external.get());
+                    }
+                    px(if last_ext.get() { 12. } else { 20. })
+                })
                 .pl_2()
                 .border_l_1()
                 .border_color(BORDER)

@@ -1398,6 +1398,8 @@ pub fn Gallery() -> impl IntoElement {
         for ctx in &mut initial.terminal_contexts {
             ctx.directory_root = ctx.cwd.clone();
         }
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        let home_scratch = format!("{}/Workspace/scratch", home.trim_end_matches('/'));
         ui.snapshot.set(initial.clone());
         ui.open_terminal("gallery-project-root-shell".into());
         let reset = initial.clone();
@@ -1409,14 +1411,15 @@ pub fn Gallery() -> impl IntoElement {
                     .flex_row()
                     .gap_2()
                     .child(action("External cd", Variant::Secondary, move |_| {
+                        let root = home_scratch.clone();
                         ui.snapshot.update(|s| {
                             if let Some(c) = s
                                 .terminal_contexts
                                 .iter_mut()
                                 .find(|c| c.terminal_id == "gallery-project-root-shell")
                             {
-                                c.cwd = Some("/tmp/external/src".into());
-                                c.directory_root = Some("/tmp/external".into());
+                                c.cwd = Some(format!("{root}/src"));
+                                c.directory_root = Some(root);
                                 c.project_id = None;
                                 c.card_id = None;
                                 c.worktree_id = None;
