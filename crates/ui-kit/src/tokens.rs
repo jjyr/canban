@@ -107,15 +107,21 @@ pub const RADIUS: f32 = 8.0;
 pub const CONTROL_HEIGHT: f32 = 34.0;
 pub const BODY_SIZE: f32 = 13.0;
 pub const CAPTION_SIZE: f32 = 12.0;
-/// Explicit Latin + CJK fixed-advance cascade for NSH rope editors.
-/// Avoids macOS `.AppleSystemUIFontMonospaced` synthetic CJK-Latin inter-script
-/// spacing so per-grapheme caret X measurement matches CoreText line rendering,
-/// and provides a crisp Linux Pango/Fontconfig monospaced + CJK fallback cascade.
+/// Explicit fixed-advance font for NSH rope editors.
+/// Note: NSH `Editor` draws rows with `FontFamily::new(MONO_FONT)` while measuring
+/// per-grapheme caret X via `CanvasFont::parse(&format!("13px \"{}\"", MONO_FONT))`,
+/// which splits on `,` and keeps only the first family. Therefore:
+/// - On macOS, the first family must be an always-installed fixed-width font (`Menlo`),
+///   never `SF Mono` (which is hidden from `CTFontDescriptor` by family name and causes
+///   `CanvasFont` measurement to fall back to proportional `.AppleSystemUIFont`) or
+///   `.AppleSystemUIFontMonospaced` (which adds synthetic CJK-Latin inter-script spacing).
+/// - On Linux, use generic `"monospace"` so Fontconfig resolves the first installed
+///   monospaced + CJK fallback identically in both row layout and `CanvasFont` measurement.
 #[cfg(target_os = "macos")]
-pub const MONO_FONT: &str = "SF Mono, Menlo, PingFang SC";
+pub const MONO_FONT: &str = "Menlo, PingFang SC";
 
 #[cfg(not(target_os = "macos"))]
-pub const MONO_FONT: &str = "JetBrains Mono, DejaVu Sans Mono, Liberation Mono, Noto Sans Mono, Noto Sans CJK SC, monospace";
+pub const MONO_FONT: &str = "monospace";
 
 #[cfg(test)]
 mod tests {
@@ -128,23 +134,12 @@ mod tests {
         assert_eq!(
             families,
             vec![
-                nsh_core::FamilyName::Named("SF Mono"),
                 nsh_core::FamilyName::Named("Menlo"),
                 nsh_core::FamilyName::Named("PingFang SC"),
             ]
         );
         #[cfg(not(target_os = "macos"))]
-        assert_eq!(
-            families,
-            vec![
-                nsh_core::FamilyName::Named("JetBrains Mono"),
-                nsh_core::FamilyName::Named("DejaVu Sans Mono"),
-                nsh_core::FamilyName::Named("Liberation Mono"),
-                nsh_core::FamilyName::Named("Noto Sans Mono"),
-                nsh_core::FamilyName::Named("Noto Sans CJK SC"),
-                nsh_core::FamilyName::Monospace,
-            ]
-        );
+        assert_eq!(families, vec![nsh_core::FamilyName::Monospace]);
     }
 
     #[test]

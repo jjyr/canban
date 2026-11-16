@@ -119,3 +119,63 @@ pub fn expand(ui: Ui) -> impl IntoElement {
         .into_element()
     })
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use canban_ui_kit::tokens::MONO_FONT;
+    use nsh_core::{
+        AttributedText, FontFamily, Points, ResolvedTextStyle, TextEngine,
+        canvas::{CanvasFont, measure_line},
+    };
+    use nsh_platform_macos::CoreTextEngine;
+
+    /// Regression guard: NSH's `Editor` draws lines with `FontFamily::new(MONO_FONT)`
+    /// (`listed_fonts` cascade) while measuring per-grapheme caret X via
+    /// `CanvasFont::parse(&format!("13px \"{}\"", MONO_FONT))`, which splits on `,`
+    /// and measures using only the first family. If the first family in `MONO_FONT`
+    /// is not user-installed on macOS (e.g. `SF Mono`), `make_font` falls back to
+    /// proportional `.AppleSystemUIFont` during `measure_text`, causing massive
+    /// caret X drift relative to the Menlo/PingFang SC rendered line.
+    #[test]
+    fn macos_editor_caret_measurement_matches_coretext_rendered_line_width() {
+        let engine = CoreTextEngine::default();
+        let css = format!("13px \"{}\"", MONO_FONT.replace('"', ""));
+        let measure_font = CanvasFont::parse(&css).expect("valid editor CSS font");
+
+        let draw_style = ResolvedTextStyle {
+            font_size: Points(13.0),
+            font_weight: 400,
+            font_family: Some(FontFamily::new(MONO_FONT)),
+            ..Default::default()
+        };
+
+        for sample in [
+            "hello world test cursor position 1234567890",
+            "我发现编辑器 cursor 位置又坏了，我们之前是好的",
+            "Mixed 中英文 test 测试 editor 光标 drift 问题 @developer #12",
+        ] {
+            let mut drawn = AttributedText {
+                no_wrap: true,
+                max_lines: 1,
+                ..Default::default()
+            };
+            drawn.push(sample, draw_style);
+            let prepared = engine.prepare(&drawn);
+            let rendered_width = engine.measure(&prepared, None).width.0;
+
+            let caret_x: f32 = sample
+                .chars()
+                .map(|ch| {
+                    let repeated = ch.to_string().repeat(64);
+                    measure_line(&engine, &measure_font, &repeated).0 / 64.0
+                })
+                .sum();
+
+            let drift = (caret_x - rendered_width).abs();
+            assert!(
+                drift < 0.5,
+                "caret X drifted from rendered CoreText line for {sample:?}: rendered={rendered_width:.2}, caret_x={caret_x:.2}, drift={drift:.2}"
+            );
+        }
+    }
+}
