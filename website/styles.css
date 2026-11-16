@@ -2399,15 +2399,7 @@ kbd {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 18px;
 }
-
-.docs-btn {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  color: var(--cyan);
-}
-.docs-btn:hover { text-decoration: underline; }
 
 .core-plaque {
   margin-top: 28px;

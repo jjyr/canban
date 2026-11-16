@@ -6,8 +6,8 @@
   "use strict";
 
   const INSTALL_COMMANDS = {
-    script: "curl -fsSL https://canban.dev/install.sh | bash",
-    source: "git clone https://github.com/jjyr/canban.git && cd canban && mise run install-app",
+    desktop: "curl -fsSL https://canban.dev/install.sh | bash",
+    headless: "curl -fsSL https://canban.dev/install.sh | bash -s -- --headless",
   };
 
   /* ------------------------------------------------------------------------ */
@@ -84,19 +84,18 @@
       al_3: "Automatic FIFO rebase merge, upstream push & worktree cleanup",
 
       closing_title: "Unburden your mind. Keep your Human Context.",
-      tab_script: "Install Script",
-      tab_source: "Build from Source",
+      tab_desktop: "Desktop",
+      tab_headless: "Headless",
       copy_label: "Copy",
       copied_label: "Copied",
       cta_star: "Star jjyr/canban on GitHub",
-      cta_docs: "Architecture Docs →",
 
       s_rust: "Canban Core Engine",
       s_herdr: "TTY Agent Support",
       s_nsh: "Native UI",
       s_ghostty: "Terminal Rendering Engine",
       closing_seo_note:
-        "Canban is an open-source native macOS and Linux (x86_64 & arm64) Kanban workbench for AI coding agents — built in Rust to run Claude Code, Codex, Antigravity (agy), and Cursor CLI in isolated Git worktrees with persistent Herdr PTY terminals.",
+        "Canban = Kanban + Workflow + Herdr — Maintain Human Context with Kanban, schedule with custom Workflows, and power native Agent CLIs with Herdr.",
 
       footer_meta: "Apache-2.0 · © 2026 JJy",
     },
@@ -171,19 +170,18 @@
       al_3: "自动交付闭环：FIFO 批量变基合并、远端同步并自动清理归档",
 
       closing_title: "卸下思维负担，保持 Human Context。",
-      tab_script: "一键脚本安装",
-      tab_source: "从源码构建",
+      tab_desktop: "Desktop",
+      tab_headless: "Headless",
       copy_label: "复制",
       copied_label: "已复制",
       cta_star: "在 GitHub 点亮 Star",
-      cta_docs: "阅读架构文档 →",
 
       s_rust: "Canban 核心引擎",
       s_herdr: "提供 TTY Agent 支持",
       s_nsh: "Native UI",
       s_ghostty: "终端渲染引擎",
       closing_seo_note:
-        "Canban 是基于 Rust 构建的开源原生 macOS 与 Linux（x86_64 / arm64）编程 Agent 看板工作台，支持在独立 Git Worktree 与 Herdr 持久 PTY 终端中运行 Claude Code、Codex、Antigravity (agy) 与 Cursor CLI。",
+        "Canban = Kanban + Workflow + Herdr — 用 Kanban 维护 Human Context，自定义 Workflow 调度，Herdr 提供原生的 Agent CLI 支持。",
 
       footer_meta: "Apache-2.0 · © 2026 JJy",
     },
@@ -352,7 +350,7 @@
   const SCENE_DURATION_MS = 8600;
 
   let currentLang = document.documentElement.getAttribute("data-lang") === "zh" ? "zh" : "en";
-  let activeInstallTab = "script";
+  let activeInstallTab = "desktop";
   let activeScene = "kanban";
   let sceneStartTime = performance.now();
   let rafId = null;
