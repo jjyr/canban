@@ -50,6 +50,7 @@ where
                 title,
                 app_id,
                 size,
+                appearance: nsh_platform_macos::Appearance::Dark,
                 ..Default::default()
             },
         );
@@ -57,6 +58,9 @@ where
     }
     #[cfg(target_os = "linux")]
     {
+        canban_ui_kit::linux_gtk::sync_theme(
+            canban_ui_kit::tokens::current_theme().chrome(),
+        );
         let code = nsh_platform_linux::run_app(
             nsh_platform_linux::AppSource::Rust(
                 nsh_platform_linux::Root::of::<C>().app_id(app_id.clone()),
@@ -65,6 +69,7 @@ where
                 title,
                 app_id,
                 size,
+                appearance: nsh_platform_linux::Appearance::Dark,
                 ..Default::default()
             },
         );

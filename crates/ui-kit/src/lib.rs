@@ -2,6 +2,7 @@
 pub mod button;
 pub mod checkbox;
 pub mod input;
+pub mod linux_gtk;
 pub mod scrollbar;
 pub mod surface;
 pub mod tokens;

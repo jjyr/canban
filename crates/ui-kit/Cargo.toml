@@ -9,3 +9,6 @@ authors.workspace = true
 nsh-core.workspace = true
 nsh-base.workspace = true
 canban-themes.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nsh-platform-linux.workspace = true

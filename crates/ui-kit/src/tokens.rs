@@ -45,6 +45,7 @@ fn sync_nsh_tokens() {
     t.set_number("radius", RADIUS);
     t.set_font("font-mono", MONO_FONT);
     nsh_core::element::set_tokens(t);
+    super::linux_gtk::sync_theme(current_theme().chrome());
 }
 pub fn current_theme() -> &'static canban_themes::Theme {
     let name = THEME.with(|p| {

@@ -715,6 +715,7 @@ dependencies = [
  "canban-themes",
  "nsh-base",
  "nsh-core",
+ "nsh-platform-linux",
 ]
 
 [[package]]
