@@ -135,13 +135,15 @@ impl Client {
     pub fn seed(&self, path: &str, data: Value) {
         if let Some((cli, user, generation)) = &self.cli {
             if cli.identity().is_some_and(|u| u.id == *user) {
+                let now = crate::cache::now();
                 let value = crate::cache::Response {
                     data,
                     link: None,
                     etag: None,
                     modified: None,
                     poll_interval: None,
-                    validated_at: crate::cache::now(),
+                    validated_at: now,
+                    fetched_at: 0,
                     cached: false,
                 };
                 let _ = cli
@@ -162,13 +164,15 @@ impl Client {
             }) {
                 return;
             }
+            let now = crate::cache::now();
             let value = crate::cache::Response {
                 data,
                 link: None,
                 etag: None,
                 modified: None,
                 poll_interval: None,
-                validated_at: crate::cache::now(),
+                validated_at: now,
+                fetched_at: 0,
                 cached: false,
             };
             let _ = cache.put(&format!("{scope}:{path}"), &value, self.cache_generation);
@@ -244,10 +248,11 @@ impl Client {
             .as_ref()
             .and_then(|(cache, _)| cache.get(key.as_deref().unwrap()));
         if let Some(old) = &old
-            && (!self.refresh || old.validated_at > started)
+            && (!self.refresh || old.fetched_at > started)
         {
             return Ok(old.clone());
         }
+        let fetched_at = crate::cache::now();
         let generation = self
             .cache
             .as_ref()
@@ -294,6 +299,7 @@ impl Client {
         let value = if status == 304 {
             let mut old = old.context("GitHub returned 304 without a cached response")?;
             old.validated_at = crate::cache::now();
+            old.fetched_at = fetched_at;
             old.cached = false;
             old
         } else {
@@ -321,6 +327,7 @@ impl Client {
                 modified,
                 poll_interval,
                 validated_at: crate::cache::now(),
+                fetched_at,
                 cached: false,
             }
         };
@@ -953,6 +960,59 @@ mod cache_tests {
         }
         worker.join().unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+    #[test]
+    fn refresh_started_during_in_flight_fetch_does_not_return_pre_mutation_cache() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            for (i, head) in ["old", "new"].into_iter().enumerate() {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                if i == 0 {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                }
+                let body = format!("{{\"head\":{{\"sha\":\"{head}\"}}}}");
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = Client {
+            token: SecretString::from("fixture"),
+            api,
+            cache: None,
+            refresh: false,
+            cache_generation: 0,
+            cli: None,
+        }
+        .with_cache(crate::cache::Cache::new(dir.path().into()), "a".into());
+        let bg = client.clone().refreshing();
+        let in_flight = std::thread::spawn(move || bg.get::<Value>("/repos/a/b/pulls/2").unwrap());
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        // Remote mutates after the first fetch already started; ensure clock advances past `fetched_at`.
+        std::thread::sleep(Duration::from_millis(5));
+        let caller = client.clone().refreshing();
+        let waiter = std::thread::spawn(move || caller.get::<Value>("/repos/a/b/pulls/2").unwrap());
+        std::thread::sleep(Duration::from_millis(5));
+        release_tx.send(()).unwrap();
+        assert_eq!(in_flight.join().unwrap()["head"]["sha"], "old");
+        assert_eq!(waiter.join().unwrap()["head"]["sha"], "new");
+        worker.join().unwrap();
     }
     #[test]
     fn delete_write_accepts_empty_no_content_response() {

@@ -26,7 +26,7 @@ fn github_pages_survive_restart_without_creating_cards_or_mirroring_bodies() {
         )
     };
     for page in [1, 2] {
-        client.seed_response(&path(page),&canban_github::cache::Response{data:json!({"items":[{"number":page,"title":"REMOTE_BODY_SENTINEL","html_url":format!("https://github.com/owner/repo/issues/{page}")}]}),link:(page==1).then(||"<https://api.github.com/x?page=2>; rel=\"next\"".into()),etag:None,modified:None,poll_interval:None,validated_at:1,cached:false});
+        client.seed_response(&path(page),&canban_github::cache::Response{data:json!({"items":[{"number":page,"title":"REMOTE_BODY_SENTINEL","html_url":format!("https://github.com/owner/repo/issues/{page}")}]}),link:(page==1).then(||"<https://api.github.com/x?page=2>; rel=\"next\"".into()),etag:None,modified:None,poll_interval:None,validated_at:1,fetched_at:0,cached:false});
     }
     let q = |page| json!({"kind":"issues","relation":"all","state":"open","query":"","page":page});
     let first = app.call("github.browse", q(1)).unwrap();

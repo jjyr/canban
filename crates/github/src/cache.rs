@@ -23,6 +23,8 @@ pub struct Response {
     pub poll_interval: Option<u64>,
     pub validated_at: u64,
     #[serde(default)]
+    pub fetched_at: u64,
+    #[serde(default)]
     pub cached: bool,
 }
 pub fn now() -> u64 {
@@ -296,6 +298,7 @@ mod tests {
             modified: None,
             poll_interval: None,
             validated_at: 1,
+            fetched_at: 1,
             cached: false,
         }
     }
@@ -337,6 +340,7 @@ mod pagination_tests {
             modified: None,
             poll_interval: None,
             validated_at: 1,
+            fetched_at: 1,
             cached: false,
         };
         for key in [first, second, other] {

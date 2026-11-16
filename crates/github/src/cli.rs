@@ -66,7 +66,7 @@ impl Service {
         let old = self.cache.get(&key);
         if let Some(old) = &old
             && (!refresh
-                || old.validated_at > start
+                || old.fetched_at > start
                 || (path.starts_with("/notifications?")
                     && old.poll_interval.is_some_and(|interval| {
                         now()
@@ -189,6 +189,7 @@ fn request_with_body(
             && !path.contains('\\'),
         "Invalid GitHub API path"
     );
+    let fetched_at = now();
     let mut output = tempfile::tempfile()?;
     let mut command = Command::new(binary());
     command.args([
@@ -256,6 +257,7 @@ fn request_with_body(
     if code == 304 {
         let mut value = old.cloned().context("304 without cache")?;
         value.validated_at = now();
+        value.fetched_at = fetched_at;
         value.cached = false;
         return Ok(value);
     }
@@ -284,6 +286,7 @@ fn request_with_body(
         modified: header("last-modified"),
         poll_interval: header("x-poll-interval").and_then(|v| v.parse().ok()),
         validated_at: now(),
+        fetched_at,
         cached: false,
     })
 }
