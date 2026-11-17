@@ -131,6 +131,14 @@ fn controls() -> impl IntoElement {
             view()
                 .gap_4()
                 .child(
+                    panel()
+                        .child(label("Selectable Markdown · Card #109"))
+                        .child(muted("Drag within a paragraph, list item or code block and copy with Command+C. Text stays read-only."))
+                        .child(canban_ui_kit::markdown::reader(|| {
+                            "Selection fixture: English and 中文 text.\n\nSecond paragraph with **bold** and `inline code`.\n\n- List item can be copied.\n\n```text\ncopy this code\n```".into()
+                        })),
+                )
+                .child(
                     section_group("Borderless Section Group")
                         .description("Reusable header + 1px bottom divider without an enclosing card border, shared across Overview, GitHub, and Settings.")
                         .count(2)

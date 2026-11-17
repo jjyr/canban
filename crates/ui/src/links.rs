@@ -400,6 +400,7 @@ pub fn reader(ui: Ui, body: impl Fn() -> String + 'static) -> nsh_base::TextView
     // the paragraph's baseline, selection and inline hit targets.
     nsh_base::text_view()
         .document(move || Some(document.get()))
+        .selectable(true)
         .text_size(px(13.))
         .text_color(TEXT)
         .min_w(px(0.))

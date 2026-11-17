@@ -14,9 +14,11 @@ pub fn install_editor_language() {
     nsh_base::editor::register_language(&PROSE_MARKDOWN);
 }
 
+/// Read-only Markdown with native text selection and clipboard shortcuts.
 pub fn reader(body: impl Fn() -> String + 'static) -> TextViewElement {
     nsh_base::text_view()
         .markdown(move || Some(body().into()))
+        .selectable(true)
         .text_size(px(13.))
         .text_color(TEXT)
         .min_w(px(0.))

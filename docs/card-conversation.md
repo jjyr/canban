@@ -72,6 +72,18 @@ remote object. No new persisted relationship/schema is introduced.
 
 ## Conversation presentation
 
+Card descriptions, comments, replies and reports support native text selection
+and copying with Command+C. Selection applies to the rendered Markdown reader,
+including expanded reports, while reference links retain their navigation behavior.
+
+Native verification (Card #109, 2026-11-17): a packaged macOS app with an isolated
+home/Core copied mixed English/Chinese description and reply text, selected across
+paragraphs, lists and code, and copied six paragraphs from an expanded long message.
+Clipboard contents were read back after copying. Copying a reply after typing in
+the composer retained the unsent draft; a Card reference still navigated to its
+target. The standalone Gallery's **Controls → Selectable Markdown** fixture also
+passed selection/copy. Linux interaction was not exercised.
+
 Human and Agent messages use the same identity marker, author/time header and
 bordered Markdown body along a single continuous 28-point vertical spine. Long
 bodies fold at a visual height while retaining the complete Markdown document;
