@@ -364,6 +364,7 @@ pub(crate) fn dot_color_for_tone(tone: Tone) -> ThemeColor {
         Tone::Danger => DANGER,
         Tone::Attention => ATTENTION,
         Tone::Info => ACCENT,
+        Tone::Highlight => HIGHLIGHT,
         Tone::Neutral => MUTED,
     }
 }

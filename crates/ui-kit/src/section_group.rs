@@ -84,6 +84,7 @@ impl IntoElement for SectionGroup {
             Tone::Danger => DANGER,
             Tone::Success => SUCCESS,
             Tone::Info => ACCENT,
+            Tone::Highlight => HIGHLIGHT,
             Tone::Neutral => TEXT,
         };
         let mut left = view()

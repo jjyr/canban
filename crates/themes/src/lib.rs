@@ -210,6 +210,13 @@ pub fn resolve(id: &str) -> &'static Theme {
 /// Semantic chrome colors: background, surface, inset, text, muted, border,
 /// accent, accent fill, on-accent, danger, success, selected, attention and tints.
 impl Theme {
+    /// A readable purple/magenta highlight distinct from success and runtime activity.
+    pub fn highlight(&self) -> (u32, u32) {
+        let foreground = readable(self.ansi[13], self.background);
+        let surface = mix(self.background, foreground, 0.12);
+        (surface, readable(foreground, surface))
+    }
+
     pub fn chrome(&self) -> [u32; 16] {
         if self.id == DEFAULT {
             return [
@@ -302,6 +309,12 @@ mod tests {
             );
             assert!(luminance(theme.background) < 0.1, "{}", theme.id);
             let chrome = theme.chrome();
+            let (highlight_surface, highlight) = theme.highlight();
+            assert!(
+                contrast(highlight, highlight_surface) >= 4.5,
+                "{} highlight",
+                theme.id
+            );
             for index in [3, 4, 6, 9, 10, 12] {
                 assert!(
                     contrast(chrome[index], chrome[1]) >= 4.5,

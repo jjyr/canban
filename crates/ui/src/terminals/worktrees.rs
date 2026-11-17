@@ -175,11 +175,11 @@ pub fn entry_scope(s: &Snapshot, e: &Entry) -> WorktreeScope {
     {
         return WorktreeScope::ManagedWorktree(wid.clone());
     }
-    if let Some(cid) = loc
-        .card_id
-        .as_ref()
-        .filter(|id| s.cards.iter().any(|c| &c.id == *id))
-    {
+    if let Some(cid) = loc.card_id.as_ref().filter(|id| {
+        s.cards
+            .iter()
+            .any(|c| &c.id == *id && c.archived_at.is_none())
+    }) {
         return WorktreeScope::CardWorktree(cid.clone());
     }
     let path = loc
@@ -201,6 +201,33 @@ pub fn entry_scope(s: &Snapshot, e: &Entry) -> WorktreeScope {
         path,
         project: loc.project_id.clone(),
     }
+}
+
+/// Delivery history of the Card at the observed location, independent of Git dirtiness
+/// and of the Terminal's task owner. No Git or network discovery is needed.
+pub fn scope_merge_label(s: &Snapshot, scope: &WorktreeScope) -> Option<String> {
+    let WorktreeScope::CardWorktree(id) = scope else {
+        return None;
+    };
+    let card = s
+        .cards
+        .iter()
+        .find(|c| &c.id == id && c.archived_at.is_none() && c.merged())?;
+    let target = card
+        .delivery
+        .as_ref()
+        .map(|d| d.target_branch.as_str())
+        .filter(|b| !b.is_empty())
+        .or_else(|| {
+            card.pull_request
+                .as_ref()
+                .filter(|p| p.merged && !p.base_branch.is_empty())
+                .map(|p| p.base_branch.as_str())
+        });
+    Some(match target {
+        Some(target) => format!("Merged into {target}"),
+        None => "Merged".into(),
+    })
 }
 
 /// Stable UI identity independent of names, branches and inferred business associations.

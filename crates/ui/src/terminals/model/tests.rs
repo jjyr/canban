@@ -3341,6 +3341,87 @@ fn shell_origin_does_not_override_observed_external_directory_and_status_does_no
 }
 
 #[test]
+fn worktree_merge_badge_follows_observed_card_and_delivery_target() {
+    use crate::terminals::worktrees::{WorktreeScope, entry_scope, scope_merge_label};
+    let mut s = fixture();
+    observe_fixture_locations(&mut s);
+    s.cards[0].delivery = Some(Delivery {
+        target_branch: "release".into(),
+        commit: "abc123".into(),
+        request_key: "merge".into(),
+        merged_at: 1,
+    });
+    // The second Card's Agent has cd'd into the first Card's dirty worktree.
+    let tid = s.terminals[1].id.clone();
+    let context = s
+        .terminal_contexts
+        .iter_mut()
+        .find(|c| c.terminal_id == tid)
+        .unwrap();
+    context.card_id = Some("c1".into());
+    context.project_id = Some("p1".into());
+    context.cwd = Some("/fixture/worktrees/c1/src".into());
+    context.directory_root = Some("/fixture/worktrees/c1".into());
+    context.dirty = true;
+    let rows = crate::terminals::entries(&s);
+    let e = rows.iter().find(|e| e.saved.id == tid).unwrap();
+    assert_eq!(e.agent.as_ref().unwrap().card.id, "c2");
+    let scope = entry_scope(&s, e);
+    assert_eq!(scope, WorktreeScope::CardWorktree("c1".into()));
+    assert_eq!(
+        scope_merge_label(&s, &scope).as_deref(),
+        Some("Merged into release")
+    );
+    assert_eq!(
+        scope_merge_label(&s, &WorktreeScope::ProjectRoot("p1".into())),
+        None
+    );
+    assert_eq!(
+        scope_merge_label(&s, &WorktreeScope::ManagedWorktree("wt".into())),
+        None
+    );
+    assert_eq!(
+        scope_merge_label(&s, &WorktreeScope::CardWorktree("c2".into())),
+        None
+    );
+
+    s.cards[0].delivery = None;
+    s.cards[0].pull_request = Some(
+        serde_json::from_value(json!({
+            "repository":"owner/repo", "repository_id":1, "number":42,
+            "url":"https://github.com/owner/repo/pull/42", "state":"closed", "head":"abc",
+            "head_branch":"feature", "base_branch":"stable", "merged":true, "checks":"",
+            "workspace":{"location":{"machine":"local","directory":"/repo"},"path":"/wt"}
+        }))
+        .unwrap(),
+    );
+    assert_eq!(
+        scope_merge_label(&s, &scope).as_deref(),
+        Some("Merged into stable")
+    );
+    s.cards[0]
+        .pull_request
+        .as_mut()
+        .unwrap()
+        .base_branch
+        .clear();
+    assert_eq!(scope_merge_label(&s, &scope).as_deref(), Some("Merged"));
+    s.cards[0].pull_request.as_mut().unwrap().merged = false;
+    assert_eq!(
+        scope_merge_label(&s, &scope),
+        None,
+        "closed PR is not merged"
+    );
+    s.cards[0].pull_request.as_mut().unwrap().merged = true;
+    s.cards[0].archived_at = Some(2);
+    assert_eq!(scope_merge_label(&s, &scope), None);
+    assert!(
+        !matches!(entry_scope(&s, e), WorktreeScope::CardWorktree(_)),
+        "stale context must not match an archived Card"
+    );
+}
+
+#[test]
 fn retained_directory_rows_survive_cd_and_unrelated_status_updates() {
     use nsh_core::{
         ApproxTextEngine, Core, EventKind, EventPayload, MountItem, NodeId, element::JsEvent,
@@ -3386,6 +3467,20 @@ fn retained_directory_rows_survive_cd_and_unrelated_status_updates() {
                                 .find(|c| c.terminal_id == tid)
                                 .unwrap();
                             c.dirty = !c.dirty;
+                        })
+                    }),
+            )
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("Merge Card".into()))
+                    .on_press(move |_: &()| {
+                        ui.snapshot.update(|s| {
+                            s.cards[0].delivery = Some(Delivery {
+                                target_branch: "release".into(),
+                                commit: "abc123".into(),
+                                request_key: "merge".into(),
+                                merged_at: 1,
+                            });
                         })
                     }),
             )
@@ -3447,9 +3542,22 @@ fn retained_directory_rows_survive_cd_and_unrelated_status_updates() {
         .map(|(k, id)| (k.clone(), *id))
         .collect();
     assert_eq!(keys.len(), 2);
-    for action in ["Update status", "Move directory", "Update status"] {
+    for action in [
+        "Update status",
+        "Merge Card",
+        "Move directory",
+        "Update status",
+    ] {
         assert!(core.component_event(m.labels[action], EventKind::Press, &EventPayload::None));
         pump(&mut core, &mut m);
+        if action == "Merge Card" {
+            assert!(
+                m.labels
+                    .keys()
+                    .any(|l| l.ends_with(" · Merged into release")),
+                "delivery-only snapshot change must update the mounted worktree header"
+            );
+        }
         for (key, id) in &keys {
             assert_eq!(m.keys[key], *id, "row remounted during {action}");
             assert!(

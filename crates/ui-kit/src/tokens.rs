@@ -65,6 +65,10 @@ impl ThemeColor {
         }
         let color = if self.0 == 17 {
             rgb(current_theme().chrome()[1]).to_hsla().lighten(0.05)
+        } else if self.0 == 18 {
+            rgb(current_theme().highlight().0).to_hsla()
+        } else if self.0 == 19 {
+            rgb(current_theme().highlight().1).to_hsla()
         } else {
             rgb(current_theme().chrome()[self.0]).to_hsla()
         };
@@ -103,6 +107,8 @@ pub const DANGER_SURFACE: ThemeColor = ThemeColor(15);
 pub const CLEAR: ThemeColor = ThemeColor(16);
 /// Quiet hover for card-like surfaces across every named theme.
 pub const CARD_HOVER: ThemeColor = ThemeColor(17);
+pub const HIGHLIGHT_SURFACE: ThemeColor = ThemeColor(18);
+pub const HIGHLIGHT: ThemeColor = ThemeColor(19);
 pub const RADIUS: f32 = 8.0;
 pub const CONTROL_HEIGHT: f32 = 34.0;
 pub const BODY_SIZE: f32 = 13.0;

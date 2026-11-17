@@ -1540,6 +1540,65 @@ pub fn Gallery() -> impl IntoElement {
             .child(canban_ui::frame::screen(ui))
             .into_element();
     }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("terminal-merged") {
+        canban_ui::frame::configure_window_chrome();
+        let mut initial = fixtures::terminal_workspace();
+        let cid = initial
+            .terminal_contexts
+            .iter()
+            .find(|c| c.terminal_id == "gallery-linked-shell")
+            .unwrap()
+            .card_id
+            .clone()
+            .unwrap();
+        initial
+            .cards
+            .iter_mut()
+            .find(|c| c.id == cid)
+            .unwrap()
+            .delivery = Some(canban_types::Delivery {
+            target_branch: "main".into(),
+            commit: "gallery-merge".into(),
+            request_key: "gallery-merge".into(),
+            merged_at: 1,
+        });
+        ui.snapshot.set(initial.clone());
+        ui.open_terminal("gallery-linked-shell".into());
+        let reset = initial;
+        let unmerged_id = cid.clone();
+        let archived_id = cid;
+        return view()
+            .flex_1()
+            .min_h(px(0.))
+            .child(
+                view()
+                    .flex_row()
+                    .gap_2()
+                    .child(action("Unmerged", Variant::Secondary, move |_| {
+                        ui.snapshot.update(|s| {
+                            s.cards
+                                .iter_mut()
+                                .find(|c| c.id == unmerged_id)
+                                .unwrap()
+                                .delivery = None;
+                        });
+                    }))
+                    .child(action("Merged into main", Variant::Secondary, move |_| {
+                        ui.snapshot.set(reset.clone());
+                    }))
+                    .child(action("Archive Card", Variant::Secondary, move |_| {
+                        ui.snapshot.update(|s| {
+                            s.cards
+                                .iter_mut()
+                                .find(|c| c.id == archived_id)
+                                .unwrap()
+                                .archived_at = Some(2);
+                        });
+                    })),
+            )
+            .child(canban_ui::frame::screen(ui))
+            .into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("terminals") {
         canban_ui::frame::configure_window_chrome();
         ui.snapshot.set(fixtures::terminal_workspace());

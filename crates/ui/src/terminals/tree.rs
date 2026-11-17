@@ -1,6 +1,8 @@
 //! Unified Project -> Worktree -> Terminal hierarchy.
 //! Only worktree scopes with >= 1 live Terminal are displayed; all active rows stay expanded.
-use super::worktrees::{WorktreeScope, create_in_scope, entry_scope, scope_git_summary};
+use super::worktrees::{
+    WorktreeScope, create_in_scope, entry_scope, scope_git_summary, scope_merge_label,
+};
 use super::*;
 use crate::drafts::{capture_scroll, scroll_position};
 use canban_types::Snapshot;
@@ -43,6 +45,7 @@ fn scope_header(
 ) -> impl IntoElement + use<> {
     let git = scope_git_summary(s, &scope, children);
     let display = scope.display_name(s, children, Some(ui));
+    let merge_label = scope_merge_label(s, &scope);
     let scope_for_active = children.first().map(super::worktrees::location_key);
     let target_terminal = children.first().map(|e| e.saved.id.clone());
     let launch_params = children.first().and_then(|e| e.location.as_ref().map(|l| json!({
@@ -62,7 +65,7 @@ fn scope_header(
         }
     });
 
-    let (lead_icon, card_badge, tooltip_text) = match &scope {
+    let (lead_icon, card_badge, mut tooltip_text) = match &scope {
         WorktreeScope::ProjectRoot(pid) => {
             let dir = s
                 .projects
@@ -140,6 +143,9 @@ fn scope_header(
             (Icon::Terminal, None, tip)
         }
     };
+    if let Some(label) = &merge_label {
+        tooltip_text.push_str(&format!("\n{label}"));
+    }
 
     let managed_wt = match &scope {
         WorktreeScope::ManagedWorktree(wid) => s.worktrees.iter().find(|w| &w.id == wid).cloned(),
@@ -165,15 +171,11 @@ fn scope_header(
         let card_more = scope_card.clone();
         let more_anchor = element_ref();
 
-        let mut btn_row = canban_ui_kit::press_target()
+        let has_git = git_now.dirty || git_now.ahead > 0 || git_now.behind > 0;
+        let stacked_git = merge_label.is_some() && has_git && ui.terminal_width.get() < 340.;
+        let mut title_row = view()
             .w_full()
             .min_w(px(0.))
-            .min_h(px(30.))
-            .px_2()
-            .rounded(px(5.))
-            .bg(if active { INSET } else { CLEAR })
-            .hover(|st| st.bg(INSET))
-            .focus(|st| st.border_1().border_color(ACCENT))
             .flex_row()
             .items_center()
             .gap_1p5()
@@ -195,16 +197,42 @@ fn scope_header(
                     })
                     .truncate(),
             );
-
         if let Some(b) = badge {
-            btn_row = btn_row.child(muted(b).text_size(px(11.)).flex_shrink_0());
+            title_row = title_row.child(muted(b).text_size(px(11.)).flex_shrink_0());
         }
-        if git_now.dirty || git_now.ahead > 0 || git_now.behind > 0 {
-            btn_row = btn_row.child(git_status_chips(&git_now));
+        if merge_label.is_some() {
+            title_row = title_row.child(
+                status("Merged", Tone::Highlight)
+                    .px_1()
+                    .py(px(1.))
+                    .flex_shrink_0(),
+            );
+        }
+        if has_git && !stacked_git {
+            title_row = title_row.child(git_status_chips(&git_now));
+        }
+        let mut btn_row = canban_ui_kit::press_target()
+            .w_full()
+            .min_w(px(0.))
+            .min_h(px(30.))
+            .px_2()
+            .rounded(px(5.))
+            .bg(if active { INSET } else { CLEAR })
+            .hover(|st| st.bg(INSET))
+            .focus(|st| st.border_1().border_color(ACCENT))
+            .flex_col()
+            .justify_center()
+            .py(px(if stacked_git { 3. } else { 0. }))
+            .child(title_row);
+        if stacked_git {
+            btn_row = btn_row.child(view().pl(px(19.)).child(git_status_chips(&git_now)));
         }
         btn_row = btn_row
             .accessibility_label({
-                let lbl = display_label.clone();
+                let lbl = match &merge_label {
+                    Some(merged) => format!("{display_label} · {merged}"),
+                    None => display_label.clone(),
+                };
                 move || Some(format!("Worktree {lbl}").into())
             })
             .on_press(move |_: &()| {
@@ -392,11 +420,24 @@ impl TreeNode {
             Self::Empty => "empty".into(),
         }
     }
-    fn height(&self) -> f32 {
+    fn height(&self, ui: Ui) -> f32 {
         match self {
             Self::Project(_) => 40.,
             Self::OtherHeader => 34.,
-            Self::Scope(..) => 34.,
+            Self::Scope(key, scope) => {
+                let stacked = ui.terminal_width.get() < 340.
+                    && ui.snapshot.with(|s| scope_merge_label(s, scope).is_some())
+                    && ui.terminal_entries.with(|rows| {
+                        rows.iter().any(|e| {
+                            e.listed()
+                                && super::worktrees::location_key(e) == *key
+                                && e.location
+                                    .as_ref()
+                                    .is_some_and(|l| l.dirty || l.ahead > 0 || l.behind > 0)
+                        })
+                    });
+                if stacked { 44. } else { 34. }
+            }
             Self::Terminal(_) => 48.,
             Self::Empty => 40.,
         }
@@ -577,6 +618,7 @@ fn node_content(
                             scope.clone(),
                             scope.display_name(s, &children, Some(ui)),
                             scope_git_summary(s, &scope, &children),
+                            scope_merge_label(s, &scope),
                             children
                                 .iter()
                                 .map(|e| e.saved.id.clone())
@@ -661,7 +703,7 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
             let mut top = 0.;
             let anchor = before.iter().find_map(|row| {
                 let start = top;
-                top += row.height();
+                top += row.height(ui);
                 (top > offset.y.0 && next.iter().any(|n| n.key() == row.key()))
                     .then(|| (row.key(), start))
             });
@@ -669,7 +711,7 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                 let new_top: f32 = next
                     .iter()
                     .take_while(|n| n.key() != key)
-                    .map(TreeNode::height)
+                    .map(|row| row.height(ui))
                     .sum();
                 let target = point(offset.x, px((new_top + offset.y.0 - start).max(0.)));
                 let ticket = scroll_generation.get();
@@ -760,7 +802,7 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                             .overflow_hidden()
                             .h(move || {
                                 px(if present.get() {
-                                    node.get().height()
+                                    node.get().height(ui)
                                 } else {
                                     0.
                                 })

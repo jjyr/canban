@@ -5,6 +5,7 @@ use nsh_core::prelude::*;
 pub enum Tone {
     Neutral,
     Info,
+    Highlight,
     Success,
     Attention,
     Danger,
@@ -13,6 +14,7 @@ pub fn tone_colors(tone: Tone) -> (ThemeColor, ThemeColor) {
     match tone {
         Tone::Neutral => (INSET, MUTED),
         Tone::Info => (SELECTED, ACCENT),
+        Tone::Highlight => (HIGHLIGHT_SURFACE, HIGHLIGHT),
         Tone::Success => (SUCCESS_SURFACE, SUCCESS),
         Tone::Attention => (ATTENTION_SURFACE, ATTENTION),
         Tone::Danger => (DANGER_SURFACE, DANGER),
@@ -130,6 +132,7 @@ pub fn notice(message: impl IntoReactive<SharedString>, tone: Tone) -> impl Into
         Tone::Attention => (ATTENTION_SURFACE, ATTENTION, ATTENTION),
         Tone::Success => (SUCCESS_SURFACE, SUCCESS, SUCCESS),
         Tone::Info => (SELECTED, ACCENT, ACCENT),
+        Tone::Highlight => (HIGHLIGHT_SURFACE, HIGHLIGHT, HIGHLIGHT),
         Tone::Neutral => (INSET, BORDER, MUTED),
     };
     view()

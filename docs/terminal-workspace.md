@@ -39,6 +39,38 @@ Implemented user-approved direction, 2026-11-08. Native/runtime acceptance is re
 
 The window chrome follows the same left/right divider as the content while aligning with the unified 42-point chrome geometry across all screens: native traffic-light clearance and `<` / `>` Back/Forward sit at the exact same horizontal coordinates as every other page, followed by the sidebar toggle (`☰`), so `<` / `>` never jump when switching to or from `Terminals`. The right panel owns **Worktree-scoped tabs** (only live Terminals in the same `WorktreeScope` as the selected Terminal), `+` (New Shell in current worktree), `▾` (Project Root / Managed Branch Worktree / Machine menu), Open Agent, current Card/Project link, the **View changes in Git** branch action (`[⎇ <branch> · +N −M · ↑N ↓M]`), compact actions, and the global right-end **Activity & Notifications** trigger pill (`[⚡ N · ● running]`, `Command+I`). Resizing the left panel moves its full-height divider. With the list hidden, tab controls clear the native window buttons and `<` / `>`. NSH owns window dragging, system double-click behavior, traffic-light geometry and resizable panels. Terminal content has no separate title, toolbar, tab strip, placeholder asking to select a conversation, or permanent technical status footer.
 
+### Card worktree merge marker (2026-11-17)
+
+Card worktree headers show a compact purple `Merged` badge when the unarchived
+Card at the Terminal's observed location has a local delivery receipt or a merged
+linked PR. The header tooltip and accessibility label use `Merged into <target>`
+from the delivery target or merged PR base branch (`Merged` if no target is known).
+This is delivery history: later working-tree edits and new commits do not erase
+it or imply that those changes have also been merged. Existing Git indicators and
+Terminal runtime status remain independent. Archived Cards do not participate,
+including when a previously observed directory context still references one.
+Project roots, independent managed worktrees and unmatched directories have no
+merge badge. The marker uses the existing Snapshot with no new Git/network probe,
+and updates when delivery/PR state changes without remounting Terminal rows.
+In narrow sidebars, a merged header places Git statistics on a second line so
+the branch, badge and worktree actions remain visible.
+
+The Gallery `terminal-merged` scene exercises long branch truncation, a merged
+dirty worktree, independent worktrees, and live unmerged/merged/archived changes.
+
+Validation on 2026-11-17: `mise run build`, all 604 workspace tests (one opt-in
+test skipped), and `mise run acceptance` passed. After the narrow-header layout
+adjustment, the 197 UI/UI Kit/theme tests and the final 33 Terminal regressions
+passed. Native Gallery checks used `mise run gallery` with
+`CANBAN_GALLERY_SCENE=terminal-merged`, verifying long-branch truncation, dirty
+statistics, and live merge/unmerge/archive transitions. A packaged App with a
+disposable home and isolated Herdr Core at
+`/private/tmp/cb-112-merged-v2_j32tx` verified a real local squash delivery updating
+the mounted header, later dirty edits, independent/root scopes without badges,
+and archive exclusion while its Shell/worktree remained live. No paid provider
+or user Core was used. This does not exercise a live GitHub PR merge; the merged
+PR target and closed-but-unmerged cases have deterministic regression coverage.
+
 ### Terminal creation response (2026-11-16)
 
 All New Terminal controls open the server-confirmed Terminal entry as soon as

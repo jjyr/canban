@@ -57,7 +57,7 @@ Historical inventory: Notes were [deferred](notes-deferred.md) on 2026-11-10. `u
 | Owner | Input/state and interaction contract | Composition and verification |
 | --- | --- | --- |
 | `ui-kit/navigation.rs` | Label, selected predicate, press intent; selected/hover/focus remain separate | Sidebar and Note list share selection styling |
-| `ui-kit/status.rs` | Semantic `Tone`, chip/notice text; state remains textual as well as colored | Runtime/attention/result feedback in Board, Card and Notes |
+| `ui-kit/status.rs` | Semantic `Tone`, chip/notice text; state remains textual as well as colored. `Highlight` uses the named theme's readable purple/magenta foreground and tinted surface, separate from success/runtime activity | Runtime/attention/result feedback and Terminal worktree delivery badges |
 | `ui-kit/split.rs` | `horizontal_group`, `split`, and `reveal_split`: left/right elements, retained width signal, minimum widths, and `HANDLE_CLASS` (`w-px bg-border group-hover:w-[3px] group-hover:bg-ring group-active:w-[3px] group-active:bg-primary`) on NSH's full-height handle indicator; NSH owns resizing/focus/accessibility | Board/Card (`reveal_split`), Card + Live Terminal (`split`), Terminals inventory/viewer (`horizontal_group`), GitHub inbox, and Controls Gallery |
 | `ui-kit/input.rs` | `bound_field` reads/writes a structured draft through the shared NSH Input | Card and Note editors keep the same geometry/focus behavior |
 | `ui/board.rs` | Project snapshot, selected Card, stage scroll store; open/move intents | Project/work-location/Add Card header, all active stage Cards, horizontal overflow and independent column scroll |
