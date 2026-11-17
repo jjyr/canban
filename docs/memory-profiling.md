@@ -131,13 +131,17 @@ Full-history DTOs, selected-Card history materialization and remote typed snapsh
 copies remain potential next optimizations; preserving reminder/history semantics
 is required before removing those inputs.
 
-Final verification limit: after the successful captures, signposts were moved
-from the custom `memory` category to standard `PointsOfInterest` so built-in
-Instruments templates include them. Clang syntax checking passed. The final App
-rebuild was blocked before compilation because the installed Bullet CLI changed
-to an unavailable v0.2.0 prebuilt bootstrap and returned HTTP 404; the previous
-local stage1 compiler was no longer present. This is recorded in bullet Card #8
-(distinct from Card #7's disappearing in-flight compiler inputs). No native Cargo
-fallback or toolchain installation was performed. Final App rebuild/capture of
-this category refinement remains pending toolchain recovery or explicit native
-Cargo authorization.
+After the initial captures, signposts moved from the custom `memory` category to
+standard `PointsOfInterest`. A final Bullet build was blocked before compilation:
+the local stage1 compiler disappeared and v0.2.0 prebuilt bootstrap returned HTTP
+404 (bullet Card #8). The user explicitly authorized native Cargo for this final
+verification. `RUSTUP_AUTO_INSTALL=0 mise run build` then passed, followed by a
+354-test backend/UI/profiling rerun using the workspace feature graph.
+
+A final ten-second Allocations capture on a debuggable copy of that native build
+completed successfully. Exported `os-signpost` and `os-signpost-arg` tables in the
+standard `PointsOfInterest` category contain `com.canban.profiler`, `rpc.decode`
+and `index.build`. Native observation also confirmed the final binary's Board
+updated to 38 replies after eight additional scratch comments. Those artifacts
+are in `ui-standard-signposts` and `native5` beneath the evidence directory.
+All scratch UI, backend and isolated Core processes were stopped afterward.
