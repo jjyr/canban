@@ -293,6 +293,32 @@ impl Ui {
             self.navigate("new-card");
         });
     }
+    /// Resolve only the visible Card/Terminal when the user clicks Board or Git.
+    /// This is a navigation target, not a separately maintained default Project.
+    pub(crate) fn navigation_project(self) -> Option<String> {
+        let project = match self.page.get_untracked().as_str() {
+            "card" => untracked(|| self.current_card()).map(|c| c.project_id),
+            "terminals" => untracked(|| crate::terminals::current(self))
+                .and_then(|e| e.card.map(|c| c.project_id).or(e.project_id)),
+            _ => None,
+        };
+        project.filter(|id| {
+            self.snapshot
+                .with_untracked(|s| s.projects.iter().any(|p| &p.id == id))
+        })
+    }
+    pub fn open_board(self) {
+        batch(|| {
+            if let Some(project) = self.navigation_project() {
+                self.project.set(project);
+            }
+            if self.page.get_untracked() == "card" {
+                self.close_card();
+            } else {
+                self.navigate("board");
+            }
+        });
+    }
     pub fn navigate(self, page: &str) {
         let dest = page.to_owned();
         batch(move || {

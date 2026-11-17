@@ -253,26 +253,28 @@ fn card_pr_info(c: &Card) -> Option<(String, u64, String)> {
 
 pub fn open_compare(ui: Ui) {
     let st = ui.review_state;
-    let expected_context = cache::key(
-        &ui.active_project_host(),
-        &ui.project.get_untracked(),
-        "checkout",
-        &json!(""),
-    );
-    let choose_default = !st.read_context.with(|v| *v == expected_context)
-        || st.mode.get_untracked() != "git"
-        || !st.checkout_cwd.get_untracked().is_empty()
-        || st.base_ref.get_untracked().is_empty()
-        || st.compare_ref.get_untracked().is_empty();
-    batch(move || {
+    let choose_default = batch(move || {
+        if let Some(project) = ui.navigation_project() {
+            ui.project.set(project);
+        }
+        let expected_context = cache::key(
+            &ui.active_project_host(),
+            &ui.project.get_untracked(),
+            "checkout",
+            &json!(""),
+        );
+        let choose_default = !st.read_context.with(|v| *v == expected_context)
+            || st.mode.get_untracked() != "git"
+            || !st.checkout_cwd.get_untracked().is_empty()
+            || st.base_ref.get_untracked().is_empty()
+            || st.compare_ref.get_untracked().is_empty();
         ui.card.set(String::new());
         ui.review.set(None);
         st.card_drawer_open.set(false);
         st.pr_target.set(None);
         st.checkout_cwd.set(String::new());
         if choose_default {
-            st.log_branch.set(String::new());
-            st.log_commits.set(Vec::new());
+            reset_git_selection(st);
         }
         st.range_backup.set(None);
         st.mode.set("git".into());
@@ -286,8 +288,43 @@ pub fn open_compare(ui: Ui) {
         st.remote_delete_error.set(String::new());
         st.error.set(String::new());
         ui.navigate("review");
+        choose_default
     });
     load_refs_and_compare(ui, choose_default);
+}
+
+fn reset_git_selection(st: State) {
+    cancel_reads(st);
+    st.checkout_cwd.set(String::new());
+    st.base_ref.set(String::new());
+    st.compare_ref.set(String::new());
+    st.log_branch.set(String::new());
+    st.three_dot.set(true);
+    st.mode.set("git".into());
+    st.pr_target.set(None);
+    st.range_backup.set(None);
+    st.selected_file.set(String::new());
+    st.active_line.set(None);
+    st.error.set(String::new());
+    st.refs_data.set(json!({}));
+    st.compare_data.set(json!({}));
+    st.prepared_lines.set(Default::default());
+    st.log_commits.set(Vec::new());
+    st.log_has_more.set(false);
+}
+
+/// A history destination keeps its Project; only foreign Git selections expire.
+fn clear_foreign_project_selection(ui: Ui) {
+    let host = ui.active_project_host();
+    let project = ui.project.get_untracked();
+    let foreign = ui.review_state.read_context.with(|key| {
+        serde_json::from_str::<Value>(key).ok().is_some_and(|key| {
+            key[0].as_str() != Some(host.as_str()) || key[1].as_str() != Some(project.as_str())
+        })
+    });
+    if foreign {
+        reset_git_selection(ui.review_state);
+    }
 }
 
 pub(crate) fn card_target_branch(card: &Card, project: Option<&canban_types::Project>) -> String {
@@ -812,6 +849,9 @@ pub fn screen(ui: Ui) -> impl IntoElement {
 
     if crate::APP.get().is_some() {
         let has_card = !ui.card.get_untracked().is_empty();
+        if !has_card {
+            clear_foreign_project_selection(ui);
+        }
         if has_card
             && !st.compare_loading.get_untracked()
             && st.compare_data.with_untracked(|v| v["files"].is_null())
@@ -900,6 +940,61 @@ pub fn screen(ui: Ui) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_changes_clear_git_choices_while_same_project_and_history_keep_their_target() {
+        let runtime = nsh_core::element::Runtime::default();
+        let _entered = runtime.enter();
+        let (_owner, ()) = nsh_core::element::create_root(|| {
+            let ui = Ui::new();
+            let st = ui.review_state;
+            ui.snapshot.update(|s| {
+                for id in ["a", "b"] {
+                    s.projects.push(
+                        serde_json::from_value(json!({
+                            "id":id,"name":id,"directory":format!("/repo/{id}"),
+                            "workflow":canban_types::Workflow::default(),"created_at":1
+                        }))
+                        .unwrap(),
+                    );
+                }
+            });
+            ui.select_project("a".into());
+            st.read_context
+                .replace(cache::key("local", "a", "checkout", &json!("")));
+            st.base_ref.set("main-a".into());
+            st.compare_ref.set("feature-a".into());
+            open_compare(ui);
+            assert_eq!(st.compare_ref.get_untracked(), "feature-a");
+
+            st.checkout_cwd.set("/repo/a-worktree".into());
+            st.log_branch.set("feature-a".into());
+            st.pr_target.set(Some(json!({"number":7})));
+            st.refs_data.set(json!({"branches":[{"name":"feature-a"}]}));
+            st.compare_data.set(json!({"files":[{"filename":"a.txt"}]}));
+            let ticket = st.compare_ticket.get_untracked();
+            ui.select_project("b".into());
+            open_compare(ui);
+            assert_eq!(ui.project.get_untracked(), "b");
+            assert!(st.base_ref.get_untracked().is_empty());
+            assert!(st.compare_ref.get_untracked().is_empty());
+            assert!(st.checkout_cwd.get_untracked().is_empty());
+            assert_ne!(st.log_branch.get_untracked(), "feature-a");
+            assert!(st.pr_target.get_untracked().is_none());
+            assert!(st.refs_data.get_untracked()["branches"].is_null());
+            assert!(st.compare_data.get_untracked()["files"].is_null());
+            assert!(st.compare_ticket.get_untracked() > ticket);
+
+            // A restored Git page drops foreign choices without changing its Project.
+            ui.project.set("a".into());
+            st.read_context
+                .replace(cache::key("local", "b", "checkout", &json!("")));
+            st.compare_ref.set("feature-b".into());
+            clear_foreign_project_selection(ui);
+            assert_eq!(ui.project.get_untracked(), "a");
+            assert!(st.compare_ref.get_untracked().is_empty());
+        });
+    }
 
     #[test]
     fn parse_patch_splits_multi_file_diffs_and_counts_lines() {

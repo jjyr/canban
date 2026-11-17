@@ -961,7 +961,7 @@ pub fn execute(ui: Ui, id: &str) {
             ui.quick_open.set(true);
         }
         "mark-all-read" => crate::overview::mark_all_read(ui, None),
-        "go-board" => ui.navigate("board"),
+        "go-board" => ui.open_board(),
         "clear-board-filters" => {
             crate::github::filters::reset(ui);
             ui.navigate("board");

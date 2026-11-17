@@ -1,6 +1,6 @@
 # Git workbench
 
-Current contract, updated 2026-11-16 (Card #100).
+Current contract, updated 2026-11-17 (Cards #100 and #108).
 
 The left Workspace selector chooses the Project checkout, a managed worktree,
 or a Card. Its choice determines the working tree, index and destination of
@@ -10,6 +10,14 @@ explicit range; `HEAD`, Working tree and Staged resolve inside that checkout.
 Opening a Card intentionally selects its review context. Choosing either ref
 explicitly enters an ordinary Git comparison. The toolbar shows the operation
 branch, with the checkout's full directory available on hover.
+
+Clicking the Git entry from a Card or Terminal opens its associated Project's
+main checkout; explicit Card Diff and Terminal branch actions keep their precise
+checkout/range targets. Entering from other pages retains the existing Project.
+Changing Project clears the old branches, comparison range, checkout and results
+before loading the new refs, fencing late reads. A loaded range in the same
+Project/main checkout stays selected. History retains its own Project without
+entry-point inference; foreign Git selections are cleared when that page mounts.
 
 The commit-history branch selector and search input are retained independently
 of the changing Workspace/Card rows and commit results. Receiving refs, a new

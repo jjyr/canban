@@ -57,6 +57,16 @@ The new assignment prompt supplies explicit request/attempt/run-directory bindin
 
 ## Global navigation
 
+Clicking Board or Git from a Card or Terminal resolves the visible object's
+associated Project for that destination. Card ownership takes precedence for
+Card-associated Terminals; independent Terminals use their observed Project.
+Unresolved contexts and entry from other pages keep the existing Project
+selection. There is no additional global working-Project state and no new
+Project-tracking watcher on Terminal selection or background updates.
+Back/Forward restores its recorded Project without this entry-point inference.
+See [Card #108 native acceptance](project-navigation-acceptance-20261117.md)
+for the isolated two-Project navigation and Git-selection exercise.
+
 Window-local navigation.rs owns Back/Forward history for Project/page/Card/Note and selected Terminal destinations. All window chrome uses the same controls and global Command+[ / Command+] commands. Existing Terminal tab-cycle shortcuts remain Command+Shift+[ / Command+Shift+]. Route mutations within one UI event are coalesced; revisiting after Back truncates only the forward branch.
 
 Traversal restores selection and the existing window-owned drafts/scroll positions, closes transient overlays, invalidates stale async output and restores Terminal focus. It never repeats Agent launch, Card mutation or another command. Closed/archived Terminal destinations resolve to Card context instead of restarting a process. Missing Cards fall back to their Board. History and drafts are in-memory per window, not persistent application history.

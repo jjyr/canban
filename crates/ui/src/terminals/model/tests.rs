@@ -83,6 +83,55 @@ fn fixture() -> Snapshot {
     }
     s
 }
+
+#[test]
+fn board_and_git_clicks_resolve_visible_context_without_tracking_terminal_selection() {
+    let runtime = nsh_core::element::Runtime::default();
+    let _entered = runtime.enter();
+    let (_owner, ()) = nsh_core::element::create_root(|| {
+        let ui = crate::presenter::Ui::new();
+        let s = fixture();
+        let terminal = s.terminals[0].id.clone();
+        ui.snapshot.set(s);
+        ui.select_project("p2".into());
+        ui.open_terminal(terminal.clone());
+        assert_eq!(ui.project.get_untracked(), "p2");
+        crate::commands::execute(ui, "go-board");
+        assert_eq!(ui.page.get_untracked(), "board");
+        assert_eq!(ui.project.get_untracked(), "p1");
+
+        ui.select_project("p2".into());
+        ui.open_terminal(terminal.clone());
+        crate::commands::execute(ui, "go-review");
+        assert_eq!(ui.project.get_untracked(), "p1");
+        assert_eq!(ui.page.get_untracked(), "review");
+
+        ui.open_card("c2".into());
+        crate::commands::execute(ui, "go-review");
+        assert_eq!(ui.project.get_untracked(), "p2");
+
+        // A remembered Terminal must not influence entry from a global page.
+        ui.open_terminal(terminal.clone());
+        ui.navigate("settings");
+        crate::commands::execute(ui, "go-board");
+        assert_eq!(ui.project.get_untracked(), "p2");
+
+        // Back restores the recorded Project, even though this Terminal belongs to p1.
+        ui.open_terminal(terminal);
+        ui.history.update(|h| h.visit(ui.location()));
+        crate::commands::execute(ui, "go-board");
+        ui.history.update(|h| h.visit(ui.location()));
+        crate::navigation::go(ui, false);
+        assert_eq!(ui.page.get_untracked(), "terminals");
+        assert_eq!(ui.project.get_untracked(), "p2");
+
+        // An unavailable/unassigned selection leaves the existing Project alone.
+        ui.terminal_selection.set("missing".into());
+        crate::commands::execute(ui, "go-board");
+        assert_eq!(ui.project.get_untracked(), "p2");
+    });
+}
+
 #[test]
 fn tree_keeps_projects_and_profiles_distinct_and_excludes_unassigned_recovery() {
     let mut s = fixture();

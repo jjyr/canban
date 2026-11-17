@@ -41,13 +41,7 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
             )
         },
         || 0,
-        move |_| {
-            if ui.page.get_untracked() == "card" {
-                ui.close_card();
-            } else {
-                ui.navigate("board");
-            }
-        },
+        move |_| ui.open_board(),
     ));
     let terminal_attention = computed(move || {
         ui.closing_terminals.with(|closing| {
