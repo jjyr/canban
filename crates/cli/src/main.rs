@@ -3,11 +3,17 @@ use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use std::{io::Read, path::PathBuf};
 
+const SKILL_HELP: &str = "Agent skill:
+  Read the bundled instructions: canban skill (or canban --skill).
+  To add the skill to your agent, create canban/SKILL.md in that agent's skills
+  directory and write the output of canban skill into that file.";
+
 #[derive(Parser)]
 #[command(
     name = "canban",
     version,
-    about = "Canban local task and Agent interface"
+    about = "Canban local task and Agent interface",
+    after_help = SKILL_HELP
 )]
 struct Args {
     #[arg(long, env = "CANBAN_HOME")]
@@ -64,6 +70,7 @@ enum Cmd {
     /// Show immutable release identity without opening application data.
     BuildInfo,
     /// Print the bundled Canban CLI SKILL.md without opening application data.
+    #[command(after_help = SKILL_HELP)]
     Skill,
     /// Submit/export YAML; SQLite remains the only configuration source.
     Workflow {
