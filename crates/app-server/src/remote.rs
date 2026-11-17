@@ -2,6 +2,23 @@
 //! exposed TCP listener or per-machine SSH reverse tunnel.
 use super::*;
 use canban_herdr::host::Host;
+fn active_remote_terminal_machines(s: &Snapshot) -> impl Iterator<Item = String> + '_ {
+    s.terminals
+        .iter()
+        .filter_map(|t| {
+            if let Some(a) = &t.agent {
+                (!a.finished())
+                    .then(|| a.location.as_ref().map(|l| l.machine.clone()))
+                    .flatten()
+            } else {
+                t.runtime
+                    .as_ref()
+                    .filter(|r| r.state != "finished" && t.origin_card_id.is_some())
+                    .map(|r| r.machine.clone())
+            }
+        })
+        .filter(|m| m != "local")
+}
 fn active_remote_script_machines(s: &Snapshot) -> impl Iterator<Item = String> + '_ {
     s.workflow_runs
         .iter()
@@ -27,13 +44,7 @@ impl AppServer {
         let Ok(snapshot) = self.snapshot() else {
             return;
         };
-        let machines: std::collections::HashSet<_> = snapshot
-            .terminals
-            .iter()
-            .filter_map(|t| t.agent.as_ref())
-            .filter(|a| !a.finished())
-            .filter_map(|a| a.location.as_ref().map(|l| l.machine.clone()))
-            .filter(|m| m != "local")
+        let machines: std::collections::HashSet<_> = active_remote_terminal_machines(&snapshot)
             .chain(active_remote_script_machines(&snapshot))
             .collect();
         for machine in machines {
@@ -47,13 +58,7 @@ impl AppServer {
                         break;
                     }
                     let active = server.snapshot().is_ok_and(|s| {
-                        s.terminals
-                            .iter()
-                            .filter_map(|t| t.agent.as_ref())
-                            .any(|a| {
-                                !a.finished()
-                                    && a.location.as_ref().is_some_and(|l| l.machine == machine)
-                            })
+                        active_remote_terminal_machines(&s).any(|m| m == machine)
                             || active_remote_script_machines(&s).any(|m| m == machine)
                     });
                     if !active {
@@ -102,7 +107,12 @@ print(json.dumps(rows))"#,
                     row["error"]
                 );
                 let method = strp(call, "method")?;
-                self.remote_call(method, call["params"].clone())
+                let mut params = call["params"].clone();
+                if method == "card.adopt" {
+                    // A bare HC_TERMINAL_ID is scoped to the authenticated source Core.
+                    params["runtime_machine"] = json!(machine);
+                }
+                self.remote_call(method, params)
             })();
             let reply = match result {
                 Ok(None) => continue,

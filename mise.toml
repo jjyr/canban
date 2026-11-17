@@ -160,6 +160,7 @@ depends = ["build"]
 run = [
   "python3 scripts/acceptance.py",
   "python3 scripts/acceptance-interactive.py",
+  "python3 scripts/acceptance-adoption.py",
   "python3 scripts/acceptance-workflows.py",
   "python3 scripts/acceptance-github-workspace.py",
   "python3 scripts/acceptance-notifications.py",
@@ -184,6 +185,10 @@ run = "python3 scripts/acceptance-editor.py"
 [tasks.acceptance-workflows]
 depends = ["build"]
 run = "python3 scripts/acceptance-workflows.py"
+
+[tasks.acceptance-adoption]
+depends = ["build"]
+run = "python3 scripts/acceptance-adoption.py"
 
 [tasks.acceptance-agent-launch]
 depends = ["terminal-deps"]

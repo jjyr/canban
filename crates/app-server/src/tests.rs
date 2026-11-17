@@ -1839,6 +1839,8 @@ fn removed_routing_fields_are_rejected_without_mutating_cards() {
     assert!(snapshot.terminals.is_empty());
 }
 
+#[path = "tests/adoption.rs"]
+mod adoption_cases;
 #[path = "tests/lifecycle.rs"]
 mod lifecycle_cases;
 #[path = "tests/terminals.rs"]

@@ -72,6 +72,9 @@ def main():
             if a.file is not None:p['body']=body(a.file)
         else:
             m='card.adopt';p=card_scope(a);p.update({'stage':a.stage,'request_key':a.request_key or uuid.uuid4().hex})
+            if os.environ.get('HC_TERMINAL_ID','').strip():
+                p['runtime_terminal']=os.environ['HC_TERMINAL_ID'];p['cwd']=os.getcwd()
+                if 'HC_SESSION' in os.environ:p['runtime_session']=os.environ['HC_SESSION']
     elif a.cmd=='bind-session':
         p=card_scope(a);p['session_id']=a.session_id
         if os.environ.get('CANBAN_BATCH_ID'):

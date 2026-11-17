@@ -43,6 +43,50 @@ fn observe_fixture_locations(s: &mut Snapshot) {
     }
 }
 use super::*;
+
+#[test]
+fn adoption_keeps_the_selected_pty_and_tab_instead_of_falling_back_to_a_neighbor() {
+    let runtime = nsh_core::element::Runtime::default();
+    let _entered = runtime.enter();
+    let (_owner, (ui, after, managed_id)) = nsh_core::element::create_root(|| {
+        let ui = crate::presenter::Ui::new();
+        let mut before = fixture();
+        let managed = before.terminals.remove(0);
+        let run = managed.agent.as_ref().unwrap();
+        let mut manual: TerminalEntry = serde_json::from_value(json!({
+            "id":"manual-to-adopt","conversation_id":null,"number":managed.number,
+            "name":null,"created_at":1,"origin_card_id":"c1",
+            "runtime":{"machine":"local","core_id":run.core_id,"terminal":run.terminal,
+                "state":"running","connection":"connected","error":null}
+        }))
+        .unwrap();
+        before.terminals.push(manual.clone());
+        observe_fixture_locations(&mut before);
+        ui.snapshot.set(before.clone());
+        ui.terminal_tabs.set(vec!["manual-to-adopt".into()]);
+        ui.terminal_selection.set("manual-to-adopt".into());
+        ui.card.set("c1".into());
+        ui.card_tab.set("manual-to-adopt".into());
+        crate::terminals::watch(ui);
+        let mut after = before;
+        manual.runtime.as_mut().unwrap().state = "finished".into();
+        manual.runtime.as_mut().unwrap().terminal = None;
+        *after
+            .terminals
+            .iter_mut()
+            .find(|t| t.id == "manual-to-adopt")
+            .unwrap() = manual;
+        let managed_id = managed.id.clone();
+        after.terminals.push(managed);
+        observe_fixture_locations(&mut after);
+        (ui, after, managed_id)
+    });
+    ui.snapshot.set(after);
+    assert_eq!(ui.terminal_selection.get_untracked(), managed_id);
+    assert_eq!(ui.terminal_tabs.get_untracked(), vec![managed_id.clone()]);
+    assert_eq!(ui.card_tab.get_untracked(), managed_id);
+}
+
 fn fixture() -> Snapshot {
     let mut s = Snapshot::default();
     for (idx, (project, card)) in [("p1", "c1"), ("p2", "c2")].into_iter().enumerate() {

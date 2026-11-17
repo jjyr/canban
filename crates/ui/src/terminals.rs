@@ -60,7 +60,45 @@ pub fn watch(ui: Ui) {
         }
         let ids = listed.get();
         let current_rows = ui.terminal_entries.get();
+        // Adoption changes the product entry ID while the original PTY stays live.
+        // Follow that exact runtime before ordinary close/fallback navigation runs.
+        let previous = prev_entries.get_untracked();
+        let promoted = |id: &str| {
+            let binding = previous.iter().find(|e| e.saved.id == id)?.binding()?;
+            current_rows
+                .iter()
+                .find(|e| {
+                    e.saved.id != id
+                        && e.listed()
+                        && e.binding().is_some_and(|b| {
+                            b["core_id"] == binding["core_id"]
+                                && b["terminal"] == binding["terminal"]
+                        })
+                })
+                .map(|e| e.saved.id.clone())
+        };
+        let selected = ui.terminal_selection.get_untracked();
+        if !ids.contains(&selected)
+            && let Some(next) = promoted(&selected)
+        {
+            batch(|| {
+                ui.terminal_tabs.update(|tabs| {
+                    for tab in tabs.iter_mut() {
+                        if *tab == selected {
+                            *tab = next.clone();
+                        }
+                    }
+                    tabs.dedup();
+                });
+                ui.terminal_selection.set(next);
+            });
+        }
         let active_card_tab = ui.card_tab.get();
+        if !ids.contains(&active_card_tab)
+            && let Some(next) = promoted(&active_card_tab)
+        {
+            select_card_tab(ui, &ui.card.get_untracked(), next);
+        }
         if let Some(confirm_id) = ui.terminal_close_confirm.get_untracked()
             && !ids.contains(&confirm_id)
         {

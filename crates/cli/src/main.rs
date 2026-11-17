@@ -681,6 +681,17 @@ fn run() -> Result<()> {
                 let mut params = card_scope(Some(card), project);
                 params["request_key"] = json!(request_key.unwrap_or_else(canban_types::id));
                 params["stage"] = json!(stage);
+                if let Ok(terminal) = std::env::var("HC_TERMINAL_ID")
+                    && !terminal.trim().is_empty()
+                {
+                    params["runtime_terminal"] = json!(terminal);
+                    if let Ok(session) = std::env::var("HC_SESSION") {
+                        params["runtime_session"] = json!(session);
+                    }
+                    if let Ok(cwd) = std::env::current_dir() {
+                        params["cwd"] = json!(cwd);
+                    }
+                }
                 ("card.adopt".into(), params)
             }
         },

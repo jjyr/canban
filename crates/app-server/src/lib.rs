@@ -942,6 +942,7 @@ pub mod network;
 pub mod representation;
 mod state;
 pub use client::{AppClient, BackendOlder, ClientEndpoint};
+mod adoption;
 mod agents;
 mod authoring;
 mod configuration;

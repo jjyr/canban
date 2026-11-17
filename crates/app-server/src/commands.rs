@@ -625,6 +625,7 @@ impl AppServer {
                     let _gate = self.terminal_gate.lock().unwrap();
                     let _ = self.ensure_card_worktree(&pre_card_id, None)?;
                 }
+                let caller_terminal = self.prepare_adopt_terminal(&p);
                 let mut emit_card = None;
                 let res = self.mutate(method, &p, |db| {
                     let mut c = super::resolve_card(db, &p)?;
@@ -645,13 +646,16 @@ impl AppServer {
                         .as_str()
                         .map(str::trim)
                         .filter(|s| !s.is_empty());
-                    let mut live_entry = db.list::<TerminalEntry>()?.into_iter().rev().find(|t| {
+                    let bound_entry = caller_terminal.as_ref().and_then(|caller| {
+                        crate::adoption::bind(db, &config, &c, &p, caller)
+                    });
+                    let mut live_entry = bound_entry.or(db.list::<TerminalEntry>()?.into_iter().rev().find(|t| {
                         t.agent.as_ref().is_some_and(|a| {
                             a.card_id == c.id
                                 && !a.finished()
                                 && requested_prof.is_none_or(|pid| a.profile.id == pid)
                         })
-                    });
+                    }));
                     let profile_label = live_entry
                         .as_ref()
                         .and_then(|t| t.agent.as_ref())
@@ -686,11 +690,23 @@ impl AppServer {
                     };
 
                     if c.stage == target {
-                        if let Some(existing) = db
+                        if let Some(mut existing) = db
                             .list::<WorkflowRun>()?
                             .into_iter()
                             .find(|r| r.card_id == c.id && r.active() && r.state == "waiting_agent")
                         {
+                            if existing.terminal_id.is_none()
+                                && let Some(entry) = &mut live_entry
+                                && let Some(agent) = &mut entry.agent
+                            {
+                                agent.workflow_run_id = Some(existing.id.clone());
+                                agent.workflow_step = existing.step.as_ref().map(|step| format!("{step}:{}", existing.visit));
+                                agent.stage = target.into();
+                                db.save(entry)?;
+                                existing.terminal_id = Some(entry.id.clone());
+                                existing.updated_at = now();
+                                db.save(&existing)?;
+                            }
                             return Ok(json!({
                                 "card": c,
                                 "workflow_run": existing,

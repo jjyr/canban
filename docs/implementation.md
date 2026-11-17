@@ -31,6 +31,42 @@ to 65 (schema 20 is unchanged). Upgrade affected clients together; old defaults
 are not preserved. See the [response contract](agent-response-contract.md) and
 [isolated/native acceptance and byte comparison](agent-interface-acceptance-20261117.md).
 
+## Adopting an existing Agent terminal (2026-11-18)
+
+`canban card adopt` automatically includes the inherited `HC_TERMINAL_ID` and,
+when available, `HC_SESSION` as optional runtime context. Its command, flags and
+receipt remain unchanged. AppServer verifies the original Core, machine, live
+PTY, Profile and Card workspace before transferring a known independent terminal
+to the canonical Card/Profile Agent entry. It preserves the existing process,
+terminal name, provider conversation and live tab selection; it does not launch
+another Agent. An already-adopted workflow can acquire this binding on a later
+adopt call without restarting the workflow.
+
+Missing, unavailable, ambiguous or conflicting runtime context only produces a
+server log message. Workflow adoption continues with its existing validation and
+response contract. Successful takeover uses the ordinary Agent report, runtime
+observation, idle reclamation and exact Resume paths, without a merge-specific
+exit condition. The optional RPC context advances desktop API to **66**; the
+database schema is unchanged. Remote CLI requests carry the same optional context
+and are scoped to their authenticated reporting bridge's machine.
+
+`mise run acceptance-adoption` exercises a deterministic provider over a real
+isolated Core/PTy, including in-process CLI identity inheritance, no relaunch,
+idempotent takeover, AppServer restart, completed idle exit and exact Resume.
+`mise exec -- python3 scripts/acceptance-adoption.py --native` also opens a copied
+packaged app for selected-terminal continuity checks. These scenarios do not use
+paid provider APIs or the user's installed Canban home/Core.
+
+Executed acceptance (2026-11-18): baseline `mise run acceptance` passed with
+`/private/tmp/cb-l6_m56ma/home`. The adoption scenario passed at
+`/private/tmp/cb-adoption-t202ok3y/evidence.json`. Native acceptance passed at
+`/private/tmp/cb-adoption-zl8514d6`, with `evidence.json` recording process/session
+continuity, restart, completed report, `idle_closed` and exact Resume;
+`native-ui-checks.json` records the native Card tab and Terminal workspace checks.
+Keyboard input after adoption reached the original provider process, and the
+original terminal name remained selected without a duplicate live row. Remote
+bridge support is implemented but was not exercised against a live remote host.
+
 ## GitHub workspace update
 
 The [GitHub workspace and cache](github-workspace.md) extends the integration with a dedicated rail page, paginated notifications/Issues/PRs, PR source Cards, local GitHub references, Board source filters, repository rules and explicit remote comments/Review. Account controls moved out of Settings. Remote data uses disposable event-refreshed file caches instead of permanent business-table mirrors; schema 9 preserves bindings and local work. The GitHub/editor integration used schema 10/API 8, extended to schema 12/API 10 by Workflows; [combined acceptance](merge-integration-20261111.md) records migration and native verification.
