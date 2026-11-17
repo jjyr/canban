@@ -24,11 +24,11 @@ impl ReadValue {
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|f| {
-                Some((
-                    f["filename"].as_str()?.to_owned(),
+            .map(|f| {
+                (
+                    super::model::file_key(f),
                     Arc::new(parse_unified_hunk_lines(f["patch"].as_str().unwrap_or(""))),
-                ))
+                )
             })
             .collect();
         Self {
@@ -338,5 +338,22 @@ mod tests {
         let two = second.join().unwrap();
         assert!(Arc::ptr_eq(&one, &two));
         assert_eq!(one.lines["a"][2].new_line, Some(1));
+    }
+}
+
+#[cfg(test)]
+mod section_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn prepared_patches_for_the_same_path_keep_independent_sources() {
+        let data = json!({"files":[
+            {"filename":"a.rs","section":"staged","patch":"@@ -1 +1 @@\n-old\n+index"},
+            {"filename":"a.rs","section":"unstaged","patch":"@@ -1 +1 @@\n-index\n+disk"}
+        ]});
+        let value = ReadValue::new(data);
+        assert_eq!(value.lines.len(), 2);
+        assert_eq!(value.lines["staged\0a.rs"][2].text, "index");
+        assert_eq!(value.lines["unstaged\0a.rs"][2].text, "disk");
     }
 }

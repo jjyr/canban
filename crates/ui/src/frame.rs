@@ -976,4 +976,46 @@ mod tests {
         );
         assert!(tree.is_mounted(code_host));
     }
+    #[test]
+    fn git_fold_keeps_same_path_index_and_disk_patches_independent() {
+        #[component]
+        fn GitFoldHarness() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            ui.review_state.compare_ref.set("UNCOMMITTED".into());
+            let value = crate::review::cache::ReadValue::new(json!({
+                "status_files":[{"path":"a.rs","staged":true,"unstaged":true}],
+                "files":[
+                    {"filename":"a.rs","section":"staged","patch":"@@ -1 +1 @@\n-old\n+index version"},
+                    {"filename":"a.rs","section":"unstaged","patch":"@@ -1 +1 @@\n-index version\n+disk version"}
+                ]
+            }));
+            crate::review::apply_compare(ui, &value);
+            crate::review::diff::workbench(ui)
+        }
+        let mut core = Core::new(ApproxTextEngine, size(px(1360.), px(900.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<GitFoldHarness>());
+        let mut tree = TreeTracker::new();
+        pump(&mut core, &mut tree);
+        assert!(tree.mounted_node_for_text("+ index version").is_some());
+        assert!(tree.mounted_node_for_text("+ disk version").is_some());
+        assert!(core.component_event(
+            tree.labels["Collapse diff for staged a.rs"],
+            EventKind::Press,
+            &EventPayload::None
+        ));
+        pump(&mut core, &mut tree);
+        assert!(tree.mounted_node_for_text("+ index version").is_none());
+        assert!(tree.mounted_node_for_text("+ disk version").is_some());
+        assert!(tree.labels.contains_key("Expand diff for staged a.rs"));
+        assert!(core.component_event(
+            tree.labels["Expand diff for staged a.rs"],
+            EventKind::Press,
+            &EventPayload::None
+        ));
+        pump(&mut core, &mut tree);
+        assert!(tree.mounted_node_for_text("+ index version").is_some());
+        assert!(tree.mounted_node_for_text("+ disk version").is_some());
+    }
 }

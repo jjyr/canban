@@ -569,16 +569,11 @@ pub fn open_compare_target(ui: Ui, target: &CompareTarget) {
 }
 
 pub fn open_diff(ui: Ui, wt: &ManagedWorktree) {
-    open_compare_target(
-        ui,
-        &CompareTarget::Checkout {
-            project: wt.project_id.clone(),
-            cwd: wt.path.clone(),
-            base: wt.base_branch.clone(),
-            branch: wt.branch.clone(),
-            three_dot: true,
-        },
-    );
+    crate::navigation::checkpoint(ui);
+    ui.project.set(wt.project_id.clone());
+    crate::review::git_ops::select_checkout(ui, wt.path.clone());
+    ui.navigate("review");
+    crate::navigation::checkpoint(ui);
 }
 
 pub fn request_remove(ui: Ui, wt_id: String, force: bool) {

@@ -1,6 +1,5 @@
-use super::{State, git_ops, open_card, open_compare, refresh_active_diff, select_git_pair};
+use super::{State, git_ops, open_compare, refresh_active_diff, select_git_pair};
 use crate::presenter::*;
-use canban_types::Card;
 use canban_ui_kit::tokens::*;
 use canban_ui_kit::*;
 use nsh_core::element::desktop::{MenuItem, popup_menu, popup_menu_at};
@@ -33,7 +32,6 @@ pub fn render_refresh(ui: Ui) -> impl IntoElement {
 }
 
 pub fn render_left_sidebar(ui: Ui) -> impl IntoElement {
-    let st = ui.review_state;
     view()
         .w(px(244.))
         .flex_shrink_0()
@@ -42,201 +40,11 @@ pub fn render_left_sidebar(ui: Ui) -> impl IntoElement {
         .border_color(BORDER)
         .bg(SURFACE)
         .child(
-            view()
-                .h(px(44.))
-                .px_3()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .border_b_1()
-                .border_color(BORDER)
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_1p5()
-                        .child(icon(Icon::Compare).w(px(14.)).h(px(14.)))
-                        .child(label("Git").font_weight(FontWeight::SEMIBOLD)),
-                )
-                .child(render_refresh(ui)),
+            scroll()
+                .flex_1()
+                .min_h(px(0.))
+                .child(view().p_2p5().child(render_commits(ui))),
         )
-        .child(
-            scroll().flex_1().min_h(px(0.)).child(
-                view()
-                    .p_2p5()
-                    .gap_4()
-                    .child(git_ops::render_checkout_picker(ui))
-                    .child(dynamic(move || render_sidebar_sections(ui, st)))
-                    .child(render_commits(ui)),
-            ),
-        )
-}
-
-fn render_sidebar_sections(ui: Ui, st: State) -> AnyElement {
-    let refs = st.refs_data.get();
-    let mode = st.mode.get();
-    let cur_base = st.base_ref.get();
-    let cur_cmp = st.compare_ref.get();
-    let cur_card = ui.card.get();
-
-    let dirty_count = refs["dirty_count"].as_u64().unwrap_or(0);
-    let staged_count = refs["staged_count"].as_u64().unwrap_or(0);
-
-    // 1. WORKSPACE (Working tree, Staged changes, Last commit)
-    let mut workspace = section_group("Workspace");
-
-    let workdir_selected = mode == "git" && cur_cmp == "WORKDIR";
-    workspace = workspace.child(sidebar_row(
-        "Working tree",
-        if dirty_count > 0 {
-            format!("{dirty_count} uncommitted")
-        } else {
-            "clean".into()
-        },
-        workdir_selected,
-        move || select_git_pair(ui, "HEAD", "WORKDIR"),
-    ));
-
-    if staged_count > 0 {
-        let staged_selected = mode == "git" && cur_cmp == "STAGED";
-        workspace = workspace.child(sidebar_row(
-            "Staged changes",
-            format!("{staged_count} staged"),
-            staged_selected,
-            move || select_git_pair(ui, "HEAD", "STAGED"),
-        ));
-    }
-
-    let last_commit_selected = mode == "git" && cur_base == "HEAD~1" && cur_cmp == "HEAD";
-    workspace = workspace.child(sidebar_row(
-        "Last commit",
-        "HEAD~1 → HEAD".into(),
-        last_commit_selected,
-        move || select_git_pair(ui, "HEAD~1", "HEAD"),
-    ));
-
-    // 2. CARDS & PRs (searchable + selectable)
-    let active_pid = ui.project.get();
-    let reviewable_cards: Vec<Card> = ui.snapshot.with(|s| {
-        s.cards
-            .iter()
-            .filter(|c| {
-                c.active()
-                    && (active_pid.is_empty() || c.project_id == active_pid)
-                    && (c.worktree.is_some()
-                        || c.branch.is_some()
-                        || c.is_github_pr()
-                        || c.pull_request.is_some()
-                        || c.stage == "review")
-            })
-            .cloned()
-            .collect()
-    });
-
-    let cards_section = if reviewable_cards.is_empty() {
-        None
-    } else {
-        let total_cards = reviewable_cards.len();
-        let cq = st.card_query.get();
-        let trimmed_cq = cq.trim();
-        let filtered_cards: Vec<Card> = if trimmed_cq.is_empty() {
-            reviewable_cards
-        } else {
-            let mut scored: Vec<(usize, usize, Card)> = reviewable_cards
-                .into_iter()
-                .enumerate()
-                .filter_map(|(idx, c)| {
-                    let br = c
-                        .branch
-                        .clone()
-                        .or_else(|| c.pull_request.as_ref().map(|p| p.head_branch.clone()))
-                        .unwrap_or_default();
-                    let pr_num = c
-                        .pull_request
-                        .as_ref()
-                        .map(|p| p.number)
-                        .or_else(|| c.github_issue().map(|g| g.number))
-                        .unwrap_or(0);
-                    let mut fields = vec![
-                        format!("#{} {}", c.number, c.title),
-                        c.number.to_string(),
-                        c.stage.clone(),
-                    ];
-                    if !br.is_empty() {
-                        fields.push(br);
-                    }
-                    if pr_num > 0 {
-                        fields.push(format!("PR #{pr_num}"));
-                        fields.push(pr_num.to_string());
-                    }
-                    canban_ui_kit::search::score(&fields, trimmed_cq).map(|s| (s, idx, c))
-                })
-                .collect();
-            scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-            scored.into_iter().map(|(_, _, c)| c).collect()
-        };
-
-        let mut grp = section_group("Cards & PRs").count(total_cards);
-        if total_cards > 3 || !trimmed_cq.is_empty() {
-            grp = grp.child(
-                view().px_1().pb_1().child(
-                    field(st.card_query, "Filter #card, PR, or branch…")
-                        .min_h(px(26.))
-                        .px_2()
-                        .py_1()
-                        .text_size(px(11.5))
-                        .label("Filter Cards & PRs"),
-                ),
-            );
-        }
-        if filtered_cards.is_empty() {
-            grp = grp.child(
-                view()
-                    .px_2()
-                    .py_1()
-                    .child(muted("No matching Cards or PRs").text_size(px(11.))),
-            );
-        } else {
-            for c in filtered_cards {
-                let cid = c.id.clone();
-                let is_sel = cur_card == c.id && mode != "git";
-                let is_pr = c.is_github_pr() || c.pull_request.is_some();
-                let prefix = if is_pr {
-                    format!("PR · #{}", c.number)
-                } else {
-                    format!("#{}", c.number)
-                };
-                let br_hint = c
-                    .branch
-                    .as_deref()
-                    .or_else(|| c.pull_request.as_ref().map(|p| p.head_branch.as_str()))
-                    .unwrap_or("");
-                let meta = if !br_hint.is_empty() {
-                    if br_hint.chars().count() > 14 {
-                        let s: String = br_hint.chars().take(12).collect();
-                        format!("{s}…")
-                    } else {
-                        br_hint.to_owned()
-                    }
-                } else {
-                    c.stage.clone()
-                };
-                grp = grp.child(sidebar_row(
-                    format!("{prefix} {}", c.title),
-                    meta,
-                    is_sel,
-                    move || open_card(ui, &cid),
-                ));
-            }
-        }
-        Some(grp)
-    };
-
-    let mut container = view().gap_4().child(workspace);
-    if let Some(cs) = cards_section {
-        container = container.child(cs);
-    }
-    container.into_element()
 }
 
 fn log_branch(st: State) -> String {
@@ -340,6 +148,25 @@ fn render_commits(ui: Ui) -> impl IntoElement {
                     .on_submit(move |_: &str| git_ops::load_branch_log(ui, log_branch(st), false)),
             ),
         )
+        .child(dynamic(move || {
+            let count = st
+                .refs_data
+                .with(|v| v["dirty_count"].as_u64().unwrap_or(0));
+            sidebar_row(
+                "Uncommitted",
+                count.to_string(),
+                st.mode.get() == "git"
+                    && matches!(
+                        st.compare_ref.get().as_str(),
+                        "UNCOMMITTED" | "WORKDIR" | "STAGED" | "UNSTAGED"
+                    ),
+                move || {
+                    st.compare_open.set(false);
+                    select_git_pair(ui, "HEAD", "UNCOMMITTED");
+                },
+            )
+        }))
+        .child(view().h(px(1.)).bg(BORDER))
         .child(dynamic(move || render_commit_rows(ui)))
 }
 
@@ -548,6 +375,13 @@ pub(crate) fn build_git_ref_options(
 
     if !is_base {
         options.push(
+            PickerOption::new("UNCOMMITTED", "Uncommitted")
+                .group("Workspace")
+                .detail("staged + unstaged")
+                .icon(Icon::Edit)
+                .selected(current_val == "UNCOMMITTED"),
+        );
+        options.push(
             PickerOption::new("WORKDIR", "Working tree")
                 .group("Workspace")
                 .detail(if dirty_count > 0 {
@@ -717,6 +551,7 @@ fn render_ref_picker(ui: Ui, is_base: bool) -> impl IntoElement {
                 } else {
                     let c = st.compare_ref.get();
                     match c.as_str() {
+                        "UNCOMMITTED" => "Uncommitted".into(),
                         "" | "WORKDIR" => "Working tree".into(),
                         "STAGED" => "Staged".into(),
                         "UNSTAGED" => "Unstaged".into(),
@@ -747,10 +582,20 @@ fn render_ref_picker(ui: Ui, is_base: bool) -> impl IntoElement {
         },
         move |chosen| {
             if is_base {
-                select_git_pair(ui, chosen, st.compare_ref.get_untracked());
+                let compare = st.compare_ref.get_untracked();
+                select_git_pair(
+                    ui,
+                    chosen,
+                    if compare == "UNCOMMITTED" {
+                        "WORKDIR".into()
+                    } else {
+                        compare
+                    },
+                );
             } else {
                 let cur_b = st.base_ref.get_untracked();
                 let b = match chosen.as_str() {
+                    "UNCOMMITTED" => "HEAD".into(),
                     "WORKDIR" | "STAGED" => {
                         if cur_b.is_empty() {
                             "HEAD".into()
@@ -802,189 +647,187 @@ fn render_ref_picker(ui: Ui, is_base: bool) -> impl IntoElement {
 pub fn render_top_bar(ui: Ui) -> impl IntoElement {
     let st = ui.review_state;
     let project_anchor = element_ref();
-
-    view().border_b_1().border_color(BORDER).bg(SURFACE).child(
-        view()
-            .min_h(px(42.))
-            .px_3()
-            .py_1p5()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .child(
-                view()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_1p5()
-                    .child(chrome_button(
-                        Icon::Sidebar,
-                        "Toggle Git sidebar",
-                        move |_| st.sidebar_open.update(|v| *v = !*v),
-                    ))
-                    .child(when(
-                        move || !ui.card.get().is_empty(),
-                        move || {
-                            chrome_button(Icon::Back, "Back to Card", move |_| {
-                                crate::navigation::back_to_card(ui);
-                            })
-                        },
-                    ))
-                    .child(
-                        canban_ui_kit::press_target()
-                            .element_ref(&project_anchor)
-                            .h(px(28.))
-                            .px_2p5()
-                            .rounded(px(RADIUS))
-                            .border_1()
-                            .border_color(BORDER)
-                            .bg(INSET)
-                            .hover(|s| s.bg(CARD_HOVER))
-                            .flex_row()
-                            .items_center()
-                            .gap_1p5()
-                            .child(icon(Icon::Projects).w(px(12.)).h(px(12.)))
-                            .child(
-                                label(move || {
-                                    ui.current_project()
-                                        .map(|p| p.name)
-                                        .unwrap_or_else(|| "Select Project".into())
-                                })
-                                .text_size(px(12.))
-                                .font_weight(FontWeight::MEDIUM),
-                            )
-                            .child(icon(Icon::ChevronDown).w(px(11.)).h(px(11.)))
-                            .on_press(move |_: &()| {
-                                let projects = ui.snapshot.with_untracked(|s| s.projects.clone());
-                                if projects.is_empty() {
-                                    return;
-                                }
-                                ui.spawn(async move {
-                                    let items: Vec<MenuItem> = projects
-                                        .into_iter()
-                                        .map(|p| {
-                                            let pid = p.id.clone();
-                                            let is_cur = ui.project.get_untracked() == pid;
-                                            MenuItem::new(format!(
-                                                "{}{}",
-                                                if is_cur { "✓ " } else { "" },
-                                                p.name
-                                            ))
-                                            .on_select(move || {
-                                                ui.select_project(pid.clone());
-                                                open_compare(ui);
-                                            })
-                                        })
-                                        .collect();
-                                    if let Some(bounds) = project_anchor.measure().await {
-                                        popup_menu_at(
-                                            items,
-                                            point(
-                                                bounds.page.x,
-                                                bounds.page.y + bounds.frame.size.height,
-                                            ),
-                                        )
-                                        .await;
-                                    } else {
-                                        popup_menu(items).await;
-                                    }
-                                });
-                            }),
-                    )
-                    .child(render_ref_picker(ui, true))
-                    .child(muted("←").text_size(px(12.)))
-                    .child(render_ref_picker(ui, false))
-                    .child(when(
-                        move || {
-                            st.mode.get() == "git"
-                                && !matches!(
-                                    st.compare_ref.get().as_str(),
-                                    "WORKDIR" | "STAGED" | "UNSTAGED"
-                                )
-                        },
-                        move || {
-                            view()
-                                .tooltip(hint_tooltip("Swap Base and Compare refs"))
-                                .child(compact_action("⇄", Variant::Quiet, move |_| {
-                                    let b = st.base_ref.get_untracked();
-                                    let c = st.compare_ref.get_untracked();
-                                    select_git_pair(ui, c, b);
-                                }))
-                        },
-                    ))
-                    .child(when(
-                        move || st.mode.get() != "github_pr",
-                        move || {
-                            view()
-                                .tooltip(hint_tooltip(
-                                    "Toggle merge-base (A...B) vs direct (A..B) diff",
-                                ))
-                                .child(compact_action(
-                                    move || {
-                                        if st.three_dot.get() { "A...B" } else { "A..B" }
-                                    },
-                                    Variant::Quiet,
-                                    move |_| {
-                                        st.three_dot.update(|v| *v = !*v);
-                                        refresh_active_diff(ui, false);
-                                    },
-                                ))
-                        },
-                    )),
-            )
-            .child(
-                view()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_1p5()
-                    .child(
-                        view()
-                            .min_w(px(0.))
-                            .max_w(px(180.))
-                            .tooltip(hint_tooltip(move || {
-                                let cwd = st.checkout_cwd.get();
-                                if cwd.is_empty() {
-                                    ui.current_project()
-                                        .map(|p| p.directory)
-                                        .unwrap_or_default()
-                                } else {
-                                    cwd
-                                }
-                            }))
-                            .child(
-                                muted(move || {
-                                    st.refs_data.with(|r| {
-                                        r["current_branch"].as_str().unwrap_or("").to_owned()
+    view()
+        .border_b_1()
+        .border_color(BORDER)
+        .bg(SURFACE)
+        .child(
+            view()
+                .min_h(px(42.))
+                .px_3()
+                .py_1p5()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .min_w(px(0.))
+                        .child(chrome_button(
+                            Icon::Sidebar,
+                            "Toggle Git sidebar",
+                            move |_| st.sidebar_open.update(|v| *v = !*v),
+                        ))
+                        .child(
+                            canban_ui_kit::press_target()
+                                .element_ref(&project_anchor)
+                                .h(px(28.))
+                                .px_2p5()
+                                .rounded(px(RADIUS))
+                                .border_1()
+                                .border_color(BORDER)
+                                .bg(INSET)
+                                .hover(|s| s.bg(CARD_HOVER))
+                                .flex_row()
+                                .items_center()
+                                .gap_1p5()
+                                .child(icon(Icon::Projects).w(px(12.)).h(px(12.)))
+                                .child(
+                                    label(move || {
+                                        ui.current_project()
+                                            .map(|p| p.name)
+                                            .unwrap_or_else(|| "Select Project".into())
                                     })
-                                })
-                                .font_family(MONO_FONT)
-                                .text_size(px(11.))
-                                .truncate(),
-                            ),
-                    )
-                    .child(git_ops::render_sync_controls(ui))
-                    .child(when(
-                        move || !ui.card.get().is_empty() && !ui.narrow.get(),
-                        move || {
-                            compact_action(
-                                move || {
-                                    if st.card_drawer_open.get() {
-                                        "Hide Card"
-                                    } else {
-                                        "Card"
+                                    .text_size(px(12.))
+                                    .font_weight(FontWeight::MEDIUM),
+                                )
+                                .child(icon(Icon::ChevronDown).w(px(11.)).h(px(11.)))
+                                .on_press(move |_: &()| {
+                                    let projects =
+                                        ui.snapshot.with_untracked(|s| s.projects.clone());
+                                    if projects.is_empty() {
+                                        return;
                                     }
-                                },
-                                Variant::Secondary,
-                                move |_| st.card_drawer_open.update(|v| *v = !*v),
+                                    ui.spawn(async move {
+                                        let items: Vec<MenuItem> = projects
+                                            .into_iter()
+                                            .map(|p| {
+                                                let pid = p.id.clone();
+                                                let is_cur = ui.project.get_untracked() == pid;
+                                                MenuItem::new(format!(
+                                                    "{}{}",
+                                                    if is_cur { "✓ " } else { "" },
+                                                    p.name
+                                                ))
+                                                .on_select(move || {
+                                                    ui.select_project(pid.clone());
+                                                    open_compare(ui);
+                                                })
+                                            })
+                                            .collect();
+                                        if let Some(bounds) = project_anchor.measure().await {
+                                            popup_menu_at(
+                                                items,
+                                                point(
+                                                    bounds.page.x,
+                                                    bounds.page.y + bounds.frame.size.height,
+                                                ),
+                                            )
+                                            .await;
+                                        } else {
+                                            popup_menu(items).await;
+                                        }
+                                    });
+                                }),
+                        )
+                        .child(when(
+                            move || st.mode.get() != "github_pr",
+                            move || git_ops::render_checkout_picker(ui),
+                        ))
+                        .child(when(
+                            move || st.mode.get() != "github_pr",
+                            move || {
+                                compact_action("Compare…", Variant::Quiet, move |_| {
+                                    super::toggle_comparison(ui)
+                                })
+                            },
+                        )),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .child(when(
+                            move || st.mode.get() != "github_pr",
+                            move || git_ops::render_sync_controls(ui),
+                        ))
+                        .child(render_refresh(ui))
+                        .child(dynamic(move || {
+                            if let Some(card) =
+                                super::related_card(ui).filter(|_| st.mode.get() != "github_pr")
+                            {
+                                compact_action(
+                                    format!("#{} ↗", card.number),
+                                    Variant::Quiet,
+                                    move |_| super::open_related_card(ui),
+                                )
+                                .into_element()
+                            } else {
+                                view().into_element()
+                            }
+                        })),
+                ),
+        )
+        .child(when(
+            move || st.compare_open.get() && st.mode.get() != "github_pr",
+            move || {
+                view()
+                    .px_3()
+                    .py_2()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(muted("Base"))
+                    .child(render_ref_picker(ui, true))
+                    .child(muted("→ Compare"))
+                    .child(render_ref_picker(ui, false))
+                    .child(
+                        compact_action("⇄", Variant::Quiet, move |_| {
+                            let base = st.base_ref.get_untracked();
+                            let compare = st.compare_ref.get_untracked();
+                            if !matches!(
+                                compare.as_str(),
+                                "UNCOMMITTED" | "WORKDIR" | "STAGED" | "UNSTAGED"
+                            ) {
+                                select_git_pair(ui, compare, base);
+                            }
+                        })
+                        .disabled(move || {
+                            matches!(
+                                st.compare_ref.get().as_str(),
+                                "UNCOMMITTED" | "WORKDIR" | "STAGED" | "UNSTAGED"
                             )
-                        },
+                        }),
+                    )
+                    .child(
+                        compact_action(
+                            move || if st.three_dot.get() { "A...B" } else { "A..B" },
+                            Variant::Quiet,
+                            move |_| {
+                                st.three_dot.update(|v| *v = !*v);
+                                refresh_active_diff(ui, false);
+                            },
+                        )
+                        .disabled(move || {
+                            matches!(
+                                st.compare_ref.get().as_str(),
+                                "UNCOMMITTED" | "STAGED" | "UNSTAGED"
+                            )
+                        }),
+                    )
+                    .child(chrome_button(
+                        Icon::Close,
+                        "Close Git comparison controls",
+                        move |_| st.compare_open.set(false),
                     ))
-                    .child(render_refresh(ui)),
-            ),
-    )
+            },
+        ))
 }
 
 pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {

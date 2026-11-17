@@ -1,9 +1,9 @@
 //! Git client actions and UI widgets for the Git workbench:
-//! - Active checkout / worktree / PR & Card branch switcher + remote sync controls (`Fetch`, `Pull`, `Push`)
+//! - Worktree selector + remote sync controls (`Fetch`, `Pull`, `Push`)
 //! - Per-branch paginated commit history & search (`git.log`)
 //! - Single-commit inspection banner with merge-commit parent selector & prev/next navigation
 //! - File-level staging, unstaging, discard confirmation modal, and inline commit / amend composer.
-use super::{load_refs, load_refs_and_compare, open_card, refresh_active_diff, select_git_pair};
+use super::{load_refs, load_refs_and_compare, refresh_active_diff, select_git_pair};
 use crate::presenter::*;
 use canban_ui_kit::tokens::*;
 use canban_ui_kit::*;
@@ -49,11 +49,22 @@ pub fn select_checkout(ui: Ui, cwd: String) {
         st.pr_target.set(None);
         st.mode.set("git".into());
         st.checkout_cwd.set(cwd);
+        st.base_ref.set("HEAD".into());
+        st.compare_ref.set("UNCOMMITTED".into());
+        st.three_dot.set(false);
+        st.compare_open.set(false);
+        st.collapsed_files.set(Default::default());
         st.log_branch.set(String::new());
         st.log_commits.set(Vec::new());
         st.range_backup.set(None);
         st.selected_file.set(String::new());
         st.active_line.set(None);
+        st.pending_file.replace(String::new());
+        st.editing_remote_comment.set(None);
+        st.remote_edit_draft.set(String::new());
+        st.remote_edit_error.set(String::new());
+        st.deleting_remote_comment.set(None);
+        st.remote_delete_error.set(String::new());
         st.error.set(String::new());
     });
     super::prepare_context(ui);
@@ -200,6 +211,7 @@ pub fn select_single_commit(ui: Ui, sha: String, parent_idx: usize, save_range: 
         st.three_dot.set(false);
         st.selected_file.set(String::new());
         st.active_line.set(None);
+        st.compare_open.set(false);
     });
     refresh_active_diff(ui, false);
 }
@@ -349,6 +361,24 @@ pub fn run_push(ui: Ui) {
     run_sync(ui, "git.push", params);
 }
 
+/// Refresh the mutation's checkout, fencing callbacks after a worktree switch.
+fn change_status(ui: Ui, method: &'static str, params: Value) {
+    let st = ui.review_state;
+    let context = st.read_context.with(|v| v.clone());
+    let project = ui.project.get_untracked();
+    let host = ui.active_project_host();
+    let cwd = st.checkout_cwd.get_untracked();
+    dispatch_then(ui, method, params, move |_| {
+        st.read_cache
+            .with(|cache| cache.invalidate_checkout(&host, &project, &cwd, None));
+        if st.read_context.with(|v| *v == context) && ui.page.get_untracked() == "review" {
+            super::invalidate_reads(ui);
+            load_refs(ui);
+            refresh_active_diff(ui, false);
+        }
+    });
+}
+
 pub fn run_stage(ui: Ui, paths: Vec<String>, all: bool) {
     let st = ui.review_state;
     if crate::APP.get().is_none() {
@@ -384,10 +414,7 @@ pub fn run_stage(ui: Ui, paths: Vec<String>, all: bool) {
     let Some(params) = git_params(ui, json!({ "paths": paths, "all": all })) else {
         return;
     };
-    dispatch_then(ui, "git.stage", params, move |_| {
-        load_refs(ui);
-        refresh_active_diff(ui, false);
-    });
+    change_status(ui, "git.stage", params);
 }
 
 pub fn run_unstage(ui: Ui, paths: Vec<String>, all: bool) {
@@ -422,10 +449,7 @@ pub fn run_unstage(ui: Ui, paths: Vec<String>, all: bool) {
     let Some(params) = git_params(ui, json!({ "paths": paths, "all": all })) else {
         return;
     };
-    dispatch_then(ui, "git.unstage", params, move |_| {
-        load_refs(ui);
-        refresh_active_diff(ui, false);
-    });
+    change_status(ui, "git.unstage", params);
 }
 
 pub fn request_discard(ui: Ui, paths: Vec<String>) {
@@ -540,13 +564,12 @@ pub fn run_commit(ui: Ui, and_push: bool) {
     });
 }
 
-/// Top bar checkout, worktree, and PR / Card branch selector with fuzzy search.
+/// Select physical checkouts only. Card hints never change the Git comparison.
 pub fn render_checkout_picker(ui: Ui) -> impl IntoElement {
     let st = ui.review_state;
-
     let trigger = canban_ui_kit::press_target()
-        .w_full()
         .min_w(px(0.))
+        .max_w(px(260.))
         .h(px(28.))
         .px_2p5()
         .rounded(px(RADIUS))
@@ -557,209 +580,56 @@ pub fn render_checkout_picker(ui: Ui) -> impl IntoElement {
         .flex_row()
         .items_center()
         .gap_1p5()
-        .accessibility_label("Workspace: switch checkout or Card")
+        .accessibility_label("Select Git worktree")
         .child(icon(Icon::Folder).w(px(12.)).h(px(12.)))
         .child(
             label(move || {
-                let mode = st.mode.get();
-                if mode != "git"
-                    && let Some(c) = ui.current_card()
-                {
-                    let title_short = if c.title.chars().count() > 18 {
-                        let s: String = c.title.chars().take(16).collect();
-                        format!("{s}…")
-                    } else {
-                        c.title.clone()
-                    };
-                    if mode == "github_pr"
-                        && let Some(pr) = st.pr_target.get()
-                    {
-                        let n = pr["number"].as_u64().unwrap_or(c.number);
-                        return format!("PR #{n} · {title_short}");
-                    }
-                    return format!("#{} {title_short}", c.number);
-                }
-                let refs = st.refs_data.get();
-                let cur_br = refs["current_branch"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("detached");
                 let cwd = st.checkout_cwd.get();
-                let checkouts = refs["checkouts"].as_array().cloned().unwrap_or_default();
-                let matched_kind = checkouts
-                    .iter()
-                    .find(|c| {
-                        let p = c["path"].as_str().unwrap_or("");
-                        if cwd.is_empty() {
-                            c["kind"].as_str() == Some("project")
-                        } else {
-                            p == cwd
-                        }
-                    })
-                    .and_then(|c| c["kind"].as_str())
-                    .unwrap_or("project");
-                let tag = match matched_kind {
-                    "card" => " · card",
-                    "worktree" => " · wt",
-                    _ => "",
-                };
-                let shown = if cur_br.chars().count() > 20 {
-                    let s: String = cur_br.chars().take(18).collect();
-                    format!("{s}…")
+                let refs = st.refs_data.get();
+                let path = refs["cwd"]
+                    .as_str()
+                    .filter(|p| !p.is_empty())
+                    .unwrap_or(&cwd);
+                let name = path
+                    .rsplit('/')
+                    .find(|s| !s.is_empty())
+                    .unwrap_or("Worktree");
+                let branch = refs["current_branch"]
+                    .as_str()
+                    .filter(|b| !b.is_empty())
+                    .unwrap_or("detached");
+                if name == branch {
+                    name.to_owned()
                 } else {
-                    cur_br.to_owned()
-                };
-                format!("{shown}{tag}")
+                    format!("{name} · {branch}")
+                }
             })
             .font_family(MONO_FONT)
             .text_size(px(11.5))
-            .font_weight(FontWeight::MEDIUM)
             .truncate()
-            .min_w(px(0.))
-            .flex_1(),
+            .min_w(px(0.)),
         )
         .child(icon(Icon::ChevronDown).w(px(11.)).h(px(11.)));
-
-    search_popover(
-        trigger,
-        move || {
+    view().tooltip(hint_tooltip(move || st.refs_data.with(|v| v["cwd"].as_str().unwrap_or("").to_owned())))
+        .child(search_popover(trigger, move || {
             let refs = st.refs_data.get();
-            let mode = st.mode.get();
-            let cur_cwd = st.checkout_cwd.get();
-            let cur_card = ui.card.get();
-            let active_pid = ui.project.get();
-
+            let cur = refs["cwd"].as_str().unwrap_or("");
             let mut checkouts = refs["checkouts"].as_array().cloned().unwrap_or_default();
-            if checkouts.is_empty()
-                && let Some(proj) = ui.current_project()
-            {
-                checkouts.push(json!({
-                    "kind": "project",
-                    "label": format!("{} (main)", proj.name),
-                    "path": proj.directory,
-                    "branch": proj.target_branch,
-                }));
+            if checkouts.is_empty() && let Some(project) = ui.current_project() {
+                checkouts.push(json!({"path":project.directory, "branch":project.target_branch, "kind":"project"}));
             }
-
-            let mut options = Vec::<PickerOption>::new();
-
-            // 1. Checkouts & Worktrees (main repo + standalone ManagedWorktrees)
-            for c in &checkouts {
-                let kind = c["kind"].as_str().unwrap_or("project");
-                if kind == "card" {
-                    continue;
-                }
-                let path = c["path"].as_str().unwrap_or("").to_owned();
-                let lbl = c["label"].as_str().unwrap_or("Checkout").to_owned();
-                let br = c["branch"].as_str().unwrap_or("").to_owned();
-                let is_cur = mode == "git"
-                    && if cur_cwd.is_empty() {
-                        kind == "project"
-                    } else {
-                        path == cur_cwd
-                    };
-                let target_id = if kind == "project" {
-                    "cwd:".to_owned()
-                } else {
-                    format!("cwd:{path}")
-                };
-                let ic = if kind == "worktree" {
-                    Icon::Branch
-                } else {
-                    Icon::Projects
-                };
-                options.push(
-                    PickerOption::new(target_id, lbl)
-                        .group("Checkouts & Worktrees")
-                        .detail(br.clone())
-                        .icon(ic)
-                        .selected(is_cur)
-                        .keywords([br, path, kind.to_owned()]),
-                );
-            }
-
-            // 2. PRs & Card Branches
-            let cards = ui.snapshot.with(|s| {
-                s.cards
-                    .iter()
-                    .filter(|c| {
-                        c.active()
-                            && (active_pid.is_empty() || c.project_id == active_pid)
-                            && (c.worktree.is_some()
-                                || c.branch.is_some()
-                                || c.is_github_pr()
-                                || c.pull_request.is_some()
-                                || c.stage == "review")
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>()
-            });
-
-            for c in cards {
-                let is_sel = mode != "git" && cur_card == c.id;
-                let is_pr = c.is_github_pr() || c.pull_request.is_some();
-                let pr_num = c
-                    .pull_request
-                    .as_ref()
-                    .map(|p| p.number)
-                    .or_else(|| c.github_issue().map(|g| g.number))
-                    .unwrap_or(0);
-                let title = if is_pr && pr_num > 0 && pr_num != c.number {
-                    format!("#{} · PR #{} {}", c.number, pr_num, c.title)
-                } else if is_pr {
-                    format!("PR #{} {}", c.number, c.title)
-                } else {
-                    format!("#{} {}", c.number, c.title)
-                };
-                let br = c
-                    .branch
-                    .clone()
-                    .or_else(|| c.pull_request.as_ref().map(|p| p.head_branch.clone()))
-                    .unwrap_or_default();
-                let detail = if !br.is_empty() {
-                    format!("{br} · {}", c.stage)
-                } else {
-                    c.stage.clone()
-                };
-                let mut kw = vec![
-                    format!("#{}", c.number),
-                    c.number.to_string(),
-                    c.stage.clone(),
-                ];
-                if !br.is_empty() {
-                    kw.push(br);
-                }
-                if pr_num > 0 {
-                    kw.push(format!("PR #{pr_num}"));
-                    kw.push(pr_num.to_string());
-                }
-                if let Some(wt) = &c.worktree {
-                    kw.push(wt.clone());
-                }
-                options.push(
-                    PickerOption::new(format!("card:{}", c.id), title)
-                        .group("Cards & PRs")
-                        .detail(detail)
-                        .icon(if is_pr { Icon::GitHub } else { Icon::Board })
-                        .selected(is_sel)
-                        .keywords(kw),
-                );
-            }
-
-            options
-        },
-        move |selected_id| {
-            if let Some(cid) = selected_id.strip_prefix("card:") {
-                open_card(ui, cid);
-            } else if let Some(cwd) = selected_id.strip_prefix("cwd:") {
-                select_checkout(ui, cwd.to_owned());
-            }
-        },
-    )
-    .placeholder("Search checkouts, PRs, #card, or branch…")
-    .empty_text("No matching checkouts or PR / Card branches")
-    .width(360.)
-    .list_height(300.)
+            checkouts.into_iter().map(|checkout| {
+                let path = checkout["path"].as_str().unwrap_or("").to_owned();
+                let branch = checkout["branch"].as_str().unwrap_or("").to_owned();
+                let name = path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(&path).to_owned();
+                let is_cur = path == cur || (st.checkout_cwd.get().is_empty() && checkout["kind"] == "project");
+                let title = if branch.is_empty() { name } else { format!("{name} · {branch}") };
+                PickerOption::new(path.clone(), title).detail(path.clone()).icon(Icon::Branch)
+                    .selected(is_cur).keywords([path, branch])
+            }).collect()
+        }, move |path| select_checkout(ui, path))
+        .placeholder("Search worktree path or branch…").empty_text("No matching worktrees")
+        .width(400.).list_height(320.))
 }
 
 /// Top bar remote Git sync actions: `Fetch`, `Pull ↓M` (`--ff-only`), and `Push ↑N`.
@@ -1055,11 +925,11 @@ pub fn render_working_tree_pane(ui: Ui, data: &Value) -> AnyElement {
             .on_press(move |_: &()| {
                 if matches!(
                     st.compare_ref.get_untracked().as_str(),
-                    "STAGED" | "UNSTAGED"
+                    "STAGED" | "UNSTAGED" | "WORKDIR"
                 ) {
-                    select_git_pair(ui, "HEAD", "WORKDIR");
+                    select_git_pair(ui, "HEAD", "UNCOMMITTED");
                 } else {
-                    st.selected_file.set(String::new());
+                    super::show_all_files(ui);
                 }
             })
             .child(
@@ -1137,7 +1007,7 @@ pub fn render_working_tree_pane(ui: Ui, data: &Value) -> AnyElement {
             .items_center()
             .justify_between()
             .child(
-                muted(format!("Changes ({unstaged_len})"))
+                muted(format!("Unstaged ({unstaged_len})"))
                     .text_size(px(11.))
                     .font_weight(FontWeight::SEMIBOLD),
             )
@@ -1185,6 +1055,19 @@ pub fn render_working_tree_pane(ui: Ui, data: &Value) -> AnyElement {
         .border_r_1()
         .border_color(BORDER)
         .bg(SURFACE)
+        .child(
+            view()
+                .h(px(36.))
+                .px_3()
+                .justify_center()
+                .border_b_1()
+                .border_color(BORDER)
+                .child(
+                    label("Files")
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::SEMIBOLD),
+                ),
+        )
         .child(scroll().flex_1().min_h(px(0.)).child(list))
         .child(render_commit_composer(ui, staged_len, unstaged_len))
         .into_element()
@@ -1199,7 +1082,13 @@ fn working_file_row(
     pending_cnt: usize,
 ) -> impl IntoElement {
     let st = ui.review_state;
-    let is_sel = selected == fname;
+    let section = if st.compare_ref.get() == "UNCOMMITTED" {
+        if is_staged_row { "staged" } else { "unstaged" }
+    } else {
+        ""
+    };
+    let key = super::model::diff_key(section, &fname);
+    let is_sel = selected == key;
     let short_name = fname.rsplit('/').next().unwrap_or(&fname).to_owned();
     let badge_col = match code.as_str() {
         "A" | "U" => SUCCESS,
@@ -1209,8 +1098,15 @@ fn working_file_row(
     };
 
     let click_path = fname.clone();
+    let click_key = key.clone();
+    let fold_key = key.clone();
+    let fold_path = fname.clone();
     let action_path = fname.clone();
     let menu_path = fname.clone();
+    let action_title = format!(
+        "{} file {fname}",
+        if is_staged_row { "Unstage" } else { "Stage" }
+    );
 
     view()
         .tooltip(hint_tooltip(fname.clone()))
@@ -1249,6 +1145,11 @@ fn working_file_row(
                 popup_menu_at(items, pos).await;
             });
         })
+        .child(super::diff::fold_button(
+            ui,
+            fold_key,
+            format!("{section} {fold_path}"),
+        ))
         .child(
             canban_ui_kit::press_target()
                 .flex_1()
@@ -1259,7 +1160,17 @@ fn working_file_row(
                 .flex_row()
                 .items_center()
                 .gap_1p5()
-                .on_press(move |_: &()| st.selected_file.set(click_path.clone()))
+                .on_press(move |_: &()| {
+                    let expected = if is_staged_row { "STAGED" } else { "UNSTAGED" };
+                    if !matches!(st.compare_ref.get_untracked().as_str(), "UNCOMMITTED")
+                        && st.compare_ref.get_untracked() != expected
+                    {
+                        select_git_pair(ui, "HEAD", expected);
+                        super::focus_file(ui, click_path.clone());
+                    } else {
+                        super::focus_file(ui, click_key.clone());
+                    }
+                })
                 .child(
                     label(code)
                         .font_family(MONO_FONT)
@@ -1280,17 +1191,20 @@ fn working_file_row(
                     view().into_element()
                 }),
         )
-        .child(compact_action(
-            if is_staged_row { "−" } else { "+" },
-            Variant::Quiet,
-            move |_| {
-                if is_staged_row {
-                    run_unstage(ui, vec![action_path.clone()], false);
-                } else {
-                    run_stage(ui, vec![action_path.clone()], false);
-                }
-            },
-        ))
+        .child(
+            compact_action(
+                if is_staged_row { "−" } else { "+" },
+                Variant::Quiet,
+                move |_| {
+                    if is_staged_row {
+                        run_unstage(ui, vec![action_path.clone()], false);
+                    } else {
+                        run_stage(ui, vec![action_path.clone()], false);
+                    }
+                },
+            )
+            .accessibility_label(move || Some(action_title.clone().into())),
+        )
 }
 
 fn render_commit_composer(ui: Ui, staged_len: usize, unstaged_len: usize) -> impl IntoElement {

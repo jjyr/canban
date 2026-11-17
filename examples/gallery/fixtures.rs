@@ -346,7 +346,7 @@ pub fn git_workdir_compare() -> serde_json::Value {
     let refs = git_refs();
     json!({
         "base_ref": "HEAD",
-        "compare_ref": "WORKDIR",
+        "compare_ref": "UNCOMMITTED",
         "base_sha": "c207c08a91fe001234567890abcdef0123456789",
         "compare_sha": "c207c08a91fe001234567890abcdef0123456789",
         "three_dot": false,
@@ -359,6 +359,7 @@ pub fn git_workdir_compare() -> serde_json::Value {
         "files": [
             {
                 "filename": "crates/workspaces/src/git_client.rs",
+                "section": "staged",
                 "status": "added",
                 "additions": 15,
                 "deletions": 0,
@@ -366,6 +367,7 @@ pub fn git_workdir_compare() -> serde_json::Value {
             },
             {
                 "filename": "crates/ui/src/review/sidebar.rs",
+                "section": "unstaged",
                 "status": "modified",
                 "additions": 8,
                 "deletions": 4,
@@ -373,6 +375,7 @@ pub fn git_workdir_compare() -> serde_json::Value {
             },
             {
                 "filename": "crates/ui/src/review/git_ops.rs",
+                "section": "unstaged",
                 "status": "added",
                 "additions": 3,
                 "deletions": 0,

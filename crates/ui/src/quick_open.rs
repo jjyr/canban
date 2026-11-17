@@ -52,6 +52,48 @@ fn contextual_commands(ui: Ui, raw_query: &str) -> Vec<(usize, SearchChoice)> {
     let cmd_query = trimmed.strip_prefix('>').unwrap_or(trimmed).trim();
     let mut dynamic_cmds = Vec::<DynamicCommand>::new();
 
+    if ui.page.get() == "review" {
+        let st = ui.review_state;
+        let collapsed = st.collapsed_files.get();
+        for file in st
+            .compare_data
+            .with(|v| v["files"].as_array().cloned().unwrap_or_default())
+        {
+            let key = crate::review::model::file_key(&file);
+            let path = file["filename"].as_str().unwrap_or("");
+            let section = file["section"].as_str().unwrap_or("");
+            let fold = if collapsed.contains(&key) {
+                "Expand"
+            } else {
+                "Collapse"
+            };
+            for (action, title) in [
+                ("git-fold", format!("Git: {fold} {section} {path}")),
+                ("git-file", format!("Git: Reveal {section} {path}")),
+            ] {
+                dynamic_cmds.push(DynamicCommand {
+                    id: format!("cmd:{action}:{key}"),
+                    title,
+                    detail: "Changes".into(),
+                    icon: Icon::Compare,
+                    keywords: "diff file collapse expand reveal".into(),
+                });
+            }
+        }
+        for checkout in st
+            .refs_data
+            .with(|v| v["checkouts"].as_array().cloned().unwrap_or_default())
+        {
+            let path = checkout["path"].as_str().unwrap_or("");
+            dynamic_cmds.push(DynamicCommand {
+                id: format!("cmd:git-checkout:{path}"),
+                title: format!("Git: Select Worktree {path}"),
+                detail: "Git".into(),
+                icon: Icon::Branch,
+                keywords: "worktree checkout directory".into(),
+            });
+        }
+    }
     if let Some(card) = ui.current_card().filter(|c| c.active())
         && let Some(project) = ui.current_project()
     {

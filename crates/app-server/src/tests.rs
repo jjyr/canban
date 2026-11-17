@@ -3811,3 +3811,82 @@ fn short_ids_card_number_paths_and_legacy_alias_resolution() {
     .unwrap();
     assert_eq!(app.snapshot().unwrap().questions[0].state, "replied");
 }
+
+#[cfg(unix)]
+#[test]
+fn git_related_card_requires_a_unique_canonical_worktree_match() {
+    let (dir, app, p, mut card) = setup();
+    let repo = Path::new(&p.directory);
+    std::fs::create_dir_all(repo).unwrap();
+    let git = |args: &[&str]| {
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    };
+    git(&["init", "-b", "main"]);
+    git(&[
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "initial",
+    ]);
+    let worktree = dir.path().join("card-worktree");
+    git(&[
+        "worktree",
+        "add",
+        "-b",
+        "feature",
+        worktree.to_str().unwrap(),
+    ]);
+    let alias = dir.path().join("alias");
+    std::os::unix::fs::symlink(&worktree, &alias).unwrap();
+    card.worktree = Some(alias.to_string_lossy().into_owned());
+    // Even an identical branch name must not associate the main checkout.
+    card.branch = Some("main".into());
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| db.save(&card))
+        .unwrap();
+    let main = app.call("git.refs", json!({"project_id":p.id})).unwrap();
+    assert!(main["related_card_id"].is_null());
+    let refs = app
+        .call("git.refs", json!({"project_id":p.id,"cwd":worktree}))
+        .unwrap();
+    assert_eq!(refs["related_card_id"], card.id);
+    let mut second: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id":p.id,"title":"Same path"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    second.worktree = Some(worktree.to_string_lossy().into_owned());
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| db.save(&second))
+        .unwrap();
+    let refs = app
+        .call("git.refs", json!({"project_id":p.id,"cwd":worktree}))
+        .unwrap();
+    assert!(refs["related_card_id"].is_null());
+    assert_eq!(
+        refs["checkouts"].as_array().unwrap().len(),
+        2,
+        "symlink aliases must be deduplicated"
+    );
+}

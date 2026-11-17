@@ -797,6 +797,30 @@ pub const CATALOG: &[Command] = &[
         keywords: "bug feedback diagnostics",
     },
     Command {
+        id: "git-compare",
+        title: "Git: Toggle Comparison Controls",
+        key: "",
+        display: "Git",
+        context: "Git",
+        keywords: "base compare refs range",
+    },
+    Command {
+        id: "git-related-card",
+        title: "Git: Open Related Card",
+        key: "",
+        display: "Git",
+        context: "Git",
+        keywords: "worktree path card",
+    },
+    Command {
+        id: "git-fold-file",
+        title: "Git: Toggle Selected File Diff",
+        key: "",
+        display: "Git",
+        context: "Git",
+        keywords: "collapse expand fold changes",
+    },
+    Command {
         id: "git-refresh",
         title: "Git: Refresh",
         key: "",
@@ -871,6 +895,18 @@ pub fn execute(ui: Ui, id: &str) {
     crate::utilities::close(ui);
     ui.quick_open.set(false);
 
+    if let Some(key) = id.strip_prefix("git-fold:") {
+        crate::review::toggle_file(ui, key.to_owned());
+        return;
+    }
+    if let Some(key) = id.strip_prefix("git-file:") {
+        crate::review::focus_file(ui, key.to_owned());
+        return;
+    }
+    if let Some(path) = id.strip_prefix("git-checkout:") {
+        crate::review::git_ops::select_checkout(ui, path.to_owned());
+        return;
+    }
     if let Some(stage_id) = id.strip_prefix("move-card:") {
         if let Some(card) = ui.current_card().filter(|c| c.active()) {
             crate::presenter::move_card(ui, &card.id, stage_id);
@@ -1525,6 +1561,14 @@ pub fn execute(ui: Ui, id: &str) {
         "check-herdr" => dispatch(ui, "herdr.status", json!({})),
         "check-updates" => crate::updates::check(ui),
         "report-issue" => crate::utilities::report::open(ui),
+        "git-compare" => crate::review::toggle_comparison(ui),
+        "git-related-card" => crate::review::open_related_card(ui),
+        "git-fold-file" => {
+            let key = ui.review_state.selected_file.get_untracked();
+            if !key.is_empty() {
+                crate::review::toggle_file(ui, key);
+            }
+        }
         "git-refresh" => crate::review::refresh(ui),
         "git-more-files" => crate::review::show_more_files(ui),
         "git-fetch" => {
@@ -1549,19 +1593,19 @@ pub fn execute(ui: Ui, id: &str) {
             if ui.page.get_untracked() != "review" {
                 crate::review::open_compare(ui);
             }
-            crate::review::select_git_pair(ui, "HEAD", "WORKDIR");
+            crate::review::select_git_pair(ui, "HEAD", "UNCOMMITTED");
             crate::review::git_ops::run_stage(ui, Vec::new(), true);
         }
         "git-unstage-all" => {
             if ui.page.get_untracked() != "review" {
                 crate::review::open_compare(ui);
             }
-            crate::review::select_git_pair(ui, "HEAD", "WORKDIR");
+            crate::review::select_git_pair(ui, "HEAD", "UNCOMMITTED");
             crate::review::git_ops::run_unstage(ui, Vec::new(), true);
         }
         "git-working-tree" => {
             crate::review::open_compare(ui);
-            crate::review::select_git_pair(ui, "HEAD", "WORKDIR");
+            crate::review::select_git_pair(ui, "HEAD", "UNCOMMITTED");
         }
         _ => {}
     }

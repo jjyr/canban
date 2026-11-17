@@ -1775,7 +1775,11 @@ pub fn Gallery() -> impl IntoElement {
     }
     if matches!(
         std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
-        Ok("review-working-tree" | "review-async" | "review-large-diff" | "review-refresh")
+        Ok("review-working-tree"
+            | "review-uncommitted"
+            | "review-async"
+            | "review-large-diff"
+            | "review-refresh")
     ) {
         canban_ui::frame::configure_window_chrome();
         ui.snapshot.set(fixtures::workspace());
@@ -1793,11 +1797,33 @@ pub fn Gallery() -> impl IntoElement {
             .compare_data
             .set(fixtures::git_workdir_compare());
         ui.review_state.base_ref.set("HEAD".into());
-        ui.review_state.compare_ref.set("WORKDIR".into());
+        ui.review_state.compare_ref.set("UNCOMMITTED".into());
         ui.review_state
             .commit_summary
             .set("feat(review): add working tree stage & commit controls".into());
         let scene = std::env::var("CANBAN_GALLERY_SCENE").unwrap_or_default();
+        if scene == "review-uncommitted" {
+            let st = ui.review_state;
+            st.checkout_cwd.set("/preview/worktrees/card-1".into());
+            st.refs_data.update(|v| {
+                v["cwd"] = json!("/preview/worktrees/card-1");
+                v["related_card_id"] = json!("card-1");
+            });
+            let mut data = fixtures::git_workdir_compare();
+            let mut extra = data["files"][0].clone();
+            extra["section"] = json!("unstaged");
+            extra["patch"] = json!("@@ -1 +1 @@\n-index version\n+working directory version");
+            data["files"].as_array_mut().unwrap().push(extra);
+            data["status_files"][0]["unstaged"] = json!(true);
+            data["status_files"][0]["worktree_code"] = json!("M");
+            st.refs_data.update(|v| {
+                v["status_files"] = data["status_files"].clone();
+                v["unstaged_count"] = json!(3);
+            });
+            let prepared = review::cache::ReadValue::new(data.clone());
+            st.prepared_lines.set(prepared.lines);
+            st.compare_data.set(data);
+        }
         if scene == "review-async" {
             let st = ui.review_state;
             set_interval(std::time::Duration::from_millis(800), move || {
@@ -2038,7 +2064,7 @@ pub fn Gallery() -> impl IntoElement {
                     );
                     ui.review_state.compare_data.set(fixtures::git_workdir_compare());
                     ui.review_state.base_ref.set("HEAD".into());
-                    ui.review_state.compare_ref.set("WORKDIR".into());
+                    ui.review_state.compare_ref.set("UNCOMMITTED".into());
                     ui.page.set("review".into());
                 }))
                 .child(action("Review delivery", Variant::Secondary, move |_| {

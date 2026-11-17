@@ -49,7 +49,7 @@ fn working_tree_mode(ui: Ui) -> bool {
     ui.review_state.mode.get() == "git"
         && matches!(
             ui.review_state.compare_ref.get().as_str(),
-            "" | "WORKDIR" | "STAGED" | "UNSTAGED"
+            "" | "UNCOMMITTED" | "WORKDIR" | "STAGED" | "UNSTAGED"
         )
 }
 
@@ -57,6 +57,11 @@ fn working_tree_mode(ui: Ui) -> bool {
 /// Only the initial unresolved query uses the full-size loading placeholder.
 pub fn workbench(ui: Ui) -> impl IntoElement {
     let st = ui.review_state;
+    let viewport = super::model::DiffViewport {
+        scroll: element_ref(),
+        content: element_ref(),
+    };
+    st.viewport.replace(Some(viewport));
     let data = computed(move || {
         let mut value = if crate::APP.get().is_none()
             && let Some(p) = ui.review.get()
@@ -114,7 +119,21 @@ pub fn workbench(ui: Ui) -> impl IntoElement {
                         .min_h(px(0.))
                         .min_w(px(0.))
                         .child(
+                            view()
+                                .h(px(36.))
+                                .px_3()
+                                .justify_center()
+                                .border_b_1()
+                                .border_color(BORDER)
+                                .child(
+                                    label("Changes")
+                                        .text_size(px(12.))
+                                        .font_weight(FontWeight::SEMIBOLD),
+                                ),
+                        )
+                        .child(
                             scroll()
+                                .element_ref(&viewport.scroll)
                                 .flex_1()
                                 .min_h(px(0.))
                                 .min_w(px(0.))
@@ -153,7 +172,9 @@ fn file_list(ui: Ui, data: &Value) -> AnyElement {
                 .gap_1p5()
                 .bg(if all_selected { SELECTED } else { CLEAR })
                 .hover(|s| s.bg(if all_selected { SELECTED } else { CARD_HOVER }))
-                .on_press(move |_: &()| st.selected_file.set(String::new()))
+                .on_press(move |_: &()| {
+                    super::show_all_files(ui);
+                })
                 .child(
                     label(format!("All files ({file_count})"))
                         .text_size(px(12.))
@@ -175,8 +196,11 @@ fn file_list(ui: Ui, data: &Value) -> AnyElement {
             let f_add = f["additions"].as_u64().unwrap_or(0);
             let f_del = f["deletions"].as_u64().unwrap_or(0);
             let f_status = f["status"].as_str().unwrap_or("modified");
-            let is_sel = selected == fname;
-            let click_name = fname.clone();
+            let key = super::model::file_key(f);
+            let is_sel = selected == key;
+            let click_name = key.clone();
+            let fold_key = key;
+            let fold_path = fname.clone();
             let pending_for_file = pending_all.iter().filter(|c| c.path == fname).count();
             let short_name = fname.rsplit('/').next().unwrap_or(&fname).to_owned();
             let status_char = match f_status {
@@ -205,43 +229,49 @@ fn file_list(ui: Ui, data: &Value) -> AnyElement {
                 );
 
             file_list = file_list.child(
-                view().tooltip(hint_tooltip(fname.clone())).child(
-                    canban_ui_kit::press_target()
-                        .w_full()
-                        .min_h(px(27.))
-                        .px_2()
-                        .py_0p5()
-                        .rounded(px(5.))
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .gap_1p5()
-                        .bg(if is_sel { SELECTED } else { CLEAR })
-                        .hover(|s| s.bg(if is_sel { SELECTED } else { CARD_HOVER }))
-                        .on_press(move |_: &()| st.selected_file.set(click_name.clone()))
-                        .child(
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .gap_1p5()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .child(
-                                    label(status_char.0)
-                                        .font_family(MONO_FONT)
-                                        .text_size(px(10.5))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(status_char.1),
-                                )
-                                .child(
-                                    label(short_name)
-                                        .text_size(px(12.))
-                                        .truncate()
-                                        .min_w(px(0.)),
-                                ),
-                        )
-                        .child(right_meta),
-                ),
+                view()
+                    .tooltip(hint_tooltip(fname.clone()))
+                    .flex_row()
+                    .items_center()
+                    .child(fold_button(ui, fold_key, fold_path))
+                    .child(
+                        canban_ui_kit::press_target()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .min_h(px(27.))
+                            .px_2()
+                            .py_0p5()
+                            .rounded(px(5.))
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .gap_1p5()
+                            .bg(if is_sel { SELECTED } else { CLEAR })
+                            .hover(|s| s.bg(if is_sel { SELECTED } else { CARD_HOVER }))
+                            .on_press(move |_: &()| super::focus_file(ui, click_name.clone()))
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .child(
+                                        label(status_char.0)
+                                            .font_family(MONO_FONT)
+                                            .text_size(px(10.5))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(status_char.1),
+                                    )
+                                    .child(
+                                        label(short_name)
+                                            .text_size(px(12.))
+                                            .truncate()
+                                            .min_w(px(0.)),
+                                    ),
+                            )
+                            .child(right_meta),
+                    ),
             );
         }
 
@@ -252,6 +282,19 @@ fn file_list(ui: Ui, data: &Value) -> AnyElement {
             .border_r_1()
             .border_color(BORDER)
             .bg(SURFACE)
+            .child(
+                view()
+                    .h(px(36.))
+                    .px_3()
+                    .justify_center()
+                    .border_b_1()
+                    .border_color(BORDER)
+                    .child(
+                        label("Files")
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::SEMIBOLD),
+                    ),
+            )
             .child(scroll().flex_1().min_h(px(0.)).child(file_list))
             .into_element()
     }
@@ -269,7 +312,7 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
     let is_workdir_mode = st.mode.get() == "git"
         && matches!(
             st.compare_ref.get().as_str(),
-            "" | "WORKDIR" | "STAGED" | "UNSTAGED"
+            "" | "UNCOMMITTED" | "WORKDIR" | "STAGED" | "UNSTAGED"
         );
 
     if files.is_empty() && commit_detail.is_none() && !is_workdir_mode {
@@ -286,7 +329,6 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
             .into_element();
     }
 
-    let selected = st.selected_file.get();
     let active_line = st.active_line.get();
     let pending_all = st.pending_comments.get();
     let editing_remote = st.editing_remote_comment.get();
@@ -317,7 +359,12 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
     };
 
     // Right main diff viewer
-    let mut diff_column = view().gap_3().p_3();
+    let content = st
+        .viewport
+        .with(|v| v.expect("diff viewport is mounted").content);
+    let mut diff_column = view().element_ref(&content).gap_3().p_3();
+    st.file_targets.replace(Default::default());
+    let collapsed_files = st.collapsed_files.get();
 
     if let Some(detail) = commit_detail {
         let detail = detail.clone();
@@ -416,17 +463,17 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
 
     let total_files = files.len();
     let limit = st.visible_file_limit.get();
-    let visible_files: Vec<Value> = if selected.is_empty() {
-        files.into_iter().take(limit).collect()
-    } else {
-        files
-            .into_iter()
-            .filter(|f| f["filename"].as_str() == Some(selected.as_str()))
-            .collect()
-    };
+    let visible_files: Vec<Value> = files.into_iter().take(limit).collect();
 
     for file in visible_files {
         let path = file["filename"].as_str().unwrap_or("").to_owned();
+        let section = file["section"].as_str().unwrap_or("").to_owned();
+        let key = super::model::file_key(&file);
+        let collapsed = collapsed_files.contains(&key);
+        let target = element_ref();
+        st.file_targets.with(|targets| {
+            targets.insert(key.clone(), target);
+        });
         let f_status = file["status"].as_str().unwrap_or("modified").to_owned();
         let additions = file["additions"].as_u64().unwrap_or(0);
         let deletions = file["deletions"].as_u64().unwrap_or(0);
@@ -455,6 +502,25 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
             .bg(INSET)
             .border_b_1()
             .border_color(BORDER)
+            .child(fold_button(
+                ui,
+                key.clone(),
+                if section.is_empty() {
+                    path.clone()
+                } else {
+                    format!("{section} {path}")
+                },
+            ))
+            .child(if section.is_empty() {
+                view().into_element()
+            } else {
+                badge(if section == "staged" {
+                    "Staged"
+                } else {
+                    "Unstaged"
+                })
+                .into_element()
+            })
             .child(
                 label(path.clone())
                     .flex_1()
@@ -479,13 +545,13 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
             );
 
         if is_workdir_mode {
-            if is_file_unstaged || !is_file_staged {
+            if section != "staged" && (is_file_unstaged || !is_file_staged) {
                 let p_stage = path.clone();
                 header = header.child(compact_action("+ Stage", Variant::Quiet, move |_| {
                     git_ops::run_stage(ui, vec![p_stage.clone()], false);
                 }));
             }
-            if is_file_staged {
+            if section != "unstaged" && is_file_staged {
                 let p_unstage = path.clone();
                 header = header.child(compact_action("− Unstage", Variant::Quiet, move |_| {
                     git_ops::run_unstage(ui, vec![p_unstage.clone()], false);
@@ -497,12 +563,14 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
             }));
         }
 
+        let file_section = section.clone();
         header = header.child(compact_action(
             "+ File comment",
             Variant::Quiet,
             move |_| {
                 st.active_line.set(Some(LineTarget {
                     path: file_btn_path.clone(),
+                    section: file_section.clone(),
                     line: 1,
                     side: "RIGHT".into(),
                     snippet: String::new(),
@@ -511,6 +579,19 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
             },
         ));
 
+        if collapsed {
+            diff_column = diff_column.child(
+                view()
+                    .element_ref(&target)
+                    .rounded(px(RADIUS))
+                    .border_1()
+                    .border_color(BORDER)
+                    .bg(SURFACE)
+                    .overflow_hidden()
+                    .child(header),
+            );
+            continue;
+        }
         let body = if patch.trim().is_empty() {
             view()
                 .p_3()
@@ -521,7 +602,7 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
         } else {
             let parsed_lines = st
                 .prepared_lines
-                .with(|all| all.get(&path).cloned())
+                .with(|all| all.get(&key).cloned())
                 .unwrap_or_else(|| std::sync::Arc::new(parse_unified_hunk_lines(&patch)));
             let mut rows = view();
 
@@ -575,6 +656,7 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
                     _ => line_btn.bg(CLEAR),
                 };
 
+                let line_section = section.clone();
                 rows = rows.child(
                     line_btn
                         .hover(|s| s.bg(SELECTED))
@@ -584,6 +666,7 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
                         .on_press(move |_: &()| {
                             st.active_line.set(Some(LineTarget {
                                 path: line_path.clone(),
+                                section: line_section.clone(),
                                 line: comment_line,
                                 side: side_owned.clone(),
                                 snippet: snippet_for_target.clone(),
@@ -762,10 +845,12 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
                 }
 
                 // Render any pending inline comments saved for this file + line + side
-                for item in pending_all
-                    .iter()
-                    .filter(|c| c.path == path && c.line == comment_line && c.side == comment_side)
-                {
+                for item in pending_all.iter().filter(|c| {
+                    c.path == path
+                        && c.section == section
+                        && c.line == comment_line
+                        && c.side == comment_side
+                }) {
                     let item_id = item.id.clone();
                     let edit_item = item.clone();
                     let body_txt = item.body.clone();
@@ -812,6 +897,7 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
                                                     });
                                                     st.active_line.set(Some(LineTarget {
                                                         path: cur.path,
+                                                        section: cur.section,
                                                         line: cur.line,
                                                         side: cur.side,
                                                         snippet: cur.snippet,
@@ -838,6 +924,7 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
                 // Render active inline composer right beneath the clicked line
                 if let Some(ref target) = active_line
                     && target.path == path
+                    && target.section == section
                     && target.line == comment_line
                     && target.side == comment_side
                 {
@@ -851,6 +938,7 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
         // Fallback composer when "+ File comment" was clicked on an empty/binary patch
         let extra_composer = if let Some(ref target) = active_line
             && target.path == path
+            && target.section == section
             && patch.trim().is_empty()
         {
             inline_composer_box(ui, target.clone()).into_element()
@@ -860,6 +948,7 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
 
         diff_column = diff_column.child(
             view()
+                .element_ref(&target)
                 .rounded(px(RADIUS))
                 .border_1()
                 .border_color(BORDER)
@@ -871,7 +960,7 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
         );
     }
 
-    if selected.is_empty() && total_files > limit {
+    if total_files > limit {
         diff_column = diff_column.child(compact_action(
             format!("Show more files ({} remaining)", total_files - limit),
             Variant::Secondary,
@@ -949,6 +1038,7 @@ fn inline_composer_box(ui: Ui, target: LineTarget) -> View {
                             list.push(PendingInlineComment {
                                 id: canban_types::id(),
                                 path: target.path.clone(),
+                                section: target.section.clone(),
                                 line: target.line,
                                 side: target.side.clone(),
                                 snippet: target.snippet.clone(),
@@ -1201,4 +1291,23 @@ fn remote_pr_comment_delete_confirm(ui: Ui, comment_id: u64, pr_target: Option<V
             move || !st.remote_delete_error.get().is_empty(),
             move || notice(move || st.remote_delete_error.get(), Tone::Danger),
         ))
+}
+
+/// Both file navigation and Changes dispatch this exact per-patch fold action.
+pub fn fold_button(ui: Ui, key: String, title: String) -> impl IntoElement {
+    let st = ui.review_state;
+    let folded = st.collapsed_files.with(|files| files.contains(&key));
+    let label = format!(
+        "{} diff for {title}",
+        if folded { "Expand" } else { "Collapse" }
+    );
+    chrome_button(
+        if folded {
+            Icon::Forward
+        } else {
+            Icon::ChevronDown
+        },
+        label,
+        move |_| super::toggle_file(ui, key.clone()),
+    )
 }

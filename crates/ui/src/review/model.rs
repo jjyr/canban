@@ -6,6 +6,7 @@ use std::sync::Arc;
 pub struct PendingInlineComment {
     pub id: String,
     pub path: String,
+    pub section: String,
     pub line: u64,
     pub side: String, // "LEFT" | "RIGHT"
     pub snippet: String,
@@ -15,14 +16,25 @@ pub struct PendingInlineComment {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LineTarget {
     pub path: String,
+    pub section: String,
     pub line: u64,
     pub side: String,
     pub snippet: String,
 }
 
 #[derive(Clone, Copy)]
+pub struct DiffViewport {
+    pub scroll: ElementRef,
+    pub content: ElementRef,
+}
+
+#[derive(Clone, Copy)]
 pub struct State {
     pub sidebar_open: Signal<bool>,
+    pub compare_open: Signal<bool>,
+    pub collapsed_files: Signal<std::collections::BTreeSet<String>>,
+    pub viewport: Stored<Option<DiffViewport>>,
+    pub file_targets: Stored<std::collections::BTreeMap<String, ElementRef>>,
     pub card_drawer_open: Signal<bool>,
     pub commits_open: Signal<bool>,
     /// "git" (ad-hoc Git comparison), "card_local" (Card worktree/branch), or "github_pr" (remote PR)
@@ -34,6 +46,7 @@ pub struct State {
     pub pr_target: Signal<Option<Value>>,
     pub selected_file: Signal<String>,
     pub summary_revision: Signal<u64>,
+    pub pending_file: Stored<String>,
     pub read_cache: Stored<Arc<super::cache::ReadCache>>,
     pub read_context: Stored<String>,
     pub refs_request: Stored<String>,
@@ -97,6 +110,10 @@ impl State {
     pub fn new() -> Self {
         Self {
             sidebar_open: signal(true),
+            compare_open: signal(false),
+            collapsed_files: signal(Default::default()),
+            viewport: stored(None),
+            file_targets: stored(Default::default()),
             card_drawer_open: signal(false),
             commits_open: signal(false),
             mode: signal("git".into()),
@@ -106,6 +123,7 @@ impl State {
             pr_target: signal(None),
             selected_file: signal(String::new()),
             summary_revision: signal(0),
+            pending_file: stored(String::new()),
             read_cache: stored(Arc::new(super::cache::ReadCache::default())),
             read_context: stored(String::new()),
             refs_request: stored(String::new()),
@@ -262,12 +280,16 @@ pub fn format_pending_markdown(
         out.push_str("\n#### Inline Comments\n");
         for (idx, item) in comments.iter().enumerate() {
             let side_note = if item.side == "LEFT" { " (old)" } else { "" };
+            let source_note = if item.section.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", item.section)
+            };
             out.push_str(&format!(
-                "\n{}. **`{}:{}`**{}\n",
+                "\n{}. **`{}:{}`**{side_note}{source_note}\n",
                 idx + 1,
                 item.path,
-                item.line,
-                side_note
+                item.line
             ));
             if !item.snippet.trim().is_empty() {
                 out.push_str(&format!("   > `{}`\n", item.snippet.trim()));
@@ -280,4 +302,19 @@ pub fn format_pending_markdown(
         }
     }
     out
+}
+
+/// The same path may have independent index and working-directory patches.
+pub fn file_key(file: &Value) -> String {
+    diff_key(
+        file["section"].as_str().unwrap_or(""),
+        file["filename"].as_str().unwrap_or(""),
+    )
+}
+pub fn diff_key(section: &str, path: &str) -> String {
+    if section.is_empty() {
+        path.to_owned()
+    } else {
+        format!("{section}\0{path}")
+    }
 }

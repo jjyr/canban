@@ -508,6 +508,40 @@ impl Ops {
         let base_trimmed = base.trim();
         let compare_trimmed = compare.trim();
 
+        // Keep index and working-directory patches separate. A net HEAD -> working
+        // tree diff can hide staged edits that were subsequently undone on disk.
+        if compare_trimmed == "UNCOMMITTED" {
+            let head = if self
+                .git(dir, &["rev-parse", "--verify", "HEAD"])?
+                .status
+                .success()
+            {
+                "HEAD"
+            } else {
+                EMPTY_TREE
+            };
+            let mut staged = self.git_compare(project, head, "STAGED", cwd_override, false)?;
+            let unstaged = self.git_compare(project, head, "UNSTAGED", cwd_override, false)?;
+            let mut files = Vec::new();
+            for (section, data) in [("staged", &staged), ("unstaged", &unstaged)] {
+                for file in data["files"].as_array().into_iter().flatten() {
+                    let mut file = file.clone();
+                    file["section"] = json!(section);
+                    files.push(file);
+                }
+            }
+            for field in ["total_additions", "total_deletions"] {
+                staged[field] = json!(
+                    staged[field].as_u64().unwrap_or(0) + unstaged[field].as_u64().unwrap_or(0)
+                );
+            }
+            staged["files"] = json!(files);
+            staged["compare_ref"] = json!("UNCOMMITTED");
+            staged["truncated"] =
+                json!(staged["truncated"] == true || unstaged["truncated"] == true);
+            return Ok(staged);
+        }
+
         // Resolve base commit (supporting EMPTY_TREE, `sha~1`/`sha^`/`sha^1` on root commits,
         // or `sha^N` for merge commit parent selection).
         let (base_sha, single_parent_idx) = if base_trimmed == EMPTY_TREE {
@@ -948,6 +982,84 @@ mod tests {
             created_at: 0,
         };
         (tmp, project)
+    }
+
+    #[test]
+    fn uncommitted_keeps_staged_and_unstaged_patches_even_when_they_cancel() {
+        let (_tmp, project) = make_repo();
+        let repo = Path::new(&project.directory);
+        let original = fs::read_to_string(repo.join("README.md")).unwrap();
+        fs::write(repo.join("README.md"), "staged replacement\n").unwrap();
+        git(repo, &["add", "README.md"]);
+        fs::write(repo.join("README.md"), &original).unwrap();
+        fs::write(repo.join("new.txt"), "untracked content\n").unwrap();
+        let ops = Ops::local();
+        let net = ops
+            .git_compare(&project, "HEAD", "WORKDIR", None, false)
+            .unwrap();
+        assert!(
+            !net["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["filename"] == "README.md")
+        );
+        let data = ops
+            .git_compare(&project, "HEAD", "UNCOMMITTED", None, false)
+            .unwrap();
+        let files = data["files"].as_array().unwrap();
+        assert_eq!(files.len(), 3);
+        let index = files
+            .iter()
+            .find(|f| f["filename"] == "README.md" && f["section"] == "staged")
+            .unwrap();
+        let disk = files
+            .iter()
+            .find(|f| f["filename"] == "README.md" && f["section"] == "unstaged")
+            .unwrap();
+        assert!(
+            index["patch"]
+                .as_str()
+                .unwrap()
+                .contains("+staged replacement")
+        );
+        assert!(
+            disk["patch"]
+                .as_str()
+                .unwrap()
+                .contains("-staged replacement")
+        );
+        assert!(files.iter().any(|f| f["filename"] == "new.txt"
+            && f["section"] == "unstaged"
+            && f["status"] == "added"));
+        // A clean checkout stays a valid empty Uncommitted comparison.
+        git(repo, &["reset", "--hard", "HEAD"]);
+        fs::remove_file(repo.join("new.txt")).unwrap();
+        assert!(
+            ops.git_compare(&project, "HEAD", "UNCOMMITTED", None, false)
+                .unwrap()["files"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn uncommitted_works_before_the_first_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        git(repo, &["init", "-b", "main"]);
+        fs::write(repo.join("staged.txt"), "index\n").unwrap();
+        git(repo, &["add", "staged.txt"]);
+        fs::write(repo.join("new.txt"), "disk\n").unwrap();
+        let mut project = make_repo().1;
+        project.directory = repo.to_string_lossy().into_owned();
+        let data = Ops::local()
+            .git_compare(&project, "HEAD", "UNCOMMITTED", None, false)
+            .unwrap();
+        assert_eq!(data["files"].as_array().unwrap().len(), 2);
+        assert_eq!(data["files"][0]["section"], "staged");
+        assert_eq!(data["files"][1]["section"], "unstaged");
     }
 
     #[test]

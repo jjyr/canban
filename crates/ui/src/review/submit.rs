@@ -538,7 +538,7 @@ fn submit_primary_button(ui: Ui, pr_info: Option<Value>) -> impl IntoElement {
                     "line": c.line,
                     "side": c.side,
                     "snippet": c.snippet,
-                    "body": c.body,
+                    "body": if c.section.is_empty() { c.body.clone() } else { format!("[{}]\n{}", c.section, c.body) },
                 })
             })
             .collect();
@@ -575,7 +575,7 @@ fn submit_primary_button(ui: Ui, pr_info: Option<Value>) -> impl IntoElement {
                         "path": c.path,
                         "line": c.line,
                         "side": c.side,
-                        "body": c.body,
+                        "body": if c.section.is_empty() { c.body.clone() } else { format!("[{}]\n{}", c.section, c.body) },
                     })
                 })
                 .collect();

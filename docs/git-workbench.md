@@ -1,26 +1,54 @@
 # Git workbench
 
-Current contract, updated 2026-11-17 (Cards #100 and #108).
+Current contract, updated 2026-11-17 (Cards #100, #106 and #108).
 
-The left Workspace selector chooses the Project checkout, a managed worktree,
-or a Card. Its choice determines the working tree, index and destination of
-Fetch, Pull, Push, staging and commits. The top toolbar's Base and Compare
-selectors choose the comparison range. Switching a checkout preserves an
-explicit range; `HEAD`, Working tree and Staged resolve inside that checkout.
-Opening a Card intentionally selects its review context. Choosing either ref
-explicitly enters an ordinary Git comparison. The toolbar shows the operation
-branch, with the checkout's full directory available on hover.
+Git is a checkout-oriented workbench with **Commits / Files / Changes** columns.
+The top Worktree picker selects the Project checkout, a managed worktree, or a
+Card worktree. Each physical directory appears once, including canonical path
+aliases. Selecting a checkout defaults to **Uncommitted**, even when it is clean.
+Fetch, Pull, Push, staging and commits act in that checkout. Re-entering Git
+retains the selected checkout and comparison for the same host and Project.
 
-Clicking the Git entry from a Card or Terminal opens its associated Project's
-main checkout; explicit Card Diff and Terminal branch actions keep their precise
-checkout/range targets. Entering from other pages retains the existing Project.
-Changing Project clears the old branches, comparison range, checkout and results
-before loading the new refs, fencing late reads. A loaded range in the same
-Project/main checkout stays selected. History retains its own Project without
-entry-point inference; foreign Git selections are cleared when that page mounts.
+Cards are optional context. AppServer matches active Cards by canonical worktree
+path on the owning machine; branch names and Board selection do not establish
+an association. Exactly one match exposes a compact `#N ↗` link to that Card.
+Ambiguous or absent matches expose no Card link. The hint never changes the
+comparison or authorizes Card reporting, workflow changes or delivery. The
+Worktree picker and Commits column do not repeat Card/PR inventories. Opening a
+local Card or managed worktree in Git selects its checkout and Uncommitted view;
+remote PR diffs remain available from GitHub without a local worktree.
+
+The Commits column contains one Uncommitted entry followed by searchable commit
+history. Uncommitted displays separate **Staged** (HEAD to index) and **Unstaged**
+(index to working directory, including untracked files) groups in Files and
+Changes. A path modified in both groups has two independently selectable and
+foldable patches. This preserves edits that cancel out in the net HEAD-to-disk
+diff. Repositories without a first commit use the empty tree as the index base.
+Selecting a commit displays its parent-to-commit diff and metadata, including the
+existing merge-parent selector.
+
+Custom Base/Compare selectors, swap and merge-base controls are hidden behind
+**Compare…**. They retain arbitrary ref, branch and tag comparison support. A
+comparison never switches the operation checkout. Choosing another worktree
+returns to its Uncommitted view rather than carrying refs from another checkout.
+The Worktree picker displays its directory and branch, with the full path on hover.
+
+Changes is a continuous file view. Clicking a file name reveals and expands its
+patch without filtering out other files. Chevron icons in Files and Changes
+share the same per-patch fold state. A collapsed patch retains its file name,
+source group, status and change statistics. Refresh of the same query retains
+fold state; changing comparison or checkout resets it. Command Palette entries
+expose Compare, checkout selection, related Card navigation and file reveal/fold.
+
+Clicking the Git entry from a Card or Terminal resolves that context's Project;
+entering from other pages retains the existing Project. Re-entering the same
+Project retains its selected checkout and range. Changing Project clears the
+old branches, comparison range, checkout and results before loading the new
+refs, fencing late reads. History retains its own Project without entry-point
+inference; foreign Git selections are cleared when that page mounts.
 
 The commit-history branch selector and search input are retained independently
-of the changing Workspace/Card rows and commit results. Receiving refs, a new
+of the changing Uncommitted count and commit results. Receiving refs, a new
 commit page or loading state must not dismiss an open branch popover, clear its
 query or remove keyboard focus. Commit search is debounced by 150 ms; Enter
 requests it immediately. The refs response supplies the initial commit page,
@@ -31,15 +59,15 @@ avoiding an identical initial `git.log` query.
 Card #104 extends branch labels into direct Compare entry points. A Card's branch
 opens its bound workspace, while a Terminal's branch follows the observed
 checkout, including after the Agent changes directory. Neither opens a workspace
-switching dropdown. A managed worktree compares its base branch with Working tree
-using merge-base semantics; a Project root compares HEAD with Working tree.
-Both include staged, unstaged and untracked files. Worktree management stays in
-Git's Workspace list, tree context menus and the Command Palette.
+switching dropdown. Local Card and managed-worktree entries default to Uncommitted. Explicit
+Terminal range actions retain their observed checkout and range; a Project root
+compares HEAD with Working tree. These views include staged, unstaged and
+untracked files. Worktree management stays in the Worktree picker, Terminal tree
+context menus and the Command Palette.
 
-The visible Card header queries the exact same `git.compare` parameters as its
-default Git view, including the bound target branch and checkout path. It shares
-the window's bounded read cache and in-flight request coalescing. Opening Compare
-therefore reuses a recent result. No Board-tile Git queries or polling timers are
+The visible Card header summarizes delivery changes against its bound target
+branch in its checkout. This is independent of Git's default Uncommitted view.
+It shares the window's bounded read cache and in-flight request coalescing. No Board-tile Git queries or polling timers are
 added. Unrelated Snapshot changes do not reload statistics. Known review events,
 host recovery, explicit Refresh Card Diff and reopening after cache expiry reread
 the relevant scope. Query tickets discard late results after a Card/context
@@ -95,9 +123,11 @@ navigation updates are confined to the commit header. Switching queries clears
 mismatched content. An offline remote view retains known content, shows the host
 notice, and waits for recovery rather than repeatedly issuing Git reads.
 
-Prepared patch lines are shared with rendering. All files initially mounts four
-file bodies; Show more files adds four, and selecting an individual file opens
-it directly. The existing per-file 500-line display bound remains in place.
+Prepared patch lines are shared with rendering and keyed by source group plus
+path. Changes initially mounts four patches; Show more files adds four. Selecting
+a later file reveals intervening headers with their unseen bodies folded, then
+expands and scrolls to the target. Already mounted patches retain their state.
+The existing per-file 500-line display bound remains in place.
 This bounds initial view construction without fetching or parsing on the UI
 thread. Refresh and Show more files also appear in the Command Palette.
 
@@ -129,8 +159,9 @@ draft, wait through several updates, then continue typing without refocusing.
 The editor, draft and focus must survive; code must not return to Loading.
 
 `CANBAN_GALLERY_SCENE=review-large-diff mise run gallery` contains 60 files with
-400 changed lines per file. Verify bounded initial content, direct file
-selection and Show more files. `review-working-tree` and `review-commits` retain
+400 changed lines per file. Verify bounded initial content, continuous file reveal, per-file folding and Show more files. The
+`review-uncommitted` scene adds the same path in both Staged and Unstaged and a
+matched Card shortcut; fold each source independently from either column. `review-working-tree` and `review-commits` retain
 the staging and commit-inspection compositions. Gallery fixtures do not prove
 real Git operation acceptance; use a packaged App with a disposable repository,
 local bare remote, isolated Canban home and isolated Herdr Core for that check.
@@ -209,3 +240,86 @@ Validated from base `c17019f` plus the refresh-isolation changes:
   `cargo clippy --workspace --lib -- -D warnings -A clippy::needless_borrow`,
   allowing only the known pre-existing GitHub borrow lint. Native fixture and
   Gallery processes and their isolated services/Core were closed afterwards.
+
+## Simplified workbench acceptance (2026-11-17, Card #106)
+
+Validated on macOS from base `7059480` plus the workbench changes:
+
+- `RUSTUP_AUTO_INSTALL=0 bu exec -- mise run build` packaged and signed
+  `.local/Canban.app`. The desktop API is 63 for the checkout Card hint and
+  `UNCOMMITTED` comparison/source-group payloads.
+- `mise run test -- --no-fail-fast`, through Bullet, passed 583 tests with one
+  configured skip. An initial run exposed eager `ElementRef` construction in
+  window-independent state initialization; references now belong to the mounted
+  diff viewport. The full rerun includes a direct initialization regression,
+  the two previously failing Terminal tests, source-specific prepared patches,
+  independent folding, canonical/ambiguous worktree matching, cancelling index/
+  disk edits and repositories without a first commit.
+- `mise run acceptance`, through Bullet, passed with isolated home
+  `/private/tmp/cb-8ldzcg2r/home` and isolated Herdr Core. This is the deterministic
+  PTY/workflow suite, separate from the native Git checks below.
+- Packaged native Git acceptance used a disposable source repository, local bare
+  remote, Canban home and Core under `/private/tmp/cb-git106-9fgcn1sb`. Project and
+  standalone checkouts displayed clean Uncommitted views without a Card link;
+  selecting the Card worktree exposed one `#1` link. Opening that link and Back
+  restored the Git workbench without changing its checkout. Both staged and
+  unstaged versions of `mixed.rs` showed their own exact patches. Chevrons in
+  Files and Changes synchronized independent fold states; refreshing the same
+  comparison retained a folded file.
+- Native single-file Stage and Unstage were verified against the real index and
+  untracked status. Commit & Push created
+  `d58b43a72f4f99e6a5250917cdf060fefe791880` in the selected worktree and local bare
+  remote, while preserving the unstaged disk edit. Stage All followed by Amend
+  produced `73484a114c5f8284fddf2f6beac1d67ec7277db0`, with two total commits and a
+  clean worktree. The Project source HEAD stayed at its seed commit and the
+  associated Card remained Backlog at revision 1.
+- Native history inspection showed the amended commit's three files and parent
+  diff. Compare… selected `main` as Base and retained the selected commit as
+  Compare, displaying the same three-file range without changing checkout.
+- The production `review-uncommitted` Gallery verified the same path's two
+  source groups and folding from both columns. The 60-file, 400-line-per-file
+  `review-large-diff` Gallery revealed `src/module-59.rs` in the continuous view,
+  retained earlier patches and folded intervening unseen bodies. This establishes
+  bounded construction/navigation behavior, not a quantitative frame-time result.
+- A later Gallery rebuild encountered Bullet 0.2.0's prebuilt-toolchain bootstrap
+  HTTP 404 before compilation. Native Gallery checks used the already packaged
+  production Gallery; the application package and full test/acceptance runs above
+  had succeeded. After explicit user approval, duplicate checking confirmed the
+  download failure is already tracked by bullet Card #8 (`0ffbe7a2`); no duplicate
+  Card, toolchain installation or native-Cargo fallback was performed.
+
+Native check receipts and Git results are in the temporary fixture's
+`evidence.json`, with `before-commit.png`, `commit-comparison.png` and
+`large-reveal.png` as supplementary UI evidence. Historical test counts above
+remain evidence for their original revisions, not this change. No prompts or
+workflow YAML were modified.
+
+The contextual Project routing and history acceptance for Card #108 is recorded
+in [Project navigation acceptance, 2026-11-17](project-navigation-acceptance-20261117.md).
+Card #106 supersedes its local Card/worktree default range with Uncommitted;
+its cross-Project isolation and observed Terminal context rules remain in effect.
+
+## Main integration verification (2026-11-17, Card #106)
+
+Rebased the workbench change onto `fcaee750` after the automatic merger stopped
+on a provider quota error. Resolved the five conflicts while retaining contextual
+Project routing, foreign-result fencing, observed Terminal checkout navigation,
+Card summary invalidation and history checkpoints. Same-Project Git entry retains
+its selected worktree/range; local Card and managed-worktree entry defaults to
+Uncommitted. The navigation regression covers both retention and Project changes.
+
+- `RUSTUP_AUTO_INSTALL=0 bu exec -- mise run build` passed and packaged the App.
+- `RUSTUP_AUTO_INSTALL=0 bu exec -- mise run test` passed 591 tests, with one
+  configured skip. `mise run acceptance` through the same Bullet wrapper passed
+  with isolated home `/private/tmp/cb-ky7ill4j/home` and isolated Core.
+- The rebuilt native App used a fresh disposable repository/home/Core under
+  `/private/tmp/cb-git106-rox3hk_b`. Clicking the Card branch opened its worktree's
+  Uncommitted view with independent staged and unstaged `mixed.rs` patches.
+  Folding its staged patch from Files changed both matching chevrons to Expand
+  and removed only that patch body. Global Back returned to the original Card.
+  The source HEAD and Card Backlog/revision 1 were unchanged. Temporary processes
+  were closed afterwards. This integration check did not repeat the earlier
+  native Commit & Push/Amend sequence documented above.
+- Changed-file formatting and `git diff --check` passed. A workspace-wide format
+  check also found existing differences outside this change; those files were
+  left untouched. No prompts or workflow YAML were changed.

@@ -78,6 +78,12 @@ impl AppServer {
             vec![(project.directory.clone(), None)];
 
         for c in &cards {
+            if c.workspace
+                .as_ref()
+                .is_some_and(|w| w.location.machine != machine)
+            {
+                continue;
+            }
             if let Some(wt_path) = c.worktree.as_deref().filter(|s| !s.is_empty()) {
                 allowed_paths.push((wt_path.to_owned(), Some(c.id.clone())));
                 if c.active() {
@@ -221,7 +227,38 @@ impl AppServer {
         let mut resp = self
             .ops(&machine)
             .git_refs_in(&ctx.project, Some(&ctx.cwd))?;
-        resp["checkouts"] = json!(ctx.checkouts);
+        // Match on this host's canonical checkout path, never on a branch name.
+        // Multiple active Cards sharing a directory are deliberately unassigned.
+        let ops = self.ops(&machine);
+        let canonical = |path: &str| {
+            ops.host
+                .canonical(Path::new(path))
+                .unwrap_or_else(|_| PathBuf::from(path))
+        };
+        let active = canonical(&ctx.cwd);
+        let mut related = std::collections::BTreeSet::new();
+        for checkout in &ctx.checkouts {
+            if checkout["kind"] == "card"
+                && canonical(checkout["path"].as_str().unwrap_or("")) == active
+                && let Some(id) = checkout["card_id"].as_str()
+            {
+                related.insert(id.to_owned());
+            }
+        }
+        resp["related_card_id"] = if related.len() == 1 {
+            json!(related.into_iter().next())
+        } else {
+            Value::Null
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        resp["checkouts"] = json!(
+            ctx.checkouts
+                .into_iter()
+                .filter(|checkout| {
+                    seen.insert(canonical(checkout["path"].as_str().unwrap_or("")))
+                })
+                .collect::<Vec<_>>()
+        );
         Ok(resp)
     }
 
