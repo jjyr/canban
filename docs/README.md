@@ -40,6 +40,8 @@ editor, modal, window-title and terminal checks.
 
 [Column transition dispatch acceptance (2026-11-17)](column-transition-acceptance-20261117.md) records direction-specific event matching, isolated workflow/merge verification, native stage-menu acceptance and the Bullet build-path limitation.
 
+[Large GitHub Board performance acceptance (2026-11-18)](board-performance-acceptance-20261118.md) records indexed filtering/status, viewport ownership, bounded source batches, Fiber-derived measurements and isolated native checks.
+
 [Agent RPC/CLI acceptance (2026-11-17)](agent-interface-acceptance-20261117.md)
 records API-65 response defaults, isolated/native consumer verification and a
 synthetic 62-operation comparison separating wire, CLI and candidate-context bytes.

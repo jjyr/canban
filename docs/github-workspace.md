@@ -156,3 +156,22 @@ These preferences only affect presentation, never Card state or scheduling.
 
 [2026-11-17 Board filter acceptance](board-filters-acceptance-20261117.md) records
 the automated checks, native startup observations and remaining interaction checks.
+
+## Large linked Project performance
+
+Board filtering borrows the active identity and uses the shared source index for
+GitHub authorship/state. Unrestricted filters skip source lookup. Board geometry
+keeps ordered Card indices, combines native height changes once per display frame,
+and mounts viewport rows plus overscan instead of every matching Card. The lifted
+and focused Card owners remain mounted across scrolling. Status-only snapshots
+that leave filtered Cards equal preserve the existing row collection and geometry.
+
+Issue discovery indexes tracked/removed source identities and cached revisions.
+Reconciliation builds a Project-scoped source/delivery/append-order index once per
+transaction. Workers apply at most 64 source changes per transaction and release
+the shared Store between batches. Each batch rechecks account/source generations
+and local removals. Earlier committed batches remain if a later batch fails;
+last-success advances only after the complete Issues/PRs/observations run succeeds.
+Provider cache reads/serialization happen before taking Store, and observation
+relations are indexed once per batch. Source deduplication, delivery-PR exclusion,
+local instructions, history and removal suppression keep their existing semantics.

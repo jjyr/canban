@@ -34,9 +34,11 @@ pub fn active_login_from(snapshot: &Snapshot, gh: &Value) -> Option<String> {
 }
 
 pub fn active_login_untracked(ui: Ui) -> Option<String> {
-    let snapshot = ui.snapshot.get_untracked();
-    let gh = ui.github.gh_status.get_untracked();
-    active_login_from(&snapshot, &gh)
+    ui.snapshot.with_untracked(|snapshot| {
+        ui.github
+            .gh_status
+            .with_untracked(|gh| active_login_from(snapshot, gh))
+    })
 }
 
 pub fn is_connected_untracked(ui: Ui) -> bool {

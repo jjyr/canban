@@ -35,6 +35,7 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage, compact: bool) -> i
     let gap_visible_stage = id.clone();
     let gap_height_stage = id.clone();
     let list_stage = id.clone();
+    let viewport_stage = id.clone();
     let count_stage = id.clone();
     let is_backlog = stage.id == "backlog";
     let mut root = view()
@@ -115,7 +116,7 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage, compact: bool) -> i
             .flex_1()
             .min_h(px(0.))
             .relative()
-            .on_layout(move |_: &Bounds<Points>| state.dirty())
+            .on_layout(move |b: &Bounds<Points>| state.viewport(&viewport_stage, b.size.height.0))
             .child(
                 scroll()
                     .element_ref(&scroll_ref)
@@ -174,16 +175,7 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage, compact: bool) -> i
                                     }),
                             )
                             .child(each(
-                                move || {
-                                    let mut cards = state.cards.with(|all| {
-                                        all.iter()
-                                            .filter(|c| c.stage == list_stage)
-                                            .cloned()
-                                            .collect::<Vec<_>>()
-                                    });
-                                    cards.sort_by(Card::board_cmp);
-                                    cards
-                                },
+                                move || state.visible(&list_stage),
                                 |c| c.id.clone(),
                                 move |card, _| row(ui, state, card),
                             )),
@@ -237,6 +229,7 @@ fn row(ui: Ui, state: BoardDrag, card: ReadSignal<Card>) -> impl IntoElement {
     let layout_id = id.clone();
     let pan_id = id.clone();
     let cleanup_id = id.clone();
+    let focus_id = id.clone();
     cleanup(move || state.row_unmounted(&cleanup_id));
     let resting_y = computed(move || {
         state
@@ -279,6 +272,8 @@ fn row(ui: Ui, state: BoardDrag, card: ReadSignal<Card>) -> impl IntoElement {
         .bind_translate_y(&y)
         .rounded(px(RADIUS))
         .focusable(true)
+        .on_focus(move || state.focused.set(focus_id.clone()))
+        .on_blur(move || state.focused.set(String::new()))
         .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
         .label(move || {
             let c = card.get();

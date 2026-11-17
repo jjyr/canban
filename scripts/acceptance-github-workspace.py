@@ -3,12 +3,14 @@
 No real GitHub writes, user credentials or live Herdr Core are used.
 """
 import argparse, json, os, plistlib, shutil, sqlite3, subprocess, tempfile, time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 parser=argparse.ArgumentParser();parser.add_argument('--native',action='store_true');args=parser.parse_args()
 root=Path(__file__).resolve().parents[1];base=Path(tempfile.mkdtemp(prefix='cb-github-workspace-',dir='/private/tmp'));home=base/'home'
 cli=root/'target/debug/canban';fixture=root/'scripts/fixture-github.py';fixture.chmod(0o755)
 core={'HC_SESSION':'github-workspace-acceptance','HC_SOCKET':str(base/'hc.sock'),'XDG_STATE_HOME':str(base/'state'),'XDG_CONFIG_HOME':str(base/'config')}
 env={k:v for k,v in os.environ.items() if not k.startswith('CANBAN_')};env.update(core);env.update(CANBAN_HOME=str(home),CANBAN_GH_BIN=str(fixture),CANBAN_GITHUB_FIXTURE_DIR=str(base))
+if os.environ.get('CANBAN_BOARD_TRACE'):env['CANBAN_BOARD_TRACE']='1'
 # All runtime connections use this Core from the first bootstrap; no default
 # session briefly competes for its socket. Browser fixtures never invoke a model.
 (home/'config').mkdir(parents=True,exist_ok=True)
@@ -126,7 +128,24 @@ try:
  before_state=call('app.state')
  call('github.browse',{'kind':'issues','relation':'all','state':'open','query':'new query cache','page':2})
  after_state=call('app.state');assert after_state['snapshot']['cards']==before_state['snapshot']['cards'];assert after_state['github_revision']>before_state['github_revision']
- results={'passed':True,'base':str(base),'home':str(home),'project_id':p['id'],'issue_card':issue['id'],'pr_card':prcard['id'],'local_card':local['id'],'rule_save_seconds':save_seconds,'checks':['nonblocking same-repository rule save','queued automatic intake after Save','paused manual sync','PR error visibility and retry','automatic Issue/PR Backlog intake','manual dedup','Local references','notification pagination/cache','versioned Diff','comment and Review receipts','stale-head rejection','source refresh without execution','notification read receipt','no mirrored remote bodies','restart/cache restore','cache-only changes propagate without Card changes']}
+ # More than two worker batches: source events, stable identities and numbering
+ # must survive incremental commits. Refreshing the same set creates no duplicates.
+ remote(issue_count=130)
+ sync_read_seconds=[]
+ with ThreadPoolExecutor(max_workers=1) as pool:
+  syncing=pool.submit(call,'github.sync',{'project_id':p['id']})
+  while not syncing.done():
+   started=time.monotonic();call('card.get',{'card_id':local['id']});sync_read_seconds.append(time.monotonic()-started)
+   time.sleep(.01)
+  syncing.result()
+ assert sync_read_seconds and max(sync_read_seconds)<2, 'Card reads stalled during bounded source import'
+ sync_read_seconds.sort()
+ sync_read_latency={'samples':len(sync_read_seconds),'p50':sync_read_seconds[len(sync_read_seconds)//2],'p95':sync_read_seconds[min(len(sync_read_seconds)-1,int(len(sync_read_seconds)*.95))],'max':max(sync_read_seconds)}
+ scaled=call('app.snapshot');assert len(scaled['cards'])==131
+ assert next(c for c in scaled['cards'] if c['id']==issue['id'])['number']==issue['number']
+ assert len({(c['content']['source']['repository_id'],c['content']['source']['issue_id']) for c in scaled['cards'] if c['content']['kind']!='local'})==130
+ call('github.sync',{'project_id':p['id']});assert len(call('app.snapshot')['cards'])==131
+ results={'passed':True,'base':str(base),'home':str(home),'project_id':p['id'],'issue_card':issue['id'],'pr_card':prcard['id'],'local_card':local['id'],'rule_save_seconds':save_seconds,'sync_card_read_seconds':sync_read_latency,'checks':['nonblocking same-repository rule save','queued automatic intake after Save','paused manual sync','PR error visibility and retry','automatic Issue/PR Backlog intake','manual dedup','Local references','notification pagination/cache','versioned Diff','comment and Review receipts','stale-head rejection','source refresh without execution','notification read receipt','no mirrored remote bodies','restart/cache restore','cache-only changes propagate without Card changes','130-source multi-batch synchronization and repeat dedup']}
  (base/'results.json').write_text(json.dumps(results,indent=2));print(json.dumps(results),flush=True)
  if args.native:
   app_id='com.canban.github-acceptance.'+base.name;bundle=base/'CanbanGitHubAcceptance.app';shutil.copytree(root/'.local/Canban.app',bundle)

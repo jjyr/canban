@@ -442,41 +442,19 @@ impl AppServer {
         let changes = sync.changes;
         if !changes.is_empty() {
             let pr_numbers: Vec<u64> = changes.iter().map(|c| c.issue.number).collect();
-            self.store.lock().unwrap().write(|db| {
-                ensure!(
-                    self.github.generation() == generation,
-                    "GitHub account changed"
-                );
-                let observations = changes
-                    .iter()
-                    .map(|c| {
-                        Ok(client
-                            .cached::<Value>(&format!(
-                                "/repos/{}/pulls/{}",
-                                source.repository, c.issue.number
-                            ))
-                            .unwrap_or(serde_json::to_value(&c.issue)?))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                integration::apply(
-                    db,
-                    project,
-                    &source.generation,
-                    integration::Sync { changes },
-                )?;
-                for item in observations {
-                    events::github::observe(
-                        db,
-                        &source.repository,
-                        item["number"].as_u64().context("Missing source number")?,
-                        "pr",
-                        "overview",
-                        &item,
-                        false,
-                    )?;
-                }
-                Ok(())
-            })?;
+            // Provider cache reads and JSON conversion must happen before taking Store.
+            let observations = changes
+                .iter()
+                .map(|c| {
+                    Ok(client
+                        .cached::<Value>(&format!(
+                            "/repos/{}/pulls/{}",
+                            source.repository, c.issue.number
+                        ))
+                        .unwrap_or(serde_json::to_value(&c.issue)?))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            self.github_apply_changes(project, generation, changes, observations, Some("pr"))?;
             for number in pr_numbers {
                 if let Some(pr_value) =
                     client.cached::<Value>(&format!("/repos/{}/pulls/{number}", source.repository))

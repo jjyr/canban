@@ -156,3 +156,22 @@ tiles cleanly. Verified with NSH `Core` deep-scroll tests (`deep_review_column_r
 `CANBAN_GALLERY_SCENE=board-deep-review` (36 Review Cards), and an isolated packaged
 `Canban.app` instance with 33 Review Cards + live `Backlog` mutations and bottom-Card
 drag reordering.
+
+### Large Board ownership
+
+Board geometry retains the complete filtered order and measured/estimated heights.
+Native row owners cover the viewport and one viewport of overscan, with a minimum
+two-row buffer. Scroll events update that range without rebuilding the complete
+Card collection. The lifted and keyboard-focused owners are pinned until their
+gesture/focus ends; both resting and displaced peer bounds participate in culling.
+Height callbacks merge into one reflow per display frame, reusing ordered indices.
+Unchanged filtered Card inputs retain geometry during synchronization status updates.
+
+`CANBAN_GALLERY_SCENE=board-large mise run gallery` exercises production components.
+Set `CANBAN_GALLERY_CARDS=5000` for scale, or `CANBAN_GALLERY_SNAPSHOT=/absolute/export.json`
+for a read-only exported Snapshot. Combining them scales that export. Gallery has no
+AppServer or provider writes. `CANBAN_BOARD_TRACE=1` records Board sync/reflow time
+and backend synchronization batch lock time. These are model/lock intervals, not
+click-to-present latency. The ignored `exported_project_switch_benchmark` test uses
+`CANBAN_BOARD_BENCH_SNAPSHOT` and reports Core commit p50/p95 and native Card owner
+counts without claiming GPU presentation timing.

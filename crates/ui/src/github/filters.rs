@@ -193,9 +193,8 @@ pub fn mine(ui: Ui) {
     });
 }
 
-pub fn matches(ui: Ui, c: &Card, snapshot: &Snapshot) -> bool {
+pub fn matches(ui: Ui, c: &Card) -> bool {
     let filter = current(ui, &c.project_id);
-    let cached = source_snapshot(c, snapshot);
     if filter.author_mode == "mine"
         && active_login_untracked(ui).is_none()
         && ui
@@ -207,7 +206,15 @@ pub fn matches(ui: Ui, c: &Card, snapshot: &Snapshot) -> bool {
     {
         return false;
     }
-    if !filter.matches_card(c, cached, active_login_untracked(ui).as_deref()) {
+    let matches = ui.index.with_untracked(|idx| {
+        let cached = if filter.author_mode.is_empty() && filter.state.is_empty() {
+            None
+        } else {
+            source_snapshot(c, idx)
+        };
+        filter.matches_card(c, cached, active_login_untracked(ui).as_deref())
+    });
+    if !matches {
         return false;
     }
     if filter.tags.is_empty() {
@@ -228,13 +235,12 @@ pub fn matches(ui: Ui, c: &Card, snapshot: &Snapshot) -> bool {
         .iter()
         .all(|wanted| card_tags.iter().any(|t| t.eq_ignore_ascii_case(wanted)))
 }
-fn source_snapshot<'a>(c: &Card, s: &'a Snapshot) -> Option<&'a GitHubIssueSnapshot> {
-    s.github_issues.iter().find(|v| {
-        v.project_id == c.project_id
-            && c.github_issue().is_some_and(|r| {
-                r.issue_id == v.source.issue_id && r.repository_id == v.source.repository_id
-            })
-    })
+fn source_snapshot<'a>(
+    c: &Card,
+    index: &'a crate::index::SnapshotIndex,
+) -> Option<&'a GitHubIssueSnapshot> {
+    let r = c.github_issue()?;
+    index.github_issue(&c.project_id, r.repository_id, r.issue_id)
 }
 fn trigger(title: String, active: bool) -> nsh_base::ButtonElement {
     compact_action(title, Variant::Secondary, |_| {})
@@ -513,7 +519,7 @@ fn notice(ui: Ui, pid: String) -> impl IntoElement {
             c.project_id == pid
                 && c.active()
                 && c.github_issue().is_some()
-                && source_snapshot(c, &s).is_none()
+                && ui.index.with(|idx| source_snapshot(c, idx).is_none())
         })
     {
         messages.push("Some GitHub source details are unavailable; authorship/state filters exclude those cards until details are available.");
@@ -526,7 +532,7 @@ fn notice(ui: Ui, pid: String) -> impl IntoElement {
         && !s
             .cards
             .iter()
-            .any(|c| c.project_id == pid && c.active() && matches(ui, c, &s))
+            .any(|c| c.project_id == pid && c.active() && matches(ui, c))
     {
         v = v.child(
             view()

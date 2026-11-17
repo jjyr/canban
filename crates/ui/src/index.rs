@@ -121,14 +121,34 @@ impl SnapshotIndex {
             }
         }
 
+        // Snapshot::merge_queue_status constructs a full Card map. Compute queues
+        // once per Project, never once (or three times) per Card in this index.
+        let mut queue_status = BTreeMap::new();
+        for pid in snapshot
+            .cards
+            .iter()
+            .map(|c| c.project_id.as_str())
+            .collect::<BTreeSet<_>>()
+        {
+            let queue = snapshot.merge_queue(pid);
+            if let Some(&head) = queue.first() {
+                for (i, run) in queue.iter().enumerate() {
+                    queue_status
+                        .entry(run.card_id.as_str())
+                        .or_insert((i + 1, queue.len(), head));
+                }
+            }
+        }
         let mut card_status = BTreeMap::new();
         for c in snapshot.cards.iter().filter(|c| c.active()) {
-            let is_merging = crate::components::activity::is_merging(snapshot, c);
-            let specs_normal = crate::components::activity::card_status_specs(snapshot, c, false);
+            let queue = queue_status.get(c.id.as_str()).copied();
+            let is_merging = crate::components::activity::is_merging_indexed(snapshot, c, queue);
+            let specs_normal =
+                crate::components::activity::card_status_specs_indexed(snapshot, c, false, queue);
             let specs_ui_merging = if c.merged() || is_merging {
                 specs_normal.clone()
             } else {
-                crate::components::activity::card_status_specs(snapshot, c, true)
+                crate::components::activity::card_status_specs_indexed(snapshot, c, true, queue)
             };
             let running = running_agents_indexed(
                 terminals_by_card
@@ -418,6 +438,53 @@ mod tests {
         }
     }
 
+    #[test]
+    fn queue_index_preserves_fifo_hold_and_pause_status_across_projects() {
+        let mut s = Snapshot::default();
+        for pid in ["p1", "p2"] {
+            s.projects.push(make_project(pid, pid, vec![]));
+            for n in 1..=3 {
+                let id = format!("{pid}-{n}");
+                let mut c = make_card(&id, pid, n, "Task", "");
+                c.stage = "review".into();
+                s.cards.push(c);
+                s.workflow_runs.push(serde_json::from_value(json!({
+                    "id":format!("run-{id}"),"project_id":pid,"card_id":id,"workflow_id":"delivery",
+                    "definition_revision":1,"definition":{"id":"delivery","name":"Delivery","entries":{"review":"deliver"},"steps":{"deliver":{"type":"deliver","sync_upstream":true,"max_conflict_attempts":3,"next":"done"},"done":{"type":"complete"}}},
+                    "state":"waiting_delivery","step":"deliver","visit":1,"trigger_event_id":null,
+                    "input_digest":"d","inputs":{"queued_at":4-n},"outputs":{},"history":[],"error":null,"created_at":0,"updated_at":0
+                })).unwrap());
+            }
+        }
+        let mut duplicate = s.workflow_runs[2].clone();
+        duplicate.id = "duplicate-run".into();
+        duplicate.inputs["queued_at"] = json!(99);
+        s.workflow_runs.push(duplicate);
+        for paused in [false, true] {
+            s.workflow_runs[2].inputs["queue_pause_reason"] = if paused {
+                json!("Checkout busy")
+            } else {
+                serde_json::Value::Null
+            };
+            s.cards[1].hold_auto_merge = paused;
+            let idx = SnapshotIndex::build(&s);
+            for c in &s.cards {
+                let digest = &idx.card_status[&c.id];
+                assert_eq!(
+                    digest.is_merging,
+                    crate::components::activity::is_merging(&s, c)
+                );
+                assert_eq!(
+                    digest.specs_normal,
+                    crate::components::activity::card_status_specs(&s, c, false)
+                );
+                assert_eq!(
+                    digest.specs_ui_merging,
+                    crate::components::activity::card_status_specs(&s, c, true)
+                );
+            }
+        }
+    }
     #[test]
     fn snapshot_index_groups_card_events_reply_counts_tags_and_preserves_link_lookup_equality() {
         let mut s1 = Snapshot::default();

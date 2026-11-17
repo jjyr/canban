@@ -3149,3 +3149,58 @@ pub fn board_filters() -> canban_types::Snapshot {
     }
     s
 }
+
+/// Production Board regression: scaled Issue/PR ownership, optional read-only
+/// exported Snapshot. No AppServer, provider requests or real Card writes.
+pub fn large_board() -> canban_types::Snapshot {
+    let mut s = if let Some(path) = std::env::var_os("CANBAN_GALLERY_SNAPSHOT") {
+        serde_json::from_slice::<canban_types::Snapshot>(
+            &std::fs::read(path).expect("Gallery snapshot file"),
+        )
+        .expect("Gallery snapshot JSON")
+    } else {
+        board_filters()
+    };
+    if let Ok(count) = std::env::var("CANBAN_GALLERY_CARDS") {
+        let count: usize = count.parse().expect("Gallery Card count");
+        let originals = s.cards.clone();
+        let sources = s.github_issues.clone();
+        s.cards.clear();
+        s.github_issues.clear();
+        s.events.clear();
+        for i in 0..count {
+            let mut c = originals[i % originals.len()].clone();
+            let original_source = c.github_issue().cloned();
+            c.id = format!("large-{i}");
+            c.number = i as u64 + 1;
+            c.board_order = Some(i as i64 * 1024);
+            c.stage = "backlog".into();
+            c.archived_at = None;
+            c.removed_at = None;
+            c.delivery = None;
+            c.pull_request = None;
+            if let canban_types::CardContent::GitHubIssue { source }
+            | canban_types::CardContent::GitHubPr { source } = &mut c.content
+            {
+                source.issue_id = i as u64 + 1;
+                source.number = i as u64 + 1;
+                if let Some(mut cached) = sources
+                    .iter()
+                    .find(|v| {
+                        original_source.as_ref().is_some_and(|r| {
+                            r.issue_id == v.source.issue_id
+                                && r.repository_id == v.source.repository_id
+                        })
+                    })
+                    .cloned()
+                {
+                    cached.id = format!("large-source-{i}");
+                    cached.source = source.clone();
+                    s.github_issues.push(cached);
+                }
+            }
+            s.cards.push(c);
+        }
+    }
+    s
+}

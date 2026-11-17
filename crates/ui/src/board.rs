@@ -3,6 +3,8 @@ pub mod activity;
 mod columns;
 mod drag;
 mod model;
+#[cfg(test)]
+mod performance;
 use crate::presenter::*;
 use canban_ui_kit::*;
 use nsh_core::prelude::*;
@@ -748,12 +750,20 @@ mod tests {
         // Scroll deep to the bottom (past 3x viewport height = ~2200pt where Card #29..#35 live).
         let scroll_measure = core.measure(review_scroll).unwrap();
         let viewport_h = scroll_measure.frame.size.height.0;
-        let deep_y = (viewport_h * 3.6).max(2400.);
+        let (_, content, viewport, _) = core.scroll_listener(review_scroll).unwrap();
+        let deep_y = (content.height.0 - viewport.height.0).max(0.);
         assert!(
             deep_y > viewport_h * 3.,
             "deep scroll offset {deep_y} must exceed 3x viewport reclaim threshold"
         );
         core.set_scroll_offset(review_scroll, point(px(0.), px(deep_y)), 0);
+        // Native hosts deliver the Scroll event in addition to updating Core's
+        // clipping offset. Virtual owners consume that event to mount new rows.
+        assert!(core.component_event(
+            review_scroll,
+            EventKind::Scroll,
+            &EventPayload::Scroll(point(px(0.), px(deep_y)))
+        ));
         pump(&mut core, &mut tree);
 
         let mounted = tree.mounted_texts();

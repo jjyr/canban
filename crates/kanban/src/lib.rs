@@ -12,9 +12,24 @@ pub fn create(
     body: &str,
     actor: &str,
 ) -> Result<Card> {
+    create_at(db, project, title, body, actor, None)
+}
+/// Intake can supply an append rank from its transaction-local Board index.
+pub(crate) fn create_at(
+    db: canban_storage::Db<'_>,
+    project: &Project,
+    title: &str,
+    body: &str,
+    actor: &str,
+    rank: Option<i64>,
+) -> Result<Card> {
     let number = db.counter(&format!("cards:{}", project.id))?;
     let mut c = card(project, number, title, body)?;
-    order::place(db, &mut c, None)?;
+    if let Some(rank) = rank {
+        c.board_order = Some(rank);
+    } else {
+        order::place(db, &mut c, None)?;
+    }
     db.save(&c)?;
     db.append(canban_timeline::event(
         &c.project_id,

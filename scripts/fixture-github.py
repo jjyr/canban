@@ -72,9 +72,10 @@ elif p=='/search/issues':
  if page==1:link='<https://api.github.com/search/issues?page=2>; rel="next"'
 elif p=='/repos/fixture/repo':result=repo
 elif p.endswith('/collaborators'):result=[user]
-elif p=='/repos/fixture/repo/issues':result=[issue(1),issue(2)]
+elif p=='/repos/fixture/repo/issues':
+ page_size=int(q.get('per_page',['100'])[0]);result=[issue(n) for n in range(1,s.get('issue_count',2)+1)][(page-1)*page_size:page*page_size]
 elif p.startswith('/repos/fixture/repo/issues/') and p.endswith('/comments'):result=s.get('comments',[])
-elif p in ['/repos/fixture/repo/issues/1','/repos/fixture/repo/issues/2']:result=issue(int(p.rsplit('/',1)[1]))
+elif p.startswith('/repos/fixture/repo/issues/') and p.rsplit('/',1)[1].isdigit():result=issue(int(p.rsplit('/',1)[1]))
 elif p=='/repos/fixture/repo/pulls':result=[pr]
 elif p=='/repos/fixture/repo/pulls/2':result=pr
 elif p.endswith('/pulls/2/files'):result=[{'filename':'src/lib.rs','status':'modified','additions':1,'deletions':1,'patch':'@@ -1 +1 @@\n-old_value\n+new_value'}]

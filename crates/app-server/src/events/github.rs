@@ -16,6 +16,34 @@ fn subject(db: Db<'_>, repo: &str, kind: &str, number: u64) -> Result<String> {
     ))
 }
 
+type Relations = std::collections::BTreeMap<(String, u64), Vec<Value>>;
+fn relation_index(cards: &[Card]) -> Relations {
+    let mut result = Relations::new();
+    for c in cards {
+        let mut keys = std::collections::BTreeMap::new();
+        if let Some(s) = c.github_issue() {
+            keys.insert((s.repository.to_lowercase(), s.number), "source");
+        }
+        if let Some(s) = &c.pull_request {
+            keys.entry((s.repository.to_lowercase(), s.number))
+                .or_insert("delivery");
+        }
+        for s in &c.github_links {
+            if let Some(number) = s.number {
+                keys.entry((s.repository.to_lowercase(), number))
+                    .or_insert("reference");
+            }
+        }
+        for (key, kind) in keys {
+            result
+                .entry(key)
+                .or_default()
+                .push(json!({"card_id":c.id,"project_id":c.project_id,"kind":kind}));
+        }
+    }
+    result
+}
+
 pub(crate) fn observe(
     db: Db<'_>,
     repository: &str,
@@ -24,6 +52,55 @@ pub(crate) fn observe(
     section: &str,
     value: &Value,
     collection_known: bool,
+) -> Result<()> {
+    observe_with_cards(
+        db,
+        repository,
+        number,
+        kind,
+        section,
+        value,
+        collection_known,
+        None,
+    )
+}
+/// Reuse one relation input for a synchronization transaction rather than loading
+/// every Card again for each source observation.
+pub(crate) fn observe_batch(
+    db: Db<'_>,
+    repository: &str,
+    items: &[Value],
+    kind: Option<&str>,
+) -> Result<()> {
+    let cards = relation_index(&db.list::<Card>()?);
+    for item in items {
+        observe_with_cards(
+            db,
+            repository,
+            item["number"].as_u64().context("Missing source number")?,
+            kind.unwrap_or(if item.get("pull_request").is_some() {
+                "pr"
+            } else {
+                "issue"
+            }),
+            "overview",
+            item,
+            false,
+            Some(&cards),
+        )?;
+    }
+    Ok(())
+}
+#[allow(clippy::too_many_arguments)]
+fn observe_with_cards(
+    db: Db<'_>,
+    repository: &str,
+    number: u64,
+    kind: &str,
+    section: &str,
+    value: &Value,
+    collection_known: bool,
+    cards: Option<&Relations>,
 ) -> Result<()> {
     let object = subject(db, repository, kind, number)?;
     let item = if section == "overview" {
@@ -154,29 +231,17 @@ pub(crate) fn observe(
             }
         }
     }
-    let cards = db.list::<Card>()?;
-    let related: Vec<_> = cards
-        .iter()
-        .filter_map(|c| {
-            let relation =
-                if c.github_issue().is_some_and(|s| {
-                    s.repository.eq_ignore_ascii_case(repository) && s.number == number
-                }) {
-                    "source"
-                } else if c.pull_request.as_ref().is_some_and(|s| {
-                    s.repository.eq_ignore_ascii_case(repository) && s.number == number
-                }) {
-                    "delivery"
-                } else if c.github_links.iter().any(|s| {
-                    s.repository.eq_ignore_ascii_case(repository) && s.number == Some(number)
-                }) {
-                    "reference"
-                } else {
-                    return None;
-                };
-            Some(json!({"card_id":c.id,"project_id":c.project_id,"kind":relation}))
-        })
-        .collect();
+    let loaded;
+    let cards = if let Some(cards) = cards {
+        cards
+    } else {
+        loaded = relation_index(&db.list::<Card>()?);
+        &loaded
+    };
+    let related = cards
+        .get(&(repository.to_lowercase(), number))
+        .cloned()
+        .unwrap_or_default();
     for action in kinds {
         db.append(canban_timeline::event("","",&format!("github.{kind}.{action}"),&format!("github:{}",value["user"]["id"]),"GitHub source observation",json!({"origin":"github","subject":object,"source_kind":format!("github.{kind}"),"repository":repository,"number":number,"item_id":value["id"],"section":section,"reply_to":value["in_reply_to_id"],"changed_fields":changed,"revision":canban_context::digest(&serde_json::to_vec(&new)?),"related_cards":related,"occurred_at":value["updated_at"],"observation":"poll","baseline":old.is_none()&&!collection_known})))?;
     }

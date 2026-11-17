@@ -217,3 +217,100 @@ fn older_overlapping_sync_cannot_overwrite_newer_issue_content() {
     assert_eq!(retained.revision, card.revision);
     assert!(store.snapshot().unwrap().github_issues.is_empty());
 }
+
+#[test]
+fn batched_intake_preserves_order_dedup_removal_and_success_checkpoint() {
+    let (_dir, mut store, p) = fixture();
+    store
+        .write(|db| {
+            crate::create(db, &p, "Existing local Card", "", "user")?;
+            apply_batch(
+                db,
+                &p,
+                "generation-a",
+                Sync {
+                    changes: (1..=64).map(change).collect(),
+                },
+                false,
+            )?;
+            assert!(
+                db.get::<Project>(&p.id)?
+                    .github
+                    .unwrap()
+                    .synced_at
+                    .is_none()
+            );
+            Ok(())
+        })
+        .unwrap();
+    let removed = store
+        .db()
+        .list::<Card>()
+        .unwrap()
+        .into_iter()
+        .find(|c| c.github_issue().is_some_and(|s| s.number == 3))
+        .unwrap();
+    store
+        .write(|db| {
+            let mut c = removed.clone();
+            remove(db, &mut c)
+        })
+        .unwrap();
+    store
+        .write(|db| {
+            apply_batch(
+                db,
+                &p,
+                "generation-a",
+                Sync {
+                    changes: (1..=128).map(change).collect(),
+                },
+                false,
+            )
+        })
+        .unwrap();
+    let cards = store.db().list::<Card>().unwrap();
+    assert_eq!(cards.len(), 129);
+    assert!(
+        store
+            .db()
+            .get::<Card>(&removed.id)
+            .unwrap()
+            .removed_at
+            .is_some()
+    );
+    let mut active: Vec<_> = cards.iter().filter(|c| c.active()).collect();
+    active.sort_by(|a, b| a.board_cmp(b));
+    assert!(active.windows(2).all(|w| w[0].number < w[1].number));
+    assert_eq!(
+        store
+            .db()
+            .list::<Event>()
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == "card.created")
+            .count(),
+        129
+    );
+    store
+        .write(|db| {
+            let mut updated = p.clone();
+            updated.github.as_mut().unwrap().generation = "changed".into();
+            db.save(&updated)
+        })
+        .unwrap();
+    assert!(
+        store
+            .write(|db| apply_batch(
+                db,
+                &p,
+                "generation-a",
+                Sync {
+                    changes: vec![change(129)]
+                },
+                false
+            ))
+            .is_err()
+    );
+    assert_eq!(store.db().list::<Card>().unwrap().len(), 129);
+}

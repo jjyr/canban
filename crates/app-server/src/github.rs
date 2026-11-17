@@ -569,36 +569,22 @@ impl AppServer {
                 integration::fetch(&client, project, &cards, &cache)
             });
         let error = fetched.as_ref().err().map(|e| format!("{e:#}"));
-        let result = self.store.lock().unwrap().write(|db| match fetched {
+        let result = match fetched {
             Ok(sync) => {
-                ensure!(
-                    self.github.generation() == account_generation,
-                    "GitHub account changed; discarded stale sync"
-                );
                 let observations = sync
                     .changes
                     .iter()
                     .map(|c| serde_json::to_value(&c.issue))
                     .collect::<std::result::Result<Vec<_>, _>>()?;
-                integration::apply(db, project, &source.generation, sync)?;
-                for item in observations {
-                    events::github::observe(
-                        db,
-                        &source.repository,
-                        item["number"].as_u64().context("Missing source number")?,
-                        if item.get("pull_request").is_some() {
-                            "pr"
-                        } else {
-                            "issue"
-                        },
-                        "overview",
-                        &item,
-                        false,
-                    )?;
-                }
-                Ok(())
+                self.github_apply_changes(
+                    project,
+                    account_generation,
+                    sync.changes,
+                    observations,
+                    None,
+                )
             }
-            Err(ref e) => {
+            Err(ref e) => self.store.lock().unwrap().write(|db| {
                 let mut current: Project = db.get(project_id)?;
                 if let Some(s) = &mut current.github
                     && s.generation == source.generation
@@ -607,12 +593,61 @@ impl AppServer {
                     db.save(&current)?;
                 }
                 Ok(())
-            }
-        });
+            }),
+        };
         self.emit("github", None);
         result?;
         if let Some(error) = error {
             bail!("{error}")
+        }
+        Ok(())
+    }
+    /// Release the shared Store between bounded transactions. Every batch fences
+    /// source/account generations and rebuilds local ownership after removals.
+    fn github_apply_changes(
+        &self,
+        project: &Project,
+        account_generation: u64,
+        changes: Vec<integration::Change>,
+        observations: Vec<Value>,
+        kind: Option<&str>,
+    ) -> Result<()> {
+        let source = project
+            .github
+            .as_ref()
+            .context("Project has no GitHub source")?;
+        let mut changes = changes.into_iter().zip(observations);
+        loop {
+            let batch: Vec<_> = changes.by_ref().take(64).collect();
+            if batch.is_empty() {
+                break;
+            }
+            let (changes, observations): (Vec<_>, Vec<_>) = batch.into_iter().unzip();
+            let mut store = self.store.lock().unwrap();
+            let started = std::time::Instant::now();
+            store.write(|db| {
+                ensure!(
+                    self.github.generation() == account_generation,
+                    "GitHub account changed; discarded stale sync"
+                );
+                integration::apply_batch(
+                    db,
+                    project,
+                    &source.generation,
+                    integration::Sync { changes },
+                    false,
+                )?;
+                events::github::observe_batch(db, &source.repository, &observations, kind)
+            })?;
+            if std::env::var_os("CANBAN_BOARD_TRACE").is_some() {
+                eprintln!(
+                    "GITHUB_APPLY_BATCH items={} lock_micros={}",
+                    observations.len(),
+                    started.elapsed().as_micros()
+                );
+            }
+            drop(store);
+            std::thread::yield_now();
         }
         Ok(())
     }

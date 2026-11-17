@@ -226,6 +226,14 @@ pub fn empty(title: &str, description: &str) -> impl IntoElement {
 
 /// Whether a Card is actively merging right now (not merely waiting behind another Card or paused).
 pub fn is_merging(snapshot: &canban_types::Snapshot, card: &canban_types::Card) -> bool {
+    is_merging_indexed(snapshot, card, snapshot.merge_queue_status(&card.id))
+}
+pub(crate) type QueueStatus<'a> = Option<(usize, usize, &'a canban_types::WorkflowRun)>;
+pub(crate) fn is_merging_indexed(
+    snapshot: &canban_types::Snapshot,
+    card: &canban_types::Card,
+    queue: QueueStatus<'_>,
+) -> bool {
     if !card.active() || card.merged() {
         return false;
     }
@@ -237,7 +245,7 @@ pub fn is_merging(snapshot: &canban_types::Snapshot, card: &canban_types::Card) 
     if card.hold_auto_merge {
         return false;
     }
-    if let Some((pos, _, head)) = snapshot.merge_queue_status(&card.id) {
+    if let Some((pos, _, head)) = queue {
         return pos == 1 && head.state == "waiting_delivery" && head.queue_pause_reason().is_none();
     }
     snapshot.workflow_runs.iter().any(|r| {
@@ -251,8 +259,22 @@ pub fn card_status_specs(
     card: &canban_types::Card,
     ui_merging: bool,
 ) -> Vec<(String, Tone, bool)> {
+    card_status_specs_indexed(
+        snapshot,
+        card,
+        ui_merging,
+        snapshot.merge_queue_status(&card.id),
+    )
+}
+pub(crate) fn card_status_specs_indexed(
+    snapshot: &canban_types::Snapshot,
+    card: &canban_types::Card,
+    ui_merging: bool,
+    queue: QueueStatus<'_>,
+) -> Vec<(String, Tone, bool)> {
     let mut specs = Vec::new();
-    let merging = is_merging(snapshot, card) || card.active() && !card.merged() && ui_merging;
+    let merging =
+        is_merging_indexed(snapshot, card, queue) || card.active() && !card.merged() && ui_merging;
     if card.merged() {
         specs.push(("Merged".into(), Tone::Success, false));
     } else if card.active()
@@ -277,7 +299,7 @@ pub fn card_status_specs(
         specs.push(("Running script".into(), Tone::Info, true));
     } else if card.active()
         && !card.hold_auto_merge
-        && let Some((pos, _, head)) = snapshot.merge_queue_status(&card.id)
+        && let Some((pos, _, head)) = queue
     {
         if pos == 1 {
             if head.state == "waiting_delivery" && head.queue_pause_reason().is_some() {

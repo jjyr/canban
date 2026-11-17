@@ -55,6 +55,10 @@ pub(super) struct BoardDrag {
     trace: bool,
     pub cards: Signal<Vec<Card>>,
     pub layout: Signal<Layout>,
+    viewports: Signal<BTreeMap<String, (f32, f32)>>,
+    reflow_pending: Stored<bool>,
+    order: Stored<model::Order>,
+    pub focused: Signal<String>,
     pub phase: Signal<u8>,
     pub lifted: Signal<String>,
     pub x: AnimatedValue,
@@ -134,6 +138,10 @@ impl BoardDrag {
             trace: std::env::var_os("CANBAN_BOARD_TRACE").is_some(),
             cards: signal(Vec::new()),
             layout: signal(Layout::default()),
+            viewports: signal(BTreeMap::new()),
+            reflow_pending: stored(false),
+            order: stored(model::Order::new()),
+            focused: signal(String::new()),
             phase: signal(0),
             lifted: signal(String::new()),
             x: animated_value(0.),
@@ -188,18 +196,88 @@ impl BoardDrag {
     }
     fn sync(self) {
         let project = self.project.with(|p| p.id.clone());
-        self.cards.set(self.ui.snapshot.with_untracked(|s| {
-            s.cards
+        let started = Instant::now();
+        let changed = self.ui.snapshot.with_untracked(|s| {
+            let candidates: Vec<_> = s
+                .cards
                 .iter()
                 .filter(|c| {
                     c.project_id == project
                         && c.active()
-                        && crate::github::filters::matches(self.ui, c, s)
+                        && crate::github::filters::matches(self.ui, c)
                 })
-                .cloned()
-                .collect()
-        }));
-        self.reflow();
+                .collect();
+            if self
+                .cards
+                .with_untracked(|old| old.iter().eq(candidates.iter().copied()))
+            {
+                return false;
+            }
+            batch(|| {
+                let cards: Vec<_> = candidates.into_iter().cloned().collect();
+                self.order.replace(model::order(&cards));
+                self.cards.set(cards);
+                self.reflow();
+            });
+            true
+        });
+        if self.trace {
+            eprintln!(
+                "BOARD_SYNC cards={} changed={changed} micros={}",
+                self.cards.with_untracked(Vec::len),
+                started.elapsed().as_micros()
+            );
+        }
+    }
+    /// A single frame task absorbs all native height callbacks from this commit.
+    fn schedule_reflow(self) {
+        if self.reflow_pending.replace(true) {
+            return;
+        }
+        self.spawn_owned(async move {
+            next_frame().await;
+            self.reflow_pending.replace(false);
+            self.reflow();
+        });
+    }
+    pub fn visible(self, stage: &str) -> Vec<Card> {
+        let (offset, height) = self
+            .viewports
+            .with(|v| v.get(stage).copied().unwrap_or((0., 720.)));
+        let lifted = self.lifted.get();
+        let focused = self.focused.get();
+        self.cards.with(|cards| {
+            self.layout.with(|layout| {
+                let rows = layout.columns.get(stage).map(Vec::as_slice).unwrap_or(&[]);
+                let mut indices: Vec<_> = model::visible(rows, offset, height)
+                    .iter()
+                    .map(|r| r.index)
+                    .collect();
+                // Never dispose the native gesture/focus owner merely because it scrolls away.
+                for id in [&lifted, &focused].into_iter().filter(|id| !id.is_empty()) {
+                    if let Some(i) = cards.iter().position(|c| &c.id == id && c.stage == stage)
+                        && !indices.contains(&i)
+                    {
+                        indices.push(i);
+                    }
+                }
+                indices
+                    .into_iter()
+                    .filter_map(|i| cards.get(i).cloned())
+                    .collect()
+            })
+        })
+    }
+    pub fn viewport(self, stage: &str, height: f32) {
+        self.dirty();
+        let old = self
+            .viewports
+            .with_untracked(|v| v.get(stage).copied().unwrap_or((0., 720.)));
+        if (old.1 - height).abs() > 0.5 {
+            self.viewports.update(|v| {
+                v.insert(stage.into(), (old.0, height));
+            });
+        }
     }
     pub fn height(self, id: &str, height: f32) {
         if height <= 0. {
@@ -217,7 +295,7 @@ impl BoardDrag {
             }
         });
         if changed {
-            self.reflow();
+            self.schedule_reflow();
         }
     }
     pub fn register(self, stage: &str, reference: ElementRef, scroll: ElementRef) {
@@ -228,6 +306,9 @@ impl BoardDrag {
             ))
             .copied()
             .unwrap_or_default()
+        });
+        self.viewports.update(|v| {
+            v.insert(stage.into(), (position.y.0, 720.));
         });
         self.metrics.with(|m| {
             m.columns.insert(
@@ -254,6 +335,15 @@ impl BoardDrag {
         self.metrics.with(|m| m.dirty = true);
     }
     pub fn scrolled(self, stage: &str, offset: f32) {
+        if self
+            .viewports
+            .with_untracked(|v| v.get(stage).is_none_or(|p| (p.0 - offset).abs() > 0.1))
+        {
+            self.viewports.update(|v| {
+                let p = v.entry(stage.into()).or_insert((0., 720.));
+                p.0 = offset;
+            });
+        }
         self.metrics.with(|m| {
             if let Some(c) = m.columns.get_mut(stage) {
                 c.offset = offset;
@@ -270,6 +360,7 @@ impl BoardDrag {
         });
     }
     fn reflow(self) {
+        let started = Instant::now();
         let stages = self.project.with(|p| {
             p.workflow
                 .stages
@@ -279,17 +370,25 @@ impl BoardDrag {
         });
         let session = self.session.get();
         let layout = self.metrics.with(|m| {
-            model::layout(
-                &self.cards.get_untracked(),
-                &stages,
-                &m.heights,
-                session.as_ref().map(|s| s.card.id.as_str()).unwrap_or(""),
-                session.as_ref().and_then(|s| s.target.as_ref()),
-            )
+            self.cards.with_untracked(|cards| {
+                self.order.with(|order| {
+                    model::layout_ordered(
+                        cards,
+                        &stages,
+                        order,
+                        &m.heights,
+                        session.as_ref().map(|s| s.card.id.as_str()).unwrap_or(""),
+                        session.as_ref().and_then(|s| s.target.as_ref()),
+                    )
+                })
+            })
         });
-        if self.layout.get_untracked() != layout {
+        if self.layout.with_untracked(|old| old != &layout) {
             self.metrics.with(|m| m.layouts += 1);
             self.layout.set(layout);
+            if self.trace {
+                eprintln!("BOARD_REFLOW micros={}", started.elapsed().as_micros());
+            }
         }
     }
     pub fn down(self, event: &PressEvent) {
@@ -362,17 +461,15 @@ impl BoardDrag {
             eprintln!("BOARD_DRAG_START card={}", card.id);
         }
         self.lifted.set(card.id.clone());
-        let all = self.cards.get_untracked();
-        let original = model::cards(&all, &card.stage, "")
-            .iter()
-            .position(|c| c.id == card.id)
-            .unwrap_or(0);
-        let original_y = *self
+        let original = self.cards.with_untracked(|all| {
+            model::cards(all, &card.stage, "")
+                .iter()
+                .position(|c| c.id == card.id)
+                .unwrap_or(0)
+        });
+        let original_y = self
             .layout
-            .get_untracked()
-            .resting
-            .get(&card.id)
-            .unwrap_or(&0.);
+            .with_untracked(|l| l.resting.get(&card.id).copied().unwrap_or(0.));
         self.session.replace(Some(Session {
             original: Slot {
                 stage: card.stage.clone(),
@@ -467,15 +564,9 @@ impl BoardDrag {
             let mut scrolls = Vec::new();
             let target = column.map(|(stage, c)| {
                 let mut offset = c.offset;
-                let max = (self
-                    .layout
-                    .get_untracked()
-                    .heights
-                    .get(stage)
-                    .copied()
-                    .unwrap_or(0.)
-                    - c.rect.h)
-                    .max(0.);
+                let max = self.layout.with_untracked(|l| {
+                    (l.heights.get(stage).copied().unwrap_or(0.) - c.rect.h).max(0.)
+                });
                 let next = (offset + model::edge_speed(py, c.rect.y, c.rect.h) * dt).clamp(0., max);
                 if (next - offset).abs() > 0.1 {
                     scrolls.push((stage.clone(), c.scroll, next));
@@ -483,14 +574,16 @@ impl BoardDrag {
                 }
                 Slot {
                     stage: stage.clone(),
-                    index: model::insertion(
-                        &self.cards.get_untracked(),
-                        stage,
-                        &session.card.id,
-                        &m.heights,
-                        py - c.rect.y + offset,
-                        session.target.as_ref(),
-                    ),
+                    index: self.cards.with_untracked(|cards| {
+                        model::insertion(
+                            cards,
+                            stage,
+                            &session.card.id,
+                            &m.heights,
+                            py - c.rect.y + offset,
+                            session.target.as_ref(),
+                        )
+                    }),
                 }
             });
             let next = (m.horizontal + model::edge_speed(px, root.x, root.w) * dt)
@@ -558,9 +651,11 @@ impl BoardDrag {
             return;
         }
         let target = target.unwrap();
-        let all = self.cards.get_untracked();
-        let peers = model::cards(&all, &target.stage, &session.card.id);
-        let before = peers.get(target.index).map(|c| c.id.clone());
+        let before = self.cards.with_untracked(|all| {
+            model::cards(all, &target.stage, &session.card.id)
+                .get(target.index)
+                .map(|c| c.id.clone())
+        });
         let intent = Drop {
             card_id: session.card.id.clone(),
             revision: session.card.revision,
@@ -599,7 +694,7 @@ impl BoardDrag {
     }
     fn land(self) -> MotionEnd {
         if let Some(s) = self.session.get()
-            && let Some((stage, y, _)) = self.layout.get_untracked().gap
+            && let Some((stage, y, _)) = self.layout.with_untracked(|l| l.gap.clone())
             && let Some(c) = self.metrics.with(|m| m.columns.get(&stage).cloned())
         {
             let horizontal = self.metrics.with(|m| m.horizontal);

@@ -8,12 +8,19 @@ pub struct Slot {
     pub stage: String,
     pub index: usize,
 }
+#[derive(Clone, Debug, PartialEq)]
+pub struct Row {
+    pub index: usize,
+    pub top: f32,
+    pub bottom: f32,
+}
 #[derive(Clone, Default, PartialEq)]
 pub struct Layout {
     /// Resting top offsets (when idle, with no Card lifted).
     /// Used directly as layout `top` so NSH scroll culling and measurements
     /// operate on real row coordinates rather than stacking all rows at `y = 0`.
     pub resting: BTreeMap<String, f32>,
+    pub columns: BTreeMap<String, Vec<Row>>,
     /// Target visual Y positions (equals `resting` when idle; includes peer
     /// displacement and gap spacing while dragging).
     pub rows: BTreeMap<String, f32>,
@@ -28,9 +35,31 @@ pub fn cards<'a>(all: &'a [Card], stage: &str, omit: &str) -> Vec<&'a Card> {
     result.sort_by(|a, b| a.board_cmp(b));
     result
 }
+#[cfg(test)]
 pub fn layout(
     all: &[Card],
     stages: &[String],
+    heights: &BTreeMap<String, f32>,
+    dragged: &str,
+    slot: Option<&Slot>,
+) -> Layout {
+    layout_ordered(all, stages, &order(all), heights, dragged, slot)
+}
+pub type Order = BTreeMap<String, Vec<usize>>;
+pub fn order(all: &[Card]) -> Order {
+    let mut columns = Order::new();
+    for (i, card) in all.iter().enumerate().filter(|(_, c)| c.active()) {
+        columns.entry(card.stage.clone()).or_default().push(i);
+    }
+    for list in columns.values_mut() {
+        list.sort_by(|&a, &b| all[a].board_cmp(&all[b]));
+    }
+    columns
+}
+pub fn layout_ordered(
+    all: &[Card],
+    stages: &[String],
+    columns: &Order,
     heights: &BTreeMap<String, f32>,
     dragged: &str,
     slot: Option<&Slot>,
@@ -39,26 +68,63 @@ pub fn layout(
     let drag_height = *heights.get(dragged).unwrap_or(&DEFAULT_HEIGHT);
     let mut result = Layout::default();
     for stage in stages {
+        let list = columns
+            .get(stage.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let mut rest_y = 0.;
-        for c in cards(all, stage, "") {
+        for &i in list {
+            let c = &all[i];
             result.resting.insert(c.id.clone(), rest_y);
             rest_y += height(c) + GAP;
         }
-        let list = cards(all, stage, dragged);
+        let peers: Vec<_> = list
+            .iter()
+            .copied()
+            .filter(|&i| all[i].id != dragged)
+            .collect();
         let mut y = 0.;
-        for i in 0..=list.len() {
-            if slot.is_some_and(|s| &s.stage == stage && s.index.min(list.len()) == i) {
+        for i in 0..=peers.len() {
+            if slot.is_some_and(|s| &s.stage == stage && s.index.min(peers.len()) == i) {
                 result.gap = Some((stage.clone(), y, drag_height));
                 y += drag_height + GAP;
             }
-            if let Some(c) = list.get(i) {
+            if let Some(&i) = peers.get(i) {
+                let c = &all[i];
                 result.rows.insert(c.id.clone(), y);
                 y += height(c) + GAP;
             }
         }
         result.heights.insert(stage.clone(), (y - GAP).max(0.));
+        result.columns.insert(
+            stage.clone(),
+            list.iter()
+                .copied()
+                .filter(|&i| all[i].id != dragged)
+                .map(|i| {
+                    let c = &all[i];
+                    let rest = result.resting[&c.id];
+                    let target = result.rows.get(&c.id).copied().unwrap_or(rest);
+                    Row {
+                        index: i,
+                        top: rest.min(target),
+                        bottom: rest.max(target) + height(c),
+                    }
+                })
+                .collect(),
+        );
     }
     result
+}
+/// Bound native owners to the viewport and one screen of overscan. Both resting
+/// and displaced bounds participate so animated peers cannot disappear mid-drag.
+pub fn visible(rows: &[Row], offset: f32, height: f32) -> &[Row] {
+    let overscan = height.max(DEFAULT_HEIGHT * 2.);
+    let start = (offset - overscan).max(0.);
+    let end = offset + height + overscan;
+    let first = rows.partition_point(|r| r.bottom < start);
+    let last = rows.partition_point(|r| r.top <= end);
+    &rows[first.min(last)..last]
 }
 /// Hit resting midpoints, not animated frames. A small dead band prevents chatter.
 pub fn insertion(
@@ -174,6 +240,44 @@ mod tests {
         assert_eq!(dragged.resting, idle.resting);
         assert_eq!(dragged.rows["r-2"] - dragged.resting["r-2"], -(96. + GAP));
         assert_eq!(dragged.rows["r-35"] - dragged.resting["r-35"], 0.);
+    }
+    #[test]
+    fn five_thousand_rows_mount_only_the_viewport_and_drag_bounds_stay_ordered() {
+        let all: Vec<_> = (1..=5000)
+            .map(|n| card(&format!("r-{n}"), "backlog", n))
+            .collect();
+        let stages = ["backlog".into()];
+        for dragged in ["", "r-1", "r-35", "r-4999"] {
+            let l = layout(
+                &all,
+                &stages,
+                &BTreeMap::new(),
+                dragged,
+                (!dragged.is_empty()).then_some(&Slot {
+                    stage: "backlog".into(),
+                    index: 200,
+                }),
+            );
+            let rows = &l.columns["backlog"];
+            assert!(
+                rows.windows(2)
+                    .all(|w| w[0].top <= w[1].top && w[0].bottom <= w[1].bottom)
+            );
+            for offset in [0., 250_000., l.heights["backlog"] - 700.] {
+                let visible = visible(rows, offset, 700.);
+                assert!(!visible.is_empty());
+                assert!(
+                    visible.len() < 24,
+                    "{} native rows at offset {offset}",
+                    visible.len()
+                );
+                assert!(
+                    visible
+                        .iter()
+                        .all(|r| r.bottom >= (offset - 700.).max(0.) && r.top <= offset + 1400.)
+                );
+            }
+        }
     }
     #[test]
     fn midpoint_hysteresis_and_scrolled_coordinates_are_stable() {
