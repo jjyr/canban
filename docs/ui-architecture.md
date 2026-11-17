@@ -2,7 +2,7 @@
 
 Status: user-approved architecture and development direction, 2026-11-06, now applied in the first native MVP. The approved UI Kit/product UI separation, suitable NSH reuse, component contracts, native gallery and component-level regression workflow guide implementation. Further components and visual refinements can extend the initial system.
 
-Current contract, reconciled 2026-11-10: the native UI, shared UI Kit and production-component Gallery exist. This document governs component ownership and interaction design; [implementation](implementation.md), the [component inventory](ui-components.md) and feature documents identify actual behavior and acceptance. Feasibility/research examples below do not establish runtime coverage.
+Current contract, reconciled 2026-11-17: the native UI, shared UI Kit and production-component Gallery exist. This document governs component ownership, interaction design and UI data/resource costs; [implementation](implementation.md), the [component inventory](ui-components.md) and feature documents identify actual behavior and acceptance. Feasibility/research examples below do not establish runtime coverage.
 
 ## Architecture
 
@@ -99,6 +99,103 @@ Each independently reusable component gets a module and a short contract: purpos
 For example, a Button owns its appearance and interaction contract; a CardTile owns title/metadata/status presentation and emits open/move intents. The screen/presenter performs an AppServer operation. Neither the tile nor generic Button launches an Agent or writes SQLite. Parent screens control placement; shared components control their own semantic styling and behavior.
 
 Keep persistent state separate from UI state. AppServer supplies accepted card/run state; UI owns navigation, focus, selection and drafts. A presenter translates async operations into pending/success/failure feedback, unregisters subscriptions on disposal, and prevents a late response for one Card from replacing the view for another. Business eligibility is still validated by AppServer. Components expose these states so the gallery can reproduce them without a live Agent.
+
+## State synchronization, ownership and memory cost
+
+The UI contract includes the cost of supplying data to components, not only the
+cost of drawing them. AppServer owns database projections and pagination;
+AppClient/HostRegistry own transport, host caches and invalidation; presenters
+own coalesced refresh and resource lifetimes; UI indexes own derived lookups.
+UI Kit remains independent of application state and persistence.
+
+### Current synchronization and ownership
+
+Implemented on 2026-11-17; [memory profiling and synchronization](memory-profiling.md)
+contains source-level details, diagnostic commands and dated acceptance evidence.
+
+```text
+Local AppClient -- app.watch(cursor) --> AppServer: small cursor checks
+                 <-- changed cursor --
+Presenter ------ app.state ----------> current full-state projection
+                 <-- owned response --
+                         |
+                    UI Snapshot
+                         |
+              event positions / summaries
+                         |
+              selected Card history view
+
+Remote supervisor -- app.state(after: cursor) --> remote AppServer
+                  <-- unchanged metadata OR updated full state --
+                         |
+                   typed offline cache
+```
+
+Local change detection does not fetch and retain a full JSON state merely to
+compare it and trigger another full fetch. Remote supervision retains cursor
+metadata beside its typed cache. Owned JSON response fields are moved into the
+next decoding stage; the global event index stores positions instead of another
+copy of every event body. Timeline RPC pages select and limit rows in SQL before
+JSON decoding, and background runtime decisions use narrower projections.
+
+A changed state can still require a full Snapshot, and concurrent updates can
+require another refresh. Runtime freshness can invalidate the cursor. This is
+not per-entity delta synchronization: full state still includes history used by
+reminders and other consumers, selected-Card history is materialized, and merged
+remote typed snapshots still involve copies. Compact global summaries and fully
+lazy history loading remain follow-up work.
+
+### Review contract for new or changed data paths
+
+- **Invalidate cheaply and refresh through the owner.** Share the existing
+  per-host synchronization path, coalesce invalidations and allow one presenter
+  refresh at a time. Rows and components must not add independent full-state
+  polling or repeated per-row RPCs. Distinguish transport liveness, observation
+  freshness and changed application content. Channels and cursors invalidate UI
+  state; they do not replace durable business facts or authorize actions.
+- **Make consistency and recovery explicit.** Pair a cursor with the state it
+  describes, and never let an older response acknowledge a newer commit. Keep
+  persistent server identity distinct from a fresh boot instance. Cover internal
+  worker writes, configuration and transient state changes, reconnects and stale
+  responses. Positional indexes must be consumed with their source Snapshot;
+  generation/resource fences protect async work and retained views.
+- **State who owns large values.** Borrow or move owned payloads before adding a
+  deep clone. Derived indexes should store IDs, positions, compact summaries or
+  suitable shared references rather than duplicate complete histories. `Rc`/`Arc`
+  share data only within a process; cross-process serialization and typed decoding
+  still have costs. Document intentional copies and their lifetime.
+- **Bound reads at the storage boundary.** Select the required records and fields
+  for the consumer; filter, order and limit history in SQL before decoding.
+  Returning a page after loading the entire table is not bounded loading.
+  Background queue/deadline checks must not pull unrelated UI/history payloads.
+- **Bound retained data as well as query work.** Give caches an owner, disposal
+  lifetime, invalidation/reconnect policy and capacity. For variable-size bodies,
+  consider byte budgets in addition to entry counts; a count limit alone does not
+  establish a memory bound. Reuse mounted views and valid derived results when
+  unrelated metadata changes, while releasing disposed subscriptions and work.
+- **Preserve observable semantics while narrowing data.** Keep unread positions,
+  reply/report deduplication, pending reminders, runtime uncertainty, offline-host
+  behavior, draft/scroll/focus retention and complete history access correct.
+  Replace history-dependent consumers with equivalent summaries before removing
+  their inputs. Silently truncating history or clearing caches without an
+  ownership/invalidation policy is not an acceptable memory fix.
+
+### Cost verification
+
+For changes to synchronization, indexes, history loading or caches, verify both
+unchanged and changed data, internal writes, reconnect/restart and the affected
+native view. Repeat the same Card navigation, Terminal switching and output
+workload when investigating growth. Report allocation volume, live bytes,
+physical footprint/peak, fragmentation and CPU separately; a lower response byte
+count or one RSS sample does not establish that a leak was fixed or that the
+workload reaches a stable memory plateau.
+
+Use opt-in Instruments intervals to attribute database reads, RPC encoding and
+decoding, UI apply, indexing and Terminal attachment to the owning layer. A trace
+file is evidence only when attachment/recording actually succeeded; retain the
+binary identity, capture status and workload. Gallery interaction checks and
+native integration checks keep their existing roles. Documentation-only updates
+add no runtime acceptance and do not require repeating an unrelated test suite.
 
 ## Native component gallery
 

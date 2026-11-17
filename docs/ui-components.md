@@ -1,6 +1,6 @@
 # UI component inventory
 
-Status: implementation inventory, current contracts reconciled 2026-11-10. Dated verification entries retain their original scope; this documentation update adds no runtime acceptance. These modules are used by the native application; the Gallery imports the same implementations.
+Status: implementation inventory, current contracts reconciled 2026-11-17. Dated verification entries retain their original scope; this documentation update adds no runtime acceptance. These modules are used by the native application; the Gallery imports the same implementations.
 
 | Component/layer | Module | NSH reuse and contract | Verification |
 | --- | --- | --- | --- |
@@ -18,7 +18,10 @@ Status: implementation inventory, current contracts reconciled 2026-11-10. Dated
 | Timeline item | crates/ui/src/components/timeline_item.rs | Connected vertical-spine narrative cards (colored Agent provider avatars via `icon_colored`, GitHub/"ME" user avatars) & semantic milestone badges, inline `+N earlier` group disclosure, file-backed Markdown reports and Terminal/detail intents | Production and Gallery `Card conversation` / `Controls` fixtures; unit projection, avatar & spine tests |
 | Agent completion / registry | crates/ui/src/profiles.rs, card/composer.rs | Caret completion and explicit recipient projection; Settings shows role instructions | Native completion/dispatch and ordinary prose exclusion; Board labels reflect template references |
 | Agent run/output panel | crates/ui/src/components.rs | Request/attempt view, retry and read-only output | Request history and retained output; interactive Terminal lives in sessions.rs |
-| Presenters | crates/ui/src/presenter.rs | Async AppServer operations, event-driven refresh, draft preservation and resource generation checks | Live state updates, native saves and image-paste refresh |
+| Desktop synchronization | crates/app-server/src/client.rs, state.rs and hosts.rs | UI-side AppClient/HostRegistry transport uses a lightweight local watch cursor and conditional remote state reads; typed offline caches retain separate small invalidation metadata | No-change/internal-write/restart regressions and isolated RPC/native acceptance in [memory profiling](memory-profiling.md) |
+| Presenters | crates/ui/src/presenter.rs | Async AppServer operations, coalesced cursor-invalidated refresh, draft preservation and resource generation checks | Live state updates, native saves and image-paste refresh; dated state-refresh checks in [memory profiling](memory-profiling.md) |
+| Snapshot indexes | crates/ui/src/index.rs | Shared derived lookups; global event groups retain positions/latest sequences, and selected-Card history is materialized from the matching Snapshot | Snapshot index/reply-count regressions and native live-comment/reopen checks in [memory profiling](memory-profiling.md) |
+| Memory diagnostics | crates/profiler, scripts/profile.py and scripts/package.py | Opt-in PointsOfInterest intervals, symbol-preserving profiling configuration and profiling-only debugger attachment entitlements | UI Allocations/backend Time Profiler captures and package-signing checks in [memory profiling](memory-profiling.md); these do not establish a long-running memory plateau |
 | Product screens | crates/ui/src/screens.rs | Compose production components; application navigation only | Board and Card native checks |
 | Standalone Gallery | examples/gallery/main.rs and fixtures.rs | Imports production components from canban-ui; local fixture state without AppServer/data/Core | Run mise run gallery for component checks |
 

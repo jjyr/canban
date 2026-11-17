@@ -1,5 +1,10 @@
 # Memory profiling and state synchronization
 
+The reusable [UI data and resource-cost contract](ui-architecture.md#state-synchronization-ownership-and-memory-cost)
+governs new synchronization, index and cache changes. The [component inventory](ui-components.md)
+identifies their owning modules. This document keeps the concrete implementation,
+capture procedure and dated acceptance evidence together.
+
 ## Implemented boundaries
 
 Canban exposes a small `app.watch` invalidation cursor and conditional
