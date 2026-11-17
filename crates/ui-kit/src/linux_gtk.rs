@@ -158,9 +158,8 @@ mod imp {
     static LATEST_CHROME: OnceLock<Mutex<[u32; 16]>> = OnceLock::new();
 
     fn latest_chrome_mutex() -> &'static Mutex<[u32; 16]> {
-        LATEST_CHROME.get_or_init(|| {
-            Mutex::new(canban_themes::resolve(canban_themes::DEFAULT).chrome())
-        })
+        LATEST_CHROME
+            .get_or_init(|| Mutex::new(canban_themes::resolve(canban_themes::DEFAULT).chrome()))
     }
 
     struct GtkThreadState {
@@ -253,7 +252,9 @@ mod tests {
         let uncomposited = gtk_css_for_chrome(&chrome, false);
         assert!(uncomposited.contains(".nsh-dark { background-color: #101318;"));
         assert!(uncomposited.contains("popover, popover.background, popover.menu"));
-        assert!(uncomposited.contains("popover > contents, popover.background > contents, popover.menu > contents"));
+        assert!(uncomposited.contains(
+            "popover > contents, popover.background > contents, popover.menu > contents"
+        ));
         assert!(uncomposited.contains("border-radius: 0;"));
         assert!(uncomposited.contains("box-shadow: none;"));
         assert!(uncomposited.contains("window.csd, window.solid-csd"));
@@ -273,6 +274,8 @@ mod tests {
         assert!(composited.contains("popover separator, popover.menu separator"));
         assert!(composited.contains("margin: 4px 0;"));
         assert!(!composited.contains("window.solid-csd"));
-        assert!(!composited.contains("popover > contents, popover.background > contents, popover.menu > contents"));
+        assert!(!composited.contains(
+            "popover > contents, popover.background > contents, popover.menu > contents"
+        ));
     }
 }

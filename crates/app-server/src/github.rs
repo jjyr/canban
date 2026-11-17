@@ -566,7 +566,7 @@ impl AppServer {
                     client.repo(&source.repository)?.id == source.repository_id,
                     "Repository identity changed; reconnect source"
                 );
-                integration::fetch(&client, &project, &cards, &cache)
+                integration::fetch(&client, project, &cards, &cache)
             });
         let error = fetched.as_ref().err().map(|e| format!("{e:#}"));
         let result = self.store.lock().unwrap().write(|db| match fetched {
@@ -580,7 +580,7 @@ impl AppServer {
                     .iter()
                     .map(|c| serde_json::to_value(&c.issue))
                     .collect::<std::result::Result<Vec<_>, _>>()?;
-                integration::apply(db, &project, &source.generation, sync)?;
+                integration::apply(db, project, &source.generation, sync)?;
                 for item in observations {
                     events::github::observe(
                         db,

@@ -46,9 +46,9 @@ mod tests {
     #[test]
     fn report_opens_markdown_template_and_prefills_public_version() {
         let u = url();
-        assert!(u.starts_with(
-            "https://github.com/jjyr/canban/issues/new?template=bug_report.md&body="
-        ));
+        assert!(
+            u.starts_with("https://github.com/jjyr/canban/issues/new?template=bug_report.md&body=")
+        );
         assert!(!u.contains('\n'));
         assert!(u.contains(&format!(
             "Canban%20{}%0ACommit%3A%20",

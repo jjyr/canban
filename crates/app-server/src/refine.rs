@@ -203,11 +203,7 @@ impl AppServer {
     }
 
     /// Apply cached and due on-demand screen refinements onto `(core_id, records)`.
-    pub(super) fn apply_refinements(
-        &self,
-        core_id: &str,
-        records: &mut [Value],
-    ) {
+    pub(super) fn apply_refinements(&self, core_id: &str, records: &mut [Value]) {
         if core_id.is_empty() {
             self.refinements.entries.lock().unwrap().clear();
             return;

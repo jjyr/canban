@@ -166,7 +166,8 @@ impl GhosttyEmulator {
 
     fn collect_side_effects(&mut self) {
         if let Some(title) = self.model.take_title() {
-            self.pending_events.push(TerminalEmulatorEvent::Title(title));
+            self.pending_events
+                .push(TerminalEmulatorEvent::Title(title));
         }
         if self.model.take_bell() {
             self.pending_events.push(TerminalEmulatorEvent::Bell);
@@ -461,10 +462,7 @@ impl ControllerSlot {
             terminal,
         }) = next
         else {
-            self.state = Arc::new(Mutex::new(State::new(
-                prev_cols.max(2),
-                prev_rows.max(1),
-            )));
+            self.state = Arc::new(Mutex::new(State::new(prev_cols.max(2), prev_rows.max(1))));
             self.size_cv = Arc::new(Condvar::new());
             self.seen_rev = u64::MAX;
             return true;
@@ -765,359 +763,347 @@ fn mount_terminal_surface(
     let read_only = Rc::new(read_only);
     let input_status = Rc::new(input_status);
 
-    view()
-        .relative()
-        .overflow_hidden()
-        .child(dynamic(move || {
-            let slot = Rc::new(RefCell::new(ControllerSlot::new(is_preview)));
-            if let Some(ref content) = initial_preview {
-                let state_arc = slot.borrow().state.clone();
-                let mut s = state_arc.lock().unwrap();
-                s.model.write(content.as_bytes());
-                let _ = s.model.replies();
-            }
+    view().relative().overflow_hidden().child(dynamic(move || {
+        let slot = Rc::new(RefCell::new(ControllerSlot::new(is_preview)));
+        if let Some(ref content) = initial_preview {
+            let state_arc = slot.borrow().state.clone();
+            let mut s = state_arc.lock().unwrap();
+            s.model.write(content.as_bytes());
+            let _ = s.model.replies();
+        }
 
-            let factory_slot = slot.clone();
-            provide_context(TerminalEmulatorFactory::new(move |size, scrollback| {
-                {
-                    let mut guard = factory_slot.borrow_mut();
-                    guard.view_size = size;
-                    if guard.is_preview {
-                        let mut s = guard.state.lock().unwrap();
-                        s.model.set_scrollback_lines(scrollback);
-                        s.model.resize(size.cols.max(2), size.rows.max(1));
-                    }
+        let factory_slot = slot.clone();
+        provide_context(TerminalEmulatorFactory::new(move |size, scrollback| {
+            {
+                let mut guard = factory_slot.borrow_mut();
+                guard.view_size = size;
+                if guard.is_preview {
+                    let mut s = guard.state.lock().unwrap();
+                    s.model.set_scrollback_lines(scrollback);
+                    s.model.resize(size.cols.max(2), size.rows.max(1));
                 }
-                Box::new(SharedSessionEmulator {
-                    slot: factory_slot.clone(),
-                    pending_events: Vec::new(),
-                })
-            }));
-
-            let term_ref = component_ref::<Terminal>();
-            let status_sig = signal(String::new());
-
-            let theme_memo = computed({
-                let theme = theme.clone();
-                move || theme()
-            });
-            let font_memo = computed({
-                let font = font.clone();
-                move || parse_font_value(&font())
-            });
-            let binding_memo = computed({
-                let binding = binding.clone();
-                move || binding()
-            });
-            let ro_memo = computed({
-                let read_only = read_only.clone();
-                move || read_only()
-            });
-            let status_override_memo = computed({
-                let input_status = input_status.clone();
-                move || input_status()
-            });
-            let focus_memo = computed({
-                let focus = focus.clone();
-                move || focus()
-            });
-
-            // Sync font cell pixel metrics into slot so PTY size reports reflect font size.
-            {
-                let slot_font = slot.clone();
-                effect(move || {
-                    let spec = font_memo.get();
-                    let cw = (spec.size * 0.6).round().max(4.0) as u32;
-                    let ch = spec.line_height.round().max(8.0) as u32;
-                    slot_font.borrow_mut().cell_px = (cw, ch);
-                });
             }
+            Box::new(SharedSessionEmulator {
+                slot: factory_slot.clone(),
+                pending_events: Vec::new(),
+            })
+        }));
 
-            // Sync theme palette into Model + LiveSession display facts + repaint.
-            {
-                let slot_theme = slot.clone();
-                let term_ref_theme = term_ref;
-                effect(move || {
-                    let next_theme = theme_memo.get();
-                    let changed = slot_theme.borrow_mut().apply_theme(&next_theme);
-                    if changed && let Some(api) = term_ref_theme.api::<TerminalApi>() {
-                        api.write(String::new());
-                    }
-                });
-            }
+        let term_ref = component_ref::<Terminal>();
+        let status_sig = signal(String::new());
 
-            // Sync read_only + input_status into status pill.
-            {
-                let slot_ro = slot.clone();
-                effect(move || {
-                    let ro = ro_memo.get();
-                    let status_text = status_override_memo.get();
-                    let next_pill = {
-                        let mut guard = slot_ro.borrow_mut();
-                        guard.read_only = ro;
-                        guard.input_status = status_text;
-                        guard.effective_status()
-                    };
+        let theme_memo = computed({
+            let theme = theme.clone();
+            move || theme()
+        });
+        let font_memo = computed({
+            let font = font.clone();
+            move || parse_font_value(&font())
+        });
+        let binding_memo = computed({
+            let binding = binding.clone();
+            move || binding()
+        });
+        let ro_memo = computed({
+            let read_only = read_only.clone();
+            move || read_only()
+        });
+        let status_override_memo = computed({
+            let input_status = input_status.clone();
+            move || input_status()
+        });
+        let focus_memo = computed({
+            let focus = focus.clone();
+            move || focus()
+        });
+
+        // Sync font cell pixel metrics into slot so PTY size reports reflect font size.
+        {
+            let slot_font = slot.clone();
+            effect(move || {
+                let spec = font_memo.get();
+                let cw = (spec.size * 0.6).round().max(4.0) as u32;
+                let ch = spec.line_height.round().max(8.0) as u32;
+                slot_font.borrow_mut().cell_px = (cw, ch);
+            });
+        }
+
+        // Sync theme palette into Model + LiveSession display facts + repaint.
+        {
+            let slot_theme = slot.clone();
+            let term_ref_theme = term_ref;
+            effect(move || {
+                let next_theme = theme_memo.get();
+                let changed = slot_theme.borrow_mut().apply_theme(&next_theme);
+                if changed && let Some(api) = term_ref_theme.api::<TerminalApi>() {
+                    api.write(String::new());
+                }
+            });
+        }
+
+        // Sync read_only + input_status into status pill.
+        {
+            let slot_ro = slot.clone();
+            effect(move || {
+                let ro = ro_memo.get();
+                let status_text = status_override_memo.get();
+                let next_pill = {
+                    let mut guard = slot_ro.borrow_mut();
+                    guard.read_only = ro;
+                    guard.input_status = status_text;
+                    guard.effective_status()
+                };
+                if status_sig.get_untracked() != next_pill {
+                    status_sig.set(next_pill);
+                }
+            });
+        }
+
+        // Sync live Herdr binding (pool lookup / attach / detach).
+        if !is_preview {
+            let slot_bind = slot.clone();
+            let term_ref_bind = term_ref;
+            effect(move || {
+                let next = binding_memo.get();
+                let rebound = slot_bind.borrow_mut().rebind(next);
+                if rebound {
+                    let next_pill = slot_bind.borrow().effective_status();
                     if status_sig.get_untracked() != next_pill {
                         status_sig.set(next_pill);
                     }
-                });
-            }
-
-            // Sync live Herdr binding (pool lookup / attach / detach).
-            if !is_preview {
-                let slot_bind = slot.clone();
-                let term_ref_bind = term_ref;
-                effect(move || {
-                    let next = binding_memo.get();
-                    let rebound = slot_bind.borrow_mut().rebind(next);
-                    if rebound {
-                        let next_pill = slot_bind.borrow().effective_status();
-                        if status_sig.get_untracked() != next_pill {
-                            status_sig.set(next_pill);
-                        }
-                        if let Some(api) = term_ref_bind.api::<TerminalApi>() {
-                            api.write(String::new());
-                        } else {
-                            after_answer(move || {
-                                if let Some(api) = term_ref_bind.api::<TerminalApi>() {
-                                    api.write(String::new());
-                                }
-                            });
-                        }
-                    }
-                });
-            }
-
-            // Sync focus request (`ticket` + `enabled`) -> `TerminalApi::focus` + Herdr `Focus`.
-            {
-                let slot_focus = slot.clone();
-                let term_ref_focus = term_ref;
-                let prev_req = Rc::new(RefCell::new(None::<FocusRequest>));
-                effect(move || {
-                    let req = focus_memo.get();
-                    let prev = *prev_req.borrow();
-                    *prev_req.borrow_mut() = Some(req);
-                    slot_focus.borrow().apply_focus(req.enabled);
-                    let should_focus =
-                        req.enabled && prev.is_none_or(|p| !p.enabled || p.ticket != req.ticket);
-                    if should_focus {
-                        if let Some(api) = term_ref_focus.api::<TerminalApi>() {
-                            api.focus();
-                        } else {
-                            after_answer(move || {
-                                if let Some(api) = term_ref_focus.api::<TerminalApi>() {
-                                    api.focus();
-                                }
-                            });
-                        }
-                    }
-                });
-            }
-
-            // Linux terminal clipboard paste shortcut (`Ctrl+Shift+V`) when focused and writable.
-            if !is_preview {
-                let slot_paste = slot.clone();
-                effect(move || {
-                    if !focus_memo.get().enabled || ro_memo.get() {
-                        return;
-                    }
-                    let slot_key = slot_paste.clone();
-                    on_key_with(
-                        "ctrl+shift+v",
-                        KeyOptions {
-                            when: nsh_core::keymap::When::Always,
-                            repeat: false,
-                            ..Default::default()
-                        },
-                        move |_| {
-                            let slot_async = slot_key.clone();
-                            spawn(async move {
-                                let files = clipboard_files().await;
-                                if !files.is_empty() {
-                                    let decoded: Vec<String> =
-                                        files.iter().filter_map(|u| decode_file_uri(u)).collect();
-                                    let escaped = crate::shell_escape_paths(decoded);
-                                    if !escaped.is_empty() {
-                                        slot_async.borrow().paste_text_to_pty(&escaped);
-                                        return;
-                                    }
-                                }
-                                let text = clipboard_string().await;
-                                if !text.is_empty() {
-                                    slot_async.borrow().paste_text_to_pty(&text);
-                                }
-                            });
-                        },
-                    );
-                });
-            }
-
-            // Async wakeup loop: wakes immediately whenever `LiveSession` receives PTY data
-            // or transitions connection state, updating clipboard, status pill, and `TerminalApi`.
-            {
-                let wake = slot.borrow().wake.clone();
-                let slot_wake = slot.clone();
-                let term_ref_wake = term_ref;
-                spawn(async move {
-                    while NextWake(wake.clone()).await {
-                        let (need_write, next_pill, clip) = {
-                            let mut guard = slot_wake.borrow_mut();
-                            if let Some(ref sess) = guard.session {
-                                sess.wake.ack();
+                    if let Some(api) = term_ref_bind.api::<TerminalApi>() {
+                        api.write(String::new());
+                    } else {
+                        after_answer(move || {
+                            if let Some(api) = term_ref_bind.api::<TerminalApi>() {
+                                api.write(String::new());
                             }
-                            let (rev, clip) = {
-                                let mut s = guard.state.lock().unwrap();
-                                (s.model.revision, s.model.take_clipboard())
-                            };
-                            let need_write = rev != guard.seen_rev;
-                            guard.seen_rev = rev;
-                            let pill = guard.effective_status();
-                            (need_write, pill, clip)
-                        };
-                        if let Some(text) = clip
-                            && try_os().is_some()
-                        {
-                            set_clipboard(text);
-                        }
-                        if status_sig.get_untracked() != next_pill {
-                            status_sig.set(next_pill);
-                        }
-                        if need_write && let Some(api) = term_ref_wake.api::<TerminalApi>() {
-                            api.write(String::new());
-                        }
+                        });
                     }
-                });
-            }
+                }
+            });
+        }
 
-            // Clean up listener registration on unmount while leaving pooled `LiveSession` alive.
-            {
-                let slot_cleanup = slot.clone();
-                cleanup(move || {
-                    let mut guard = slot_cleanup.borrow_mut();
-                    guard.wake.close();
-                    guard.detach_session();
-                });
-            }
+        // Sync focus request (`ticket` + `enabled`) -> `TerminalApi::focus` + Herdr `Focus`.
+        {
+            let slot_focus = slot.clone();
+            let term_ref_focus = term_ref;
+            let prev_req = Rc::new(RefCell::new(None::<FocusRequest>));
+            effect(move || {
+                let req = focus_memo.get();
+                let prev = *prev_req.borrow();
+                *prev_req.borrow_mut() = Some(req);
+                slot_focus.borrow().apply_focus(req.enabled);
+                let should_focus =
+                    req.enabled && prev.is_none_or(|p| !p.enabled || p.ticket != req.ticket);
+                if should_focus {
+                    if let Some(api) = term_ref_focus.api::<TerminalApi>() {
+                        api.focus();
+                    } else {
+                        after_answer(move || {
+                            if let Some(api) = term_ref_focus.api::<TerminalApi>() {
+                                api.focus();
+                            }
+                        });
+                    }
+                }
+            });
+        }
 
-            let slot_data = slot.clone();
-            let slot_drop = slot.clone();
-            let slot_wheel = slot.clone();
-            let term_ref_drop = term_ref;
-
-            let term_el = terminal()
-                .component_ref(&term_ref)
-                .scrollback(4000u32)
-                .font_family(move || font_memo.get().family)
-                .font_size(move || Points(font_memo.get().size))
-                .line_height(move || Points(font_memo.get().line_height))
-                .cursor_style(move |s| {
-                    let cur = parse_rgb_or(&theme_memo.get()["cursor"], [224, 228, 236]);
-                    s.bg(adaptive_rgba(cur, 0.45))
-                })
-                .accessibility_label(Some(SharedString::from("Terminal")))
-                .on_data(move |data: &SharedString| {
-                    let guard = slot_data.borrow();
-                    if guard.is_preview || guard.read_only {
-                        return;
-                    }
-                    let can_send = {
-                        let mut s = guard.state.lock().unwrap();
-                        if !session::accepts_pty_input(&s, guard.read_only) {
-                            false
-                        } else {
-                            s.model.clear_selection();
-                            s.model.scroll_to_bottom();
-                            true
-                        }
-                    };
-                    if can_send {
-                        guard.send_bytes(data.as_str().as_bytes().to_vec());
-                    }
-                })
-                .size_full();
-
-            view()
-                .size_full()
-                .relative()
-                .overflow_hidden()
-                .bg(move || {
-                    adaptive_rgb(parse_rgb_or(&theme_memo.get()["background"], [24, 24, 28]))
-                })
-                .p(px(6.0))
-                .on_file_drop(move |ev: &FileDropEvent| {
-                    let paths: Vec<String> =
-                        ev.uris.iter().filter_map(|u| decode_file_uri(u)).collect();
-                    let escaped = crate::shell_escape_paths(paths);
-                    if !escaped.is_empty() {
-                        slot_drop.borrow().paste_text_to_pty(&escaped);
-                        if let Some(api) = term_ref_drop.api::<TerminalApi>() {
-                            api.focus();
-                        }
-                    }
-                })
-                .on_wheel(move |ev: &WheelEvent| {
-                    let guard = slot_wheel.borrow();
-                    if guard.is_preview || guard.read_only {
-                        return;
-                    }
-                    let delta_y = match ev.delta {
-                        WheelDelta::Lines(pt) => -pt.y,
-                        WheelDelta::Points(pt) => -(pt.y.0 / 18.0),
-                    };
-                    let rows_step = delta_y.round() as isize;
-                    if rows_step == 0 {
-                        return;
-                    }
-                    let out = {
-                        let mut s = guard.state.lock().unwrap();
-                        if !session::accepts_pty_input(&s, guard.read_only) {
-                            return;
-                        }
-                        // Only intercept wheel when TUI mouse tracking or alternate scroll (1007) is active;
-                        // primary scrollback is scrolled natively by `nsh_base::Terminal`'s virtual_list.
-                        if !s.model.mouse_tracking()
-                            && s.model.active_screen()
-                                != crate::ffi::GHOSTTY_TERMINAL_SCREEN_ALTERNATE
-                        {
-                            return;
-                        }
-                        s.model.wheel(
-                            rows_step,
-                            0,
-                            ev.position.x.0,
-                            ev.position.y.0,
-                            0,
-                            false,
-                        )
-                    };
-                    if let WheelOutput::Pty(bytes) = out {
-                        guard.send_bytes(bytes);
-                    }
-                })
-                .child(term_el)
-                .child(when(
-                    move || !status_sig.get().is_empty(),
-                    move || {
-                        view()
-                            .absolute()
-                            .top(px(8.0))
-                            .right(px(12.0))
-                            .pointer_events(PointerEvents::None)
-                            .px(px(8.0))
-                            .py(px(3.0))
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(adaptive_rgba([255, 255, 255], 0.14))
-                            .bg(adaptive_rgba([20, 22, 28], 0.86))
-                            .child(
-                                text(move || SharedString::from(status_sig.get()))
-                                    .text_size(px(11.0))
-                                    .text_color(adaptive_rgb([214, 220, 230])),
-                            )
+        // Linux terminal clipboard paste shortcut (`Ctrl+Shift+V`) when focused and writable.
+        if !is_preview {
+            let slot_paste = slot.clone();
+            effect(move || {
+                if !focus_memo.get().enabled || ro_memo.get() {
+                    return;
+                }
+                let slot_key = slot_paste.clone();
+                on_key_with(
+                    "ctrl+shift+v",
+                    KeyOptions {
+                        when: nsh_core::keymap::When::Always,
+                        repeat: false,
+                        ..Default::default()
                     },
-                ))
-        }))
+                    move |_| {
+                        let slot_async = slot_key.clone();
+                        spawn(async move {
+                            let files = clipboard_files().await;
+                            if !files.is_empty() {
+                                let decoded: Vec<String> =
+                                    files.iter().filter_map(|u| decode_file_uri(u)).collect();
+                                let escaped = crate::shell_escape_paths(decoded);
+                                if !escaped.is_empty() {
+                                    slot_async.borrow().paste_text_to_pty(&escaped);
+                                    return;
+                                }
+                            }
+                            let text = clipboard_string().await;
+                            if !text.is_empty() {
+                                slot_async.borrow().paste_text_to_pty(&text);
+                            }
+                        });
+                    },
+                );
+            });
+        }
+
+        // Async wakeup loop: wakes immediately whenever `LiveSession` receives PTY data
+        // or transitions connection state, updating clipboard, status pill, and `TerminalApi`.
+        {
+            let wake = slot.borrow().wake.clone();
+            let slot_wake = slot.clone();
+            let term_ref_wake = term_ref;
+            spawn(async move {
+                while NextWake(wake.clone()).await {
+                    let (need_write, next_pill, clip) = {
+                        let mut guard = slot_wake.borrow_mut();
+                        if let Some(ref sess) = guard.session {
+                            sess.wake.ack();
+                        }
+                        let (rev, clip) = {
+                            let mut s = guard.state.lock().unwrap();
+                            (s.model.revision, s.model.take_clipboard())
+                        };
+                        let need_write = rev != guard.seen_rev;
+                        guard.seen_rev = rev;
+                        let pill = guard.effective_status();
+                        (need_write, pill, clip)
+                    };
+                    if let Some(text) = clip
+                        && try_os().is_some()
+                    {
+                        set_clipboard(text);
+                    }
+                    if status_sig.get_untracked() != next_pill {
+                        status_sig.set(next_pill);
+                    }
+                    if need_write && let Some(api) = term_ref_wake.api::<TerminalApi>() {
+                        api.write(String::new());
+                    }
+                }
+            });
+        }
+
+        // Clean up listener registration on unmount while leaving pooled `LiveSession` alive.
+        {
+            let slot_cleanup = slot.clone();
+            cleanup(move || {
+                let mut guard = slot_cleanup.borrow_mut();
+                guard.wake.close();
+                guard.detach_session();
+            });
+        }
+
+        let slot_data = slot.clone();
+        let slot_drop = slot.clone();
+        let slot_wheel = slot.clone();
+        let term_ref_drop = term_ref;
+
+        let term_el = terminal()
+            .component_ref(&term_ref)
+            .scrollback(4000u32)
+            .font_family(move || font_memo.get().family)
+            .font_size(move || Points(font_memo.get().size))
+            .line_height(move || Points(font_memo.get().line_height))
+            .cursor_style(move |s| {
+                let cur = parse_rgb_or(&theme_memo.get()["cursor"], [224, 228, 236]);
+                s.bg(adaptive_rgba(cur, 0.45))
+            })
+            .accessibility_label(Some(SharedString::from("Terminal")))
+            .on_data(move |data: &SharedString| {
+                let guard = slot_data.borrow();
+                if guard.is_preview || guard.read_only {
+                    return;
+                }
+                let can_send = {
+                    let mut s = guard.state.lock().unwrap();
+                    if !session::accepts_pty_input(&s, guard.read_only) {
+                        false
+                    } else {
+                        s.model.clear_selection();
+                        s.model.scroll_to_bottom();
+                        true
+                    }
+                };
+                if can_send {
+                    guard.send_bytes(data.as_str().as_bytes().to_vec());
+                }
+            })
+            .size_full();
+
+        view()
+            .size_full()
+            .relative()
+            .overflow_hidden()
+            .bg(move || adaptive_rgb(parse_rgb_or(&theme_memo.get()["background"], [24, 24, 28])))
+            .p(px(6.0))
+            .on_file_drop(move |ev: &FileDropEvent| {
+                let paths: Vec<String> =
+                    ev.uris.iter().filter_map(|u| decode_file_uri(u)).collect();
+                let escaped = crate::shell_escape_paths(paths);
+                if !escaped.is_empty() {
+                    slot_drop.borrow().paste_text_to_pty(&escaped);
+                    if let Some(api) = term_ref_drop.api::<TerminalApi>() {
+                        api.focus();
+                    }
+                }
+            })
+            .on_wheel(move |ev: &WheelEvent| {
+                let guard = slot_wheel.borrow();
+                if guard.is_preview || guard.read_only {
+                    return;
+                }
+                let delta_y = match ev.delta {
+                    WheelDelta::Lines(pt) => -pt.y,
+                    WheelDelta::Points(pt) => -(pt.y.0 / 18.0),
+                };
+                let rows_step = delta_y.round() as isize;
+                if rows_step == 0 {
+                    return;
+                }
+                let out = {
+                    let mut s = guard.state.lock().unwrap();
+                    if !session::accepts_pty_input(&s, guard.read_only) {
+                        return;
+                    }
+                    // Only intercept wheel when TUI mouse tracking or alternate scroll (1007) is active;
+                    // primary scrollback is scrolled natively by `nsh_base::Terminal`'s virtual_list.
+                    if !s.model.mouse_tracking()
+                        && s.model.active_screen() != crate::ffi::GHOSTTY_TERMINAL_SCREEN_ALTERNATE
+                    {
+                        return;
+                    }
+                    s.model
+                        .wheel(rows_step, 0, ev.position.x.0, ev.position.y.0, 0, false)
+                };
+                if let WheelOutput::Pty(bytes) = out {
+                    guard.send_bytes(bytes);
+                }
+            })
+            .child(term_el)
+            .child(when(
+                move || !status_sig.get().is_empty(),
+                move || {
+                    view()
+                        .absolute()
+                        .top(px(8.0))
+                        .right(px(12.0))
+                        .pointer_events(PointerEvents::None)
+                        .px(px(8.0))
+                        .py(px(3.0))
+                        .rounded(px(6.0))
+                        .border_1()
+                        .border_color(adaptive_rgba([255, 255, 255], 0.14))
+                        .bg(adaptive_rgba([20, 22, 28], 0.86))
+                        .child(
+                            text(move || SharedString::from(status_sig.get()))
+                                .text_size(px(11.0))
+                                .text_color(adaptive_rgb([214, 220, 230])),
+                        )
+                },
+            ))
+    }))
 }
 
 /// Mounts a live Herdr-backed `<nsh_base::Terminal />` with reactive theme, font, focus,
@@ -1185,8 +1171,7 @@ mod tests {
 
     #[test]
     fn ghostty_emulator_renders_themed_rgb_runs_and_preserves_style_flags() {
-        let mut emu =
-            GhosttyEmulator::with_theme(TerminalSize::new(40, 6), 1000, &sample_theme());
+        let mut emu = GhosttyEmulator::with_theme(TerminalSize::new(40, 6), 1000, &sample_theme());
         // ANSI index 1 (themed red [235,80,90]), bold+italic+underline, then 24-bit bg + dim + strike,
         // then inverse, then hidden, then CJK wide chars.
         emu.feed(
@@ -1220,7 +1205,10 @@ mod tests {
         emu.feed(b"\r\n\x1b[44m\x1b[2K\x1b[0m");
         let line1 = emu.line(1);
         assert_eq!(line1.text().len(), 40);
-        assert_eq!(line1.runs[0].style.bg, Some(TerminalColor::Rgb(90, 150, 245)));
+        assert_eq!(
+            line1.runs[0].style.bg,
+            Some(TerminalColor::Rgb(90, 150, 245))
+        );
     }
 
     #[test]
@@ -1250,7 +1238,10 @@ mod tests {
         assert!(!line0.text().contains('\u{10EEEE}'));
         for run in &line0.runs {
             if run.text == "  " {
-                assert!(!run.style.underline, "placeholder spaces must suppress underline");
+                assert!(
+                    !run.style.underline,
+                    "placeholder spaces must suppress underline"
+                );
             }
         }
     }
@@ -1318,7 +1309,11 @@ Adwaita Mono\t100\tFalse
         assert!(parsed.others.contains(&"Noto Sans".to_owned()));
         assert!(parsed.others.contains(&"Noto Sans CJK SC".to_owned()));
         assert!(!parsed.monospaced.contains(&"Noto Color Emoji".to_owned()));
-        assert!(!parsed.monospaced.contains(&"Noto Sans SignWriting".to_owned()));
+        assert!(
+            !parsed
+                .monospaced
+                .contains(&"Noto Sans SignWriting".to_owned())
+        );
     }
 
     #[test]

@@ -198,11 +198,7 @@ fn section_looks_like_prompt(lines: &[&str]) -> bool {
     }
     lines.iter().any(|line| {
         let t = line.trim_start();
-        t == ">"
-            || t.starts_with("> ")
-            || t == "❯"
-            || t.starts_with("❯ ")
-            || t.starts_with("!")
+        t == ">" || t.starts_with("> ") || t == "❯" || t.starts_with("❯ ") || t.starts_with("!")
     })
 }
 
@@ -367,7 +363,8 @@ fn check_fullscreen_views(lines: &[&str]) -> Option<RefineDecision> {
     let has_board_chrome = lines[tail_start..]
         .iter()
         .any(|l| l.contains("Swarm board") || l.contains("prev/next post"))
-        || (lines.iter().any(|l| l.contains("Roster")) && lines.iter().any(|l| l.contains("Posts")));
+        || (lines.iter().any(|l| l.contains("Roster"))
+            && lines.iter().any(|l| l.contains("Posts")));
     if has_board_chrome
         && let Some(header) = lines[..head_end]
             .iter()
@@ -432,10 +429,7 @@ fn has_positive_counter(line: &str, unit: &str) -> bool {
                 .chars()
                 .next_back()
                 .is_some_and(|c| !c.is_ascii_alphanumeric());
-        if boundary_ok
-            && !digits.is_empty()
-            && digits.parse::<u64>().is_ok_and(|n| n > 0)
-        {
+        if boundary_ok && !digits.is_empty() && digits.parse::<u64>().is_ok_and(|n| n > 0) {
             return true;
         }
         rest = &rest[pos + unit.len()..];
@@ -488,7 +482,11 @@ mod tests {
 ────────────────────────────────────────────────────────────────────────────────
 ? for shortcuts                                 accept-edits · Gemini 4 Carbon · low"
             );
-            assert_eq!(refine_screen(&screen), RefineDecision::Keep, "{finished_row}");
+            assert_eq!(
+                refine_screen(&screen),
+                RefineDecision::Keep,
+                "{finished_row}"
+            );
         }
 
         // Conversely, an active Swarm whose worker post preview contains `Done` after `member:`

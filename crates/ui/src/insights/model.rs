@@ -2258,7 +2258,7 @@ mod tests {
         let now = ts_utc8(2026, 11, 17, 15, 0);
         let mut s = Snapshot::default();
         let mut project = sample_project("p1", "New workspace");
-        project.created_at = now - 3600_000;
+        project.created_at = now - 3_600_000;
         s.projects.push(project);
         merged(&mut s, "new", now - 60_000);
         let d = compute(&s, None, RangeWindow::Today, now, &tz_plus_8());

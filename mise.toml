@@ -1,4 +1,5 @@
 [tools]
+hk = "2.4.0"
 rust = "beta-2026-10-14"
 zig = "0.17.1"
 "aqua:nextest-rs/nextest/cargo-nextest" = "0.9.152"
@@ -7,8 +8,13 @@ zig = "0.17.1"
 run = "python3 scripts/terminal-deps.py"
 
 [tasks.check]
+description = "Check Rust formatting, compilation, and Clippy without running tests or packaging"
 depends = ["terminal-deps"]
-run = "cargo check --workspace"
+run = [
+  "cargo fmt --all -- --check",
+  "cargo check --workspace --all-targets --locked",
+  "cargo clippy --workspace --all-targets --locked -- -D warnings",
+]
 
 [tasks.test]
 depends = ["terminal-deps"]

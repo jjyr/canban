@@ -94,21 +94,6 @@ pub(crate) fn checkpoint(ui: Ui) {
     ui.history.update(|h| h.checkpoint(route));
 }
 
-pub(crate) fn back_to_card(ui: Ui) {
-    let card = ui.card.get_untracked();
-    let has_origin = ui.history.with(|h| {
-        h.index
-            .checked_sub(1)
-            .and_then(|i| h.entries.get(i))
-            .is_some_and(|r| r.page == "card" && r.card == card)
-    });
-    if has_origin {
-        go(ui, false);
-    } else {
-        ui.open_card(card);
-    }
-}
-
 pub fn go(ui: Ui, forward: bool) {
     let mut history = ui.history.get_untracked();
     // Include a navigation from the same native event before traversing.

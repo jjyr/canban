@@ -74,7 +74,7 @@ mod tests {
             assert_eq!(spec.env, env);
             assert_eq!(spec.cwd, "/worktree");
             assert_eq!(&spec.argv[..argv.len()], argv.as_slice());
-            for pair in spec.argv[argv.len()..].chunks_exact(2) {
+            for pair in spec.argv[argv.len()..].as_chunks::<2>().0 {
                 assert_eq!(pair[0], "-c");
                 let (key, value) = pair[1].split_once('=').unwrap();
                 let key = key.strip_prefix("shell_environment_policy.set.").unwrap();

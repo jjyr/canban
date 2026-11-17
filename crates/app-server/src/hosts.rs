@@ -1017,28 +1017,28 @@ impl HostRegistry {
                         if let Some(slot) = guard.get_mut(&id)
                             && !slot.updating
                         {
-                            if state_val["changed"] == true {
-                                if let (Ok(snap), Ok(cfg)) = (
+                            if state_val["changed"] == true
+                                && let (Ok(snap), Ok(cfg)) = (
                                     serde_json::from_value::<Snapshot>(
                                         state_val["snapshot"].take(),
                                     ),
                                     serde_json::from_value::<Config>(state_val["config"].take()),
-                                ) {
-                                    client.set_cached_config(cfg.clone());
-                                    let data = CachedHostData {
-                                        saved_at: now(),
-                                        snapshot: snap,
-                                        config: cfg,
-                                    };
-                                    Self::save_cache(&self.local_home, &id, &data);
-                                    slot.cached = Some(data);
-                                    topic = Some(client::change_topic(
-                                        true,
-                                        &slot.last_state_marker,
-                                        &state_val,
-                                    ));
-                                    slot.last_state_marker = super::state::state_marker(&state_val);
-                                }
+                                )
+                            {
+                                client.set_cached_config(cfg.clone());
+                                let data = CachedHostData {
+                                    saved_at: now(),
+                                    snapshot: snap,
+                                    config: cfg,
+                                };
+                                Self::save_cache(&self.local_home, &id, &data);
+                                slot.cached = Some(data);
+                                topic = Some(client::change_topic(
+                                    true,
+                                    &slot.last_state_marker,
+                                    &state_val,
+                                ));
+                                slot.last_state_marker = super::state::state_marker(&state_val);
                             }
                             if let HostConnectionState::Connected {
                                 rtt_ms: prev_rtt, ..

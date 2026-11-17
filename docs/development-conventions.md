@@ -83,6 +83,18 @@ The implementation now includes UI Kit, a native Gallery and an opt-in real-Herd
 
 ## Verification and documentation updates
 
+Run `mise run check` for lightweight Rust checks: `cargo fmt --all -- --check`,
+`cargo check --workspace --all-targets --locked`, and
+`cargo clippy --workspace --all-targets --locked -- -D warnings`. This task does
+not run tests or package the app; formatting differences and warnings fail the check.
+
+After cloning, install the pinned tools with `mise install`, then enable this
+repository's Git hooks with `mise exec -- hk install --mise`. The `pre-commit`
+hook calls `mise run check` for every commit, temporarily stashing unstaged work
+so it checks the staged content. It does not format or stage files automatically.
+Run `mise exec -- hk run pre-commit` to exercise the hook manually. See
+[hk's mise integration](https://hk.jdx.dev/mise_integration.html).
+
 For implementation changes, use `mise run build`, `mise run test` and the affected acceptance tasks. `mise run test` runs `cargo nextest run --workspace`; when filtering to a single crate, keep `--workspace` (for example `mise run test -- -E 'package(canban-app-server)'` or `cargo nextest run --workspace -E 'package(...)'`) so Cargo resolves the identical workspace feature graph without rebuilding shared dependencies. UI component changes use `mise run gallery`; application-flow changes need a real packaged native app with an isolated home/Core for acceptance. Use `mise run dev` / `mise run dev-stop` for branch-scoped development; `mise run run` is the same isolated start entry. Explicit homes override branch selection. The manager refuses installed `~/.canban`, foreign process records and unrecorded services. Socket, lock and data follow the home; changing only a socket or bundle ID is insufficient. Ordinary development may share Herdr Core, but acceptance must isolate it. `CANBAN_ENDPOINT` attaches to existing service data. See [development startup](development-startup.md) and [remaining isolation gaps](instance-isolation.md).
 
 Record what was exercised, the environment/build and material omissions. Distinguish deterministic providers over real PTYs from real Codex/Claude runs, Gallery checks from actual App integration, and transport timing from end-to-end input latency. A passing build or a screenshot alone proves neither interaction correctness nor provider readiness. Do not silently count an unavailable/failed check as passed or rerun unrelated suites for a documentation-only correction.

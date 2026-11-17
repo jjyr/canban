@@ -94,7 +94,8 @@ impl AppServer {
                         let mut updated = false;
                         self.store.lock().unwrap().write(|db| {
                             let mut current: ConfigurationSession = db.get(&session.id)?;
-                            if current.generation == expected_gen && current.state == expected_state {
+                            if current.generation == expected_gen && current.state == expected_state
+                            {
                                 current.state = next_state;
                                 db.save(&current)?;
                                 updated = true;
