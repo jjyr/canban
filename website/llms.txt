@@ -31,6 +31,9 @@ git clone https://github.com/jjyr/canban.git && cd canban && mise run install-ap
 ## Links
 
 - Website: https://canban.dev/
+- 中文: https://canban.dev/zh/
+- Installation & FAQ: https://canban.dev/install/
+- Changelog: https://canban.dev/changelog/
 - GitHub Repository: https://github.com/jjyr/canban
 - Architecture & Documentation: https://github.com/jjyr/canban/tree/main/docs
 - Herdr Core (`herdr-core`): https://github.com/herdrdev/herdr-core

@@ -1,0 +1,120 @@
+{
+  "en": {
+    "home": "Workbench",
+    "install": "Install",
+    "changelog": "Changelog",
+    "install_title": "Install Canban",
+    "install_desc": "Install or update Canban on macOS and Linux, set up a headless server, and find answers to common questions.",
+    "install_intro": "A native workbench on your desktop. Persistent agents on your server.",
+    "requirements": "Before you begin",
+    "requirements_text": "Install Git and your chosen agent CLI, and complete the agent’s authentication. Canban uses Herdr Core (hc) to run persistent terminal sessions and guides you through setup on first launch if it is missing.",
+    "desktop": "Desktop",
+    "desktop_text": "Run this command to install or update the desktop app.",
+    "macos": "macOS 13.0+ · Apple Silicon",
+    "macos_text": "Installs Canban.app in /Applications.",
+    "linux": "Linux · x86_64 / arm64",
+    "linux_text": "Installs to ~/.local/opt/canban and adds an application launcher. GTK4 and GStreamer runtime libraries are required.",
+    "linux_deps": "Linux runtime dependencies",
+    "headless": "Headless Linux server",
+    "headless_text": "Install the CLI and daemon without GTK4 or a desktop session. Connect from the desktop app over SSH or Tailscale. Install Git, Herdr Core, your agent CLI, and project dependencies on the server.",
+    "updates": "Updates",
+    "updates_text": "Run the same installation command again to update an existing installation. The desktop app also provides an update action when a new version is available.",
+    "releases_link": "Read the Changelog",
+    "source": "Build from source",
+    "source_text": "For platform build dependencies and source installation instructions, see the GitHub README.",
+    "faq": "Frequently asked questions",
+    "faq_items": [
+      [
+        "What is Canban?",
+        "Canban is a native Kanban and terminal workbench for AI coding agents. It brings task specifications, agent discussions, progress, and code review together on cards, with workflows that organize development and delivery."
+      ],
+      [
+        "Which agents can I use?",
+        "Canban uses Herdr to run agents, so agents supported by Herdr are supported in Canban — including Claude Code, Codex, Antigravity, Cursor CLI, and custom terminal agents. Install and authenticate your chosen agent CLI before using it in Canban."
+      ],
+      [
+        "Which operating systems are supported?",
+        "Canban is available for macOS 13.0 or later on Apple Silicon, and Linux on x86_64 and arm64. Linux desktops require GTK4 and GStreamer runtime libraries. Linux servers without a desktop can use headless mode."
+      ],
+      [
+        "How do I install or update Canban?",
+        "Use the installation command on this page to install or update Canban. Running agents also requires Git, your chosen agent CLI, and Herdr Core. Canban guides you through Herdr Core setup on first launch if it is missing. See the Changelog for release details."
+      ],
+      [
+        "Can I run agents on a remote server?",
+        "Yes. Install Canban in headless mode on a Linux server, then connect from the desktop app over SSH or Tailscale to manage remote tasks and terminals. Install your agent CLI and development dependencies on the remote machine."
+      ],
+      [
+        "Is Canban free?",
+        "Canban is free and open source under the Apache-2.0 license. Your chosen agents, model APIs, or other services may have separate costs."
+      ]
+    ],
+    "release_intro": "Published Canban releases, latest versions first.",
+    "release_note": "Release notes are shown in their original language.",
+    "github_release": "View on GitHub",
+    "prerelease": "Pre-release",
+    "no_notes": "See the GitHub release for details.",
+    "all_releases": "All releases on GitHub",
+    "copy": "Copy",
+    "latest": "Latest release"
+  },
+  "zh": {
+    "home": "工作台",
+    "install": "安装",
+    "changelog": "版本更新",
+    "install_title": "安装 Canban",
+    "install_desc": "在 macOS 和 Linux 上安装或更新 Canban，配置无桌面的远程服务器，并查看常见问题解答。",
+    "install_intro": "桌面上的原生工作台，服务器上持续运行的 Agent。",
+    "requirements": "开始之前",
+    "requirements_text": "安装 Git 和你选择的 Agent CLI，并完成 Agent 自身的登录或 API 配置。Canban 使用 Herdr Core（hc）运行持久终端会话；首次启动时会引导安装缺失的 Herdr Core。",
+    "desktop": "桌面版",
+    "desktop_text": "运行以下命令，安装或更新桌面应用。",
+    "macos": "macOS 13.0+ · Apple Silicon",
+    "macos_text": "安装 Canban.app 到 /Applications。",
+    "linux": "Linux · x86_64 / arm64",
+    "linux_text": "安装到 ~/.local/opt/canban 并添加应用启动器。需要 GTK4 和 GStreamer 运行库。",
+    "linux_deps": "Linux 运行库依赖",
+    "headless": "Headless Linux 服务器",
+    "headless_text": "安装 CLI 和后台服务，无需 GTK4 或桌面环境。通过桌面端使用 SSH 或 Tailscale 连接。请在服务器上安装 Git、Herdr Core、Agent CLI 和项目开发依赖。",
+    "updates": "更新",
+    "updates_text": "再次运行相同的安装命令即可更新已有安装。桌面应用在检测到新版本时也会提供更新入口。",
+    "releases_link": "查看版本更新",
+    "source": "从源码构建",
+    "source_text": "各平台构建依赖和源码安装步骤，请参阅 GitHub README。",
+    "faq": "常见问题",
+    "faq_items": [
+      [
+        "Canban 是什么？",
+        "Canban 是面向 AI 编程 Agent 的原生看板与终端工作台。它将任务说明、Agent 讨论、开发进度和代码审查集中在卡片中，并通过工作流组织开发与交付。"
+      ],
+      [
+        "支持哪些 Agent？",
+        "Canban 使用 Herdr 运行 Agent，因此支持 Herdr 所支持的 Agent，例如 Claude Code、Codex、Antigravity、Cursor CLI 和自定义终端 Agent。请先安装所需的 Agent CLI，并完成它自己的登录或 API 配置。"
+      ],
+      [
+        "支持哪些操作系统？",
+        "Canban 提供 macOS 13.0 及以上 Apple Silicon 版本，以及 Linux x86_64 和 arm64 版本。Linux 桌面版需要 GTK4 和 GStreamer 运行库；无桌面的 Linux 服务器可以使用 Headless 模式。"
+      ],
+      [
+        "如何安装和更新？",
+        "使用本页的安装命令即可安装或更新 Canban。运行 Agent 还需要 Git、相应的 Agent CLI 和 Herdr Core；首次启动时，Canban 会引导安装缺失的 Herdr Core。各版本改动可在版本更新页查看。"
+      ],
+      [
+        "可以在远程服务器上运行 Agent 吗？",
+        "可以。在 Linux 服务器上安装 Headless 版本，再通过 SSH 或 Tailscale 从桌面端连接，即可管理远程任务和终端。Agent 及其开发依赖需要安装在执行任务的远程机器上。"
+      ],
+      [
+        "Canban 免费吗？",
+        "Canban 是采用 Apache-2.0 许可证的免费开源软件。你使用的 Agent、模型 API 或其他服务可能另行收费。"
+      ]
+    ],
+    "release_intro": "已发布的 Canban 版本，按版本倒序排列。",
+    "release_note": "版本说明保留发布时的原始语言。",
+    "github_release": "在 GitHub 查看",
+    "prerelease": "预发布版本",
+    "no_notes": "详情请查看 GitHub Release。",
+    "all_releases": "在 GitHub 查看所有版本",
+    "copy": "复制",
+    "latest": "最新版本"
+  }
+}

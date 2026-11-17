@@ -7,6 +7,14 @@ zig = "0.17.1"
 [tasks.terminal-deps]
 run = "python3 scripts/terminal-deps.py"
 
+[tasks.build-website]
+description = "Generate the bilingual static website (pass --refresh-releases for current GitHub releases)"
+run = "python3 scripts/website.py"
+
+[tasks.test-website]
+description = "Check localized website metadata, links, FAQ, and safe release rendering"
+run = "python3 scripts/test-website.py"
+
 [tasks.check]
 description = "Check Rust formatting, compilation, and Clippy without running tests or packaging"
 depends = ["terminal-deps"]

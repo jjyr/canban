@@ -1,0 +1,354 @@
+[
+  {
+    "tag_name": "20261118-1",
+    "name": "20261118-1",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261118-1",
+    "published_at": "2026-11-17T16:48:16Z",
+    "body": "## What's Changed\n- chore: run Rust checks through mise before commits (fa14d95)\n- Show merged delivery badges on Card worktree headers (9f8f8a1)\n- docs(cli): guide agents to save the bundled Canban skill (d1ac1a3)\n- feat: default agent RPC and CLI to concise responses (e7609e8)\n- docs(insights): record rebased integration verification (8710644)\n- feat(insights): add daily comparisons and annual contribution views (b4b520e)\n- Document memory synchronization merge verification (c0470ad)\n- Advance desktop API for merged state synchronization (1dfdd25)\n- Document UI synchronization ownership and memory review contracts (f494f08)\n- Record final native build and standard signpost acceptance (41ddb91)\n- Reduce full-state memory churn and add Instruments profiling (02f7848)\n- Simplify worktree-based Git workbench (#106) (6195870)\n- Fix contextual Board and Git navigation and clear foreign Git selections (fcaee75)\n- fix(ui): allow selecting and copying Card Markdown (b216537)\n- Fix workflow column transition dispatch and event metadata (312e062)\n- Make Card and Terminal branches open their changes directly (7cb6fa7)\n- Unify Board filters and persist Mine per account and project (7059480)\n- Open newly created Card details after submission (c8deed4)\n\n**Full Changelog**: https://github.com/jjyr/canban/compare/20261116-7...20261118-1",
+    "prerelease": false
+  },
+  {
+    "tag_name": "20261116-7",
+    "name": "20261116-7",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261116-7",
+    "published_at": "2026-11-16T16:11:04Z",
+    "body": "## What's Changed\n- fix(git): scope refresh events and retain diff views (3e68835)\n- perf(terminal): open new terminals before workspace refresh (c17019f)\n- Improve Git workbench async loading and interaction feedback (f1b801d)\n- fix(ui): acknowledge submissions before workspace refresh (b83a189)\n\n**Full Changelog**: https://github.com/jjyr/canban/compare/20261116-6...20261116-7",
+    "prerelease": false
+  },
+  {
+    "tag_name": "20261116-6",
+    "name": "20261116-6",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261116-6",
+    "published_at": "2026-11-16T12:41:29Z",
+    "body": "## What's Changed\n- fix(test): capture pooled transport exit flag before replying (d2572f4)\n- fix(github): coalesce cache refreshes by request start time instead of completion time (f53ea20)\n- Adapt Codex launch environments through a shared provider boundary (a0b1805)\n- fix(ui): show total running agents in Activity & Notifications instead of slot ratio (1d05f04)\n- Simplify issue templates to Markdown and request Canban version (f11e864)\n- feat(ui): separate non-project terminal directories and compact local home paths (2699576)\n- Derive terminal navigation from live directories and retain sidebar rows (32e1ad4)\n- Make GitHub settings responsive and queue project synchronization (b05d118)\n- fix(ui-kit,ui): restore Menlo editor font cascade and guard CoreText caret measurement (4954ba9)\n\n**Full Changelog**: https://github.com/jjyr/canban/compare/20261116-5...20261116-6",
+    "prerelease": false
+  },
+  {
+    "tag_name": "20261116-5",
+    "name": "20261116-5",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261116-5",
+    "published_at": "2026-11-16T08:48:19Z",
+    "body": "## What's Changed\n- docs: update multi-host Updating state, update.daemon, and DESKTOP_API 60 (f34f5ec)\n- feat(hosts): surface live Updating status during remote daemon upgrades (19eb690)\n- fix(app-server): fix TCP stream FD leak, update.daemon RPC timeout, and deleted exe resolution (c671d82)\n- Fix update download timeouts, staging error cleanup, and bump DESKTOP_API to 60 (151ff06)\n\n**Full Changelog**: https://github.com/jjyr/canban/compare/20261116-4...20261116-5",
+    "prerelease": false
+  },
+  {
+    "tag_name": "20261116-4",
+    "name": "20261116-4",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261116-4",
+    "published_at": "2026-11-16T05:05:31Z",
+    "body": "## What's Changed\n- fix(ui-kit,ui): eliminate uncomposited X11 GTK4 black boxes and theme Linux popups (4f78d20)\n\n**Full Changelog**: https://github.com/jjyr/canban/compare/20261116-3...20261116-4",
+    "prerelease": false
+  },
+  {
+    "tag_name": "20261116-3",
+    "name": "20261116-3",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261116-3",
+    "published_at": "2026-11-16T04:33:49Z",
+    "body": "## What's Changed\n- fix(release): rename headless CLI archive to canban-cli-* to avoid GitHub asset case collision (788733c)\n- fix(app-server): guard configuration session generations and in-flight outbox flushes (56b2b51)\n- feat(website): update install tabs to Desktop/Headless, slogan, and CTA layout (c7f34dd)\n- Fix Linux clippy warnings in UI and Gallery (af8c0f6)\n- feat(packaging): add Linux desktop bundles, installer modes, CI, and docs (109e8b8)\n- feat(updater): support Linux desktop bundles, systemd coordination, and daemon coexistence (7fc4a88)\n- feat(ui): support Linux desktop host, CSD chrome, shortcuts, and terminal mount (b5ca1ba)\n- feat(terminal): add cross-platform session pool, Linux terminal backend, and Cargo target deps (1a67b67)\n\n**Full Changelog**: https://github.com/jjyr/canban/compare/20261116-1...20261116-3",
+    "prerelease": false
+  },
+  {
+    "tag_name": "20261116-1",
+    "name": "20261116-1",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261116-1",
+    "published_at": "2026-11-15T18:25:57Z",
+    "body": "## What's Changed\n- feat(hosts): add remote daemon updates and unify UI routing under Hosts (e147449)\n- feat(terminal): add Kitty Graphics Protocol rendering and default Ghostty identity (74ed4d0)\n- feat(lifecycle): reclaim completed idle agent terminals after 30s (64afa3b)\n- feat(workflows): add scheduled tasks panel, cron triggers, and card/cardless agent execution (#39) (78f73ce)\n- Refine agy Swarm and background-task status via Herdr screen inspection (0e6f221)\n\n**Full Changelog**: https://github.com/jjyr/canban/compare/20261115-2...20261116-1",
+    "prerelease": false
+  },
+  {
+    "tag_name": "20261115-2",
+    "name": "20261115-2",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261115-2",
+    "published_at": "2026-11-15T15:29:31Z",
+    "body": "## What's Changed\n- fix(ci): guard nullable Herdr observed/status fields in acceptance polling (0dee543)\n- feat(ui): add Insights daily Kanban merge and Agent scheduling page (11a0f3b)\n- feat(terminal): automatic Nerd Font fallback and cell scaling for PUA glyphs (cfdb3a9)\n- fix(ci): eliminate update.check lock and UI shim races in release upgrade gate (a52cc7f)\n- fix(hosts): fix SSH bootstrap quoting, keep terminal open, and title as Add machine (97dbf7b)\n- fix(updater): allow batch.report in handoff outbox queue (4ad33f3)\n- perf(ui): add LRU caches, derived snapshot indexes, and persistent board shell (491db46)\n- feat: add simultaneous multi-host canband connections, pairing UX, and diagnostics (fcdcd1f)\n- fix(workflow,app-server): reset completed live AgentRun on card adopt so report advances merge queue (b76e5f0)\n- feat(terminals): expand Card terminal split when jumping from Terminals to Card (55e351d)\n- fix(terminals): vertically center top-right project title in header (0ea85b3)\n\n**Full Changelog**: https://github.com/jjyr/canban/compare/20261115-1...20261115-2",
+    "prerelease": false
+  },
+  {
+    "tag_name": "20261115-1",
+    "name": "20261115-1",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261115-1",
+    "published_at": "2026-11-15T09:49:36Z",
+    "body": "## What's Changed\n- feat(updater,ci): add pre-upgrade SQLite snapshot rollback, release upgrade gate, and gh test isolation (3ebd9c6)\n- fix(storage,updater): purge legacy workflow_templates rows in schema 19 and validate state on startup (e804178)\n- feat(terminals): compact sidebar session rows to fixed two-line layout (89abd79)\n- feat(terminal): support file drag-and-drop and Finder file path paste (5373e42)\n- feat(workflows): add global default workflow preset and project workflow copy (6ee268e)\n- refactor(context): replace inline prompt env overrides with $CANBAN_CLI (7e99d0c)\n- feat(terminals,ui,notifications): unify real-time Herdr status feedback and notifications (#83) (d5d7e7c)\n- feat(terminals): replace changed status with +N/-M diff line stats (2026c6c)\n- feat(terminals): name shells from live per-project max, add Cmd+1..9, and refine close fallback (04f2fc4)\n- ci(release): cache builds, harden workflow, run test-install, and decouple GitHub action gate (669b261)\n- fix(acceptance): update workflow schema check and card script log path (d5dcd6a)\n- feat(website): improve SEO metadata, crawlability, and sync canonical install.sh (d4f5a3c)\n- Replace project directory chooser with inline path combobox (#82) (1ee7a79)\n- feat(github): auto-detect and link project GitHub repositories (1c08132)\n- Update README (0b58abc)\n- update README (ff16f6b)\n- feat(website): redesign as Monokai CRT deck and enable GitHub Pages (912129d)\n- fix(ui): track WorktreeScope selection in terminal tabs and highlight active tab (c591bff)\n- fix(ui): pass reply count through CardTileModel after card_tile refactor (704482f)\n- docs: require English prompts and explicit user approval before prompt changes (fb29355)\n- fix(terminal): stabilize cursor during Chinese IME preedit, commit, and synchronized output (0364fdf)\n- feat(terminals): show recognized Agent CLI icon in Shells from Herdr push (6a6c34f)\n- fix(board): position rows at resting layout top to prevent deep-column scroll culling and tile overlap (b813c8c)\n- feat(ui,ui-kit): rename Diff & Review to Git, add searchable ref/PR pickers, and streamline Git UI (81e2911)\n- feat(agents): add collapsible Command + Argv editor in Settings (e585ef4)\n- feat(website): add Zen static site for canban.dev with i18n and Pages deploy (3309ce4)\n- Update README (c06e159)\n- feat(ui): display reply icon and count on Board Cards when non-zero (f7dbeaa)\n- ci(release): generate reverse-chronological non-merge commit changelog against previous release (2e8ecb6)\n- feat(profiles,ui): detect per-model effort support and omit unsupported effort flags (29490e3)\n- fix(ui): render plain Agents label in Board header without override count (9760f9c)\n- docs(readme): streamline philosophy, highlights, installation, and drop local development (17924b6)\n- feat(skill,review): prefer short card numbers in SKILL.md RPC examples and review.preview (323c868)\n- refactor(terminals): show batch @merger directly under project root without special group (481269a)\n- docs,install,terminal: add bilingual READMEs, curl installer, Monokai showcase, and fix initial zero-bounds PTY sizing (67c597d)\n- feat(merge-queue): add batch merge queue, @merger session UI, and agy workspace trust (13ccbb5)\n- feat(ids,storage): migrate instance IDs to 8-char hex and card paths to card numbers (62805b2)\n- fix(workflow): route failed @merger retries through the FIFO merge queue (1bc73f0)\n- feat(review): add Git client commit browser, staging, and remote sync (d48d739)\n- perf(build,test): unify workspace features, cache ghostty-vt, avoid git env spawn, and use nextest (9f66883)\n- feat(workflow): add schema 6 script steps, env propagation, and single-fallback recovery (c670547)\n- feat(terminals): add worktree-scoped tabs, branch tree, and git status (33a98d9)\n- fix(workspaces,workflow): preserve mid-rebase branch for @merger and allow retrying failed deliveries (8798b4e)\n- feat(comments): support deleting own comments and jumping to GitHub comment anchors (ef40877)\n- fix(ui): highlight Card Terminal icon directly instead of showing a badge dot (d746cf4)\n- feat(ui,app-server): show compact elapsed runtime on Agent capsules and workflow stepper (a591cad)\n- feat(comments): support editing own local and GitHub comments (8596276)\n- fix(notifications): suppress false unreported-stop alerts until 1-hour idle fallback (3f6a51a)\n- feat(ui,app-server): default Card Terminal split to collapsed, converge onto Terminal button, and inject CARD_ID (c31fac6)\n- ci(release): publish official GitHub Releases and run integration tests before release (141940b)\n- feat(agents): support per-project model and effort overrides for role identities (270b137)\n- fix(startup): prevent theme remount loop and stabilize updater recovery (6c9d3c2)\n- feat(delivery): default to rebase merge strategy and add squash/merge options (1501412)\n- feat(startup): detect herdr-core on launch with Install and Check actions (e8d301e)\n- fix(ui): re-enable YAML syntax highlighting in Workflow source editor (95688c3)\n- fix(package,updater): refresh macOS bundle mtime and LaunchServices icon registration (7ba7b3a)\n- refactor: remove Attempt and unify Card-role Agents onto TerminalEntry (8fd10e1)\n- perf(terminal): eliminate open flash, add optimistic close, and pool sessions & RPC connections (2dd87b1)\n- feat(ui): confirm before closing terminal with non-done running agent (d6db208)\n- feat: remove Request model and unify Card CLI/terminal identity on CANBAN_CARD (5096236)\n- feat(ui): render colored provider icons for Agent comment avatars (8939b6a)\n- fix(ui): render full-height split divider in Card Live Terminal and Terminals (570225e)\n- feat(board): display active column automation pills on column headers (606eee1)\n- feat(ui,ui-kit): promote event-first hierarchy and semantic icon badges in Activity & Notifications (6337e16)\n- build(release): require manual workflow_dispatch and add mise release task (d109224)\n- feat(skill,ui): bundle Canban CLI skill, optional setup prompt, and global ⌘T terminal (41459a2)\n\n**Full Changelog**: https://github.com/jjyr/canban/compare/20261114-4...20261115-1",
+    "prerelease": false
+  },
+  {
+    "tag_name": "20261114-4",
+    "name": "20261114-4",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261114-4",
+    "published_at": "2026-11-13T18:18:00Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261114-2...20261114-4",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261114-3",
+    "name": "20261114-3",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261114-3",
+    "published_at": "2026-11-13T18:17:07Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261114-1...20261114-3",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261114-2",
+    "name": "20261114-2",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261114-2",
+    "published_at": "2026-11-13T17:54:47Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261114-1...20261114-2",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261114-1",
+    "name": "20261114-1",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261114-1",
+    "published_at": "2026-11-13T16:47:37Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261113-22...20261114-1",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261113-9",
+    "name": "20261113-9",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261113-9",
+    "published_at": "2026-11-13T09:32:59Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261113-5...20261113-9",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261113-8",
+    "name": "20261113-8",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261113-8",
+    "published_at": "2026-11-13T09:18:46Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261113-5...20261113-8",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261113-7",
+    "name": "20261113-7",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261113-7",
+    "published_at": "2026-11-13T09:14:20Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261113-6...20261113-7",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261113-6",
+    "name": "20261113-6",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261113-6",
+    "published_at": "2026-11-13T08:39:01Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261112-6...20261113-6",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261113-5",
+    "name": "20261113-5",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261113-5",
+    "published_at": "2026-11-13T07:32:05Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261113-4...20261113-5",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261113-4",
+    "name": "20261113-4",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261113-4",
+    "published_at": "2026-11-13T06:22:38Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261112-6...20261113-4",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261113-23",
+    "name": "20261113-23",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261113-23",
+    "published_at": "2026-11-13T15:46:03Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261113-21...20261113-23",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261113-22",
+    "name": "20261113-22",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261113-22",
+    "published_at": "2026-11-13T14:54:28Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261113-21...20261113-22",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261113-21",
+    "name": "20261113-21",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261113-21",
+    "published_at": "2026-11-13T14:29:07Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261113-17...20261113-21",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261113-20",
+    "name": "20261113-20",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261113-20",
+    "published_at": "2026-11-13T14:14:12Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261113-10...20261113-20",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261113-2",
+    "name": "20261113-2",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261113-2",
+    "published_at": "2026-11-13T05:06:33Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261112-6...20261113-2",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261113-19",
+    "name": "20261113-19",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261113-19",
+    "published_at": "2026-11-13T13:53:52Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261113-18...20261113-19",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261113-18",
+    "name": "20261113-18",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261113-18",
+    "published_at": "2026-11-13T13:19:37Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261113-17...20261113-18",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261113-17",
+    "name": "20261113-17",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261113-17",
+    "published_at": "2026-11-13T12:29:31Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261113-10...20261113-17",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261113-16",
+    "name": "20261113-16",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261113-16",
+    "published_at": "2026-11-13T12:23:19Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261113-10...20261113-16",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261113-15",
+    "name": "20261113-15",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261113-15",
+    "published_at": "2026-11-13T12:15:57Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261113-10...20261113-15",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261113-14",
+    "name": "20261113-14",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261113-14",
+    "published_at": "2026-11-13T12:14:47Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261113-11...20261113-14",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261113-12",
+    "name": "20261113-12",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261113-12",
+    "published_at": "2026-11-13T12:09:41Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261113-11...20261113-12",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261113-11",
+    "name": "20261113-11",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261113-11",
+    "published_at": "2026-11-13T11:39:15Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261113-10...20261113-11",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261113-10",
+    "name": "20261113-10",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261113-10",
+    "published_at": "2026-11-13T09:36:13Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261113-6...20261113-10",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261113-1",
+    "name": "20261113-1",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261113-1",
+    "published_at": "2026-11-12T16:10:54Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261112-6...20261113-1",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261112-6",
+    "name": "20261112-6",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261112-6",
+    "published_at": "2026-11-12T15:02:08Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261112-5...20261112-6",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261112-5",
+    "name": "20261112-5",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261112-5",
+    "published_at": "2026-11-12T14:01:56Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261112-4...20261112-5",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261112-4",
+    "name": "20261112-4",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261112-4",
+    "published_at": "2026-11-12T13:39:22Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261112-3...20261112-4",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261112-3",
+    "name": "20261112-3",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261112-3",
+    "published_at": "2026-11-12T08:25:43Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261112-2...20261112-3",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261112-2",
+    "name": "20261112-2",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261112-2",
+    "published_at": "2026-11-12T05:58:08Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261112-1...20261112-2",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261112-1",
+    "name": "20261112-1",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261112-1",
+    "published_at": "2026-11-11T23:12:38Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261111-5...20261112-1",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261111-5",
+    "name": "20261111-5",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261111-5",
+    "published_at": "2026-11-11T11:28:46Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261111-4...20261111-5",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261111-4",
+    "name": "20261111-4",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261111-4",
+    "published_at": "2026-11-11T07:10:31Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261111-3...20261111-4",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261111-3",
+    "name": "20261111-3",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261111-3",
+    "published_at": "2026-11-11T06:25:09Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/compare/20261111-2...20261111-3",
+    "prerelease": true
+  },
+  {
+    "tag_name": "20261111-2",
+    "name": "20261111-2",
+    "html_url": "https://github.com/jjyr/canban/releases/tag/20261111-2",
+    "published_at": "2026-11-11T01:44:17Z",
+    "body": "**Full Changelog**: https://github.com/jjyr/canban/commits/20261111-2",
+    "prerelease": true
+  }
+]

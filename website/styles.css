@@ -95,6 +95,7 @@ kbd {
   height: 100dvh;
   padding: 8px 12px 10px;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: 42px minmax(0, 1fr) 40px;
   gap: 8px;
   background:
@@ -210,7 +211,7 @@ kbd {
   font-weight: 600;
 }
 
-.lang-btn[aria-pressed="true"] {
+.lang-btn[aria-current="page"] {
   background: var(--bg-surface);
   color: var(--fg);
 }

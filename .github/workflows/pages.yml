@@ -6,7 +6,16 @@ on:
     paths:
       - 'website/**'
       - 'scripts/install.sh'
+      - 'scripts/website.py'
+      - 'scripts/test-website.py'
+      - 'mise.toml'
       - '.github/workflows/pages.yml'
+  release:
+    types: [published, edited, deleted, unpublished]
+  # Releases published using GITHUB_TOKEN do not trigger another release workflow.
+  workflow_run:
+    workflows: ['Release']
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -14,12 +23,12 @@ permissions:
   pages: write
   id-token: write
 
-concurrency:
-  group: 'pages'
-  cancel-in-progress: true
-
 jobs:
   deploy:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    concurrency:
+      group: 'pages'
+      cancel-in-progress: true
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -27,19 +36,23 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Editing an old release must not restore the website from its old tag.
+          ref: ${{ (github.event_name == 'release' || github.event_name == 'workflow_run') && github.event.repository.default_branch || github.sha }}
       - name: Setup Pages
         uses: actions/configure-pages@v5
         with:
           enablement: true
-      - name: Sync canonical installer into website artifact
-        run: |
-          rm -f website/install.sh
-          cp scripts/install.sh website/install.sh
-          chmod 0755 website/install.sh
+      - name: Validate website generator
+        run: python3 scripts/test-website.py
+      - name: Build localized pages and current release history
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/website.py --refresh-releases
       - name: Upload static site artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: 'website'
+          path: '.local/website'
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

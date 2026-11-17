@@ -1,0 +1,61 @@
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": "https://canban.dev/#website",
+      "name": "Canban",
+      "alternateName": [
+        "Canban.dev",
+        "Canban App",
+        "Canban Workbench"
+      ],
+      "url": "https://canban.dev/",
+      "inLanguage": [
+        "en",
+        "zh-CN"
+      ],
+      "description": "Official website for Canban — the open-source native macOS and Linux Kanban workbench for AI coding agents (Canban = Kanban + Workflow + Herdr)."
+    },
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://canban.dev/#software",
+      "name": "Canban",
+      "alternateName": "Canban Workbench",
+      "url": "https://canban.dev/",
+      "downloadUrl": "https://canban.dev/install.sh",
+      "installUrl": "https://canban.dev/#ch-3",
+      "codeRepository": "https://github.com/jjyr/canban",
+      "sameAs": [
+        "https://github.com/jjyr/canban"
+      ],
+      "image": "https://canban.dev/og-image.png",
+      "screenshot": "https://canban.dev/og-image.png",
+      "applicationCategory": "DeveloperApplication",
+      "applicationSubCategory": "AI Coding Agent Workbench & Kanban Board",
+      "operatingSystem": "macOS 13.0+, Linux (x86_64, arm64)",
+      "softwareRequirements": "git, Herdr Core (hc), GTK4 runtime on Linux desktop, and any native Agent CLI (Claude Code, Codex, Antigravity agy, Cursor CLI)",
+      "license": "https://www.apache.org/licenses/LICENSE-2.0",
+      "isAccessibleForFree": true,
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      },
+      "author": {
+        "@type": "Person",
+        "name": "JJy",
+        "url": "https://github.com/jjyr"
+      },
+      "description": "Canban is an open-source native macOS and Linux desktop workbench built in Rust that unifies Kanban cards for Human Context, GitHub Actions-style Workflows with isolated Git worktrees and FIFO Queue Merge, and Herdr persistent PTY terminals for native AI coding agent CLIs.",
+      "featureList": [
+        "Kanban board for Human Context with Markdown specs, #Card links, screenshots, @Agent discussions, and GitHub Issue/PR sync",
+        "Visual Workflow Studio & YAML workflows with automatic per-Card Git worktree isolation",
+        "Serialized FIFO Queue Merge with automatic @merger conflict resolution",
+        "Herdr persistent PTY terminal powered by Rust, longbridge/nsh (AppKit/Metal on macOS, GTK4 on Linux), and libghostty-vt",
+        "Simultaneous multi-host canband connections over SSH or Tailscale alongside zero-interference Claude Code, Codex, Antigravity (agy), and Cursor CLI support"
+      ],
+      "keywords": "Canban, canban.dev, AI Kanban, coding agents, Claude Code, Codex, Herdr, Git worktree workflow, developer workbench, macOS Rust app, Linux GTK4 Rust app"
+    }
+  ]
+}

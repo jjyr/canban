@@ -11,181 +11,9 @@
   };
 
   /* ------------------------------------------------------------------------ */
-  /* Bilingual Copy                                                           */
+  /* Static-page Copy Labels                                                  */
   /* ------------------------------------------------------------------------ */
-  const I18N = {
-    en: {
-      meta_title:
-        "Canban — AI-Native Kanban Workbench for Coding Agents (Kanban + Workflow + Herdr)",
-      meta_desc:
-        "Canban is an open-source native macOS and Linux Kanban workbench for coding agents. Maintain Human Context on Kanban cards, automate isolated Git worktrees & Queue Merge with custom Workflows, and run Claude Code, Codex, or Agy inside Herdr persistent PTY terminals.",
-
-      ch_1: "WORKBENCH",
-      ch_2: "CONTEXT",
-      ch_3: "TOPOLOGY",
-      ch_4: "INSTALL",
-      star_prompt: "STAR",
-
-      hero_subtitle:
-        "Maintain Human Context with Kanban, schedule with custom Workflows, and power native Agent CLIs with Herdr.",
-
-      tab_1_desc: "Maintain Human Context",
-      tab_2_desc: "Custom Workflow Scheduling",
-      tab_3_desc: "Native Agent CLI Support",
-
-      term_chrome_crumb: "canban / Card #65 · CRT & Monokai polish",
-      c68_title: "Wayland fractional scale host",
-      c67_title: "Remote machine SSH multiplexer",
-      c65_title: "CRT deck & Monokai polish",
-      c63_title: "GitHub App token rotation",
-      c63_wait: "Needs answer",
-      c64_title: "Workflow schema v7 migration",
-      c61_title: "Durable event journal cursor",
-      c60_title: "Unified ⌘O Command Palette",
-
-      tl_msg_1: "Build a bold retro CRT Monokai deck, one screen per channel.",
-      tl_mile: "⎇ Worktree <code>canban-0afd/65</code> · @developer started",
-      tl_msg_2: "Redrew full width Workflow Studio and live Agent CLI view.",
-
-      wf_intake: "Intake",
-      wn_0_title: "Plan task",
-      wn_0_sub: "Inspect repository & draft implementation steps",
-      wn_1_title: "Wait for free Agent",
-      wn_1_sub: "Admit in Board order when global slot is free",
-      wn_2_title: "Implement",
-      wn_2_sub: "Isolated Git worktree · awaits explicit CLI report",
-      wn_3_title: "External PR check",
-      wn_4_title: "Queue merge",
-      wn_4_sub: "FIFO batch integration & upstream branch sync",
-
-      hs_desc_label: "Description",
-      hs_desc_text:
-        "Present Canban inside a retro Monokai CRT deck. Keep Workflow pure visual Studio and show real Agent CLI TUI beside the Card.",
-      hs_comment_1: "@developer Add CRT scanlines, channel glitch, and ASCII topology on CH.03.",
-      hs_comment_2: "Applying Monokai phosphor tokens and verifying layout.",
-      tsc_placeholder: "Write a comment…",
-      tui_prompt_hint: "Steer @developer directly in TTY, or close window safely…",
-
-      ctx_title: "Track all task context and progress with Kanban cards.",
-      old_tag: "Scattered Terminal Tabs",
-      new_tag: "1 Card = Complete Context",
-      ccm_title: "GitHub App device OAuth token refresh",
-      ccm_msg_user:
-        "Refresh installation tokens 5m before expiry without storing client secrets. @developer",
-      ccm_msg_agent:
-        "Implemented secretless Device Flow rotation and passed 14 auth integration tests. Ready to merge.",
-      ccm_mile: "✓ Queued for automatic rebase & upstream sync",
-
-      ascii_title: "Parallel Agents. Isolated Worktrees. Zero Conflict Delivery.",
-      rf_card_title: "Token Refresh & Sync",
-      rf_plan_title: "Plan & Admit",
-      al_1: "Zero branch collisions: every Card gets its own clean checkout",
-      al_2: "Bring any native Agent CLI inside persistent Herdr TTYs",
-      al_3: "Automatic FIFO rebase merge, upstream push & worktree cleanup",
-
-      closing_title: "Unburden your mind. Keep your Human Context.",
-      tab_desktop: "Desktop",
-      tab_headless: "Headless",
-      copy_label: "Copy",
-      copied_label: "Copied",
-      cta_star: "Star jjyr/canban on GitHub",
-
-      s_rust: "Canban Core Engine",
-      s_herdr: "TTY Agent Support",
-      s_nsh: "Native UI",
-      s_ghostty: "Terminal Rendering Engine",
-      closing_seo_note:
-        "Canban = Kanban + Workflow + Herdr — Maintain Human Context with Kanban, schedule with custom Workflows, and power native Agent CLIs with Herdr.",
-
-      footer_meta: "Apache-2.0 · © 2026 JJy",
-    },
-
-    zh: {
-      meta_title:
-        "Canban — 面向 AI 编程 Agent 的原生 Kanban 工作台 (Kanban + Workflow + Herdr)",
-      meta_desc:
-        "Canban 是开源原生 macOS 与 Linux 编程 Agent 看板工作台：用 Kanban 卡片维护 Human Context，通过自定义 Workflow 自动隔离 Git Worktree 与 Queue Merge，并在 Herdr 持久化 PTY 终端中直接运行 Claude Code、Codex、Agy 等原生 Agent CLI。",
-
-      ch_1: "工作台",
-      ch_2: "上下文",
-      ch_3: "并行拓扑",
-      ch_4: "安装",
-      star_prompt: "STAR",
-
-      hero_subtitle:
-        "用 Kanban 维护 Human Context，自定义 Workflow 调度，Herdr 提供原生的 Agent CLI 支持。",
-
-      tab_1_desc: "维护 Human Context",
-      tab_2_desc: "自定义 Workflow 调度",
-      tab_3_desc: "原生的 Agent CLI 支持",
-
-      term_chrome_crumb: "canban / Card #65 · CRT 复古终端与 Monokai 质感",
-      c68_title: "Wayland 分数缩放窗口适配",
-      c67_title: "远程机器 SSH 多路复用连接",
-      c65_title: "CRT 复古终端与 Monokai 质感",
-      c63_title: "GitHub App 令牌轮换机制",
-      c63_wait: "待人工回复",
-      c64_title: "Workflow schema v7 迁移",
-      c61_title: "持久化事件日志游标恢复",
-      c60_title: "统一 ⌘O 全局命令面板",
-
-      tl_msg_1: "采用老式 CRT 终端切屏风格，搭配 Monokai 荧光质感。",
-      tl_mile: "⎇ Worktree <code>canban-0afd/65</code> · @developer 已启动",
-      tl_msg_2: "已重绘全宽 Workflow Studio 与右侧真实 Agent CLI 界面。",
-
-      wf_intake: "准入",
-      wn_0_title: "任务规划",
-      wn_0_sub: "读取仓库结构并生成实施步骤",
-      wn_1_title: "等待空闲 Agent 槽位",
-      wn_1_sub: "按看板优先级排队，有空闲并发槽位自动准入",
-      wn_2_title: "编码实现",
-      wn_2_sub: "独立 Git Worktree 隔离开发 · 等待 CLI 显式汇报",
-      wn_3_title: "外部 PR 安全检查",
-      wn_4_title: "Queue Merge 队列合并",
-      wn_4_sub: "FIFO 批量变基集成并自动推送远端分支",
-
-      hs_desc_label: "任务描述",
-      hs_desc_text:
-        "采用复古 CRT 显像管分屏展示 Canban。Workflow 保持纯图形化 Studio，Herdr 分屏展示真实 Agent CLI 交互输出。",
-      hs_comment_1: "@developer 加上 CRT 扫描线噪点、切台 Glitch 和第 3 屏 ASCII 拓扑图。",
-      hs_comment_2: "正在写入 Monokai 荧光色板并校验各频道布局。",
-      tsc_placeholder: "输入评论或 @agent…",
-      tui_prompt_hint: "直接在 TTY 中引导 @developer，或随时安全关闭窗口…",
-
-      ctx_title: "使用 Kanban 卡片追踪任务相关的所有上下文以及进度",
-      old_tag: "散落的终端标签",
-      new_tag: "1 张 Card = 完整现场",
-      ccm_title: "GitHub App 设备流 OAuth 令牌无感续期",
-      ccm_msg_user:
-        "在过期前 5 分钟自动刷新安装令牌，本地不落盘任何 Client Secret。@developer",
-      ccm_msg_agent:
-        "已完成免密钥 Device Flow 轮换逻辑，14 项鉴权集成测试全部通过，可随时合入。",
-      ccm_mile: "✓ 已进入 Queue Merge 自动变基合并队列",
-
-      ascii_title: "多 Agent 并行 · 独立 Worktree 隔离 · 零冲突自动合入",
-      rf_card_title: "令牌无感刷新与同步",
-      rf_plan_title: "规划与准入",
-      al_1: "零分支污染：每张 Card 独占干净的 Git Worktree",
-      al_2: "不绑架工具：在 Herdr 持久 TTY 中运行任意原生 Agent CLI",
-      al_3: "自动交付闭环：FIFO 批量变基合并、远端同步并自动清理归档",
-
-      closing_title: "卸下思维负担，保持 Human Context。",
-      tab_desktop: "Desktop",
-      tab_headless: "Headless",
-      copy_label: "复制",
-      copied_label: "已复制",
-      cta_star: "在 GitHub 点亮 Star",
-
-      s_rust: "Canban 核心引擎",
-      s_herdr: "提供 TTY Agent 支持",
-      s_nsh: "Native UI",
-      s_ghostty: "终端渲染引擎",
-      closing_seo_note:
-        "Canban = Kanban + Workflow + Herdr — 用 Kanban 维护 Human Context，自定义 Workflow 调度，Herdr 提供原生的 Agent CLI 支持。",
-
-      footer_meta: "Apache-2.0 · © 2026 JJy",
-    },
-  };
+  const COPY = JSON.parse(document.getElementById("page-copy").textContent);
 
   /* ------------------------------------------------------------------------ */
   /* Channel Paging Deck (One Screen at a Time + CRT Glitch Transition)       */
@@ -205,13 +33,14 @@
   let touchStartY = null;
 
   function switchChannel(nextIndex, syncHash) {
+    const mobile = window.matchMedia("(max-width: 720px)").matches;
     const clamped = Math.max(0, Math.min(TOTAL_CHANNELS - 1, nextIndex));
-    if (clamped === currentChannel) return;
+    if (clamped === currentChannel && !mobile) return;
 
     currentChannel = clamped;
 
     if (syncHash !== false && window.history && window.history.replaceState) {
-      const hash = currentChannel === 0 ? window.location.pathname + window.location.search : `#ch-${currentChannel}`;
+      const hash = window.location.pathname + window.location.search + (currentChannel === 0 ? "" : `#ch-${currentChannel}`);
       try {
         window.history.replaceState(null, "", hash);
       } catch (_) {}
@@ -222,7 +51,7 @@
     const readout = document.getElementById("ch-readout");
 
     /* Trigger CRT H-Sync Glitch Burst */
-    if (glass && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    if (glass && !mobile && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
       glass.classList.remove("is-glitching");
       void glass.offsetWidth;
       glass.classList.add("is-glitching");
@@ -246,6 +75,12 @@
     /* Update bottom readout */
     if (readout) {
       readout.textContent = `CH 0${currentChannel + 1} / 0${TOTAL_CHANNELS}`;
+    }
+
+    if (mobile) {
+      document.getElementById(`ch-${clamped}`).scrollIntoView({
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth",
+      });
     }
 
     /* Flash retro green OSD label */
@@ -282,6 +117,7 @@
     window.addEventListener(
       "wheel",
       (e) => {
+        if (window.matchMedia("(max-width: 720px)").matches) return;
         const now = performance.now();
         if (now < wheelLockUntil) return;
 
@@ -318,6 +154,7 @@
     window.addEventListener(
       "touchend",
       (e) => {
+        if (window.matchMedia("(max-width: 720px)").matches) return;
         if (touchStartY === null || !e.changedTouches.length) return;
         const dy = touchStartY - e.changedTouches[0].clientY;
         touchStartY = null;
@@ -330,7 +167,8 @@
 
     /* Keyboard ArrowUp/Down, PageUp/PageDown, 1-4 */
     window.addEventListener("keydown", (e) => {
-      if (e.target && ["INPUT", "TEXTAREA"].includes(e.target.tagName)) return;
+      if (window.matchMedia("(max-width: 720px)").matches) return;
+      if (e.target && ["INPUT", "TEXTAREA", "BUTTON", "A"].includes(e.target.tagName)) return;
       if (e.key === "ArrowDown" || e.key === "PageDown" || e.key === " ") {
         e.preventDefault();
         switchChannel(currentChannel + 1);
@@ -349,7 +187,7 @@
   const SCENES = ["kanban", "workflow", "terminal"];
   const SCENE_DURATION_MS = 8600;
 
-  let currentLang = document.documentElement.getAttribute("data-lang") === "zh" ? "zh" : "en";
+  const currentLang = document.documentElement.getAttribute("data-lang") === "zh" ? "zh" : "en";
   let activeInstallTab = "desktop";
   let activeScene = "kanban";
   let sceneStartTime = performance.now();
@@ -581,55 +419,10 @@
   }
 
   /* ------------------------------------------------------------------------ */
-  /* Localization & Copy Helpers                                              */
+  /* Copy Helpers                                                             */
   /* ------------------------------------------------------------------------ */
-  function applyLanguage(lang, persist) {
-    const normalized = lang === "zh" ? "zh" : "en";
-    currentLang = normalized;
-    const dict = I18N[normalized];
-
-    document.documentElement.setAttribute("data-lang", normalized);
-    document.documentElement.setAttribute("lang", normalized === "zh" ? "zh-CN" : "en");
-    document.title = dict.meta_title;
-
-    const metaDesc = document.querySelector('meta[name="description"]');
-    if (metaDesc) metaDesc.setAttribute("content", dict.meta_desc);
-
-    document.querySelectorAll("[data-i18n]").forEach((el) => {
-      const key = el.getAttribute("data-i18n");
-      if (dict[key] !== undefined) {
-        if (key === "tl_mile") {
-          el.innerHTML = dict[key];
-        } else {
-          el.textContent = dict[key];
-        }
-      }
-    });
-
-    document.querySelectorAll("[data-set-lang]").forEach((btn) => {
-      btn.setAttribute("aria-pressed", btn.getAttribute("data-set-lang") === normalized ? "true" : "false");
-    });
-
-    if (persist) {
-      try {
-        localStorage.setItem("canban_lang", normalized);
-      } catch (_) {}
-      if (window.history && window.history.replaceState) {
-        try {
-          const url = new URL(window.location.href);
-          if (normalized === "zh") {
-            url.searchParams.set("lang", "zh");
-          } else {
-            url.searchParams.delete("lang");
-          }
-          window.history.replaceState(null, "", url.pathname + url.search + url.hash);
-        } catch (_) {}
-      }
-    }
-  }
-
   function copyText(text, buttonEl) {
-    const dict = I18N[currentLang] || I18N.en;
+    const dict = COPY;
     const labelEl = buttonEl.querySelector(".copy-text");
 
     const showSuccess = () => {
@@ -638,7 +431,7 @@
       window.clearTimeout(buttonEl._copyTimer);
       buttonEl._copyTimer = window.setTimeout(() => {
         buttonEl.classList.remove("is-copied");
-        const latest = I18N[currentLang] || I18N.en;
+        const latest = COPY;
         if (labelEl) labelEl.textContent = latest.copy_label;
       }, 1800);
     };
@@ -705,12 +498,12 @@
   }
 
   document.addEventListener("DOMContentLoaded", () => {
-    setupChannelNavigation();
+    const isHome = document.body.classList.contains("home-page");
+    if (isHome) setupChannelNavigation();
 
-    document.querySelectorAll("[data-set-lang]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        applyLanguage(btn.getAttribute("data-set-lang"), true);
-        activateScene(activeScene);
+    document.querySelectorAll(".lang-switch a").forEach((link) => {
+      link.addEventListener("click", () => {
+        link.hash = window.location.hash;
       });
     });
 
@@ -729,9 +522,10 @@
     });
 
     setupInstallTabs();
-    applyLanguage(currentLang, false);
-    activateScene("kanban");
-    startLoops();
-    fetchGitHubStars();
+    if (isHome) {
+      activateScene("kanban");
+      startLoops();
+      fetchGitHubStars();
+    }
   });
 })();

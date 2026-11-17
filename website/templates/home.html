@@ -1,193 +1,9 @@
-<!DOCTYPE html>
-<html lang="en" data-lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Canban — AI-Native Kanban Workbench for Coding Agents (Kanban + Workflow + Herdr)</title>
-  <meta name="description" content="Canban is an open-source native macOS and Linux Kanban workbench for coding agents. Maintain Human Context on Kanban cards, automate isolated Git worktrees &amp; Queue Merge with custom Workflows, and run Claude Code, Codex, or Agy inside Herdr persistent PTY terminals.">
-  <meta name="application-name" content="Canban">
-  <meta name="apple-mobile-web-app-title" content="Canban">
-  <meta name="author" content="JJy">
-  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
-  <meta name="theme-color" content="#141511">
-
-  <!-- Open Graph -->
-  <meta property="og:site_name" content="Canban">
-  <meta property="og:title" content="Canban — AI-Native Kanban Workbench (Kanban + Workflow + Herdr)">
-  <meta property="og:description" content="Open-source native macOS and Linux Kanban workbench for AI coding agents. Maintain Human Context on Kanban cards, automate isolated Git worktrees &amp; Queue Merge, and run native Agent CLIs in Herdr persistent PTYs.">
-  <meta property="og:type" content="website">
-  <meta property="og:url" content="https://canban.dev/">
-  <meta property="og:locale" content="en_US">
-  <meta property="og:locale:alternate" content="zh_CN">
-  <meta property="og:image" content="https://canban.dev/og-image.png">
-  <meta property="og:image:type" content="image/png">
-  <meta property="og:image:width" content="1200">
-  <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Canban = Kanban + Workflow + Herdr — Open-source AI-native Kanban workbench for coding agents">
-
-  <!-- Twitter / X Card -->
-  <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Canban — AI-Native Kanban Workbench (Kanban + Workflow + Herdr)">
-  <meta name="twitter:description" content="Open-source native macOS and Linux Kanban workbench for AI coding agents. Maintain Human Context, automate Git worktrees &amp; Queue Merge, and run Agent CLIs in persistent PTYs.">
-  <meta name="twitter:image" content="https://canban.dev/og-image.png">
-  <meta name="twitter:image:alt" content="Canban = Kanban + Workflow + Herdr">
-
-  <!-- Canonical & Localization -->
-  <link rel="canonical" href="https://canban.dev/">
-  <link rel="alternate" hreflang="en" href="https://canban.dev/">
-  <link rel="alternate" hreflang="zh-CN" href="https://canban.dev/?lang=zh">
-  <link rel="alternate" hreflang="x-default" href="https://canban.dev/">
-
-  <!-- Icons & Manifest -->
-  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <link rel="icon" type="image/png" sizes="48x48" href="/favicon-48x48.png">
-  <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
-  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
-  <link rel="manifest" href="/site.webmanifest">
-
-  <!-- Structured Data (JSON-LD: WebSite + SoftwareApplication + FAQPage) -->
-  <script type="application/ld+json">
-  {
-    "@context": "https://schema.org",
-    "@graph": [
-      {
-        "@type": "WebSite",
-        "@id": "https://canban.dev/#website",
-        "name": "Canban",
-        "alternateName": ["Canban.dev", "Canban App", "Canban Workbench"],
-        "url": "https://canban.dev/",
-        "inLanguage": ["en", "zh-CN"],
-        "description": "Official website for Canban — the open-source native macOS and Linux Kanban workbench for AI coding agents (Canban = Kanban + Workflow + Herdr)."
-      },
-      {
-        "@type": "SoftwareApplication",
-        "@id": "https://canban.dev/#software",
-        "name": "Canban",
-        "alternateName": "Canban Workbench",
-        "url": "https://canban.dev/",
-        "downloadUrl": "https://canban.dev/install.sh",
-        "installUrl": "https://canban.dev/#ch-3",
-        "codeRepository": "https://github.com/jjyr/canban",
-        "sameAs": [
-          "https://github.com/jjyr/canban"
-        ],
-        "image": "https://canban.dev/og-image.png",
-        "screenshot": "https://canban.dev/og-image.png",
-        "applicationCategory": "DeveloperApplication",
-        "applicationSubCategory": "AI Coding Agent Workbench & Kanban Board",
-        "operatingSystem": "macOS 13.0+, Linux (x86_64, arm64)",
-        "softwareRequirements": "git, Herdr Core (hc), GTK4 runtime on Linux desktop, and any native Agent CLI (Claude Code, Codex, Antigravity agy, Cursor CLI)",
-        "license": "https://www.apache.org/licenses/LICENSE-2.0",
-        "isAccessibleForFree": true,
-        "offers": {
-          "@type": "Offer",
-          "price": "0",
-          "priceCurrency": "USD"
-        },
-        "author": {
-          "@type": "Person",
-          "name": "JJy",
-          "url": "https://github.com/jjyr"
-        },
-        "description": "Canban is an open-source native macOS and Linux desktop workbench built in Rust that unifies Kanban cards for Human Context, GitHub Actions-style Workflows with isolated Git worktrees and FIFO Queue Merge, and Herdr persistent PTY terminals for native AI coding agent CLIs.",
-        "featureList": [
-          "Kanban board for Human Context with Markdown specs, #Card links, screenshots, @Agent discussions, and GitHub Issue/PR sync",
-          "Visual Workflow Studio & YAML workflows with automatic per-Card Git worktree isolation",
-          "Serialized FIFO Queue Merge with automatic @merger conflict resolution",
-          "Herdr persistent PTY terminal powered by Rust, longbridge/nsh (AppKit/Metal on macOS, GTK4 on Linux), and libghostty-vt",
-          "Simultaneous multi-host canband connections over SSH or Tailscale alongside zero-interference Claude Code, Codex, Antigravity (agy), and Cursor CLI support"
-        ],
-        "keywords": "Canban, canban.dev, AI Kanban, coding agents, Claude Code, Codex, Herdr, Git worktree workflow, developer workbench, macOS Rust app, Linux GTK4 Rust app"
-      },
-      {
-        "@type": "FAQPage",
-        "@id": "https://canban.dev/#faq",
-        "mainEntity": [
-          {
-            "@type": "Question",
-            "name": "What is Canban?",
-            "acceptedAnswer": {
-              "@type": "Answer",
-              "text": "Canban (canban.dev) is an open-source native macOS and Linux workbench for orchestrating AI coding agents, defined by Canban = Kanban + Workflow + Herdr. Unlike generic Kanban web apps, Canban pairs each Kanban card with an isolated Git worktree, declarative agent workflows, and persistent Herdr PTY terminals."
-            }
-          },
-          {
-            "@type": "Question",
-            "name": "Which AI coding agent CLIs work with Canban?",
-            "acceptedAnswer": {
-              "@type": "Answer",
-              "text": "Canban runs any native Agent CLI directly inside persistent Herdr PTY sessions — including Claude Code (claude), OpenAI Codex (codex), Antigravity (agy), Cursor CLI (cursor-agent), Pi, and custom terminal agents — preserving native TUIs, MCP servers, skills, permissions, and session resume across app restarts."
-            }
-          },
-          {
-            "@type": "Question",
-            "name": "How do I install Canban on macOS and Linux?",
-            "acceptedAnswer": {
-              "@type": "Answer",
-              "text": "Install or live-upgrade Canban on macOS 13.0+ (Apple Silicon) or Linux (x86_64 and arm64) by running: curl -fsSL https://canban.dev/install.sh | bash (pass --headless on remote Linux servers without a desktop session), or build from source via git clone https://github.com/jjyr/canban.git && cd canban && mise run install-app."
-            }
-          },
-          {
-            "@type": "Question",
-            "name": "Does Canban support Linux desktops and remote Linux servers?",
-            "acceptedAnswer": {
-              "@type": "Answer",
-              "text": "Yes. Canban ships native GTK4 desktop bundles for Linux x86_64 and arm64 (~/.local/opt/canban with ~/.local/bin symlinks and XDG .desktop launcher) as well as standalone headless canband daemons, and can connect simultaneously to local and remote Linux/macOS hosts over SSH or Tailscale."
-            }
-          }
-        ]
-      }
-    ]
-  }
-  </script>
-
-  <script>
-    (function () {
-      try {
-        var params = new URLSearchParams(window.location.search);
-        var urlLang = params.get("lang");
-        var saved = localStorage.getItem("canban_lang");
-        var chosen = "en";
-        if (urlLang === "zh" || urlLang === "zh-CN") {
-          chosen = "zh";
-        } else if (urlLang === "en") {
-          chosen = "en";
-        } else if (saved === "en" || saved === "zh") {
-          chosen = saved;
-        } else {
-          var langs = navigator.languages && navigator.languages.length
-            ? navigator.languages
-            : [navigator.language || "en"];
-          for (var i = 0; i < langs.length; i++) {
-            var code = String(langs[i] || "").toLowerCase();
-            if (code.indexOf("zh") === 0) {
-              chosen = "zh";
-              break;
-            }
-            if (code.indexOf("en") === 0) {
-              chosen = "en";
-              break;
-            }
-          }
-        }
-        document.documentElement.setAttribute("data-lang", chosen);
-        document.documentElement.setAttribute("lang", chosen === "zh" ? "zh-CN" : "en");
-      } catch (_) {}
-    })();
-  </script>
-
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="./styles.css">
-</head>
-<body>
-  <div class="crt-shell" id="crt-shell">
+<div class="crt-shell" id="crt-shell">
     <!-- Top Monitor Bezel Bar -->
     <header class="crt-topbar">
       <a href="#ch-0" class="crt-brand" data-goto-ch="0" aria-label="Canban CH 01">
         <span class="power-led" aria-hidden="true"></span>
-        <img src="./favicon.svg" alt="Canban logo" class="brand-mark" width="20" height="20">
+        <img src="/favicon.svg" alt="Canban logo" class="brand-mark" width="20" height="20">
         <span class="brand-word">CANBAN</span>
       </a>
 
@@ -212,8 +28,8 @@
 
       <div class="crt-actions">
         <div class="lang-switch" role="group" aria-label="Language Switcher">
-          <button type="button" class="lang-btn" data-set-lang="en" aria-pressed="true">EN</button>
-          <button type="button" class="lang-btn" data-set-lang="zh" aria-pressed="false">中文</button>
+          <a class="lang-btn" data-language="en" href="{{en_url}}">EN</a>
+          <a class="lang-btn" data-language="zh" href="{{zh_url}}">中文</a>
         </div>
 
         <a
@@ -257,7 +73,7 @@
               <span class="f-h">Herdr</span>
             </h1>
             <p class="hero-subtitle" data-i18n="hero_subtitle">
-              Maintain Human Context with Kanban, schedule with custom Workflows, and power native Agent CLIs with Herdr.
+              A native Kanban and terminal workbench for AI coding agents
             </p>
           </div>
 
@@ -1072,6 +888,11 @@
               </a>
             </div>
 
+            <nav class="page-links" aria-label="Resources">
+              <a href="{{install_url}}" data-i18n="install_guide">Installation guide</a>
+              <a href="{{changelog_url}}" data-i18n="changelog">Changelog</a>
+            </nav>
+
             <div class="core-plaque">
               <div class="cp-cell"><b>Rust</b> <span data-i18n="s_rust">Canban Core Engine</span></div>
               <div class="cp-cell"><b>Herdr</b> <span data-i18n="s_herdr">TTY Agent Support</span></div>
@@ -1113,7 +934,3 @@
       </div>
     </footer>
   </div>
-
-  <script src="./app.js" defer></script>
-</body>
-</html>
