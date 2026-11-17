@@ -571,6 +571,7 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
 }
 
 pub fn get_or_spawn_session(init: SessionInit) -> Arc<LiveSession> {
+    let _span = canban_profiler::Span::new("terminal.attach");
     let mut pool = session_pool().lock().unwrap();
     pool.retain(|s| !s.stop.load(Ordering::SeqCst) && !s.state.lock().unwrap().exited);
     if let Some(idx) = pool
@@ -618,6 +619,7 @@ pub fn get_or_spawn_session(init: SessionInit) -> Arc<LiveSession> {
 }
 
 pub fn detach_session_listener(session: &LiveSession, listener_id: usize) {
+    let _span = canban_profiler::Span::new("terminal.detach");
     session.wake.detach(listener_id);
     if !session.wake.has_listeners() {
         let was_focused = {

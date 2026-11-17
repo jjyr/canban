@@ -31,6 +31,9 @@ pub struct AppServer {
     github_jobs: Mutex<github::worker::Jobs>,
     github_job_signal: std::sync::Condvar,
     github_revision: std::sync::atomic::AtomicU64,
+    state_instance: String,
+    state_revision: std::sync::atomic::AtomicU64,
+    state_signal: (Mutex<()>, std::sync::Condvar),
     github_cli: Arc<canban_github::cli::Service>,
     github_queries: Mutex<std::collections::BTreeMap<String, Value>>,
     identity: String,
@@ -95,11 +98,15 @@ pub(crate) struct MergingCard<'a> {
 }
 impl Drop for MergingCard<'_> {
     fn drop(&mut self) {
-        self.server
+        let removed = self
+            .server
             .merging_cards
             .lock()
             .unwrap()
             .remove(&self.card_id);
+        if removed {
+            self.server.emit("review", Some(self.card_id.clone()));
+        }
     }
 }
 pub(crate) struct MergingCards<'a> {
@@ -109,8 +116,13 @@ pub(crate) struct MergingCards<'a> {
 impl Drop for MergingCards<'_> {
     fn drop(&mut self) {
         let mut guard = self.server.merging_cards.lock().unwrap();
+        let mut changed = false;
         for id in &self.card_ids {
-            guard.remove(id);
+            changed |= guard.remove(id);
+        }
+        drop(guard);
+        if changed {
+            self.server.emit("review", None);
         }
     }
 }
@@ -625,6 +637,9 @@ impl AppServer {
             github_jobs: Mutex::new(Default::default()),
             github_job_signal: std::sync::Condvar::new(),
             github_revision: std::sync::atomic::AtomicU64::new(0),
+            state_instance: id(),
+            state_revision: std::sync::atomic::AtomicU64::new(0),
+            state_signal: (Mutex::new(()), std::sync::Condvar::new()),
             github_queries: Mutex::new(
                 std::fs::read(home.join("cache/github/queries.json"))
                     .ok()
@@ -776,6 +791,8 @@ impl AppServer {
         rx
     }
     fn emit(&self, topic: &'static str, card: Option<String>) {
+        self.state_revision.fetch_add(1, Ordering::SeqCst);
+        self.state_signal.1.notify_all();
         if topic == "github" {
             self.github_revision.fetch_add(1, Ordering::SeqCst);
         }
@@ -850,6 +867,11 @@ impl AppServer {
             })
             .cloned()
             .collect();
+        self.project_observation_freshness(&mut snapshot);
+        Ok(snapshot)
+    }
+
+    fn project_observation_freshness(&self, snapshot: &mut Snapshot) {
         let inv = self.inventory.lock().unwrap();
         if inv.error.is_none() && inv.last_at > 0 {
             for t in &mut snapshot.terminals {
@@ -862,7 +884,6 @@ impl AppServer {
                 }
             }
         }
-        Ok(snapshot)
     }
     pub fn config(&self) -> Config {
         self.config.read().unwrap().clone()
@@ -918,6 +939,7 @@ mod drafts;
 mod github;
 pub mod hosts;
 pub mod network;
+mod state;
 pub use client::{AppClient, BackendOlder, ClientEndpoint};
 mod agents;
 mod authoring;

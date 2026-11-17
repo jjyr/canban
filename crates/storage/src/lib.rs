@@ -500,13 +500,45 @@ impl Db<'_> {
         })
     }
 
+    /// Deadline decisions need current runtime and report timestamps, not Timeline bodies.
+    pub fn runtime_snapshot(&self) -> Result<Snapshot> {
+        let mut snapshot = self.admission_snapshot()?;
+        snapshot.projects = self.list()?;
+        snapshot.reports = self.list()?;
+        snapshot.schedule_states = self.list()?;
+        Ok(snapshot)
+    }
+
+    pub fn timeline_page(&self, card: &str, after: u64, limit: usize) -> Result<Vec<Event>> {
+        let mut span = canban_profiler::Span::new("timeline.load");
+        let mut query = self.conn.prepare(
+            "SELECT data FROM events WHERE card_id=?1 AND number>?2 ORDER BY number LIMIT ?3",
+        )?;
+        let rows = query.query_map(rusqlite::params![card, after, limit as u64], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut bytes = 0;
+        let events = rows
+            .map(|row| {
+                let json = row?;
+                bytes += json.len();
+                Ok(serde_json::from_str(&json)?)
+            })
+            .collect::<Result<Vec<Event>>>()?;
+        span.counts(events.len(), bytes);
+        Ok(events)
+    }
+
     pub fn snapshot(&self) -> Result<Snapshot> {
+        let _span = canban_profiler::Span::new("state.load_db");
         let sources: Vec<WorkflowSource> = self.list()?;
-        let revisions: Vec<WorkflowRevision> = self.list()?;
-        let active = revisions
-            .into_iter()
-            .filter(|w| sources.iter().any(|s| s.revision_id == w.id))
-            .collect();
+        let mut query = self.conn.prepare(
+            "SELECT r.data FROM workflow_revisions r WHERE r.id IN (SELECT json_extract(data,'$.revision_id') FROM workflow_sources) ORDER BY r.rowid",
+        )?;
+        let rows = query.query_map([], |row| row.get::<_, String>(0))?;
+        let active = rows
+            .map(|row| Ok(serde_json::from_str(&row?)?))
+            .collect::<Result<Vec<WorkflowRevision>>>()?;
         Ok(Snapshot {
             github_sync: Default::default(),
             workflow_runs: self.list()?,

@@ -150,7 +150,7 @@ struct RemoteSlot {
     connection: HostConnectionState,
     updating: bool,
     cached: Option<CachedHostData>,
-    last_state_raw: Value,
+    last_state_marker: Value,
     reconnect_count: u32,
     consecutive_failures: u32,
     next_retry_at: std::time::Instant,
@@ -264,7 +264,7 @@ impl HostRegistry {
                     connection: initial_conn,
                     updating: false,
                     cached,
-                    last_state_raw: Value::Null,
+                    last_state_marker: Value::Null,
                     reconnect_count: 0,
                     consecutive_failures: 0,
                     next_retry_at: std::time::Instant::now(),
@@ -407,7 +407,7 @@ impl HostRegistry {
         }
 
         // Perform immediate connection/probe validation so errors surface cleanly in the wizard.
-        let (client, tunnel, conn, state_val, server_id) =
+        let (client, tunnel, conn, mut state_val, server_id) =
             self.establish_connection(&host.id, &host.transport)?;
 
         if let Some(sid) = &server_id {
@@ -428,9 +428,13 @@ impl HostRegistry {
         }
 
         host.server_id = server_id;
-        let cached = if let Some(val) = &state_val
-            && let Ok(snap) = serde_json::from_value::<Snapshot>(val["snapshot"].clone())
-            && let Ok(cfg) = serde_json::from_value::<Config>(val["config"].clone())
+        let marker = state_val
+            .as_ref()
+            .map(super::state::state_marker)
+            .unwrap_or(Value::Null);
+        let cached = if let Some(val) = &mut state_val
+            && let Ok(snap) = serde_json::from_value::<Snapshot>(val["snapshot"].take())
+            && let Ok(cfg) = serde_json::from_value::<Config>(val["config"].take())
         {
             let data = CachedHostData {
                 saved_at: now(),
@@ -452,7 +456,7 @@ impl HostRegistry {
                 connection: conn,
                 updating: false,
                 cached,
-                last_state_raw: state_val.unwrap_or(Value::Null),
+                last_state_marker: marker,
                 reconnect_count: 0,
                 consecutive_failures: 0,
                 next_retry_at: std::time::Instant::now(),
@@ -597,7 +601,7 @@ impl HostRegistry {
         let previous = slot.connection.clone();
         let data_changed = state_val
             .as_ref()
-            .is_some_and(|v| *v != slot.last_state_raw);
+            .is_some_and(|v| super::state::state_marker(v) != slot.last_state_marker);
         slot.client = client_opt;
         slot.tunnel = tunnel;
         slot.connection = conn_state;
@@ -615,10 +619,11 @@ impl HostRegistry {
         {
             slot.saved.server_id = Some(sid);
         }
-        if let Some(val) = state_val {
+        if let Some(mut val) = state_val {
+            let marker = super::state::state_marker(&val);
             if let (Ok(snap), Ok(cfg)) = (
-                serde_json::from_value::<Snapshot>(val["snapshot"].clone()),
-                serde_json::from_value::<Config>(val["config"].clone()),
+                serde_json::from_value::<Snapshot>(val["snapshot"].take()),
+                serde_json::from_value::<Config>(val["config"].take()),
             ) {
                 let data = CachedHostData {
                     saved_at: now(),
@@ -628,7 +633,7 @@ impl HostRegistry {
                 Self::save_cache(&self.local_home, host_id, &data);
                 slot.cached = Some(data);
             }
-            slot.last_state_raw = val;
+            slot.last_state_marker = marker;
         }
         let became_connected = !previous.is_connected() && slot.connection.is_connected();
         (
@@ -998,19 +1003,26 @@ impl HostRegistry {
 
             if let Some(client) = existing_client {
                 let start = std::time::Instant::now();
-                match client.call("app.state", json!({})) {
-                    Ok(state_val) => {
+                let after = self
+                    .remotes
+                    .lock()
+                    .unwrap()
+                    .get(&id)
+                    .map(|slot| slot.last_state_marker["revision"].clone())
+                    .unwrap_or(Value::Null);
+                match client.call("app.state", json!({"after":after})) {
+                    Ok(mut state_val) => {
                         let rtt_ms = start.elapsed().as_millis() as u64;
                         let mut guard = self.remotes.lock().unwrap();
                         if let Some(slot) = guard.get_mut(&id)
                             && !slot.updating
                         {
-                            if slot.last_state_raw != state_val {
+                            if state_val["changed"] == true {
                                 if let (Ok(snap), Ok(cfg)) = (
                                     serde_json::from_value::<Snapshot>(
-                                        state_val["snapshot"].clone(),
+                                        state_val["snapshot"].take(),
                                     ),
-                                    serde_json::from_value::<Config>(state_val["config"].clone()),
+                                    serde_json::from_value::<Config>(state_val["config"].take()),
                                 ) {
                                     client.set_cached_config(cfg.clone());
                                     let data = CachedHostData {
@@ -1020,13 +1032,13 @@ impl HostRegistry {
                                     };
                                     Self::save_cache(&self.local_home, &id, &data);
                                     slot.cached = Some(data);
+                                    topic = Some(client::change_topic(
+                                        true,
+                                        &slot.last_state_marker,
+                                        &state_val,
+                                    ));
+                                    slot.last_state_marker = super::state::state_marker(&state_val);
                                 }
-                                topic = Some(client::change_topic(
-                                    true,
-                                    &slot.last_state_raw,
-                                    &state_val,
-                                ));
-                                slot.last_state_raw = state_val;
                             }
                             if let HostConnectionState::Connected {
                                 rtt_ms: prev_rtt, ..
@@ -1380,19 +1392,19 @@ impl HostRegistry {
         let Some(client) = client else {
             return;
         };
-        if let Ok(state_val) = client.call("app.state", json!({}))
+        if let Ok(mut state_val) = client.call("app.state", json!({}))
             && let (Ok(snap), Ok(cfg)) = (
-                serde_json::from_value::<Snapshot>(state_val["snapshot"].clone()),
-                serde_json::from_value::<Config>(state_val["config"].clone()),
+                serde_json::from_value::<Snapshot>(state_val["snapshot"].take()),
+                serde_json::from_value::<Config>(state_val["config"].take()),
             )
         {
             client.set_cached_config(cfg.clone());
-            let mut reg_snap = snap.clone();
-            reg_snap.register_host_entities(host_id);
+            let mut snap = snap;
+            snap.register_host_entities(host_id);
             {
                 let mut eh = self.entity_hosts.write().unwrap();
-                for (k, v) in reg_snap.entity_hosts {
-                    eh.insert(k, v);
+                for (k, v) in &snap.entity_hosts {
+                    eh.insert(k.clone(), v.clone());
                 }
             }
             let data = CachedHostData {
@@ -1404,7 +1416,7 @@ impl HostRegistry {
             let mut guard = self.remotes.lock().unwrap();
             if let Some(slot) = guard.get_mut(host_id) {
                 slot.cached = Some(data);
-                slot.last_state_raw = state_val;
+                slot.last_state_marker = super::state::state_marker(&state_val);
             }
         }
     }
@@ -1447,6 +1459,7 @@ impl HostRegistry {
                 method,
                 "app.ping"
                     | "app.state"
+                    | "app.watch"
                     | "app.snapshot"
                     | "agent.catalog"
                     | "diagnostics.status"

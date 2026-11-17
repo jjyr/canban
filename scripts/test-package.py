@@ -58,7 +58,7 @@ class MacOSPackaging(unittest.TestCase):
         (self.root / "crates/ui/assets").symlink_to(REPO / "crates/ui/assets")
         (self.root / "third_party").symlink_to(REPO / "third_party")
         (self.root / "THIRD_PARTY_NOTICES.md").symlink_to(REPO / "THIRD_PARTY_NOTICES.md")
-        for profile in ("debug", "release"):
+        for profile in ("debug", "release", "profiling"):
             target = self.root / "target" / profile
             (target / "examples").mkdir(parents=True)
             for binary in ("canban-ui", "canban", "canban-updater", "examples/gallery"):
@@ -107,11 +107,29 @@ class MacOSPackaging(unittest.TestCase):
         return bundle
 
     def test_clean_local_bundles_have_valid_resource_signatures(self):
-        for args, name in (((), "Canban"), (("--dev",), "CanbanDev"), (("--gallery",), "CanbanGallery")):
+        for args, name in (((), "Canban"), (("--dev",), "CanbanDev"), (("--gallery",), "CanbanGallery"), (("--profile", "profiling"), "Canban")):
             with self.subTest(name=name):
                 self.package(*args)
                 bundle = self.verify(name)
                 self.assertTrue((bundle / "Contents/_CodeSignature/CodeResources").is_file())
+
+    def test_profiling_debug_entitlements_are_limited_to_profiling_packages(self):
+        self.package("--profile", "profiling")
+        bundle = self.verify()
+        for name in ("canban-ui", "canban", "canban-updater"):
+            result = subprocess.run(
+                ["/usr/bin/codesign", "--display", "--entitlements", ":-", str(bundle / "Contents/MacOS" / name)],
+                check=True, capture_output=True,
+            )
+            self.assertTrue(plistlib.loads(result.stdout)["com.apple.security.get-task-allow"])
+        self.package()
+        self.verify()
+        for name in ("canban-ui", "canban", "canban-updater"):
+            result = subprocess.run(
+                ["/usr/bin/codesign", "--display", "--entitlements", ":-", str(bundle / "Contents/MacOS" / name)],
+                check=True, capture_output=True,
+            )
+            self.assertNotIn(b"get-task-allow", result.stdout)
 
     def test_release_then_debug_replaces_the_old_resource_signature(self):
         self.package("--release")
@@ -220,7 +238,7 @@ class LinuxPackaging(unittest.TestCase):
         (self.root / "crates/ui/assets").symlink_to(REPO / "crates/ui/assets")
         (self.root / "third_party").symlink_to(REPO / "third_party")
         (self.root / "THIRD_PARTY_NOTICES.md").symlink_to(REPO / "THIRD_PARTY_NOTICES.md")
-        for profile in ("debug", "release"):
+        for profile in ("debug", "release", "profiling"):
             target = self.root / "target" / profile
             (target / "examples").mkdir(parents=True)
             for binary in ("canban-ui", "canban", "canban-updater", "examples/gallery"):

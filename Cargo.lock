@@ -512,6 +512,7 @@ dependencies = [
  "canban-herdr",
  "canban-kanban",
  "canban-notifications",
+ "canban-profiler",
  "canban-profiles",
  "canban-scheduler",
  "canban-storage",
@@ -606,6 +607,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "canban-profiler"
+version = "0.1.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "canban-profiles"
 version = "0.1.0"
 dependencies = [
@@ -631,6 +639,7 @@ name = "canban-storage"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "canban-profiler",
  "canban-types",
  "rusqlite",
  "serde",
@@ -646,6 +655,7 @@ dependencies = [
  "base64 0.22.1",
  "bindgen",
  "canban-herdr",
+ "canban-profiler",
  "canban-types",
  "cc",
  "nsh-base",
@@ -688,6 +698,7 @@ dependencies = [
  "canban-context",
  "canban-github",
  "canban-notifications",
+ "canban-profiler",
  "canban-profiles",
  "canban-scheduler",
  "canban-terminal",

@@ -8,6 +8,7 @@ impl AppServer {
                 "app.ping"
                     | "app.shutdown"
                     | "app.state"
+                    | "app.watch"
                     | "app.snapshot"
                     | "host.probe"
                     | "host.discover"
@@ -96,9 +97,8 @@ impl AppServer {
                 self.context_signal.notify_all();
                 Ok(json!({"stopping":true}))
             }
-            "app.state" => Ok(
-                json!({"snapshot":self.snapshot()?,"config":self.config(),"home":self.home,"server_id":self.identity,"hostname":network::hostname_string(),"github_revision":self.github_revision.load(Ordering::SeqCst)}),
-            ),
+            "app.state" => self.state_response(&p, true),
+            "app.watch" => self.state_response(&p, false),
             "host.probe" => Ok(self.host_probe_payload()),
             "host.discover" => Ok(serde_json::to_value(network::discover_all())?),
             "machine.list" => self.machines(),
@@ -179,12 +179,7 @@ impl AppServer {
                 };
                 let after = p["after_sequence"].as_u64().unwrap_or(0);
                 let limit = p["limit"].as_u64().unwrap_or(100).clamp(1, 500) as usize;
-                let events = self.store.lock().unwrap().db().list::<Event>()?;
-                let mut events = events
-                    .into_iter()
-                    .filter(|e| e.card_id == card && e.sequence > after)
-                    .take(limit + 1)
-                    .collect::<Vec<_>>();
+                let mut events = self.store.lock().unwrap().db().timeline_page(&card, after, limit + 1)?;
                 let more = events.len() > limit;
                 events.truncate(limit);
                 Ok(

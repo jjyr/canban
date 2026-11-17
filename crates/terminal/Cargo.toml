@@ -7,6 +7,7 @@ authors.workspace = true
 links = "ghostty-vt"
 
 [dependencies]
+canban-profiler.workspace = true
 anyhow.workspace = true
 png.workspace = true
 serde_json.workspace = true

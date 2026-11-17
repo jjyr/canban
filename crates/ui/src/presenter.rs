@@ -725,47 +725,50 @@ impl Ui {
             return;
         }
         let project = self.project.get_untracked();
-        let pending_keys = self.index.with_untracked(|idx| {
-            let mut candidates: Vec<(u64, String, String, u64)> = Vec::new();
-            for card in idx
-                .cards
-                .values()
-                .filter(|c| c.active() && (project.is_empty() || c.project_id == project))
-            {
-                let Some(events) = idx.events_by_card.get(&card.id) else {
-                    continue;
-                };
-                for ev in events.iter().rev() {
-                    let Some(path) = ev.data["path"].as_str() else {
+        let pending_keys = self.snapshot.with_untracked(|s| {
+            self.index.with_untracked(|idx| {
+                let mut candidates: Vec<(u64, String, String, u64)> = Vec::new();
+                for card in idx
+                    .cards
+                    .values()
+                    .filter(|c| c.active() && (project.is_empty() || c.project_id == project))
+                {
+                    let Some(events) = idx.events_by_card.get(&card.id) else {
                         continue;
                     };
-                    let ver = event_body_version(ev);
-                    candidates.push((ev.created_at, card.id.clone(), path.to_owned(), ver));
+                    for &position in events.iter().rev() {
+                        let ev = &s.events[position];
+                        let Some(path) = ev.data["path"].as_str() else {
+                            continue;
+                        };
+                        let ver = event_body_version(ev);
+                        candidates.push((ev.created_at, card.id.clone(), path.to_owned(), ver));
+                    }
                 }
-            }
-            candidates.sort_by_key(|(created_at, _, _, _)| std::cmp::Reverse(*created_at));
-            let mut selected = Vec::new();
-            let mut seen = BTreeSet::new();
-            for (_, cid, path, ver) in candidates {
-                if selected.len() >= PREFETCH_REPORT_BATCH_LIMIT {
-                    break;
+                candidates.sort_by_key(|(created_at, _, _, _)| std::cmp::Reverse(*created_at));
+                let mut selected = Vec::new();
+                let mut seen = BTreeSet::new();
+                for (_, cid, path, ver) in candidates {
+                    if selected.len() >= PREFETCH_REPORT_BATCH_LIMIT {
+                        break;
+                    }
+                    let key = (cid, path);
+                    if !seen.insert(key.clone()) {
+                        continue;
+                    }
+                    let already_cached = self
+                        .report_bodies
+                        .with(|cache| cache.peek(&key).is_some_and(|entry| entry.version >= ver));
+                    if already_cached {
+                        continue;
+                    }
+                    let newly_inflight = self.report_inflight.with(|set| set.insert(key.clone()));
+                    if newly_inflight {
+                        selected.push((key.0, key.1, ver));
+                    }
                 }
-                let key = (cid, path);
-                if !seen.insert(key.clone()) {
-                    continue;
-                }
-                let already_cached = self
-                    .report_bodies
-                    .with(|cache| cache.peek(&key).is_some_and(|entry| entry.version >= ver));
-                if already_cached {
-                    continue;
-                }
-                let newly_inflight = self.report_inflight.with(|set| set.insert(key.clone()));
-                if newly_inflight {
-                    selected.push((key.0, key.1, ver));
-                }
-            }
-            selected
+                selected
+            })
         });
         if pending_keys.is_empty() {
             return;
@@ -960,6 +963,7 @@ pub fn refresh(ui: Ui) {
         }
         match result {
             Ok(Ok((mut snapshot, config, summaries, saved_project))) => {
+                let _span = canban_profiler::Span::new("ui.apply");
                 ui.committed_writes
                     .with(|writes| writes.reconcile(&mut snapshot));
                 if ui.notification_resync.replace(false) {

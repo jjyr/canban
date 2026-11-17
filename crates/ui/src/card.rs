@@ -149,18 +149,16 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             }
         }
     });
-    let last_event = stored(ui.index.with_untracked(|idx| {
-        idx.events_by_card
-            .get(&id)
-            .and_then(|evs| evs.iter().map(|e| e.sequence).max())
-            .unwrap_or(0)
-    }));
+    let last_event = stored(
+        ui.index
+            .with_untracked(|idx| idx.last_event_by_card.get(&id).copied().unwrap_or(0)),
+    );
     let event_card = card.id.clone();
     effect(move || {
         let last = ui.index.with(|idx| {
-            idx.events_by_card
+            idx.last_event_by_card
                 .get(&event_card)
-                .and_then(|evs| evs.iter().map(|e| e.sequence).max())
+                .copied()
                 .unwrap_or(0)
         });
         let before = last_event.replace(last);

@@ -72,6 +72,7 @@ editor, modal, window-title and terminal checks.
 | [Live Review and delivery exercise](review-delivery-dogfood-20261111.md) | Two real App deliveries, continued-assignment blocker repair and interaction findings |
 | [MVP progress and next steps](product/mvp-next-steps.md) | Current acceptance boundaries and recommended daily-use, review and code-delivery priorities |
 | [Event-driven runtime observation](runtime-observation.md) | Subscription, connection recovery, bounded discovery, Git caches and exit classification |
+| [Memory profiling and synchronization](memory-profiling.md) | Conditional state synchronization, SQL history reads, UI indexes and Instruments capture |
 | [Runtime observation cost](runtime-observation-cost.md) | Historical polling baseline and prototype; superseded by event-driven runtime observation |
 | [Agent lifecycle implementation](agent-overview-and-lifecycle.md) | Status-aware global budget, idle reclamation, global Overview and isolated/native validation |
 | [Terminal interaction and navigation](terminal-interaction.md) | Delayed idle exit, live inactive filtering, input pipeline, global Back/Forward and current acceptance |

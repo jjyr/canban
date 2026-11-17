@@ -160,7 +160,8 @@ impl Reader {
                                         && visible(b.origin.y.0, b.size.height.0, offset, height)
                                 })
                                 .filter(|(seq, _)| {
-                                    card_events.iter().any(|e| {
+                                    card_events.iter().any(|&p| {
+                                        let e = &s.events[p];
                                         e.sequence == **seq
                                             && canban_notifications::message_id(s, e).is_some()
                                     })

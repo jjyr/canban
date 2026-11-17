@@ -27,6 +27,7 @@ nsh-core = { git = "https://github.com/longbridge/nsh", rev = "f4d68f7f9f31eb7b3
 nsh-base = { git = "https://github.com/longbridge/nsh", rev = "f4d68f7f9f31eb7b3ecc8a4cbc31096d5c6238a1", default-features = false, features = ["editor", "highlight", "term"] }
 nsh-platform-macos = { git = "https://github.com/longbridge/nsh", rev = "f4d68f7f9f31eb7b3ecc8a4cbc31096d5c6238a1", default-features = false }
 nsh-platform-linux = { git = "https://github.com/longbridge/nsh", rev = "f4d68f7f9f31eb7b3ecc8a4cbc31096d5c6238a1", default-features = false, features = ["shader", "editor", "highlight", "term"] }
+canban-profiler = { path = "crates/profiler" }
 canban-themes = { path = "crates/themes" }
 canban-types = { path = "crates/types" }
 canban-usage = { path = "crates/usage" }
@@ -51,3 +52,9 @@ debug = 0
 
 [profile.test]
 debug = 0
+
+# Release-like optimization with symbols retained for Instruments / allocation stacks.
+[profile.profiling]
+inherits = "release"
+debug = 2
+strip = "none"

@@ -76,6 +76,7 @@ impl RpcConn {
     }
 
     fn call(&mut self, method: &str, params: &Value) -> Result<Value> {
+        let _rpc = canban_profiler::Span::new("rpc.request");
         let req_id = self.next_id;
         self.next_id += 1;
         let read_timeout = rpc_read_timeout(method);
@@ -147,7 +148,9 @@ impl RpcConn {
                 }
             }
         }
-        let reply: Value = serde_json::from_str(&line)?;
+        let mut decode = canban_profiler::Span::new("rpc.decode");
+        decode.counts(1, line.len());
+        let mut reply: Value = serde_json::from_str(&line)?;
         if let Some(err) = reply.get("error") {
             let code = err["code"].as_i64().unwrap_or(-32000);
             let msg = err["message"].as_str().unwrap_or("Canban RPC error");
@@ -157,8 +160,8 @@ impl RpcConn {
             bail!("{msg}");
         }
         reply
-            .get("result")
-            .cloned()
+            .get_mut("result")
+            .map(Value::take)
             .context("Invalid Canban response")
     }
 }
@@ -532,9 +535,9 @@ impl AppClient {
     }
 
     pub fn snapshot(&self) -> Result<Snapshot> {
-        let state = self.call("app.state", json!({}))?;
-        *self.config.write().unwrap() = serde_json::from_value(state["config"].clone())?;
-        Ok(serde_json::from_value(state["snapshot"].clone())?)
+        let mut state = self.call("app.state", json!({}))?;
+        *self.config.write().unwrap() = serde_json::from_value(state["config"].take())?;
+        Ok(serde_json::from_value(state["snapshot"].take())?)
     }
 
     pub(crate) fn set_cached_config(&self, cfg: Config) {
@@ -563,9 +566,12 @@ impl AppClient {
             let mut last = Value::Null;
             let mut connected = false;
             while let Some(app) = weak.upgrade() {
-                match app.call("app.state", json!({})) {
+                match app.call(
+                    "app.watch",
+                    json!({"after":last["revision"],"wait_ms":15_000}),
+                ) {
                     Ok(state) => {
-                        if !connected || state != last {
+                        if !connected || state["changed"] == true {
                             if tx
                                 .send(AppEvent::Changed {
                                     topic: change_topic(connected, &last, &state),
@@ -575,14 +581,16 @@ impl AppClient {
                             {
                                 break;
                             }
-                            last = state;
+                            last = super::state::state_marker(&state);
                         }
                         connected = true;
                     }
-                    Err(_) => connected = false,
+                    Err(_) => {
+                        connected = false;
+                        std::thread::sleep(Duration::from_millis(750));
+                    }
                 }
                 drop(app);
-                std::thread::sleep(Duration::from_millis(750));
             }
         });
         rx

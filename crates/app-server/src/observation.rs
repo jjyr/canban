@@ -256,7 +256,13 @@ impl AppServer {
                                         .as_str()
                                         .is_some_and(|t| t.contains('/'));
                                     if remote || message["method"] == "heartbeat" {
-                                        let s = server.snapshot().unwrap_or_default();
+                                        let s = server
+                                            .store
+                                            .lock()
+                                            .unwrap()
+                                            .db()
+                                            .admission_snapshot()
+                                            .unwrap_or_default();
                                         if s.terminals.iter().any(|t| {
                                             t.agent.as_ref().is_some_and(|a| {
                                                 !a.finished()
@@ -469,7 +475,13 @@ impl AppServer {
                         eprintln!("Canban delivery: {e:#}");
                     }
                     let _ = server.pump_admissions();
-                    let s = server.snapshot().unwrap_or_default();
+                    let s = server
+                        .store
+                        .lock()
+                        .unwrap()
+                        .db()
+                        .admission_snapshot()
+                        .unwrap_or_default();
                     if s.terminals.iter().any(|t| {
                         t.agent
                             .as_ref()
@@ -589,7 +601,14 @@ impl AppServer {
                 if let Err(e) = server.tick() {
                     eprintln!("Canban runtime: {e:#}");
                 }
-                let s = server.snapshot().unwrap_or_default();
+                let mut s = server
+                    .store
+                    .lock()
+                    .unwrap()
+                    .db()
+                    .runtime_snapshot()
+                    .unwrap_or_default();
+                server.project_observation_freshness(&mut s);
                 let mut wait: Option<Duration> = None;
                 let mut due = |at: u64| {
                     let duration = Duration::from_millis(at.saturating_sub(now()).max(1));

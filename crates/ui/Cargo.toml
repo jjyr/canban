@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+canban-profiler.workspace = true
 canban-github.workspace = true
 canban-workflow-engine.workspace = true
 canban-updater.workspace = true

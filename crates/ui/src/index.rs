@@ -27,7 +27,9 @@ pub struct SnapshotIndex {
     pub project_order: Vec<Project>,
     pub project_has_deliver: BTreeSet<String>,
     pub cards: BTreeMap<String, Card>,
-    pub events_by_card: BTreeMap<String, Rc<Vec<Event>>>,
+    /// Positions into the matching Snapshot; no duplicated event bodies.
+    pub events_by_card: BTreeMap<String, Vec<usize>>,
+    pub last_event_by_card: BTreeMap<String, u64>,
     pub reply_counts: BTreeMap<String, usize>,
     pub artifact_counts: BTreeMap<String, usize>,
     pub github_issues: BTreeMap<(String, u64, u64), GitHubIssueSnapshot>,
@@ -38,6 +40,8 @@ pub struct SnapshotIndex {
 
 impl SnapshotIndex {
     pub fn build(snapshot: &Snapshot) -> Self {
+        let mut span = canban_profiler::Span::new("index.build");
+        span.counts(snapshot.events.len(), 0);
         let mut projects = BTreeMap::new();
         for p in &snapshot.projects {
             projects.insert(p.id.clone(), p.clone());
@@ -69,21 +73,25 @@ impl SnapshotIndex {
             }
         }
 
-        let mut raw_events: BTreeMap<String, Vec<Event>> = BTreeMap::new();
-        for ev in &snapshot.events {
-            raw_events
+        let mut events_by_card: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        let mut last_event_by_card: BTreeMap<String, u64> = BTreeMap::new();
+        for (position, ev) in snapshot.events.iter().enumerate() {
+            events_by_card
                 .entry(ev.card_id.clone())
                 .or_default()
-                .push(ev.clone());
+                .push(position);
+            let last = last_event_by_card.entry(ev.card_id.clone()).or_default();
+            *last = (*last).max(ev.sequence);
         }
-        let mut events_by_card = BTreeMap::new();
         let mut reply_counts = BTreeMap::new();
-        for (card_id, list) in raw_events {
-            let count = crate::card::timeline::reply_count(&list, &card_id);
+        for (card_id, positions) in &events_by_card {
+            let count = crate::card::timeline::reply_count_iter(
+                positions.iter().map(|&p| &snapshot.events[p]),
+                card_id,
+            );
             if count > 0 {
                 reply_counts.insert(card_id.clone(), count);
             }
-            events_by_card.insert(card_id, Rc::new(list));
         }
 
         let mut artifact_counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -127,10 +135,12 @@ impl SnapshotIndex {
                     .get(&c.id)
                     .map(Vec::as_slice)
                     .unwrap_or(&[]),
-                events_by_card
+                &events_by_card
                     .get(&c.id)
-                    .map(|rc| rc.as_slice())
-                    .unwrap_or(&[]),
+                    .into_iter()
+                    .flatten()
+                    .map(|&p| &snapshot.events[p])
+                    .collect::<Vec<_>>(),
             );
             card_status.insert(
                 c.id.clone(),
@@ -150,6 +160,7 @@ impl SnapshotIndex {
             project_has_deliver,
             cards,
             events_by_card,
+            last_event_by_card,
             reply_counts,
             artifact_counts,
             github_issues,
@@ -163,11 +174,16 @@ impl SnapshotIndex {
         self.reply_counts.get(card_id).copied().unwrap_or(0)
     }
 
-    pub fn card_events(&self, card_id: &str) -> Rc<Vec<Event>> {
-        self.events_by_card
-            .get(card_id)
-            .cloned()
-            .unwrap_or_else(|| Rc::new(Vec::new()))
+    /// Materialize only the selected Card's history, paired with this index's source.
+    pub fn card_events(&self, snapshot: &Snapshot, card_id: &str) -> Rc<Vec<Event>> {
+        Rc::new(
+            self.events_by_card
+                .get(card_id)
+                .into_iter()
+                .flatten()
+                .map(|&p| snapshot.events[p].clone())
+                .collect(),
+        )
     }
 
     pub fn github_issue(
@@ -188,7 +204,7 @@ impl PartialEq for SnapshotIndex {
 }
 impl Eq for SnapshotIndex {}
 
-fn agent_started_at_from_events(entry: &TerminalEntry, card_events: &[Event]) -> Option<u64> {
+fn agent_started_at_from_events(entry: &TerminalEntry, card_events: &[&Event]) -> Option<u64> {
     let agent = entry.agent.as_ref()?;
     if let Some(ts) = agent.started_at.filter(|&t| t > 1_000_000_000_000) {
         return Some(ts);
@@ -211,7 +227,7 @@ fn agent_started_at_from_events(entry: &TerminalEntry, card_events: &[Event]) ->
 
 fn running_agents_indexed(
     card_terminals: &[&TerminalEntry],
-    card_events: &[Event],
+    card_events: &[&Event],
 ) -> Vec<(TerminalEntry, Option<u64>)> {
     let mut profiles = BTreeSet::new();
     let mut running: Vec<&TerminalEntry> = card_terminals
@@ -425,9 +441,9 @@ mod tests {
             .push(make_event(4, "c2", "comment.created", "Unrelated reply"));
 
         let idx1 = SnapshotIndex::build(&s1);
-        assert_eq!(idx1.card_events("c1").len(), 3);
-        assert_eq!(idx1.card_events("c2").len(), 1);
-        assert_eq!(idx1.card_events("missing").len(), 0);
+        assert_eq!(idx1.card_events(&s1, "c1").len(), 3);
+        assert_eq!(idx1.card_events(&s1, "c2").len(), 1);
+        assert_eq!(idx1.card_events(&s1, "missing").len(), 0);
         assert_eq!(
             idx1.reply_count("c1"),
             crate::card::timeline::reply_count(&s1.events, "c1")

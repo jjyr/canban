@@ -334,13 +334,20 @@ impl AppServer {
             first = false;
             let id = input["id"].clone();
             let reply = match self.call(strp(&input, "method")?, input["params"].clone()) {
-                Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
+                Ok(result) => {
+                    let mut reply = json!({"jsonrpc":"2.0","id":id});
+                    reply["result"] = result;
+                    reply
+                }
                 Err(e) => {
                     json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":format!("{e:#}")}})
                 }
             };
-            writeln!(stream, "{reply}")?;
-            stream.flush()?;
+            {
+                let _span = canban_profiler::Span::new("rpc.encode");
+                writeln!(stream, "{reply}")?;
+                stream.flush()?;
+            }
             if self.stopped() {
                 return Ok(());
             }
@@ -414,13 +421,20 @@ impl AppServer {
             }
             first = false;
             let reply = match this.call(method, input["params"].clone()) {
-                Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
+                Ok(result) => {
+                    let mut reply = json!({"jsonrpc":"2.0","id":id});
+                    reply["result"] = result;
+                    reply
+                }
                 Err(e) => {
                     json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":format!("{e:#}")}})
                 }
             };
-            writeln!(stream, "{reply}")?;
-            stream.flush()?;
+            {
+                let _span = canban_profiler::Span::new("rpc.encode");
+                writeln!(stream, "{reply}")?;
+                stream.flush()?;
+            }
             if this.stopped() {
                 let _ = stream.shutdown(std::net::Shutdown::Both);
                 return Ok(());

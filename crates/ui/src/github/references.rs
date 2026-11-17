@@ -64,6 +64,7 @@ pub fn related(card: &Card, snapshot: &Snapshot) -> Vec<GitHubReference> {
 pub(crate) fn related_indexed(
     card: &Card,
     index: &crate::index::SnapshotIndex,
+    snapshot: &Snapshot,
 ) -> Vec<GitHubReference> {
     let mut bodies = vec![card.body.as_str()];
     if let Some(source) = card.github_issue()
@@ -75,6 +76,7 @@ pub(crate) fn related_indexed(
     if let Some(events) = index.events_by_card.get(&card.id) {
         for event in events
             .iter()
+            .map(|&p| &snapshot.events[p])
             .filter(|e| matches!(e.kind.as_str(), "comment.created" | "comment.replied"))
         {
             bodies.push(event.data["body"].as_str().unwrap_or(&event.message));
@@ -88,7 +90,9 @@ pub fn panel(ui: Ui) -> impl IntoElement {
         let Some(c) = ui.current_card() else {
             return view().into_element();
         };
-        let refs = ui.index.with(|idx| related_indexed(&c, idx));
+        let refs = ui
+            .snapshot
+            .with(|s| ui.index.with(|idx| related_indexed(&c, idx, s)));
         let mut area = view().gap_1();
         if !refs.is_empty() {
             let mut row = view()

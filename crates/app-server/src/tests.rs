@@ -3890,3 +3890,5 @@ fn git_related_card_requires_a_unique_canonical_worktree_match() {
         "symlink aliases must be deduplicated"
     );
 }
+
+mod memory;

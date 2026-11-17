@@ -33,8 +33,16 @@ pub fn entries(events: &[Event]) -> Vec<(Event, bool)> {
 
 /// Counts visible narrative messages (comments, Agent replies, GitHub comments, and
 /// non-echoed reports) for `card_id` without cloning or sorting `Snapshot.events`.
+#[cfg(test)]
 pub(crate) fn reply_count(events: &[Event], card_id: &str) -> usize {
-    let card_events: Vec<&Event> = events.iter().filter(|e| e.card_id == card_id).collect();
+    reply_count_iter(events.iter(), card_id)
+}
+
+pub(crate) fn reply_count_iter<'a>(
+    events: impl Iterator<Item = &'a Event>,
+    card_id: &str,
+) -> usize {
+    let card_events: Vec<&Event> = events.filter(|e| e.card_id == card_id).collect();
     card_events
         .iter()
         .filter(|event| is_narrative_event_ref(event, &card_events))
@@ -321,7 +329,8 @@ pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
     let expanded_groups = signal(BTreeSet::<u64>::new());
     let events = computed(move || {
         let cid = ui.card_id();
-        ui.index.with(|idx| idx.card_events(&cid))
+        ui.snapshot
+            .with(|s| ui.index.with(|idx| idx.card_events(s, &cid)))
     });
     let rows = computed(move || {
         let expanded = expanded_groups.get();
