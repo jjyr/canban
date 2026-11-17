@@ -1527,6 +1527,14 @@ pub fn Gallery() -> impl IntoElement {
                             }
                         })
                     }))
+                    .child(action("New in current", Variant::Secondary, move |_| {
+                        canban_ui::terminals::new_tab(ui);
+                    }))
+                    .child(action("New unknown", Variant::Secondary, move |_| {
+                        ui.terminal_selection.set(String::new());
+                        ui.project.set(String::new());
+                        canban_ui::terminals::new_tab(ui);
+                    }))
                     .child(action("Restore", Variant::Secondary, move |_| {
                         ui.snapshot.set(reset.clone())
                     }))

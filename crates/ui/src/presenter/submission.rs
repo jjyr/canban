@@ -1,6 +1,6 @@
 //! Read-your-writes while a background (possibly cached remote) snapshot catches up.
 //! Only server-confirmed replies enter this overlay; failed submissions never do.
-use canban_types::{Card, Event, Snapshot, TerminalEntry};
+use canban_types::{Card, Event, Snapshot, TerminalContext, TerminalEntry};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -16,9 +16,14 @@ pub(crate) struct CommittedWrites {
     cards: BTreeMap<String, Card>,
     comments: BTreeMap<String, Event>,
     terminals: BTreeMap<String, (TerminalEntry, String)>,
+    terminal_hints: BTreeMap<String, TerminalContext>,
 }
 
 impl CommittedWrites {
+    pub(super) fn record_terminal_hint(&mut self, hint: TerminalContext) {
+        self.terminal_hints.insert(hint.terminal_id.clone(), hint);
+    }
+
     pub(super) fn record(&mut self, method: &str, reply: &Value, host: &str) {
         if method == "card.remove" && reply["removed"] == true {
             if let Some(id) = reply["card_id"].as_str() {
@@ -54,6 +59,24 @@ impl CommittedWrites {
                 .entity_hosts
                 .insert(terminal.id.clone(), host.clone());
         }
+        for hint in self.terminal_hints.values() {
+            if !hint_applies(snapshot, hint) {
+                continue;
+            }
+            // An unknown context is not a cwd observation. Keep placement until
+            // Core actually observes a directory for this exact runtime binding.
+            if let Some(context) = snapshot
+                .terminal_contexts
+                .iter_mut()
+                .find(|c| c.terminal_id == hint.terminal_id)
+            {
+                if context.cwd.is_none() {
+                    *context = hint.clone();
+                }
+            } else {
+                snapshot.terminal_contexts.push(hint.clone());
+            }
+        }
         for card in self.cards.values() {
             if let Some(saved) = snapshot.cards.iter_mut().find(|c| c.id == card.id) {
                 if saved.revision < card.revision {
@@ -75,6 +98,13 @@ impl CommittedWrites {
     /// Drop a receipt only after the authoritative snapshot includes it. A
     /// newer Card revision or edited/deleted comment must always win.
     pub(super) fn reconcile(&mut self, snapshot: &mut Snapshot) {
+        self.terminal_hints.retain(|id, hint| {
+            (hint_applies(snapshot, hint) || self.terminals.contains_key(id))
+                && !snapshot
+                    .terminal_contexts
+                    .iter()
+                    .any(|c| c.terminal_id == *id && c.cwd.is_some())
+        });
         self.terminals
             .retain(|id, _| !snapshot.terminals.iter().any(|t| &t.id == id));
         self.cards.retain(|id, card| {
@@ -87,6 +117,18 @@ impl CommittedWrites {
             .retain(|id, _| !snapshot.events.iter().any(|e| &e.id == id));
         self.overlay(snapshot);
     }
+}
+
+fn hint_applies(snapshot: &Snapshot, hint: &TerminalContext) -> bool {
+    snapshot.terminals.iter().any(|t| {
+        t.id == hint.terminal_id
+            && t.runtime.as_ref().is_some_and(|r| {
+                r.state != "finished"
+                    && r.machine == hint.machine
+                    && r.core_id.as_deref() == Some(hint.core_id.as_str())
+                    && r.terminal.as_deref() == Some(hint.terminal.as_str())
+            })
+    })
 }
 
 #[cfg(test)]
@@ -137,6 +179,71 @@ mod tests {
         let mut later = Snapshot::default();
         writes.overlay(&mut later);
         assert!(later.terminals.is_empty());
+    }
+
+    #[test]
+    fn creation_placement_survives_unknown_context_then_yields_to_observation() {
+        let terminal: TerminalEntry = serde_json::from_value(json!({
+            "id":"new", "number":1, "created_at":1,
+            "runtime":{"machine":"local", "core_id":"core", "terminal":"pty",
+                "state":"running", "connection":"connected"}
+        }))
+        .unwrap();
+        let hint = TerminalContext {
+            terminal_id: "new".into(),
+            machine: "local".into(),
+            core_id: "core".into(),
+            terminal: "pty".into(),
+            cwd: Some("/known".into()),
+            directory_root: Some("/known".into()),
+            ..Default::default()
+        };
+        let mut writes = CommittedWrites::default();
+        writes.record(
+            "terminal.create",
+            &serde_json::to_value(&terminal).unwrap(),
+            "local",
+        );
+        writes.record_terminal_hint(hint.clone());
+        let mut stale = Snapshot::default();
+        writes.reconcile(&mut stale);
+        assert_eq!(stale.terminal_contexts, vec![hint.clone()]);
+        let unknown = TerminalContext {
+            cwd: None,
+            ..hint.clone()
+        };
+        let fresh = Snapshot {
+            terminals: vec![terminal.clone()],
+            terminal_contexts: vec![unknown],
+            ..Default::default()
+        };
+        let mut applied = fresh.clone();
+        writes.reconcile(&mut applied);
+        assert_eq!(applied.terminal_contexts, vec![hint.clone()]);
+        // The entry itself arriving does not discard its placement hint.
+        assert!(writes.terminals.is_empty());
+        assert_eq!(writes.terminal_hints.len(), 1);
+        for state in ["observed", "finished", "replaced", "removed"] {
+            let mut writes = CommittedWrites::default();
+            writes.record_terminal_hint(hint.clone());
+            let mut s = fresh.clone();
+            match state {
+                "observed" => {
+                    s.terminal_contexts[0].cwd = Some("/actually-elsewhere".into());
+                    s.terminal_contexts[0].directory_root = Some("/actually-elsewhere".into());
+                }
+                "finished" => s.terminals[0].runtime.as_mut().unwrap().state = "finished".into(),
+                "replaced" => {
+                    s.terminals[0].runtime.as_mut().unwrap().terminal = Some("other-pty".into())
+                }
+                "removed" => s.terminals.clear(),
+                _ => unreachable!(),
+            }
+            let expected = s.terminal_contexts.clone();
+            writes.reconcile(&mut s);
+            assert!(writes.terminal_hints.is_empty(), "{state}");
+            assert_eq!(s.terminal_contexts, expected, "{state}");
+        }
     }
 
     #[test]

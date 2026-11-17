@@ -1871,6 +1871,18 @@ fn global_new_terminal_opens_in_project_root_while_in_page_new_tab_inherits_curr
             .unwrap();
         assert_eq!(
             entry_scope(&snap2, &global_entry),
+            WorktreeScope::Unassigned("local".into()),
+            "a root not yet present in the tree waits for background discovery"
+        );
+        // Simulate the ordinary observation that confirms the newly occupied root.
+        let mut snap2 = snap2;
+        observe_fixture_locations(&mut snap2);
+        let global_entry = crate::terminals::entries(&snap2)
+            .into_iter()
+            .find(|e| e.saved.id == global_id)
+            .unwrap();
+        assert_eq!(
+            entry_scope(&snap2, &global_entry),
             WorktreeScope::ProjectRoot("p1".into()),
             "global ⌘T from outside Terminals must land in active ProjectRoot"
         );
@@ -2433,6 +2445,9 @@ fn mod_digit_shortcuts_select_numbered_tab_in_current_workspace_and_reset_labels
         let mut ids = Vec::new();
         for expected_num in 1..=9 {
             crate::terminals::create(ui, "p1".into(), None);
+            // This shortcut scenario needs observed locations, including the first
+            // root creation which has no pre-existing tree group to match.
+            ui.snapshot.update(observe_fixture_locations);
             let tid = ui.terminal_selection.get_untracked();
             let title = ui.snapshot.with_untracked(|snap| {
                 snap.terminals.iter().find(|t| t.id == tid).unwrap().title()

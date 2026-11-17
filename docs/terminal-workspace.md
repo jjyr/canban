@@ -78,9 +78,18 @@ All New Terminal controls open the server-confirmed Terminal entry as soon as
 snapshot or remote-host cache synchronization. The UI retains the committed
 entry and its backend host while older snapshots catch up; authoritative runtime
 observations and renames supersede that receipt. Full refresh and observed
-directory grouping continue in the background. A location may briefly remain
-unassigned until its actual Core observation arrives; launch arguments are not
-presented as observed cwd.
+directory grouping continue in the background.
+
+On creation, the UI uses the known launch directory to provisionally place the
+entry under a location already present in the Terminal tree. Matching is purely
+in memory, scoped to the backend host and execution machine, with the deepest
+matching known worktree preferred. Ordinary non-Git directories match exactly.
+No filesystem, Git, Core or network query is added to the opening path. Unknown
+directories (including unmatched aliases and newly created worktrees) initially
+appear under Other Directories and follow normal background discovery. This
+local placement hint survives snapshots with no observed cwd, yields to the
+first authoritative cwd, and is discarded on close or runtime replacement. It
+does not persist launch arguments as an observed directory in AppServer.
 
 AppServer naming, default-name restoration and explicit directory-context reads
 use a terminal-specific projection containing Projects, Cards, Terminals,
@@ -116,10 +125,30 @@ the dedicated disposable harness was used instead. An initial simultaneous
 packaging attempt conflicted during code-sign verification; subsequent packaging
 and acceptance passed. The installed `/Applications/Canban.app` was not replaced.
 
+### Creation placement validation (2026-11-18, Card #113)
+
+`mise run build`, `mise run check`, all 614 workspace tests (one opt-in provider
+test skipped), and isolated real-PTY `mise run acceptance` passed. Regressions
+cover known and unmatched paths, deepest worktree matching, ordinary directory
+boundaries, Card worktree allocation, host/machine separation, and hint retirement
+after authoritative cwd, closure or runtime replacement.
+
+The native `terminal-directory` Gallery verified creation into the current known
+location and unknown-location fallback, including an empty tree. A packaged App
+with a disposable home and isolated Core at
+`/private/tmp/cb113-native-bfx30hic` verified Shell creation from both managed
+worktree and Project-root `+` controls, input/output, a real builtin
+`cd /private/tmp` reparenting the new Shell, and closing a new Shell while its
+neighbor remained usable. The disposable App/Core and Gallery were stopped.
+These are functional checks; no comparative click-to-prompt latency benchmark
+or live remote/paid-provider acceptance is claimed. The matching path adds only
+in-memory work and no additional IO query or wait.
+
 ### Live directory projection (2026-11-16)
 
 Terminals are the source of the sidebar, not Project membership. Every live Shell,
-CLI and workflow Agent is placed by its observed cwd on its owning machine.
+CLI and workflow Agent is placed by its observed cwd on its owning machine,
+with the provisional creation placement described above until cwd is observed.
 Launch Project and Card identity never override that location. Task ownership,
 report destinations and execution history remain unchanged when a Terminal moves.
 A directory associated with a Card displays that association independently of the
@@ -134,8 +163,8 @@ Terminal's task identity.
   tree. Non-Project directories and unassigned host locations sit below a subtle
   `OTHER DIRECTORIES` eyebrow divider, left-aligned rather than indented under the
   preceding Project, with local `$HOME` prefixes compacted to `~` (preserving full
-  paths in tooltips). Unknown locations are shown without inventing a launch-directory
-  binding. Transient observation/discovery loss retains the last confirmed location
+  paths in tooltips). Unmatched launch locations remain unassigned until observed.
+  Transient observation/discovery loss retains the last confirmed location
   for the same Core/Terminal binding.
 - Tabs and terminal cycling use the current location scope. Ordinary directories
   outside Git are separate scopes; subdirectories of one Git checkout share a scope.
@@ -147,6 +176,9 @@ Terminal's task identity.
 - Rendering performs no filesystem, Git or network IO. Existing event observation
   and bounded shared context caches own discovery. Per-row presentation memos keep
   unrelated status changes out of structural reconciliation.
+
+The Gallery `terminal-directory` scene includes `New in current` and `New unknown`
+actions for creation placement and fallback, alongside observed directory moves.
 
 - **Unified real-time Herdr status & notifications (2026-11-15):** Every Terminal—Card Role Agents (`AgentRun`), ephemeral CLI Agents (`agent_engine`), Configuration/Merge sessions, and interactive Shells where a user manually launches an Agent CLI (`observed_agent`)—projects a single real-time `HerdrStatus` (`Working`, `Starting`, `Queued`, `Blocked` with `RuntimeWait` details, `Done`, `Idle`, `Error`, `Disconnected`, or quiet `PlainShell`). Top/Card tab strips display compact leading status marks (`live_dot(ACCENT)` for `Working`, amber shield/help icon for `Blocked`, green check for `Done`, danger triangle for `Error`/`Offline`, and quiet plain Shells without status clutter; Worktree headers carry no aggregate status counts), while Terminal sidebar rows place `[status_mark] + [status_word]` on the right end of their second line (keeping detailed wait/error reasons in the row hover tooltip rather than adding a third line). When a manual CLI Agent exits back to its login Shell (`zsh`/`bash`), AppServer clears any residual PTY OSC 7501 `agent_status`, `agent_turn`, and `waiting` fields. Active (`Working`/`Starting`) standalone/manual Agent terminals appear in `⌘I` `Running` without consuming Scheduler `max_agents` slots, while `Blocked`/`Error`/`Disconnected` terminals surface in `⌘I` `Needs you`, increment the top-right alert pill and primary `Terminals` rail badge, and trigger audible chimes via `sound_items`.
 - **Compact fixed two-line sidebar session rows (2026-11-15):** Every session row in the `Terminals` sidebar tree (`crates/ui/src/terminals/tree.rs`) renders a uniform two-line compact layout (`h(px(46.))`) that never wraps or shifts height when selected, deselected, or blocked:

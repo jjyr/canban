@@ -1,4 +1,5 @@
 //! Independent Terminal workspace: split window chrome, numbered tabs and one viewer.
+pub(crate) mod creation;
 pub mod entries;
 pub(crate) mod labels;
 pub mod model;
@@ -356,13 +357,11 @@ pub(crate) fn select_card_tab(ui: Ui, card_id: &str, terminal_id: String) {
     ui.terminal_focus.update(|v| *v += 1);
 }
 
-fn gallery_create_entry(
-    ui: Ui,
-    project_id: Option<String>,
-    card_id: Option<String>,
-    agent: bool,
-    inherit: bool,
-) -> String {
+fn gallery_create_entry(ui: Ui, params: serde_json::Value) -> String {
+    let project_id = params["project_id"].as_str().map(str::to_owned);
+    let card_id = params["card_id"].as_str().map(str::to_owned);
+    let agent = params["agent"] == true;
+    let inherit = params["inherit_terminal_id"].as_str().is_some();
     let prefix = if agent {
         "gallery-agent"
     } else {
@@ -419,6 +418,25 @@ fn gallery_create_entry(
     let resolved_name = ui.snapshot.with_untracked(|s| {
         s.next_terminal_label(origin_project.as_deref(), agent_engine.as_deref(), None)
     });
+    let machine = params["machine"]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| {
+            inherited
+                .as_ref()?
+                .location
+                .as_ref()
+                .map(|l| l.machine.clone())
+        })
+        .or_else(|| {
+            ui.snapshot.with_untracked(|s| {
+                s.projects
+                    .iter()
+                    .find(|p| Some(&p.id) == origin_project.as_ref())
+                    .map(|p| p.work_location().machine)
+            })
+        })
+        .unwrap_or_else(|| "local".into());
     let saved = canban_types::TerminalEntry {
         id: id.clone(),
         conversation_id: None,
@@ -433,7 +451,7 @@ fn gallery_create_entry(
         agent: None,
         created_at: 0,
         runtime: Some(canban_types::TerminalRuntime {
-            machine: "local".into(),
+            machine,
             owner_core_id: None,
             core_id: Some("gallery".into()),
             terminal: Some(id.clone()),
@@ -446,50 +464,16 @@ fn gallery_create_entry(
             waiting: None,
         }),
     };
-    let inherited_location = inherited.and_then(|e| e.location);
+    let host = params["host_id"].as_str().unwrap_or("local");
+    let hint = ui.snapshot.with_untracked(|s| {
+        ui.terminal_entries
+            .with_untracked(|rows| creation::location_hint(s, rows, &params, &saved, host))
+    });
     ui.snapshot.update(|s| {
+        s.entity_hosts.insert(id.clone(), host.into());
         s.terminals.push(saved);
-        if let Some(mut loc) = inherited_location {
-            loc.terminal_id = id.clone();
-            loc.core_id = "gallery".into();
-            loc.terminal = id.clone();
-            if let Some(ref pid) = project_id {
-                loc.project_id = Some(pid.clone());
-            }
-            if let Some(ref cid) = card_id {
-                loc.card_id = Some(cid.clone());
-            }
-            s.terminal_contexts.push(loc);
-        } else if project_id.is_some() || card_id.is_some() {
-            let resolved_card = card_id
-                .as_deref()
-                .and_then(|cid| s.cards.iter().find(|c| c.id == cid));
-            let resolved_project = project_id
-                .as_deref()
-                .or_else(|| resolved_card.map(|c| c.project_id.as_str()))
-                .and_then(|pid| s.projects.iter().find(|p| p.id == pid));
-            let cwd = resolved_card
-                .and_then(|c| c.worktree.clone())
-                .filter(|w| !w.is_empty())
-                .or_else(|| resolved_project.map(|p| p.directory.clone()))
-                .unwrap_or_else(|| "/workspace/project".into());
-            let branch = resolved_card
-                .and_then(|c| c.branch.clone())
-                .or_else(|| resolved_project.and_then(|p| p.target_branch.clone()));
-            let machine = resolved_project
-                .and_then(|p| p.location.as_ref().map(|l| l.machine.clone()))
-                .unwrap_or_else(|| "local".into());
-            s.terminal_contexts.push(canban_types::TerminalContext {
-                machine,
-                terminal_id: id.clone(),
-                core_id: "gallery".into(),
-                terminal: id.clone(),
-                cwd: Some(cwd),
-                project_id: project_id.or_else(|| resolved_project.map(|p| p.id.clone())),
-                card_id,
-                branch,
-                ..Default::default()
-            });
+        if let Some(hint) = hint {
+            s.terminal_contexts.push(hint);
         }
     });
     id
@@ -545,7 +529,10 @@ pub fn create_in_card(ui: Ui, project_id: String, card_id: String, agent: bool) 
         ui.card_terminal_focused.set(true);
     }
     if crate::APP.get().is_none() {
-        let id = gallery_create_entry(ui, Some(project_id), Some(card_id.clone()), agent, false);
+        let id = gallery_create_entry(
+            ui,
+            json!({"project_id":project_id,"card_id":card_id,"agent":agent}),
+        );
         if ui.page.get_untracked() == "card" && ui.card.get_untracked() == card_id {
             select_card_tab(ui, &card_id, id);
             ui.card_terminal_open.set(true);
@@ -630,16 +617,12 @@ fn launch(ui: Ui, params: serde_json::Value) {
     let source = ui.location();
     let selection = ui.terminal_selection.get_untracked();
     if crate::APP.get().is_none() {
-        let project_id = params["project_id"].as_str().map(str::to_owned);
-        let card_id = params["card_id"].as_str().map(str::to_owned);
         let custom_name = params["name"]
             .as_str()
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
-        let agent = params["agent"] == true;
-        let inherit = params["inherit_terminal_id"].as_str().is_some();
-        let id = gallery_create_entry(ui, project_id, card_id, agent, inherit);
+        let id = gallery_create_entry(ui, params.clone());
         if let Some(hid) = params["host_id"]
             .as_str()
             .filter(|h| !h.is_empty() && *h != "local")
@@ -701,7 +684,7 @@ pub fn open_global(ui: Ui) {
         if let Some(ref p) = target_project {
             ui.project.set(p.clone());
         }
-        let id = gallery_create_entry(ui, target_project, None, false, false);
+        let id = gallery_create_entry(ui, json!({"project_id":target_project}));
         ui.open_terminal(id);
         ui.terminal_focus.update(|v| *v += 1);
         return;

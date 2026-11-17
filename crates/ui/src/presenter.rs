@@ -1081,6 +1081,7 @@ pub fn dispatch_complete(
         .unwrap_or_else(|| "local".into());
     let cfg_host = ui.effective_config_host();
     let immediate = submission::immediate(method);
+    let terminal_launch = (method == "terminal.create").then(|| params.clone());
     let epoch = ui.snapshot_epoch.get_untracked();
     ui.spawn(async move {
         let result = blocking(move || {
@@ -1110,6 +1111,23 @@ pub fn dispatch_complete(
                     ui.snapshot_epoch.update(|v| *v += 1);
                     ui.committed_writes
                         .with(|writes| writes.record(method, &value, &target_host));
+                    if let Some(params) = terminal_launch.as_ref()
+                        && let Ok(terminal) = serde_json::from_value(value.clone())
+                        && let Some(hint) = ui.snapshot.with_untracked(|s| {
+                            ui.terminal_entries.with_untracked(|rows| {
+                                crate::terminals::creation::location_hint(
+                                    s,
+                                    rows,
+                                    params,
+                                    &terminal,
+                                    &target_host,
+                                )
+                            })
+                        })
+                    {
+                        ui.committed_writes
+                            .with(|writes| writes.record_terminal_hint(hint));
+                    }
                     if let Some((mut snapshot, config)) = refreshed.filter(|_| !stale) {
                         ui.committed_writes
                             .with(|writes| writes.reconcile(&mut snapshot));
