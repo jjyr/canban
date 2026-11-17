@@ -74,12 +74,25 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage, compact: bool) -> i
                             .rounded(px(10.))
                             .bg(INSET)
                             .child(muted(move || {
-                                state
-                                    .cards
-                                    .with(|all| {
-                                        all.iter().filter(|c| c.stage == count_stage).count()
-                                    })
-                                    .to_string()
+                                let visible = state.cards.with(|all| {
+                                    all.iter().filter(|c| c.stage == count_stage).count()
+                                });
+                                let pid = ui.project.get();
+                                let total = ui.snapshot.with(|s| {
+                                    s.cards
+                                        .iter()
+                                        .filter(|c| {
+                                            c.project_id == pid
+                                                && c.active()
+                                                && c.stage == count_stage
+                                        })
+                                        .count()
+                                });
+                                if visible == total {
+                                    visible.to_string()
+                                } else {
+                                    format!("{visible} / {total}")
+                                }
                             })),
                     ),
             )

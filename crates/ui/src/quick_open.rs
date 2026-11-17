@@ -71,6 +71,52 @@ fn contextual_commands(ui: Ui, raw_query: &str) -> Vec<(usize, SearchChoice)> {
     let snapshot = ui.snapshot.get();
     let pid = ui.project.get();
     if !pid.is_empty() {
+        for (kind, title) in [
+            ("", "All cards"),
+            ("local", "Local cards"),
+            ("github", "GitHub cards"),
+            ("issue", "GitHub Issues"),
+            ("pr", "GitHub PRs"),
+        ] {
+            dynamic_cmds.push(DynamicCommand {
+                id: format!("cmd:filter-board-type:{kind}"),
+                title: format!("Filter Board Type: {title}"),
+                detail: "Board filter".into(),
+                icon: Icon::Board,
+                keywords: "type source filter".into(),
+            });
+        }
+        let authors: std::collections::BTreeSet<_> = snapshot
+            .cards
+            .iter()
+            .filter(|c| c.project_id == pid && c.github_issue().is_none())
+            .map(|c| c.created_by.clone())
+            .chain(
+                snapshot
+                    .github_issues
+                    .iter()
+                    .filter(|v| v.project_id == pid)
+                    .map(|v| v.author_login.clone()),
+            )
+            .filter(|a| !a.is_empty())
+            .chain(std::iter::once(String::new()))
+            .collect();
+        for author in authors {
+            dynamic_cmds.push(DynamicCommand {
+                id: format!("cmd:filter-board-author:{author}"),
+                title: format!(
+                    "Filter Board Author: {}",
+                    if author.is_empty() {
+                        "Anyone".into()
+                    } else {
+                        format!("@{author}")
+                    }
+                ),
+                detail: "Board filter".into(),
+                icon: Icon::Board,
+                keywords: "author filter".into(),
+            });
+        }
         let active = crate::tags::active_board_tags(ui, &pid);
         let project_name = snapshot
             .projects

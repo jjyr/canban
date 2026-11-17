@@ -325,6 +325,22 @@ pub const CATALOG: &[Command] = &[
         keywords: "kanban cards",
     },
     Command {
+        id: "filter-board-mine",
+        title: "Filter Board: Mine",
+        key: "",
+        display: "Board",
+        context: "Board",
+        keywords: "author me my cards created by me filter",
+    },
+    Command {
+        id: "filter-board-more",
+        title: "Filter Board: GitHub State or Scheduled…",
+        key: "",
+        display: "Board",
+        context: "Board",
+        keywords: "more filters open closed draft merged scheduled",
+    },
+    Command {
         id: "clear-board-filters",
         title: "Clear Board Filters",
         key: "",
@@ -837,6 +853,20 @@ pub fn execute(ui: Ui, id: &str) {
         }
         return;
     }
+    if let Some(kind) = id.strip_prefix("filter-board-type:") {
+        let pid = ui.project.get_untracked();
+        crate::github::filters::edit(ui, &pid, |f| f.set_kind(kind));
+        ui.navigate("board");
+        return;
+    }
+    if let Some(author) = id.strip_prefix("filter-board-author:") {
+        let pid = ui.project.get_untracked();
+        crate::github::filters::edit(ui, &pid, |f| {
+            f.set_author(if author.is_empty() { "" } else { "author" }, author)
+        });
+        ui.navigate("board");
+        return;
+    }
     if let Some(tag) = id.strip_prefix("filter-tag:") {
         let pid = ui.project.get_untracked();
         if !pid.is_empty() {
@@ -909,13 +939,16 @@ pub fn execute(ui: Ui, id: &str) {
         "mark-all-read" => crate::overview::mark_all_read(ui, None),
         "go-board" => ui.navigate("board"),
         "clear-board-filters" => {
-            let pid = ui.project.get_untracked();
-            if !pid.is_empty() {
-                ui.github.filters.update(|m| {
-                    m.remove(&pid);
-                });
-            }
+            crate::github::filters::reset(ui);
             ui.navigate("board");
+        }
+        "filter-board-mine" => {
+            crate::github::filters::mine(ui);
+            ui.navigate("board");
+        }
+        "filter-board-more" => {
+            ui.navigate("board");
+            crate::github::filters::open_more(ui, ui.project.get_untracked());
         }
         "go-terminals" => ui.navigate("terminals"),
         "go-review" => crate::review::open_compare(ui),

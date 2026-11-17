@@ -412,8 +412,7 @@ pub fn toggle_board_filter(ui: Ui, project_id: &str, raw_tag: &str) {
     if pid.is_empty() {
         return;
     }
-    ui.github.filters.update(|all| {
-        let entry = all.entry(pid).or_default();
+    crate::github::filters::edit(ui, &pid, |entry| {
         if let Some(pos) = entry.tags.iter().position(|t| t.to_lowercase() == lower) {
             entry.tags.remove(pos);
         } else {
@@ -432,11 +431,7 @@ pub fn clear_board_tags(ui: Ui, project_id: &str) {
     if pid.is_empty() {
         return;
     }
-    ui.github.filters.update(|all| {
-        if let Some(entry) = all.get_mut(&pid) {
-            entry.tags.clear();
-        }
-    });
+    crate::github::filters::edit(ui, &pid, |entry| entry.tags.clear());
 }
 
 /// Active Board tag filters for `project_id`.

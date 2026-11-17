@@ -3080,3 +3080,65 @@ steps:
 
     (s, draft)
 }
+
+/// Mixed-source Board filter regression fixture; no network or runtime.
+pub fn board_filters() -> canban_types::Snapshot {
+    use canban_types::*;
+    let mut s = workspace();
+    s.github = GitHubAccount {
+        state: "connected".into(),
+        login: Some("alice".into()),
+        ..Default::default()
+    };
+    while s.cards.len() < 5 {
+        let mut card = s.cards[0].clone();
+        card.id = format!("card-{}", s.cards.len() + 1);
+        card.number = (s.cards.len() + 1) as u64;
+        s.cards.push(card);
+    }
+    s.cards.truncate(5);
+    for (i, c) in s.cards.iter_mut().enumerate() {
+        c.delivery = None;
+        c.attention = None;
+        c.human_gate = None;
+        c.stage = "backlog".into();
+        c.created_by = if i == 1 { "bob" } else { "alice" }.into();
+        c.title = [
+            "My local card",
+            "Bob's local card",
+            "My GitHub PR",
+            "Bob's PR imported by me",
+            "PR with unavailable details",
+        ][i]
+            .into();
+        if i >= 2 {
+            let source = GitHubIssueRef {
+                repository: "fixture/repo".into(),
+                repository_id: 1,
+                issue_id: i as u64,
+                number: i as u64,
+                url: format!("https://github.com/fixture/repo/pull/{i}"),
+            };
+            c.content = CardContent::GitHubPr {
+                source: source.clone(),
+            };
+            if i != 4 {
+                s.github_issues.push(GitHubIssueSnapshot {
+                    id: format!("source-{i}"),
+                    project_id: c.project_id.clone(),
+                    source,
+                    title: c.title.clone(),
+                    body: String::new(),
+                    state: "open".into(),
+                    author_id: i as u64,
+                    author_login: if i == 2 { "alice" } else { "bob" }.into(),
+                    labels: vec![],
+                    assignees: vec![],
+                    updated_at: String::new(),
+                    synced_at: 0,
+                });
+            }
+        }
+    }
+    s
+}

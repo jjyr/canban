@@ -1319,6 +1319,32 @@ pub fn Gallery() -> impl IntoElement {
         ui.page.set("board".into());
         return canban_ui::frame::screen(ui).into_element();
     }
+    if let Ok(
+        scene @ ("board-filters"
+        | "board-filters-mine"
+        | "board-filters-empty"
+        | "board-filters-local"),
+    ) = std::env::var("CANBAN_GALLERY_SCENE").as_deref()
+    {
+        let mut s = fixtures::board_filters();
+        if scene == "board-filters-local" {
+            s.cards.retain(|c| c.github_issue().is_none());
+        }
+        ui.snapshot.set(s);
+        ui.project.set("gallery-project".into());
+        ui.card.set(String::new());
+        ui.page.set("board".into());
+        if scene == "board-filters-mine" {
+            canban_ui::github::filters::mine(ui);
+        }
+        if scene == "board-filters-empty" {
+            canban_ui::github::filters::edit(ui, "gallery-project", |f| {
+                f.set_author("mine", "");
+                f.tags = vec!["missing-tag".into()];
+            });
+        }
+        return canban_ui::frame::screen(ui).into_element();
+    }
     // Card tile states (running Agent pulse, gates, branch); `-open` keeps a
     // Card pane open so a narrow Board switches to one stage with stage tabs.
     if let Ok(

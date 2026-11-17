@@ -30,7 +30,7 @@ Automatic intake creates Backlog records without Agent, Session or worktree laun
 
 Accepted next architecture (2026-11-11, initial implementation; see [workflow/event coverage](product/workflow-engine.md)): [event subscriptions](product/events-and-notifications.md) can react to source-bound Card creation and Issue/PR observations, and start the [unified workflow engine](product/workflow-engine.md). Intake itself retains the Backlog-only ownership action; execution requires an enabled subscription. Source bindings must be complete before publishing creation. Discovery/baselines, polling gaps and durable deduplication are explicit. Persist minimal event/progress metadata independently of disposable responses; do not restore permanent remote-body/comment/diff mirrors. Existing refresh broadcasts are not this durable event feed. A configured workflow may explicitly react to source close/merge; these observations still have no built-in Card progression.
 
-The Board filter bar supports All/Local/GitHub, Issue/PR type, author and remote state. Local means source kind, including Local Cards with GitHub references. Author means local creator or remote source author, never an Agent Profile. Filters are remembered per Project within the window and affect visibility only. Column counts distinguish visible Cards from their total. Filtering does not change ordering, scheduling or human approval.
+The Board filter bar combines source/type into Type and provides Author (including Mine), Tags and More (GitHub state and Scheduled). Filters persist per desktop account and host-qualified Project across restarts and affect visibility only. See [Unified Board filters and persistence](#unified-board-filters-and-persistence) for identity, reset and unavailable-source behavior.
 
 ## Remote lists and PR workspace
 
@@ -118,3 +118,41 @@ Leaving the page does not cancel synchronization or overwrite unsaved drafts.
 Desktop API 61 introduces the queue, discovery RPCs and snapshot status.
 
 [2026-11-16 synchronization acceptance](github-sync-acceptance-20261116.md) records the automated, native and live Fiber source checks and their boundaries.
+
+## Unified Board filters and persistence
+
+The Board uses one compact filter bar on both local and GitHub Projects:
+`Type: All cards`, `Author: Anyone`, `Tags`, and `More`. Every filter uses the
+same control height and active border treatment. Type combines source and object
+kind: All cards, Local cards, GitHub cards, GitHub Issues, or GitHub PRs. Local
+Cards with delivery PRs or GitHub references remain Local cards.
+
+Author is one mutually exclusive choice: Anyone, Mine, or a searchable author.
+Mine matches the active desktop GitHub account, case-insensitively: local
+`created_by` for Local Cards and cached source authorship for Issue/PR Cards.
+Importing a PR, assigning it to someone, or running an Agent does not establish
+authorship. Without a signed-in account, Mine matches the server's `Local`
+creator and explains that GitHub authorship requires sign-in. Legacy `Local`
+records cannot be attributed to a signed-in account and are excluded with a
+visible explanation. Missing source details never fall back to the importing
+user; the filter stays selected and explains the missing metadata.
+
+Tags allow multiple selections (AND). More contains GitHub state and the
+independent Scheduled-only condition. Selected tags and More conditions remain
+visible as removable chips. Selecting a GitHub state restricts Type to GitHub
+when needed; selecting Local or All cards clears the remote-state condition.
+Reset clears all conditions for the current Project. Empty filtered results offer
+Reset; column counts distinguish visible Cards from totals. Narrow layouts wrap
+controls rather than concealing active conditions. Command Palette entries use
+the same filter intents.
+
+The local desktop AppServer atomically saves filters in `config/desktop.json`,
+scoped by desktop account and host-qualified Project identity. They restore on
+Project navigation and desktop restart. Mine stores a relative mode rather than
+a literal login. Per-Project patches preserve other Projects, accounts and
+preferences. One writer serializes/coalesces rapid edits, retains failed writes
+for retry on the next edit, and flushes pending writes on orderly desktop Quit.
+These preferences only affect presentation, never Card state or scheduling.
+
+[2026-11-17 Board filter acceptance](board-filters-acceptance-20261117.md) records
+the automated checks, native startup observations and remaining interaction checks.

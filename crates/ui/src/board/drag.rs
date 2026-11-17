@@ -149,6 +149,7 @@ impl BoardDrag {
         effect(move || {
             ui.snapshot.with(|_| ());
             ui.github.filters.with(|_| ());
+            ui.github.gh_status.with(|_| ());
             ui.merging_cards.with(|_| ());
             ui.local_tags.with(|_| ());
             if this.phase.get_untracked() == 0 {

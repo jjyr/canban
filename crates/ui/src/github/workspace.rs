@@ -25,6 +25,9 @@ pub struct Browser {
     pub detail_ticket: Signal<u64>,
     pub gh_status: Signal<Value>,
     pub cache_bytes: Signal<u64>,
+    pub filter_account: Signal<Option<String>>,
+    pub filter_pending: Signal<std::collections::BTreeMap<String, Value>>,
+    pub filter_saving: Signal<bool>,
     pub filters: Signal<std::collections::BTreeMap<String, BoardFilter>>,
     pub width: Signal<f32>,
     pub editing_comment: Signal<Option<(String, u64)>>,
@@ -34,14 +37,7 @@ pub struct Browser {
     pub delete_error: Signal<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct BoardFilter {
-    pub source: String,
-    pub kind: String,
-    pub author: String,
-    pub state: String,
-    pub tags: Vec<String>,
-}
+pub use canban_types::BoardFilter;
 
 impl Default for Browser {
     fn default() -> Self {
@@ -73,6 +69,9 @@ impl Browser {
             detail_ticket: signal(0),
             gh_status: signal(json!({})),
             cache_bytes: signal(0),
+            filter_account: signal(None),
+            filter_pending: signal(Default::default()),
+            filter_saving: signal(false),
             filters: signal(Default::default()),
             width: signal(460.),
             editing_comment: signal(None),

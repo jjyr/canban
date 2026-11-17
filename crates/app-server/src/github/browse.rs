@@ -100,6 +100,7 @@ impl AppServer {
                         Ok(json!({
                             "state": if installed { "signed_out" } else { "missing" },
                             "installed": installed,
+                            "last_login": self.github_cli.login(),
                             "message": format!("{e:#}"),
                         }))
                     }

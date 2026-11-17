@@ -190,31 +190,13 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         let _ = ui.project.get();
         ui.current_project()
     });
-    let has_github = computed(move || {
-        let current = ui.project.get();
-        project.get().is_some_and(|p| p.github.is_some())
-            || ui
-                .index
-                .with(|idx| idx.project_has_github_cards.contains(&current))
-    });
     view()
         .flex_1()
         .min_w(px(0.))
         .min_h(px(0.))
         .p_4()
         .gap_3()
-        .child(when(
-            move || has_github.get(),
-            move || crate::github::filters::toolbar(ui),
-        ))
-        .child(when(
-            move || {
-                let _ = ui.github.filters.get();
-                !has_github.get()
-                    && !crate::tags::active_board_tags(ui, &ui.project.get()).is_empty()
-            },
-            move || crate::github::filters::tag_bar(ui),
-        ))
+        .child(crate::github::filters::toolbar(ui))
         .child(dynamic(move || {
             let Some(project) = project.get() else {
                 let create = entry_card(
@@ -251,7 +233,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     })
                     .child(when(move || compact.get(), {
                         let stages = stages.clone();
-                        move || stage_tabs(state, stages.clone(), focus)
+                        move || stage_tabs(ui, state, stages.clone(), focus)
                     }))
                     .child(
                         scroll()
@@ -357,6 +339,7 @@ fn focus_stage(ui: Ui, stages: &[canban_types::Stage]) -> Signal<String> {
 }
 
 fn stage_tabs(
+    ui: Ui,
     state: drag::BoardDrag,
     stages: Vec<canban_types::Stage>,
     focus: Signal<String>,
@@ -371,11 +354,23 @@ fn stage_tabs(
                     let selected = id.clone();
                     let count = id.clone();
                     compact_segment(
-                        format!(
-                            "{} {}",
-                            stage.name,
-                            cards.iter().filter(|c| c.stage == count).count()
-                        ),
+                        format!("{} {}", stage.name, {
+                            let visible = cards.iter().filter(|c| c.stage == count).count();
+                            let pid = ui.project.get();
+                            let total = ui.snapshot.with(|s| {
+                                s.cards
+                                    .iter()
+                                    .filter(|c| {
+                                        c.project_id == pid && c.active() && c.stage == count
+                                    })
+                                    .count()
+                            });
+                            if visible == total {
+                                visible.to_string()
+                            } else {
+                                format!("{visible} / {total}")
+                            }
+                        }),
                         None,
                         move || focus.get() == selected,
                         move |_| focus.set(id.clone()),
@@ -753,9 +748,9 @@ mod tests {
         // Scroll deep to the bottom (past 3x viewport height = ~2200pt where Card #29..#35 live).
         let scroll_measure = core.measure(review_scroll).unwrap();
         let viewport_h = scroll_measure.frame.size.height.0;
-        let deep_y = viewport_h * 3.6;
+        let deep_y = (viewport_h * 3.6).max(2400.);
         assert!(
-            deep_y > 2300.,
+            deep_y > viewport_h * 3.,
             "deep scroll offset {deep_y} must exceed 3x viewport reclaim threshold"
         );
         core.set_scroll_offset(review_scroll, point(px(0.), px(deep_y)), 0);

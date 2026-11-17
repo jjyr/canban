@@ -110,6 +110,7 @@ pub(crate) fn workspace_root() -> impl IntoElement {
     utilities::init(ui);
     updates::init(ui);
     github::init(ui);
+    github::filters::init(ui);
     reminders::init(ui);
     projects::selection::remember(ui);
     terminals::bindings(ui);
@@ -251,6 +252,7 @@ fn run_application(ran_window: &mut bool) -> Result<()> {
     } else {
         platform::run_root::<startup::Bootstrap>(app_id, "Canban — Human Context", (1360, 900))
     };
+    github::filters::flush();
     drafts::persistence::flush();
     if startup::fatal_exit() {
         anyhow::bail!("Canban startup failed");

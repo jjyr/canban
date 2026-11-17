@@ -1,313 +1,606 @@
-use super::workspace::BoardFilter;
+//! One controlled Board filter model for toolbar, content tags and commands.
 use super::*;
-pub fn matches(ui: Ui, c: &Card, snapshot: &Snapshot) -> bool {
-    let filter = ui
-        .github
-        .filters
-        .with_untracked(|m| m.get(&c.project_id).cloned().unwrap_or_default());
-    if !filter.tags.is_empty() {
-        let card_tags = ui.known_tags.with_untracked(|kt| {
-            let indexed_matches = ui
-                .index
-                .with_untracked(|idx| idx.cards.get(&c.id) == Some(c));
-            if indexed_matches && c.removed_at.is_none() {
-                kt.tags_for_card(&c.id)
-            } else {
-                let known = kt.for_project(Some(&c.project_id));
-                crate::tags::card_tags(c, &known)
+use canban_types::BoardFilter;
+use canban_ui_kit::{PickerOption, search_popover, tokens::*};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Mutex;
+// Keep pending writes alive after native owners are disposed; orderly Quit flushes them.
+static PENDING: Mutex<BTreeMap<String, Value>> = Mutex::new(BTreeMap::new());
+static WRITER: Mutex<()> = Mutex::new(());
+pub fn flush() {
+    let Some(app) = crate::APP.get() else {
+        return;
+    };
+    let _writer = WRITER.lock().unwrap();
+    let patches = PENDING.lock().unwrap().clone();
+    for (key, patch) in patches {
+        if app
+            .call("utilities.configure", json!({"board_filter":patch}))
+            .is_ok()
+        {
+            let mut pending = PENDING.lock().unwrap();
+            if pending.get(&key) == Some(&patch) {
+                pending.remove(&key);
             }
-        });
-        if !filter.tags.iter().all(|wanted| {
-            let w = wanted.to_lowercase();
-            card_tags.iter().any(|t| t.to_lowercase() == w)
-        }) {
-            return false;
         }
     }
-    let source = c.github_issue();
-    if filter.source == "local" && source.is_some()
-        || filter.source == "github" && source.is_none()
-        || filter.source == "scheduled" && c.schedule_source.is_none()
-    {
-        return false;
-    }
-    if !filter.kind.is_empty()
-        && filter.kind != "all"
-        && (source.is_none() || filter.kind != c.source_kind())
-    {
-        return false;
-    }
-    let cached = snapshot.github_issues.iter().find(|v| {
-        v.project_id == c.project_id
-            && source.is_some_and(|s| {
-                s.issue_id == v.source.issue_id && s.repository_id == v.source.repository_id
-            })
-    });
-    if !filter.author.is_empty() {
-        let author = cached
-            .map(|v| v.author_login.as_str())
-            .unwrap_or(&c.created_by);
-        if !author.eq_ignore_ascii_case(&filter.author) {
-            return false;
-        }
-    }
-    filter.state.is_empty()
-        || filter.state == "all"
-        || cached.is_some_and(|v| v.state == filter.state)
 }
+
+pub fn current(ui: Ui, pid: &str) -> BoardFilter {
+    ui.github
+        .filters
+        .with(|m| m.get(pid).cloned().unwrap_or_default())
+}
+
+/// Restore only after preferences and account discovery, before accepting edits.
+pub fn init(ui: Ui) {
+    effect(move || {
+        let ready = ui.snapshot_ready.get();
+        let prefs = ui.utility.get();
+        let gh = ui.github.gh_status.get();
+        let snapshot = ui.snapshot.get();
+        if !ready || prefs.get("platform").is_none() || gh.get("state").is_none() {
+            return;
+        }
+        let login = active_login_from(&snapshot, &gh);
+        // Transport failures are not account changes. Keep the selected scope and
+        // Mine visible; do not silently replace it with an unfiltered local scope.
+        if login.is_none()
+            && gh["state"] == "unavailable"
+            && ui.github.filter_account.get_untracked().is_some()
+        {
+            return;
+        }
+        let account = login
+            .or_else(|| gh["last_login"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| "Local".into())
+            .to_lowercase();
+        if ui.github.filter_account.get_untracked().as_ref() != Some(&account) {
+            let filters = restored(&prefs, &account, &ui.github.filter_pending.get_untracked());
+            batch(|| {
+                ui.github.filter_account.set(Some(account));
+                ui.github.filters.set(filters);
+            });
+        }
+    });
+}
+
+fn restored(
+    prefs: &Value,
+    account: &str,
+    pending: &BTreeMap<String, Value>,
+) -> BTreeMap<String, BoardFilter> {
+    let mut filters: BTreeMap<String, BoardFilter> =
+        serde_json::from_value(prefs["preferences"]["board_filters"][account].clone())
+            .unwrap_or_default();
+    for patch in pending
+        .values()
+        .filter(|p| p["account"].as_str() == Some(account))
+    {
+        if let (Some(pid), Ok(filter)) = (
+            patch["project_id"].as_str(),
+            serde_json::from_value::<BoardFilter>(patch["value"].clone()),
+        ) {
+            filters.insert(pid.into(), filter);
+        }
+    }
+    filters
+}
+
+pub fn edit(ui: Ui, pid: &str, change: impl FnOnce(&mut BoardFilter)) {
+    if pid.is_empty() {
+        return;
+    }
+    if crate::APP.get().is_some() && ui.github.filter_account.get_untracked().is_none() {
+        return;
+    }
+    let mut filter = current(ui, pid);
+    change(&mut filter);
+    if filter == current(ui, pid) {
+        return;
+    }
+    ui.github.filters.update(|m| {
+        m.insert(pid.into(), filter.clone());
+    });
+    let Some(account) = ui.github.filter_account.get_untracked() else {
+        return;
+    };
+    let key = serde_json::to_string(&(&account, pid)).unwrap();
+    let patch = json!({"account":account,"project_id":pid,"value":filter});
+    ui.utility.update(|v| {
+        v["preferences"]["board_filters"][&account][pid] = json!(filter);
+    });
+    PENDING.lock().unwrap().insert(key.clone(), patch.clone());
+    ui.github.filter_pending.update(|pending| {
+        pending.insert(key, patch);
+    });
+    save_next(ui);
+}
+
+/// Serialize writes; coalesce pending changes to the same account/Project.
+fn save_next(ui: Ui) {
+    let Some(app) = crate::APP.get().cloned() else {
+        return;
+    };
+    if ui.github.filter_saving.get_untracked() {
+        return;
+    }
+    let next = ui.github.filter_pending.with_untracked(|pending| {
+        pending
+            .first_key_value()
+            .map(|(k, v)| (k.clone(), v.clone()))
+    });
+    let Some((key, patch)) = next else {
+        return;
+    };
+    ui.github.filter_saving.set(true);
+    ui.utility_epoch.update(|n| *n += 1);
+    ui.spawn(async move {
+        let sent = patch.clone();
+        let write_key = key.clone();
+        let result = blocking(move || {
+            let _writer = WRITER.lock().unwrap();
+            if PENDING.lock().unwrap().get(&write_key) != Some(&patch) {
+                return Ok(json!({}));
+            }
+            let result = app.call("utilities.configure", json!({"board_filter":patch}));
+            if result.is_ok() {
+                let mut pending = PENDING.lock().unwrap();
+                if pending.get(&write_key) == Some(&patch) {
+                    pending.remove(&write_key);
+                }
+            }
+            result
+        })
+        .await;
+        ui.github.filter_saving.set(false);
+        ui.utility_epoch.update(|n| *n += 1);
+        if matches!(result, Ok(Ok(_))) {
+            ui.github.filter_pending.update(|pending| {
+                if pending.get(&key) == Some(&sent) {
+                    pending.remove(&key);
+                }
+            });
+            // Commit only the submitted field; preserve edits made during this write.
+            let account = sent["account"].as_str().unwrap();
+            let pid = sent["project_id"].as_str().unwrap();
+            if !ui
+                .github
+                .filter_pending
+                .with_untracked(|p| p.contains_key(&key))
+            {
+                ui.utility.update(|v| {
+                    v["preferences"]["board_filters"][account][pid] = sent["value"].clone();
+                });
+            }
+            save_next(ui);
+        } else {
+            ui.operation_error
+                .set("Could not remember Board filters. Change a filter to retry saving.".into());
+        }
+    });
+}
+
+pub fn reset(ui: Ui) {
+    let pid = ui.project.get_untracked();
+    edit(ui, &pid, |f| *f = BoardFilter::default());
+}
+pub fn mine(ui: Ui) {
+    let pid = ui.project.get_untracked();
+    edit(ui, &pid, |f| {
+        f.author_mode = "mine".into();
+        f.author.clear();
+    });
+}
+
+pub fn matches(ui: Ui, c: &Card, snapshot: &Snapshot) -> bool {
+    let filter = current(ui, &c.project_id);
+    let cached = source_snapshot(c, snapshot);
+    if filter.author_mode == "mine"
+        && active_login_untracked(ui).is_none()
+        && ui
+            .github
+            .filter_account
+            .get_untracked()
+            .as_deref()
+            .is_some_and(|a| a != "local")
+    {
+        return false;
+    }
+    if !filter.matches_card(c, cached, active_login_untracked(ui).as_deref()) {
+        return false;
+    }
+    if filter.tags.is_empty() {
+        return true;
+    }
+    let card_tags = ui.known_tags.with_untracked(|kt| {
+        let indexed_matches = ui
+            .index
+            .with_untracked(|idx| idx.cards.get(&c.id) == Some(c));
+        if indexed_matches && c.removed_at.is_none() {
+            kt.tags_for_card(&c.id)
+        } else {
+            crate::tags::card_tags(c, &kt.for_project(Some(&c.project_id)))
+        }
+    });
+    filter
+        .tags
+        .iter()
+        .all(|wanted| card_tags.iter().any(|t| t.eq_ignore_ascii_case(wanted)))
+}
+fn source_snapshot<'a>(c: &Card, s: &'a Snapshot) -> Option<&'a GitHubIssueSnapshot> {
+    s.github_issues.iter().find(|v| {
+        v.project_id == c.project_id
+            && c.github_issue().is_some_and(|r| {
+                r.issue_id == v.source.issue_id && r.repository_id == v.source.repository_id
+            })
+    })
+}
+fn trigger(title: String, active: bool) -> nsh_base::ButtonElement {
+    compact_action(title, Variant::Secondary, |_| {})
+        .border_color(if active { ACCENT } else { BORDER })
+        .max_w(px(260.))
+}
+fn type_title(kind: &str) -> &'static str {
+    match kind {
+        "local" => "Local cards",
+        "github" => "GitHub cards",
+        "issue" => "GitHub Issues",
+        "pr" => "GitHub PRs",
+        _ => "All cards",
+    }
+}
+
 pub fn toolbar(ui: Ui) -> impl IntoElement {
     dynamic(move || {
-        let id = ui.project.get();
-        let initial = ui
-            .github
-            .filters
-            .with_untracked(|m| m.get(&id).cloned().unwrap_or_default());
-        let source = signal(if initial.source.is_empty() {
-            "all".into()
-        } else {
-            initial.source.clone()
-        });
-        let kind = signal(if initial.kind.is_empty() {
-            "all".into()
-        } else {
-            initial.kind.clone()
-        });
-        let state = signal(if initial.state.is_empty() {
-            "all".into()
-        } else {
-            initial.state.clone()
-        });
-        let author = signal(initial.author);
-        let save = id.clone();
-        let clear_id = id.clone();
-        let tag_btn_id = id.clone();
-        let chips_id = id.clone();
-        effect(move || {
-            let s = source.get();
-            let k = kind.get();
-            let st = state.get();
-            let a = author.get();
-            ui.github.filters.update(|m| {
-                let existing_tags = m.get(&save).map(|f| f.tags.clone()).unwrap_or_default();
-                m.insert(
-                    save.clone(),
-                    BoardFilter {
-                        source: s,
-                        kind: k,
-                        state: st,
-                        author: a,
-                        tags: existing_tags,
-                    },
-                );
-            });
-        });
-        let mut source_seg = segmented();
-        for (key, title) in [
-            ("all", "All"),
-            ("local", "Local"),
-            ("github", "GitHub"),
-            ("scheduled", "Scheduled"),
-        ] {
-            source_seg = source_seg.child(compact_segment(
-                title,
-                None,
-                move || source.get() == key,
-                move |_| source.set(key.into()),
-            ));
+        let pid = ui.project.get();
+        if pid.is_empty() {
+            return view().into_element();
         }
+        if crate::APP.get().is_some() && ui.github.filter_account.get().is_none() {
+            return muted("Restoring Board filters…").into_element();
+        }
+        let filter = current(ui, &pid);
+        let type_pid = pid.clone();
+        let type_edit_pid = pid.clone();
+        let author_pid = pid.clone();
+        let author_edit_pid = pid.clone();
+        let tag_pid = pid.clone();
+        let tag_edit_pid = pid.clone();
+        let more_pid = pid.clone();
+        let more = usize::from(filter.scheduled) + usize::from(!filter.state.is_empty());
+        let author_title = match filter.author_mode.as_str() {
+            "mine" => "Mine".into(),
+            "author" => format!("@{}", filter.author),
+            _ => "Anyone".into(),
+        };
         let row = view()
             .flex_row()
             .flex_wrap()
             .items_center()
             .gap_2()
-            .child(source_seg);
-        row.child(choice(
-            ui,
-            kind,
-            vec![
-                ("all", "All types"),
-                ("issue", "Issues"),
-                ("pr", "Pull requests"),
-            ],
-        ))
-        .child(action(
-            move || {
-                if author.get().is_empty() {
-                    "Author ▾".to_owned()
-                } else {
-                    format!("Author: {} ▾", author.get())
-                }
-            },
-            Variant::Secondary,
-            move |_| {
-                let mut authors: std::collections::BTreeSet<_> = ui.snapshot.with_untracked(|s| {
-                    s.github_issues
-                        .iter()
-                        .filter(|v| v.project_id == id)
-                        .map(|v| v.author_login.clone())
-                        .chain(
-                            s.cards
-                                .iter()
-                                .filter(|c| c.project_id == id)
-                                .map(|c| c.created_by.clone()),
-                        )
-                        .filter(|a| !a.is_empty())
+            .child(
+                search_popover(
+                    trigger(
+                        format!("Type: {} ▾", type_title(&filter.kind)),
+                        !filter.kind.is_empty(),
+                    ),
+                    move || {
+                        let f = current(ui, &type_pid);
+                        [
+                            ("", "All cards"),
+                            ("local", "Local cards"),
+                            ("github", "GitHub cards"),
+                            ("issue", "GitHub Issues"),
+                            ("pr", "GitHub PRs"),
+                        ]
+                        .into_iter()
+                        .map(|(id, title)| PickerOption::new(id, title).selected(f.kind == id))
                         .collect()
-                });
-                authors.insert(String::new());
-                ui.spawn(async move {
-                    nsh_core::element::desktop::popup_menu(
-                        authors
-                            .into_iter()
-                            .map(|name| {
-                                nsh_core::element::desktop::MenuItem::new(if name.is_empty() {
-                                    "All authors".into()
-                                } else {
-                                    name.clone()
-                                })
-                                .on_select(move || author.set(name.clone()))
-                            })
-                            .collect(),
-                    )
-                    .await;
-                });
-            },
-        ))
-        .child(choice(
-            ui,
-            state,
-            vec![
-                ("all", "All GitHub states"),
-                ("open", "Open"),
-                ("closed", "Closed"),
-                ("draft", "Draft"),
-                ("merged", "Merged"),
-            ],
-        ))
-        .child(tag_picker_button(ui, tag_btn_id))
-        .child(active_tag_chips(ui, chips_id))
-        .child(action("Clear", Variant::Quiet, move |_| {
-            let cid = clear_id.clone();
-            batch(move || {
-                source.set("all".into());
-                kind.set("all".into());
-                state.set("all".into());
-                author.set(String::new());
-                crate::tags::clear_board_tags(ui, &cid);
-            })
-        }))
-        .into_element()
-    })
-}
-
-fn tag_picker_button(ui: Ui, project_id: String) -> impl IntoElement {
-    let label_pid = project_id.clone();
-    let visible_pid = project_id.clone();
-    when(
-        move || {
-            let s = ui.snapshot.get();
-            let lt = ui.local_tags.get();
-            let _ = ui.github.filters.get();
-            !crate::tags::ordered_known(&s, &lt, Some(&visible_pid)).is_empty()
-                || !crate::tags::active_board_tags(ui, &visible_pid).is_empty()
-        },
-        move || {
-            let label_pid = label_pid.clone();
-            let menu_pid = project_id.clone();
-            compact_action(
-                move || {
-                    let _ = ui.github.filters.get();
-                    let active = crate::tags::active_board_tags(ui, &label_pid);
-                    if active.is_empty() {
-                        "Tag ▾".to_owned()
-                    } else {
-                        format!("Tag ({}) ▾", active.len())
-                    }
-                },
-                Variant::Secondary,
-                move |_| {
-                    let pid = menu_pid.clone();
-                    let tags = crate::tags::ordered_known(
-                        &ui.snapshot.get_untracked(),
-                        &ui.local_tags.get_untracked(),
-                        Some(&pid),
-                    );
-                    let active = crate::tags::active_board_tags(ui, &pid);
-                    let mut items = Vec::new();
-                    let clear_pid = pid.clone();
-                    items.push(
-                        nsh_core::element::desktop::MenuItem::new("All tags")
-                            .on_select(move || crate::tags::clear_board_tags(ui, &clear_pid)),
-                    );
-                    if !tags.is_empty() {
-                        items.push(nsh_core::element::desktop::MenuItem::separator());
-                    }
-                    for tag in tags {
-                        let is_active = active
-                            .iter()
-                            .any(|t| t.to_lowercase() == tag.to_lowercase());
-                        let item_label = if is_active {
-                            format!("✓ #{tag}")
-                        } else {
-                            format!("#{tag}")
-                        };
-                        let item_pid = pid.clone();
-                        items.push(
-                            nsh_core::element::desktop::MenuItem::new(item_label).on_select(
-                                move || crate::tags::toggle_board_filter(ui, &item_pid, &tag),
-                            ),
-                        );
-                    }
-                    ui.spawn(async move {
-                        nsh_core::element::desktop::popup_menu(items).await;
-                    });
-                },
+                    },
+                    move |id| edit(ui, &type_edit_pid, |f| f.set_kind(&id)),
+                )
+                .placeholder("Search card types…")
+                .width(260.),
             )
-        },
-    )
-}
-
-fn active_tag_chips(ui: Ui, project_id: String) -> impl IntoElement {
-    dynamic(move || {
-        let _ = ui.github.filters.get();
-        let active = crate::tags::active_board_tags(ui, &project_id);
-        view()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .gap_1p5()
-            .children(active.into_iter().map(|tag| {
-                let pid = project_id.clone();
-                let remove_tag = tag.clone();
-                compact_action(format!("#{tag} ×"), Variant::Secondary, move |_| {
-                    crate::tags::toggle_board_filter(ui, &pid, &remove_tag)
-                })
-                .into_element()
-            }))
-    })
-}
-
-/// Compact Board filter bar for local Projects whenever one or more `#tag` filters are active.
-pub fn tag_bar(ui: Ui) -> impl IntoElement {
-    dynamic(move || {
-        let id = ui.project.get();
-        let _ = ui.github.filters.get();
-        let active = crate::tags::active_board_tags(ui, &id);
-        if active.is_empty() {
-            return view().into_element();
+            .child(
+                search_popover(
+                    trigger(
+                        format!("Author: {author_title} ▾"),
+                        !filter.author_mode.is_empty(),
+                    ),
+                    move || {
+                        let f = current(ui, &author_pid);
+                        let mut authors: BTreeSet<_> = ui.snapshot.with(|s| {
+                            s.github_issues
+                                .iter()
+                                .filter(|v| v.project_id == author_pid)
+                                .map(|v| v.author_login.clone())
+                                .chain(
+                                    s.cards
+                                        .iter()
+                                        .filter(|c| {
+                                            c.project_id == author_pid && c.github_issue().is_none()
+                                        })
+                                        .map(|c| c.created_by.clone()),
+                                )
+                                .filter(|a| !a.is_empty())
+                                .collect()
+                        });
+                        if !f.author.is_empty() {
+                            authors.insert(f.author.clone());
+                        }
+                        let mut options = vec![
+                            PickerOption::new("", "Anyone").selected(f.author_mode.is_empty()),
+                            PickerOption::new("mine", "Mine")
+                                .selected(f.author_mode == "mine")
+                                .keywords(["me", "my", "created by me"]),
+                        ];
+                        options.extend(authors.into_iter().map(|a| {
+                            PickerOption::new(format!("author:{a}"), format!("@{a}"))
+                                .group("Authors")
+                                .selected(
+                                    f.author_mode == "author" && f.author.eq_ignore_ascii_case(&a),
+                                )
+                        }));
+                        options
+                    },
+                    move |id| {
+                        edit(ui, &author_edit_pid, |f| {
+                            f.author_mode = if id.starts_with("author:") {
+                                "author".into()
+                            } else {
+                                id.clone()
+                            };
+                            f.author = id.strip_prefix("author:").unwrap_or_default().into();
+                        })
+                    },
+                )
+                .placeholder("Search authors…")
+                .width(280.),
+            )
+            .child(
+                search_popover(
+                    trigger(
+                        if filter.tags.is_empty() {
+                            "Tags ▾".into()
+                        } else {
+                            format!("Tags ({}) ▾", filter.tags.len())
+                        },
+                        !filter.tags.is_empty(),
+                    ),
+                    move || {
+                        let f = current(ui, &tag_pid);
+                        let mut tags = crate::tags::ordered_known(
+                            &ui.snapshot.get(),
+                            &ui.local_tags.get(),
+                            Some(&tag_pid),
+                        );
+                        for t in &f.tags {
+                            if !tags.iter().any(|a| a.eq_ignore_ascii_case(t)) {
+                                tags.push(t.clone());
+                            }
+                        }
+                        let mut options =
+                            vec![PickerOption::new("", "All tags").selected(f.tags.is_empty())];
+                        options.extend(tags.into_iter().map(|t| {
+                            PickerOption::new(format!("tag:{t}"), format!("#{t}"))
+                                .selected(f.tags.iter().any(|a| a.eq_ignore_ascii_case(&t)))
+                        }));
+                        options
+                    },
+                    move |id| {
+                        if let Some(tag) = id.strip_prefix("tag:") {
+                            crate::tags::toggle_board_filter(ui, &tag_edit_pid, tag);
+                        } else {
+                            crate::tags::clear_board_tags(ui, &tag_edit_pid);
+                        }
+                    },
+                )
+                .placeholder("Search tags…")
+                .width(260.),
+            )
+            .child(
+                compact_action(
+                    if more == 0 {
+                        "More ▾".into()
+                    } else {
+                        format!("More ({more}) ▾")
+                    },
+                    Variant::Secondary,
+                    move |_| open_more(ui, more_pid.clone()),
+                )
+                .border_color(if more > 0 { ACCENT } else { BORDER }),
+            );
+        let row = row.children(
+            filter
+                .active()
+                .then(|| compact_action("Reset", Variant::Quiet, move |_| reset(ui))),
+        );
+        let mut chips = view().flex_row().flex_wrap().items_center().gap_1p5();
+        for tag in filter.tags {
+            let pid = pid.clone();
+            chips = chips.child(compact_action(
+                format!("#{tag} ×"),
+                Variant::Secondary,
+                move |_| crate::tags::toggle_board_filter(ui, &pid, &tag),
+            ));
         }
-        let clear_id = id.clone();
+        if !filter.state.is_empty() {
+            let pid = pid.clone();
+            chips = chips.child(compact_action(
+                format!("GitHub state: {} ×", filter.state),
+                Variant::Secondary,
+                move |_| edit(ui, &pid, |f| f.set_state("")),
+            ));
+        }
+        if filter.scheduled {
+            let pid = pid.clone();
+            chips = chips.child(compact_action(
+                "Scheduled ×",
+                Variant::Secondary,
+                move |_| edit(ui, &pid, |f| f.scheduled = false),
+            ));
+        }
         view()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
             .gap_2()
-            .child(muted("Filtered by"))
-            .child(active_tag_chips(ui, id.clone()))
-            .child(tag_picker_button(ui, id))
-            .child(compact_action("Clear", Variant::Quiet, move |_| {
-                crate::tags::clear_board_tags(ui, &clear_id)
-            }))
+            .child(row)
+            .child(chips)
+            .child(notice(ui, pid))
             .into_element()
     })
+}
+pub fn open_more(ui: Ui, pid: String) {
+    use nsh_core::element::desktop::{MenuItem, popup_menu};
+    let f = current(ui, &pid);
+    let mut items = vec![];
+    for (id, title) in [
+        ("", "All GitHub states"),
+        ("open", "Open"),
+        ("closed", "Closed"),
+        ("draft", "Draft"),
+        ("merged", "Merged"),
+    ] {
+        let pid = pid.clone();
+        items.push(
+            MenuItem::new(format!(
+                "{}{}",
+                if f.state == id { "✓ " } else { "" },
+                title
+            ))
+            .on_select(move || edit(ui, &pid, |f| f.set_state(id))),
+        );
+    }
+    items.push(MenuItem::separator());
+    items.push(
+        MenuItem::new(if f.scheduled {
+            "✓ Scheduled only"
+        } else {
+            "Scheduled only"
+        })
+        .on_select(move || edit(ui, &pid, |f| f.scheduled = !f.scheduled)),
+    );
+    ui.spawn(async move {
+        popup_menu(items).await;
+    });
+}
+fn notice(ui: Ui, pid: String) -> impl IntoElement {
+    let f = current(ui, &pid);
+    if !f.active() {
+        return view().into_element();
+    }
+    // Account checks can change independently of the project snapshot.
+    let _ = ui.github.gh_status.get();
+    let s = ui.snapshot.get();
+    let mut messages = vec![];
+    if f.author_mode == "mine" {
+        if active_login_untracked(ui).is_none() {
+            messages.push(if ui.github.filter_account.with_untracked(|a| a.as_deref().is_some_and(|a| a != "local")) {
+                "GitHub identity is unavailable. Mine remains selected; sign in to confirm authorship."
+            } else {
+                "GitHub identity is unavailable. Mine matches only this server's Local creator until an account is available."
+            });
+        } else if s
+            .cards
+            .iter()
+            .any(|c| c.project_id == pid && c.github_issue().is_none() && c.created_by == "Local")
+        {
+            messages.push("Older Local cards have no account identity and are excluded from Mine while signed in.");
+        }
+    }
+    if (!f.author_mode.is_empty() || !f.state.is_empty())
+        && s.cards.iter().any(|c| {
+            c.project_id == pid
+                && c.active()
+                && c.github_issue().is_some()
+                && source_snapshot(c, &s).is_none()
+        })
+    {
+        messages.push("Some GitHub source details are unavailable; authorship/state filters exclude those cards until details are available.");
+    }
+    let mut v = view().gap_2();
+    for message in messages {
+        v = v.child(muted(message));
+    }
+    if s.cards.iter().any(|c| c.project_id == pid && c.active())
+        && !s
+            .cards
+            .iter()
+            .any(|c| c.project_id == pid && c.active() && matches(ui, c, &s))
+    {
+        v = v.child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(muted("No cards match the current filters."))
+                .child(compact_action("Reset filters", Variant::Quiet, move |_| {
+                    reset(ui)
+                })),
+        );
+    }
+    v.into_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn restoring_accounts_and_hosts_keeps_pending_edits_and_reset() {
+        let prefs = json!({"preferences":{"board_filters":{
+            "alice":{"p":{"author_mode":"mine"},"remote:p":{"kind":"pr"}},
+            "bob":{"p":{"kind":"local"}}
+        }}});
+        assert_eq!(
+            restored(&prefs, "alice", &BTreeMap::new())["p"].author_mode,
+            "mine"
+        );
+        assert_eq!(restored(&prefs, "bob", &BTreeMap::new())["p"].kind, "local");
+        assert!(restored(&prefs, "new-user", &BTreeMap::new()).is_empty());
+        let pending = BTreeMap::from([(
+            "key".into(),
+            json!({"account":"alice","project_id":"p","value":BoardFilter::default()}),
+        )]);
+        let filters = restored(&prefs, "alice", &pending);
+        assert!(!filters["p"].active());
+        assert_eq!(filters["remote:p"].kind, "pr");
+        assert_eq!(restored(&prefs, "bob", &pending)["p"].kind, "local");
+    }
+    #[test]
+    fn local_projects_render_the_same_mine_and_tag_filter_controls() {
+        use nsh_core::{ApproxTextEngine, Core, MountItem, geometry::size};
+        #[component]
+        fn FilterProbe() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            ui.project.set("local-project".into());
+            mine(ui);
+            crate::tags::toggle_board_filter(ui, "local-project", "bug");
+            toolbar(ui)
+        }
+        let mut core = Core::new(ApproxTextEngine, size(px(700.), px(400.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<FilterProbe>());
+        let batch = core.commit().unwrap();
+        let texts: Vec<_> = batch
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                MountItem::Text { text, .. } => Some(text.text.to_string()),
+                _ => None,
+            })
+            .collect();
+        for wanted in [
+            "Type: All cards ▾",
+            "Author: Mine ▾",
+            "Tags (1) ▾",
+            "#bug ×",
+            "Reset",
+        ] {
+            assert!(
+                texts.iter().any(|t| t == wanted),
+                "Missing {wanted}: {texts:?}"
+            );
+        }
+    }
 }
