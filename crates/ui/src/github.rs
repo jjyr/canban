@@ -672,19 +672,9 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                                 latest.body.clear();
                             }
                         }
-                        // Remain on New Card with a fresh draft identity so
-                        // users can create multiple Cards consecutively while
-                        // preserving any post-submit input.
-                        let still_here = draft.try_get().is_some()
-                            && ui.page.get_untracked() == "new-card"
-                            && ui.new_draft.get_untracked() == key;
-                        if still_here {
-                            let next = format!("new-card:{}", id());
-                            drafts::put(ui, next.clone(), latest);
-                            drafts::remove(ui, &key);
-                            ui.new_draft.set(next);
-                            crate::navigation::replace(ui);
-                        } else if latest.has_content(&key) {
+                        // The presenter opens the acknowledged Card. Retain
+                        // post-submit input in Drafts for explicit restoration.
+                        if latest.has_content(&key) {
                             drafts::put(ui, key, latest);
                         } else {
                             drafts::remove(ui, &key);

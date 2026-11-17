@@ -1195,11 +1195,12 @@ pub fn dispatch_complete(
                             ui.page.set("board".into());
                         }
                     }
-                    "card.create" | "github.issue.add" | "github.item.add"
-                        if should_open_created_card(active, &source) =>
-                    {
+                    "card.create" | "github.issue.add" | "github.item.add" if active => {
                         if let Some(id) = value["id"].as_str() {
                             ui.open_card(id.into());
+                            if source.page == "new-card" {
+                                crate::navigation::replace(ui);
+                            }
                         }
                     }
                     "card.archive" if active => crate::card_actions::after_archive(ui),
@@ -1366,29 +1367,10 @@ pub fn copy_text(ui: Ui, value: String) {
     set_clipboard(&value);
     ui.notify("Copied to clipboard");
 }
-/// New Card form submissions remain on a fresh New Card draft for consecutive
-/// creation; other active surfaces (e.g. GitHub `+ Add to Board`) open the Card.
-pub(crate) fn should_open_created_card(active: bool, source: &Location) -> bool {
-    active && source.page != "new-card"
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     mod submission_rpc;
-
-    fn location(page: &str, new_draft: &str) -> Location {
-        Location {
-            new_draft: new_draft.into(),
-            page: page.into(),
-            project: "proj-1".into(),
-            card: String::new(),
-            request: String::new(),
-            terminal: String::new(),
-            standalone: false,
-            terminal_card: String::new(),
-        }
-    }
 
     #[test]
     fn workspace_dismiss_closes_only_card_and_new_card_when_unblocked() {
@@ -1404,17 +1386,6 @@ mod tests {
         assert_eq!(workspace_dismiss_action("review", false), None);
         assert_eq!(workspace_dismiss_action("card", true), None);
         assert_eq!(workspace_dismiss_action("new-card", true), None);
-    }
-
-    #[test]
-    fn new_card_submission_stays_on_new_card_for_consecutive_creation() {
-        let new_card = location("new-card", "new-card:first");
-        assert!(!should_open_created_card(true, &new_card));
-        assert!(!should_open_created_card(false, &new_card));
-
-        let github = location("github", "");
-        assert!(should_open_created_card(true, &github));
-        assert!(!should_open_created_card(false, &github));
     }
 
     #[test]

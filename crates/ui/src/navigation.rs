@@ -230,13 +230,13 @@ mod tests {
         assert_eq!(h.entries.len(), 3);
     }
     #[test]
-    fn consecutive_new_card_replacement_keeps_single_back_step_to_origin() {
+    fn created_card_replaces_form_and_keeps_single_back_step_to_origin() {
         let mut h = History::default();
         let board = route("board");
         let mut first = route("new-card");
         first.new_draft = "new-card:first".into();
-        let mut second = route("new-card");
-        second.new_draft = "new-card:second".into();
+        let mut second = route("card");
+        second.card = "created-card".into();
         h.visit(board.clone());
         h.visit(first);
         h.replace_current(second.clone());

@@ -64,10 +64,11 @@ New Card drafts have independent identities in navigation history and submission
 fences, retain the target Project and keep
 Local description and GitHub instructions separately. Content-derived request
 keys make retries of an identical create submission idempotent. Creating a Card
-from New Card keeps the New Card form open on a fresh draft identity (preserving
-the selected target Project, card kind and any post-submit input, while replacing
-the submitted draft's history entry so Back returns directly to the previous
-route), allowing consecutive Card creation without re-opening New Card. Published
+from New Card opens the newly created Card's details and replaces the submitted
+form's history entry, so Back returns directly to the previous route. Any input
+entered after submission remains available in Drafts. If the user navigated away
+before acknowledgement, completion preserves their current route. Command+N opens
+a new Card form when another Card is needed. Published
 task readers do not present unsubmitted edits as saved content.
 
 New Card submission completes when AppServer acknowledges the write, without
@@ -89,6 +90,23 @@ GitHub reference search is debounced, cached per editor/source/query, bounded to
 completion requests. Local candidates do not wait for the network; failures keep
 the editor usable and display an error. These are references, not Issue imports,
 remote edits, delivery selection or Agent dispatch.
+
+## Creation navigation acceptance (Card #103, 2026-11-17)
+
+The packaged native app in `/private/tmp/cb-103-ocxy3v5f` used a dedicated home
+and isolated Herdr Core. Create and Command+Enter each opened the acknowledged
+Card's details with the saved title/body. Back returned directly to the Board,
+and Command+N opened a blank New Card form. RPC reads confirmed one Card per
+submission and tombstones for both submitted drafts. The scratch UI, AppServer
+and Core were stopped afterwards.
+
+All 572 workspace tests passed (one additional test skipped), including the
+presenter/socket regression for opening details before snapshot refresh,
+replacing the submitted route, and preserving a different draft's route when a
+create response arrives late. Packaged build and isolated `mise run acceptance`
+passed. Changed Rust files passed formatting checks; the workspace-wide format
+check still reports existing differences in unrelated files. This run did not
+exercise live GitHub imports or Chinese IME input.
 
 ## Readers, previews and navigation
 

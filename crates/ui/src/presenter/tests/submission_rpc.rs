@@ -113,7 +113,10 @@ fn submissions_finish_before_refresh_and_refresh_failure_does_not_fail_the_write
     fn ProbeRoot() -> impl IntoElement {
         let ui = Ui::new();
         ui.project.set("p1".into());
+        let origin = ui.location();
+        ui.history.update(|h| h.visit(origin.clone()));
         ui.page.set("new-card".into());
+        ui.history.update(|h| h.visit(ui.location()));
         dispatch_complete(
             ui,
             "card.create",
@@ -122,6 +125,11 @@ fn submissions_finish_before_refresh_and_refresh_failure_does_not_fail_the_write
                 assert!(result.is_ok());
                 assert!(!ui.pending.get_untracked());
                 assert_eq!(ui.snapshot.with_untracked(|s| s.cards.len()), 1);
+                assert_eq!(ui.page.get_untracked(), "card");
+                assert_eq!(ui.card.get_untracked(), "c1");
+                assert_eq!(ui.history.with(|h| h.entries.len()), 2);
+                assert_eq!(ui.history.with(|h| h.entries[0].clone()), origin);
+                assert_eq!(ui.history.with(|h| h.entries[1].clone()), ui.location());
                 // A second write must be admitted while the previous refresh is stalled.
                 dispatch_complete(
                     ui,
@@ -131,8 +139,21 @@ fn submissions_finish_before_refresh_and_refresh_failure_does_not_fail_the_write
                         assert!(result.is_ok());
                         assert!(!ui.pending.get_untracked());
                         assert_eq!(ui.snapshot.with_untracked(|s| s.events.len()), 1);
-                        // Its callback is called exactly once, before the refresh failure.
-                        DONE.store(true, Ordering::SeqCst);
+                        // A late create receipt must not replace a different draft.
+                        ui.page.set("new-card".into());
+                        ui.new_draft.set("new-card:submitted".into());
+                        dispatch_complete(
+                            ui,
+                            "card.create",
+                            json!({"project_id":"p1","title":"Second"}),
+                            move |result| {
+                                assert!(result.is_ok());
+                                assert_eq!(ui.page.get_untracked(), "new-card");
+                                assert_eq!(ui.new_draft.get_untracked(), "new-card:other");
+                                DONE.store(true, Ordering::SeqCst);
+                            },
+                        );
+                        ui.new_draft.set("new-card:other".into());
                     },
                 );
             },
@@ -173,7 +194,7 @@ fn submissions_finish_before_refresh_and_refresh_failure_does_not_fail_the_write
         finished_before_refresh,
         "write callbacks waited for the blocked snapshot"
     );
-    assert_eq!(creates.load(Ordering::SeqCst), 1);
+    assert_eq!(creates.load(Ordering::SeqCst), 2);
     assert_eq!(comments.load(Ordering::SeqCst), 1);
     assert!(
         reads.load(Ordering::SeqCst) >= 3,
