@@ -36,7 +36,7 @@ def command(argv, timeout=100):
     return result.stdout.strip()
 
 def call(method, params=None):
-    return json.loads(command([str(cli),'--home',str(args.home),'call',method,json.dumps(params or {})]))
+    return json.loads(command([str(cli),'--home',str(args.home),'--full','call',method,json.dumps(params or {})]))
 
 def mutate(method, params):
     return call(method,{**params,'request_key':uuid.uuid4().hex})

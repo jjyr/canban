@@ -14,7 +14,7 @@ fn setup() -> (tempfile::TempDir, Arc<AppServer>, Project, Card) {
     let c: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id":p.id,"title":"Implement change","body":"Task context"}),
+            json!({"view":"full","project_id":p.id,"title":"Implement change","body":"Task context"}),
         )
         .unwrap(),
     )
@@ -68,7 +68,7 @@ fn state_history_and_queue_are_atomic_and_retries_do_not_dispatch_twice() {
     );
     let conflict = app.call(
         "card.move",
-        json!({"card_id":c.id,"revision":1,"stage":"backlog","request_key":"move-once"}),
+        json!({"view":"full","card_id":c.id,"revision":1,"stage":"backlog","request_key":"move-once"}),
     );
     assert!(conflict.is_err());
     drop(app);
@@ -91,7 +91,7 @@ fn failed_revision_leaves_no_event_or_request() {
     assert!(
         app.call(
             "card.move",
-            json!({"card_id":c.id,"revision":99,"stage":"develop"})
+            json!({"view":"full","card_id":c.id,"revision":99,"stage":"develop"})
         )
         .is_err()
     );
@@ -105,12 +105,12 @@ fn mentions_coalesce_in_the_card_profile_queue_without_stage_callback() {
     let (_d, app, p, c) = setup();
     app.call(
         "comment.add",
-        json!({"card_id":c.id,"body":"@codex explain this"}),
+        json!({"view":"full","card_id":c.id,"body":"@codex explain this"}),
     )
     .unwrap();
     app.call(
         "comment.add",
-        json!({"card_id":c.id,"body":"@codex another question"}),
+        json!({"view":"full","card_id":c.id,"body":"@codex another question"}),
     )
     .unwrap();
     let snap = app.snapshot().unwrap();
@@ -131,7 +131,7 @@ fn blocked_produces_attention_and_durable_notice() {
     let (_d, app, p, c) = setup();
     app.call(
         "card.move",
-        json!({"card_id":c.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let _run = admit(&app, &app.snapshot().unwrap().terminals[0]);
@@ -168,7 +168,7 @@ fn legacy_tags_are_ignored_and_unassigned_stages_use_the_global_default() {
         .unwrap();
     app.call(
         "card.move",
-        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let snapshot = app.snapshot().unwrap();
@@ -209,7 +209,7 @@ fn archive_compresses_owned_files_and_remains_readable_after_restore() {
     let c = app.snapshot().unwrap().cards[0].clone();
     app.call(
         "card.restore",
-        json!({"card_id":c.id,"revision":c.revision}),
+        json!({"view":"full","card_id":c.id,"revision":c.revision}),
     )
     .unwrap();
     assert_eq!(
@@ -283,7 +283,7 @@ fn ipc_preserves_large_context_and_report_frames() {
     let card = rpc(
         &app.endpoint(),
         "card.create",
-        json!({"project_id":project.id,"title":"Large body","body":body}),
+        json!({"view":"full","project_id":project.id,"title":"Large body","body":body}),
     )
     .unwrap();
     assert_eq!(card["body"].as_str().unwrap(), body);
@@ -323,12 +323,12 @@ fn deferred_notes_preserve_legacy_data_without_injecting_it_into_new_executions(
     .unwrap();
     app.call(
         "card.context.update",
-        json!({"card_id":card.id,"revision":1,"note_ids":[first.id]}),
+        json!({"view":"full","card_id":card.id,"revision":1,"note_ids":[first.id]}),
     )
     .unwrap();
     app.call(
         "card.move",
-        json!({"card_id":card.id,"revision":2,"stage":"develop"}),
+        json!({"view":"full","card_id":card.id,"revision":2,"stage":"develop"}),
     )
     .unwrap();
     let snapshot = app.snapshot().unwrap();
@@ -375,7 +375,7 @@ fn legacy_capacity_fields_do_not_survive_config_or_request_loading() {
     );
     app.call(
         "comment.add",
-        json!({"card_id":card.id,"body":"@codex task"}),
+        json!({"view":"full","card_id":card.id,"body":"@codex task"}),
     )
     .unwrap();
     let mut request =
@@ -399,14 +399,14 @@ fn template_profiles_and_mentions_select_independent_roles_and_callbacks() {
     );
     app.call(
         "card.move",
-        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let developer = app.snapshot().unwrap().terminals[0].clone();
     assert_eq!(developer.agent.as_ref().unwrap().profile.id, "developer");
     app.call(
         "comment.add",
-        json!({"card_id":card.id,"body":"@reviewer assess the approach"}),
+        json!({"view":"full","card_id":card.id,"body":"@reviewer assess the approach"}),
     )
     .unwrap();
     let mention = app
@@ -509,7 +509,7 @@ fn queued_role_and_stage_task_are_immutable_after_config_reload() {
     let (_dir, app, project, card) = setup();
     app.call(
         "card.move",
-        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let before = app.snapshot().unwrap().terminals[0].clone();
@@ -537,7 +537,7 @@ fn queued_role_and_stage_task_are_immutable_after_config_reload() {
     assert!(!prompt.contains("New role"));
     app.call(
         "comment.add",
-        json!({"card_id":card.id,"body":"@developer explain"}),
+        json!({"view":"full","card_id":card.id,"body":"@developer explain"}),
     )
     .unwrap();
     // Input appended to the existing invocation retains its loaded profile.
@@ -546,7 +546,7 @@ fn queued_role_and_stage_task_are_immutable_after_config_reload() {
     app.call("execution.report",json!({"project_id":project.id,"card":card.number,"profile_id":"developer","state":"completed","request_key":"finish-old-role"})).unwrap();
     app.call(
         "comment.add",
-        json!({"card_id":card.id,"body":"@developer next assignment"}),
+        json!({"view":"full","card_id":card.id,"body":"@developer next assignment"}),
     )
     .unwrap();
     assert!(
@@ -616,7 +616,7 @@ fn live_replies_preserve_task_callback_and_require_current_invocation() {
     );
     app.call(
         "card.move",
-        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let run = admit(&app, &app.snapshot().unwrap().terminals[0]);
@@ -625,7 +625,7 @@ fn live_replies_preserve_task_callback_and_require_current_invocation() {
     app.call("agent.turn_ended", json!({"project_id":project.id,"card":card.number,"profile_id":"developer","session_id":"exact-thread","body":"Ready"})).unwrap();
     app.call(
         "comment.add",
-        json!({"card_id":card.id,"body":"@developer explain progress"}),
+        json!({"view":"full","card_id":card.id,"body":"@developer explain progress"}),
     )
     .unwrap();
     let snap = app.snapshot().unwrap();
@@ -690,7 +690,7 @@ fn restarting_does_not_blindly_redeliver_uncertain_question() {
     .unwrap();
     app.call(
         "comment.add",
-        json!({"card_id":card.id,"body":"@developer question"}),
+        json!({"view":"full","card_id":card.id,"body":"@developer question"}),
     )
     .unwrap();
     app.store
@@ -715,7 +715,7 @@ fn completion_retains_interactive_terminal_until_idle_timeout_or_explicit_close(
     let (_dir, app, project, card) = setup();
     app.call(
         "card.move",
-        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let run = admit(&app, &app.snapshot().unwrap().terminals[0]);
@@ -735,7 +735,7 @@ fn completion_retains_interactive_terminal_until_idle_timeout_or_explicit_close(
     assert_eq!(app.snapshot().unwrap().cards[0].stage, "review");
     app.call(
         "comment.add",
-        json!({"card_id":card.id,"body":"Follow up", "mentions":["developer"]}),
+        json!({"view":"full","card_id":card.id,"body":"Follow up", "mentions":["developer"]}),
     )
     .unwrap();
     let s = app.snapshot().unwrap();
@@ -850,7 +850,7 @@ fn review_delivery_receipt_survives_retry_restart_and_archive_is_separate() {
     // observation stays live after Review exits, but no longer owns runtime.
     app.call(
         "comment.add",
-        json!({"card_id":card.id,"body":"@codex review"}),
+        json!({"view":"full","card_id":card.id,"body":"@codex review"}),
     )
     .unwrap();
     let run = admit(&app, &app.snapshot().unwrap().terminals[0]);
@@ -941,7 +941,7 @@ fn review_delivery_receipt_survives_retry_restart_and_archive_is_separate() {
     let source_head = git(&["rev-parse", "HEAD"]);
     app.call(
         "card.restore",
-        json!({"card_id":archived.id,"revision":archived.revision}),
+        json!({"view":"full","card_id":archived.id,"revision":archived.revision}),
     )
     .unwrap();
     let restored = app.snapshot().unwrap().cards[0].clone();
@@ -956,7 +956,7 @@ fn remote_pr_merge_defers_archive_while_agent_live_then_archives_and_handles_pr_
     let (_dir, app, project, card) = setup();
     app.call(
         "card.move",
-        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let req = app.snapshot().unwrap().terminals[0].clone();
@@ -1028,7 +1028,7 @@ fn remote_pr_merge_defers_archive_while_agent_live_then_archives_and_handles_pr_
     let pr_card: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id":project.id,"title":"PR source"}),
+            json!({"view":"full","project_id":project.id,"title":"PR source"}),
         )
         .unwrap(),
     )
@@ -1137,7 +1137,7 @@ fn review_clears_warning_when_herdr_reports_agent_stopped_and_never_blocks_merge
 
     app.call(
         "comment.add",
-        json!({"card_id":card.id,"body":"@codex review"}),
+        json!({"view":"full","card_id":card.id,"body":"@codex review"}),
     )
     .unwrap();
     let run = admit(&app, &app.snapshot().unwrap().terminals[0]);
@@ -1287,7 +1287,7 @@ fn core_loss_during_question_delivery_becomes_unknown_without_replay() {
     let (_dir, app, _project, card) = setup();
     app.call(
         "card.move",
-        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let run = admit(&app, &app.snapshot().unwrap().terminals[0]);
@@ -1304,7 +1304,7 @@ fn core_loss_during_question_delivery_becomes_unknown_without_replay() {
         .unwrap();
     app.call(
         "comment.add",
-        json!({"card_id":card.id,"body":"@developer explain progress"}),
+        json!({"view":"full","card_id":card.id,"body":"@developer explain progress"}),
     )
     .unwrap();
     let client = canban_herdr::Client {
@@ -1365,7 +1365,7 @@ fn notes_keep_revisions_links_and_provenance_atomically() {
     assert_eq!(unchanged.links, vec![b.id.clone()]);
     app.call(
         "card.move",
-        json!({"card_id":card.id,"revision":card.revision,"stage":"develop"}),
+        json!({"view":"full","card_id":card.id,"revision":card.revision,"stage":"develop"}),
     )
     .unwrap();
     let req = app.snapshot().unwrap().terminals[0].clone();
@@ -1437,12 +1437,12 @@ fn note_links_and_card_creation_roll_back_on_invalid_scope() {
     assert!(
         app.call(
             "card.create",
-            json!({"project_id":other.id,"title":"Invalid","source_note_id":note.id})
+            json!({"view":"full","project_id":other.id,"title":"Invalid","source_note_id":note.id})
         )
         .is_err()
     );
     assert_eq!(before, app.snapshot().unwrap());
-    let card:Card=serde_json::from_value(app.call("card.create",json!({"project_id":project.id,"title":"Scoped work","body":"Implement scope","source_note_id":note.id})).unwrap()).unwrap();
+    let card:Card=serde_json::from_value(app.call("card.create",json!({"view":"full","project_id":project.id,"title":"Scoped work","body":"Implement scope","source_note_id":note.id})).unwrap()).unwrap();
     assert_eq!(card.stage, "backlog");
     assert_eq!(card.context_notes, Some(vec![note.id.clone()]));
     assert!(app.snapshot().unwrap().terminals.is_empty());
@@ -1451,7 +1451,7 @@ fn note_links_and_card_creation_roll_back_on_invalid_scope() {
     assert_eq!(saved.card_ids, vec![card.id.clone()]);
     app.call(
         "card.context.update",
-        json!({"card_id":card.id,"revision":card.revision,"note_ids":[]}),
+        json!({"view":"full","card_id":card.id,"revision":card.revision,"note_ids":[]}),
     )
     .unwrap();
     let saved: Note =
@@ -1497,14 +1497,14 @@ fn global_slots_include_closing_and_unknown_agents_and_resume_after_exit() {
         let c: Card = serde_json::from_value(
             app.call(
                 "card.create",
-                json!({"project_id":project.id,"title":format!("Task {i}")}),
+                json!({"view":"full","project_id":project.id,"title":format!("Task {i}")}),
             )
             .unwrap(),
         )
         .unwrap();
         app.call(
             "card.move",
-            json!({"card_id":c.id,"revision":1,"stage":"develop"}),
+            json!({"view":"full","card_id":c.id,"revision":1,"stage":"develop"}),
         )
         .unwrap();
         if i < 8 {
@@ -1553,7 +1553,7 @@ fn later_template_stages_win_across_boards_and_human_cards_are_skipped() {
     let (dir, app, _project, card) = setup();
     app.call(
         "card.move",
-        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let custom_yaml = r#"schema: 1
@@ -1609,14 +1609,14 @@ steps:
     let second: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id":second_project.id,"title":"Later stage"}),
+            json!({"view":"full","project_id":second_project.id,"title":"Later stage"}),
         )
         .unwrap(),
     )
     .unwrap();
     app.call(
         "card.move",
-        json!({"card_id":second.id,"revision":1,"stage":"custom-final-check"}),
+        json!({"view":"full","card_id":second.id,"revision":1,"stage":"custom-final-check"}),
     )
     .unwrap();
     let mut snapshot = app.snapshot().unwrap();
@@ -1687,7 +1687,7 @@ fn human_review_gate_survives_reports_acknowledgement_restart_and_requires_expli
     );
     app.call(
         "card.move",
-        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let request = app.snapshot().unwrap().terminals[0].clone();
@@ -1713,7 +1713,7 @@ fn human_review_gate_survives_reports_acknowledgement_restart_and_requires_expli
     // Explicit manual work can run, but its completion cannot approve this gate.
     app.call(
         "comment.add",
-        json!({"card_id":card.id,"body":"@reviewer help me inspect"}),
+        json!({"view":"full","card_id":card.id,"body":"@reviewer help me inspect"}),
     )
     .unwrap();
     let manual = app.snapshot().unwrap().terminals.last().unwrap().clone();
@@ -1727,7 +1727,7 @@ fn human_review_gate_survives_reports_acknowledgement_restart_and_requires_expli
     let approve =
         json!({"card_id":card.id,"revision":current.revision,"request_key":"approve-gate"});
     assert!(app.call("card.continue",json!({"card_id":card.id,"revision":current.revision,"execution":{"agent":true,"profile_id":"reviewer"}})).is_err());
-    assert!(app.call("card.move",json!({"card_id":card.id,"revision":current.revision,"stage":"review","execution":{"agent":true,"profile_id":"reviewer"}})).is_err());
+    assert!(app.call("card.move",json!({"view":"full","card_id":card.id,"revision":current.revision,"stage":"review","execution":{"agent":true,"profile_id":"reviewer"}})).is_err());
     app.call("card.continue", approve.clone()).unwrap();
     app.call("card.continue", approve).unwrap();
     let after = app.snapshot().unwrap();
@@ -1753,7 +1753,7 @@ fn blocked_completion_does_not_advance_until_human_continues() {
     let (_dir, app, project, card) = setup();
     app.call(
         "card.move",
-        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let request = app.snapshot().unwrap().terminals[0].clone();
@@ -1777,7 +1777,7 @@ fn recovery_gate_retains_completion_callback_until_human_approval() {
     let (_dir, app, project, card) = setup();
     app.call(
         "card.move",
-        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let request = app.snapshot().unwrap().terminals[0].clone();
@@ -1813,7 +1813,7 @@ fn removed_routing_fields_are_rejected_without_mutating_cards() {
         let error = app
             .call(
                 "card.create",
-                json!({"project_id":project.id,"title":"Old client","tags":tags}),
+                json!({"view":"full","project_id":project.id,"title":"Old client","tags":tags}),
             )
             .unwrap_err();
         assert!(
@@ -1824,7 +1824,7 @@ fn removed_routing_fields_are_rejected_without_mutating_cards() {
         let error = app
             .call(
                 "card.update",
-                json!({"card_id":card.id,"revision":1,"title":"Changed","tags":tags}),
+                json!({"view":"full","card_id":card.id,"revision":1,"title":"Changed","tags":tags}),
             )
             .unwrap_err();
         assert!(
@@ -1851,13 +1851,13 @@ fn explicit_comment_recipients_override_prose_scanning() {
     let (_d, app, _p, c) = setup();
     app.call(
         "comment.add",
-        json!({"card_id":c.id,"body":"The UI shows Ask @claude", "mentions":[]}),
+        json!({"view":"full","card_id":c.id,"body":"The UI shows Ask @claude", "mentions":[]}),
     )
     .unwrap();
     assert!(app.snapshot().unwrap().terminals.is_empty());
     app.call(
         "comment.add",
-        json!({"card_id":c.id,"body":"Compare @claude and @codex", "mentions":["codex"]}),
+        json!({"view":"full","card_id":c.id,"body":"Compare @claude and @codex", "mentions":["codex"]}),
     )
     .unwrap();
     let s = app.snapshot().unwrap();
@@ -1878,7 +1878,7 @@ fn local_card_removal_is_reversible_cancels_queue_and_retains_history() {
     let (_d, app, _p, c) = setup();
     app.call(
         "card.move",
-        json!({"card_id":c.id,"revision":c.revision,"stage":"develop"}),
+        json!({"view":"full","card_id":c.id,"revision":c.revision,"stage":"develop"}),
     )
     .unwrap();
     let current = app.snapshot().unwrap().cards[0].clone();
@@ -1895,16 +1895,20 @@ fn local_card_removal_is_reversible_cancels_queue_and_retains_history() {
             .all(|r| r.agent.as_ref().unwrap().state == "cancelled")
     );
     assert!(s.events.iter().any(|e| e.kind == "card.removed"));
-    let removed: Card =
-        serde_json::from_value(app.call("card.get", json!({"card_id":c.id})).unwrap()).unwrap();
+    let removed: Card = serde_json::from_value(
+        app.call("card.get", json!({"view":"full","card_id":c.id}))
+            .unwrap(),
+    )
+    .unwrap();
     assert!(removed.removed_at.is_some());
     let listed = app
-        .call("card.list", json!({"include_removed":true}))
-        .unwrap();
+        .call("card.list", json!({"view":"full","include_removed":true}))
+        .unwrap()["items"]
+        .clone();
     assert_eq!(listed.as_array().unwrap().len(), 1);
     app.call(
         "card.restore",
-        json!({"card_id":c.id,"revision":removed.revision}),
+        json!({"view":"full","card_id":c.id,"revision":removed.revision}),
     )
     .unwrap();
     let s = app.snapshot().unwrap();
@@ -1920,7 +1924,7 @@ fn local_card_removal_cannot_orphan_a_live_agent() {
     let (_d, app, _p, c) = setup();
     app.call(
         "card.move",
-        json!({"card_id":c.id,"revision":c.revision,"stage":"develop"}),
+        json!({"view":"full","card_id":c.id,"revision":c.revision,"stage":"develop"}),
     )
     .unwrap();
     let run = admit(&app, &app.snapshot().unwrap().terminals[0]);
@@ -1943,7 +1947,7 @@ fn continued_assignment_rejects_new_stale_reports_but_preserves_completion_recei
     let (_d, app, p, c) = setup();
     app.call(
         "card.move",
-        json!({"card_id":c.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let run = admit(&app, &app.snapshot().unwrap().terminals[0]);
@@ -2272,7 +2276,7 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
     // 3. Disabled `@claude` is ignored in prose mentions and rejected when explicitly mentioned!
     app.call(
         "comment.add",
-        json!({
+        json!({"view":"full",
             "card_id": card.id,
             "body": "Hey @claude should not trigger because claude is disabled",
         }),
@@ -2289,7 +2293,7 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
     let err = app
         .call(
             "comment.add",
-            json!({
+            json!({"view":"full",
                 "card_id": card.id,
                 "body": "Explicit @claude",
                 "mentions": ["claude"],
@@ -2361,7 +2365,7 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
     .unwrap();
     app.call(
         "comment.add",
-        json!({
+        json!({"view":"full",
             "card_id": card.id,
             "body": "@developer @reviewer check project override",
             "mentions": ["developer", "reviewer"],
@@ -2453,14 +2457,14 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
     let second_card: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": second_proj.id, "title": "Drag to Develop"}),
+            json!({"view":"full","project_id": second_proj.id, "title": "Drag to Develop"}),
         )
         .unwrap(),
     )
     .unwrap();
     app.call(
         "card.move",
-        json!({"card_id": second_card.id, "revision": second_card.revision, "stage": "develop"}),
+        json!({"view":"full","card_id": second_card.id, "revision": second_card.revision, "stage": "develop"}),
     )
     .unwrap();
     let null_prof_req = app
@@ -2924,7 +2928,7 @@ fn request_trigger_prompts_omit_duplicate_reply_for_comments_and_dedupe_completi
     let comment_ev: Event = serde_json::from_value(
         app.call(
             "comment.add",
-            json!({"card_id": card.id, "body": "@developer What should we name the merger role?"}),
+            json!({"view":"full","card_id": card.id, "body": "@developer What should we name the merger role?"}),
         )
         .unwrap(),
     )
@@ -3035,7 +3039,7 @@ fn request_trigger_prompts_omit_duplicate_reply_for_comments_and_dedupe_completi
     let c2: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": project.id, "title": "Interactive Card", "body": "Discuss"}),
+            json!({"view":"full","project_id": project.id, "title": "Interactive Card", "body": "Discuss"}),
         )
         .unwrap(),
     )
@@ -3073,19 +3077,19 @@ fn request_trigger_prompts_omit_duplicate_reply_for_comments_and_dedupe_completi
     let c3: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": project.id, "title": "Task Card", "body": "Build"}),
+            json!({"view":"full","project_id": project.id, "title": "Task Card", "body": "Build"}),
         )
         .unwrap(),
     )
     .unwrap();
     app.call(
         "card.move",
-        json!({"card_id": c3.id, "revision": c3.revision, "stage": "develop"}),
+        json!({"view":"full","card_id": c3.id, "revision": c3.revision, "stage": "develop"}),
     )
     .unwrap();
     app.call(
         "comment.add",
-        json!({"card_id": c3.id, "body": "@developer Please also check Windows paths"}),
+        json!({"view":"full","card_id": c3.id, "body": "@developer Please also check Windows paths"}),
     )
     .unwrap();
     let task_req = app
@@ -3283,7 +3287,7 @@ fn comment_update_edits_own_local_comment_preserves_mentions_and_rejects_non_use
     let (_d, app, p, c) = setup();
     app.call(
         "comment.add",
-        json!({"card_id": c.id, "body": "Initial thought for @codex", "mentions": ["codex"]}),
+        json!({"view":"full","card_id": c.id, "body": "Initial thought for @codex", "mentions": ["codex"]}),
     )
     .unwrap();
     let snap1 = app.snapshot().unwrap();
@@ -3301,7 +3305,7 @@ fn comment_update_edits_own_local_comment_preserves_mentions_and_rejects_non_use
     let updated: Event = serde_json::from_value(
         app.call(
             "comment.update",
-            json!({
+            json!({"view":"full",
                 "card_id": c.id,
                 "comment_id": created.id,
                 "body": "Refined thought for @codex and @reviewer — see https://github.com/a/b/issues/9",
@@ -3315,7 +3319,7 @@ fn comment_update_edits_own_local_comment_preserves_mentions_and_rejects_non_use
     // Idempotent replay with same request_key does not bump revision twice.
     app.call(
         "comment.update",
-        json!({
+        json!({"view":"full",
             "card_id": c.id,
             "comment_id": created.id,
             "body": "Refined thought for @codex and @reviewer — see https://github.com/a/b/issues/9",
@@ -3356,7 +3360,7 @@ fn comment_update_edits_own_local_comment_preserves_mentions_and_rejects_non_use
     assert!(
         app.call(
             "comment.update",
-            json!({"card_id": c.id, "comment_id": created.id, "body": "   "}),
+            json!({"view":"full","card_id": c.id, "comment_id": created.id, "body": "   "}),
         )
         .is_err()
     );
@@ -3385,7 +3389,7 @@ fn comment_update_edits_own_local_comment_preserves_mentions_and_rejects_non_use
     assert!(
         app.call(
             "comment.update",
-            json!({"card_id": c.id, "comment_id": agent_reply.id, "body": "Tamper"}),
+            json!({"view":"full","card_id": c.id, "comment_id": agent_reply.id, "body": "Tamper"}),
         )
         .is_err()
     );
@@ -3395,7 +3399,7 @@ fn comment_update_edits_own_local_comment_preserves_mentions_and_rejects_non_use
     let added2: Event = serde_json::from_value(
         app2.call(
             "comment.add",
-            json!({"card_id": c2.id, "body": "Before archive"}),
+            json!({"view":"full","card_id": c2.id, "body": "Before archive"}),
         )
         .unwrap(),
     )
@@ -3406,7 +3410,7 @@ fn comment_update_edits_own_local_comment_preserves_mentions_and_rejects_non_use
     assert!(
         app2.call(
             "comment.update",
-            json!({"card_id": c2.id, "comment_id": added2.id, "body": "Edit while archived"}),
+            json!({"view":"full","card_id": c2.id, "comment_id": added2.id, "body": "Edit while archived"}),
         )
         .is_err()
     );
@@ -3418,7 +3422,7 @@ fn comment_delete_tombstones_own_comment_cancels_pending_questions_and_preserves
     let comment1: Event = serde_json::from_value(
         app.call(
             "comment.add",
-            json!({
+            json!({"view":"full",
                 "card_id": c.id,
                 "body": "Queued question for @codex and https://github.com/a/b/issues/55",
                 "mentions": ["codex"],
@@ -3488,7 +3492,7 @@ fn comment_delete_tombstones_own_comment_cancels_pending_questions_and_preserves
     let comment2: Event = serde_json::from_value(
         app.call(
             "comment.add",
-            json!({"card_id": c.id, "body": "Start @reviewer", "mentions": ["reviewer"]}),
+            json!({"view":"full","card_id": c.id, "body": "Start @reviewer", "mentions": ["reviewer"]}),
         )
         .unwrap(),
     )
@@ -3503,7 +3507,7 @@ fn comment_delete_tombstones_own_comment_cancels_pending_questions_and_preserves
     let comment3: Event = serde_json::from_value(
         app.call(
             "comment.add",
-            json!({"card_id": c.id, "body": "Accidental follow-up @reviewer", "mentions": ["reviewer"]}),
+            json!({"view":"full","card_id": c.id, "body": "Accidental follow-up @reviewer", "mentions": ["reviewer"]}),
         )
         .unwrap(),
     )
@@ -3575,7 +3579,7 @@ fn comment_delete_tombstones_own_comment_cancels_pending_questions_and_preserves
     let comment_arch: Event = serde_json::from_value(
         app2.call(
             "comment.add",
-            json!({"card_id": c2.id, "body": "Before archive"}),
+            json!({"view":"full","card_id": c2.id, "body": "Before archive"}),
         )
         .unwrap(),
     )
@@ -3731,7 +3735,7 @@ fn short_ids_card_number_paths_and_legacy_alias_resolution() {
     // Move to develop, admit, add a comment to create a Question, then report & reply.
     app.call(
         "card.move",
-        json!({"card_id":c.id,"revision":c.revision,"stage":"develop"}),
+        json!({"view":"full","card_id":c.id,"revision":c.revision,"stage":"develop"}),
     )
     .unwrap();
     let entry = app
@@ -3745,7 +3749,7 @@ fn short_ids_card_number_paths_and_legacy_alias_resolution() {
     let _running = admit(&app, &entry);
     app.call(
         "comment.add",
-        json!({"card_id":c.id,"body":"@developer quick question"}),
+        json!({"view":"full","card_id":c.id,"body":"@developer quick question"}),
     )
     .unwrap();
     app.call(
@@ -3784,16 +3788,26 @@ fn short_ids_card_number_paths_and_legacy_alias_resolution() {
 
     // Legacy 32-char project_id + prefix + project name resolve on card.get / card.list.
     let by_legacy = app
-        .call("card.get", json!({"project_id":old_pid,"card":c.number}))
+        .call(
+            "card.get",
+            json!({"view":"full","project_id":old_pid,"card":c.number}),
+        )
         .unwrap();
     assert_eq!(by_legacy["id"], c.id);
     let by_name = app
-        .call("card.get", json!({"project_id":"Example","card":c.number}))
+        .call(
+            "card.get",
+            json!({"view":"full","project_id":"Example","card":c.number}),
+        )
         .unwrap();
     assert_eq!(by_name["id"], c.id);
-    let by_old_card = app.call("card.get", json!({"card_id":old_cid})).unwrap();
+    let by_old_card = app
+        .call("card.get", json!({"view":"full","card_id":old_cid}))
+        .unwrap();
     assert_eq!(by_old_card["id"], c.id);
-    let by_prefix = app.call("card.get", json!({"card_id":&c.id[..4]})).unwrap();
+    let by_prefix = app
+        .call("card.get", json!({"view":"full","card_id":&c.id[..4]}))
+        .unwrap();
     assert_eq!(by_prefix["id"], c.id);
     let preview_err = app
         .call(
@@ -3869,7 +3883,7 @@ fn git_related_card_requires_a_unique_canonical_worktree_match() {
     let mut second: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id":p.id,"title":"Same path"}),
+            json!({"view":"full","project_id":p.id,"title":"Same path"}),
         )
         .unwrap(),
     )
@@ -3892,3 +3906,5 @@ fn git_related_card_requires_a_unique_canonical_worktree_match() {
 }
 
 mod memory;
+
+mod representations;

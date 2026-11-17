@@ -7,7 +7,7 @@ env={**{k:v for k,v in os.environ.items() if not k.startswith('CANBAN_')},'CANBA
 env.update(core_env)
 log=open(base/'server.log','w');server=subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log)
 def call(method,p=None):
- r=subprocess.run([str(cli),'call',method,json.dumps(p or {})],env=env,capture_output=True,text=True,timeout=90)
+ r=subprocess.run([str(cli),"--full",'call',method,json.dumps(p or {})],env=env,capture_output=True,text=True,timeout=90)
  if r.returncode:raise RuntimeError(r.stderr)
  return json.loads(r.stdout)
 def wait(predicate,label,timeout=45):

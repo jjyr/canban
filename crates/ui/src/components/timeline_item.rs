@@ -716,13 +716,14 @@ fn render_narrative(
                             "comment.update",
                             json!({
                                 "card_id": save_card,
+                                "fields": ["body"],
                                 "comment_id": save_cid,
                                 "body": updated,
                                 "mentions": mentions,
                             }),
                             move |result| match result {
                                 Ok(val) => {
-                                    if let Some(new_msg) = val["message"].as_str() {
+                                    if let Some(new_msg) = val["body"].as_str() {
                                         body.try_set(new_msg.into());
                                     }
                                     edit_error.try_set(String::new());

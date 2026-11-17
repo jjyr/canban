@@ -17,9 +17,12 @@ core_env={'HC_SESSION':'native-acceptance','HC_SOCKET':str(base/'hc.sock'),'XDG_
 # terminal or changing any user Core. Removing the marker restores the same ID.
 wrapper=base/'hc-wrapper'
 wrapper.write_text('#!/bin/sh\nif [ -e "'+str(base/'offline')+'" ]; then echo "Scratch core temporarily unavailable" >&2; exit 1; fi\nexec '+shutil.which('hc')+' "$@"\n');wrapper.chmod(0o755)
+# Configure isolation before the first daemon can subscribe to Core.
+(home/'config').mkdir(parents=True)
+(home/'config/agents.json').write_text(json.dumps({'hc':str(wrapper),'hc_session':core_env['HC_SESSION'],'hc_env':core_env,'default_agent':'developer','profiles':[{'id':'codex','preset':'codex'},{'id':'claude','preset':'claude'},{'id':'developer','preset':'codex'},{'id':'reviewer','preset':'codex'}]}))
 log=open(base/'server.log','w');server=subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log)
 def call(method,p=None):
- r=subprocess.run([str(cli),'call',method,json.dumps(p or {})],env=env,capture_output=True,text=True,timeout=90)
+ r=subprocess.run([str(cli),"--full",'call',method,json.dumps(p or {})],env=env,capture_output=True,text=True,timeout=90)
  if r.returncode:raise RuntimeError(r.stderr)
  return json.loads(r.stdout)
 try:
@@ -38,10 +41,11 @@ try:
  call('card.move',{'card_id':card['id'],'revision':card['revision'],'stage':'develop'})
  for _ in range(100):
   s=call('app.snapshot')
-  if s['attempts'] and s['attempts'][0].get('provider_session_id'):break
+  runs=[t['agent'] for t in s['terminals'] if t.get('agent')]
+  if runs and runs[0].get('provider_session_id'):break
   time.sleep(.1)
  server.terminate();server.wait(timeout=10)
- metadata={'base':str(base),'home':str(home),'core_env':core_env,'app_id':app_id,'bundle':str(bundle),'card_id':card['id'],'project_id':project['id'],'first':s['attempts'][0]}
+ metadata={'base':str(base),'home':str(home),'core_env':core_env,'app_id':app_id,'bundle':str(bundle),'card_id':card['id'],'project_id':project['id'],'first':runs[0]}
  (base/'native.json').write_text(json.dumps(metadata,indent=2));(repo/'.local/native-acceptance.json').write_text(json.dumps(metadata,indent=2))
  print('NATIVE_ACCEPTANCE_BASE='+str(base),flush=True)
  while True:

@@ -90,7 +90,8 @@ pub fn card(project: &Project, number: u64, title: &str, body: &str) -> Result<C
 pub fn check_revision(card: &Card, expected: u64) -> Result<()> {
     ensure!(
         card.revision == expected,
-        "revision_conflict: card changed; refresh and retry"
+        "revision_conflict: expected revision {expected}, current revision {}; refresh and retry",
+        card.revision
     );
     Ok(())
 }

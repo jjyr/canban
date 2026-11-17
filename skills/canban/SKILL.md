@@ -79,10 +79,12 @@ When a human posts a follow-up question with a Question ID against an already ru
 
 ### Inspect or update the current Card (`card show` / `card update`)
 
-Read the current Card JSON (uses `CANBAN_CARD` + `CANBAN_PROJECT` automatically, or pass `--card <NUMBER>`):
+Read the current Card summary (uses `CANBAN_CARD` + `CANBAN_PROJECT` automatically, or pass `--card <NUMBER>`):
 
 ```sh
 "$CANBAN_CLI" card show
+# Request task text explicitly when it is not already in the session context.
+"$CANBAN_CLI" card show --fields number,title,body,stage,revision
 ```
 
 Update the Card title or Markdown description only with user-confirmed design decisions or when explicitly requested:
@@ -99,6 +101,33 @@ In an interactive session on a Card not yet in `develop`, once the user authoriz
 "$CANBAN_CLI" card adopt --stage develop
 ```
 
+## Efficient RPC and CLI use
+
+- RPC and CLI default to compact Agent-facing summaries and mutation receipts.
+  `--human` pretty-prints the same JSON; it does not expand content.
+- Use `--fields number,title,body,stage,revision` (RPC `fields` array) when task
+  text is needed. Use `--full` (RPC `view:"full"`) only for a complete business
+  view. Fields/full are mutually exclusive; fields are explicit top-level names.
+- Reuse injected task text and existing query data. If the needed fields are
+  already known, request them together rather than summary then detail.
+- Inventory with `card.list` and a stage filter. Read `items`, follow every
+  `next_cursor` to null, and handle `cursor_stale` by restarting and deduplicating
+  IDs. The default limit is 50; the maximum is 500. Do not routinely send full
+  project lists or snapshots into model context.
+- Check discussions with `timeline.list`, `kinds:["comment.created","comment.updated"]`
+  and `after_sequence`. Follow next_cursor, then save last_sequence even after
+  an empty filtered result. Comment read text appears once as `body`.
+- `event.list` instead filters after paging: continue its global cursor to
+  highwater even after an empty page. Do not confuse the two cursor contracts.
+- Accepted write receipts normally suffice; do not read back full objects just
+  to confirm the write. Verify business outcomes or ambiguous/queued results
+  specifically. Preserve revision checks on concurrent writes.
+- Write long payloads through `call METHOD @params.json`, explicitly set comment
+  `mentions:[]` unless dispatch is intended, and reuse a stable request_key when
+  retrying. Changing only fields/full does not change the write's identity.
+- `canban skill` is the current binary's bundled skill; refresh installed copies
+  when upgrading. Old RPC defaults are not a compatibility contract.
+
 ## Inspecting State & Calling AppServer RPCs
 
 Inspect overall state or runtime health:
@@ -114,15 +143,15 @@ Call any public AppServer JSON-RPC method via `"$CANBAN_CLI" call <METHOD> '<JSO
 ```sh
 # List Projects or Cards
 "$CANBAN_CLI" call project.list '{}'
-"$CANBAN_CLI" call card.list '{"project_id":"<PROJECT_ID>"}'
+"$CANBAN_CLI" call card.list '{"project_id":"<PROJECT_ID>","stage":"backlog","limit":50}'
 
 # Read a Card, its Timeline events, or Diff preview
-"$CANBAN_CLI" call card.get '{"card":<CARD_NUMBER>,"project_id":"<PROJECT_ID>"}'
-"$CANBAN_CLI" call timeline.list '{"card":<CARD_NUMBER>,"project_id":"<PROJECT_ID>","limit":50}'
+"$CANBAN_CLI" call card.get '{"card":<CARD_NUMBER>,"project_id":"<PROJECT_ID>","fields":["number","title","body","stage","revision"]}'
+"$CANBAN_CLI" call timeline.list '{"card":<CARD_NUMBER>,"project_id":"<PROJECT_ID>","kinds":["comment.created","comment.updated"],"after_sequence":0,"limit":50}'
 "$CANBAN_CLI" call review.preview '{"card":<CARD_NUMBER>,"project_id":"<PROJECT_ID>"}'
 
 # Post a Card comment (supports @profile mentions to schedule another role)
-"$CANBAN_CLI" call comment.add '{"card":<CARD_NUMBER>,"project_id":"<PROJECT_ID>","body":"Ready for @reviewer"}'
+"$CANBAN_CLI" call comment.add '{"card":<CARD_NUMBER>,"project_id":"<PROJECT_ID>","body":"Ready for @reviewer","mentions":["reviewer"],"request_key":"review-request-unique"}'
 
 # Create a follow-up Card in Backlog
 "$CANBAN_CLI" call card.create '{"project_id":"<PROJECT_ID>","title":"Follow-up task","body":"Details..."}'

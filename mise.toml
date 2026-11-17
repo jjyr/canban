@@ -54,6 +54,10 @@ run = "python3 scripts/acceptance-notifications.py"
 depends = ["build"]
 run = "python3 scripts/acceptance.py"
 
+[tasks.acceptance-agent-interface]
+depends = ["build"]
+run = 'python3 scripts/acceptance-agent-interface.py --output "${CANBAN_RUN_DIR:-/tmp}/canban-interface-acceptance"'
+
 [tasks.acceptance-real]
 depends = ["build"]
 run = "python3 scripts/acceptance-real.py"

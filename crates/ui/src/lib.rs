@@ -49,9 +49,13 @@ pub(crate) static HOSTS: std::sync::OnceLock<Arc<canban_app_server::hosts::HostR
 
 pub(crate) fn routed_call(
     method: &str,
-    params: serde_json::Value,
+    mut params: serde_json::Value,
     active_project_id: Option<&str>,
 ) -> Result<serde_json::Value> {
+    // These writes hydrate the desktop's immediate, server-confirmed overlay.
+    if matches!(method, "card.create" | "comment.add") {
+        params["view"] = serde_json::json!("full");
+    }
     if let Some(hosts) = HOSTS.get() {
         return hosts.call_routed(method, params, active_project_id);
     }

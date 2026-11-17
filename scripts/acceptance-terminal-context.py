@@ -25,7 +25,7 @@ wrapper.chmod(0o755)
 log = open(base/'runtime.log','w')
 server = subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log)
 def call(method, params=None):
-    r = subprocess.run([str(cli),'call',method,json.dumps(params or {})],env=env,capture_output=True,text=True,timeout=30)
+    r = subprocess.run([str(cli),"--full",'call',method,json.dumps(params or {})],env=env,capture_output=True,text=True,timeout=30)
     if r.returncode: raise RuntimeError(r.stderr)
     return json.loads(r.stdout)
 try:

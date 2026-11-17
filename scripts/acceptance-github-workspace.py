@@ -16,7 +16,7 @@ env={k:v for k,v in os.environ.items() if not k.startswith('CANBAN_')};env.updat
 log=(base/'server.log').open('w');server=subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log);ui=None
 
 def call(method,p=None,check=True):
- r=subprocess.run([str(cli),'call',method,json.dumps(p or {})],env=env,capture_output=True,text=True,timeout=90)
+ r=subprocess.run([str(cli),"--full",'call',method,json.dumps(p or {})],env=env,capture_output=True,text=True,timeout=90)
  if check and r.returncode:raise RuntimeError(method+': '+r.stderr)
  return json.loads(r.stdout) if not r.returncode else {'error':r.stderr}
 def ready():

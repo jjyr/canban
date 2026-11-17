@@ -57,7 +57,7 @@ The following is a proposed command boundary for the core loop. Operation schema
 | timeline.list | Card, after-sequence/cursor, limit | Ordered bounded history page and next cursor |
 | card.archive | Card, expected revision | Archive/history event and managed-worktree handling; Project directory/history retained |
 
-Native UI handlers and CLI RPC calls use these same service operations. An optional WebView bridge, if a specific component needs one, is another narrow adapter rather than the primary UI path. The existing [card.move example](../product/agent-interface.md#example-move) illustrates the command envelope. Resource upload and detailed configuration operations remain bounded follow-on schemas, not a requirement for a second application authority.
+Native UI handlers and CLI RPC calls use these same service operations. An optional WebView bridge, if a specific component needs one, is another narrow adapter rather than the primary UI path. The [Agent-first RPC and CLI contract](../product/agent-interface.md#agent-first-rpc-and-cli) describes the current move parameters and receipts. The [response contract](../agent-response-contract.md) defines default summaries, explicit fields/full views and pagination. Resource upload and detailed configuration operations remain bounded follow-on schemas, not a requirement for a second application authority.
 
 ## Execution reference
 

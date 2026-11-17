@@ -21,6 +21,16 @@ Status: native macOS (AppKit/Metal) and Linux (GTK4) desktop workbench with simu
 
 [Desktop utilities](desktop-utilities.md) covers the shared bottom bar, subscription Usage, Caffeine, persisted appearance, command catalog and cross-Project Card creation.
 
+## Agent RPC and CLI responses (2026-11-17)
+
+RPC and CLI now default to Agent-oriented Card summaries, normalized paginated
+Timeline reads and mutation receipts. Content is selected in AppServer through
+`fields` or `view: "full"`; CLI maps `--fields`/`--full` and defaults to compact
+JSON, with `--human` changing formatting only. This change advances desktop API
+to 65 (schema 20 is unchanged). Upgrade affected clients together; old defaults
+are not preserved. See the [response contract](agent-response-contract.md) and
+[isolated/native acceptance and byte comparison](agent-interface-acceptance-20261117.md).
+
 ## GitHub workspace update
 
 The [GitHub workspace and cache](github-workspace.md) extends the integration with a dedicated rail page, paginated notifications/Issues/PRs, PR source Cards, local GitHub references, Board source filters, repository rules and explicit remote comments/Review. Account controls moved out of Settings. Remote data uses disposable event-refreshed file caches instead of permanent business-table mirrors; schema 9 preserves bindings and local work. The GitHub/editor integration used schema 10/API 8, extended to schema 12/API 10 by Workflows; [combined acceptance](merge-integration-20261111.md) records migration and native verification.
@@ -107,12 +117,12 @@ target/debug/canban call card.move '{"card_id":"CARD_ID","revision":1,"stage":"d
 
 See [Agent profile configuration](product/agent-profiles.md) for loadable JSON examples, schema, routing precedence and backward compatibility. Settings displays the shared registry and roles, Board header tooltips display stage profile references, and the Card composer offers Ask @profile actions.
 
-Public operations include update.state/check/install, app.ping/snapshot, project.create/list, card.create/get/list/update/adopt/move/archive/restore/attention.clear/continue/workspace, comment.add, timeline.list, execution.get/report/retry/output, attachment.add, resource.read/materialize, config.get/reload, scheduler.status/configure, herdr.status/check/install/templates, profile.presets, review.preview/merge, terminal.create/rename/context/interrupt/end/close and agent.open/bind/reply/interrupt/end. Note RPCs, card.context.update and the hidden canban note command remain legacy compatibility paths, outside the current product scope. agent.turn_ended is a deprecated ignored compatibility endpoint. For timeline.list supply card_id, optional after_sequence and limit; next_cursor provides pagination. Current code and shared types are authoritative for exact payloads; the [interface design](interfaces/mvp-contract.md) remains a broader contract reference.
+Public operations include update.state/check/install, app.ping/snapshot, project.create/list, card.create/get/list/update/adopt/move/archive/restore/attention.clear/continue/workspace, comment.add, timeline.list, execution.get/report/retry/output, attachment.add, resource.read/materialize, config.get/reload, scheduler.status/configure, herdr.status/check/install/templates, profile.presets, review.preview/merge, terminal.create/rename/context/interrupt/end/close and agent.open/bind/reply/interrupt/end. Note RPCs, card.context.update and the hidden canban note command remain legacy compatibility paths, outside the current product scope. agent.turn_ended is a deprecated ignored compatibility endpoint. For timeline.list supply card_id, optional kinds, after_sequence and limit; follow next_cursor and persist last_sequence when the scan ends. Card lists return items/next_cursor and require full pagination. Card details and mutation responses use the explicit views in the [response contract](agent-response-contract.md). Current code and shared types are authoritative for exact payloads; the [interface design](interfaces/mvp-contract.md) remains a broader contract reference.
 
 The launcher injects CANBAN_CLI, CANBAN_HOME, CANBAN_ENDPOINT, CANBAN_PROJECT, CANBAN_CARD, CARD_ID, CANBAN_SESSION_ID, CANBAN_PROFILE_ID and CANBAN_RUN_DIR across scheduled Agent terminals and Card terminals, and supplies reporting instructions in the actual prompt.
 
 ```sh
-"$CANBAN_CLI" card show
+"$CANBAN_CLI" card show --fields number,title,body,stage,revision
 "$CANBAN_CLI" card update --file "$CANBAN_RUN_DIR/card.md"
 "$CANBAN_CLI" card adopt
 "$CANBAN_CLI" report --state working --message "Investigating"

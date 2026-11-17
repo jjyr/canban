@@ -12,7 +12,7 @@ fn runtime_budget_releases_waits_but_reserves_unknown_and_keeps_live_conversatio
     let (_d, app, _p, c) = setup();
     app.call(
         "card.move",
-        json!({"card_id":c.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let request = app.snapshot().unwrap().terminals[0].clone();
@@ -63,7 +63,7 @@ fn runtime_wait_episodes_are_durable_deduplicated_and_never_approve_task_gates()
     let (_d, app, _p, c) = setup();
     app.call(
         "card.move",
-        json!({"card_id":c.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let req = app.snapshot().unwrap().terminals[0].clone();
@@ -236,7 +236,7 @@ fn overview_is_global_deduplicates_conversations_and_surfaces_unfinished_idle_ag
     let (_d, app, p, c) = setup();
     app.call(
         "card.move",
-        json!({"card_id":c.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let req = app.snapshot().unwrap().terminals[0].clone();
@@ -369,7 +369,7 @@ fn terminal_exit_resolves_runtime_wait_even_when_root_status_is_unchanged() {
     let (_d, app, _p, c) = setup();
     app.call(
         "card.move",
-        json!({"card_id":c.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let req = app.snapshot().unwrap().terminals[0].clone();
@@ -411,7 +411,7 @@ fn a_closing_idle_terminal_cannot_receive_a_new_assignment_and_reserves_its_slot
     let (_d, app, _p, c) = setup();
     app.call(
         "card.move",
-        json!({"card_id":c.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let request = app.snapshot().unwrap().terminals[0].clone();
@@ -483,7 +483,7 @@ fn exited_agent_keeps_task_recovery_but_reads_saved_output_without_a_core() {
     let (_dir, app, _project, card) = setup();
     app.call(
         "card.move",
-        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let request = app.snapshot().unwrap().terminals[0].clone();
@@ -577,7 +577,7 @@ fn migration_only_clears_the_automatic_exit_gate_and_keeps_explicit_task_gates()
     let (_dir, app, _project, card) = setup();
     app.call(
         "card.move",
-        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let request = app.snapshot().unwrap().terminals[0].clone();
@@ -627,7 +627,7 @@ fn authoritative_missing_resolves_terminal_input_but_keeps_task_decisions_and_kn
     let (_dir, app, _project, card) = setup();
     app.call(
         "card.move",
-        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let request = app.snapshot().unwrap().terminals[0].clone();
@@ -727,7 +727,7 @@ for line in sys.stdin:
     // 1. Admit a Card Role Agent (`developer` -> `agy`) on `t1` and an independent shell on `t2`.
     app.call(
         "card.move",
-        json!({"card_id": c.id, "revision": 1, "stage": "develop"}),
+        json!({"view":"full","card_id": c.id, "revision": 1, "stage": "develop"}),
     )
     .unwrap();
     let queued = app.snapshot().unwrap().terminals[0].clone();

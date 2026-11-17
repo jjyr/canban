@@ -3,7 +3,7 @@ fn peer(app: &AppServer, project: &Project, title: &str) -> Card {
     serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id":project.id,"title":title}),
+            json!({"view":"full","project_id":project.id,"title":title}),
         )
         .unwrap(),
     )
@@ -66,7 +66,7 @@ fn board_reorder_is_durable_idempotent_and_preserves_human_gates() {
     );
     app.call(
         "card.move",
-        json!({"card_id":c.id,"revision":2,"stage":"backlog","before_card_id":b.id}),
+        json!({"view":"full","card_id":c.id,"revision":2,"stage":"backlog","before_card_id":b.id}),
     )
     .unwrap();
     assert_eq!(
@@ -89,7 +89,7 @@ fn cross_column_drop_persists_slot_and_dispatches_exactly_once() {
     let b = peer(&app, &p, "B");
     app.call(
         "card.move",
-        json!({"card_id":b.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":b.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let args = json!({"card_id":a.id,"revision":1,"stage":"develop","before_card_id":b.id,"request_key":"drop-a"});
@@ -110,14 +110,14 @@ fn cross_column_drop_persists_slot_and_dispatches_exactly_once() {
     assert!(
         app.call(
             "card.move",
-            json!({"card_id":a.id,"revision":1,"stage":"develop","before_card_id":null})
+            json!({"view":"full","card_id":a.id,"revision":1,"stage":"develop","before_card_id":null})
         )
         .is_err()
     );
     assert!(
         app.call(
             "card.move",
-            json!({"card_id":a.id,"revision":2,"stage":"backlog","before_card_id":"missing"})
+            json!({"view":"full","card_id":a.id,"revision":2,"stage":"backlog","before_card_id":"missing"})
         )
         .is_err()
     );
@@ -143,7 +143,7 @@ fn exhausted_ranks_compact_without_changing_peer_revisions_or_relative_order() {
         .unwrap();
     app.call(
         "card.move",
-        json!({"card_id":c.id,"revision":1,"stage":"backlog","before_card_id":b.id}),
+        json!({"view":"full","card_id":c.id,"revision":1,"stage":"backlog","before_card_id":b.id}),
     )
     .unwrap();
     assert_eq!(

@@ -35,7 +35,7 @@ env.update(core_env)
 server = subprocess.Popen([str(cli), "serve"], env=env, stdout=log, stderr=log)
 
 def call(method, params=None):
-    result = subprocess.run([str(cli), "call", method, json.dumps(params or {})], env=env, text=True, capture_output=True, timeout=95)
+    result = subprocess.run([str(cli), "--full","call", method, json.dumps(params or {})], env=env, text=True, capture_output=True, timeout=95)
     if result.returncode:
         raise RuntimeError(result.stderr)
     return json.loads(result.stdout)

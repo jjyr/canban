@@ -25,7 +25,7 @@ log = (base/'server.log').open('w')
 server = subprocess.Popen([str(cli), 'serve'], env=env, stdout=log, stderr=log)
 
 def call(method, params=None):
-    r = subprocess.run([str(cli), 'call', method, json.dumps(params or {})],
+    r = subprocess.run([str(cli), "--full",'call', method, json.dumps(params or {})],
                        env=env, capture_output=True, text=True, timeout=45)
     if r.returncode:
         raise RuntimeError(r.stderr)

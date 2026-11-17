@@ -939,6 +939,7 @@ mod drafts;
 mod github;
 pub mod hosts;
 pub mod network;
+pub mod representation;
 mod state;
 pub use client::{AppClient, BackendOlder, ClientEndpoint};
 mod agents;

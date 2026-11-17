@@ -12,7 +12,7 @@ cli = repo / 'target/debug/canban'
 log = open(base / 'delivery-server.log', 'w')
 server = subprocess.Popen([str(cli), 'serve'], env=env, stdout=log, stderr=log)
 def call(method, params=None):
-    result = subprocess.run([str(cli), 'call', method, json.dumps(params or {})], env=env, capture_output=True, text=True, timeout=90)
+    result = subprocess.run([str(cli), "--full",'call', method, json.dumps(params or {})], env=env, capture_output=True, text=True, timeout=90)
     if result.returncode: raise RuntimeError(result.stderr)
     return json.loads(result.stdout)
 def git(source,*args):

@@ -17,8 +17,47 @@ struct Args {
     /// Print the bundled Canban CLI SKILL.md to stdout and exit.
     #[arg(long)]
     skill: bool,
+    #[command(flatten)]
+    output: Output,
     #[command(subcommand)]
     command: Option<Cmd>,
+}
+/// Formatting is local; content selection is an AppServer responsibility.
+#[derive(clap::Args, Default)]
+struct Output {
+    /// Pretty-print the selected JSON for human reading. Does not fetch more data.
+    #[arg(long, global = true)]
+    human: bool,
+    /// Select response fields (comma-separated). See the RPC response contract.
+    #[arg(long, global = true, value_delimiter = ',', conflicts_with = "full")]
+    fields: Option<Vec<String>>,
+    /// Request the complete business view, still with normalized comment bodies.
+    #[arg(long, global = true, conflicts_with = "fields")]
+    full: bool,
+}
+impl Output {
+    fn params(&self, method: &str, p: &mut Value) -> Result<()> {
+        if self.full || self.fields.is_some() {
+            anyhow::ensure!(
+                p.get("view").is_none() && p.get("fields").is_none(),
+                "Specify output selection in flags or RPC parameters, not both"
+            );
+        }
+        if self.full {
+            p["view"] = json!("full");
+        }
+        if let Some(fields) = &self.fields {
+            p["fields"] = json!(fields);
+        }
+        canban_app_server::representation::validate(method, p)
+    }
+    fn encode(&self, value: &Value) -> Result<String> {
+        Ok(if self.human {
+            serde_json::to_string_pretty(value)?
+        } else {
+            serde_json::to_string(value)?
+        })
+    }
 }
 #[derive(Subcommand)]
 enum Cmd {
@@ -326,7 +365,7 @@ fn card_scope(card: Option<u64>, project: Option<String>) -> Value {
 }
 fn main() {
     if let Err(e) = run() {
-        eprintln!("canban: {e:#}");
+        eprintln!("{}", json!({"error":{"message":format!("{e:#}")}}));
         std::process::exit(1)
     }
 }
@@ -363,6 +402,7 @@ enum WorkflowCmd {
 
 fn run() -> Result<()> {
     let args = Args::parse();
+    let output = args.output;
     if args.skill || matches!(args.command, Some(Cmd::Skill)) {
         print!("{}", canban_context::SKILL_MD);
         return Ok(());
@@ -481,16 +521,18 @@ fn run() -> Result<()> {
                     port,
                     listen,
                 )?;
-                println!("{}", serde_json::to_string_pretty(&status)?);
+                println!("{}", output.encode(&status)?);
             }
             ServiceCmd::Status => {
                 let status = canban_app_server::network::service_status(&home);
-                println!("{}", serde_json::to_string_pretty(&status)?);
+                println!("{}", output.encode(&status)?);
             }
         }
         return Ok(());
     }
     if let Cmd::Workflow { command } = &command {
+        let mut selection = json!({});
+        output.params("workflow.sources", &mut selection)?;
         match command {
             WorkflowCmd::Submit {
                 project_id,
@@ -530,7 +572,7 @@ fn run() -> Result<()> {
                     },
                     json!({"project_id":project_id,"revision":revision,"sources":sources,"request_key":canban_types::id()}),
                 )?;
-                println!("{}", serde_json::to_string_pretty(&value)?);
+                println!("{}", output.encode(&value)?);
             }
             WorkflowCmd::Export {
                 project_id,
@@ -574,7 +616,7 @@ fn run() -> Result<()> {
                     "workflow.default.set",
                     json!({"project_id": project_id, "request_key": canban_types::id()}),
                 )?;
-                println!("{}", serde_json::to_string_pretty(&value)?);
+                println!("{}", output.encode(&value)?);
             }
             WorkflowCmd::ResetDefault => {
                 let value = canban_app_server::rpc(
@@ -582,7 +624,7 @@ fn run() -> Result<()> {
                     "workflow.default.reset",
                     json!({"request_key": canban_types::id()}),
                 )?;
-                println!("{}", serde_json::to_string_pretty(&value)?);
+                println!("{}", output.encode(&value)?);
             }
         }
         return Ok(());
@@ -851,6 +893,7 @@ fn run() -> Result<()> {
         | Cmd::Database { .. } => unreachable!(),
     };
     anyhow::ensure!(p.is_object(), "Parameters must be an object");
+    output.params(&method, &mut p)?;
     if !matches!(
         method.as_str(),
         "app.snapshot"
@@ -951,13 +994,59 @@ fn run() -> Result<()> {
         print!("{}", result["body"].as_str().context("Note body missing")?);
         return Ok(());
     }
-    println!("{}", serde_json::to_string_pretty(&result)?);
+    println!("{}", output.encode(&result)?);
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_flags_select_server_content_without_changing_human_content() {
+        let args = Args::try_parse_from([
+            "canban",
+            "card",
+            "show",
+            "--card",
+            "111",
+            "--fields",
+            "number,body",
+            "--human",
+        ])
+        .unwrap();
+        let mut p = json!({});
+        args.output.params("card.show", &mut p).unwrap();
+        assert_eq!(p, json!({"fields":["number","body"]}));
+        let value = json!({"body":"text","number":111});
+        let human = args.output.encode(&value).unwrap();
+        let compact = Output::default().encode(&value).unwrap();
+        assert!(human.contains('\n'));
+        assert!(!compact.contains('\n'));
+        assert_eq!(serde_json::from_str::<Value>(&human).unwrap(), value);
+        assert_eq!(serde_json::from_str::<Value>(&compact).unwrap(), value);
+        assert!(
+            Args::try_parse_from([
+                "canban", "--full", "--fields", "body", "card", "show", "--card", "111"
+            ])
+            .is_err()
+        );
+        let invalid = Output {
+            fields: Some(vec!["typo".into()]),
+            ..Default::default()
+        };
+        assert!(invalid.params("card.create", &mut json!({})).is_err());
+        assert!(
+            args.output
+                .params("comment.delete", &mut json!({}))
+                .is_err()
+        );
+        assert!(
+            args.output
+                .params("card.show", &mut json!({"fields":["id"]}))
+                .is_err()
+        );
+    }
 
     #[test]
     fn parses_skill_flag_and_subcommand() {

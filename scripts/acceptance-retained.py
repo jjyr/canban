@@ -9,7 +9,7 @@ env.update(core)
 log=open(base/'server.log','w');server=subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log);viewer=None
 
 def call(method,p=None):
- r=subprocess.run([str(cli),'call',method,json.dumps(p or {})],env=env,capture_output=True,text=True,timeout=40)
+ r=subprocess.run([str(cli),"--full",'call',method,json.dumps(p or {})],env=env,capture_output=True,text=True,timeout=40)
  if r.returncode:raise RuntimeError(r.stderr)
  return json.loads(r.stdout)
 def agent(s):

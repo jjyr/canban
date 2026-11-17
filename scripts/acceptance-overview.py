@@ -9,7 +9,7 @@ core_env={'HC_SESSION':'default','HC_SOCKET':str(base/'hc.sock'),'XDG_STATE_HOME
 env.update(core_env)
 log=open(base/'server.log','w');server=subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log)
 def call(m,p=None):
- r=subprocess.run([str(cli),'call',m,json.dumps(p or {})],env=env,capture_output=True,text=True,timeout=90)
+ r=subprocess.run([str(cli),"--full",'call',m,json.dumps(p or {})],env=env,capture_output=True,text=True,timeout=90)
  if r.returncode:raise RuntimeError(r.stderr)
  return json.loads(r.stdout)
 def wait(f,label,timeout=60):

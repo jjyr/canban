@@ -119,7 +119,7 @@ fn timeline_pages_ignore_other_card_bodies_and_preserve_sequence_order() {
     let other: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({
+            json!({"view":"full",
                 "project_id":project.id,"title":"Unrelated history"
             }),
         )
@@ -129,7 +129,7 @@ fn timeline_pages_ignore_other_card_bodies_and_preserve_sequence_order() {
     for n in 0..5 {
         app.call(
             "comment.add",
-            json!({"card_id":card.id,"body":format!("message {n}")}),
+            json!({"view":"full","card_id":card.id,"body":format!("message {n}")}),
         )
         .unwrap();
     }
@@ -149,7 +149,7 @@ fn timeline_pages_ignore_other_card_bodies_and_preserve_sequence_order() {
         let page = app
             .call(
                 "timeline.list",
-                json!({"card_id":card.id,"after_sequence":after,"limit":2}),
+                json!({"view":"full","card_id":card.id,"after_sequence":after,"limit":2}),
             )
             .unwrap();
         let events: Vec<Event> = serde_json::from_value(page["events"].clone()).unwrap();

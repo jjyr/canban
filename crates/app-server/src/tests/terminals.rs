@@ -825,7 +825,7 @@ fn managed_worktree_create_status_promote_remove_and_read_all() {
     // Verify notifications.read_all marks unread Cards read.
     app.call(
         "comment.add",
-        json!({"card_id": c.id, "body": "New update", "request_key": "read-all-comment"}),
+        json!({"view":"full","card_id": c.id, "body": "New update", "request_key": "read-all-comment"}),
     )
     .unwrap();
     let read_res = app
@@ -877,7 +877,7 @@ fn opening_card_shell_and_agent_terminals_immediately_creates_card_worktree_and_
     let c: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": p.id, "title": "Open terminal in Card worktree", "body": "Notes"}),
+            json!({"view":"full","project_id": p.id, "title": "Open terminal in Card worktree", "body": "Notes"}),
         )
         .unwrap(),
     )

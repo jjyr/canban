@@ -24,7 +24,7 @@ def start():
   except RuntimeError:time.sleep(.1)
  raise RuntimeError('AppServer failed to start')
 def call(method,p=None):
- r=subprocess.run([str(cli),'call',method,json.dumps(p or {})],env=env,text=True,capture_output=True,timeout=90)
+ r=subprocess.run([str(cli),"--full",'call',method,json.dumps(p or {})],env=env,text=True,capture_output=True,timeout=90)
  if r.returncode:raise RuntimeError(r.stderr)
  return json.loads(r.stdout)
 def agents(s,card_id=None):
@@ -137,7 +137,7 @@ try:
  # Project YAML authoring and a configuration Agent share real transport,
  # without creating a Card/assignment or sending the initial prompt twice.
  params_file=base/'source-query.json';params_file.write_text(json.dumps({'project_id':project['id']}))
- collection=json.loads(subprocess.check_output([str(cli),'call','workflow.sources','@'+str(params_file)],env=env,text=True))
+ collection=json.loads(subprocess.check_output([str(cli),"--full",'call','workflow.sources','@'+str(params_file)],env=env,text=True))
  assert len(collection['sources'])==2
  current_schema=call('workflow.schema')['schema_version']
  custom=next(f for f in collection['sources'] if f['active']['workflow_id']=='plan-deliver')

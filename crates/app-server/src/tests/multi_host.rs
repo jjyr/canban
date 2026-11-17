@@ -97,7 +97,7 @@ fn host_registry_merges_multi_host_routes_mutations_caches_offline_and_recovers(
         local_app
             .call(
                 "card.create",
-                json!({"project_id": local_p.id, "title": "Local card", "body": "On Mac"}),
+                json!({"view":"full","project_id": local_p.id, "title": "Local card", "body": "On Mac"}),
             )
             .unwrap(),
     )
@@ -129,7 +129,7 @@ fn host_registry_merges_multi_host_routes_mutations_caches_offline_and_recovers(
         remote_app
             .call(
                 "card.create",
-                json!({"project_id": remote_p.id, "title": "Remote card 1", "body": "On Linux"}),
+                json!({"view":"full","project_id": remote_p.id, "title": "Remote card 1", "body": "On Linux"}),
             )
             .unwrap(),
     )
@@ -210,7 +210,7 @@ fn host_registry_merges_multi_host_routes_mutations_caches_offline_and_recovers(
         registry
             .call_routed(
                 "card.create",
-                json!({
+                json!({"view":"full",
                     "project_id": remote_p.id,
                     "title": "Created via routed client",
                     "body": "Transparently routed to home-linux",
@@ -256,7 +256,7 @@ fn host_registry_merges_multi_host_routes_mutations_caches_offline_and_recovers(
     registry
         .call_routed(
             "card.create",
-            json!({
+            json!({"view":"full",
                 "project_id": local_p.id,
                 "title": "Offline local work",
                 "body": "Works on plane/train",
@@ -271,7 +271,7 @@ fn host_registry_merges_multi_host_routes_mutations_caches_offline_and_recovers(
     let offline_mut = registry
         .call_routed(
             "card.create",
-            json!({"project_id": remote_p.id, "title": "Should fail while offline"}),
+            json!({"view":"full","project_id": remote_p.id, "title": "Should fail while offline"}),
             None,
         )
         .unwrap_err();
@@ -282,7 +282,7 @@ fn host_registry_merges_multi_host_routes_mutations_caches_offline_and_recovers(
     remote_app2
         .call(
             "card.create",
-            json!({
+            json!({"view":"full",
                 "project_id": remote_p.id,
                 "title": "Autonomous overnight remote card",
                 "body": "Created while MacBook slept"

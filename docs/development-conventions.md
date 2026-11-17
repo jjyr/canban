@@ -12,6 +12,16 @@ Status: user-selected conventions, updated 2026-11-10. Applied by the Rust works
 - Keep workflow stage, assignment outcome, runtime status, connection health and human decision state distinct. A process exit or Herdr `done` cannot substitute for an Agent report, and a reply/read acknowledgement cannot approve a human gate. See the [state model](product/sessions.md#independent-state-dimensions).
 - Use existing events and shared projections/caches before adding background polling or per-row queries. Define cache invalidation, disconnect recovery and query bounds. The [runtime observation contract](runtime-observation.md) specifies the current subscription, deadlines and on-demand Git checks; it does not prohibit unrelated mechanisms such as GitHub synchronization.
 
+## Agent RPC and CLI design
+
+RPC and CLI are Agent-first: default to concise query summaries and trustworthy
+mutation receipts. AppServer owns selection, filtering and pagination; CLI maps
+explicit field/full flags to RPC and controls formatting only. Human formatting
+must not expand content. Preserve pagination/revision/status controls, business
+idempotency and durable event payloads while minimizing read representations.
+Migrate affected consumers explicitly when defaults change; do not maintain a
+second legacy response protocol. See [the response contract](agent-response-contract.md).
+
 ## Cargo package names and filesystem names
 
 Use canban-xxx for Cargo package names. Use the unprefixed xxx for crate directories and ordinary source/module filenames.

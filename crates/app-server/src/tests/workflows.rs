@@ -30,7 +30,7 @@ fn manual_column_moves_dispatch_only_destination_and_record_resulting_card() {
         let moved = app
             .call(
                 "card.move",
-                json!({"card_id":c.id,"revision":card.revision,"stage":to}),
+                json!({"view":"full","card_id":c.id,"revision":card.revision,"stage":to}),
             )
             .unwrap();
         let after = app.snapshot().unwrap();
@@ -97,20 +97,23 @@ fn admission_projection_matches_full_state_without_loading_history() {
     let (_dir, app, p, c) = setup();
     app.call(
         "card.move",
-        json!({"card_id":c.id,"stage":"develop","revision":c.revision}),
+        json!({"view":"full","card_id":c.id,"stage":"develop","revision":c.revision}),
     )
     .unwrap();
     app.call(
         "comment.add",
-        json!({"card_id":c.id,"body":"Question","mentions":["codex"]}),
+        json!({"view":"full","card_id":c.id,"body":"Question","mentions":["codex"]}),
     )
     .unwrap();
     let other = app
-        .call("card.create", json!({"project_id":p.id,"title":"Second"}))
+        .call(
+            "card.create",
+            json!({"view":"full","project_id":p.id,"title":"Second"}),
+        )
         .unwrap();
     app.call(
         "card.move",
-        json!({"card_id":other["id"],"stage":"develop","revision":other["revision"]}),
+        json!({"view":"full","card_id":other["id"],"stage":"develop","revision":other["revision"]}),
     )
     .unwrap();
     let full = app.snapshot().unwrap();
@@ -243,8 +246,11 @@ fn published_revision_is_immediate_for_new_runs_and_frozen_for_active_runs() {
             .contains("report_id")
     );
     let other: Card = serde_json::from_value(
-        app.call("card.create", json!({"project_id":p.id,"title":"Second"}))
-            .unwrap(),
+        app.call(
+            "card.create",
+            json!({"view":"full","project_id":p.id,"title":"Second"}),
+        )
+        .unwrap(),
     )
     .unwrap();
     let r = app
@@ -280,12 +286,12 @@ fn subscription_progress_survives_restart_and_consumers_ack_independently() {
     let sub=app.call("subscription.save",json!({"revision":0,"enabled":true,"selector":{"card_id":c.id,"types":["comment.*"]},"target":{"type":"consumer"}})).unwrap();
     app.call(
         "comment.add",
-        json!({"card_id":c.id,"body":"one","mentions":[],"request_key":"comment"}),
+        json!({"view":"full","card_id":c.id,"body":"one","mentions":[],"request_key":"comment"}),
     )
     .unwrap();
     app.call(
         "comment.add",
-        json!({"card_id":c.id,"body":"one","mentions":[],"request_key":"comment"}),
+        json!({"view":"full","card_id":c.id,"body":"one","mentions":[],"request_key":"comment"}),
     )
     .unwrap();
     let deliveries = app
@@ -318,7 +324,7 @@ fn event_workflows_use_final_card_binding_and_failures_do_not_rollback_source_co
     let c = app
         .call(
             "card.create",
-            json!({"project_id":p.id,"title":"Automatic"}),
+            json!({"view":"full","project_id":p.id,"title":"Automatic"}),
         )
         .unwrap();
     let s = app.snapshot().unwrap();
@@ -337,7 +343,7 @@ fn event_workflows_use_final_card_binding_and_failures_do_not_rollback_source_co
     app.call("subscription.save",json!({"revision":0,"enabled":true,"selector":{"types":["comment.created"]},"target":{"type":"workflow","workflow_id":"plan","entry":"start"}})).unwrap();
     app.call(
         "comment.add",
-        json!({"card_id":c["id"],"body":"Still committed","mentions":[]}),
+        json!({"view":"full","card_id":c["id"],"body":"Still committed","mentions":[]}),
     )
     .unwrap();
     assert!(
@@ -371,7 +377,7 @@ fn stale_plan_cannot_approve_and_rework_gets_new_step_identity() {
     let updated = app
         .call(
             "card.update",
-            json!({"card_id":card.id,"revision":card.revision,"body":"New requirement"}),
+            json!({"view":"full","card_id":card.id,"revision":card.revision,"body":"New requirement"}),
         )
         .unwrap();
     assert!(app.call("workflow.decide",json!({"run_id":run.id,"visit":run.visit,"revision":updated["revision"],"decision":"approve"})).is_err());
@@ -396,7 +402,7 @@ fn invalid_graph_cannot_publish_and_active_run_survives_service_restart() {
     assert!(upsert_yaml(&app, &p, "bad.yaml", &bad_yaml).is_err());
     app.call(
         "card.move",
-        json!({"card_id":c.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let request = app.snapshot().unwrap().terminals[0].clone();
@@ -504,7 +510,7 @@ steps:
     let card = app.snapshot().unwrap().cards[0].clone();
     app.call(
         "card.move",
-        json!({"card_id":c.id,"revision":card.revision,"stage":"develop"}),
+        json!({"view":"full","card_id":c.id,"revision":card.revision,"stage":"develop"}),
     )
     .unwrap();
     let deliveries = app
@@ -601,8 +607,11 @@ steps:
     )
     .unwrap();
     let revision = app.snapshot().unwrap().cards[0].revision;
-    app.call("card.restore", json!({"card_id":c.id,"revision":revision}))
-        .unwrap();
+    app.call(
+        "card.restore",
+        json!({"view":"full","card_id":c.id,"revision":revision}),
+    )
+    .unwrap();
     assert!(app.snapshot().unwrap().workflow_runs.is_empty());
 }
 
@@ -619,7 +628,7 @@ fn compatible_continue_records_one_human_approval_fact() {
         .unwrap();
     app.call(
         "card.move",
-        json!({"card_id":c.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     finish(&app, &app.snapshot().unwrap().terminals[0], "develop-done");
@@ -768,7 +777,7 @@ fn multiple_yaml_event_rules_queue_without_expiring_and_capture_definition() {
     apply_yaml(&app, &p, &source);
     app.call(
         "comment.add",
-        json!({"card_id":c.id,"body":"Start both","mentions":[]}),
+        json!({"view":"full","card_id":c.id,"body":"Start both","mentions":[]}),
     )
     .unwrap();
     let deliveries = app.call("subscription.deliveries", json!({})).unwrap();
@@ -1164,7 +1173,7 @@ steps:
     upsert_yaml(&app, &p, "development.yaml", &review_yaml).unwrap();
     app.call(
         "card.move",
-        json!({"card_id":c.id,"revision":1,"stage":"review"}),
+        json!({"view":"full","card_id":c.id,"revision":1,"stage":"review"}),
     )
     .unwrap();
     let request = app.snapshot().unwrap().terminals[0].clone();
@@ -1262,7 +1271,7 @@ workspace:
     let held: Card = serde_json::from_value(
         app.call(
             "card.hold_auto_merge",
-            json!({"card_id": c.id, "revision": c.revision, "hold": true}),
+            json!({"view":"full","card_id": c.id, "revision": c.revision, "hold": true}),
         )
         .unwrap(),
     )
@@ -1272,7 +1281,7 @@ workspace:
     // Move to develop -> agent:develop runs -> moves to review -> pauses at deliver:review because hold_auto_merge is true
     app.call(
         "card.move",
-        json!({"card_id": c.id, "revision": held.revision, "stage": "develop"}),
+        json!({"view":"full","card_id": c.id, "revision": held.revision, "stage": "develop"}),
     )
     .unwrap();
     let req1 = app.snapshot().unwrap().terminals[0].clone();
@@ -1315,7 +1324,7 @@ workspace:
     let card_rev = snap.cards[0].revision;
     app.call(
         "card.hold_auto_merge",
-        json!({"card_id": c.id, "revision": card_rev, "hold": false}),
+        json!({"view":"full","card_id": c.id, "revision": card_rev, "hold": false}),
     )
     .unwrap();
     finish(&app, &req2, "dev-2");
@@ -1326,7 +1335,7 @@ workspace:
     let ext_card: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": p.id, "title": "External PR card"}),
+            json!({"view":"full","project_id": p.id, "title": "External PR card"}),
         )
         .unwrap(),
     )
@@ -1349,7 +1358,7 @@ workspace:
         .unwrap();
     app.call(
         "card.move",
-        json!({"card_id": ext_card.id, "revision": ext_card.revision, "stage": "review"}),
+        json!({"view":"full","card_id": ext_card.id, "revision": ext_card.revision, "stage": "review"}),
     )
     .unwrap();
     let snap = app.snapshot().unwrap();
@@ -1446,7 +1455,7 @@ fn default_workflow_queue_merge_syncs_upstream_and_respects_local_only_option() 
     let c1: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": p.id, "title": "Feature 1", "body": "Sync upstream by default"}),
+            json!({"view":"full","project_id": p.id, "title": "Feature 1", "body": "Sync upstream by default"}),
         )
         .unwrap(),
     )
@@ -1460,7 +1469,7 @@ fn default_workflow_queue_merge_syncs_upstream_and_respects_local_only_option() 
     // and Queue Merge merges locally + pushes to upstream remote!
     app.call(
         "card.move",
-        json!({"card_id": c1.id, "revision": c1.revision, "stage": "develop"}),
+        json!({"view":"full","card_id": c1.id, "revision": c1.revision, "stage": "develop"}),
     )
     .unwrap();
     let snap = app.snapshot().unwrap();
@@ -1543,14 +1552,14 @@ fn default_workflow_queue_merge_syncs_upstream_and_respects_local_only_option() 
     let c2: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": p.id, "title": "Feature 2", "body": "Local merge without upstream push"}),
+            json!({"view":"full","project_id": p.id, "title": "Feature 2", "body": "Local merge without upstream push"}),
         )
         .unwrap(),
     )
     .unwrap();
     app.call(
         "card.move",
-        json!({"card_id": c2.id, "revision": c2.revision, "stage": "develop"}),
+        json!({"view":"full","card_id": c2.id, "revision": c2.revision, "stage": "develop"}),
     )
     .unwrap();
     let snap = app.snapshot().unwrap();
@@ -1653,7 +1662,7 @@ fn backlog_and_review_options_drive_card_lifecycle_and_preserve_custom_stages() 
     let c_plan_dev: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": p.id, "title": "Analyze then Develop", "body": "Wait for analysis"}),
+            json!({"view":"full","project_id": p.id, "title": "Analyze then Develop", "body": "Wait for analysis"}),
         )
         .unwrap(),
     )
@@ -1736,7 +1745,7 @@ fn backlog_and_review_options_drive_card_lifecycle_and_preserve_custom_stages() 
     let c_direct_dev: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": p.id, "title": "Immediate Develop", "body": "Skip analysis"}),
+            json!({"view":"full","project_id": p.id, "title": "Immediate Develop", "body": "Skip analysis"}),
         )
         .unwrap(),
     )
@@ -1851,14 +1860,14 @@ fn queue_merge_conflict_routes_to_agent_then_fast_forwards_after_resolution() {
     let c: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": p.id, "title": "Edit README", "body": "Conflicting edit"}),
+            json!({"view":"full","project_id": p.id, "title": "Edit README", "body": "Conflicting edit"}),
         )
         .unwrap(),
     )
     .unwrap();
     app.call(
         "card.move",
-        json!({"card_id": c.id, "revision": c.revision, "stage": "develop"}),
+        json!({"view":"full","card_id": c.id, "revision": c.revision, "stage": "develop"}),
     )
     .unwrap();
     let snap = app.snapshot().unwrap();
@@ -2039,14 +2048,14 @@ fn queue_merge_conflict_respects_custom_deliver_profile_and_rejects_unknown_prof
     let c: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": p.id, "title": "Conflict with custom profile", "body": "Test"}),
+            json!({"view":"full","project_id": p.id, "title": "Conflict with custom profile", "body": "Test"}),
         )
         .unwrap(),
     )
     .unwrap();
     app.call(
         "card.move",
-        json!({"card_id": c.id, "revision": c.revision, "stage": "develop"}),
+        json!({"view":"full","card_id": c.id, "revision": c.revision, "stage": "develop"}),
     )
     .unwrap();
     let snap = app.snapshot().unwrap();
@@ -2127,14 +2136,14 @@ fn queue_merge_conflict_pauses_for_human_after_attempt_budget() {
     let c: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": p.id, "title": "Edit", "body": "x"}),
+            json!({"view":"full","project_id": p.id, "title": "Edit", "body": "x"}),
         )
         .unwrap(),
     )
     .unwrap();
     app.call(
         "card.move",
-        json!({"card_id": c.id, "revision": c.revision, "stage": "develop"}),
+        json!({"view":"full","card_id": c.id, "revision": c.revision, "stage": "develop"}),
     )
     .unwrap();
     let snap = app.snapshot().unwrap();
@@ -2206,7 +2215,7 @@ fn backlog_admission_plans_ahead_k_and_starts_in_board_order_when_agent_free() {
         serde_json::from_value(
             app.call(
                 "card.create",
-                json!({"project_id": p.id, "title": title, "body": "task"}),
+                json!({"view":"full","project_id": p.id, "title": title, "body": "task"}),
             )
             .unwrap(),
         )
@@ -2225,7 +2234,7 @@ fn backlog_admission_plans_ahead_k_and_starts_in_board_order_when_agent_free() {
         .unwrap();
     app.call(
         "card.move",
-        json!({"card_id": c3.id, "revision": c3_now.revision, "stage": "backlog", "before_card_id": c2.id}),
+        json!({"view":"full","card_id": c3.id, "revision": c3_now.revision, "stage": "backlog", "before_card_id": c2.id}),
     )
     .unwrap();
 
@@ -2343,7 +2352,7 @@ fn removing_a_column_returns_its_cards_to_the_first_column() {
     let moved: Card = serde_json::from_value(
         app.call(
             "card.move",
-            json!({"card_id": c.id, "revision": c.revision, "stage": "review"}),
+            json!({"view":"full","card_id": c.id, "revision": c.revision, "stage": "review"}),
         )
         .unwrap(),
     )
@@ -2367,7 +2376,7 @@ fn removing_the_running_step_finishes_it_then_stops_the_run() {
     let (_dir, app, p, c) = setup();
     app.call(
         "card.move",
-        json!({"card_id": c.id, "revision": c.revision, "stage": "develop"}),
+        json!({"view":"full","card_id": c.id, "revision": c.revision, "stage": "develop"}),
     )
     .unwrap();
     let req = app.snapshot().unwrap().terminals[0].clone();
@@ -2435,14 +2444,14 @@ fn report_auto_commits_card_worktree_and_workflow_deliver_retries_paused_or_stop
     let c1: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": p.id, "title": "Feature A", "body": "auto commit test"}),
+            json!({"view":"full","project_id": p.id, "title": "Feature A", "body": "auto commit test"}),
         )
         .unwrap(),
     )
     .unwrap();
     app.call(
         "card.move",
-        json!({"card_id": c1.id, "revision": c1.revision, "stage": "develop"}),
+        json!({"view":"full","card_id": c1.id, "revision": c1.revision, "stage": "develop"}),
     )
     .unwrap();
     let snap = app.snapshot().unwrap();
@@ -2536,14 +2545,14 @@ fn report_auto_commits_card_worktree_and_workflow_deliver_retries_paused_or_stop
     let c2: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": p.id, "title": "Feature B", "body": "stopped conflict retry"}),
+            json!({"view":"full","project_id": p.id, "title": "Feature B", "body": "stopped conflict retry"}),
         )
         .unwrap(),
     )
     .unwrap();
     app.call(
         "card.move",
-        json!({"card_id": c2.id, "revision": c2.revision, "stage": "develop"}),
+        json!({"view":"full","card_id": c2.id, "revision": c2.revision, "stage": "develop"}),
     )
     .unwrap();
     let snap = app.snapshot().unwrap();
@@ -2744,7 +2753,7 @@ workspace:
         let c: Card = serde_json::from_value(
             app.call(
                 "card.create",
-                json!({"project_id": p.id, "title": "In flight", "body": "keep rev 1"}),
+                json!({"view":"full","project_id": p.id, "title": "In flight", "body": "keep rev 1"}),
             )
             .unwrap(),
         )
@@ -2752,7 +2761,7 @@ workspace:
         card_id = c.id.clone();
         app.call(
             "card.move",
-            json!({"card_id": c.id, "revision": c.revision, "stage": "develop"}),
+            json!({"view":"full","card_id": c.id, "revision": c.revision, "stage": "develop"}),
         )
         .unwrap();
         let snap = app.snapshot().unwrap();
@@ -2818,7 +2827,7 @@ fn streamlined_prompt_omits_manifest_instruction_and_inlines_context_conditional
     let moved: Card = serde_json::from_value(
         app.call(
             "card.move",
-            json!({"card_id": c.id, "revision": c.revision, "stage": "develop"}),
+            json!({"view":"full","card_id": c.id, "revision": c.revision, "stage": "develop"}),
         )
         .unwrap(),
     )
@@ -2867,7 +2876,7 @@ fn streamlined_prompt_omits_manifest_instruction_and_inlines_context_conditional
     .unwrap();
     app.call(
         "comment.add",
-        json!({"card_id": c.id, "body": "Use OAuth2 PKCE flow."}),
+        json!({"view":"full","card_id": c.id, "body": "Use OAuth2 PKCE flow."}),
     )
     .unwrap();
     let src_file = app.home.join("spec.txt");
@@ -2959,7 +2968,7 @@ workspace:
     let card: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": p.id, "title": "Legacy cleanup", "body": "Remove v0 shim"}),
+            json!({"view":"full","project_id": p.id, "title": "Legacy cleanup", "body": "Remove v0 shim"}),
         )
         .unwrap(),
     )
@@ -2968,7 +2977,7 @@ workspace:
     let card: Card = serde_json::from_value(
         app.call(
             "card.move",
-            json!({"card_id": card.id, "revision": card.revision, "stage": "develop"}),
+            json!({"view":"full","card_id": card.id, "revision": card.revision, "stage": "develop"}),
         )
         .unwrap(),
     )
@@ -3121,14 +3130,14 @@ fn queue_merge_waits_for_connected_agent_turn_wrapup_and_falls_back_after_settle
     let c1: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": p.id, "title": "Wrap-up Wait", "body": "Wait for turn end"}),
+            json!({"view":"full","project_id": p.id, "title": "Wrap-up Wait", "body": "Wait for turn end"}),
         )
         .unwrap(),
     )
     .unwrap();
     app.call(
         "card.move",
-        json!({"card_id": c1.id, "revision": c1.revision, "stage": "develop"}),
+        json!({"view":"full","card_id": c1.id, "revision": c1.revision, "stage": "develop"}),
     )
     .unwrap();
     let snap = app.snapshot().unwrap();
@@ -3233,14 +3242,14 @@ fn queue_merge_waits_for_connected_agent_turn_wrapup_and_falls_back_after_settle
     let c2: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": p.id, "title": "Settle Timeout Fallback", "body": "Stuck status"}),
+            json!({"view":"full","project_id": p.id, "title": "Settle Timeout Fallback", "body": "Stuck status"}),
         )
         .unwrap(),
     )
     .unwrap();
     app.call(
         "card.move",
-        json!({"card_id": c2.id, "revision": c2.revision, "stage": "develop"}),
+        json!({"view":"full","card_id": c2.id, "revision": c2.revision, "stage": "develop"}),
     )
     .unwrap();
     let snap = app.snapshot().unwrap();
@@ -3365,7 +3374,7 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
     let card: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({
+            json!({"view":"full",
                 "project_id": p.id,
                 "title": "Rough Backlog Idea",
                 "body": "Initial notes"
@@ -3377,7 +3386,7 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
     let _other_card: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({
+            json!({"view":"full",
                 "project_id": p.id,
                 "title": "Unrelated Card",
                 "body": "Do not touch"
@@ -3431,7 +3440,8 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
 
     // Validation check: `card.adopt` requires `--card` (or `CANBAN_CARD`) / `card_id`.
     assert!(
-        app.call("card.adopt", json!({"stage": "develop"})).is_err(),
+        app.call("card.adopt", json!({"view":"full","stage": "develop"}))
+            .is_err(),
         "card.adopt requires --card / CANBAN_CARD or card_id"
     );
 
@@ -3439,7 +3449,7 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
     let updated_card: Card = serde_json::from_value(
         app.call(
             "card.update",
-            json!({
+            json!({"view":"full",
                 "project_id": p.id,
                 "card": card.number,
                 "agent": true,
@@ -3467,7 +3477,7 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
     let adopt_res = app
         .call(
             "card.adopt",
-            json!({
+            json!({"view":"full",
                 "project_id": p.id,
                 "card": card.number,
                 "stage": "develop",
@@ -3483,7 +3493,7 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
     let adopt_again = app
         .call(
             "card.adopt",
-            json!({
+            json!({"view":"full",
                 "project_id": p.id,
                 "card": card.number,
                 "stage": "develop",
@@ -3534,7 +3544,7 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
     // Updating the Card again from the same bound Agent refreshes `input_digest` so completion does not go `stale`.
     app.call(
         "card.update",
-        json!({
+        json!({"view":"full",
             "project_id": p.id,
             "card": card.number,
             "agent": true,
@@ -3606,7 +3616,7 @@ fn comment_session_completed_then_adopted_in_same_live_terminal_advances_to_merg
     let card: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({
+            json!({"view":"full",
                 "project_id": p.id,
                 "title": "Jump to Card and expand terminal",
                 "body": "Initial notes"
@@ -3619,7 +3629,7 @@ fn comment_session_completed_then_adopted_in_same_live_terminal_advances_to_merg
     // 1. User posts a `@developer` comment in Backlog -> spawns a comment session.
     app.call(
         "comment.add",
-        json!({
+        json!({"view":"full",
             "card_id": card.id,
             "body": "@developer Please analyze the approach first"
         }),
@@ -3702,7 +3712,7 @@ fn comment_session_completed_then_adopted_in_same_live_terminal_advances_to_merg
     let adopt_res = app
         .call(
             "card.adopt",
-            json!({
+            json!({"view":"full",
                 "project_id": p.id,
                 "card": card.number,
                 "profile_id": "developer",
@@ -3790,7 +3800,7 @@ fn comment_session_completed_then_adopted_in_same_live_terminal_advances_to_merg
     let card2: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({
+            json!({"view":"full",
                 "project_id": p.id,
                 "title": "Legacy stuck adopted terminal",
                 "body": "Fallback check"
@@ -3828,7 +3838,7 @@ fn comment_session_completed_then_adopted_in_same_live_terminal_advances_to_merg
     let adopt2 = app
         .call(
             "card.adopt",
-            json!({
+            json!({"view":"full",
                 "project_id": p.id,
                 "card": card2.number,
                 "stage": "develop",
@@ -3928,7 +3938,7 @@ fn merge_queue_drains_fifo_holds_head_during_conflict_and_never_spawns_merger_fo
         let c: Card = serde_json::from_value(
             app.call(
                 "card.create",
-                json!({"project_id": p.id, "title": title, "body": title}),
+                json!({"view":"full","project_id": p.id, "title": title, "body": title}),
             )
             .unwrap(),
         )
@@ -3940,7 +3950,7 @@ fn merge_queue_drains_fifo_holds_head_during_conflict_and_never_spawns_merger_fo
     let prepare_in_develop = |card: &Card| -> (TerminalEntry, PathBuf) {
         app.call(
             "card.move",
-            json!({"card_id": card.id, "revision": card.revision, "stage": "develop"}),
+            json!({"view":"full","card_id": card.id, "revision": card.revision, "stage": "develop"}),
         )
         .unwrap();
         let snap = app.snapshot().unwrap();
@@ -4228,7 +4238,7 @@ fn live_card_move_from_backlog_to_review_returns_immediately_while_delivery_merg
     let c1: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": p.id, "title": "Dragged from Backlog to Review", "body": "Ready branch"}),
+            json!({"view":"full","project_id": p.id, "title": "Dragged from Backlog to Review", "body": "Ready branch"}),
         )
         .unwrap(),
     )
@@ -4236,7 +4246,7 @@ fn live_card_move_from_backlog_to_review_returns_immediately_while_delivery_merg
     let c2: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": p.id, "title": "Peer Card remains interactive", "body": "Peer"}),
+            json!({"view":"full","project_id": p.id, "title": "Peer Card remains interactive", "body": "Peer"}),
         )
         .unwrap(),
     )
@@ -4272,7 +4282,7 @@ fn live_card_move_from_backlog_to_review_returns_immediately_while_delivery_merg
         rpc(
             &endpoint,
             "card.move",
-            json!({"card_id": c1.id, "revision": c1.revision, "stage": "review", "before_card_id": null}),
+            json!({"view":"full","card_id": c1.id, "revision": c1.revision, "stage": "review", "before_card_id": null}),
         )
         .unwrap(),
     )
@@ -4307,7 +4317,7 @@ fn live_card_move_from_backlog_to_review_returns_immediately_while_delivery_merg
         rpc(
             &endpoint,
             "card.update",
-            json!({"card_id": c2.id, "revision": c2.revision, "title": "Peer updated immediately"}),
+            json!({"view":"full","card_id": c2.id, "revision": c2.revision, "title": "Peer updated immediately"}),
         )
         .unwrap(),
     )
@@ -4376,7 +4386,7 @@ fn manual_card_terminal_updates_adopts_and_reports_via_short_card_number_with_ze
     let card: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": p.id, "title": "Manual Terminal Card", "body": "Draft idea"}),
+            json!({"view":"full","project_id": p.id, "title": "Manual Terminal Card", "body": "Draft idea"}),
         )
         .unwrap(),
     )
@@ -4403,8 +4413,11 @@ fn manual_card_terminal_updates_adopts_and_reports_via_short_card_number_with_ze
 
     // 2. Agent inside that terminal inspects and updates the Card using only `card` number + `cwd`.
     let shown: Card = serde_json::from_value(
-        app.call("card.show", json!({"card": card.number, "cwd": wt}))
-            .unwrap(),
+        app.call(
+            "card.show",
+            json!({"view":"full","card": card.number, "cwd": wt}),
+        )
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(shown.id, card.id);
@@ -4412,7 +4425,7 @@ fn manual_card_terminal_updates_adopts_and_reports_via_short_card_number_with_ze
     let updated: Card = serde_json::from_value(
         app.call(
             "card.update",
-            json!({
+            json!({"view":"full",
                 "card": card.number,
                 "cwd": wt,
                 "agent": true,
@@ -4431,7 +4444,7 @@ fn manual_card_terminal_updates_adopts_and_reports_via_short_card_number_with_ze
     let adopted = app
         .call(
             "card.adopt",
-            json!({
+            json!({"view":"full",
                 "card": card.number,
                 "cwd": wt,
                 "stage": "develop",
@@ -4459,7 +4472,7 @@ fn manual_card_terminal_updates_adopts_and_reports_via_short_card_number_with_ze
     // Updating the Card again while adopted keeps `WorkflowRun.input_digest` in sync even with `terminal_id: None`.
     app.call(
         "card.update",
-        json!({
+        json!({"view":"full",
             "card": card.number,
             "cwd": wt,
             "agent": true,
@@ -4564,14 +4577,14 @@ fn queue_merge_supports_rebase_squash_and_merge_strategies_and_routes_conflicts_
         let c1: Card = serde_json::from_value(
             app.call(
                 "card.create",
-                json!({"project_id": p.id, "title": "Clean feature"}),
+                json!({"view":"full","project_id": p.id, "title": "Clean feature"}),
             )
             .unwrap(),
         )
         .unwrap();
         app.call(
             "card.move",
-            json!({"card_id": c1.id, "revision": c1.revision, "stage": "develop"}),
+            json!({"view":"full","card_id": c1.id, "revision": c1.revision, "stage": "develop"}),
         )
         .unwrap();
         let dev1 = snap_latest_card_terminal(&app, &c1.id);
@@ -4649,14 +4662,14 @@ fn queue_merge_supports_rebase_squash_and_merge_strategies_and_routes_conflicts_
         let c2: Card = serde_json::from_value(
             app.call(
                 "card.create",
-                json!({"project_id": p.id, "title": "Conflicting feature"}),
+                json!({"view":"full","project_id": p.id, "title": "Conflicting feature"}),
             )
             .unwrap(),
         )
         .unwrap();
         app.call(
             "card.move",
-            json!({"card_id": c2.id, "revision": c2.revision, "stage": "develop"}),
+            json!({"view":"full","card_id": c2.id, "revision": c2.revision, "stage": "develop"}),
         )
         .unwrap();
         let dev2 = snap_latest_card_terminal(&app, &c2.id);
@@ -4819,14 +4832,14 @@ fn failed_rebase_conflict_delivery_retries_via_workflow_deliver_without_burning_
     let c: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": p.id, "title": "Conflicting rebase"}),
+            json!({"view":"full","project_id": p.id, "title": "Conflicting rebase"}),
         )
         .unwrap(),
     )
     .unwrap();
     app.call(
         "card.move",
-        json!({"card_id": c.id, "revision": c.revision, "stage": "develop"}),
+        json!({"view":"full","card_id": c.id, "revision": c.revision, "stage": "develop"}),
     )
     .unwrap();
     let dev = admit(&app, &snap_latest_card_terminal(&app, &c.id));
@@ -5239,14 +5252,14 @@ for line in sys.stdin:
     let c: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": p.id, "title": "Env flow card"}),
+            json!({"view":"full","project_id": p.id, "title": "Env flow card"}),
         )
         .unwrap(),
     )
     .unwrap();
     app.call(
         "card.move",
-        json!({"card_id": c.id, "revision": c.revision, "stage": "develop"}),
+        json!({"view":"full","card_id": c.id, "revision": c.revision, "stage": "develop"}),
     )
     .unwrap();
 
@@ -5466,14 +5479,14 @@ workspace:
     let c1: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": p.id, "title": "Slot holder"}),
+            json!({"view":"full","project_id": p.id, "title": "Slot holder"}),
         )
         .unwrap(),
     )
     .unwrap();
     app.call(
         "card.move",
-        json!({"card_id": c1.id, "revision": c1.revision, "stage": "develop"}),
+        json!({"view":"full","card_id": c1.id, "revision": c1.revision, "stage": "develop"}),
     )
     .unwrap();
     let holder = snap_latest_card_terminal(&app, &c1.id);
@@ -5484,7 +5497,7 @@ workspace:
     let c2: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": p.id, "title": "Script recovery"}),
+            json!({"view":"full","project_id": p.id, "title": "Script recovery"}),
         )
         .unwrap(),
     )
@@ -5591,7 +5604,7 @@ workspace:
     let c: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id": p.id, "title": "Herdr script card"}),
+            json!({"view":"full","project_id": p.id, "title": "Herdr script card"}),
         )
         .unwrap(),
     )
@@ -5671,13 +5684,16 @@ fn failed_merger_retry_joins_tail_of_merge_queue_behind_active_card() {
     // and move the Card into the Deliver (`review`) step.
     let enter_conflicting_deliver = |title: &str, conflict_file: &str| -> (Card, PathBuf) {
         let card: Card = serde_json::from_value(
-            app.call("card.create", json!({"project_id": p.id, "title": title}))
-                .unwrap(),
+            app.call(
+                "card.create",
+                json!({"view":"full","project_id": p.id, "title": title}),
+            )
+            .unwrap(),
         )
         .unwrap();
         app.call(
             "card.move",
-            json!({"card_id": card.id, "revision": card.revision, "stage": "develop"}),
+            json!({"view":"full","card_id": card.id, "revision": card.revision, "stage": "develop"}),
         )
         .unwrap();
         let dev = admit(&app, &snap_latest_card_terminal(&app, &card.id));
@@ -6070,7 +6086,7 @@ impl BatchQueueTestHarness {
             self.app
                 .call(
                     "card.create",
-                    json!({"project_id": self.project.id, "title": title, "body": title}),
+                    json!({"view":"full","project_id": self.project.id, "title": title, "body": title}),
                 )
                 .unwrap(),
         )
@@ -6078,7 +6094,7 @@ impl BatchQueueTestHarness {
         self.app
             .call(
                 "card.move",
-                json!({"card_id": card.id, "revision": card.revision, "stage": "develop"}),
+                json!({"view":"full","card_id": card.id, "revision": card.revision, "stage": "develop"}),
             )
             .unwrap();
         let dev = admit(&self.app, &snap_latest_card_terminal(&self.app, &card.id));

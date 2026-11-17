@@ -570,6 +570,8 @@ pub struct Event {
     pub sequence: u64,
     pub kind: String,
     pub actor: String,
+    // Read views normalize comment text to `body`; stored events still serialize `message`.
+    #[serde(alias = "body")]
     pub message: String,
     pub data: Value,
     pub created_at: u64,

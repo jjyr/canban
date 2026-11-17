@@ -83,7 +83,7 @@ os.execv(str(Path(__file__).with_name('canban-real')),[str(Path(__file__).with_n
     env={**{k:v for k,v in os.environ.items() if not k.startswith('CANBAN_')},**core,'CANBAN_HOME':str(home),'CANBAN_UPDATE_API':'http://127.0.0.1:'+str(release_server.server_address[1]),'CANBAN_APP_ID':app_id}
     cli=target/'Contents/MacOS/canban';log=(root/'server.log').open('w');server=subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log);ui=None
     def call(method,p=None):
-        r=subprocess.run([str(cli),'call',method,json.dumps(p or {})],env=env,capture_output=True,text=True,timeout=30)
+        r=subprocess.run([str(cli),"--full",'call',method,json.dumps(p or {})],env=env,capture_output=True,text=True,timeout=30)
         if r.returncode:raise RuntimeError(r.stderr)
         return json.loads(r.stdout)
     def wait(fn,label,timeout=60):
@@ -111,7 +111,7 @@ os.execv(str(Path(__file__).with_name('canban-real')),[str(Path(__file__).with_n
         core_id=attempt['owner_core_id'];terminal=attempt['terminal'];worktree=call('card.get',{'card_id':card['id']})['worktree']
         wait(lambda:call('update.state')['state'].get('available'),'automatic release discovery')
         assert call('update.state')['state']['available']['manifest']['version']==candidate_info['version']
-        agent_install=subprocess.run([str(cli),'call','update.install',json.dumps({'version':candidate_info['version']})],env={**env,'CANBAN_PROFILE_ID':'developer','CANBAN_CARD':str(card['number']),'CANBAN_PROJECT':project['id']},capture_output=True,text=True,timeout=15)
+        agent_install=subprocess.run([str(cli),"--full",'call','update.install',json.dumps({'version':candidate_info['version']})],env={**env,'CANBAN_PROFILE_ID':'developer','CANBAN_CARD':str(card['number']),'CANBAN_PROJECT':project['id']},capture_output=True,text=True,timeout=15)
         assert agent_install.returncode!=0 and 'explicit user action' in agent_install.stderr
         ui=subprocess.Popen([str(target/'Contents/MacOS/canban-ui')],env=env,stdout=log,stderr=log)
         sent=threading.Event()

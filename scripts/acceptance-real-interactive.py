@@ -6,7 +6,7 @@ repo=Path(__file__).resolve().parents[1];base=Path(tempfile.mkdtemp(prefix='cb-r
 env={**os.environ,'CANBAN_HOME':str(home)};core_env={'HC_SESSION':'real-interactive','HC_SOCKET':str(base/'hc.sock'),'XDG_STATE_HOME':str(base/'hc-state'),'XDG_CONFIG_HOME':str(base/'hc-config')}
 log=open(base/'server.log','w');server=subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log)
 def call(method,p=None):
- r=subprocess.run([str(cli),'call',method,json.dumps(p or {})],env=env,capture_output=True,text=True,timeout=90)
+ r=subprocess.run([str(cli),"--full",'call',method,json.dumps(p or {})],env=env,capture_output=True,text=True,timeout=90)
  if r.returncode:raise RuntimeError(r.stderr)
  return json.loads(r.stdout)
 trusted=set()

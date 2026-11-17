@@ -2,6 +2,15 @@ use super::*;
 
 impl AppServer {
     pub fn call(&self, method: &str, p: Value) -> Result<Value> {
+        representation::validate(method, &p)?;
+        let mut business = p.clone();
+        business.as_object_mut().unwrap().remove("view");
+        business.as_object_mut().unwrap().remove("fields");
+        let result = self.call_business(method, business)?;
+        Ok(representation::render(method, &p, result))
+    }
+
+    fn call_business(&self, method: &str, p: Value) -> Result<Value> {
         if canban_updater::handoff::active(&self.home)
             && !matches!(
                 method,
@@ -154,38 +163,8 @@ impl AppServer {
                 let store = self.store.lock().unwrap();
                 Ok(serde_json::to_value(super::resolve_card(store.db(), &p)?)?)
             }
-            "card.list" => {
-                let store = self.store.lock().unwrap();
-                let db = store.db();
-                let filter_pid = p["project_id"]
-                    .as_str()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(|raw| super::resolve_project_id(db, raw))
-                    .transpose()?;
-                let cards = db.list::<Card>()?;
-                Ok(serde_json::to_value(
-                    cards
-                        .into_iter()
-                        .filter(|c| c.removed_at.is_none() || p["include_removed"] == true)
-                        .filter(|c| filter_pid.as_deref().is_none_or(|id| c.project_id == id))
-                        .collect::<Vec<_>>(),
-                )?)
-            }
-            "timeline.list" => {
-                let card = {
-                    let store = self.store.lock().unwrap();
-                    super::resolve_card(store.db(), &p)?.id
-                };
-                let after = p["after_sequence"].as_u64().unwrap_or(0);
-                let limit = p["limit"].as_u64().unwrap_or(100).clamp(1, 500) as usize;
-                let mut events = self.store.lock().unwrap().db().timeline_page(&card, after, limit + 1)?;
-                let more = events.len() > limit;
-                events.truncate(limit);
-                Ok(
-                    json!({"next_cursor":if more{events.last().map(|e|e.sequence)}else{None},"events":events}),
-                )
-            }
+            "card.list" => self.card_page(&p),
+            "timeline.list" => self.timeline_page(&p),
             "execution.get" => {
                 let s = self.snapshot()?;
                 if let Some(tid) = p["terminal_id"].as_str().filter(|v| !v.is_empty()) {
@@ -1080,7 +1059,9 @@ impl AppServer {
                 }
                 c.revision += 1;
                 db.save(&c)?;
-                Ok(serde_json::to_value(event)?)
+                let mut result = serde_json::to_value(event)?;
+                result["card_revision"] = json!(c.revision);
+                Ok(result)
             }),
             "comment.update" => self.mutate(method, &p, |db| {
                 let mut c = super::resolve_card(db, &p)?;
@@ -1247,7 +1228,9 @@ impl AppServer {
                         "edited_at": edited_at,
                     }),
                 ))?;
-                Ok(serde_json::to_value(event)?)
+                let mut result = serde_json::to_value(event)?;
+                result["card_revision"] = json!(c.revision);
+                Ok(result)
             }),
             "comment.delete" => self.mutate(method, &p, |db| {
                 let mut c = super::resolve_card(db, &p)?;

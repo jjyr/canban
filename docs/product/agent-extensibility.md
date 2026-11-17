@@ -2,6 +2,11 @@
 
 Status: implemented 2026-11-07; current lifecycle/API description reconciled 2026-11-10. [Profile schema](agent-profiles.md) and [MVP acceptance](../mvp-acceptance.md) are the current references. The earlier provider lifecycle adapters and mandatory notify/Stop callbacks were removed. Per-invocation command/environment adaptation now lives in canban-profiles; see [launch adaptation](agent-profiles.md#per-invocation-launch-adaptation). It does not interpret provider lifecycle or install hooks.
 
+RPC and CLI use [Agent-first response defaults](../agent-response-contract.md):
+concise summaries and write receipts, explicit fields/full content requests,
+server-owned selection/pagination, and formatting-only `--human`. The default
+response change requires client migration; no legacy raw-response mode is kept.
+
 ## CLI capability surface
 
 The CLI and native UI call the same AppServer operations through a same-user socket. Remote Agents use the [Core-backed CLI bridge](../multi-machine.md#remote-context-and-agent-cli) to that same authority, not a second product server. Dedicated helpers are `report`, `reply`, `card update`, `card adopt`, `bind-session`, `skill` (`--skill`), `status` and `snapshot`; the general form is `canban call METHOD JSON`. `serve` hosts the same AppServer without the UI.

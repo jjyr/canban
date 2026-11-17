@@ -43,42 +43,19 @@ A routine card.move into Develop automatically creates work under its binding. N
 
 Submitted @profile comments use the existing Card/profile conversation: deliver a Question when live or start/resume through Scheduler when absent/exited. Workflow Agent steps retain independent Request/Attempt and owning run/step bindings. These use the same execution model, not question/stage Session classes. A reply does not complete a different assignment or approve a decision. See [Session contract](sessions.md).
 
-## Example move
+## Agent-first RPC and CLI
 
-Illustrative JSON-RPC-style request:
+Both surfaces default to concise summaries and reliable write receipts. AppServer
+owns filtering, pagination and response views; CLI requests `fields` / `view: "full"`
+and controls compact JSON versus `--human` pretty formatting. Full content is
+explicit. See the [current response contract](../agent-response-contract.md) for
+method defaults, pagination, normalized comments, idempotency and breaking-client
+migration. Durable event consumers retain their original fact payloads.
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 7,
-  "method": "card.move",
-  "params": {
-    "request_key": "move-card-42-to-develop-1",
-    "project_id": "project_123",
-    "card_id": "card_789",
-    "expected_revision": 5,
-    "to_stage_id": "develop"
-  }
-}
-```
-
-Illustrative accepted result:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 7,
-  "result": {
-    "operation_id": "operation_321",
-    "card_revision": 6,
-    "stage_event_id": "event_456",
-    "dispatch_request_id": "request_654",
-    "dispatch_state": "queued"
-  }
-}
-```
-
-Queued means the service accepted the workflow intent. It does not claim the agent already started. A Backlog move produces a stage event without a stage-entry launch. Unavailable routing or pending startup must be represented in the request/read model instead of pretending a terminal exists.
+For example, `card.move` takes `card_id`, `revision`, `stage` and `request_key`;
+its default result confirms the committed Card identity, stage and revision,
+without echoing the description. It does not assert that a triggered Agent has
+started. A handoff queue acknowledgement remains distinct from a recorded write.
 
 ## Identity and allowed actions
 

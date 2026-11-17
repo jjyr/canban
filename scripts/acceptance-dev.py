@@ -72,7 +72,7 @@ def seed(instance):
 
 
 def call(instance, method, params=None, check=True):
-    r=command([cli,'--home',instance['home'],'call',method,json.dumps(params or {})],check=check)
+    r=command([cli,'--home',instance['home'],'--full','call',method,json.dumps(params or {})],check=check)
     return json.loads(r.stdout) if r.returncode==0 else r
 
 

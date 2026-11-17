@@ -40,6 +40,10 @@ editor, modal, window-title and terminal checks.
 
 [Column transition dispatch acceptance (2026-11-17)](column-transition-acceptance-20261117.md) records direction-specific event matching, isolated workflow/merge verification, native stage-menu acceptance and the Bullet build-path limitation.
 
+[Agent RPC/CLI acceptance (2026-11-17)](agent-interface-acceptance-20261117.md)
+records API-65 response defaults, isolated/native consumer verification and a
+synthetic 62-operation comparison separating wire, CLI and candidate-context bytes.
+
 ## Current product documents
 
 | Document | Purpose |
@@ -64,7 +68,8 @@ editor, modal, window-title and terminal checks.
 | [Agent interaction](product/agent-interaction.md) | Interactive terminal execution, completion/exit, resume and acceptance limits |
 | [One Session model](product/sessions.md) | Card/profile conversations, request/attempt lifetimes and live replies through one execution model |
 | [Unified timeline](product/timeline.md) | Card history presentation, comment revisions, artifacts and ordering; shared event contract links |
-| [Agent-callable interface](product/agent-interface.md) | Proposed application operations shared with the desktop |
+| [Agent-callable interface](product/agent-interface.md) | Application operations shared with the desktop |
+| [Agent RPC and CLI responses](agent-response-contract.md) | Agent-first defaults, explicit fields/full views, reliable receipts and pagination |
 | [MVP sequence](mvp-plan.md) | Scope, implementation proposals, decision gates, and acceptance matrix |
 | [MVP scope review](product/mvp-scope-review.md) | User resolutions and the simplified first-release boundary |
 | [Review and code delivery](product/review-delivery.md) | Basic Diff, return-to-Develop, explicit commit/merge, conflict and receipt behavior |

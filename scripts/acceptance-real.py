@@ -28,7 +28,7 @@ overlap = False
 last_progress = 0.0
 
 def call(method, params=None):
-    out = subprocess.run([str(cli), "call", method, json.dumps(params or {})], env=env, capture_output=True, text=True, timeout=95)
+    out = subprocess.run([str(cli), "--full","call", method, json.dumps(params or {})], env=env, capture_output=True, text=True, timeout=95)
     if out.returncode:
         raise RuntimeError(out.stderr)
     return json.loads(out.stdout)

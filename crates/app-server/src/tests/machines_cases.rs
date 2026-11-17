@@ -4,7 +4,7 @@ fn remote_reports_wait_through_handoff_without_consuming_or_duplicating_completi
     let (_dir, app, p, c) = setup();
     app.call(
         "card.move",
-        json!({"card_id":c.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let _run = admit(&app, &app.snapshot().unwrap().terminals[0]);
@@ -18,7 +18,7 @@ fn remote_reports_wait_through_handoff_without_consuming_or_duplicating_completi
     assert!(
         app.remote_call(
             "card.create",
-            json!({"project_id":p.id,"title":"do not replay"})
+            json!({"view":"full","project_id":p.id,"title":"do not replay"})
         )
         .is_err()
     );
@@ -46,7 +46,7 @@ fn location_edits_retarget_queued_work_but_not_existing_attempts_or_resumes() {
     );
     app.call(
         "card.move",
-        json!({"card_id":c.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let next = dir.path().join("next");
@@ -134,7 +134,7 @@ fn changed_environment_never_reviews_an_unrelated_checkout() {
     );
     app.call(
         "card.move",
-        json!({"card_id":c.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     app.tick().unwrap();
@@ -187,7 +187,7 @@ fn remote_completion_keeps_terminal_without_an_exit_intent_or_clock_comparison()
     let (_dir, app, _, c) = setup();
     app.call(
         "card.move",
-        json!({"card_id":c.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let s = app.snapshot().unwrap();
@@ -217,7 +217,7 @@ fn offline_work_does_not_starve_local_boards_or_fall_back_for_terminals() {
     app.call("project.location",json!({"project_id":p.id,"location":{"machine":"remote-owner","directory":"/offline/source"}})).unwrap();
     app.call(
         "card.move",
-        json!({"card_id":c.id,"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let p2 = app
@@ -229,12 +229,12 @@ fn offline_work_does_not_starve_local_boards_or_fall_back_for_terminals() {
     let c2 = app
         .call(
             "card.create",
-            json!({"project_id":p2["id"],"title":"Runnable"}),
+            json!({"view":"full","project_id":p2["id"],"title":"Runnable"}),
         )
         .unwrap();
     app.call(
         "card.move",
-        json!({"card_id":c2["id"],"revision":1,"stage":"develop"}),
+        json!({"view":"full","card_id":c2["id"],"revision":1,"stage":"develop"}),
     )
     .unwrap();
     app.tick().unwrap();
@@ -294,7 +294,7 @@ fn provider_session_ids_are_scoped_to_the_owning_machine() {
     let second = app
         .call(
             "card.create",
-            json!({"project_id":p.id,"title":"Another Card"}),
+            json!({"view":"full","project_id":p.id,"title":"Another Card"}),
         )
         .unwrap();
     for card in [json!(c.id), second["id"].clone()] {

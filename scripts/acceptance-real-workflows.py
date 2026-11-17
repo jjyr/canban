@@ -20,7 +20,7 @@ last_progress = 0.0
 overlap = False
 
 def call(method, params=None):
-    result = subprocess.run([str(cli), 'call', method, json.dumps(params or {})], env=env,
+    result = subprocess.run([str(cli), "--full",'call', method, json.dumps(params or {})], env=env,
                             capture_output=True, text=True, timeout=90)
     if result.returncode:
         raise RuntimeError(result.stderr)

@@ -10,7 +10,7 @@ p=argparse.ArgumentParser();p.add_argument('--home',type=pathlib.Path,required=T
 repo=pathlib.Path(__file__).resolve().parents[1];cli=repo/'target/debug/canban';env={k:v for k,v in os.environ.items() if not k.startswith('CANBAN_')};env['CANBAN_HOME']=str(a.home)
 config=json.loads((a.home/'config/agents.json').read_text());core_env={**os.environ,**config['hc_env'],'HC_SESSION':config['hc_session']}
 def call(m,p=None):
- r=subprocess.run([str(cli),'call',m,json.dumps(p or {})],env=env,text=True,capture_output=True,timeout=95)
+ r=subprocess.run([str(cli),"--full",'call',m,json.dumps(p or {})],env=env,text=True,capture_output=True,timeout=95)
  if r.returncode:raise RuntimeError(r.stderr)
  return json.loads(r.stdout)
 def hc(m,p=None):

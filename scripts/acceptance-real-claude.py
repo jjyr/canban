@@ -9,7 +9,7 @@ core={'HC_SESSION':'real-claude-acceptance','HC_SOCKET':str(base/'hc.sock'),'XDG
 log=open(base/'server.log','w');server=subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log)
 trusted=set()
 def call(method,p=None):
- r=subprocess.run([str(cli),'call',method,json.dumps(p or {})],env=env,text=True,capture_output=True,timeout=90)
+ r=subprocess.run([str(cli),"--full",'call',method,json.dumps(p or {})],env=env,text=True,capture_output=True,timeout=90)
  if r.returncode:raise RuntimeError(r.stderr)
  return json.loads(r.stdout)
 def wait(predicate,label,timeout=180):
