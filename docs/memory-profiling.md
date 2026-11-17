@@ -150,3 +150,31 @@ and `index.build`. Native observation also confirmed the final binary's Board
 updated to 38 replies after eight additional scratch comments. Those artifacts
 are in `ui-standard-signposts` and `native5` beneath the evidence directory.
 All scratch UI, backend and isolated Core processes were stopped afterward.
+
+## Integration verification: 2026-11-17
+
+Card #110 was rebased onto `619587071d5ffdca3a38d83f05607d45def0fe76`
+(the worktree-based Git workbench). The test-file conflict retained both the
+canonical worktree matching regression and the memory regression module.
+Both branches had independently selected desktop API 63; the integrated build
+uses API 64 so it can detect an older backend missing the state synchronization
+contract.
+
+- `mise run test`: 596 passed, one configured skip, including both retained
+  regressions, state cursor/restart/concurrent-update checks, indexed Timeline
+  pagination, UI indexing and reminder coverage.
+- `mise run build`: packaged `.local/Canban.app`; `mise run test-package` passed
+  all eight packaging/signing tests. Rust tasks were invoked through `bu exec`.
+- `mise run acceptance`: passed with a disposable home and isolated Herdr Core,
+  exercising real-PTY development/review, blocked mentions, archive/restore,
+  restart and cross-Board concurrency.
+- A copy of the packaged native app, using a separate disposable home/Core,
+  displayed two existing comments, updated to three replies after an external
+  comment, and retained all three comments after closing/reopening the Card.
+  The isolated backend reported API 64. Test UI/backend/Core processes were
+  stopped after verification.
+
+Integration evidence is in the Card's `agents/merger` run directory, including
+build/test/acceptance logs and the `native-smoke` fixture. No new Instruments
+capture or matched-workload memory plateau comparison was performed during
+conflict resolution; the earlier profiling evidence and limits still apply.
