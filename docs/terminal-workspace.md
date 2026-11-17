@@ -39,6 +39,10 @@ Implemented user-approved direction, 2026-11-08. Native/runtime acceptance is re
 
 The window chrome follows the same left/right divider as the content while aligning with the unified 42-point chrome geometry across all screens: native traffic-light clearance and `<` / `>` Back/Forward sit at the exact same horizontal coordinates as every other page, followed by the sidebar toggle (`☰`), so `<` / `>` never jump when switching to or from `Terminals`. The right panel owns **Worktree-scoped tabs** (only live Terminals in the same `WorktreeScope` as the selected Terminal), `+` (New Shell in current worktree), `▾` (Project Root / Managed Branch Worktree / Machine menu), Open Agent, current Card/Project link, the **View changes in Git** branch action (`[⎇ <branch> · +N −M · ↑N ↓M]`), compact actions, and the global right-end **Activity & Notifications** trigger pill (`[⚡ N · ● running]`, `Command+I`). Resizing the left panel moves its full-height divider. With the list hidden, tab controls clear the native window buttons and `<` / `>`. NSH owns window dragging, system double-click behavior, traffic-light geometry and resizable panels. Terminal content has no separate title, toolbar, tab strip, placeholder asking to select a conversation, or permanent technical status footer.
 
+The Card worktree header's `⋯` and context menu contain actions only: New Terminal,
+Open Agent, Open Card, Open in Git, and Copy Worktree Path when available. They
+omit the redundant Card title, branch and path information rows.
+
 ### Card worktree merge marker (2026-11-17)
 
 Card worktree headers show a compact purple `Merged` badge when the unarchived

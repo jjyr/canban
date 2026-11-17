@@ -399,30 +399,16 @@ pub async fn card_scope_menu(ui: Ui, card: canban_types::Card, at: Option<Point<
     let cid_agent = card.id.clone();
     let wt_copy = card.worktree.clone();
 
-    let mut items = vec![MenuItem::new(format!("#{} {}", card.number, card.title)).disabled(true)];
-    if let Some(br) = &card.branch {
-        items.push(MenuItem::new(format!("⎇ {br}")).disabled(true));
-    }
-    if let Some(wt) = &card.worktree {
-        items.push(MenuItem::new(wt.clone()).disabled(true));
-    }
-    items.push(MenuItem::separator());
-    items.push(
+    let mut items = vec![
         MenuItem::new("New Terminal in Card Worktree")
             .on_select(move || super::create(ui, pid_shell.clone(), Some(cid_shell.clone()))),
-    );
-    items.push(
         MenuItem::new("Open Agent in Card Worktree").on_select(move || {
             super::create_in_card(ui, pid_agent.clone(), cid_agent.clone(), true)
         }),
-    );
-    items.push(MenuItem::separator());
-    items.push(
+        MenuItem::separator(),
         MenuItem::new("Open Card").on_select(move || ui.terminal_card(cid_open.clone(), None)),
-    );
-    items.push(
         MenuItem::new("Open in Git").on_select(move || crate::review::open_card(ui, &cid_diff)),
-    );
+    ];
     if let Some(path) = wt_copy {
         items.push(
             MenuItem::new("Copy Worktree Path").on_select(move || copy_text(ui, path.clone())),
