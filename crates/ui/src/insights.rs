@@ -1,5 +1,5 @@
 //! Insights dashboard: daily Kanban merge throughput, Agent scheduling outcomes,
-//! 12-week cadence heatmap, and role/trigger breakdown.
+//! Calendar-day comparisons, Project/Agent breakdowns, annual cadence and cycle samples.
 
 pub mod model;
 
@@ -9,8 +9,8 @@ use crate::{
 };
 use canban_ui_kit::{tokens::*, *};
 use model::{
-    Dashboard, DayBucket, HeatmapWeek, ProfileStat, RangeWindow, TriggerKind, TriggerStat,
-    format_delta_pct, format_duration_compact,
+    ActivityMetric, Comparison, Dashboard, DayBucket, RangeWindow, format_delta_pct,
+    format_duration_compact,
 };
 use nsh_core::{element::AdaptiveColor, prelude::*};
 
@@ -21,6 +21,20 @@ pub struct State {
     /// Empty string means `All Projects`; otherwise holds a `Project.id`.
     pub scope_project: Signal<String>,
     pub range: Signal<RangeWindow>,
+    pub selected_date: Signal<Option<chrono::NaiveDate>>,
+    pub date_text: Signal<String>,
+    pub comparison: Signal<Comparison>,
+    pub metric: Signal<ActivityMetric>,
+    pub hourly_metric: Signal<ActivityMetric>,
+    pub trend_days: Signal<i64>,
+    pub scroll: Signal<Option<ElementRef>>,
+    pub annual_width: Signal<f32>,
+    pub efficiency_open: Signal<bool>,
+    pub queue_samples: Signal<bool>,
+    pub sample_page: Signal<usize>,
+    pub provider_group: Signal<bool>,
+    pub sort_created: Signal<bool>,
+    pub drilldown: Signal<String>,
     /// Optional fixed timestamp (ms) for deterministic Gallery/test rendering; `None` uses live clock.
     pub anchor_ms: Signal<Option<u64>>,
 }
@@ -35,7 +49,21 @@ impl State {
     pub fn new() -> Self {
         Self {
             scope_project: signal(String::new()),
-            range: signal(RangeWindow::Days30),
+            range: signal(RangeWindow::Today),
+            selected_date: signal(None),
+            date_text: signal(String::new()),
+            comparison: signal(Comparison::Previous),
+            metric: signal(ActivityMetric::Merged),
+            hourly_metric: signal(ActivityMetric::Merged),
+            trend_days: signal(14),
+            scroll: signal(None),
+            annual_width: signal(0.),
+            efficiency_open: signal(false),
+            queue_samples: signal(false),
+            sample_page: signal(0),
+            provider_group: signal(false),
+            sort_created: signal(false),
+            drilldown: signal(String::new()),
             anchor_ms: signal(None),
         }
     }
@@ -43,6 +71,11 @@ impl State {
 
 pub fn set_range(ui: Ui, next: RangeWindow) {
     ui.insights.range.set(next);
+    if next != RangeWindow::Today {
+        ui.insights.comparison.set(Comparison::Previous);
+    }
+    ui.insights.sample_page.set(0);
+    ui.insights.drilldown.set(String::new());
 }
 
 fn nice_ceil_tick(max_val: usize) -> usize {
@@ -167,20 +200,25 @@ pub fn chrome_bar(ui: Ui) -> View {
         .border_1()
         .border_color(BORDER)
         .children(
-            [RangeWindow::Days7, RangeWindow::Days30, RangeWindow::Days90]
-                .into_iter()
-                .map(|rw| {
-                    compact_segment(
-                        rw.label(),
-                        None,
-                        move || ui.insights.range.get() == rw,
-                        move |_| set_range(ui, rw),
-                    )
-                    .min_h(px(22.))
-                    .px_2()
-                    .into_element()
-                })
-                .collect::<Vec<_>>(),
+            [
+                RangeWindow::Today,
+                RangeWindow::Days7,
+                RangeWindow::Days30,
+                RangeWindow::Days90,
+            ]
+            .into_iter()
+            .map(|rw| {
+                compact_segment(
+                    rw.label(),
+                    None,
+                    move || ui.insights.range.get() == rw,
+                    move |_| set_range(ui, rw),
+                )
+                .min_h(px(22.))
+                .px_2()
+                .into_element()
+            })
+            .collect::<Vec<_>>(),
         );
 
     view()
@@ -307,135 +345,126 @@ fn kpi_card(spec: KpiSpec) -> View {
 }
 
 fn render_kpis(dash: &Dashboard, narrow: bool) -> View {
-    let delta_merges = format_delta_pct(dash.merged_total, dash.prev_merged_total);
-    let merge_tone = if dash.merged_total >= dash.prev_merged_total {
-        Tone::Success
-    } else {
-        Tone::Neutral
-    };
-    let wip_str = if dash.net_wip_delta > 0 {
-        format!("+{}", dash.net_wip_delta)
-    } else {
-        dash.net_wip_delta.to_string()
-    };
-    let c1 = kpi_card(KpiSpec {
-        mark: Icon::GitMerge,
-        mark_tint: SUCCESS,
-        eyebrow: "MERGED CARDS",
-        hero: dash.merged_total.to_string(),
-        pill_text: Some((delta_merges, merge_tone)),
-        sub_primary: format!("{} local · {} PR", dash.local_merges, dash.pr_merges),
-        sub_secondary: format!("{} created · Net WIP {wip_str}", dash.created_total),
-        extra_bar: None,
-    });
-
-    let delta_runs = format_delta_pct(dash.scheduled_total, dash.prev_scheduled_total);
-    let runs_tone = if dash.scheduled_total > 0 {
-        Tone::Info
-    } else {
-        Tone::Neutral
-    };
-    let c2 = kpi_card(KpiSpec {
-        mark: Icon::Agent,
-        mark_tint: ACCENT,
-        eyebrow: "SCHEDULED RUNS",
-        hero: dash.scheduled_total.to_string(),
-        pill_text: Some((delta_runs, runs_tone)),
-        sub_primary: format!(
-            "{} completed · {} active",
-            dash.completed_runs, dash.active_runs
-        ),
-        sub_secondary: format!(
-            "{} blocked · {} failed",
-            dash.blocked_runs, dash.failed_runs
-        ),
-        extra_bar: None,
-    });
-
-    let rate_hero = dash
-        .success_rate_pct
-        .map(|p| format!("{p}%"))
-        .unwrap_or_else(|| "—".into());
-    let rate_tone = match dash.success_rate_pct {
-        Some(p) if p >= 80 => Tone::Success,
-        Some(p) if p >= 50 => Tone::Attention,
-        Some(_) => Tone::Danger,
-        None => Tone::Neutral,
-    };
-    let total_r = dash.scheduled_total.max(1);
-    let outcome_bar = view()
-        .w_full()
-        .h(px(6.))
-        .rounded_full()
-        .bg(INSET)
-        .overflow_hidden()
-        .flex_row()
-        .children(if dash.scheduled_total == 0 {
-            Vec::new()
-        } else {
-            [
-                (dash.completed_runs, SUCCESS),
-                (dash.blocked_runs, ATTENTION),
-                (dash.failed_runs, DANGER),
-                (dash.active_runs, ACCENT),
-            ]
-            .into_iter()
-            .filter(|(n, _)| *n > 0)
-            .map(|(n, col)| {
-                let frac = (n as f32 / total_r as f32).clamp(0.03, 1.0);
-                view().h_full().w(relative(frac)).bg(col).into_element()
+    let known = dash.history_start.is_some_and(|d| d <= dash.selected_date);
+    let ref_line = |value: Option<f64>| {
+        value
+            .map(|n| {
+                format!(
+                    "Previous 7 days: {n:.1} / day ({} days)",
+                    dash.reference_days
+                )
             })
-            .collect::<Vec<_>>()
-        })
-        .into_element();
-    let resolved_cnt = dash.completed_runs + dash.blocked_runs + dash.failed_runs;
-    let c3 = kpi_card(KpiSpec {
-        mark: Icon::Check,
-        mark_tint: SUCCESS,
-        eyebrow: "RUN SUCCESS RATE",
-        hero: rate_hero,
-        pill_text: Some((format!("{resolved_cnt} resolved"), rate_tone)),
-        sub_primary: "Completed ÷ resolved runs".into(),
-        sub_secondary: if dash.active_runs > 0 {
-            format!("Excludes {} in-flight active runs", dash.active_runs)
-        } else {
-            format!("Across {}", dash.range.description())
+            .unwrap_or_else(|| "Previous 7 days: insufficient history".into())
+    };
+    let cards = [
+        KpiSpec {
+            mark: Icon::Board,
+            mark_tint: ACCENT,
+            eyebrow: "CREATED CARDS",
+            hero: if known {
+                dash.created_total.to_string()
+            } else {
+                "—".into()
+            },
+            pill_text: Some((
+                if dash.baseline_known {
+                    format_delta_pct(dash.created_total, dash.previous_created)
+                } else {
+                    "Insufficient history".into()
+                },
+                Tone::Neutral,
+            )),
+            sub_primary: format!(
+                "Baseline: {}",
+                if dash.baseline_known {
+                    dash.previous_created.to_string()
+                } else {
+                    "—".into()
+                }
+            ),
+            sub_secondary: if dash.range == RangeWindow::Today {
+                ref_line(dash.reference_created)
+            } else {
+                "Created within the selected period".into()
+            },
+            extra_bar: None,
         },
-        extra_bar: Some(outcome_bar),
-    });
-
-    let lead_hero = dash
-        .median_lead_time_ms
-        .map(format_duration_compact)
-        .unwrap_or_else(|| "—".into());
-    let queue_str = dash
-        .median_queue_wait_ms
-        .map(format_duration_compact)
-        .unwrap_or_else(|| "—".into());
-    let c4 = kpi_card(KpiSpec {
-        mark: Icon::Trigger,
-        mark_tint: ATTENTION,
-        eyebrow: "CYCLE & QUEUE",
-        hero: lead_hero,
-        pill_text: Some(("p50 lead".into(), Tone::Neutral)),
-        sub_primary: "Execution start → Merge median".into(),
-        sub_secondary: format!("Queue wait p50: {queue_str}"),
-        extra_bar: None,
-    });
-
+        KpiSpec {
+            mark: Icon::GitMerge,
+            mark_tint: SUCCESS,
+            eyebrow: "MERGED CARDS",
+            hero: if known {
+                dash.merged_total.to_string()
+            } else {
+                "—".into()
+            },
+            pill_text: Some((
+                if dash.baseline_known {
+                    format_delta_pct(dash.merged_total, dash.prev_merged_total)
+                } else {
+                    "Insufficient history".into()
+                },
+                Tone::Neutral,
+            )),
+            sub_primary: format!("{} local · {} PR", dash.local_merges, dash.pr_merges),
+            sub_secondary: if dash.range == RangeWindow::Today {
+                ref_line(dash.reference_merged)
+            } else {
+                "Unique merged Cards in the period".into()
+            },
+            extra_bar: None,
+        },
+        KpiSpec {
+            mark: Icon::Projects,
+            mark_tint: ACCENT,
+            eyebrow: "CONTRIBUTING PROJECTS",
+            hero: if known {
+                dash.project_stats.len().to_string()
+            } else {
+                "—".into()
+            },
+            pill_text: None,
+            sub_primary: "Created, merged or executed".into(),
+            sub_secondary: "Unique Projects · breakdown below".into(),
+            extra_bar: None,
+        },
+        KpiSpec {
+            mark: Icon::Agent,
+            mark_tint: ACCENT,
+            eyebrow: "AGENTS USED",
+            hero: if known {
+                format!("{} profiles", dash.used_profiles)
+            } else {
+                "—".into()
+            },
+            pill_text: None,
+            sub_primary: format!(
+                "{} known providers · {} unknown",
+                dash.providers, dash.unknown_providers
+            ),
+            sub_secondary: format!(
+                "{} new starts · {} overlapping runs",
+                dash.scheduled_total, dash.used_runs
+            ),
+            extra_bar: None,
+        },
+    ]
+    .into_iter()
+    .map(kpi_card)
+    .collect::<Vec<_>>();
+    let mut iter = cards.into_iter();
     if narrow {
         view()
             .gap_3()
-            .child(view().flex_row().gap_3().child(c1).child(c2))
-            .child(view().flex_row().gap_3().child(c3).child(c4))
+            .child(
+                view()
+                    .flex_row()
+                    .gap_3()
+                    .children(iter.by_ref().take(2).collect::<Vec<_>>()),
+            )
+            .child(view().flex_row().gap_3().children(iter.collect::<Vec<_>>()))
     } else {
-        view()
-            .flex_row()
-            .gap_3()
-            .child(c1)
-            .child(c2)
-            .child(c3)
-            .child(c4)
+        view().flex_row().gap_3().children(iter.collect::<Vec<_>>())
     }
 }
 
@@ -485,7 +514,7 @@ fn chart_y_axis(top_tick: usize) -> View {
         )
 }
 
-fn render_kanban_flow_chart(dash: &Dashboard) -> View {
+fn render_kanban_flow_chart(ui: Ui, dash: &Dashboard) -> View {
     let top_tick = nice_ceil_tick(dash.max_daily_kanban);
     let n = dash.days.len();
     let col_gap = if n > 45 {
@@ -508,7 +537,8 @@ fn render_kanban_flow_chart(dash: &Dashboard) -> View {
     let columns = dash
         .days
         .iter()
-        .map(|day| {
+        .enumerate()
+        .map(|(day_index, day)| {
             let c_h = if day.created_cards == 0 {
                 0.0
             } else {
@@ -524,7 +554,17 @@ fn render_kanban_flow_chart(dash: &Dashboard) -> View {
                 "Merged: {} ({} local · {} PR)",
                 day.merged_cards, day.local_merges, day.pr_merges
             );
-            let tip_created = format!("Created: {}", day.created_cards);
+            let avg = dash.moving_average[day_index];
+            let tip_created = format!(
+                "Created: {} · 7D mean: {}{}",
+                day.created_cards,
+                avg.map(|v| format!("{v:.1}")).unwrap_or_else(|| "—".into()),
+                if day.date_key == dash.annual_end.to_string() {
+                    " · In progress"
+                } else {
+                    ""
+                }
+            );
 
             view()
                 .flex_1()
@@ -548,6 +588,20 @@ fn render_kanban_flow_chart(dash: &Dashboard) -> View {
                         .child(label(tip_merged).text_size(px(11.5)).text_color(SUCCESS))
                         .child(muted(tip_created).text_size(px(11.5))),
                 )
+                .relative()
+                .child(if let Some(avg) = avg {
+                    view()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom(px((avg as f32 / top_tick as f32 * usable_h).min(usable_h)))
+                        .h(px(2.))
+                        .bg(ATTENTION)
+                        .pointer_events(PointerEvents::None)
+                        .into_element()
+                } else {
+                    view().into_element()
+                })
                 .child(
                     view()
                         .w_full()
@@ -579,6 +633,10 @@ fn render_kanban_flow_chart(dash: &Dashboard) -> View {
     let ticks = x_axis_ticks(&dash.days);
 
     card_surface()
+        .child(if dash.range == RangeWindow::Today { row()
+            .child(choice(ui,"Recent 14 days","trend-14",ui.insights.trend_days.get() == 14))
+            .child(choice(ui,"Recent 30 days","trend-30",ui.insights.trend_days.get() == 30)).into_element()
+        } else { view().into_element() })
         .child(
             view()
                 .flex_row()
@@ -590,12 +648,12 @@ fn render_kanban_flow_chart(dash: &Dashboard) -> View {
                     view()
                         .gap_0p5()
                         .child(
-                            label("Daily Kanban Flow")
+                            label("Recent daily flow")
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_size(px(14.)),
                         )
                         .child(
-                            muted("Cards created vs merged per local day · only merged Cards count as completed")
+                            muted("Daily created / merged · line: 7-day mean of complete days · today is partial")
                                 .text_size(px(11.5)),
                         ),
                 )
@@ -682,197 +740,449 @@ fn render_kanban_flow_chart(dash: &Dashboard) -> View {
         )
 }
 
-fn render_agent_scheduling_chart(dash: &Dashboard) -> View {
-    let top_tick = nice_ceil_tick(dash.max_daily_runs);
-    let n = dash.days.len();
-    let col_gap = if n > 45 {
-        1.5
-    } else if n > 14 {
-        3.5
-    } else {
-        12.0
-    };
-    let bar_max_w = if n > 45 {
-        7.0
-    } else if n > 14 {
-        14.0
-    } else {
-        34.0
-    };
-    let usable_h = CHART_HEIGHT - 8.0;
+fn now_ms(ui: Ui) -> u64 {
+    ui.insights.anchor_ms.get().unwrap_or_else(|| {
+        // The shared clock schedules refreshes; fresh snapshots must use the actual wall time.
+        ui.runtime_clock.get();
+        canban_types::now()
+    })
+}
 
-    let columns = dash
-        .days
-        .iter()
-        .map(|day| {
-            let total = day.total_runs();
-            let total_h = if total == 0 {
-                0.0
-            } else {
-                (total as f32 / top_tick as f32 * usable_h).max(3.0)
-            };
+pub fn select_date(ui: Ui, date: Option<chrono::NaiveDate>) {
+    let actual = chrono::DateTime::from_timestamp_millis(now_ms(ui) as i64)
+        .unwrap()
+        .with_timezone(&chrono::Local)
+        .date_naive();
+    if date.is_some_and(|d| d > actual) {
+        return;
+    }
+    ui.insights.selected_date.set(date);
+    ui.scrolls.with(|s| {
+        s.insert("insights:dashboard".into(), Point::default());
+    });
+    if let Some(scroll) = ui.insights.scroll.get_untracked() {
+        scroll.scroll_to(Point::default(), false);
+    }
+    ui.insights
+        .date_text
+        .set(date.map(|d| d.to_string()).unwrap_or_default());
+    ui.insights.sample_page.set(0);
+    ui.insights.drilldown.set(String::new());
+}
 
-            let segments = if total == 0 {
-                Vec::new()
-            } else {
-                [
-                    (day.active_runs, ACCENT),
-                    (day.failed_runs, DANGER),
-                    (day.blocked_runs, ATTENTION),
-                    (day.completed_runs, SUCCESS),
-                ]
-                .into_iter()
-                .filter(|(cnt, _)| *cnt > 0)
-                .map(|(cnt, color)| {
-                    let seg_h = (cnt as f32 / total as f32 * total_h).max(2.0);
-                    view().w_full().h(px(seg_h)).bg(color).into_element()
-                })
-                .collect::<Vec<_>>()
-            };
-
-            let tip_title = format!("{} ({}) · {} runs", day.date_key, day.weekday_label, total);
-            let tip_breakdown = format!(
-                "{} ok · {} blocked · {} failed · {} active",
-                day.completed_runs, day.blocked_runs, day.failed_runs, day.active_runs
+/// Shared intents for pointer controls and searchable Command Palette actions.
+pub fn intent(ui: Ui, operation: &str) {
+    use chrono::Duration;
+    match operation {
+        "today" => {
+            select_date(ui, None);
+            set_range(ui, RangeWindow::Today);
+        }
+        "previous-day" | "next-day" => {
+            let actual = chrono::DateTime::from_timestamp_millis(now_ms(ui) as i64)
+                .unwrap()
+                .with_timezone(&chrono::Local)
+                .date_naive();
+            let day = ui.insights.selected_date.get().unwrap_or(actual);
+            select_date(
+                ui,
+                Some(day + Duration::days(if operation == "previous-day" { -1 } else { 1 })),
             );
+        }
+        "apply-date" => {
+            if let Ok(date) =
+                chrono::NaiveDate::parse_from_str(&ui.insights.date_text.get(), "%Y-%m-%d")
+            {
+                select_date(ui, Some(date));
+            } else {
+                ui.notify("Use a date in YYYY-MM-DD format");
+            }
+        }
+        "compare-previous" => ui.insights.comparison.set(Comparison::Previous),
+        "compare-week" => ui.insights.comparison.set(Comparison::LastWeek),
+        "metric-merged" => ui.insights.metric.set(ActivityMetric::Merged),
+        "metric-created" => ui.insights.metric.set(ActivityMetric::Created),
+        "metric-runs" => ui.insights.metric.set(ActivityMetric::Runs),
+        "hourly-merged" => ui.insights.hourly_metric.set(ActivityMetric::Merged),
+        "hourly-created" => ui.insights.hourly_metric.set(ActivityMetric::Created),
+        "hourly-runs" => ui.insights.hourly_metric.set(ActivityMetric::Runs),
+        "trend-14" => ui.insights.trend_days.set(14),
+        "trend-30" => ui.insights.trend_days.set(30),
+        "efficiency" => ui.insights.efficiency_open.update(|v| *v = !*v),
+        "samples-cycle" | "samples-queue" => {
+            ui.insights.queue_samples.set(operation == "samples-queue");
+            ui.insights.sample_page.set(0);
+            ui.insights.efficiency_open.set(true);
+        }
+        "samples-next" => {
+            let d = dashboard(ui);
+            let count = if ui.insights.queue_samples.get() {
+                d.efficiency.queue.len()
+            } else {
+                d.efficiency.cycle.len()
+            };
+            ui.insights
+                .sample_page
+                .update(|p| *p = (*p + 1).min(count.div_ceil(20).saturating_sub(1)));
+        }
+        "samples-previous" => ui.insights.sample_page.update(|p| *p = p.saturating_sub(1)),
+        "group-provider" => ui.insights.provider_group.set(true),
+        "group-profile" => ui.insights.provider_group.set(false),
+        "sort-created" => ui.insights.sort_created.set(true),
+        "sort-merged" => ui.insights.sort_created.set(false),
+        "cards-created" => ui.insights.drilldown.set("created".into()),
+        "cards-merged" => ui.insights.drilldown.set("merged".into()),
+        "cards-close" => ui.insights.drilldown.set(String::new()),
+        _ => {}
+    }
+}
 
+fn heading(title: &str) -> Text {
+    label(title.to_owned())
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_size(px(14.))
+}
+fn note(value: impl Into<String>) -> Text {
+    muted(value.into()).text_size(px(11.5))
+}
+fn row() -> View {
+    view().flex_row().flex_wrap().items_center().gap_3()
+}
+fn choice(ui: Ui, title: &'static str, op: &'static str, selected: bool) -> impl IntoElement {
+    compact_action(
+        title,
+        if selected {
+            Variant::Secondary
+        } else {
+            Variant::Quiet
+        },
+        move |_| intent(ui, op),
+    )
+    .accessibility_label(title)
+}
+fn metric_choices(ui: Ui, annual: bool) -> View {
+    let metric = if annual {
+        ui.insights.metric.get()
+    } else {
+        ui.insights.hourly_metric.get()
+    };
+    row()
+        .child(choice(
+            ui,
+            "Merged",
+            if annual {
+                "metric-merged"
+            } else {
+                "hourly-merged"
+            },
+            metric == ActivityMetric::Merged,
+        ))
+        .child(choice(
+            ui,
+            "Created",
+            if annual {
+                "metric-created"
+            } else {
+                "hourly-created"
+            },
+            metric == ActivityMetric::Created,
+        ))
+        .child(choice(
+            ui,
+            "Agent starts",
+            if annual { "metric-runs" } else { "hourly-runs" },
+            metric == ActivityMetric::Runs,
+        ))
+}
+
+fn render_period(ui: Ui, dash: &Dashboard) -> View {
+    let actual = dash.annual_end;
+    let dash_date = dash.selected_date;
+    let valid_date =
+        chrono::NaiveDate::parse_from_str(&ui.insights.date_text.get(), "%Y-%m-%d").ok();
+    view()
+        .gap_2()
+        .child(
+            row()
+                .child(chrome_button(Icon::Back, "Previous day", move |_| {
+                    intent(ui, "previous-day")
+                }))
+                .child(label(dash.period_label.clone()).font_weight(FontWeight::MEDIUM))
+                .child(chrome_button_disabled(
+                    Icon::Forward,
+                    "Next day",
+                    move || dash_date >= actual,
+                    move |_| intent(ui, "next-day"),
+                ))
+                .child(compact_action("Today", Variant::Quiet, move |_| {
+                    intent(ui, "today")
+                }))
+                .child(note(dash.timezone.clone())),
+        )
+        .child(
+            row()
+                .child(
+                    field(ui.insights.date_text, "YYYY-MM-DD")
+                        .label("Insights date")
+                        .w(px(140.)),
+                )
+                .child(
+                    compact_action("Apply date", Variant::Quiet, move |_| {
+                        intent(ui, "apply-date")
+                    })
+                    .disabled(valid_date.is_none_or(|d| d > actual)),
+                )
+                .child(choice(
+                    ui,
+                    "Previous period",
+                    "compare-previous",
+                    ui.insights.comparison.get() == Comparison::Previous,
+                ))
+                .child(if dash.range == RangeWindow::Today {
+                    choice(
+                        ui,
+                        "Last week, same day",
+                        "compare-week",
+                        ui.insights.comparison.get() == Comparison::LastWeek,
+                    )
+                    .into_element()
+                } else {
+                    view().into_element()
+                }),
+        )
+        .child(note(format!("Baseline: {}", dash.comparison_label)))
+        .child(
+            if dash.history_start.is_none_or(|h| h > dash.selected_date) {
+                note("No retained history for this period; unavailable counts are shown as —.")
+                    .into_element()
+            } else if dash
+                .history_start
+                .is_some_and(|h| h.to_string() > dash.window_start_key)
+            {
+                note("Partial history: the selected period starts before retained records.")
+                    .into_element()
+            } else {
+                view().into_element()
+            },
+        )
+}
+
+fn render_hourly(ui: Ui, dash: &Dashboard) -> View {
+    let maximum = dash
+        .hours
+        .iter()
+        .filter(|h| !h.future)
+        .map(|h| h.current.max(h.previous))
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let cols = dash
+        .hours
+        .iter()
+        .map(|h| {
+            let title = format!(
+                "{:02}:00 · cumulative {} / baseline {}{}",
+                h.hour,
+                h.current,
+                h.previous,
+                if h.future { " · future" } else { "" }
+            );
             view()
                 .flex_1()
                 .min_w(px(0.))
                 .h(px(CHART_HEIGHT))
-                .rounded(px(4.))
-                .hover(|s| s.bg(CARD_HOVER))
                 .justify_end()
-                .items_center()
-                .tooltip(
-                    tooltip_box()
-                        .gap_0p5()
-                        .child(
-                            text(tip_title)
-                                .font_family(MONO_FONT)
-                                .text_size(px(11.5))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(TEXT),
-                        )
-                        .child(muted(tip_breakdown).text_size(px(11.5))),
-                )
-                .child(
+                .relative()
+                .tooltip(tooltip_box().child(note(title)))
+                .child(if h.future {
+                    view().into_element()
+                } else {
                     view()
-                        .w_full()
-                        .max_w(px(bar_max_w))
-                        .h(px(total_h))
-                        .rounded(px(2.))
-                        .overflow_hidden()
-                        .justify_end()
-                        .children(segments),
+                        .flex_row()
+                        .gap(px(1.))
+                        .items_end()
+                        .child(
+                            view()
+                                .flex_1()
+                                .h(px(h.previous as f32 / maximum as f32 * (CHART_HEIGHT - 8.)))
+                                .bg(BORDER),
+                        )
+                        .child(
+                            view()
+                                .flex_1()
+                                .h(px(h.current as f32 / maximum as f32 * (CHART_HEIGHT - 8.)))
+                                .bg(ACCENT),
+                        )
+                        .into_element()
+                })
+                .into_element()
+        })
+        .collect::<Vec<_>>();
+    card_surface()
+        .child(heading("Hourly comparison"))
+        .child(note(
+            "Cumulative selected metric · current day / baseline · future hours left blank",
+        ))
+        .child(metric_choices(ui, false))
+        .child(
+            view()
+                .flex_row()
+                .items_end()
+                .gap_1()
+                .child(chart_y_axis(maximum))
+                .children(cols),
+        )
+        .child(
+            row()
+                .justify_between()
+                .child(note("00:00"))
+                .child(note("06:00"))
+                .child(note("12:00"))
+                .child(note("18:00"))
+                .child(note("24:00")),
+        )
+}
+
+fn render_projects(ui: Ui, dash: &Dashboard) -> View {
+    let mut projects = dash.project_stats.clone();
+    if ui.insights.sort_created.get() {
+        projects.sort_by_key(|p| std::cmp::Reverse(p.created));
+    }
+    let rows = projects
+        .into_iter()
+        .map(|p| {
+            let pid = p.id.clone();
+            let share = if dash.merged_total > 0 {
+                format!("{:.1}%", p.merged as f64 * 100. / dash.merged_total as f64)
+            } else {
+                "—".into()
+            };
+            let spark = p
+                .recent_merges
+                .iter()
+                .map(|v| match v {
+                    0 => '·',
+                    1 => '▁',
+                    2..=3 => '▃',
+                    4..=6 => '▅',
+                    _ => '█',
+                })
+                .collect::<String>();
+            press_target()
+                .w_full()
+                .p_2()
+                .rounded(px(6.))
+                .hover(|s| s.bg(CARD_HOVER))
+                .accessibility_label(format!("Insights Project: {}", p.name))
+                .on_press(move |_: &()| {
+                    ui.insights.scope_project.set(pid.clone());
+                    ui.insights.sample_page.set(0);
+                })
+                .child(
+                    row()
+                        .child(label(p.name).w(px(160.)).truncate())
+                        .child(note(format!("{} created", p.created)))
+                        .child(note(format!("{} merged ({share})", p.merged)))
+                        .child(note(format!(
+                            "{} active Cards · {} profiles",
+                            p.cards.len(),
+                            p.profiles.len()
+                        )))
+                        .child(
+                            text(spark)
+                                .font_family(MONO_FONT)
+                                .text_color(SUCCESS)
+                                .tooltip(
+                                    tooltip_box().child(note("Daily merges in the last 7 days")),
+                                ),
+                        ),
                 )
                 .into_element()
         })
         .collect::<Vec<_>>();
-
-    let ticks = x_axis_ticks(&dash.days);
-
-    card_surface()
-        .child(
-            view()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(
-                    view()
-                        .gap_0p5()
-                        .child(
-                            label("Daily Agent Scheduling")
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_size(px(14.)),
-                        )
-                        .child(
-                            muted("Scheduled Agent runs stacked by execution outcome")
-                                .text_size(px(11.5)),
-                        ),
-                )
-                .child(
-                    view()
-                        .flex_row()
-                        .flex_wrap()
-                        .items_center()
-                        .gap_3()
-                        .child(legend_swatch(SUCCESS, "Completed"))
-                        .child(legend_swatch(ATTENTION, "Blocked"))
-                        .child(legend_swatch(DANGER, "Failed"))
-                        .child(legend_swatch(ACCENT, "Active")),
-                ),
-        )
-        .child(
-            view()
-                .flex_row()
-                .items_center()
-                .child(chart_y_axis(top_tick))
-                .child(
-                    view()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .h(px(CHART_HEIGHT))
-                        .relative()
-                        .child(
-                            view()
-                                .absolute()
-                                .left_0()
-                                .right_0()
-                                .top(px(4.))
-                                .h(px(1.))
-                                .bg(BORDER)
-                                .opacity(0.45)
-                                .pointer_events(PointerEvents::None),
-                        )
-                        .child(
-                            view()
-                                .absolute()
-                                .left_0()
-                                .right_0()
-                                .top(px(CHART_HEIGHT / 2.0))
-                                .h(px(1.))
-                                .bg(BORDER)
-                                .opacity(0.45)
-                                .pointer_events(PointerEvents::None),
-                        )
-                        .child(
-                            view()
-                                .absolute()
-                                .left_0()
-                                .right_0()
-                                .bottom_0()
-                                .h(px(1.))
-                                .bg(BORDER)
-                                .pointer_events(PointerEvents::None),
-                        )
-                        .child(
-                            view()
-                                .w_full()
-                                .h_full()
-                                .flex_row()
-                                .items_end()
-                                .gap(px(col_gap))
-                                .children(columns),
-                        ),
-                ),
-        )
-        .child(
-            view().pl(px(28.)).flex_row().justify_between().children(
-                ticks
-                    .into_iter()
-                    .map(|t| {
-                        text(t)
-                            .font_family(MONO_FONT)
-                            .text_size(px(10.5))
-                            .text_color(MUTED)
-                            .into_element()
-                    })
-                    .collect::<Vec<_>>(),
+    let mut panel = card_surface().child(
+        row()
+            .justify_between()
+            .child(heading("Project contributions"))
+            .child(
+                row()
+                    .child(choice(
+                        ui,
+                        "Sort by merged",
+                        "sort-merged",
+                        !ui.insights.sort_created.get(),
+                    ))
+                    .child(choice(
+                        ui,
+                        "Sort by created",
+                        "sort-created",
+                        ui.insights.sort_created.get(),
+                    )),
             ),
-        )
+    );
+    if rows.is_empty() {
+        panel = panel.child(note("No Project activity in this period."));
+    }
+    panel.children(rows).child(note("Active Cards are unique Cards created, merged or executed in this period. Click a Project to scope Insights."))
+}
+
+fn render_agents(ui: Ui, dash: &Dashboard) -> View {
+    let provider_group = ui.insights.provider_group.get();
+    let mut panel = card_surface().child(
+        row().justify_between().child(heading("Agents used")).child(
+            row()
+                .child(choice(ui, "Profile", "group-profile", !provider_group))
+                .child(choice(ui, "Provider", "group-provider", provider_group)),
+        ),
+    );
+    if provider_group {
+        let mut grouped = std::collections::BTreeMap::<
+            String,
+            (usize, usize, std::collections::BTreeSet<String>),
+        >::new();
+        for p in &dash.profile_stats {
+            let g = grouped.entry(p.provider.clone()).or_default();
+            g.0 += 1;
+            g.1 += p.total_runs;
+            g.2.extend(p.card_ids.iter().cloned());
+        }
+        for (name, (profiles, starts, cards)) in grouped {
+            panel = panel.child(row().child(label(name).w(px(150.)).truncate()).child(note(
+                format!(
+                    "{profiles} profiles · {starts} new starts · {} Cards touched",
+                    cards.len()
+                ),
+            )));
+        }
+    } else {
+        for p in &dash.profile_stats {
+            panel = panel.child(
+                row()
+                    .child(label(format!("@{}", p.profile_id)).w(px(150.)).truncate())
+                    .child(note(p.provider.clone()))
+                    .child(note(format!(
+                        "{} starts · {} Cards",
+                        p.total_runs, p.cards_touched
+                    )))
+                    .child(note(format!(
+                        "Queue p50: {}",
+                        p.median_queue_wait_ms
+                            .map(format_duration_compact)
+                            .unwrap_or_else(|| "—".into())
+                    ))),
+            );
+        }
+    }
+    if dash.profile_stats.is_empty() {
+        panel = panel.child(note("No Agent execution observed in this period."));
+    }
+    let triggers = dash
+        .trigger_stats
+        .iter()
+        .map(|s| format!("{}: {}", s.kind.label(), s.count))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    panel.child(note(triggers)).child(note("Includes cross-day executions; starts count only launches in the period. Cards can involve several Agents. Provider uses retained run configuration, or current Profile configuration when unavailable."))
 }
 
 fn heatmap_level_bg(level: u8) -> AdaptiveColor {
@@ -884,432 +1194,406 @@ fn heatmap_level_bg(level: u8) -> AdaptiveColor {
         _ => SUCCESS.resolve(),
     }
 }
-
-fn render_heatmap_panel(weeks: &[HeatmapWeek]) -> View {
-    let cell_size = 15.0;
-    let cell_gap = 3.0;
-
-    let month_headers = weeks
+fn render_heatmap_panel(ui: Ui, dash: &Dashboard) -> View {
+    let annual_scroll = element_ref();
+    let cell_size = 14.;
+    let gap = 3.;
+    let headers = dash
+        .heatmap_weeks
         .iter()
         .map(|w| {
             view()
                 .w(px(cell_size))
-                .h(px(14.))
-                .child(if let Some(m) = &w.month_header {
-                    text(m.clone())
-                        .w(px(28.))
-                        .flex_shrink_0()
-                        .text_size(px(10.))
-                        .text_color(MUTED)
-                        .into_element()
-                } else {
-                    view().into_element()
-                })
-                .into_element()
-        })
-        .collect::<Vec<_>>();
-
-    let weekday_labels = ["Mon", "", "Wed", "", "Fri", "", "Sun"]
-        .into_iter()
-        .map(|lbl| {
-            view()
-                .h(px(cell_size))
-                .justify_center()
-                .pr_1p5()
+                .h(px(16.))
+                .flex_shrink_0()
                 .child(
-                    text(lbl)
-                        .font_family(MONO_FONT)
-                        .text_size(px(10.))
-                        .text_color(MUTED),
+                    note(w.month_header.clone().unwrap_or_default())
+                        .w(px(32.))
+                        .flex_shrink_0()
+                        .text_size(px(10.)),
                 )
                 .into_element()
         })
         .collect::<Vec<_>>();
-
-    let week_cols = weeks
+    let columns = dash
+        .heatmap_weeks
         .iter()
         .map(|w| {
-            let cells = w
-                .cells
-                .iter()
-                .map(|cell| {
-                    if cell.is_future {
-                        return view()
-                            .w(px(cell_size))
-                            .h(px(cell_size))
-                            .rounded(px(3.))
-                            .border_1()
-                            .border_color(BORDER)
-                            .opacity(0.25)
-                            .into_element();
-                    }
-                    let lvl = cell.level;
-                    let is_today = cell.is_today;
-                    let tip_head = format!(
-                        "{} ({}){}",
-                        cell.date_key,
-                        cell.weekday_label,
-                        if is_today { " · Today" } else { "" }
-                    );
-                    let tip_body = format!(
-                        "{} merged · {} scheduled runs",
-                        cell.merged_cards, cell.total_runs
-                    );
-
-                    view()
-                        .w(px(cell_size))
-                        .h(px(cell_size))
-                        .rounded(px(3.))
-                        .bg(move || heatmap_level_bg(lvl))
-                        .border_1()
-                        .border_color(if is_today { TEXT } else { CLEAR })
-                        .hover(|s| s.border_color(ACCENT))
-                        .tooltip(
-                            tooltip_box()
-                                .gap_0p5()
-                                .child(
-                                    text(tip_head)
-                                        .font_family(MONO_FONT)
-                                        .text_size(px(11.5))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(TEXT),
-                                )
-                                .child(muted(tip_body).text_size(px(11.5))),
-                        )
-                        .into_element()
-                })
-                .collect::<Vec<_>>();
-
-            view().gap(px(cell_gap)).children(cells).into_element()
-        })
-        .collect::<Vec<_>>();
-
-    let legend_cells = (0u8..=4)
-        .map(|lvl| {
             view()
-                .w(px(10.))
-                .h(px(10.))
-                .rounded(px(2.))
-                .bg(move || heatmap_level_bg(lvl))
+                .gap(px(gap))
+                .children(
+                    w.cells
+                        .iter()
+                        .map(|c| {
+                            if c.is_future {
+                                return view().w(px(cell_size)).h(px(cell_size)).into_element();
+                            }
+                            let date =
+                                chrono::NaiveDate::parse_from_str(&c.date_key, "%Y-%m-%d").unwrap();
+                            let title = if c.known {
+                                format!(
+                                    "{} · {} created · {} merged · {} Agent starts",
+                                    c.date_key, c.created_cards, c.merged_cards, c.total_runs
+                                )
+                            } else {
+                                format!("{} · no retained history", c.date_key)
+                            };
+                            view()
+                                .w(px(cell_size))
+                                .h(px(cell_size))
+                                .tooltip(tooltip_box().child(note(title.clone())))
+                                .child(
+                                    press_target()
+                                        .w(px(cell_size))
+                                        .h(px(cell_size))
+                                        .min_w(px(cell_size))
+                                        .min_h(px(cell_size))
+                                        .rounded(px(3.))
+                                        .bg(heatmap_level_bg(c.level))
+                                        .border_1()
+                                        .border_color(if c.is_today {
+                                            TEXT
+                                        } else if c.in_range {
+                                            ACCENT
+                                        } else {
+                                            CLEAR
+                                        })
+                                        .opacity(if c.known { 1. } else { 0.25 })
+                                        .hover(|s| s.border_color(TEXT))
+                                        .accessibility_label(title)
+                                        .on_press(move |_: &()| {
+                                            select_date(ui, Some(date));
+                                            set_range(ui, RangeWindow::Today);
+                                        }),
+                                )
+                                .into_element()
+                        })
+                        .collect::<Vec<_>>(),
+                )
                 .into_element()
         })
         .collect::<Vec<_>>();
-
-    card_surface()
-        .flex_shrink_0()
-        .justify_between()
-        .child(
-            view()
-                .gap_0p5()
-                .child(
-                    label("Activity Cadence · 12 Weeks")
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(14.)),
-                )
-                .child(
-                    muted("Daily merges + Agent runs across the past 12 weeks").text_size(px(11.5)),
-                ),
-        )
-        .child(
-            view()
-                .gap_1()
-                .child(
-                    view()
-                        .pl(px(30.))
-                        .flex_row()
-                        .gap(px(cell_gap))
-                        .children(month_headers),
-                )
-                .child(
-                    view()
-                        .flex_row()
-                        .items_start()
-                        .child(view().gap(px(cell_gap)).children(weekday_labels))
-                        .child(view().flex_row().gap(px(cell_gap)).children(week_cols)),
-                ),
-        )
+    let grid = view()
+        .min_w(px(dash.heatmap_weeks.len() as f32 * (cell_size + gap) + 32.))
+        .gap_1()
+        .child(view().flex_row().pl(px(32.)).gap(px(gap)).children(headers))
         .child(
             view()
                 .flex_row()
-                .items_center()
-                .justify_between()
-                .gap_3()
-                .pt_1()
-                .child(muted("Hover any day square for totals").text_size(px(11.)))
                 .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_1()
-                        .flex_shrink_0()
-                        .child(muted("Less").text_size(px(10.5)))
-                        .children(legend_cells)
-                        .child(muted("More").text_size(px(10.5))),
-                ),
-        )
-}
-
-fn render_roles_and_triggers_panel(
-    ui: Ui,
-    profiles: &[ProfileStat],
-    triggers: &[TriggerStat],
-) -> View {
-    let all_cfg_profiles = ui.all_profiles.get();
-    let max_role_runs = profiles.first().map(|p| p.total_runs).unwrap_or(1).max(1);
-
-    let role_rows = if profiles.is_empty() {
-        vec![
-            muted("No scheduled Agent runs in this time range.")
-                .text_size(px(CAPTION_SIZE))
-                .into_element(),
-        ]
-    } else {
-        profiles
-            .iter()
-            .take(6)
-            .map(|p| {
-                let mark = all_cfg_profiles
-                    .iter()
-                    .find(|cfg_p| cfg_p.id == p.profile_id)
-                    .map(|cfg_p| crate::profiles::provider(cfg_p).0)
-                    .unwrap_or_else(|| crate::profiles::agent_icon(&p.profile_id));
-                let resolved = p.completed_runs + p.blocked_runs + p.failed_runs;
-                let rate_txt = (p.completed_runs * 100 + resolved / 2)
-                    .checked_div(resolved)
-                    .map(|pct| format!(" · {pct}% ok"))
-                    .unwrap_or_default();
-                let bar_frac = (p.total_runs as f32 / max_role_runs as f32).clamp(0.04, 1.0);
-                let total_p = p.total_runs.max(1);
-                let segments = [
-                    (p.completed_runs, SUCCESS),
-                    (p.blocked_runs, ATTENTION),
-                    (p.failed_runs, DANGER),
-                    (p.active_runs, ACCENT),
-                ]
-                .into_iter()
-                .filter(|(c, _)| *c > 0)
-                .map(|(c, col)| {
-                    view()
-                        .h_full()
-                        .w(relative(c as f32 / total_p as f32))
-                        .bg(col)
-                        .into_element()
-                })
-                .collect::<Vec<_>>();
-
-                view()
-                    .gap_1()
-                    .child(
-                        view()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .child(
+                    view().w(px(32.)).gap(px(gap)).children(
+                        ["Mon", "", "Wed", "", "Fri", "", "Sun"]
+                            .into_iter()
+                            .map(|d| {
                                 view()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap_1p5()
-                                    .min_w(px(0.))
-                                    .child(icon_colored(mark, 14.))
-                                    .child(
-                                        text(format!("@{}", p.profile_id))
-                                            .font_family(MONO_FONT)
-                                            .text_size(px(12.))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(TEXT)
-                                            .truncate(),
-                                    ),
-                            )
-                            .child(
-                                text(format!("{} runs{rate_txt}", p.total_runs))
-                                    .font_family(MONO_FONT)
-                                    .text_size(px(11.5))
-                                    .text_color(MUTED),
-                            ),
-                    )
-                    .child(
-                        view()
-                            .w_full()
-                            .h(px(6.))
-                            .rounded_full()
-                            .bg(INSET)
-                            .overflow_hidden()
-                            .child(
-                                view()
-                                    .h_full()
-                                    .w(relative(bar_frac))
-                                    .rounded_full()
-                                    .overflow_hidden()
-                                    .flex_row()
-                                    .children(segments),
-                            ),
-                    )
-                    .into_element()
-            })
-            .collect::<Vec<_>>()
-    };
-
-    let trigger_rows = triggers
-        .iter()
-        .map(|t| {
-            let trig_icon = match t.kind {
-                TriggerKind::Workflow => Icon::Trigger,
-                TriggerKind::Mention => Icon::MessageSquare,
-                TriggerKind::Interactive => Icon::Terminal,
-            };
-            view()
-                .flex_row()
-                .items_center()
-                .gap_2p5()
-                .child(
-                    view()
-                        .w(px(156.))
-                        .flex_shrink_0()
-                        .flex_row()
-                        .items_center()
-                        .gap_1p5()
-                        .child(icon(trig_icon).w(px(13.)).h(px(13.)))
-                        .child(label(t.kind.label()).text_size(px(12.)).truncate()),
-                )
-                .child(
-                    view()
-                        .flex_1()
-                        .h(px(6.))
-                        .rounded_full()
-                        .bg(INSET)
-                        .overflow_hidden()
-                        .child(if t.count > 0 {
-                            view()
-                                .h_full()
-                                .w(relative((t.share_pct as f32 / 100.0).clamp(0.04, 1.0)))
-                                .rounded_full()
-                                .bg(ACCENT)
-                                .into_element()
-                        } else {
-                            view().into_element()
-                        }),
-                )
-                .child(
-                    view().w(px(76.)).flex_shrink_0().items_end().child(
-                        text(format!("{} ({}%)", t.count, t.share_pct))
-                            .font_family(MONO_FONT)
-                            .text_size(px(11.5))
-                            .text_color(MUTED),
+                                    .h(px(cell_size))
+                                    .child(note(d).text_size(px(9.)))
+                                    .into_element()
+                            })
+                            .collect::<Vec<_>>(),
                     ),
                 )
-                .into_element()
-        })
-        .collect::<Vec<_>>();
+                .child(view().flex_row().gap(px(gap)).children(columns)),
+        );
+    card_surface().child(row().justify_between().child(heading("Yearly activity")).child(metric_choices(ui,true)))
+        .child(note(format!("{} – {} · Last 365 days · {}",dash.annual_start,dash.annual_end,ui.insights.metric.get().label())))
+        .child(scroll().horizontal().w_full().element_ref(&annual_scroll)
+            .content_offset(Point::new(px(10_000.),px(0.)))
+            .on_layout(move |bounds: &Bounds<Points>| {
+                let width = bounds.size.width.0;
+                if (ui.insights.annual_width.get_untracked() - width).abs() > 0.5 {
+                    ui.insights.annual_width.set(width);
+                    annual_scroll.scroll_to_end(false);
+                }
+            }).child(grid))
+        .child(row().justify_between().child(note(format!("{} active days · Current streak: {}d · Longest: {}d",dash.active_days,dash.current_streak,dash.longest_streak)))
+            .child(row().child(note("Less")).children((0..=4).map(|n| view().w(px(10.)).h(px(10.)).rounded(px(2.)).bg(heatmap_level_bg(n)).into_element()).collect::<Vec<_>>()).child(note("More"))))
+        .child(note("Select a tile to inspect that date. Faded tiles precede retained history. Project scope applies; the annual range stays fixed."))
+}
 
-    card_surface()
-        .flex_1()
-        .min_w(px(0.))
-        .gap_3()
+fn duration_text(value: Option<u64>) -> String {
+    value
+        .map(format_duration_compact)
+        .unwrap_or_else(|| "—".into())
+}
+fn render_efficiency(ui: Ui, dash: &Dashboard) -> View {
+    let open = ui.insights.efficiency_open.get();
+    let mut panel = card_surface().child(
+        press_target()
+            .w_full()
+            .on_press(move |_: &()| intent(ui, "efficiency"))
+            .accessibility_label("Toggle efficiency details")
+            .child(
+                row()
+                    .justify_between()
+                    .child(heading(if open {
+                        "▾ Efficiency & timing"
+                    } else {
+                        "▸ Efficiency & timing"
+                    }))
+                    .child(note(format!(
+                        "Cycle p50: {} · Queue p50: {}",
+                        duration_text(dash.median_lead_time_ms),
+                        duration_text(dash.median_queue_wait_ms)
+                    ))),
+            ),
+    );
+    if !open {
+        return panel;
+    }
+    panel = panel
+        .child(note(format!("Baseline: {}", dash.comparison_label)))
         .child(
-            view()
-                .gap_0p5()
-                .child(
-                    label("Agent Roles & Scheduling Triggers")
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(14.)),
-                )
-                .child(muted("Throughput by @identity and dispatch origin").text_size(px(11.5))),
+            row()
+                .child(label("Metric").w(px(205.)))
+                .child(note("Current / Baseline / Change / Samples")),
+        );
+    for (title, current, previous, p) in [
+        (
+            "Execution → merge, p50",
+            &dash.efficiency.cycle,
+            &dash.efficiency.previous_cycle,
+            50,
+        ),
+        (
+            "Execution → merge, p90",
+            &dash.efficiency.cycle,
+            &dash.efficiency.previous_cycle,
+            90,
+        ),
+        (
+            "Queue → start, p50",
+            &dash.efficiency.queue,
+            &dash.efficiency.previous_queue,
+            50,
+        ),
+        (
+            "Queue → start, p90",
+            &dash.efficiency.queue,
+            &dash.efficiency.previous_queue,
+            90,
+        ),
+    ] {
+        let value = model::percentile(current, p);
+        let baseline = model::percentile(previous, p);
+        let delta = match (value, baseline) {
+            (Some(a), Some(b)) => format!(
+                "{}{}",
+                if a >= b { "+" } else { "−" },
+                format_duration_compact(a.abs_diff(b))
+            ),
+            _ => "—".into(),
+        };
+        let op = if title.starts_with("Queue") {
+            "samples-queue"
+        } else {
+            "samples-cycle"
+        };
+        panel = panel.child(
+            press_target()
+                .w_full()
+                .p_2()
+                .hover(|s| s.bg(CARD_HOVER))
+                .on_press(move |_: &()| intent(ui, op))
+                .accessibility_label(format!("Inspect {title}"))
+                .child(row().child(label(title).w(px(205.))).child(note(format!(
+                    "{} / {} / {} / n={} vs {}",
+                    duration_text(value),
+                    duration_text(baseline),
+                    delta,
+                    current.len(),
+                    previous.len()
+                )))),
+        );
+    }
+    panel = panel.child(note("Cycle includes elapsed waiting between first execution and merge. Queue samples belong to runs started in the selected period. Missing timestamps are excluded; small samples are descriptive."));
+    let queue = ui.insights.queue_samples.get();
+    let samples = if queue {
+        &dash.efficiency.queue
+    } else {
+        &dash.efficiency.cycle
+    };
+    let pages = samples.len().div_ceil(20).max(1);
+    let page = ui.insights.sample_page.get().min(pages - 1);
+    panel = panel
+        .child(
+            row()
+                .child(choice(ui, "Merged Card samples", "samples-cycle", !queue))
+                .child(choice(ui, "Queue samples", "samples-queue", queue)),
         )
-        .child(view().gap_2().children(role_rows))
-        .child(view().h(px(1.)).bg(BORDER))
-        .child(view().gap_1p5().children(trigger_rows))
+        .child(note(format!(
+            "{} valid samples · longest duration first",
+            samples.len()
+        )));
+    for sample in samples.iter().skip(page * 20).take(20) {
+        let id = sample.card_id.clone();
+        let begin = chrono::DateTime::from_timestamp_millis(sample.start as i64)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%m-%d %H:%M")
+            .to_string();
+        let end = chrono::DateTime::from_timestamp_millis(sample.end as i64)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%m-%d %H:%M")
+            .to_string();
+        panel = panel.child(
+            press_target()
+                .w_full()
+                .p_2()
+                .rounded(px(5.))
+                .hover(|s| s.bg(CARD_HOVER))
+                .disabled(id.is_empty())
+                .accessibility_label(format!("Open timing sample #{}", sample.number))
+                .on_press(move |_: &()| ui.open_card(id.clone()))
+                .child(
+                    view()
+                        .gap_1()
+                        .child(
+                            label(format!(
+                                "#{} {} · {}",
+                                sample.number, sample.title, sample.project
+                            ))
+                            .truncate(),
+                        )
+                        .child(note(format!(
+                            "{} → {} · {}{}",
+                            begin,
+                            end,
+                            format_duration_compact(sample.duration),
+                            sample
+                                .profile
+                                .as_ref()
+                                .map(|p| format!(" · @{p}"))
+                                .unwrap_or_default()
+                        ))),
+                ),
+        );
+    }
+    if samples.is_empty() {
+        panel = panel.child(note(
+            "No samples with reliable start and end timestamps in this period.",
+        ));
+    }
+    panel.child(
+        row()
+            .child(
+                compact_action("Previous samples", Variant::Quiet, move |_| {
+                    intent(ui, "samples-previous")
+                })
+                .disabled(page == 0),
+            )
+            .child(note(format!("Page {} / {pages}", page + 1)))
+            .child(
+                compact_action("Next samples", Variant::Quiet, move |_| {
+                    intent(ui, "samples-next")
+                })
+                .disabled(page + 1 >= pages),
+            ),
+    )
+}
+
+fn render_card_drilldown(ui: Ui, dash: &Dashboard) -> View {
+    let filter = ui.insights.drilldown.get();
+    let mut panel = view().gap_2().child(
+        row()
+            .child(compact_action(
+                "View created Cards",
+                Variant::Quiet,
+                move |_| intent(ui, "cards-created"),
+            ))
+            .child(compact_action(
+                "View merged Cards",
+                Variant::Quiet,
+                move |_| intent(ui, "cards-merged"),
+            )),
+    );
+    if filter.is_empty() {
+        return panel;
+    }
+    let ids = if filter == "created" {
+        &dash.created_ids
+    } else {
+        &dash.merged_ids
+    };
+    panel = panel.child(
+        row()
+            .child(note(format!("{} {} Cards", ids.len(), filter)))
+            .child(compact_action(
+                "Close Card list",
+                Variant::Quiet,
+                move |_| intent(ui, "cards-close"),
+            )),
+    );
+    for id in ids.iter().take(100) {
+        if let Some(card) = ui
+            .snapshot
+            .with(|s| s.cards.iter().find(|c| &c.id == id).cloned())
+        {
+            let id = id.clone();
+            panel = panel.child(
+                press_target()
+                    .w_full()
+                    .p_2()
+                    .hover(|s| s.bg(CARD_HOVER))
+                    .on_press(move |_: &()| ui.open_card(id.clone()))
+                    .child(label(format!("#{} {}", card.number, card.title)).truncate()),
+            );
+        }
+    }
+    if ids.len() > 100 {
+        panel = panel.child(note(
+            "Showing the first 100 Cards. Select a shorter range or a Project to narrow the list.",
+        ));
+    }
+    panel
+}
+
+fn dashboard(ui: Ui) -> Dashboard {
+    let scope = ui.insights.scope_project.get();
+    let range = ui.insights.range.get();
+    let now = now_ms(ui);
+    let profiles = ui.all_profiles.get();
+    ui.snapshot.with(|s| {
+        model::compute_view(
+            s,
+            (!scope.is_empty()).then_some(scope.as_str()),
+            range,
+            now,
+            &chrono::Local,
+            ui.insights.selected_date.get(),
+            ui.insights.comparison.get(),
+            ui.insights.metric.get(),
+            ui.insights.hourly_metric.get(),
+            ui.insights.trend_days.get(),
+            &profiles,
+        )
+    })
 }
 
 pub fn screen(ui: Ui) -> impl IntoElement {
-    let dashboard = computed(move || {
-        let scope = ui.insights.scope_project.get();
-        let range = ui.insights.range.get();
-        let now_ms = ui
-            .insights
-            .anchor_ms
-            .get()
-            .unwrap_or_else(canban_types::now);
-        ui.snapshot.with(|s| {
-            model::compute(
-                s,
-                (!scope.is_empty()).then_some(scope.as_str()),
-                range,
-                now_ms,
-                &chrono::Local,
-            )
-        })
-    });
-
+    let dashboard = computed(move || dashboard(ui));
     let scroll_ref = element_ref();
+    ui.insights.scroll.set(Some(scroll_ref));
     let scroll_key = "insights:dashboard".to_owned();
-    let scroll_capture_key = scroll_key.clone();
-
-    view()
-        .flex_1()
-        .min_h(px(0.))
-        .min_w(px(0.))
-        .relative()
-        .bg(BACKGROUND)
-        .child(
-            scroll()
-                .element_ref(&scroll_ref)
-                .scrollbar(false)
-                .flex_1()
-                .min_h(px(0.))
-                .content_offset(scroll_position(ui, &scroll_key))
-                .on_scroll(move |e: &ScrollEvent| capture_scroll(ui, scroll_capture_key.clone(), e))
-                .child(
-                    view()
-                        .w_full()
-                        .max_w(px(1180.))
-                        .min_w(px(0.))
-                        .p_5()
-                        .gap_4()
-                        .child(dynamic(move || {
-                            let dash = dashboard.get();
-                            let narrow = ui.narrow.get();
-
-                            let bottom_row = if narrow {
-                                view()
-                                    .gap_4()
-                                    .child(render_heatmap_panel(&dash.heatmap_weeks))
-                                    .child(render_roles_and_triggers_panel(
-                                        ui,
-                                        &dash.profile_stats,
-                                        &dash.trigger_stats,
-                                    ))
-                            } else {
-                                view()
-                                    .flex_row()
-                                    .items_stretch()
-                                    .gap_4()
-                                    .child(render_heatmap_panel(&dash.heatmap_weeks))
-                                    .child(render_roles_and_triggers_panel(
-                                        ui,
-                                        &dash.profile_stats,
-                                        &dash.trigger_stats,
-                                    ))
-                            };
-
-                            view()
-                                .gap_4()
-                                .min_w(px(0.))
-                                .child(render_kpis(&dash, narrow))
-                                .child(render_kanban_flow_chart(&dash))
-                                .child(render_agent_scheduling_chart(&dash))
-                                .child(bottom_row)
-                                .into_element()
-                        })),
-                ),
-        )
-        .child(
-            vertical_scrollbar(scroll_ref)
-                .absolute()
-                .top(px(6.))
-                .bottom(px(6.))
-                .right(px(4.)),
-        )
+    let capture_key = scroll_key.clone();
+    view().flex_1().min_h(px(0.)).min_w(px(0.)).bg(BACKGROUND)
+        .child(scroll().scrollbar(false).flex_1().min_h(px(0.))
+            .element_ref(&scroll_ref).content_offset(scroll_position(ui,&scroll_key)).on_scroll(move |e: &ScrollEvent| capture_scroll(ui,capture_key.clone(),e))
+            .child(view().w_full().max_w(px(1180.)).min_w(px(0.)).p_5().gap_4().child(dynamic(move || {
+                let dash = dashboard.get();
+                let mut content = view().gap_4().min_w(px(0.)).child(render_period(ui,&dash)).child(render_kpis(&dash,ui.narrow.get()))
+                    .child(render_card_drilldown(ui,&dash));
+                if dash.range == RangeWindow::Today { content = content.child(render_hourly(ui,&dash)); }
+                content = content.child(render_kanban_flow_chart(ui,&dash)).child(render_projects(ui,&dash)).child(render_agents(ui,&dash))
+                    .child(render_heatmap_panel(ui,&dash)).child(render_efficiency(ui,&dash));
+                let offline = ui.snapshot.with(|s| s.host_summaries.values().filter(|h| h.is_offline())
+                    .map(|h| format!("{} (last sync: {})",h.name,h.last_synced_at.map(|t| chrono::DateTime::from_timestamp_millis(t as i64).unwrap().with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string()).unwrap_or_else(|| "unknown".into())))
+                    .collect::<Vec<_>>().join(", "));
+                content.child(note(format!("Retained history from {} · {} merged Cards have no reliable merge date and are excluded from date totals. {} Agent batches have no retained launch timestamp. Removed history may be unavailable.{}",
+                    dash.history_start.map(|d| d.to_string()).unwrap_or_else(|| "—".into()),dash.unknown_merge_dates,dash.unknown_batch_starts,
+                    if offline.is_empty() { String::new() } else { format!(" Offline hosts: {offline}; cached data may be stale.") }))).into_element()
+            }))))
 }
 
 #[cfg(test)]
@@ -1502,27 +1786,51 @@ mod tests {
 
             view()
                 .w(px(1400.))
-                .h(px(900.))
+                .h(px(3600.))
                 .child(crate::frame::screen(ui))
         }
 
-        let mut core = Core::new(ApproxTextEngine, size(px(1400.), px(900.)));
+        let mut core = Core::new(ApproxTextEngine, size(px(1400.), px(3600.)));
         core.set_components(nsh_base::registry());
         core.mount_root(&nsh_core::element::Root::of::<InsightsHarness>());
         let mut tree = Tracker::new();
         pump(&mut core, &mut tree);
 
         assert!(tree.has_mounted_text("Insights"));
-        assert!(tree.has_mounted_text("Daily Kanban Flow"));
-        assert!(tree.has_mounted_text("Daily Agent Scheduling"));
-        assert!(tree.has_mounted_text("Activity Cadence · 12 Weeks"));
-        assert!(tree.has_mounted_text("Agent Roles & Scheduling Triggers"));
+        assert!(tree.has_mounted_text("Recent daily flow"));
+        assert!(tree.has_mounted_text("Hourly comparison"));
+        assert!(tree.has_mounted_text("Yearly activity"));
+        assert!(tree.has_mounted_text("Agents used"));
         assert!(!tree.has_mounted_text("Daily Ledger"));
+        assert!(!tree.has_mounted_text("Recent activity"));
+        assert!(!tree.has_mounted_text("RUN RESULTS"));
+        let toggle = *tree.labels.get("Toggle efficiency details").unwrap();
+        assert!(core.component_event(toggle, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert!(
+            tree.has_mounted_text("Execution → merge, p90"),
+            "Mounted texts after expand: {:?}",
+            tree.texts
+                .iter()
+                .filter(|(id, _)| tree.is_mounted(**id))
+                .map(|(_, t)| t)
+                .collect::<Vec<_>>()
+        );
+        assert!(tree.has_mounted_text("Queue → start, p90"));
+        let sample_tab = *tree.labels.get("Queue samples").unwrap();
+        assert!(core.component_event(sample_tab, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert!(
+            tree.has_mounted_text(
+                "No samples with reliable start and end timestamps in this period."
+            )
+        );
 
         // Switch range to 7D via segmented button
         let btn_7d = *tree.labels.get("7D").expect("7D segment button");
         assert!(core.component_event(btn_7d, EventKind::Press, &EventPayload::None));
         pump(&mut core, &mut tree);
-        assert!(tree.has_mounted_text("Across last 7 days"));
+        assert!(tree.has_mounted_text("Yearly activity"));
+        assert!(!tree.has_mounted_text("Hourly comparison"));
     }
 }

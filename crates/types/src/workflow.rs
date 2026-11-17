@@ -751,6 +751,11 @@ pub struct MergeBatch {
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Exact Agent scheduling/launch facts; absent in legacy batches. Never infer from integration time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
     pub created_at: u64,
     pub updated_at: u64,
 }

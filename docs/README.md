@@ -84,6 +84,7 @@ editor, modal, window-title and terminal checks.
 | [Card conversation workspace](card-conversation.md) | Side-by-side Card + Live Terminal workspace, compact Card header, scrolling task/Timeline, explicit recipients and comment shortcuts |
 | [Native UI motion](ui-motion.md) | Shared motion policy, retained Card reveal, editor resizing, native modal fades and regression scenes |
 | [Desktop utilities](desktop-utilities.md) | Implemented Usage/reset countdown, Caffeine, Theme, Shortcuts, target-Project creation and acceptance |
+| [Insights](insights.md) | Daily comparisons, Project / Agent contributions, annual cadence and timing samples |
 | [Releases and updates](updates.md) | Manual release dispatch (`mise run release`), pre-release integration tests, daily release checks, local backend activation, paired migrations and recovery |
 | [Development startup](development-startup.md) | Branch-scoped dev/dev-stop, bound homes/bundles, ownership checks, native startup errors and acceptance |
 | [Instance isolation and remaining gaps](instance-isolation.md) | Implemented checkout/branch isolation and explicit installed-backend activation and remaining generic compatibility boundaries |

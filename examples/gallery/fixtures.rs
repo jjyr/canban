@@ -2420,9 +2420,11 @@ pub fn multi_host_workspace(
     (local, vec![local_summary, remote_summary])
 }
 
+pub const INSIGHTS_NOW: u64 = 1_794_900_600_000;
+
 pub fn insights() -> canban_types::Snapshot {
     use canban_types::*;
-    let base_now = now();
+    let base_now = INSIGHTS_NOW;
     let day_ms: u64 = 86_400_000;
     let hour_ms: u64 = 3_600_000;
     let min_ms: u64 = 60_000;
@@ -2457,8 +2459,8 @@ pub fn insights() -> canban_types::Snapshot {
     let mut seq = 500u64;
     let mut card_num = 10u64;
 
-    // Populate 65 days of realistic history across both projects
-    for days_ago in (0u64..65).rev() {
+    // Populate a full year across both Projects for cadence and date navigation.
+    for days_ago in (0u64..365).rev() {
         let pattern = (days_ago * 7 + 3) % 11;
         // Occasional quiet weekend-like days
         if pattern == 0 || pattern == 5 {
@@ -2668,6 +2670,8 @@ pub fn insights() -> canban_types::Snapshot {
             items: Vec::new(),
             prompt: "Resolve conflict in crates/ui/src/rail.rs".into(),
             error: None,
+            queued_at: Some(ts),
+            started_at: Some(ts + min_ms),
             created_at: ts,
             updated_at: ts + 6 * min_ms,
         });

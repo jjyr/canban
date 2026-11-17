@@ -6274,6 +6274,12 @@ fn batch_merge_queue_conflict_dispatches_single_merger_with_agy_trusted_paths_an
             .starts_with(&format!("merge-queue:{}:", env.project.id))
     );
     assert_eq!(batch.state, "running");
+    assert!(batch.queued_at.is_some_and(|q| q >= batch.created_at));
+    assert!(
+        batch
+            .started_at
+            .is_some_and(|s| s >= batch.queued_at.unwrap())
+    );
     assert_eq!(batch.failure_kind.as_deref(), Some("conflict"));
     assert_eq!(batch.conflict_card_number, Some(c2.number));
     assert_eq!(batch.items.len(), 3);

@@ -495,6 +495,8 @@ impl AppServer {
             items: placeholder_items,
             prompt: String::new(),
             error: None,
+            queued_at: None,
+            started_at: None,
             created_at: started_at,
             updated_at: started_at,
         };
@@ -716,6 +718,7 @@ impl AppServer {
             .collect();
         batch.prompt = render_batch_prompt(project, batch, &card_map);
         batch.state = "queued".into();
+        batch.queued_at = Some(now());
         batch.updated_at = now();
 
         let offending_num = offending.0.number;
@@ -1098,6 +1101,7 @@ impl AppServer {
                 runtime.state = "running".into();
                 runtime.connection = "connected".into();
                 batch.state = "running".into();
+                batch.started_at = Some(now());
                 batch.error = None;
                 batch.updated_at = now();
                 {

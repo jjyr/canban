@@ -816,6 +816,8 @@ mod tests {
             }],
             prompt: "Resolve".into(),
             error: None,
+            queued_at: None,
+            started_at: None,
             created_at: t0,
             updated_at: t0,
         };

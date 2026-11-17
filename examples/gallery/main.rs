@@ -1006,7 +1006,7 @@ pub fn Gallery() -> impl IntoElement {
     }
     if matches!(
         std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
-        Ok("insights" | "insights-empty")
+        Ok("insights" | "insights-empty" | "insights-efficiency" | "insights-short-history")
     ) {
         canban_ui::frame::configure_window_chrome();
         if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("insights-empty") {
@@ -1017,6 +1017,37 @@ pub fn Gallery() -> impl IntoElement {
             ui.snapshot.set(empty);
         } else {
             ui.snapshot.set(fixtures::insights());
+        }
+        ui.insights.anchor_ms.set(Some(fixtures::INSIGHTS_NOW));
+        ui.insights
+            .efficiency_open
+            .set(std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("insights-efficiency"));
+        ui.all_profiles.set(vec![
+            canban_types::Profile {
+                id: "developer".into(),
+                preset: Some("codex".into()),
+                ..Default::default()
+            },
+            canban_types::Profile {
+                id: "reviewer".into(),
+                preset: Some("claude".into()),
+                ..Default::default()
+            },
+            canban_types::Profile {
+                id: "planner".into(),
+                preset: Some("codex".into()),
+                ..Default::default()
+            },
+        ]);
+        if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("insights-short-history") {
+            let cutoff = fixtures::INSIGHTS_NOW - 3_600_000;
+            ui.snapshot.update(|s| {
+                s.cards.retain(|c| c.created_at >= cutoff);
+                s.events.retain(|e| e.created_at >= cutoff);
+                for p in &mut s.projects {
+                    p.created_at = cutoff;
+                }
+            });
         }
         ui.project.set("gallery-project".into());
         ui.card.set(String::new());

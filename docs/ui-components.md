@@ -265,8 +265,15 @@ owns adjacent routine-event grouping, read coordinates and execution disclosure.
 - `ui/startup.rs`, `ui/lib.rs`: Owns the reactive desktop root (`startup::Bootstrap`) combining **AppServer** connection/version verification and **Herdr Core (`hc`)** runtime detection in a single two-step startup checklist (`checking_screen`, `backend_update_screen_auto`, `error_screen_with_retry`, and `herdr_setup_screen`). Fast healthy startups defer rendering the bootstrap panel for 140 ms so normal launches mount `<Canban />` with zero flicker. When `herdr-core` is not installed or fails its `server.status` handshake, `herdr_setup_screen` displays **Install Herdr Core** (polling live `herdr.install` output and advancing automatically on success), **Check** (re-evaluating `herdr.check` after manual terminal installation), and a copyable `curl -fsSL https://releases.herdr.dev/core/install.sh | sh` command row. Gallery `herdr-missing`, `herdr-installing`, `herdr-error`, `startup-error`, and `backend-older` scenes exercise these production surfaces without opening an AppServer or mutating the host's Herdr Core.
 
 
-## Insights Dashboard (2026-11-15)
+## Insights Dashboard (updated 2026-11-17)
 
-- `ui-kit/icons.rs`: Adds `Icon::Insights` (`assets/lucide/chart-column.svg`) for the 56-point navigation rail and Command Palette entries.
-- `ui/insights/model.rs`: Pure local-timezone (`chrono::TimeZone`) projection over `Snapshot` (`cards`, `events`, `terminals`, `merge_batches`, `projects`) computing `7D` / `30D` / `90D` KPIs, period-over-period deltas, median (`p50`) lead time and queue wait, strict merge-only Kanban completion counts (`card.merged()`, excluding unmerged archived or removed Cards), deduplicated Agent run outcomes (`Completed`, `Blocked`, `Failed`, `Active`), 12-week Monday–Sunday cadence heatmap cells, and `@profile` / trigger-origin distributions without extra RPCs or SQLite queries.
-- `ui/insights.rs`: Composes the 42-point `chrome_bar` (`search_popover` Project scope selector for `All Projects` vs single Project and `7D | 30D | 90D` range segments) and responsive dashboard (`render_kpis`, `Daily Kanban Flow` paired vertical bar chart, `Daily Agent Scheduling` stacked outcome bar chart, 12-week cadence heatmap, and `@profile` & trigger breakdown). Gallery `insights` and `insights-empty` scenes exercise the production surface across wide and narrow viewports.
+See [Insights](insights.md) for the counting and interaction contract.
+
+- `ui/insights/model.rs`: Local-calendar Snapshot projection for 1D / 7D / 30D / 90D,
+  matching-progress comparisons, hourly / daily trends, Project and Agent usage,
+  365-date cadence and p50/p90 timing samples. Missing dates remain explicit.
+- `ui/insights.rs`: Shared chrome, date controls, four KPIs, contribution tables,
+  independent full-width annual grid and collapsible timing samples, with shared
+  Command Palette intents and retained Card navigation.
+- `examples/gallery`: Fixed-clock `insights`, `insights-empty`,
+  `insights-efficiency` and `insights-short-history` production-component scenes.

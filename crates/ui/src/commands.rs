@@ -381,6 +381,214 @@ pub const CATALOG: &[Command] = &[
         keywords: "statistics metrics charts kanban merged completion scheduling throughput cadence",
     },
     Command {
+        id: "insights-today",
+        title: "Insights: Show Today (1D)",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "statistics daily date comparison trend agents samples efficiency",
+    },
+    Command {
+        id: "insights-previous-day",
+        title: "Insights: Previous Day",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "statistics daily date comparison trend agents samples efficiency",
+    },
+    Command {
+        id: "insights-next-day",
+        title: "Insights: Next Day",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "statistics daily date comparison trend agents samples efficiency",
+    },
+    Command {
+        id: "insights-apply-date",
+        title: "Insights: Apply Entered Date",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "statistics daily date comparison trend agents samples efficiency",
+    },
+    Command {
+        id: "insights-compare-previous",
+        title: "Insights: Compare Previous Period",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "statistics daily date comparison trend agents samples efficiency",
+    },
+    Command {
+        id: "insights-compare-week",
+        title: "Insights: Compare Last Week",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "statistics daily date comparison trend agents samples efficiency",
+    },
+    Command {
+        id: "insights-metric-merged",
+        title: "Insights: Chart Merged Cards",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "statistics daily date comparison trend agents samples efficiency",
+    },
+    Command {
+        id: "insights-metric-created",
+        title: "Insights: Chart Created Cards",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "statistics daily date comparison trend agents samples efficiency",
+    },
+    Command {
+        id: "insights-metric-runs",
+        title: "Insights: Chart Agent Starts",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "statistics daily date comparison trend agents samples efficiency",
+    },
+    Command {
+        id: "insights-efficiency",
+        title: "Insights: Toggle Efficiency Details",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "statistics daily date comparison trend agents samples efficiency",
+    },
+    Command {
+        id: "insights-samples-cycle",
+        title: "Insights: Inspect Merge Timing Samples",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "statistics daily date comparison trend agents samples efficiency",
+    },
+    Command {
+        id: "insights-samples-queue",
+        title: "Insights: Inspect Queue Timing Samples",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "statistics daily date comparison trend agents samples efficiency",
+    },
+    Command {
+        id: "insights-samples-next",
+        title: "Insights: Next Sample Page",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "statistics daily date comparison trend agents samples efficiency",
+    },
+    Command {
+        id: "insights-samples-previous",
+        title: "Insights: Previous Sample Page",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "statistics daily date comparison trend agents samples efficiency",
+    },
+    Command {
+        id: "insights-group-provider",
+        title: "Insights: Group Agents by Provider",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "statistics daily date comparison trend agents samples efficiency",
+    },
+    Command {
+        id: "insights-group-profile",
+        title: "Insights: Group Agents by Profile",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "statistics daily date comparison trend agents samples efficiency",
+    },
+    Command {
+        id: "insights-sort-created",
+        title: "Insights: Sort Projects by Created",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "statistics daily date comparison trend agents samples efficiency",
+    },
+    Command {
+        id: "insights-sort-merged",
+        title: "Insights: Sort Projects by Merged",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "statistics daily date comparison trend agents samples efficiency",
+    },
+    Command {
+        id: "insights-cards-created",
+        title: "Insights: Inspect Created Cards",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "statistics daily date comparison trend agents samples efficiency",
+    },
+    Command {
+        id: "insights-cards-merged",
+        title: "Insights: Inspect Merged Cards",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "statistics daily date comparison trend agents samples efficiency",
+    },
+    Command {
+        id: "insights-cards-close",
+        title: "Insights: Close Card List",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "statistics daily date comparison trend agents samples efficiency",
+    },
+    Command {
+        id: "insights-hourly-merged",
+        title: "Insights: Hourly Merged Cards",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "hourly today chart",
+    },
+    Command {
+        id: "insights-hourly-created",
+        title: "Insights: Hourly Created Cards",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "hourly today chart",
+    },
+    Command {
+        id: "insights-hourly-runs",
+        title: "Insights: Hourly Agent Starts",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "hourly today chart",
+    },
+    Command {
+        id: "insights-trend-14",
+        title: "Insights: Recent 14-day Trend",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "daily recent trend chart",
+    },
+    Command {
+        id: "insights-trend-30",
+        title: "Insights: Recent 30-day Trend",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "daily recent trend chart",
+    },
+    Command {
         id: "insights-range-7d",
         title: "Insights: Show Last 7 Days (7D)",
         key: "",
@@ -1014,6 +1222,110 @@ pub fn execute(ui: Ui, id: &str) {
         "go-review" => crate::review::open_compare(ui),
         "go-github" => ui.navigate("github"),
         "go-insights" => ui.navigate("insights"),
+        "insights-today" => {
+            crate::insights::intent(ui, "today");
+            ui.navigate("insights");
+        }
+        "insights-previous-day" => {
+            crate::insights::intent(ui, "previous-day");
+            ui.navigate("insights");
+        }
+        "insights-next-day" => {
+            crate::insights::intent(ui, "next-day");
+            ui.navigate("insights");
+        }
+        "insights-apply-date" => {
+            crate::insights::intent(ui, "apply-date");
+            ui.navigate("insights");
+        }
+        "insights-compare-previous" => {
+            crate::insights::intent(ui, "compare-previous");
+            ui.navigate("insights");
+        }
+        "insights-compare-week" => {
+            crate::insights::intent(ui, "compare-week");
+            ui.navigate("insights");
+        }
+        "insights-metric-merged" => {
+            crate::insights::intent(ui, "metric-merged");
+            ui.navigate("insights");
+        }
+        "insights-metric-created" => {
+            crate::insights::intent(ui, "metric-created");
+            ui.navigate("insights");
+        }
+        "insights-metric-runs" => {
+            crate::insights::intent(ui, "metric-runs");
+            ui.navigate("insights");
+        }
+        "insights-efficiency" => {
+            crate::insights::intent(ui, "efficiency");
+            ui.navigate("insights");
+        }
+        "insights-samples-cycle" => {
+            crate::insights::intent(ui, "samples-cycle");
+            ui.navigate("insights");
+        }
+        "insights-samples-queue" => {
+            crate::insights::intent(ui, "samples-queue");
+            ui.navigate("insights");
+        }
+        "insights-samples-next" => {
+            crate::insights::intent(ui, "samples-next");
+            ui.navigate("insights");
+        }
+        "insights-samples-previous" => {
+            crate::insights::intent(ui, "samples-previous");
+            ui.navigate("insights");
+        }
+        "insights-group-provider" => {
+            crate::insights::intent(ui, "group-provider");
+            ui.navigate("insights");
+        }
+        "insights-group-profile" => {
+            crate::insights::intent(ui, "group-profile");
+            ui.navigate("insights");
+        }
+        "insights-sort-created" => {
+            crate::insights::intent(ui, "sort-created");
+            ui.navigate("insights");
+        }
+        "insights-sort-merged" => {
+            crate::insights::intent(ui, "sort-merged");
+            ui.navigate("insights");
+        }
+        "insights-cards-created" => {
+            crate::insights::intent(ui, "cards-created");
+            ui.navigate("insights");
+        }
+        "insights-cards-merged" => {
+            crate::insights::intent(ui, "cards-merged");
+            ui.navigate("insights");
+        }
+        "insights-cards-close" => {
+            crate::insights::intent(ui, "cards-close");
+            ui.navigate("insights");
+        }
+        "insights-hourly-merged" => {
+            crate::insights::intent(ui, "hourly-merged");
+            ui.navigate("insights");
+        }
+        "insights-hourly-created" => {
+            crate::insights::intent(ui, "hourly-created");
+            ui.navigate("insights");
+        }
+        "insights-hourly-runs" => {
+            crate::insights::intent(ui, "hourly-runs");
+            ui.navigate("insights");
+        }
+        "insights-trend-14" => {
+            crate::insights::intent(ui, "trend-14");
+            ui.navigate("insights");
+        }
+        "insights-trend-30" => {
+            crate::insights::intent(ui, "trend-30");
+            ui.navigate("insights");
+        }
         "insights-range-7d" => {
             crate::insights::set_range(ui, crate::insights::model::RangeWindow::Days7);
             ui.navigate("insights");

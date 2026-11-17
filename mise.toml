@@ -177,3 +177,7 @@ run = ["cargo build --profile profiling --locked -p canban-ui -p canban-cli -p c
 
 [tasks.profile]
 run = "python3 scripts/profile.py"
+
+[tasks.acceptance-insights]
+depends = ["build"]
+run = "python3 scripts/acceptance-insights.py"

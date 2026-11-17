@@ -1905,6 +1905,8 @@ fn merge_batch_terminal_uses_its_actual_checkout_and_git_summary() {
         items: vec![],
         prompt: String::new(),
         error: None,
+        queued_at: None,
+        started_at: None,
         created_at: 1,
         updated_at: 2,
     });
