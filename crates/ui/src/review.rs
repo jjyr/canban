@@ -290,6 +290,18 @@ pub fn open_compare(ui: Ui) {
     load_refs_and_compare(ui, choose_default);
 }
 
+pub(crate) fn card_target_branch(card: &Card, project: Option<&canban_types::Project>) -> String {
+    card.workspace
+        .as_ref()
+        .and_then(|w| w.target_branch.clone())
+        .or_else(|| project.and_then(|p| p.target_branch.clone()))
+        .unwrap_or_else(|| "main".into())
+}
+
+pub(crate) fn card_compare_params(card: &Card, target: &str) -> Value {
+    json!({"card_id":card.id, "cwd":card.worktree, "use_card_worktree":true, "target_branch":target, "three_dot":true})
+}
+
 pub fn open_card(ui: Ui, card_id: &str) {
     let Some(card) = ui
         .snapshot
@@ -298,14 +310,12 @@ pub fn open_card(ui: Ui, card_id: &str) {
         open_compare(ui);
         return;
     };
+    crate::navigation::checkpoint(ui);
     let st = ui.review_state;
     let project = ui
         .snapshot
         .with_untracked(|s| s.projects.iter().find(|p| p.id == card.project_id).cloned());
-    let target_branch = project
-        .as_ref()
-        .and_then(|p| p.target_branch.clone())
-        .unwrap_or_else(|| "main".into());
+    let target_branch = card_target_branch(&card, project.as_ref());
     let delivery_default = if card.delivery_mode.clone().unwrap_or_else(|| {
         project
             .as_ref()
@@ -372,6 +382,7 @@ pub fn open_card(ui: Ui, card_id: &str) {
         st.delivery_mode.set(delivery_default.into());
         st.delivery_strategy.set(strategy_default.into());
         st.base_ref.set(target_branch.clone());
+        st.three_dot.set(true);
         if let Some((repo, num, url)) = pr {
             st.pr_target.set(Some(json!({
                 "repository": repo,
@@ -394,6 +405,7 @@ pub fn open_card(ui: Ui, card_id: &str) {
         }
         ui.navigate("review");
     });
+    crate::navigation::checkpoint(ui);
     prepare_context(ui);
     load_refs(ui);
     refresh_active_diff(ui, false);
@@ -411,6 +423,7 @@ pub fn invalidate_reads(ui: Ui) {
             Some(&ui.card.get_untracked()),
         )
     });
+    st.summary_revision.update(|n| *n += 1);
     cancel_reads(st);
 }
 
@@ -549,6 +562,9 @@ pub(crate) fn handle_host_events(ui: Ui, events: &[canban_app_server::hosts::Hos
                 cwd == ui.review_state.checkout_cwd.get_untracked()
                     || card_id.as_deref() == Some(ui.card.get_untracked().as_str())
             });
+    }
+    if active_changed {
+        ui.review_state.summary_revision.update(|n| *n += 1);
     }
     if active_changed && ui.page.get_untracked() == "review" {
         refresh(ui);
@@ -708,7 +724,7 @@ fn load_active_diff(ui: Ui, force_remote_refresh: bool) {
         };
         (
             "git.compare",
-            json!({"card_id":card.id, "use_card_worktree":true, "target_branch":st.base_ref.get_untracked(), "three_dot":st.three_dot.get_untracked()}),
+            card_compare_params(&card, &st.base_ref.get_untracked()),
         )
     } else {
         let base = st.base_ref.get_untracked();

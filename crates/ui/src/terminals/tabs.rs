@@ -204,202 +204,6 @@ fn tab(ui: Ui, e: Entry, capacity: Memo<f32>) -> impl IntoElement {
         cell
     })
 }
-async fn switcher_menu(ui: Ui, at: Option<Point<Points>>) {
-    use super::worktrees::{WorktreeScope, activate_scope, entry_scope, scope_git_summary};
-    let s = ui.snapshot.get_untracked();
-    let live_rows: Vec<Entry> = ui.closing_terminals.with_untracked(|closing| {
-        ui.terminal_entries.with_untracked(|rows| {
-            rows.iter()
-                .filter(|e| e.listed() && !closing.contains(&e.saved.id))
-                .cloned()
-                .collect()
-        })
-    });
-    let current_scope = untracked(|| current(ui)).map(|e| entry_scope(&s, &e));
-    let mut items: Vec<MenuItem> = Vec::new();
-    let mut idle_managed: Vec<(String, canban_types::ManagedWorktree)> = Vec::new();
-
-    for proj in &s.projects {
-        if !items.is_empty() {
-            items.push(MenuItem::separator());
-        }
-        items.push(MenuItem::new(format!("📁 {}", proj.name)).disabled(true));
-
-        let root_scope = WorktreeScope::ProjectRoot(proj.id.clone());
-        let root_children: Vec<Entry> = live_rows
-            .iter()
-            .filter(|e| entry_scope(&s, e) == root_scope)
-            .cloned()
-            .collect();
-        let root_git = scope_git_summary(&s, &root_scope, &root_children);
-        let root_name = root_scope.display_name(&s, &root_children, Some(ui));
-        let mut root_label = format!(
-            "{}📁 {root_name} (Project root)",
-            if current_scope.as_ref() == Some(&root_scope) {
-                "✓ "
-            } else {
-                "   "
-            }
-        );
-        let root_ind = root_git.indicators();
-        if !root_ind.is_empty() {
-            root_label.push_str(&format!(" · {}", root_ind.join(" ")));
-        }
-        if !root_children.is_empty() {
-            root_label.push_str(&format!(" · {} live", root_children.len()));
-        }
-        let scope_sel = root_scope.clone();
-        items.push(MenuItem::new(root_label).on_select(move || activate_scope(ui, &scope_sel)));
-
-        let mut proj_cards: Vec<&canban_types::Card> = s
-            .cards
-            .iter()
-            .filter(|c| {
-                c.project_id == proj.id
-                    && c.archived_at.is_none()
-                    && (c.worktree.as_ref().is_some_and(|w| !w.is_empty())
-                        || live_rows.iter().any(|e| {
-                            entry_scope(&s, e) == WorktreeScope::CardWorktree(c.id.clone())
-                        }))
-            })
-            .collect();
-        proj_cards.sort_by_key(|c| (c.number, c.id.clone()));
-        for card in proj_cards {
-            let c_scope = WorktreeScope::CardWorktree(card.id.clone());
-            let c_children: Vec<Entry> = live_rows
-                .iter()
-                .filter(|e| entry_scope(&s, e) == c_scope)
-                .cloned()
-                .collect();
-            let c_git = scope_git_summary(&s, &c_scope, &c_children);
-            let c_branch = c_scope.display_name(&s, &c_children, Some(ui));
-            let mut c_label = format!(
-                "{}⎇ {} · #{} {}",
-                if current_scope.as_ref() == Some(&c_scope) {
-                    "✓ "
-                } else {
-                    "   "
-                },
-                c_branch,
-                card.number,
-                compact(&card.title, 28)
-            );
-            let c_ind = c_git.indicators();
-            if !c_ind.is_empty() {
-                c_label.push_str(&format!(" · {}", c_ind.join(" ")));
-            }
-            if !c_children.is_empty() {
-                c_label.push_str(&format!(" · {} live", c_children.len()));
-            }
-            let scope_sel = c_scope.clone();
-            items.push(MenuItem::new(c_label).on_select(move || activate_scope(ui, &scope_sel)));
-        }
-
-        for wt in s.worktrees.iter().filter(|w| w.project_id == proj.id) {
-            let wt_scope = WorktreeScope::ManagedWorktree(wt.id.clone());
-            let wt_children: Vec<Entry> = live_rows
-                .iter()
-                .filter(|e| entry_scope(&s, e) == wt_scope)
-                .cloned()
-                .collect();
-            let wt_git = scope_git_summary(&s, &wt_scope, &wt_children);
-            let mut wt_label = format!(
-                "{}⎇ {}",
-                if current_scope.as_ref() == Some(&wt_scope) {
-                    "✓ "
-                } else {
-                    "   "
-                },
-                wt.branch
-            );
-            let wt_ind = wt_git.indicators();
-            if !wt_ind.is_empty() {
-                wt_label.push_str(&format!(" · {}", wt_ind.join(" ")));
-            }
-            if wt_children.is_empty() {
-                wt_label.push_str(" · idle");
-                idle_managed.push((proj.name.clone(), wt.clone()));
-            } else {
-                wt_label.push_str(&format!(" · {} live", wt_children.len()));
-            }
-            let scope_sel = wt_scope.clone();
-            items.push(MenuItem::new(wt_label).on_select(move || activate_scope(ui, &scope_sel)));
-        }
-    }
-
-    let other_scopes = super::worktrees::project_scopes_in_tree_order(&s, &live_rows, None);
-    if !other_scopes.is_empty() {
-        if !items.is_empty() {
-            items.push(MenuItem::separator());
-        }
-        items.push(MenuItem::new("Other").disabled(true));
-        for (u_scope, u_children) in other_scopes {
-            let name = u_scope.display_name(&s, &u_children, Some(ui));
-            let label_str = format!(
-                "{}{} · {} live",
-                if current_scope.as_ref() == Some(&u_scope) {
-                    "✓ "
-                } else {
-                    "   "
-                },
-                name,
-                u_children.len()
-            );
-            let scope_sel = u_scope.clone();
-            items.push(MenuItem::new(label_str).on_select(move || activate_scope(ui, &scope_sel)));
-        }
-    }
-
-    if !idle_managed.is_empty() {
-        items.push(MenuItem::separator());
-        items.push(MenuItem::new("Idle Managed Worktrees").disabled(true));
-        for (proj_name, wt) in idle_managed {
-            let wt_diff = wt.clone();
-            let wt_promote = wt.id.clone();
-            let wt_del = wt.id.clone();
-            items.push(
-                MenuItem::new(format!("Compare ⎇ {} ({proj_name})", wt.branch))
-                    .on_select(move || super::worktrees::open_diff(ui, &wt_diff)),
-            );
-            items.push(
-                MenuItem::new(format!("Promote ⎇ {} to Board Card…", wt.branch))
-                    .on_select(move || ui.worktree_promote.set(Some(wt_promote.clone()))),
-            );
-            items.push(
-                MenuItem::new(format!("Delete ⎇ {}…", wt.branch))
-                    .on_select(move || super::worktrees::request_remove(ui, wt_del.clone(), false)),
-            );
-        }
-    }
-
-    if !s.projects.is_empty() {
-        items.push(MenuItem::separator());
-        let active_pid = {
-            let pid = ui.project.get_untracked();
-            if !pid.is_empty() {
-                pid
-            } else {
-                s.projects[0].id.clone()
-            }
-        };
-        items.push(
-            MenuItem::new("New Managed Branch Worktree…")
-                .on_select(move || ui.worktree_modal.set(Some(active_pid.clone()))),
-        );
-    } else {
-        items.push(
-            MenuItem::new("Create New Project…").on_select(move || ui.navigate("new-project")),
-        );
-    }
-
-    if let Some(pos) = at {
-        popup_menu_at(items, pos).await;
-    } else {
-        popup_menu(items).await;
-    }
-    ui.terminal_focus.update(|v| *v += 1);
-}
-
 pub fn header(ui: Ui) -> impl IntoElement {
     let active_scope = computed(move || {
         let cur = current(ui)?;
@@ -579,7 +383,6 @@ pub fn header(ui: Ui) -> impl IntoElement {
             let s = ui.snapshot.get_untracked();
             let cur = untracked(|| current(ui));
             let scope_tabs_now = untracked(|| super::scope_tabs(ui));
-            let switcher_anchor = element_ref();
             let more_anchor = element_ref();
 
             let mut context_bar = view()
@@ -680,63 +483,28 @@ pub fn header(ui: Ui) -> impl IntoElement {
                 }
             }
 
-            // Worktree Switcher pill (always available when projects/worktrees or a live terminal exist)
-            let has_switcher_targets =
-                cur.is_some() || !s.projects.is_empty() || !s.worktrees.is_empty();
-            if has_switcher_targets {
-                let (pill_icon, pill_branch, pill_git, pill_tooltip) = if let Some(ref e) = cur {
-                    let scope = super::worktrees::entry_scope(&s, e);
-                    let git = super::worktrees::scope_git_summary(&s, &scope, &scope_tabs_now);
-                    let name = scope.display_name(&s, &scope_tabs_now, Some(ui));
-                    let mut tip = format!(
-                        "Switch Project / Worktree\nCurrent: {name}\nDirectory: {}",
-                        e.cwd().unwrap_or_else(|| "Unavailable".into())
-                    );
-                    let ind = git.tooltip_indicators();
-                    if !ind.is_empty() {
-                        tip.push_str(&format!("\nGit: {}", ind.join(" · ")));
+            // Compare the observed directory; workspace selection belongs to the tree.
+            if let Some(ref e) = cur {
+                let scope = super::worktrees::entry_scope(&s, e);
+                let git = super::worktrees::scope_git_summary(&s, &scope, &scope_tabs_now);
+                let branch = e.location.as_ref().and_then(|l| l.branch.clone());
+                let target = super::worktrees::compare_target(&s, e);
+                let hint = match &target {
+                    Some(_) => format!(
+                        "View changes in Git\nBranch: {}\nDirectory: {}\nWorking tree: {}",
+                        branch.as_deref().unwrap_or("Detached HEAD"),
+                        e.cwd().unwrap_or_default(),
+                        git.tooltip_indicators().join(" · "),
+                    ),
+                    None => {
+                        "Changes unavailable: no Git checkout could be resolved for this terminal"
+                            .into()
                     }
-                    let ic = match scope {
-                        super::worktrees::WorktreeScope::ProjectRoot(_) => Icon::Projects,
-                        super::worktrees::WorktreeScope::Unassigned(_)
-                        | super::worktrees::WorktreeScope::Directory { .. } => Icon::Terminal,
-                        _ => Icon::Branch,
-                    };
-                    (ic, name, git, tip)
-                } else {
-                    let pid = ui.project.get_untracked();
-                    let proj = s
-                        .projects
-                        .iter()
-                        .find(|p| p.id == pid)
-                        .or_else(|| s.projects.first());
-                    let name = proj
-                        .map(|p| p.name.clone())
-                        .unwrap_or_else(|| "Worktrees".into());
-                    (
-                        Icon::Branch,
-                        name.clone(),
-                        super::worktrees::ScopeGitSummary::default(),
-                        format!("Switch Project / Worktree ({name})"),
-                    )
                 };
-
                 let limit = if ui.narrow.get() { 10 } else { 18 };
-                let short = compact(
-                    &pill_branch,
-                    if pill_branch.is_ascii() {
-                        limit
-                    } else {
-                        limit / 2
-                    },
-                );
-                let mut pill_row = canban_ui_kit::press_target()
+                let mut pill = canban_ui_kit::press_target()
                     .h(px(30.))
-                    .max_w(move || {
-                        px((if ui.narrow.get() { 130f32 } else { 210f32 })
-                            .min((width.get() * 0.4).min(420.) - 44.)
-                            .max(56.))
-                    })
+                    .max_w(move || px(if ui.narrow.get() { 160. } else { 250. }))
                     .min_w(px(0.))
                     .px_2()
                     .rounded(px(5.))
@@ -746,65 +514,54 @@ pub fn header(ui: Ui) -> impl IntoElement {
                     .bg(CLEAR)
                     .hover(|st| st.bg(SURFACE))
                     .focus(|st| st.border_1().border_color(ACCENT))
-                    .accessibility_label({
-                        let b = pill_branch.clone();
-                        move || Some(format!("Switch worktree ({b})").into())
-                    })
-                    .child(icon(pill_icon).w(px(13.)).h(px(13.)).flex_shrink_0())
-                    .child(muted(short).min_w(px(0.)).truncate());
-
-                if pill_git.dirty {
-                    pill_row = pill_row
+                    .disabled(target.is_none())
+                    .accessibility_label(|| Some("View terminal changes in Git".into()))
+                    .child(icon(Icon::Branch).w(px(13.)).h(px(13.)).flex_shrink_0())
+                    .child(
+                        muted(compact(
+                            branch.as_deref().unwrap_or("No Git checkout"),
+                            limit,
+                        ))
+                        .min_w(px(0.))
+                        .truncate(),
+                    );
+                if git.dirty {
+                    pill = pill
                         .child(
-                            label(format!("+{}", pill_git.additions))
+                            label(format!("+{}", git.additions))
                                 .text_size(px(11.))
                                 .font_family(MONO_FONT)
                                 .text_color(SUCCESS)
                                 .flex_shrink_0(),
                         )
                         .child(
-                            label(format!("−{}", pill_git.deletions))
+                            label(format!("−{}", git.deletions))
                                 .text_size(px(11.))
                                 .font_family(MONO_FONT)
                                 .text_color(DANGER)
                                 .flex_shrink_0(),
                         );
                 }
-                if pill_git.ahead > 0 || pill_git.behind > 0 {
-                    let mut ab = Vec::new();
-                    if pill_git.ahead > 0 {
-                        ab.push(format!("↑{}", pill_git.ahead));
+                for (count, arrow) in [(git.ahead, "↑"), (git.behind, "↓")] {
+                    if count > 0 {
+                        pill = pill.child(
+                            muted(format!("{arrow}{count}"))
+                                .text_size(px(11.))
+                                .flex_shrink_0(),
+                        );
                     }
-                    if pill_git.behind > 0 {
-                        ab.push(format!("↓{}", pill_git.behind));
-                    }
-                    pill_row =
-                        pill_row.child(muted(ab.join(" ")).text_size(px(11.)).flex_shrink_0());
                 }
-                pill_row = pill_row
-                    .child(
-                        icon(Icon::ChevronDown)
-                            .w(px(12.))
-                            .h(px(12.))
-                            .flex_shrink_0(),
-                    )
-                    .on_press(move |_: &()| {
-                        ui.spawn(async move {
-                            let pos = switcher_anchor
-                                .measure()
-                                .await
-                                .map(|b| point(b.page.x, b.page.y + b.frame.size.height));
-                            switcher_menu(ui, pos).await;
-                        });
-                    });
-
+                pill = pill.on_press(move |_: &()| {
+                    if let Some(target) = &target {
+                        super::worktrees::open_compare_target(ui, target);
+                    }
+                });
                 context_bar = context_bar.child(
                     view()
                         .flex_shrink_0()
                         .min_w(px(0.))
-                        .element_ref(&switcher_anchor)
-                        .tooltip(hint_tooltip(pill_tooltip).placement(Placement::Bottom))
-                        .child(pill_row),
+                        .tooltip(hint_tooltip(hint).placement(Placement::Bottom))
+                        .child(pill),
                 );
             }
 

@@ -1418,6 +1418,33 @@ pub fn Gallery() -> impl IntoElement {
         }
         return canban_ui::frame::screen(ui).into_element();
     }
+    if let Ok(
+        scene @ ("card-changes"
+        | "card-changes-loading"
+        | "card-changes-error"
+        | "card-changes-empty"
+        | "card-changes-missing"),
+    ) = std::env::var("CANBAN_GALLERY_SCENE").as_deref()
+    {
+        ui.card_standalone.set(true);
+        ui.snapshot.update(|s| {
+            let card = s.cards.iter_mut().find(|c| c.id == "card-1").unwrap();
+            card.stage = "develop".into();
+            card.branch = Some("canban/104-long-branch-name-with-中文".into());
+            if scene == "card-changes-missing" {
+                card.worktree = None;
+                card.branch = None;
+            }
+        });
+        let data = match scene {
+            "card-changes-loading" => json!({"summary_loading":true}),
+            "card-changes-error" => json!({"summary_error":"Host offline"}),
+            "card-changes-empty" => json!({"files":[],"total_additions":0,"total_deletions":0}),
+            _ => fixtures::git_compare(),
+        };
+        ui.review_state.compare_data.set(data);
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("terminal-directory") {
         canban_ui::frame::configure_window_chrome();
         let mut initial = fixtures::terminal_workspace();

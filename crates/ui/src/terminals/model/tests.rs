@@ -903,6 +903,21 @@ fn card_open_collapses_terminal_by_default_while_terminal_and_pill_entries_expan
         assert!(!ui.card_terminal_open.get_untracked());
         assert!(!ui.card_terminal_focused.get_untracked());
 
+        // Inspecting the Card diff and returning preserves the existing split/tab without launching anything.
+        ui.card_terminal_open.set(true);
+        ui.card_tab.set(conv_id.clone());
+        ui.history.update(|h| {
+            h.entries.clear();
+            h.index = 0;
+            h.visit(ui.location());
+        });
+        crate::review::open_card(ui, "c1");
+        crate::navigation::go(ui, false);
+        assert_eq!(ui.page.get_untracked(), "card");
+        assert!(ui.card_terminal_open.get_untracked());
+        assert_eq!(ui.card_tab.get_untracked(), conv_id);
+        assert!(!ui.card_terminal_focused.get_untracked());
+
         // 3. Clicking the Card `[>_ Terminal]` action from Board or Diff & Review (`open_card_quick`) navigates to Card + expanded Terminal split, never `"terminals"`.
         ui.page.set("review".into());
         ui.card_terminal_open.set(false);
@@ -1537,6 +1552,13 @@ fn worktree_scopes_isolate_tabs_and_cycle_hide_empty_branches_and_regroup_on_cd(
         // 3. When `card-shell` (opened with `origin_card_id = Some("c1")`) `cd`s into ProjectRoot `/repo/p1`,
         //    it dynamically regroups from `CardWorktree("c1")` into `ProjectRoot("p1")`!
         ui.open_terminal("card-shell".into());
+        let before_cd = crate::terminals::current(ui).unwrap();
+        assert_eq!(
+            crate::terminals::worktrees::compare_target(&ui.snapshot.get_untracked(), &before_cd),
+            Some(crate::terminals::worktrees::CompareTarget::Card(
+                "c1".into()
+            ))
+        );
         let conv_c1 = Conversation::key("c1", &Config::default().profiles[0].id);
         let card_tabs: Vec<_> = crate::terminals::scope_tabs(ui)
             .into_iter()
@@ -1564,6 +1586,35 @@ fn worktree_scopes_isolate_tabs_and_cycle_hide_empty_branches_and_regroup_on_cd(
             entry_scope(&snap_after, &moved),
             WorktreeScope::ProjectRoot("p1".into())
         );
+        assert_eq!(
+            crate::terminals::worktrees::compare_target(&snap_after, &moved),
+            Some(crate::terminals::worktrees::CompareTarget::Checkout {
+                project: "p1".into(),
+                cwd: "/repo/p1".into(),
+                base: "HEAD".into(),
+                branch: "main".into(),
+                three_dot: false,
+            })
+        );
+        let managed_entry = crate::terminals::entries(&snap_after)
+            .into_iter()
+            .find(|e| {
+                e.location.as_ref().and_then(|l| l.worktree_id.as_deref()) == Some("wt-active")
+            })
+            .unwrap();
+        assert_eq!(
+            crate::terminals::worktrees::compare_target(&snap_after, &managed_entry),
+            Some(crate::terminals::worktrees::CompareTarget::Checkout {
+                project: "p1".into(),
+                cwd: "/repo/p1-worktrees/feat-active".into(),
+                base: "main".into(),
+                branch: "feat/active".into(),
+                three_dot: true,
+            })
+        );
+        let mut non_git = moved.clone();
+        non_git.location.as_mut().unwrap().branch = None;
+        assert!(crate::terminals::worktrees::compare_target(&snap_after, &non_git).is_none());
         let root_tabs_after: Vec<_> = crate::terminals::scope_tabs(ui)
             .into_iter()
             .map(|e| e.saved.id)

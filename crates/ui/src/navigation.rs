@@ -32,6 +32,21 @@ impl History {
             self.visit(route);
         }
     }
+    /// Capture a navigation source even if the deferred watcher has not visited it yet.
+    /// Presentation changes replace the same route rather than adding a Back step.
+    pub fn checkpoint(&mut self, route: Location) {
+        let same_route = self.entries.get(self.index).is_some_and(|current| {
+            let mut current = current.clone();
+            current.card_terminal_open = route.card_terminal_open;
+            current.card_tab = route.card_tab.clone();
+            current == route
+        });
+        if same_route {
+            self.replace_current(route);
+        } else {
+            self.visit(route);
+        }
+    }
     pub fn step(&mut self, forward: bool) -> Option<Location> {
         if forward {
             if self.index + 1 >= self.entries.len() {
@@ -74,6 +89,26 @@ pub fn replace(ui: Ui) {
     let route = ui.location();
     ui.history.update(|h| h.replace_current(route));
 }
+pub(crate) fn checkpoint(ui: Ui) {
+    let route = ui.location();
+    ui.history.update(|h| h.checkpoint(route));
+}
+
+pub(crate) fn back_to_card(ui: Ui) {
+    let card = ui.card.get_untracked();
+    let has_origin = ui.history.with(|h| {
+        h.index
+            .checked_sub(1)
+            .and_then(|i| h.entries.get(i))
+            .is_some_and(|r| r.page == "card" && r.card == card)
+    });
+    if has_origin {
+        go(ui, false);
+    } else {
+        ui.open_card(card);
+    }
+}
+
 pub fn go(ui: Ui, forward: bool) {
     let mut history = ui.history.get_untracked();
     // Include a navigation from the same native event before traversing.
@@ -117,6 +152,7 @@ pub fn go(ui: Ui, forward: bool) {
         target.page = "board".into();
         target.new_draft.clear();
     }
+    let returning_from_compare = ui.page.get_untracked() == "review" && target.page == "card";
     history.entries[history.index] = target.clone();
     ui.history.set(history);
     batch(move || {
@@ -148,8 +184,19 @@ pub fn go(ui: Ui, forward: bool) {
         } else {
             String::new()
         };
-        ui.card_tab.set(default_card_tab);
-        ui.card_terminal_open.set(false);
+        let restored_tab = if target.page == "card"
+            && !target.card_tab.is_empty()
+            && crate::terminals::card_live_entries_for_ui(ui, &target.card)
+                .iter()
+                .any(|e| e.saved.id == target.card_tab)
+        {
+            target.card_tab.clone()
+        } else {
+            default_card_tab
+        };
+        ui.card_terminal_open
+            .set(returning_from_compare && target.card_terminal_open && !restored_tab.is_empty());
+        ui.card_tab.set(restored_tab);
         ui.card_terminal_focused.set(false);
         ui.card.set(target.card);
         ui.request.set(target.request);
@@ -198,6 +245,8 @@ mod tests {
             card: String::new(),
             request: String::new(),
             terminal: String::new(),
+            card_terminal_open: false,
+            card_tab: String::new(),
             standalone: false,
             terminal_card: String::new(),
         }
@@ -213,6 +262,32 @@ mod tests {
         history.visit(first.clone());
         history.visit(second);
         assert_eq!(history.step(false), Some(first));
+    }
+    #[test]
+    fn compare_checkpoint_preserves_source_when_route_watcher_is_still_on_board() {
+        let mut h = History::default();
+        h.visit(route("board"));
+        let mut card = route("card");
+        card.card = "c1".into();
+        card.card_terminal_open = true;
+        h.checkpoint(card.clone());
+        h.checkpoint(route("review"));
+        assert_eq!(h.step(false), Some(card));
+        assert_eq!(h.step(false).unwrap().page, "board");
+    }
+    #[test]
+    fn compare_roundtrip_preserves_card_terminal_context_without_an_extra_back_step() {
+        let mut h = History::default();
+        let mut card = route("card");
+        card.card = "c1".into();
+        h.visit(card.clone());
+        card.card_terminal_open = true;
+        card.card_tab = "c1:developer".into();
+        h.checkpoint(card.clone());
+        h.checkpoint(route("review"));
+        assert_eq!(h.step(false), Some(card));
+        assert_eq!(h.entries.len(), 2);
+        assert_eq!(h.step(true).unwrap().page, "review");
     }
     #[test]
     fn traversal_does_not_duplicate_and_new_navigation_discards_forward_only() {

@@ -1,5 +1,6 @@
 //! Compact Card reader: two-row header, scrolling context/conversation, fixed composer.
 pub(crate) mod attachments;
+pub(crate) mod changes;
 mod composer;
 mod details;
 mod header;

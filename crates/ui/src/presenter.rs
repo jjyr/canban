@@ -38,6 +38,10 @@ pub struct Location {
     pub terminal: String,
     pub standalone: bool,
     pub terminal_card: String,
+    #[serde(default)]
+    pub card_terminal_open: bool,
+    #[serde(default)]
+    pub card_tab: String,
 }
 
 #[derive(Clone, Copy)]
@@ -539,6 +543,13 @@ impl Ui {
             request: self.request.get_untracked(),
             terminal: if self.page.get_untracked() == "terminals" {
                 self.terminal_selection.get_untracked()
+            } else {
+                String::new()
+            },
+            card_terminal_open: self.page.get_untracked() == "card"
+                && self.card_terminal_open.get_untracked(),
+            card_tab: if self.page.get_untracked() == "card" {
+                self.card_tab.get_untracked()
             } else {
                 String::new()
             },

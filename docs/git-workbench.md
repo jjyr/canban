@@ -18,6 +18,41 @@ query or remove keyboard focus. Commit search is debounced by 150 ms; Enter
 requests it immediately. The refs response supplies the initial commit page,
 avoiding an identical initial `git.log` query.
 
+## Direct change navigation
+
+Card #104 extends branch labels into direct Compare entry points. A Card's branch
+opens its bound workspace, while a Terminal's branch follows the observed
+checkout, including after the Agent changes directory. Neither opens a workspace
+switching dropdown. A managed worktree compares its base branch with Working tree
+using merge-base semantics; a Project root compares HEAD with Working tree.
+Both include staged, unstaged and untracked files. Worktree management stays in
+Git's Workspace list, tree context menus and the Command Palette.
+
+The visible Card header queries the exact same `git.compare` parameters as its
+default Git view, including the bound target branch and checkout path. It shares
+the window's bounded read cache and in-flight request coalescing. Opening Compare
+therefore reuses a recent result. No Board-tile Git queries or polling timers are
+added. Unrelated Snapshot changes do not reload statistics. Known review events,
+host recovery, explicit Refresh Card Diff and reopening after cache expiry reread
+the relevant scope. Query tickets discard late results after a Card/context
+switch; unavailable hosts and errors never appear as zero-change results.
+
+Header counts summarize the rendered patch; a truncated patch is labelled `≥`
+and explains that the counts are partial. Empty, loading, unavailable and missing
+workspace are distinct states. Binary-only changes remain discoverable through
+the tooltip's file count even when line totals are zero. Card context menus and
+the Command Palette provide branch copying and diff refresh. Ordinary Card open
+still collapses Terminal; returning directly from Compare restores the prior
+split and selected live tab without replaying execution. Drafts and Card reading
+positions continue using their existing route owners.
+
+Gallery scenes: `card-changes`, `card-changes-loading`, `card-changes-error`,
+`card-changes-empty` and `card-changes-missing` use the production header with
+deterministic data. `terminals` exercises the direct branch action and existing
+worktree tree. Gallery states are distinct from packaged-App acceptance. See the
+[Card #104 acceptance record](card-changes-acceptance-20261117.md) for executed
+checks, build-tool workarounds and unexercised boundaries.
+
 ## Asynchronous reads and cache
 
 Each window owns a capacity-bounded LRU of 24 Git read results with a ten-second

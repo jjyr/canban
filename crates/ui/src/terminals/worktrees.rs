@@ -487,14 +487,98 @@ pub fn open_agent(ui: Ui, wt: &ManagedWorktree, profile_id: &str) {
     );
 }
 
-pub fn open_diff(ui: Ui, wt: &ManagedWorktree) {
-    ui.project.set(wt.project_id.clone());
-    ui.review_state.checkout_cwd.set(wt.path.clone());
-    ui.review_state.log_branch.set(wt.branch.clone());
-    crate::review::select_git_pair(ui, wt.base_branch.clone(), wt.branch.clone());
+/// Navigation follows observed checkout identity, never the Agent's original Card.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompareTarget {
+    Card(String),
+    Checkout {
+        project: String,
+        cwd: String,
+        base: String,
+        branch: String,
+        three_dot: bool,
+    },
+}
+
+pub fn compare_target(s: &Snapshot, e: &Entry) -> Option<CompareTarget> {
+    let loc = e.location.as_ref()?;
+    let branch = loc.branch.as_ref()?.clone();
+    loc.cwd.as_ref()?;
+    match entry_scope(s, e) {
+        WorktreeScope::CardWorktree(id) => Some(CompareTarget::Card(id)),
+        WorktreeScope::ManagedWorktree(id) => {
+            let wt = s.worktrees.iter().find(|w| w.id == id)?;
+            Some(CompareTarget::Checkout {
+                project: wt.project_id.clone(),
+                cwd: wt.path.clone(),
+                base: wt.base_branch.clone(),
+                branch,
+                three_dot: true,
+            })
+        }
+        WorktreeScope::ProjectRoot(id) => {
+            let p = s.projects.iter().find(|p| p.id == id)?;
+            Some(CompareTarget::Checkout {
+                project: id,
+                cwd: p.directory.clone(),
+                base: "HEAD".into(),
+                branch,
+                three_dot: false,
+            })
+        }
+        WorktreeScope::Directory { .. } | WorktreeScope::Unassigned(_) => None,
+    }
+}
+
+pub fn open_current_diff(ui: Ui) {
+    let target = current(ui).and_then(|e| ui.snapshot.with_untracked(|s| compare_target(s, &e)));
+    if let Some(target) = target {
+        open_compare_target(ui, &target);
+    } else {
+        ui.notify("Changes unavailable: no Git checkout could be resolved for this terminal");
+    }
+}
+
+pub fn open_compare_target(ui: Ui, target: &CompareTarget) {
+    if let CompareTarget::Card(id) = target {
+        crate::review::open_card(ui, id);
+        return;
+    }
+    let CompareTarget::Checkout {
+        project,
+        cwd,
+        base,
+        branch,
+        three_dot,
+    } = target
+    else {
+        unreachable!()
+    };
+    crate::navigation::checkpoint(ui);
+    batch(|| {
+        ui.project.set(project.clone());
+        ui.review_state.checkout_cwd.set(cwd.clone());
+        ui.review_state.log_branch.set(branch.clone());
+        ui.review_state.three_dot.set(*three_dot);
+        crate::review::select_git_pair(ui, base.clone(), "WORKDIR");
+        ui.navigate("review");
+    });
+    crate::navigation::checkpoint(ui);
     crate::review::load_refs(ui);
-    crate::review::git_ops::load_branch_log(ui, wt.branch.clone(), false);
-    ui.navigate("review");
+    crate::review::git_ops::load_branch_log(ui, branch.clone(), false);
+}
+
+pub fn open_diff(ui: Ui, wt: &ManagedWorktree) {
+    open_compare_target(
+        ui,
+        &CompareTarget::Checkout {
+            project: wt.project_id.clone(),
+            cwd: wt.path.clone(),
+            base: wt.base_branch.clone(),
+            branch: wt.branch.clone(),
+            three_dot: true,
+        },
+    );
 }
 
 pub fn request_remove(ui: Ui, wt_id: String, force: bool) {

@@ -597,6 +597,30 @@ pub const CATALOG: &[Command] = &[
         keywords: "full screen expand pty",
     },
     Command {
+        id: "open-terminal-diff",
+        title: "View Terminal Changes in Git",
+        key: "",
+        display: "Terminal",
+        context: "Terminal",
+        keywords: "diff compare branch current directory",
+    },
+    Command {
+        id: "copy-card-branch",
+        title: "Copy Card Branch",
+        key: "",
+        display: "Card",
+        context: "Card",
+        keywords: "git branch clipboard",
+    },
+    Command {
+        id: "refresh-card-diff",
+        title: "Refresh Card Diff",
+        key: "",
+        display: "Card",
+        context: "Card",
+        keywords: "git compare branch changes reload",
+    },
+    Command {
         id: "open-card-diff",
         title: "Open Card Diff in Git",
         key: "",
@@ -1093,13 +1117,10 @@ pub fn execute(ui: Ui, id: &str) {
                 ui.navigate("terminals");
             }
         }
-        "open-card-diff" => {
-            if let Some(c) = ui.current_card() {
-                crate::review::open_card(ui, &c.id);
-            } else {
-                crate::review::open_compare(ui);
-            }
-        }
+        "open-terminal-diff" => crate::terminals::worktrees::open_current_diff(ui),
+        "copy-card-branch" => crate::card::changes::copy_branch(ui),
+        "refresh-card-diff" => crate::card::changes::refresh(ui),
+        "open-card-diff" => crate::card::changes::open(ui),
         "quick-merge-card" => {
             if let Some(c) = ui.current_card() {
                 let project = ui.current_project();

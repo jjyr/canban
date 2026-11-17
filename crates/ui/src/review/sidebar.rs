@@ -828,7 +828,7 @@ pub fn render_top_bar(ui: Ui) -> impl IntoElement {
                         move || !ui.card.get().is_empty(),
                         move || {
                             chrome_button(Icon::Back, "Back to Card", move |_| {
-                                ui.page.set("card".into());
+                                crate::navigation::back_to_card(ui);
                             })
                         },
                     ))

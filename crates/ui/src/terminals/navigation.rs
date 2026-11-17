@@ -200,6 +200,8 @@ mod tests {
             card: "card".into(),
             request: String::new(),
             terminal: String::new(),
+            card_terminal_open: false,
+            card_tab: String::new(),
             standalone: true,
             terminal_card: String::new(),
         }

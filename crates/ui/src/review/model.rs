@@ -33,6 +33,7 @@ pub struct State {
     /// Optional GitHub PR target (`{ "repository": "owner/repo", "number": 42 }`)
     pub pr_target: Signal<Option<Value>>,
     pub selected_file: Signal<String>,
+    pub summary_revision: Signal<u64>,
     pub read_cache: Stored<Arc<super::cache::ReadCache>>,
     pub read_context: Stored<String>,
     pub refs_request: Stored<String>,
@@ -104,6 +105,7 @@ impl State {
             three_dot: signal(true),
             pr_target: signal(None),
             selected_file: signal(String::new()),
+            summary_revision: signal(0),
             read_cache: stored(Arc::new(super::cache::ReadCache::default())),
             read_context: stored(String::new()),
             refs_request: stored(String::new()),

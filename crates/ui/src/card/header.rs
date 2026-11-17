@@ -74,19 +74,19 @@ fn terminal_button(ui: Ui) -> View {
                 }),
         )
 }
-fn review(ui: Ui) {
-    if let Some(c) = ui.current_card() {
-        crate::review::open_card(ui, &c.id);
-    } else {
-        crate::review::open_compare(ui);
-    }
-}
+
 fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
     let Some(card) = ui.current_card() else {
         return;
     };
     ui.spawn(async move {
         let mut items = Vec::new();
+        if card.branch.as_ref().is_some_and(|b| !b.is_empty()) {
+            items.push(
+                MenuItem::new("Copy Card branch").on_select(move || changes::copy_branch(ui)),
+            );
+            items.push(MenuItem::new("Refresh Card diff").on_select(move || changes::refresh(ui)));
+        }
         for (title, kind) in [
             ("Edit task…", 0),
             ("Attachments…", 1),
@@ -232,6 +232,7 @@ fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
     });
 }
 pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElement {
+    let summary = changes::observe(ui);
     let is_review = computed(move || ui.page.get() == "review");
     let show_back = computed(move || {
         ui.page.get() == "card"
@@ -466,33 +467,11 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 row = row.child(status("Auto-merge held", Tone::Attention));
             }
             if let Some(branch) = c.branch.clone().filter(|b| !b.is_empty()) {
-                row = row.child(
-                    view()
-                        .min_w(px(0.))
-                        .max_w(px(150.))
-                        .tooltip(hint_tooltip(branch.clone()))
-                        .child(
-                            canban_ui_kit::press_target()
-                                .min_w(px(0.))
-                                .h(px(24.))
-                                .px_1p5()
-                                .rounded(px(5.))
-                                .flex_row()
-                                .items_center()
-                                .gap_1()
-                                .bg(CLEAR)
-                                .hover(|st| st.bg(INSET))
-                                .focus(|st| st.border_1().border_color(ACCENT))
-                                .accessibility_label(|| Some("Copy Card branch".into()))
-                                .child(icon(Icon::Branch).w(px(12.)).h(px(12.)))
-                                .child(
-                                    muted(crate::components::git_workspace::compact(&branch, 22))
-                                        .truncate(),
-                                )
-                                .on_press(move |_: &()| copy_text(ui, branch.clone())),
-                        ),
-                );
+                row = row.child(changes::button(ui, branch, summary));
+            } else if c.worktree.is_none() && !c.is_github_pr() && c.pull_request.is_none() {
+                row = row.child(muted("Workspace not created"));
             }
+
             if attachment_count > 0 {
                 row = row.child(
                     canban_ui_kit::press_target()
@@ -524,19 +503,15 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 || c.branch.as_ref().is_some_and(|b| !b.is_empty())
                 || c.is_github_pr()
                 || c.pull_request.is_some();
-            if !review_mode && can_review_diff {
+            if !review_mode && can_review_diff && (in_review_stage || c.branch.as_ref().is_none_or(|b| b.is_empty())) {
                 row = row.child(compact_action(
-                    if in_review_stage || c.is_github_pr() {
-                        "Review"
-                    } else {
-                        "Diff"
-                    },
+                    if in_review_stage { "Review" } else if c.is_github_pr() || c.pull_request.is_some() { "View PR diff" } else { "Diff" },
                     if c.stage == "review" {
                         Variant::Primary
                     } else {
                         Variant::Secondary
                     },
-                    move |_| review(ui),
+                    move |_| changes::open(ui),
                 ));
             }
             if !review_mode && quick_merge::eligible(&c, project.as_ref()) {
