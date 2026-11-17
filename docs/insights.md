@@ -91,7 +91,7 @@ Those inventory concepts retain their existing application surfaces.
 
 The UI projects the existing complete retained snapshot and reacts to snapshot
 changes plus the shared runtime clock. It adds no per-tile queries or polling.
-The optional batch timestamps extend the snapshot contract (Desktop API 63),
+The optional batch timestamps extend the snapshot contract (Desktop API 65 after integration with main),
 without changing SQLite schema or rewriting legacy JSON records.
 
 ## Verification surfaces

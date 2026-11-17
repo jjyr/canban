@@ -69,3 +69,43 @@ Historical provider attribution can fall back to current Profile configuration.
 Legacy batches without exact launch time, merges without a trustworthy date,
 removed history and stale offline-host caches remain explicit coverage limits;
 no historical timestamps or human work estimates are synthesized.
+
+
+## Merge integration verification — 2026-11-17
+
+Card #107 was rebased onto `c0470ad4730da82e1e2f51e854d548103976b660`
+with implementation commit `b4b520e`. The updater conflict advances Desktop API
+from main's 64 to 65, retaining the Insights batch scheduling/launch fields
+alongside main's state synchronization contract. The mise conflict retains
+`build-profiling`, `profile` and `acceptance-insights` together. SQLite schema
+remains unchanged; the API 63 statement above describes the original build.
+
+Fresh verification after rebase:
+
+- Standard `mise run build` passed and signed `.local/Canban.app`.
+- Standard `mise run test`: **603 passed, one configured skip**, including
+  Insights, state synchronization, Timeline indexing and workflow regressions.
+- `mise run test-package`: all **eight** packaging/signing tests passed.
+- `mise run acceptance`: passed with disposable home/Core at
+  `/private/tmp/cb-w3jezi4x/home`, including restart and three-Board scheduling.
+- `mise exec -- python3 scripts/acceptance-insights.py --native`: source-fact
+  assertions passed with disposable home/Core at
+  `/private/tmp/cb-insights-wma2xw06`. The packaged production App displayed
+  five created Cards, one local merge, two contributing Projects and one used
+  Agent Profile. Opening the merged Card list reached the delivered Card;
+  global Back retained the list and selected Today scope.
+- `CANBAN_GALLERY_SCENE=insights-efficiency mise run gallery`: the production
+  components displayed the independent annual row above expanded efficiency,
+  p50/p90 comparisons and explicit current/baseline sample sizes. Switching
+  to Queue samples changed the list from one cycle sample to two queue samples.
+  No separate activity feed or run-results/attention blocks appeared there.
+- `git diff main --check` passed. Build/test commands used the configured
+  toolchain directly; this integration did not require Bullet artifact staging.
+
+Logs and `gallery-efficiency.png` are retained under the Card's
+`agents/merger` run directory. Only the disposable fixture App and Gallery were
+operated; their UI processes, backend and isolated Core were stopped afterward.
+The earlier native acceptance remains historical evidence for the broader
+interaction matrix; this merge pass did not repeat narrow-window/DST interactions
+or perform a new Instruments measurement. Deterministic Agents exercised real
+PTYs; no paid provider execution was used.
