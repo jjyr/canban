@@ -325,6 +325,71 @@ workspace:
  art=call('schedule.read_artifact',{'schedule_run_id':audit_run_id,'path':audit_runs[0]['report_path']})
  assert 'completed cleanly without creating a Card' in art['body']
  evidence['checks']+=['original YAML preservation','collection revision conflict','SQL source revision matches publication','explicit YAML file submit/export','Project-owned configuration PTY','exact preview and launch prompt','Continue without reinjection','exact provider history resume','schema 6 script execution and inherited Agent PTY env','schema 8 scheduled Card and Cardless Terminal Agent execution with auto-reclamation']
+ # A finished development run can remain in Develop until a manual move to Review.
+ # Exercise the actual CLI, event dispatcher, real PTY and local merge queue together.
+ transition_source=base/'column-transitions';transition_source.mkdir()
+ def transition_git(directory,*argv):
+  return subprocess.check_output(['git','-C',str(directory),*argv],text=True,stderr=subprocess.STDOUT).strip()
+ transition_git(transition_source,'init','-b','main')
+ for key,value in [('user.name','Acceptance'),('user.email','acceptance@example.invalid'),('core.hooksPath','/dev/null'),('commit.gpgsign','false')]:
+  transition_git(transition_source,'config',key,value)
+ transition_git(transition_source,'commit','--allow-empty','-m','Seed')
+ transition_yaml="""schema: 8
+id: manual-column-transition
+name: Manual column transition
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  develop:
+    event: card.column_entered
+    match:
+      column: develop
+    start_at: development
+  review:
+    event: card.column_entered
+    match:
+      column: review
+    start_at: delivery
+steps:
+  - id: development
+    uses: agent
+    with:
+      profile: developer
+    next: done
+  - id: delivery
+    uses: deliver
+    with:
+      sync_upstream: false
+    next: done
+  - id: done
+    uses: complete
+workspace:
+  create_worktree: true
+  sync_base: false
+"""
+ transition_project=call('project.create',{'name':'Manual column transition','directory':str(transition_source),'workflow_yaml':transition_yaml})
+ transition_card=call('card.create',{'project_id':transition_project['id'],'title':'Finished development then manual Review'})
+ call('card.move',{'card_id':transition_card['id'],'revision':transition_card['revision'],'stage':'develop'})
+ s=wait(lambda s:any(r['card_id']==transition_card['id'] and r['state']=='completed' for r in s['workflow_runs']) and any(a['card_id']==transition_card['id'] and (a.get('observed') or {}).get('state')=='finished' for a in agents(s)),'development finishes in Develop')
+ developed=next(c for c in s['cards'] if c['id']==transition_card['id']);assert developed['stage']=='develop'
+ assert not transition_git(developed['worktree'],'status','--porcelain'),'completed development was not checkpointed'
+ assert transition_git(developed['worktree'],'rev-parse','HEAD')!=transition_git(transition_source,'rev-parse','HEAD')
+ before_agents=[(a['profile']['id'],a['number']) for a in agents(s,developed['id'])]
+ call('card.move',{'card_id':developed['id'],'revision':developed['revision'],'stage':'review'})
+ s=wait(lambda s:any(c['id']==developed['id'] and c.get('delivery') for c in s['cards']),'manual Review enters and completes merge queue')
+ assert [(a['profile']['id'],a['number']) for a in agents(s,developed['id'])]==before_agents,'manual Review restarted an Agent'
+ transition_runs=[r for r in s['workflow_runs'] if r['card_id']==developed['id']]
+ assert len(transition_runs)==2 and all(r['state']=='completed' for r in transition_runs)
+ move_event=next(e for e in s['events'] if e['card_id']==developed['id'] and e['kind']=='card.stage_changed' and e['data']['to']=='review')
+ assert move_event['data']['stage']=='review' and move_event['data']['card_revision']==developed['revision']+1
+ assert (transition_source/'canban-acceptance.txt').read_text()=='Herdr executed the Canban Card task.\n'
+ evidence['column_transition']={'project_id':transition_project['id'],'card_id':developed['id'],'event_id':move_event['id'],'agents':before_agents}
+ evidence['checks']+=['manual Develop-to-Review dispatches only Review and completes local merge without restarting developer']
  (base/'evidence.json').write_text(json.dumps(evidence,indent=2));print('WORKFLOW_ACCEPTANCE_OK '+str(base),flush=True)
  if options.native:
   bundle=base/'CanbanWorkflowAcceptance.app';shutil.copytree(repo/'.local/Canban.app',bundle)

@@ -80,6 +80,8 @@ card.stage_changed(T1, backlog -> develop)
 
 Same-column reorder is neither leave nor enter. Creation/restoration enters its column; archive/removal leaves active Board membership. Preserve reasons. Restore does not implicitly schedule work: default entry bindings exclude restoration unless configured otherwise.
 
+For `card.stage_changed`, entry selectors match only `to` and exit selectors match only `from`, including replay of historical events whose `stage` metadata contains the old column. Creation/restoration and archive/removal use `stage` for their respective membership direction. Each type alternative applies its own column constraint. New transition facts are appended after saving the Card, so `stage` and `card_revision` describe the resulting Card in the same transaction.
+
 A view retains the original event ID and stable match identity. One subscription matches an original fact once even if multiple selector alternatives match; independent subscriptions each receive it. Workflow-owned moves use the same facts with ownership preventing duplicate starts.
 
 ## GitHub source events

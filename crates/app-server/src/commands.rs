@@ -865,6 +865,7 @@ impl AppServer {
                 c.revision += 1;
                 c.attention = None;
                 c.human_gate = None;
+                db.save(&c)?;
                 log(
                     db,
                     &c,
@@ -875,7 +876,6 @@ impl AppServer {
                     json!({"from":from,"to":target,"before_card_id":p["before_card_id"]}),
                 )?;
                 workflow::stop_card(db, &self.config(), &c.id, "superseded")?;
-                db.save(&c)?;
                 Ok(serde_json::to_value(c)?)
             }),
             "card.continue" => self.continue_card(p),

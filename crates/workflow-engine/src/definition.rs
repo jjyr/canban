@@ -309,44 +309,40 @@ pub fn matches(selector: &EventSelector, event: &Event) -> bool {
     {
         return false;
     }
-    let entered = matches!(
-        event.kind.as_str(),
-        "card.created" | "card.restored" | "card.stage_changed"
-    );
-    let left = matches!(
-        event.kind.as_str(),
-        "card.archived" | "card.removed" | "card.stage_changed"
-    );
+    // Transition directions remain authoritative even for historical facts
+    // whose snapshot metadata still contains the source column.
+    let (entered, left) = match event.kind.as_str() {
+        "card.stage_changed" if data["from"] != data["to"] => {
+            (data["to"].as_str(), data["from"].as_str())
+        }
+        "card.created" | "card.restored" => (data["stage"].as_str(), None),
+        "card.archived" | "card.removed" => (None, data["stage"].as_str()),
+        _ => (None, None),
+    };
+    let column_matches = |column: Option<&str>| {
+        column.is_some_and(|column| selector.column.as_deref().is_none_or(|v| column == v))
+    };
+    let current_column_matches = selector
+        .column
+        .as_deref()
+        .is_none_or(|v| data["stage"].as_str().or_else(|| data["to"].as_str()) == Some(v));
     let type_match = selector.types.is_empty()
         || selector.types.iter().any(|t| {
-            t == "*"
-                || t == &event.kind
-                || t.strip_suffix(".*")
-                    .is_some_and(|prefix| event.kind.starts_with(&format!("{prefix}.")))
-                || (t == "card.column_entered"
-                    && entered
-                    && selector
-                        .column
-                        .as_ref()
-                        .is_none_or(|v| data["to"] == *v || data["stage"] == *v))
-                || (t == "card.column_left"
-                    && left
-                    && selector
-                        .column
-                        .as_ref()
-                        .is_none_or(|v| data["from"] == *v || data["stage"] == *v))
-                || (t == "card.content_changed" && event.kind == "card.updated")
+            if t == "card.column_entered" {
+                column_matches(entered)
+            } else if t == "card.column_left" {
+                column_matches(left)
+            } else {
+                current_column_matches
+                    && (t == "*"
+                        || t == &event.kind
+                        || t.strip_suffix(".*")
+                            .is_some_and(|prefix| event.kind.starts_with(&format!("{prefix}.")))
+                        || (t == "card.content_changed" && event.kind == "card.updated"))
+            }
         });
     type_match
-        && (selector.column.is_none()
-            || selector
-                .types
-                .iter()
-                .any(|t| t == "card.column_entered" || t == "card.column_left")
-            || selector
-                .column
-                .as_ref()
-                .is_some_and(|v| data["stage"] == *v || data["to"] == *v))
+        && (!selector.types.is_empty() || current_column_matches)
         && (selector.changed_fields.is_empty()
             || data["changed_fields"].as_array().is_some_and(|a| {
                 selector
@@ -354,4 +350,92 @@ pub fn matches(selector: &EventSelector, event: &Event) -> bool {
                     .iter()
                     .any(|v| a.iter().any(|f| f == v))
             }))
+}
+
+#[cfg(test)]
+mod column_selector_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn check(kind: &str, data: serde_json::Value, entered: &[&str], left: &[&str]) {
+        let event = canban_timeline::event("project", "card", kind, "user", "", data);
+        for (view, expected) in [("card.column_entered", entered), ("card.column_left", left)] {
+            for column in ["backlog", "develop", "review"] {
+                let selector =
+                    serde_json::from_value(json!({"types":[view],"column":column})).unwrap();
+                assert_eq!(
+                    matches(&selector, &event),
+                    expected.contains(&column),
+                    "{kind}: {view} {column}: {}",
+                    event.data
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transition_views_use_direction_even_with_stale_snapshot_metadata() {
+        for stage in ["develop", "review"] {
+            check(
+                "card.stage_changed",
+                json!({"from":"develop","to":"review","stage":stage}),
+                &["review"],
+                &["develop"],
+            );
+            check(
+                "card.stage_changed",
+                json!({"from":"review","to":"develop","stage":stage}),
+                &["develop"],
+                &["review"],
+            );
+        }
+        check(
+            "card.stage_changed",
+            json!({"from":"develop","to":"develop","stage":"develop"}),
+            &[],
+            &[],
+        );
+        check("card.stage_changed", json!({"stage":"develop"}), &[], &[]);
+        check("card.order_changed", json!({"stage":"develop"}), &[], &[]);
+    }
+
+    #[test]
+    fn membership_views_and_mixed_type_alternatives_keep_column_constraints() {
+        for kind in ["card.created", "card.restored"] {
+            check(
+                kind,
+                json!({"stage":"backlog","from":"review","to":"develop"}),
+                &["backlog"],
+                &[],
+            );
+        }
+        for kind in ["card.archived", "card.removed"] {
+            check(
+                kind,
+                json!({"stage":"review","from":"develop","to":"backlog"}),
+                &[],
+                &["review"],
+            );
+        }
+        let event = canban_timeline::event(
+            "project",
+            "card",
+            "card.updated",
+            "user",
+            "",
+            json!({"stage":"develop"}),
+        );
+        for types in [
+            json!([]),
+            json!(["*"]),
+            json!(["card.updated", "card.column_entered"]),
+            json!(["card.content_changed", "card.column_left"]),
+        ] {
+            for column in ["develop", "review"] {
+                let selector =
+                    serde_json::from_value(json!({"types":types,"column":column})).unwrap();
+                assert_eq!(matches(&selector, &event), column == "develop");
+            }
+        }
+    }
 }

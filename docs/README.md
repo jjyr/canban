@@ -38,6 +38,8 @@ editor, modal, window-title and terminal checks.
 
 [Card conversation refinement acceptance (2026-11-11)](card-conversation-acceptance-20261111.md) records content-derived references, local/Issue/PR identity, grouped Timeline, quick replies and native verification boundaries.
 
+[Column transition dispatch acceptance (2026-11-17)](column-transition-acceptance-20261117.md) records direction-specific event matching, isolated workflow/merge verification, native stage-menu acceptance and the Bullet build-path limitation.
+
 ## Current product documents
 
 | Document | Purpose |

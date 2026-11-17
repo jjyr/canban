@@ -372,6 +372,7 @@ impl AppServer {
                         &report,
                     )?;
                 }
+                let mut returned_from = None;
                 if state == "backlog" {
                     crate::workflow::stop_card(db, &config, &card.id, "returned_to_backlog")?;
                     for mut pending in db.list::<TerminalEntry>()? {
@@ -407,25 +408,28 @@ impl AppServer {
                         let from = std::mem::replace(&mut card.stage, backlog_stage);
                         card.board_order = None;
                         canban_kanban::order::place(db, &mut card, None)?;
-                        log(
-                            db,
-                            &card,
-                            "card.stage_changed",
-                            &actor,
-                            &format!("{from} → {} (returned by @{profile_label})", card.stage),
-                            terminal_id.clone(),
-                            json!({
-                                "from": from,
-                                "to": card.stage,
-                                "reason": "agent_returned_backlog",
-                                "terminal_id": terminal_id,
-                                "workflow_run_id": active_wf_id,
-                            }),
-                        )?;
+                        returned_from = Some(from);
                     }
                 }
                 card.revision += 1;
                 db.save(&card)?;
+                if let Some(from) = returned_from {
+                    log(
+                        db,
+                        &card,
+                        "card.stage_changed",
+                        &actor,
+                        &format!("{from} → {} (returned by @{profile_label})", card.stage),
+                        terminal_id.clone(),
+                        json!({
+                            "from": from,
+                            "to": card.stage,
+                            "reason": "agent_returned_backlog",
+                            "terminal_id": terminal_id,
+                            "workflow_run_id": active_wf_id,
+                        }),
+                    )?;
+                }
             }
             Ok(json!({
                 "accepted": true,

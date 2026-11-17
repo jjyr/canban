@@ -1,6 +1,98 @@
 use super::*;
 
 #[test]
+fn manual_column_moves_dispatch_only_destination_and_record_resulting_card() {
+    let (_dir, app, p, c) = setup();
+    std::fs::create_dir_all(&p.directory).unwrap();
+    // Seed a finished development stage without launching a process.
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut card: Card = db.get(&c.id)?;
+            card.stage = "develop".into();
+            // Keep delivery at its human gate; this test exercises dispatch,
+            // while the isolated acceptance harness exercises actual merging.
+            card.hold_auto_merge = true;
+            db.save(&card)
+        })
+        .unwrap();
+    let mut observers = Vec::new();
+    for view in ["card.column_entered", "card.column_left"] {
+        for column in ["develop", "review"] {
+            let sub = app.call("subscription.save", json!({"revision":0,"enabled":true,"selector":{"card_id":c.id,"types":[view],"column":column},"target":{"type":"consumer"}})).unwrap();
+            observers.push((view, column, sub["id"].clone()));
+        }
+    }
+    for (from, to) in [("develop", "review"), ("review", "develop")] {
+        let before = app.snapshot().unwrap();
+        let card = before.cards.iter().find(|card| card.id == c.id).unwrap();
+        let moved = app
+            .call(
+                "card.move",
+                json!({"card_id":c.id,"revision":card.revision,"stage":to}),
+            )
+            .unwrap();
+        let after = app.snapshot().unwrap();
+        let event = after
+            .events
+            .iter()
+            .rev()
+            .find(|e| e.card_id == c.id && e.kind == "card.stage_changed")
+            .unwrap();
+        assert_eq!(event.data["from"], from);
+        assert_eq!(event.data["to"], to);
+        assert_eq!(event.data["stage"], to);
+        assert_eq!(event.data["card_revision"], moved["revision"]);
+        for (view, column, id) in &observers {
+            let deliveries = app
+                .call("subscription.deliveries", json!({"subscription_id":id}))
+                .unwrap();
+            let count = deliveries
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|d| d["event_id"] == event.id)
+                .count();
+            assert_eq!(
+                count,
+                usize::from(
+                    *column
+                        == if *view == "card.column_entered" {
+                            to
+                        } else {
+                            from
+                        }
+                ),
+                "{view} {column}"
+            );
+        }
+        let runs: Vec<_> = after
+            .workflow_runs
+            .iter()
+            .filter(|r| r.card_id == c.id && r.active())
+            .collect();
+        assert_eq!(runs.len(), 1, "runs: {:?}", after.workflow_runs);
+        if to == "review" {
+            assert_eq!(runs[0].step.as_deref(), Some("deliver:review"));
+            assert_eq!(runs[0].state, "waiting_approval");
+            assert!(after.terminals.iter().all(|t| t.agent.is_none()));
+        } else {
+            assert_eq!(runs[0].step.as_deref(), Some("agent:develop"));
+            assert_eq!(
+                after
+                    .terminals
+                    .iter()
+                    .filter_map(|t| t.agent.as_ref())
+                    .filter(|a| a.card_id == c.id && a.profile.id == "developer")
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
+#[test]
 fn admission_projection_matches_full_state_without_loading_history() {
     let (_dir, app, p, c) = setup();
     app.call(
@@ -2948,6 +3040,8 @@ workspace:
             && e.data["from"] == "develop"
             && e.data["to"] == "backlog"
             && e.data["reason"] == "agent_returned_backlog"
+            && e.data["stage"] == "backlog"
+            && e.data["card_revision"] == updated.revision
     }));
 
     // Unread notification reminder alerts the user to read the Agent's explanation on the Card.
