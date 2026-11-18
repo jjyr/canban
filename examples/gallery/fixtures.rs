@@ -2508,7 +2508,11 @@ pub fn insights() -> canban_types::Snapshot {
                 card.archived_at = None;
                 card.delivery = None;
             } else {
-                let lead_hours = ((card_num % 7) + 1) * 2;
+                let lead_hours = if days_ago <= 4 {
+                    (card_num % 2) + 1
+                } else {
+                    ((card_num % 7) + 2) * 2
+                };
                 let merged_at =
                     (work_start + lead_hours * hour_ms).min(base_now.saturating_sub(60_000));
                 card.stage = "review".into();
@@ -2674,6 +2678,42 @@ pub fn insights() -> canban_types::Snapshot {
             started_at: Some(ts + min_ms),
             created_at: ts,
             updated_at: ts + 6 * min_ms,
+        });
+    }
+
+    // Add a few bulk initial-sync GitHub issues so Gallery demonstrates organic vs sync separation
+    for sync_idx in 1..=12u64 {
+        card_num += 1;
+        let cid = format!("insights-sync-{sync_idx}");
+        let sync_ts = base_now.saturating_sub(2 * hour_ms);
+        let mut card = s.cards[0].clone();
+        card.id = cid.clone();
+        card.project_id = "herdr-core".into();
+        card.number = card_num;
+        card.title = format!("Synced upstream issue #{sync_idx}");
+        card.stage = "backlog".into();
+        card.created_at = sync_ts;
+        card.archived_at = None;
+        card.delivery = None;
+        card.attention = None;
+        card.human_gate = None;
+        s.cards.push(card);
+        seq += 1;
+        s.events.push(Event {
+            id: format!("ins-ev-{seq}"),
+            project_id: "herdr-core".into(),
+            card_id: cid,
+            sequence: seq,
+            kind: "card.created".into(),
+            actor: "github".into(),
+            message: "Card created".into(),
+            data: serde_json::json!({
+                "initial_sync": true,
+                "origin": "github",
+                "reason": "automatic_intake",
+                "source_kind": "github.issue",
+            }),
+            created_at: sync_ts,
         });
     }
 

@@ -22,6 +22,8 @@ repo = Path(__file__).resolve().parents[1]
 base = Path(tempfile.mkdtemp(prefix='cb-insights-', dir='/private/tmp'))
 home = base / 'home'
 cli = repo / 'target/debug/canban'
+if not cli.exists() and (repo / '.local/Canban.app/Contents/MacOS/canban').exists():
+    cli = repo / '.local/Canban.app/Contents/MacOS/canban'
 core = {'HC_SESSION': 'insights-acceptance', 'HC_SOCKET': str(base / 'hc.sock'),
         'XDG_STATE_HOME': str(base / 'state'), 'XDG_CONFIG_HOME': str(base / 'config')}
 env = {k: v for k, v in os.environ.items() if not k.startswith(('CANBAN_', 'HC_'))}

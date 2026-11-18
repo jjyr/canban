@@ -589,6 +589,46 @@ pub const CATALOG: &[Command] = &[
         keywords: "daily recent trend chart",
     },
     Command {
+        id: "insights-cadence-daily",
+        title: "Insights: Daily Velocity & Efficiency Trend",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "daily dod comparison velocity efficiency trend",
+    },
+    Command {
+        id: "insights-cadence-weekly",
+        title: "Insights: Weekly Velocity & Efficiency Comparison (WoW)",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "weekly wow comparison velocity efficiency trend",
+    },
+    Command {
+        id: "insights-toggle-initial-sync",
+        title: "Insights: Toggle Exclude GitHub Initial Sync Intake",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "initial sync organic created github intake filter",
+    },
+    Command {
+        id: "insights-sort-wip",
+        title: "Insights: Sort Projects by Active WIP",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "sort projects wip backlog develop review",
+    },
+    Command {
+        id: "insights-sort-runs",
+        title: "Insights: Sort Projects by Agent Runs",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "sort projects agent runs starts",
+    },
+    Command {
         id: "insights-range-7d",
         title: "Insights: Show Last 7 Days (7D)",
         key: "",
@@ -1374,6 +1414,26 @@ pub fn execute(ui: Ui, id: &str) {
         }
         "insights-trend-30" => {
             crate::insights::intent(ui, "trend-30");
+            ui.navigate("insights");
+        }
+        "insights-cadence-daily" => {
+            crate::insights::intent(ui, "cadence-daily");
+            ui.navigate("insights");
+        }
+        "insights-cadence-weekly" => {
+            crate::insights::intent(ui, "cadence-weekly");
+            ui.navigate("insights");
+        }
+        "insights-toggle-initial-sync" => {
+            crate::insights::intent(ui, "toggle-initial-sync");
+            ui.navigate("insights");
+        }
+        "insights-sort-wip" => {
+            crate::insights::intent(ui, "sort-wip");
+            ui.navigate("insights");
+        }
+        "insights-sort-runs" => {
+            crate::insights::intent(ui, "sort-runs");
             ui.navigate("insights");
         }
         "insights-range-7d" => {

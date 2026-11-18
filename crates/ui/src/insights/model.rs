@@ -1,9 +1,11 @@
-//! Pure local-date aggregation of Kanban completions (merges) and Agent scheduling.
+//! Pure local-date aggregation of Kanban completions (merges), pipeline WIP, Agent scheduling,
+//! automation health, and Day-over-Day / Week-over-Week personal efficiency trajectories.
 //!
-//! Operates directly on `canban_types::Snapshot` with zero extra RPCs or SQLite queries,
-//! so multi-host merged snapshots and standalone Gallery fixtures behave identically.
+//! Operates directly on `canban_types::Snapshot` (optionally accelerated with pre-bucketed
+//! `events_by_card` indices) with zero extra RPCs or SQLite queries, so multi-host merged
+//! snapshots and standalone Gallery fixtures behave identically.
 
-use canban_types::{Card, ExecutionTrigger, Snapshot};
+use canban_types::{Card, CardContent, Event, ExecutionTrigger, Profile, Snapshot};
 use chrono::{Datelike, Duration, NaiveDate, TimeZone, Timelike};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -45,6 +47,22 @@ impl RangeWindow {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TrendCadence {
+    #[default]
+    Daily,
+    Weekly,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProjectSort {
+    #[default]
+    Merged,
+    Created,
+    Wip,
+    Runs,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutcomeKind {
     Completed,
@@ -81,12 +99,21 @@ impl TriggerKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntakeKind {
+    LocalManual,
+    GitHubPr,
+    GitHubIssue,
+    InitialSync,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DayBucket {
     pub date_key: String,
     pub short_label: String,
     pub weekday_label: &'static str,
     pub created_cards: usize,
+    pub initial_sync_cards: usize,
     pub merged_cards: usize,
     pub local_merges: usize,
     pub pr_merges: usize,
@@ -94,6 +121,8 @@ pub struct DayBucket {
     pub blocked_runs: usize,
     pub failed_runs: usize,
     pub active_runs: usize,
+    pub human_touches: usize,
+    pub cycle_p50_ms: Option<u64>,
 }
 
 impl DayBucket {
@@ -101,9 +130,104 @@ impl DayBucket {
         self.completed_runs + self.blocked_runs + self.failed_runs + self.active_runs
     }
 
+    pub fn pass_rate_pct(&self) -> Option<usize> {
+        let resolved = self.completed_runs + self.blocked_runs + self.failed_runs;
+        (resolved > 0).then(|| (self.completed_runs * 100 + resolved / 2) / resolved)
+    }
+
     pub fn total_activity(&self) -> usize {
         self.merged_cards + self.total_runs()
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WeekBucket {
+    pub week_start: NaiveDate,
+    pub week_end: NaiveDate,
+    pub label: String,
+    pub short_label: String,
+    pub is_partial: bool,
+    pub known: bool,
+    pub created_cards: usize,
+    pub initial_sync_cards: usize,
+    pub merged_cards: usize,
+    pub projected_merges: Option<usize>,
+    pub local_merges: usize,
+    pub pr_merges: usize,
+    pub total_runs: usize,
+    pub completed_runs: usize,
+    pub blocked_runs: usize,
+    pub failed_runs: usize,
+    pub pass_rate_pct: Option<usize>,
+    pub cycle_p50_ms: Option<u64>,
+    pub human_touches: usize,
+    pub elapsed_days: f64,
+}
+
+impl WeekBucket {
+    pub fn merges_per_day(&self) -> f64 {
+        if self.elapsed_days <= 0.05 {
+            0.0
+        } else {
+            self.merged_cards as f64 / self.elapsed_days
+        }
+    }
+
+    pub fn touches_per_merge(&self) -> Option<f64> {
+        (self.merged_cards > 0).then(|| self.human_touches as f64 / self.merged_cards as f64)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WowComparison {
+    pub baseline_known: bool,
+    pub is_partial: bool,
+    pub current_label: String,
+    pub previous_label: String,
+    pub current_merged: usize,
+    pub previous_merged: usize,
+    pub current_created: usize,
+    pub previous_created: usize,
+    pub current_runs: usize,
+    pub previous_runs: usize,
+    pub current_pass_pct: Option<usize>,
+    pub previous_pass_pct: Option<usize>,
+    pub current_cycle_p50_ms: Option<u64>,
+    pub previous_cycle_p50_ms: Option<u64>,
+    pub current_touches_per_merge: Option<f64>,
+    pub previous_touches_per_merge: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PipelineSnapshot {
+    pub active_wip: usize,
+    pub backlog: usize,
+    pub develop: usize,
+    pub review: usize,
+    pub other_stage: usize,
+    pub human_gated: usize,
+    pub attention_cards: usize,
+    pub merging_now: usize,
+    pub merge_batches_period: usize,
+    pub conflict_batches_period: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IntakeBreakdown {
+    pub local_manual: usize,
+    pub github_pr: usize,
+    pub github_issue: usize,
+    pub initial_sync: usize,
+    pub total_raw: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScheduleSummary {
+    pub configured: usize,
+    pub runs_in_period: usize,
+    pub completed: usize,
+    pub failed_or_blocked: usize,
+    pub active: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -135,10 +259,19 @@ pub struct ProfileStat {
     pub cards_touched: usize,
     pub median_queue_wait_ms: Option<u64>,
     pub total_runs: usize,
+    pub overlapping_runs: usize,
     pub completed_runs: usize,
     pub blocked_runs: usize,
     pub failed_runs: usize,
     pub active_runs: usize,
+    pub human_asks: usize,
+}
+
+impl ProfileStat {
+    pub fn pass_rate_pct(&self) -> Option<usize> {
+        let resolved = self.completed_runs + self.blocked_runs + self.failed_runs;
+        (resolved > 0).then(|| (self.completed_runs * 100 + resolved / 2) / resolved)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,6 +283,7 @@ pub struct TriggerStat {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Dashboard {
+    pub exclude_initial_sync: bool,
     pub created_ids: Vec<String>,
     pub merged_ids: Vec<String>,
     pub selected_date: NaiveDate,
@@ -171,6 +305,16 @@ pub struct Dashboard {
     pub hours: Vec<HourBucket>,
     pub efficiency: Efficiency,
     pub moving_average: Vec<Option<f64>>,
+    pub weeks: Vec<WeekBucket>,
+    pub weekly_moving_average: Vec<Option<f64>>,
+    pub max_weekly_kanban: usize,
+    pub wow: WowComparison,
+    pub pipeline: PipelineSnapshot,
+    pub intake: IntakeBreakdown,
+    pub schedules: ScheduleSummary,
+    pub human_asks_period: usize,
+    pub prev_human_asks_period: usize,
+    pub workflow_runs_completed: usize,
     pub annual_start: NaiveDate,
     pub annual_end: NaiveDate,
     pub active_days: usize,
@@ -185,6 +329,7 @@ pub struct Dashboard {
     pub local_merges: usize,
     pub pr_merges: usize,
     pub created_total: usize,
+    pub initial_sync_period: usize,
     pub net_wip_delta: isize,
     pub scheduled_total: usize,
     pub prev_scheduled_total: usize,
@@ -192,9 +337,14 @@ pub struct Dashboard {
     pub blocked_runs: usize,
     pub failed_runs: usize,
     pub active_runs: usize,
+    pub prev_completed_runs: usize,
+    pub prev_resolved_runs: usize,
     pub success_rate_pct: Option<usize>,
+    pub prev_success_rate_pct: Option<usize>,
     pub median_lead_time_ms: Option<u64>,
+    pub prev_median_lead_time_ms: Option<u64>,
     pub median_queue_wait_ms: Option<u64>,
+    pub prev_median_queue_wait_ms: Option<u64>,
     pub days: Vec<DayBucket>,
     pub max_daily_kanban: usize,
     pub max_daily_runs: usize,
@@ -240,10 +390,22 @@ pub struct ProjectStat {
     pub id: String,
     pub name: String,
     pub created: usize,
+    pub initial_sync: usize,
     pub merged: usize,
+    pub wip_backlog: usize,
+    pub wip_develop: usize,
+    pub wip_review: usize,
+    pub wip_gated: usize,
+    pub agent_runs: usize,
     pub cards: BTreeSet<String>,
     pub profiles: BTreeSet<String>,
     pub recent_merges: Vec<usize>,
+}
+
+impl ProjectStat {
+    pub fn total_wip(&self) -> usize {
+        self.wip_backlog + self.wip_develop + self.wip_review
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -276,10 +438,13 @@ pub struct HourBucket {
 
 #[derive(Clone, Debug)]
 struct ReconstructedRun {
+    terminal_id: String,
+    run_number: u32,
     card_ids: Vec<String>,
     project_id: String,
     ended_at: Option<u64>,
     profile_id: String,
+    explicit_provider: Option<String>,
     trigger: TriggerKind,
     queued_at: Option<u64>,
     started_at: Option<u64>,
@@ -412,6 +577,24 @@ pub fn format_delta_pct(current: usize, previous: usize) -> String {
     }
 }
 
+pub fn format_duration_delta(
+    current: Option<u64>,
+    previous: Option<u64>,
+) -> Option<(String, bool)> {
+    let (a, b) = (current?, previous?);
+    if a == b {
+        return Some(("0s vs prev".into(), true));
+    }
+    let diff = format_duration_compact(a.abs_diff(b));
+    if a < b {
+        let pct = ((b - a) * 100 + b / 2) / b.max(1);
+        Some((format!("−{diff} (−{pct}%)"), true))
+    } else {
+        let pct = ((a - b) * 100 + b / 2) / b.max(1);
+        Some((format!("+{diff} (+{pct}%)"), false))
+    }
+}
+
 fn card_is_pr_merge(card: &Card) -> bool {
     card.is_github_pr()
         || card.pull_request.as_ref().is_some_and(|pr| pr.number > 0)
@@ -421,7 +604,34 @@ fn card_is_pr_merge(card: &Card) -> bool {
             .is_some_and(|d| d.request_key.starts_with("github:"))
 }
 
-fn resolve_merged_at(card: &Card, card_events: Option<&Vec<&canban_types::Event>>) -> Option<u64> {
+fn classify_card_intake(card: &Card, card_events: Option<&Vec<&Event>>) -> IntakeKind {
+    let created_ev = card_events.and_then(|evs| evs.iter().find(|e| e.kind == "card.created"));
+    if let Some(ev) = created_ev {
+        if ev.data["initial_sync"].as_bool() == Some(true) {
+            return IntakeKind::InitialSync;
+        }
+        match ev.data["source_kind"].as_str().unwrap_or_default() {
+            "github.pr" => return IntakeKind::GitHubPr,
+            "github.issue" => return IntakeKind::GitHubIssue,
+            _ => {}
+        }
+    }
+    match &card.content {
+        CardContent::GitHubPr { .. } => IntakeKind::GitHubPr,
+        CardContent::GitHubIssue { .. } => IntakeKind::GitHubIssue,
+        CardContent::Local => {
+            if card.pull_request.as_ref().is_some_and(|pr| pr.number > 0)
+                && card.created_by.is_empty()
+            {
+                IntakeKind::GitHubPr
+            } else {
+                IntakeKind::LocalManual
+            }
+        }
+    }
+}
+
+fn resolve_merged_at(card: &Card, card_events: Option<&Vec<&Event>>) -> Option<u64> {
     if let Some(ts) = card
         .delivery
         .as_ref()
@@ -437,7 +647,10 @@ fn resolve_merged_at(card: &Card, card_events: Option<&Vec<&canban_types::Event>
             .find(|e| {
                 matches!(
                     e.kind.as_str(),
-                    "review.merged" | "github.pr_merged" | "github.pr_delivered"
+                    "review.merged"
+                        | "github.pr_merged"
+                        | "github.pr_delivered"
+                        | "github.pr.merged"
                 )
             })
             .map(|e| e.created_at)
@@ -451,7 +664,7 @@ fn resolve_merged_at(card: &Card, card_events: Option<&Vec<&canban_types::Event>
 fn resolve_work_started_at(
     _card: &Card,
     merged_at: u64,
-    card_events: Option<&Vec<&canban_types::Event>>,
+    card_events: Option<&Vec<&Event>>,
 ) -> Option<u64> {
     card_events?
         .iter()
@@ -495,38 +708,32 @@ fn reconstruct_runs(
     snapshot: &Snapshot,
     in_scope_project: impl Fn(&str) -> bool,
     valid_cards: &BTreeMap<&str, &Card>,
-    now_ms: u64,
+    events_by_card: &BTreeMap<&str, Vec<&Event>>,
 ) -> Vec<ReconstructedRun> {
     let mut by_terminal: BTreeMap<String, BTreeMap<u32, ReconstructedRun>> = BTreeMap::new();
     let mut synthetic_seq: u32 = 1_000_000;
 
-    let mut sorted_events: Vec<&canban_types::Event> = snapshot
-        .events
-        .iter()
+    let mut sorted_events: Vec<&Event> = events_by_card
+        .values()
+        .flat_map(|evs| evs.iter().copied())
         .filter(|ev| {
-            ev.created_at <= now_ms
-                && in_scope_project(&ev.project_id)
-                && valid_cards.contains_key(ev.card_id.as_str())
+            matches!(
+                ev.kind.as_str(),
+                "execution.queued"
+                    | "execution.retry_queued"
+                    | "execution.started"
+                    | "execution.continued"
+                    | "execution.reported"
+                    | "execution.failed"
+                    | "execution.missing"
+                    | "execution.close_requested"
+                    | "execution.idle_closed"
+            )
         })
         .collect();
     sorted_events.sort_by_key(|ev| (ev.created_at, ev.sequence));
 
     for ev in sorted_events {
-        let relevant = matches!(
-            ev.kind.as_str(),
-            "execution.queued"
-                | "execution.retry_queued"
-                | "execution.started"
-                | "execution.continued"
-                | "execution.reported"
-                | "execution.failed"
-                | "execution.missing"
-                | "execution.close_requested"
-                | "execution.idle_closed"
-        );
-        if !relevant {
-            continue;
-        }
         if ev.kind == "execution.retry_queued"
             && ev.data["queued_for_delivery"].as_bool() == Some(true)
         {
@@ -567,10 +774,13 @@ fn reconstruct_runs(
                     synthetic_seq
                 };
                 let entry = runs.entry(key).or_insert_with(|| ReconstructedRun {
+                    terminal_id: terminal_id.clone(),
+                    run_number: explicit_num,
                     card_ids: vec![ev.card_id.clone()],
                     project_id: ev.project_id.clone(),
                     ended_at: None,
                     profile_id,
+                    explicit_provider: None,
                     trigger,
                     queued_at: Some(ev.created_at),
                     started_at: None,
@@ -597,6 +807,7 @@ fn reconstruct_runs(
                             && r.outcome == OutcomeKind::Active
                     }) {
                         let mut moved = runs.remove(&old_k).unwrap();
+                        moved.run_number = explicit_num;
                         moved.started_at = Some(ev.created_at);
                         runs.insert(explicit_num, moved);
                         continue;
@@ -613,10 +824,13 @@ fn reconstruct_runs(
                     synthetic_seq
                 };
                 let entry = runs.entry(target_key).or_insert_with(|| ReconstructedRun {
+                    terminal_id: terminal_id.clone(),
+                    run_number: explicit_num,
                     card_ids: vec![ev.card_id.clone()],
                     project_id: ev.project_id.clone(),
                     ended_at: None,
                     profile_id,
+                    explicit_provider: None,
                     trigger,
                     queued_at: None,
                     started_at: Some(ev.created_at),
@@ -640,6 +854,7 @@ fn reconstruct_runs(
                         .map(|(&k, _)| k);
                     if let Some(old_k) = pending_key {
                         let mut moved = runs.remove(&old_k).unwrap();
+                        moved.run_number = explicit_num;
                         moved.started_at = Some(ev.created_at);
                         runs.insert(explicit_num, moved);
                         continue;
@@ -652,10 +867,13 @@ fn reconstruct_runs(
                     synthetic_seq
                 };
                 let entry = runs.entry(key).or_insert_with(|| ReconstructedRun {
+                    terminal_id: terminal_id.clone(),
+                    run_number: explicit_num,
                     card_ids: vec![ev.card_id.clone()],
                     project_id: ev.project_id.clone(),
                     ended_at: None,
                     profile_id,
+                    explicit_provider: None,
                     trigger,
                     queued_at: None,
                     started_at: Some(ev.created_at),
@@ -707,10 +925,13 @@ fn reconstruct_runs(
                     runs.insert(
                         key,
                         ReconstructedRun {
+                            terminal_id: terminal_id.clone(),
+                            run_number: explicit_num,
                             card_ids: vec![ev.card_id.clone()],
                             project_id: ev.project_id.clone(),
                             ended_at: None,
                             profile_id,
+                            explicit_provider: None,
                             trigger,
                             queued_at: None,
                             started_at: None,
@@ -771,12 +992,19 @@ fn reconstruct_runs(
         } else {
             agent.profile.id.clone()
         };
+        let explicit_prov = {
+            let p = provider_name(&agent.profile);
+            (p != "Unknown").then_some(p)
+        };
         let scheduled_at = agent
             .started_at
             .or((agent.updated_at > 0).then_some(agent.updated_at))
             .unwrap_or(entry.created_at);
 
         if let Some(existing) = runs.get_mut(&key) {
+            if existing.explicit_provider.is_none() {
+                existing.explicit_provider = explicit_prov;
+            }
             if agent.state != "running" && agent.state != "queued" && agent.updated_at > 0 {
                 existing.ended_at = existing.ended_at.or(Some(agent.updated_at));
             }
@@ -806,6 +1034,8 @@ fn reconstruct_runs(
             runs.insert(
                 key,
                 ReconstructedRun {
+                    terminal_id: entry.id.clone(),
+                    run_number: agent.number,
                     card_ids: vec![agent.card_id.clone()],
                     project_id: agent.project_id.clone(),
                     ended_at: matches!(
@@ -814,6 +1044,7 @@ fn reconstruct_runs(
                     )
                     .then_some(agent.updated_at),
                     profile_id,
+                    explicit_provider: explicit_prov,
                     trigger,
                     queued_at: None,
                     started_at: agent.started_at,
@@ -846,9 +1077,15 @@ fn reconstruct_runs(
                 } else {
                     pending.profile.id.clone()
                 };
+                let p_prov = {
+                    let p = provider_name(&pending.profile);
+                    (p != "Unknown").then_some(p)
+                };
                 runs.insert(
                     synthetic_seq,
                     ReconstructedRun {
+                        terminal_id: entry.id.clone(),
+                        run_number: 0,
                         card_ids: vec![agent.card_id.clone()],
                         project_id: agent.project_id.clone(),
                         ended_at: matches!(
@@ -862,6 +1099,7 @@ fn reconstruct_runs(
                         )
                         .then_some(agent.updated_at),
                         profile_id: p_profile,
+                        explicit_provider: p_prov,
                         trigger: p_trigger,
                         queued_at: Some(pending.queued_at),
                         started_at: None,
@@ -874,10 +1112,28 @@ fn reconstruct_runs(
         }
     }
 
+    let terminal_providers: BTreeMap<&str, String> = snapshot
+        .terminals
+        .iter()
+        .filter_map(|t| {
+            let a = t.agent.as_ref()?;
+            let p = provider_name(&a.profile);
+            (p != "Unknown").then_some((t.id.as_str(), p))
+        })
+        .collect();
+
     let mut out: Vec<ReconstructedRun> = by_terminal
         .into_values()
         .flat_map(|m| m.into_values())
         .filter(|r| !r.cancelled_before_start && r.scheduled_at > 0)
+        .map(|mut r| {
+            if r.explicit_provider.is_none()
+                && let Some(tp) = terminal_providers.get(r.terminal_id.as_str())
+            {
+                r.explicit_provider = Some(tp.clone());
+            }
+            r
+        })
         .collect();
 
     for batch in &snapshot.merge_batches {
@@ -907,6 +1163,8 @@ fn reconstruct_runs(
             batch.profile_id.clone()
         };
         out.push(ReconstructedRun {
+            terminal_id: batch.id.clone(),
+            run_number: 1,
             card_ids: batch
                 .items
                 .iter()
@@ -916,6 +1174,7 @@ fn reconstruct_runs(
             project_id: batch.project_id.clone(),
             ended_at: (!batch.active()).then_some(batch.updated_at),
             profile_id,
+            explicit_provider: None,
             trigger: TriggerKind::Workflow,
             queued_at: batch.queued_at,
             started_at: batch.started_at,
@@ -928,8 +1187,6 @@ fn reconstruct_runs(
     out
 }
 
-/// Calendar boundaries resolve in the caller's timezone rather than subtracting 24 hours.
-/// In zones with a missing midnight, use the first valid minute of that date.
 fn boundary<Tz: TimeZone>(date: NaiveDate, time: chrono::NaiveTime, tz: &Tz) -> u64 {
     let mut naive = date.and_time(time);
     for _ in 0..=180 {
@@ -958,7 +1215,7 @@ pub fn percentile(samples: &[DurationSample], p: usize) -> Option<u64> {
     )
 }
 
-fn provider_name(profile: &canban_types::Profile) -> String {
+fn provider_name(profile: &Profile) -> String {
     profile
         .preset
         .clone()
@@ -1008,7 +1265,42 @@ pub fn compute_view<Tz: TimeZone>(
     metric: ActivityMetric,
     hourly_metric: ActivityMetric,
     trend_days: i64,
-    profiles: &[canban_types::Profile],
+    profiles: &[Profile],
+) -> Dashboard {
+    compute_full(
+        snapshot,
+        None,
+        scope_project,
+        range,
+        now_ms,
+        tz,
+        selected,
+        comparison,
+        metric,
+        hourly_metric,
+        trend_days,
+        8,
+        true,
+        profiles,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn compute_full<Tz: TimeZone>(
+    snapshot: &Snapshot,
+    indexed_events_by_card: Option<&BTreeMap<String, Vec<usize>>>,
+    scope_project: Option<&str>,
+    range: RangeWindow,
+    now_ms: u64,
+    tz: &Tz,
+    selected: Option<NaiveDate>,
+    comparison: Comparison,
+    metric: ActivityMetric,
+    hourly_metric: ActivityMetric,
+    trend_days: i64,
+    trend_weeks: i64,
+    exclude_initial_sync: bool,
+    profiles: &[Profile],
 ) -> Dashboard {
     let scope = scope_project.filter(|s| !s.is_empty());
     let in_scope = |pid: &str| {
@@ -1046,24 +1338,42 @@ pub fn compute_view<Tz: TimeZone>(
     };
     let current = |ts: u64| ts > 0 && ts >= from && ts < until;
     let previous = |ts: u64| ts > 0 && ts >= prev_from && ts < prev_until;
+
     let valid_cards: BTreeMap<&str, &Card> = snapshot
         .cards
         .iter()
         .filter(|c| c.removed_at.is_none() && in_scope(&c.project_id))
         .map(|c| (c.id.as_str(), c))
         .collect();
-    let mut events_by_card: BTreeMap<&str, Vec<&canban_types::Event>> = BTreeMap::new();
-    for ev in snapshot
-        .events
-        .iter()
-        .filter(|e| e.created_at <= now_ms && valid_cards.contains_key(e.card_id.as_str()))
-    {
-        events_by_card.entry(&ev.card_id).or_default().push(ev);
+
+    let mut events_by_card: BTreeMap<&str, Vec<&Event>> = BTreeMap::new();
+    if let Some(idx_map) = indexed_events_by_card {
+        for &cid in valid_cards.keys() {
+            if let Some(positions) = idx_map.get(cid) {
+                let mut evs: Vec<&Event> = positions
+                    .iter()
+                    .filter_map(|&pos| snapshot.events.get(pos))
+                    .filter(|e| e.created_at <= now_ms)
+                    .collect();
+                evs.sort_by_key(|e| (e.created_at, e.sequence));
+                if !evs.is_empty() {
+                    events_by_card.insert(cid, evs);
+                }
+            }
+        }
+    } else {
+        for ev in snapshot
+            .events
+            .iter()
+            .filter(|e| e.created_at <= now_ms && valid_cards.contains_key(e.card_id.as_str()))
+        {
+            events_by_card.entry(&ev.card_id).or_default().push(ev);
+        }
+        for events in events_by_card.values_mut() {
+            events.sort_by_key(|e| (e.created_at, e.sequence));
+        }
     }
-    for events in events_by_card.values_mut() {
-        events.sort_by_key(|e| (e.created_at, e.sequence));
-    }
-    // Earliest retained evidence is a coverage boundary, not a guarantee of complete history.
+
     let history_start = valid_cards
         .values()
         .map(|c| c.created_at)
@@ -1078,6 +1388,7 @@ pub fn compute_view<Tz: TimeZone>(
         .filter(|t| *t > 0 && *t <= now_ms)
         .min()
         .map(|t| local_date(t, tz));
+
     let mut projects: BTreeMap<String, ProjectStat> = snapshot
         .projects
         .iter()
@@ -1093,14 +1404,30 @@ pub fn compute_view<Tz: TimeZone>(
             )
         })
         .collect();
+
+    let mut pipeline = PipelineSnapshot {
+        merging_now: snapshot
+            .merging_cards
+            .iter()
+            .filter(|cid| valid_cards.contains_key(cid.as_str()))
+            .count(),
+        ..Default::default()
+    };
+    let mut intake = IntakeBreakdown::default();
+
     let mut daily_created = BTreeMap::<NaiveDate, usize>::new();
+    let mut daily_initial_sync = BTreeMap::<NaiveDate, usize>::new();
     let mut daily_local = BTreeMap::<NaiveDate, usize>::new();
     let mut daily_pr = BTreeMap::<NaiveDate, usize>::new();
     let mut daily_runs = BTreeMap::<NaiveDate, [usize; 4]>::new();
+    let mut daily_cycles = BTreeMap::<NaiveDate, Vec<u64>>::new();
+    let mut daily_touches = BTreeMap::<NaiveDate, usize>::new();
+
     let mut efficiency = Efficiency::default();
     let mut created_ids = Vec::new();
     let mut merged_ids = Vec::new();
     let mut created_total = 0;
+    let mut initial_sync_period = 0;
     let mut previous_created = 0;
     let mut merged_total = 0;
     let mut prev_merged_total = 0;
@@ -1110,7 +1437,39 @@ pub fn compute_view<Tz: TimeZone>(
     let mut created_times = Vec::new();
     let mut merge_times = Vec::new();
     let mut start_times = Vec::new();
+    let mut all_cycles: Vec<(u64, u64)> = Vec::new();
+    let mut all_human_touches: Vec<u64> = Vec::new();
+    let mut human_asks_by_profile_period = BTreeMap::<String, usize>::new();
+    let mut human_asks_period = 0usize;
+    let mut prev_human_asks_period = 0usize;
+
     let mut project_merges: BTreeMap<String, BTreeMap<NaiveDate, usize>> = BTreeMap::new();
+
+    for (&cid, evs) in &events_by_card {
+        for ev in evs {
+            if matches!(
+                ev.kind.as_str(),
+                "execution.input_required" | "review.merge_conflict"
+            ) && ev.created_at > 0
+            {
+                let d = local_date(ev.created_at, tz);
+                *daily_touches.entry(d).or_default() += 1;
+                all_human_touches.push(ev.created_at);
+                if current(ev.created_at) {
+                    human_asks_period += 1;
+                    if ev.kind == "execution.input_required" {
+                        let tid = ev.data["terminal_id"].as_str().unwrap_or_default();
+                        let prof = extract_profile_from_terminal_or_actor(cid, tid, &ev.actor);
+                        *human_asks_by_profile_period.entry(prof).or_default() += 1;
+                    }
+                }
+                if previous(ev.created_at) {
+                    prev_human_asks_period += 1;
+                }
+            }
+        }
+    }
+
     for card in valid_cards.values() {
         let p = projects
             .entry(card.project_id.clone())
@@ -1119,25 +1478,82 @@ pub fn compute_view<Tz: TimeZone>(
                 name: card.project_id.clone(),
                 ..Default::default()
             });
-        if card.created_at > 0 && card.created_at <= now_ms {
-            *daily_created
-                .entry(local_date(card.created_at, tz))
-                .or_default() += 1;
-            created_times.push(card.created_at);
-            if current(card.created_at) {
-                created_ids.push(card.id.clone());
-                created_total += 1;
-                p.created += 1;
-                p.cards.insert(card.id.clone());
+
+        if card.active() && !card.merged() {
+            pipeline.active_wip += 1;
+            match card.stage.as_str() {
+                "backlog" => {
+                    pipeline.backlog += 1;
+                    p.wip_backlog += 1;
+                }
+                "develop" => {
+                    pipeline.develop += 1;
+                    p.wip_develop += 1;
+                }
+                "review" => {
+                    pipeline.review += 1;
+                    p.wip_review += 1;
+                }
+                _ => {
+                    pipeline.other_stage += 1;
+                    p.wip_backlog += 1;
+                }
             }
-            if previous(card.created_at) {
+            if card.human_gate.is_some() {
+                pipeline.human_gated += 1;
+                p.wip_gated += 1;
+            }
+            if card
+                .attention
+                .as_deref()
+                .is_some_and(|a| !a.trim().is_empty())
+            {
+                pipeline.attention_cards += 1;
+            }
+        }
+
+        let card_evs = events_by_card.get(card.id.as_str());
+        let intake_kind = classify_card_intake(card, card_evs);
+        let is_init_sync = intake_kind == IntakeKind::InitialSync;
+
+        if card.created_at > 0 && card.created_at <= now_ms {
+            let cd = local_date(card.created_at, tz);
+            if is_init_sync {
+                *daily_initial_sync.entry(cd).or_default() += 1;
+            }
+            let counts_as_created = !exclude_initial_sync || !is_init_sync;
+            if counts_as_created {
+                *daily_created.entry(cd).or_default() += 1;
+                created_times.push(card.created_at);
+            }
+            if current(card.created_at) {
+                intake.total_raw += 1;
+                match intake_kind {
+                    IntakeKind::LocalManual => intake.local_manual += 1,
+                    IntakeKind::GitHubPr => intake.github_pr += 1,
+                    IntakeKind::GitHubIssue => intake.github_issue += 1,
+                    IntakeKind::InitialSync => {
+                        intake.initial_sync += 1;
+                        initial_sync_period += 1;
+                        p.initial_sync += 1;
+                    }
+                }
+                if counts_as_created {
+                    created_ids.push(card.id.clone());
+                    created_total += 1;
+                    p.created += 1;
+                    p.cards.insert(card.id.clone());
+                }
+            }
+            if counts_as_created && previous(card.created_at) {
                 previous_created += 1;
             }
         }
+
         if !card.merged() {
             continue;
         }
-        let Some(merged_at) = resolve_merged_at(card, events_by_card.get(card.id.as_str())) else {
+        let Some(merged_at) = resolve_merged_at(card, card_evs) else {
             unknown_merge_dates += 1;
             continue;
         };
@@ -1171,9 +1587,10 @@ pub fn compute_view<Tz: TimeZone>(
         if previous(merged_at) {
             prev_merged_total += 1;
         }
-        if let Some(began) =
-            resolve_work_started_at(card, merged_at, events_by_card.get(card.id.as_str()))
-        {
+        if let Some(began) = resolve_work_started_at(card, merged_at, card_evs) {
+            let dur = merged_at - began;
+            daily_cycles.entry(d).or_default().push(dur);
+            all_cycles.push((merged_at, dur));
             let sample = DurationSample {
                 card_id: card.id.clone(),
                 number: card.number,
@@ -1182,7 +1599,7 @@ pub fn compute_view<Tz: TimeZone>(
                 profile: None,
                 start: began,
                 end: merged_at,
-                duration: merged_at - began,
+                duration: dur,
             };
             if current(merged_at) {
                 efficiency.cycle.push(sample.clone());
@@ -1192,16 +1609,64 @@ pub fn compute_view<Tz: TimeZone>(
             }
         }
     }
-    let mut runs = reconstruct_runs(snapshot, in_scope, &valid_cards, now_ms);
-    // Never let future fixture/remote timestamps enter either comparison.
+
+    for batch in &snapshot.merge_batches {
+        if !in_scope(&batch.project_id) || batch.created_at == 0 || batch.state == "cancelled" {
+            continue;
+        }
+        let ts = batch.started_at.unwrap_or(batch.created_at);
+        if current(ts) {
+            pipeline.merge_batches_period += 1;
+            if batch.failure_kind.as_deref() == Some("conflict")
+                || !batch.conflict_files.is_empty()
+                || !batch.prompt.trim().is_empty()
+            {
+                pipeline.conflict_batches_period += 1;
+            }
+        }
+    }
+
+    let workflow_runs_completed = snapshot
+        .workflow_runs
+        .iter()
+        .filter(|w| in_scope(&w.project_id) && w.state == "completed" && current(w.updated_at))
+        .count();
+
+    let mut schedules = ScheduleSummary {
+        configured: snapshot
+            .schedule_states
+            .iter()
+            .filter(|st| st.project_id.is_empty() || in_scope(&st.project_id))
+            .count(),
+        ..Default::default()
+    };
+    for sr in &snapshot.scheduled_runs {
+        if !sr.project_id.is_empty() && !in_scope(&sr.project_id) {
+            continue;
+        }
+        let ts = sr.started_at.unwrap_or(sr.scheduled_at);
+        if current(ts) {
+            schedules.runs_in_period += 1;
+            match sr.state.as_str() {
+                "completed" => schedules.completed += 1,
+                "failed" | "blocked" => schedules.failed_or_blocked += 1,
+                "running" | "starting" | "queued" => schedules.active += 1,
+                _ => {}
+            }
+        }
+    }
+
+    let mut runs = reconstruct_runs(snapshot, in_scope, &valid_cards, &events_by_card);
     runs.retain(|r| r.scheduled_at <= now_ms);
     let mut scheduled_total = 0;
     let mut prev_scheduled_total = 0;
     let mut outcomes = [0usize; 4];
+    let mut prev_outcomes = [0usize; 4];
     let mut profile_map: BTreeMap<String, ProfileStat> = BTreeMap::new();
     let mut profile_waits: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     let mut trigger_counts: BTreeMap<TriggerKind, usize> = BTreeMap::new();
     let mut used_runs = 0;
+
     for run in &runs {
         let Some(began) = run.started_at.filter(|t| *t > 0 && *t <= now_ms) else {
             continue;
@@ -1216,41 +1681,56 @@ pub fn compute_view<Tz: TimeZone>(
         start_times.push(began);
         if previous(began) {
             prev_scheduled_total += 1;
+            prev_outcomes[index] += 1;
         }
         let overlaps = began < until && run.ended_at.unwrap_or(now_ms) >= from;
         if current(began) {
             scheduled_total += 1;
             outcomes[index] += 1;
             *trigger_counts.entry(run.trigger).or_default() += 1;
+            if let Some(p) = projects.get_mut(&run.project_id) {
+                p.agent_runs += 1;
+            }
         }
+        let provider = run
+            .explicit_provider
+            .clone()
+            .or_else(|| {
+                profiles
+                    .iter()
+                    .find(|p| p.id == run.profile_id)
+                    .map(provider_name)
+            })
+            .or_else(|| {
+                snapshot
+                    .terminals
+                    .iter()
+                    .filter_map(|t| t.agent.as_ref())
+                    .find(|a| a.project_id == run.project_id && a.profile.id == run.profile_id)
+                    .map(|a| provider_name(&a.profile))
+            })
+            .unwrap_or_else(|| "Unknown".into());
+        let group_key = format!("{}:{provider}", run.profile_id);
+
         if overlaps {
             used_runs += 1;
-            let provider = snapshot
-                .terminals
-                .iter()
-                .filter_map(|t| t.agent.as_ref())
-                .find(|a| a.project_id == run.project_id && a.profile.id == run.profile_id)
-                .map(|a| provider_name(&a.profile))
-                .or_else(|| {
-                    profiles
-                        .iter()
-                        .find(|p| p.id == run.profile_id)
-                        .map(provider_name)
-                })
-                .unwrap_or_else(|| "Unknown".into());
-            let group_key = format!("{}:{provider}", run.profile_id);
-            let stat = profile_map.entry(group_key).or_insert_with(|| ProfileStat {
-                card_ids: BTreeSet::new(),
-                profile_id: run.profile_id.clone(),
-                provider,
-                cards_touched: 0,
-                median_queue_wait_ms: None,
-                total_runs: 0,
-                completed_runs: 0,
-                blocked_runs: 0,
-                failed_runs: 0,
-                active_runs: 0,
-            });
+            let stat = profile_map
+                .entry(group_key.clone())
+                .or_insert_with(|| ProfileStat {
+                    card_ids: BTreeSet::new(),
+                    profile_id: run.profile_id.clone(),
+                    provider: provider.clone(),
+                    cards_touched: 0,
+                    median_queue_wait_ms: None,
+                    total_runs: 0,
+                    overlapping_runs: 0,
+                    completed_runs: 0,
+                    blocked_runs: 0,
+                    failed_runs: 0,
+                    active_runs: 0,
+                    human_asks: 0,
+                });
+            stat.overlapping_runs += 1;
             if current(began) {
                 stat.total_runs += 1;
                 match index {
@@ -1290,7 +1770,7 @@ pub fn compute_view<Tz: TimeZone>(
             };
             if current(began) {
                 profile_waits
-                    .entry(run.profile_id.clone())
+                    .entry(group_key)
                     .or_default()
                     .push(sample.duration);
                 efficiency.queue.push(sample.clone());
@@ -1300,19 +1780,29 @@ pub fn compute_view<Tz: TimeZone>(
             }
         }
     }
+
+    let mut assigned_ask_profiles = BTreeSet::new();
     let mut profile_stats: Vec<_> = profile_map
-        .into_values()
-        .map(|mut p| {
+        .into_iter()
+        .map(|(gkey, mut p)| {
             p.cards_touched = p.card_ids.len();
-            p.median_queue_wait_ms = profile_waits.remove(&p.profile_id).and_then(median_u64);
+            p.median_queue_wait_ms = profile_waits.remove(&gkey).and_then(median_u64);
+            if assigned_ask_profiles.insert(p.profile_id.clone()) {
+                p.human_asks = human_asks_by_profile_period
+                    .get(&p.profile_id)
+                    .copied()
+                    .unwrap_or(0);
+            }
             p
         })
         .collect();
     profile_stats.sort_by(|a, b| {
         b.total_runs
             .cmp(&a.total_runs)
+            .then_with(|| b.overlapping_runs.cmp(&a.overlapping_runs))
             .then_with(|| a.profile_id.cmp(&b.profile_id))
     });
+
     let providers = profile_stats
         .iter()
         .filter(|p| p.provider != "Unknown")
@@ -1331,6 +1821,7 @@ pub fn compute_view<Tz: TimeZone>(
     let merged_on = |d: NaiveDate| {
         daily_local.get(&d).copied().unwrap_or(0) + daily_pr.get(&d).copied().unwrap_or(0)
     };
+
     let chart_days = if range == RangeWindow::Today {
         if trend_days == 30 { 30 } else { 14 }
     } else {
@@ -1349,11 +1840,13 @@ pub fn compute_view<Tz: TimeZone>(
                     / 7.
             }));
             let o = daily_runs.get(&d).copied().unwrap_or_default();
+            let day_cyc = daily_cycles.get(&d).cloned().and_then(median_u64);
             DayBucket {
                 date_key: d.to_string(),
                 short_label: d.format("%m-%d").to_string(),
                 weekday_label: weekday_short(d),
                 created_cards: daily_created.get(&d).copied().unwrap_or(0),
+                initial_sync_cards: daily_initial_sync.get(&d).copied().unwrap_or(0),
                 merged_cards: merged_on(d),
                 local_merges: daily_local.get(&d).copied().unwrap_or(0),
                 pr_merges: daily_pr.get(&d).copied().unwrap_or(0),
@@ -1361,9 +1854,206 @@ pub fn compute_view<Tz: TimeZone>(
                 blocked_runs: o[1],
                 failed_runs: o[2],
                 active_runs: o[3],
+                human_touches: daily_touches.get(&d).copied().unwrap_or(0),
+                cycle_p50_ms: day_cyc,
             }
         })
         .collect();
+
+    let num_weeks = trend_weeks.clamp(4, 16);
+    let current_week_monday =
+        today - Duration::days(i64::from(today.weekday().num_days_from_monday()));
+    let first_week_monday = current_week_monday - Duration::weeks(num_weeks - 1);
+    let weeks: Vec<WeekBucket> = (0..num_weeks)
+        .map(|w| {
+            let ws = first_week_monday + Duration::weeks(w);
+            let we = (ws + Duration::days(6)).min(today);
+            let is_curr_partial =
+                ws == current_week_monday && (today < ws + Duration::days(6) || partial);
+            let w_from = boundary(ws, midnight, tz);
+            let w_until = if ws == current_week_monday && partial {
+                until
+            } else {
+                boundary(we + Duration::days(1), midnight, tz)
+            };
+            let elapsed_ms = w_until.saturating_sub(w_from);
+            let elapsed_days = if is_curr_partial {
+                (elapsed_ms as f64 / 86_400_000.0).clamp(0.05, 7.0)
+            } else {
+                ((we - ws).num_days() + 1) as f64
+            };
+            let mut w_created = 0;
+            let mut w_sync = 0;
+            let mut w_local = 0;
+            let mut w_pr = 0;
+            let mut w_runs = [0usize; 4];
+            let mut w_touches = 0;
+            let mut w_cycles = Vec::new();
+            let span_days = (we - ws).num_days() + 1;
+            for di in 0..span_days {
+                let d = ws + Duration::days(di);
+                w_created += daily_created.get(&d).copied().unwrap_or(0);
+                w_sync += daily_initial_sync.get(&d).copied().unwrap_or(0);
+                w_local += daily_local.get(&d).copied().unwrap_or(0);
+                w_pr += daily_pr.get(&d).copied().unwrap_or(0);
+                let ro = daily_runs.get(&d).copied().unwrap_or_default();
+                for k in 0..4 {
+                    w_runs[k] += ro[k];
+                }
+                w_touches += daily_touches.get(&d).copied().unwrap_or(0);
+                if let Some(cs) = daily_cycles.get(&d) {
+                    w_cycles.extend(cs.iter().copied());
+                }
+            }
+            let w_merged = w_local + w_pr;
+            let resolved_r = w_runs[0] + w_runs[1] + w_runs[2];
+            let total_r = resolved_r + w_runs[3];
+            let projected_merges = if is_curr_partial && elapsed_days >= 0.25 && w_merged > 0 {
+                Some(((w_merged as f64 / elapsed_days) * 7.0).round() as usize)
+            } else {
+                None
+            };
+            let iso_w = ws.iso_week().week();
+            WeekBucket {
+                week_start: ws,
+                week_end: we,
+                label: format!("W{iso_w:02} · {}", ws.format("%m-%d")),
+                short_label: format!("W{iso_w:02}"),
+                is_partial: is_curr_partial,
+                known: history_start.is_some_and(|h| we >= h),
+                created_cards: w_created,
+                initial_sync_cards: w_sync,
+                merged_cards: w_merged,
+                projected_merges,
+                local_merges: w_local,
+                pr_merges: w_pr,
+                total_runs: total_r,
+                completed_runs: w_runs[0],
+                blocked_runs: w_runs[1],
+                failed_runs: w_runs[2],
+                pass_rate_pct: (resolved_r > 0)
+                    .then(|| (w_runs[0] * 100 + resolved_r / 2) / resolved_r),
+                cycle_p50_ms: median_u64(w_cycles),
+                human_touches: w_touches,
+                elapsed_days,
+            }
+        })
+        .collect();
+
+    let weekly_moving_average: Vec<Option<f64>> = weeks
+        .iter()
+        .enumerate()
+        .map(|(idx, w)| {
+            if w.is_partial || idx < 3 {
+                return None;
+            }
+            let slice = &weeks[idx - 3..=idx];
+            if slice.iter().all(|b| b.known) {
+                Some(slice.iter().map(|b| b.merged_cards).sum::<usize>() as f64 / 4.0)
+            } else {
+                None
+            }
+        })
+        .collect();
+    let max_weekly_kanban = weeks
+        .iter()
+        .map(|w| {
+            w.created_cards
+                .max(w.merged_cards)
+                .max(w.projected_merges.unwrap_or(0))
+        })
+        .max()
+        .unwrap_or(0);
+
+    let prev_week_monday = current_week_monday - Duration::days(7);
+    let prev_week_cutoff_date = today - Duration::days(7);
+    let cur_w_from = boundary(current_week_monday, midnight, tz);
+    let cur_w_until = until;
+    let prev_w_from = boundary(prev_week_monday, midnight, tz);
+    let prev_w_until = if partial {
+        boundary(prev_week_cutoff_date, now.time(), tz).saturating_add(1)
+    } else {
+        boundary(prev_week_cutoff_date + Duration::days(1), midnight, tz)
+    };
+    let in_cur_w = |ts: u64| ts >= cur_w_from && ts < cur_w_until;
+    let in_prev_w = |ts: u64| ts >= prev_w_from && ts < prev_w_until;
+    let cur_w_merged = merge_times.iter().filter(|&&t| in_cur_w(t)).count();
+    let prev_w_merged = merge_times.iter().filter(|&&t| in_prev_w(t)).count();
+    let cur_w_created = created_times.iter().filter(|&&t| in_cur_w(t)).count();
+    let prev_w_created = created_times.iter().filter(|&&t| in_prev_w(t)).count();
+    let mut cur_w_r = [0usize; 4];
+    let mut prev_w_r = [0usize; 4];
+    for r in &runs {
+        if let Some(began) = r.started_at.filter(|&t| t > 0 && t <= now_ms) {
+            let k = match r.outcome {
+                OutcomeKind::Completed => 0,
+                OutcomeKind::Blocked => 1,
+                OutcomeKind::Failed => 2,
+                OutcomeKind::Active => 3,
+            };
+            if in_cur_w(began) {
+                cur_w_r[k] += 1;
+            }
+            if in_prev_w(began) {
+                prev_w_r[k] += 1;
+            }
+        }
+    }
+    let cur_w_res = cur_w_r[0] + cur_w_r[1] + cur_w_r[2];
+    let prev_w_res = prev_w_r[0] + prev_w_r[1] + prev_w_r[2];
+    let cur_w_cyc = median_u64(
+        all_cycles
+            .iter()
+            .filter(|&&(t, _)| in_cur_w(t))
+            .map(|&(_, d)| d)
+            .collect(),
+    );
+    let prev_w_cyc = median_u64(
+        all_cycles
+            .iter()
+            .filter(|&&(t, _)| in_prev_w(t))
+            .map(|&(_, d)| d)
+            .collect(),
+    );
+    let cur_w_touches = all_human_touches.iter().filter(|&&t| in_cur_w(t)).count();
+    let prev_w_touches = all_human_touches.iter().filter(|&&t| in_prev_w(t)).count();
+    let wow = WowComparison {
+        baseline_known: history_start.is_some_and(|h| h <= prev_week_monday),
+        is_partial: today < current_week_monday + Duration::days(6) || partial,
+        current_label: format!(
+            "W{:02} ({}..{})",
+            current_week_monday.iso_week().week(),
+            current_week_monday.format("%m-%d"),
+            today.format("%m-%d")
+        ),
+        previous_label: format!(
+            "W{:02} ({}..{}{})",
+            prev_week_monday.iso_week().week(),
+            prev_week_monday.format("%m-%d"),
+            prev_week_cutoff_date.format("%m-%d"),
+            if partial {
+                format!(" {}", now.fixed_offset().format("%H:%M"))
+            } else {
+                String::new()
+            }
+        ),
+        current_merged: cur_w_merged,
+        previous_merged: prev_w_merged,
+        current_created: cur_w_created,
+        previous_created: prev_w_created,
+        current_runs: cur_w_res + cur_w_r[3],
+        previous_runs: prev_w_res + prev_w_r[3],
+        current_pass_pct: (cur_w_res > 0).then(|| (cur_w_r[0] * 100 + cur_w_res / 2) / cur_w_res),
+        previous_pass_pct: (prev_w_res > 0)
+            .then(|| (prev_w_r[0] * 100 + prev_w_res / 2) / prev_w_res),
+        current_cycle_p50_ms: cur_w_cyc,
+        previous_cycle_p50_ms: prev_w_cyc,
+        current_touches_per_merge: (cur_w_merged > 0)
+            .then(|| cur_w_touches as f64 / cur_w_merged as f64),
+        previous_touches_per_merge: (prev_w_merged > 0)
+            .then(|| prev_w_touches as f64 / prev_w_merged as f64),
+    };
+
     for p in projects.values_mut() {
         p.recent_merges = (0..7)
             .map(|i| {
@@ -1377,14 +2067,16 @@ pub fn compute_view<Tz: TimeZone>(
     }
     let mut project_stats: Vec<_> = projects
         .into_values()
-        .filter(|p| !p.cards.is_empty())
+        .filter(|p| !p.cards.is_empty() || p.total_wip() > 0 || p.initial_sync > 0)
         .collect();
     project_stats.sort_by(|a, b| {
         b.merged
             .cmp(&a.merged)
             .then_with(|| b.created.cmp(&a.created))
+            .then_with(|| b.total_wip().cmp(&a.total_wip()))
             .then_with(|| a.name.cmp(&b.name))
     });
+
     let hourly = |times: &[u64], date: NaiveDate, cutoff: u64, hour: u32| {
         times
             .iter()
@@ -1409,12 +2101,13 @@ pub fn compute_view<Tz: TimeZone>(
             future: partial && hour > now.hour(),
         })
         .collect();
+
     let mut reference_created = 0;
     let mut reference_merged = 0;
     let mut reference_days = 0;
     for i in 1..=7 {
         let d = today - Duration::days(i);
-        if !history_start.is_some_and(|h| d > h) {
+        if !history_start.is_some_and(|h| d >= h) {
             continue;
         }
         let a = boundary(d, midnight, tz);
@@ -1427,12 +2120,13 @@ pub fn compute_view<Tz: TimeZone>(
         reference_merged += merge_times.iter().filter(|t| **t >= a && **t < b).count();
         reference_days += 1;
     }
+
     let annual_start = actual_today - Duration::days(364);
     let heatmap_start =
         annual_start - Duration::days(i64::from(annual_start.weekday().num_days_from_monday()));
     let heatmap_end =
         actual_today + Duration::days(6 - i64::from(actual_today.weekday().num_days_from_monday()));
-    let weeks = (heatmap_end - heatmap_start).num_days() / 7 + 1;
+    let num_hm_weeks = (heatmap_end - heatmap_start).num_days() / 7 + 1;
     let activity_on = |d: NaiveDate| {
         metric.value(
             daily_created.get(&d).copied().unwrap_or(0),
@@ -1459,7 +2153,7 @@ pub fn compute_view<Tz: TimeZone>(
         }
     }
     let mut previous_month = None;
-    let heatmap_weeks = (0..weeks)
+    let heatmap_weeks = (0..num_hm_weeks)
         .map(|w| {
             let monday = heatmap_start + Duration::weeks(w);
             let header = (previous_month != Some(monday.month()))
@@ -1493,7 +2187,9 @@ pub fn compute_view<Tz: TimeZone>(
             }
         })
         .collect();
+
     let resolved = outcomes[0] + outcomes[1] + outcomes[2];
+    let prev_resolved = prev_outcomes[0] + prev_outcomes[1] + prev_outcomes[2];
     let trigger_stats = [
         TriggerKind::Workflow,
         TriggerKind::Mention,
@@ -1509,13 +2205,21 @@ pub fn compute_view<Tz: TimeZone>(
         }
     })
     .collect();
+
     efficiency
         .cycle
         .sort_by_key(|s| std::cmp::Reverse(s.duration));
     efficiency
         .queue
         .sort_by_key(|s| std::cmp::Reverse(s.duration));
+
+    let median_lead_time_ms = percentile(&efficiency.cycle, 50);
+    let prev_median_lead_time_ms = percentile(&efficiency.previous_cycle, 50);
+    let median_queue_wait_ms = percentile(&efficiency.queue, 50);
+    let prev_median_queue_wait_ms = percentile(&efficiency.previous_queue, 50);
+
     Dashboard {
+        exclude_initial_sync,
         baseline_known: history_start.is_some_and(|h| h <= previous_start),
         unknown_batch_starts: snapshot
             .merge_batches
@@ -1525,27 +2229,54 @@ pub fn compute_view<Tz: TimeZone>(
         created_ids,
         merged_ids,
         selected_date: today,
-        period_label: format!(
-            "{} – {} {}{}",
-            start,
-            today,
-            if partial {
-                now.fixed_offset().format("%H:%M").to_string()
-            } else {
-                "24:00".into()
-            },
-            if partial { " · In progress" } else { "" }
-        ),
-        comparison_label: format!(
-            "{} – {} {}",
-            previous_start,
-            previous_date,
-            if partial {
-                format!("{} · same time", now.fixed_offset().format("%H:%M"))
-            } else {
-                "· full days".into()
-            }
-        ),
+        period_label: if start == today {
+            format!(
+                "{} ({}) · {}{}",
+                today,
+                weekday_short(today),
+                if partial {
+                    now.fixed_offset().format("%H:%M").to_string()
+                } else {
+                    "24:00".into()
+                },
+                if partial { " · In progress" } else { "" }
+            )
+        } else {
+            format!(
+                "{} – {} {}{}",
+                start,
+                today,
+                if partial {
+                    now.fixed_offset().format("%H:%M").to_string()
+                } else {
+                    "24:00".into()
+                },
+                if partial { " · In progress" } else { "" }
+            )
+        },
+        comparison_label: if previous_start == previous_date {
+            format!(
+                "{} ({}) {}",
+                previous_date,
+                weekday_short(previous_date),
+                if partial {
+                    format!("· through {}", now.fixed_offset().format("%H:%M"))
+                } else {
+                    "· full day".into()
+                }
+            )
+        } else {
+            format!(
+                "{} – {} {}",
+                previous_start,
+                previous_date,
+                if partial {
+                    format!("· through {}", now.fixed_offset().format("%H:%M"))
+                } else {
+                    "· full days".into()
+                }
+            )
+        },
         timezone: now.fixed_offset().format("%Z (UTC%:z)").to_string(),
         previous_created,
         reference_created: (reference_days > 0)
@@ -1561,6 +2292,16 @@ pub fn compute_view<Tz: TimeZone>(
         unknown_merge_dates,
         hours,
         moving_average,
+        weeks,
+        weekly_moving_average,
+        max_weekly_kanban,
+        wow,
+        pipeline,
+        intake,
+        schedules,
+        human_asks_period,
+        prev_human_asks_period,
+        workflow_runs_completed,
         annual_start,
         annual_end: actual_today,
         active_days,
@@ -1575,6 +2316,7 @@ pub fn compute_view<Tz: TimeZone>(
         local_merges,
         pr_merges,
         created_total,
+        initial_sync_period,
         net_wip_delta: created_total as isize - merged_total as isize,
         scheduled_total,
         prev_scheduled_total,
@@ -1582,9 +2324,15 @@ pub fn compute_view<Tz: TimeZone>(
         blocked_runs: outcomes[1],
         failed_runs: outcomes[2],
         active_runs: outcomes[3],
-        success_rate_pct: (resolved > 0).then(|| outcomes[0] * 100 / resolved),
-        median_lead_time_ms: percentile(&efficiency.cycle, 50),
-        median_queue_wait_ms: percentile(&efficiency.queue, 50),
+        prev_completed_runs: prev_outcomes[0],
+        prev_resolved_runs: prev_resolved,
+        success_rate_pct: (resolved > 0).then(|| (outcomes[0] * 100 + resolved / 2) / resolved),
+        prev_success_rate_pct: (prev_resolved > 0)
+            .then(|| (prev_outcomes[0] * 100 + prev_resolved / 2) / prev_resolved),
+        median_lead_time_ms,
+        prev_median_lead_time_ms,
+        median_queue_wait_ms,
+        prev_median_queue_wait_ms,
         efficiency,
         max_daily_kanban: days
             .iter()
@@ -1603,7 +2351,9 @@ pub fn compute_view<Tz: TimeZone>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use canban_types::{Delivery, Event, MergeBatch, MergeBatchItem, Project, Workflow};
+    use canban_types::{
+        Delivery, Event, MergeBatch, MergeBatchItem, Project, TerminalEntry, Workflow,
+    };
     use chrono::FixedOffset;
     use serde_json::json;
 
@@ -1664,6 +2414,7 @@ mod tests {
         assert_eq!(dash.median_lead_time_ms, None);
         assert_eq!(dash.median_queue_wait_ms, None);
         assert_eq!(dash.days.len(), 30);
+        assert_eq!(dash.weeks.len(), 8);
         assert_eq!(dash.heatmap_weeks.len(), 53);
         assert!(!dash.has_any_history);
     }
@@ -1720,6 +2471,203 @@ mod tests {
         assert_eq!(today_bucket.merged_cards, 2);
         assert_eq!(today_bucket.local_merges, 1);
         assert_eq!(today_bucket.pr_merges, 1);
+    }
+
+    #[test]
+    fn excludes_initial_sync_cards_by_default_and_can_include_when_toggled() {
+        let mut snap = Snapshot::default();
+        snap.projects.push(sample_project("p1", "Fiber"));
+        let now = ts_utc8(2026, 11, 18, 18, 0);
+
+        let c_organic = sample_card("c-org", "p1", 1, ts_utc8(2026, 11, 18, 10, 0));
+        let c_sync = sample_card("c-sync", "p1", 2, ts_utc8(2026, 11, 18, 10, 5));
+        snap.cards.extend([c_organic, c_sync]);
+        snap.events.push(Event {
+            id: "ev-sync".into(),
+            project_id: "p1".into(),
+            card_id: "c-sync".into(),
+            sequence: 1,
+            kind: "card.created".into(),
+            actor: "github".into(),
+            message: "Card created".into(),
+            data: json!({"initial_sync": true, "source_kind": "github.issue", "origin": "github"}),
+            created_at: ts_utc8(2026, 11, 18, 10, 5),
+        });
+
+        let default_dash = compute(&snap, None, RangeWindow::Today, now, &tz_plus_8());
+        assert_eq!(default_dash.created_total, 1);
+        assert_eq!(default_dash.initial_sync_period, 1);
+        assert_eq!(default_dash.intake.initial_sync, 1);
+        assert_eq!(default_dash.intake.local_manual, 1);
+
+        let inclusive = compute_full(
+            &snap,
+            None,
+            None,
+            RangeWindow::Today,
+            now,
+            &tz_plus_8(),
+            None,
+            Comparison::Previous,
+            ActivityMetric::Created,
+            ActivityMetric::Created,
+            14,
+            8,
+            false,
+            &[],
+        );
+        assert_eq!(inclusive.created_total, 2);
+    }
+
+    #[test]
+    fn separates_queue_wait_per_provider_and_computes_weekly_wow_trajectory() {
+        let mut snap = Snapshot::default();
+        snap.projects.push(sample_project("p1", "Canban"));
+        let now = ts_utc8(2026, 11, 18, 18, 0);
+
+        let mut c_prev = sample_card("c-prev", "p1", 1, ts_utc8(2026, 11, 10, 9, 0));
+        c_prev.delivery = Some(Delivery {
+            target_branch: "main".into(),
+            commit: "prev1".into(),
+            request_key: "merge:prev".into(),
+            merged_at: ts_utc8(2026, 11, 10, 12, 0),
+        });
+        snap.cards.push(c_prev);
+        snap.events.extend([
+            Event {
+                id: "ep-1".into(),
+                project_id: "p1".into(),
+                card_id: "c-prev".into(),
+                sequence: 1,
+                kind: "execution.started".into(),
+                actor: "system".into(),
+                message: String::new(),
+                data: json!({"terminal_id": "c-prev:merger", "run_number": 1}),
+                created_at: ts_utc8(2026, 11, 10, 10, 0),
+            },
+            Event {
+                id: "ep-2".into(),
+                project_id: "p1".into(),
+                card_id: "c-prev".into(),
+                sequence: 2,
+                kind: "execution.input_required".into(),
+                actor: "herdr".into(),
+                message: String::new(),
+                data: json!({"terminal_id": "c-prev:merger"}),
+                created_at: ts_utc8(2026, 11, 10, 10, 30),
+            },
+            Event {
+                id: "ep-3".into(),
+                project_id: "p1".into(),
+                card_id: "c-prev".into(),
+                sequence: 3,
+                kind: "execution.reported".into(),
+                actor: "agent:merger".into(),
+                message: String::new(),
+                data: json!({"terminal_id": "c-prev:merger", "run_number": 1, "state": "completed"}),
+                created_at: ts_utc8(2026, 11, 10, 11, 50),
+            },
+        ]);
+
+        for (idx, d, prov, q_sec) in [(2u64, 17u32, "codex", 10u64), (3u64, 18u32, "agy", 40u64)] {
+            let cid = format!("c-{idx}");
+            let mut c = sample_card(&cid, "p1", idx, ts_utc8(2026, 11, d, 9, 0));
+            c.delivery = Some(Delivery {
+                target_branch: "main".into(),
+                commit: format!("sha{idx}"),
+                request_key: format!("merge:{cid}"),
+                merged_at: ts_utc8(2026, 11, d, 10, 30),
+            });
+            snap.cards.push(c);
+            let tid = format!("{cid}:merger");
+            let q_at = ts_utc8(2026, 11, d, 10, 0) - q_sec * 1_000;
+            let s_at = ts_utc8(2026, 11, d, 10, 0);
+            snap.events.extend([
+                Event {
+                    id: format!("eq-{idx}"),
+                    project_id: "p1".into(),
+                    card_id: cid.clone(),
+                    sequence: 1,
+                    kind: "execution.queued".into(),
+                    actor: "system".into(),
+                    message: String::new(),
+                    data: json!({"terminal_id": tid, "run_number": 1}),
+                    created_at: q_at,
+                },
+                Event {
+                    id: format!("es-{idx}"),
+                    project_id: "p1".into(),
+                    card_id: cid.clone(),
+                    sequence: 2,
+                    kind: "execution.started".into(),
+                    actor: "system".into(),
+                    message: String::new(),
+                    data: json!({"terminal_id": tid, "run_number": 1}),
+                    created_at: s_at,
+                },
+                Event {
+                    id: format!("er-{idx}"),
+                    project_id: "p1".into(),
+                    card_id: cid.clone(),
+                    sequence: 3,
+                    kind: "execution.reported".into(),
+                    actor: "agent:merger".into(),
+                    message: String::new(),
+                    data: json!({"terminal_id": tid, "run_number": 1, "state": "completed"}),
+                    created_at: s_at + 20 * 60_000,
+                },
+            ]);
+            let entry: TerminalEntry = serde_json::from_value(json!({
+                "id": tid,
+                "number": idx,
+                "name": "merger",
+                "created_at": q_at,
+                "origin_project_id": "p1",
+                "agent": {
+                    "project_id": "p1",
+                    "card_id": cid,
+                    "number": 1,
+                    "stage": "review",
+                    "state": "completed",
+                    "started_at": s_at,
+                    "updated_at": s_at + 20 * 60_000,
+                    "completed_at": s_at + 20 * 60_000,
+                    "connection_state": "closed",
+                    "profile": {
+                        "id": "merger",
+                        "preset": prov,
+                        "argv": [prov],
+                        "exit": {"type": "manual"},
+                        "role_instruction": "",
+                        "session_instruction": ""
+                    }
+                }
+            }))
+            .unwrap();
+            snap.terminals.push(entry);
+        }
+
+        let dash = compute(&snap, None, RangeWindow::Days7, now, &tz_plus_8());
+        assert_eq!(dash.profile_stats.len(), 2);
+        let codex_row = dash
+            .profile_stats
+            .iter()
+            .find(|p| p.provider == "codex")
+            .unwrap();
+        let agy_row = dash
+            .profile_stats
+            .iter()
+            .find(|p| p.provider == "agy")
+            .unwrap();
+        assert_eq!(codex_row.median_queue_wait_ms, Some(10_000));
+        assert_eq!(agy_row.median_queue_wait_ms, Some(40_000));
+
+        assert_eq!(dash.wow.current_merged, 2);
+        assert_eq!(dash.wow.previous_merged, 1);
+        assert_eq!(dash.wow.current_cycle_p50_ms, Some(30 * 60_000));
+        assert_eq!(dash.wow.previous_cycle_p50_ms, Some(2 * 3_600_000));
+        assert_eq!(dash.wow.current_touches_per_merge, Some(0.0));
+        assert_eq!(dash.wow.previous_touches_per_merge, Some(1.0));
     }
 
     #[test]
@@ -1980,6 +2928,7 @@ mod tests {
         assert_eq!(dash.median_lead_time_ms, Some(3 * 3_600_000));
         assert_eq!(format_duration_compact(3 * 3_600_000), "3h");
     }
+
     fn event(s: &mut Snapshot, card: &str, profile: &str, kind: &str, at: u64, number: u32) {
         s.events.push(Event {
             id: format!("event-{}", s.events.len()),
@@ -1993,6 +2942,7 @@ mod tests {
             created_at: at,
         });
     }
+
     fn merged(s: &mut Snapshot, id: &str, at: u64) {
         let mut c = sample_card(id, "p1", s.cards.len() as u64 + 1, at - 60_000);
         c.delivery = Some(Delivery {
@@ -2019,7 +2969,6 @@ mod tests {
         ] {
             merged(&mut s, id, ts_utc8(2026, 11, d, h, 0));
         }
-        // Future timestamps must not contribute even when they share today's date.
         merged(&mut s, "future", ts_utc8(2026, 11, 17, 20, 0));
         let d = compute(&s, None, RangeWindow::Today, now, &tz);
         assert_eq!(
@@ -2130,8 +3079,8 @@ mod tests {
         assert_eq!(valid.len(), 365);
         assert_eq!(valid.first().unwrap().date_key, "2027-03-03");
         let leap = valid.iter().find(|c| c.date_key == "2028-02-29").unwrap();
-        assert_eq!((leap.merged_cards, leap.total_runs, leap.level), (1, 1, 1)); // never merges+runs
-        assert_eq!(d.current_streak, 1); // Today's empty partial day does not break yesterday's streak.
+        assert_eq!((leap.merged_cards, leap.total_runs, leap.level), (1, 1, 1));
+        assert_eq!(d.current_streak, 1);
         assert_eq!(d.moving_average.last(), Some(&None));
     }
 
@@ -2175,14 +3124,14 @@ mod tests {
             4,
         );
         s.events.last_mut().unwrap().data["state"] = json!("completed");
-        s.events.push(s.events[1].clone()); // duplicate delivery
+        s.events.push(s.events[1].clone());
         let profiles = vec![
-            canban_types::Profile {
+            Profile {
                 id: "codex".into(),
                 preset: Some("codex".into()),
                 ..Default::default()
             },
-            canban_types::Profile {
+            Profile {
                 id: "reviewer".into(),
                 preset: Some("claude".into()),
                 ..Default::default()
@@ -2281,6 +3230,7 @@ mod tests {
         assert_eq!(percentile(&samples, 50), Some(5));
         assert_eq!(percentile(&samples, 90), Some(9));
     }
+
     #[test]
     fn local_dst_boundaries_follow_civil_days() {
         if std::env::var_os("CANBAN_INSIGHTS_DST_CHILD").is_none() {

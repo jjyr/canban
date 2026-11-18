@@ -265,15 +265,18 @@ owns adjacent routine-event grouping, read coordinates and execution disclosure.
 - `ui/startup.rs`, `ui/lib.rs`: Owns the reactive desktop root (`startup::Bootstrap`) combining **AppServer** connection/version verification and **Herdr Core (`hc`)** runtime detection in a single two-step startup checklist (`checking_screen`, `backend_update_screen_auto`, `error_screen_with_retry`, and `herdr_setup_screen`). Fast healthy startups defer rendering the bootstrap panel for 140 ms so normal launches mount `<Canban />` with zero flicker. When `herdr-core` is not installed or fails its `server.status` handshake, `herdr_setup_screen` displays **Install Herdr Core** (polling live `herdr.install` output and advancing automatically on success), **Check** (re-evaluating `herdr.check` after manual terminal installation), and a copyable `curl -fsSL https://releases.herdr.dev/core/install.sh | sh` command row. Gallery `herdr-missing`, `herdr-installing`, `herdr-error`, `startup-error`, and `backend-older` scenes exercise these production surfaces without opening an AppServer or mutating the host's Herdr Core.
 
 
-## Insights Dashboard (updated 2026-11-17)
+## Insights Dashboard (updated 2026-11-18)
 
 See [Insights](insights.md) for the counting and interaction contract.
 
-- `ui/insights/model.rs`: Local-calendar Snapshot projection for 1D / 7D / 30D / 90D,
-  matching-progress comparisons, hourly / daily trends, Project and Agent usage,
-  365-date cadence and p50/p90 timing samples. Missing dates remain explicit.
-- `ui/insights.rs`: Shared chrome, date controls, four KPIs, contribution tables,
-  independent full-width annual grid and collapsible timing samples, with shared
-  Command Palette intents and retained Card navigation.
-- `examples/gallery`: Fixed-clock `insights`, `insights-empty`,
+- `ui/insights/model.rs`: Indexed local-calendar Snapshot projection for 1D / 7D / 30D / 90D,
+  organic vs. initial-sync intake separation, matching-progress DoD and ISO-week WoW
+  comparisons, daily / weekly / hourly velocity trends, live Board WIP & gate inventory,
+  per-`(profile, provider)` Agent pass rate / human-ask / queue-wait matrices,
+  365-date cadence, and p50/p90 timing samples. Missing dates remain explicit.
+- `ui/insights.rs`: Shared chrome with Daily/Weekly cadence toggle, compact period sub-bar,
+  four multi-dimensional KPIs with proportional bars, velocity + efficiency trajectory
+  two-column cockpit, intake/pipeline breakdown, sortable Project and Agent matrices,
+  independent full-width annual grid, and collapsible timing samples.
+- `examples/gallery`: Fixed-clock `insights`, `insights-weekly`, `insights-empty`,
   `insights-efficiency` and `insights-short-history` production-component scenes.

@@ -1104,7 +1104,11 @@ pub fn Gallery() -> impl IntoElement {
     }
     if matches!(
         std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
-        Ok("insights" | "insights-empty" | "insights-efficiency" | "insights-short-history")
+        Ok("insights"
+            | "insights-weekly"
+            | "insights-empty"
+            | "insights-efficiency"
+            | "insights-short-history")
     ) {
         canban_ui::frame::configure_window_chrome();
         if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("insights-empty") {
@@ -1117,6 +1121,11 @@ pub fn Gallery() -> impl IntoElement {
             ui.snapshot.set(fixtures::insights());
         }
         ui.insights.anchor_ms.set(Some(fixtures::INSIGHTS_NOW));
+        if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("insights-weekly") {
+            ui.insights
+                .cadence
+                .set(canban_ui::insights::model::TrendCadence::Weekly);
+        }
         ui.insights
             .efficiency_open
             .set(std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("insights-efficiency"));
