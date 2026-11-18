@@ -1,6 +1,5 @@
 use super::*;
 use canban_ui_kit::markdown::MarkdownInput;
-use nsh_base::editor::EditorCompletionAcceptEvent;
 use serde_json::json;
 
 pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElement {
@@ -49,13 +48,12 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
         }
         let body = comment.get_untracked();
         let current_draft = draft.get_untracked();
-        let mut mentions = crate::profiles::addressed(&body, &ui.profiles.get_untracked());
-        for recipient in current_draft.recipients {
-            if !mentions.contains(&recipient) {
-                mentions.push(recipient);
-            }
-        }
-        mentions.retain(|id| !current_draft.suppressed_recipients.contains(id));
+        let mentions = crate::profiles::active_recipients(
+            &[&body],
+            &current_draft.recipients,
+            &current_draft.suppressed_recipients,
+            &ui.profiles.get_untracked(),
+        );
         let submitted_mentions = mentions.clone();
         let card = card.clone();
         let key = key.clone();
@@ -103,38 +101,26 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             );
         }
     });
-    let (source, reference_error) = crate::references::source(
+    let (source, reference_error) = crate::references::attach(
         ui,
         editor,
+        editor.source(
+            comment,
+            "Card comment",
+            "Write a comment… @Agent, #Card or #tag",
+        ),
         comment,
         computed(move || ui.current_card().map(|c| c.project_id).unwrap_or_default()),
-        "Card comment",
-        "Write a comment… @Agent, #Card or #tag",
-    );
-    let source = source.on_completion_accept(move |event: &EditorCompletionAcceptEvent| {
-        let project_id = ui
-            .current_card()
-            .map(|c| c.project_id)
-            .unwrap_or_else(|| ui.project.get_untracked());
-        if crate::references::accept_tag(ui, &project_id, event).is_some() {
-            return;
-        }
-        let id = event.item.label.to_string();
-        if event
-            .item
-            .insert_text
-            .as_ref()
-            .is_some_and(|text| text.as_ref() == format!("@{id} "))
-            && ui.profiles.with_untracked(|p| p.iter().any(|p| p.id == id))
-        {
+        crate::references::ReferenceFormat::Markdown,
+        Some(std::rc::Rc::new(move |id| {
             draft.update(|d| {
                 d.suppressed_recipients.retain(|p| p != &id);
                 if !d.recipients.contains(&id) {
                     d.recipients.push(id);
                 }
             });
-        }
-    });
+        })),
+    );
     view()
         .element_ref(&reading.composer)
         .on_touch(move |e: &TouchEvent| {
@@ -178,44 +164,21 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             move || !reference_error.get().is_empty(),
             move || notice(move || reference_error.get(), Tone::Attention),
         ))
-        .child(dynamic(move || {
-            let d = draft.get();
-            let mut recipients = crate::profiles::addressed(&comment.get(), &ui.profiles.get());
-            for id in d.recipients {
-                if !recipients.contains(&id) {
-                    recipients.push(id);
-                }
-            }
-            recipients.retain(|id| !d.suppressed_recipients.contains(id));
-            view().flex_row().flex_wrap().gap_1().children(
-                recipients
-                    .into_iter()
-                    .map(|id| {
-                        action(format!("@{id} ×"), Variant::Quiet, move |_| {
-                            let updated = crate::profiles::remove_address(
-                                &comment.get_untracked(),
-                                &id,
-                                &ui.profiles.get_untracked(),
-                            );
-                            let still_in_prose =
-                                crate::profiles::addressed(&updated, &ui.profiles.get_untracked())
-                                    .contains(&id);
-                            draft.update(|d| {
-                                d.recipients.retain(|p| p != &id);
-                                if still_in_prose && !d.suppressed_recipients.contains(&id) {
-                                    d.suppressed_recipients.push(id.clone());
-                                }
-                            });
-                            if updated != comment.get_untracked() {
-                                comment.set(updated);
-                            }
-                            editor.focus();
-                        })
-                        .into_element()
-                    })
-                    .collect::<Vec<_>>(),
-            )
-        }))
+        .child(crate::editor::recipient_chips(
+            ui,
+            vec![comment],
+            move || draft.with(|d| d.recipients.clone()),
+            move || draft.with(|d| d.suppressed_recipients.clone()),
+            move |id, still_in_prose| {
+                draft.update(|d| {
+                    d.recipients.retain(|p| p != &id);
+                    if still_in_prose && !d.suppressed_recipients.contains(&id) {
+                        d.suppressed_recipients.push(id);
+                    }
+                });
+                editor.focus();
+            },
+        ))
         .child(when(
             move || draft.with(|d| !d.comment_error.is_empty()),
             move || notice(move || draft.get().comment_error, Tone::Danger),

@@ -200,6 +200,7 @@ fn create_local_linked_card(
             "project_id": project_id,
             "title": title,
             "body": body,
+            "mentions": [],
         }),
         move |res| {
             if let Ok(card_val) = res
@@ -617,6 +618,7 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                 !draft.get().title.trim().is_empty()
             }
     });
+    let instructions_suppressed = signal(Vec::<String>::new());
     // Button, command help and keyboard all dispatch the same scoped form intent.
     let seen_submit = stored(ui.card_submit.get_untracked());
     effect(move || {
@@ -632,10 +634,23 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
         let d = draft.get_untracked();
         let is_github = kind.get_untracked() != "local";
         let submit_project = target.get_untracked();
+        let profiles = ui.profiles.get_untracked();
         let mut params = if is_github {
-            json!({"project_id":submit_project,"number":d.selected_issue.as_ref().map(|r|&r["issue"]["number"]),"source_generation":d.selected_issue.as_ref().map(|r|&r["source_generation"]),"instructions":d.instructions,"kind":kind.get_untracked()})
+            let mentions = crate::profiles::active_recipients(
+                &[&d.instructions],
+                &[],
+                &instructions_suppressed.get_untracked(),
+                &profiles,
+            );
+            json!({"project_id":submit_project,"number":d.selected_issue.as_ref().map(|r|&r["issue"]["number"]),"source_generation":d.selected_issue.as_ref().map(|r|&r["source_generation"]),"instructions":d.instructions,"kind":kind.get_untracked(),"mentions":mentions})
         } else {
-            json!({"project_id":submit_project,"title":d.title,"body":d.body})
+            let mentions = crate::profiles::active_recipients(
+                &[&d.title, &d.body],
+                &d.recipients,
+                &d.suppressed_recipients,
+                &profiles,
+            );
+            json!({"project_id":submit_project,"title":d.title,"body":d.body,"mentions":mentions})
         };
         params["request_key"] = json!(format!(
             "{}:{}",
@@ -662,11 +677,16 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                         if is_github {
                             if latest.instructions == d.instructions {
                                 latest.instructions.clear();
+                                instructions_suppressed.try_set(Vec::new());
                             }
                             if latest.selected_issue == d.selected_issue {
                                 latest.selected_issue = None;
                             }
                         } else {
+                            if latest.title == d.title && latest.body == d.body {
+                                latest.recipients.clear();
+                                latest.suppressed_recipients.clear();
+                            }
                             if latest.title == d.title {
                                 latest.title.clear();
                             }
@@ -694,6 +714,7 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
             },
         );
     });
+    let local_title = crate::card::title_proxy(draft);
     let local = crate::card::proxy(draft, false);
     let instructions = signal(draft.get_untracked().instructions);
     effect(move || {
@@ -706,6 +727,33 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
         let value = draft.get().instructions;
         if instructions.get_untracked() != value {
             instructions.set(value);
+        }
+    });
+    effect(move || {
+        let profiles = ui.profiles.get();
+        let t = local_title.get();
+        let b = local.get();
+        let cur = draft.with_untracked(|d| d.suppressed_recipients.clone());
+        if cur.is_empty() {
+            return;
+        }
+        let present = crate::profiles::active_recipients(&[&t, &b], &[], &[], &profiles);
+        let next: Vec<String> = cur.into_iter().filter(|id| present.contains(id)).collect();
+        if next != draft.with_untracked(|d| d.suppressed_recipients.clone()) {
+            draft.update(|d| d.suppressed_recipients = next);
+        }
+    });
+    effect(move || {
+        let profiles = ui.profiles.get();
+        let text = instructions.get();
+        let cur = instructions_suppressed.get_untracked();
+        if cur.is_empty() {
+            return;
+        }
+        let present = crate::profiles::active_recipients(&[&text], &[], &[], &profiles);
+        let next: Vec<String> = cur.into_iter().filter(|id| present.contains(id)).collect();
+        if next != instructions_suppressed.get_untracked() {
+            instructions_suppressed.set(next);
         }
     });
     let height = signal(280.);
@@ -727,26 +775,51 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
             },
         );
     });
-    let (local_editor, local_view) = crate::editor::body(
+    let on_local_mention: std::rc::Rc<dyn Fn(String)> = std::rc::Rc::new(move |id| {
+        draft.update(|d| {
+            d.suppressed_recipients.retain(|p| p != &id);
+        });
+    });
+    let (title_editor, title_view) = crate::editor::title(
+        ui,
+        local_title,
+        computed(move || target.get()),
+        computed(move || active.get() && kind.get() == "local"),
+        true,
+        || false,
+        move || ui.card_submit.update(|n| *n += 1),
+        Some(on_local_mention.clone()),
+    );
+    let (local_editor, local_view) = crate::editor::body_with_mentions(
         ui,
         local,
         computed(move || target.get()),
         computed(move || active.get() && kind.get() == "local"),
         height,
         move || ui.card_submit.update(|n| *n += 1),
+        Some(on_local_mention),
     );
-    let (instructions_editor, instructions_view) = crate::editor::body(
+    let (instructions_editor, instructions_view) = crate::editor::body_with_mentions(
         ui,
         instructions,
         computed(move || target.get()),
         computed(move || active.get() && kind.get() != "local"),
         height,
         move || ui.card_submit.update(|n| *n += 1),
+        Some(std::rc::Rc::new(move |id| {
+            instructions_suppressed.update(|list| list.retain(|p| p != &id));
+        })),
     );
     effect(move || {
         if !active.get() {
+            title_editor.blur();
             local_editor.blur();
             instructions_editor.blur();
+        } else if kind.get() == "local" {
+            instructions_editor.blur();
+        } else {
+            title_editor.blur();
+            local_editor.blur();
         }
     });
     view()
@@ -755,7 +828,7 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
         .min_h(px(0.))
         .min_w(px(0.))
         .bg(canban_ui_kit::tokens::SURFACE)
-        .on_layout(move |b: &Bounds<Points>| height.set((b.size.height.0 - 300.).max(180.)))
+        .on_layout(move |b: &Bounds<Points>| height.set((b.size.height.0 - 350.).max(150.)))
         .child(
             view()
                 .flex_row()
@@ -824,16 +897,39 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                             .gap_3()
                             .style_when(move || kind.get() != "local", |s| s.hidden())
                             .accessibility_elements_hidden(move || kind.get() != "local")
-                            .child(
-                                bound_field(
-                                    move || draft.get().title,
-                                    move |v| draft.update(|d| d.title = v.into()),
-                                    "Card title",
-                                )
-                                .label("Card title")
-                                .auto_focus(true),
-                            )
-                            .child(local_view),
+                            .child(title_view)
+                            .child(local_view)
+                            .child(when(
+                                move || {
+                                    let profiles = ui.profiles.get();
+                                    let d = draft.get();
+                                    !crate::profiles::active_recipients(
+                                        &[&d.title, &d.body],
+                                        &d.recipients,
+                                        &d.suppressed_recipients,
+                                        &profiles,
+                                    )
+                                    .is_empty()
+                                },
+                                move || {
+                                    crate::editor::recipient_chips(
+                                        ui,
+                                        vec![local_title, local],
+                                        move || draft.with(|d| d.recipients.clone()),
+                                        move || draft.with(|d| d.suppressed_recipients.clone()),
+                                        move |id, still_in_prose| {
+                                            draft.update(|d| {
+                                                d.recipients.retain(|p| p != &id);
+                                                if still_in_prose
+                                                    && !d.suppressed_recipients.contains(&id)
+                                                {
+                                                    d.suppressed_recipients.push(id);
+                                                }
+                                            });
+                                        },
+                                    )
+                                },
+                            )),
                     )
                     .child(
                         view()
@@ -943,7 +1039,37 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                                     .into_element()
                             }))
                             .child(muted("Additional instructions · local to Canban"))
-                            .child(instructions_view),
+                            .child(instructions_view)
+                            .child(when(
+                                move || {
+                                    let profiles = ui.profiles.get();
+                                    let text = instructions.get();
+                                    !crate::profiles::active_recipients(
+                                        &[&text],
+                                        &[],
+                                        &instructions_suppressed.get(),
+                                        &profiles,
+                                    )
+                                    .is_empty()
+                                },
+                                move || {
+                                    crate::editor::recipient_chips(
+                                        ui,
+                                        vec![instructions],
+                                        Vec::new,
+                                        move || instructions_suppressed.get(),
+                                        move |id, still_in_prose| {
+                                            if still_in_prose {
+                                                instructions_suppressed.update(|list| {
+                                                    if !list.contains(&id) {
+                                                        list.push(id);
+                                                    }
+                                                });
+                                            }
+                                        },
+                                    )
+                                },
+                            )),
                     )
                     .child(crate::editor::draft_status(ui, key.clone(), draft))
                     .child(when(

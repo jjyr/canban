@@ -14,6 +14,12 @@ use std::collections::BTreeSet;
 const TAG_DETAIL_PREFIX: &str = "Tag";
 const CREATE_TAG_DETAIL: &str = "New tag · Create";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReferenceFormat {
+    Markdown,
+    PlainText,
+}
+
 /// UTF-16 caret -> token start/trigger/query. Markdown syntax stays literal.
 pub fn context(body: &str, offset: u32) -> Option<(u32, char, String)> {
     let prefix: String = body
@@ -98,16 +104,50 @@ pub fn source(
     name: &str,
     placeholder: &str,
 ) -> (nsh_base::EditorElement, Signal<String>) {
+    attach(
+        ui,
+        editor,
+        editor.source(text, name, placeholder),
+        text,
+        project,
+        ReferenceFormat::Markdown,
+        None,
+    )
+}
+
+pub fn attach(
+    ui: Ui,
+    editor: MarkdownInput,
+    element: nsh_base::EditorElement,
+    text: Signal<String>,
+    project: Memo<String>,
+    format: ReferenceFormat,
+    on_mention: Option<std::rc::Rc<dyn Fn(String)>>,
+) -> (nsh_base::EditorElement, Signal<String>) {
     let epoch = signal(0u64);
     let remote_error = signal(String::new());
     let cache = stored(std::collections::BTreeMap::<String, Vec<Value>>::new());
     let accept_project = project;
-    let source = editor
-        .source(text, name, placeholder)
+    let source = element
         .completion(true)
         .completion_trigger_characters(vec!["@".into(), "#".into()])
         .on_completion_accept(move |event: &EditorCompletionAcceptEvent| {
-            let _ = accept_tag(ui, &accept_project.get_untracked(), event);
+            let project_id = accept_project.get_untracked();
+            if accept_tag(ui, &project_id, event).is_some() {
+                return;
+            }
+            if let Some(on_mention) = &on_mention {
+                let id = event.item.label.to_string();
+                if event
+                    .item
+                    .insert_text
+                    .as_ref()
+                    .is_some_and(|text| text.as_ref() == format!("@{id} "))
+                    && ui.profiles.with_untracked(|p| p.iter().any(|p| p.id == id))
+                {
+                    on_mention(id);
+                }
+            }
         })
         .on_completion_request(move |request: &EditorCompletionRequest| {
             epoch.update(|n| *n += 1);
@@ -127,7 +167,7 @@ pub fn source(
             let remote_first = ui
                 .current_card()
                 .is_some_and(|c| c.github_issue().is_some());
-            let mut items = local_candidates_with_tags(
+            let mut items = local_candidates_with_format(
                 &snapshot,
                 &ui.profiles.get_untracked(),
                 &local_tags,
@@ -135,6 +175,7 @@ pub fn source(
                 trigger,
                 &query,
                 range,
+                format,
             );
             // Recompute against the complete inventory as the query grows and
             // refresh the explicit replacement range through the current caret.
@@ -150,7 +191,7 @@ pub fn source(
             };
             let cache_key = format!("{account}:{target}:{}:{query}", source.generation);
             if let Some(rows) = cache.with(|c| c.get(&cache_key).cloned()) {
-                append_remote(&mut items, rows, &source.repository, range);
+                append_remote(&mut items, rows, &source.repository, range, format);
                 rank_candidates(&mut items, remote_first);
                 editor.completions(request.id, items, true);
                 return;
@@ -208,7 +249,7 @@ pub fn source(
                                 c.insert(cache_key, rows.clone());
                             });
                             let mut items = local;
-                            append_remote(&mut items, rows, &repository, range);
+                            append_remote(&mut items, rows, &repository, range, format);
                             rank_candidates(&mut items, remote_first);
                             editor.completions(request.id, items, true);
                         }
@@ -249,7 +290,7 @@ fn local_candidates(
     query: &str,
     range: EditorRange,
 ) -> Vec<EditorCompletionItem> {
-    local_candidates_with_tags(
+    local_candidates_with_format(
         snapshot,
         profiles,
         &BTreeSet::new(),
@@ -257,10 +298,12 @@ fn local_candidates(
         trigger,
         query,
         range,
+        ReferenceFormat::Markdown,
     )
 }
 
-fn local_candidates_with_tags(
+#[allow(clippy::too_many_arguments)]
+fn local_candidates_with_format(
     snapshot: &canban_types::Snapshot,
     profiles: &[canban_types::Profile],
     local_tags: &BTreeSet<String>,
@@ -268,6 +311,7 @@ fn local_candidates_with_tags(
     trigger: char,
     query: &str,
     range: EditorRange,
+    format: ReferenceFormat,
 ) -> Vec<EditorCompletionItem> {
     if trigger == '@' {
         let project = snapshot.projects.iter().find(|p| p.id == target);
@@ -335,10 +379,22 @@ fn local_candidates_with_tags(
             .map(|p| p.name.as_str())
             .unwrap_or("Project");
         let order = out.len() + 100;
+        let insert = match format {
+            ReferenceFormat::Markdown => {
+                format!("[{} #{}](card:{}) ", escape(project), c.number, c.id)
+            }
+            ReferenceFormat::PlainText => {
+                if c.project_id == target {
+                    format!("#{} ", c.number)
+                } else {
+                    format!("{project} #{} ", c.number)
+                }
+            }
+        };
         out.push(item(
             format!("{} {}", c.number, c.title),
             format!("Card · {project}"),
-            format!("[{} #{}](card:{}) ", escape(project), c.number, c.id),
+            insert,
             range,
             order,
         ));
@@ -385,6 +441,7 @@ fn append_remote(
     rows: Vec<Value>,
     repository: &str,
     range: EditorRange,
+    format: ReferenceFormat,
 ) {
     // Keep "New tag · Create" at the tail if present so exact/existing matches lead.
     let create_item = items
@@ -402,13 +459,17 @@ fn append_remote(
         if !url.starts_with("https://github.com/") {
             continue;
         }
+        let insert = match format {
+            ReferenceFormat::Markdown => format!("[{}#{number}]({url}) ", escape(repository)),
+            ReferenceFormat::PlainText => format!("{repository}#{number} "),
+        };
         items.push(item(
             format!("{number} {}", row["title"].as_str().unwrap_or_default()),
             format!(
                 "{kind} · {repository} · {}",
                 row["state"].as_str().unwrap_or_default()
             ),
-            format!("[{}#{number}]({url}) ", escape(repository)),
+            insert,
             range,
             items.len() + 100,
         ));
@@ -455,6 +516,67 @@ mod tests {
         assert_eq!(
             local_candidates(&s, &profiles, "p", '#', "65", range).len(),
             1
+        );
+    }
+    #[test]
+    fn plain_text_title_candidates_format_card_and_remote_references_without_markdown_links() {
+        let mut s = snapshot();
+        s.projects.push(serde_json::from_value(json!({"id":"p2","name":"Other","directory":"/fixture2","created_at":1,"workflow":canban_types::Workflow::default()})).unwrap());
+        s.cards.push(serde_json::from_value(json!({"id":"other-card","project_id":"p2","number":9,"title":"Cross project needle","body":"Context","stage":"backlog","revision":1,"created_at":1})).unwrap());
+        s.projects[0].tags = vec!["bug".into()];
+        let profiles = canban_types::Config::default().profiles;
+        let range = EditorRange::new(
+            nsh_base::editor::EditorPosition::new(0, 0),
+            nsh_base::editor::EditorPosition::new(0, 5),
+        );
+
+        let mention_items = local_candidates_with_format(
+            &s,
+            &profiles,
+            &BTreeSet::new(),
+            "p",
+            '@',
+            "",
+            range,
+            ReferenceFormat::PlainText,
+        );
+        assert!(
+            mention_items
+                .iter()
+                .any(|item| item.insert_text.as_deref() == Some("@developer "))
+        );
+
+        let mut hash_items = local_candidates_with_format(
+            &s,
+            &profiles,
+            &BTreeSet::new(),
+            "p",
+            '#',
+            "needle",
+            range,
+            ReferenceFormat::PlainText,
+        );
+        assert_eq!(hash_items[0].insert_text.as_deref(), Some("#65 "));
+        assert_eq!(hash_items[1].insert_text.as_deref(), Some("Other #9 "));
+        assert_eq!(hash_items[2].insert_text.as_deref(), Some("#needle "));
+
+        append_remote(
+            &mut hash_items,
+            vec![json!({
+                "number": 42,
+                "title": "Remote issue",
+                "state": "open",
+                "html_url": "https://github.com/owner/repo/issues/42",
+                "pull_request": null
+            })],
+            "owner/repo",
+            range,
+            ReferenceFormat::PlainText,
+        );
+        assert!(
+            hash_items
+                .iter()
+                .any(|item| item.insert_text.as_deref() == Some("owner/repo#42 "))
         );
     }
     #[test]

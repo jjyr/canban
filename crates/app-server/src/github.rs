@@ -421,12 +421,13 @@ impl AppServer {
                             .is_some_and(|s| s.generation == source.generation),
                         "Project source changed; search again"
                     );
+                    let instructions = p["instructions"].as_str().unwrap_or("");
                     let mut card = integration::upsert(
                         db,
                         &current,
                         Change { issue, comments },
                         true,
-                        p["instructions"].as_str().unwrap_or(""),
+                        instructions,
                     )?;
                     if let Some(note_id) = p["source_note_id"].as_str() {
                         let note: Note = db.get(note_id)?;
@@ -441,6 +442,14 @@ impl AppServer {
                         db.save(&card)?;
                         crate::notes::relate_card(db, &note.id, &card, true)?;
                     }
+                    crate::sessions::queue_interactive_mentions(
+                        db,
+                        &self.config(),
+                        &mut card,
+                        &current,
+                        &p,
+                        &[instructions],
+                    )?;
                     Ok(serde_json::to_value(card)?)
                 })
             }

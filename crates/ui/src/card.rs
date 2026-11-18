@@ -354,6 +354,23 @@ pub fn screen(ui: Ui) -> impl IntoElement {
     .into_element()
 }
 
+pub(crate) fn title_proxy(draft: Signal<Draft>) -> Signal<String> {
+    let text = signal(draft.get_untracked().title);
+    effect(move || {
+        let value = text.get();
+        if value != draft.get_untracked().title {
+            draft.update(|d| d.title = value);
+        }
+    });
+    effect(move || {
+        let value = draft.get().title;
+        if text.get_untracked() != value {
+            text.set(value);
+        }
+    });
+    text
+}
+
 pub(crate) fn proxy(draft: Signal<Draft>, comment: bool) -> Signal<String> {
     let text = signal(if comment {
         draft.get_untracked().comment

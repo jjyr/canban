@@ -519,6 +519,16 @@ impl AppServer {
                 } else {
                     db.save(&c)?;
                 }
+                let title_text = c.title.clone();
+                let body_text = c.body.clone();
+                crate::sessions::queue_interactive_mentions(
+                    db,
+                    &config,
+                    &mut c,
+                    &project,
+                    &p,
+                    &[&title_text, &body_text],
+                )?;
                 Ok(serde_json::to_value(c)?)
             }),
             "card.update" => {

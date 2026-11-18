@@ -3,15 +3,12 @@ use crate::{drafts::*, presenter::*};
 use canban_ui_kit::{markdown::MarkdownInput, *};
 use nsh_core::prelude::*;
 
-pub fn body(
+fn configure_editor(
     ui: Ui,
-    text: Signal<String>,
-    project: Memo<String>,
+    editor: MarkdownInput,
     active: Memo<bool>,
-    height: Signal<f32>,
     submit: impl Fn() + 'static,
-) -> (MarkdownInput, impl IntoElement) {
-    let editor = MarkdownInput::new();
+) {
     editor.restore_after(
         computed(move || ui.quick_open.get() || !ui.utility_popup.get().is_empty()),
         active,
@@ -25,6 +22,30 @@ pub fn body(
         },
         submit,
     );
+}
+
+pub fn body(
+    ui: Ui,
+    text: Signal<String>,
+    project: Memo<String>,
+    active: Memo<bool>,
+    height: Signal<f32>,
+    submit: impl Fn() + 'static,
+) -> (MarkdownInput, impl IntoElement) {
+    body_with_mentions(ui, text, project, active, height, submit, None)
+}
+
+pub fn body_with_mentions(
+    ui: Ui,
+    text: Signal<String>,
+    project: Memo<String>,
+    active: Memo<bool>,
+    height: Signal<f32>,
+    submit: impl Fn() + 'static,
+    on_mention: Option<std::rc::Rc<dyn Fn(String)>>,
+) -> (MarkdownInput, impl IntoElement) {
+    let editor = MarkdownInput::new();
+    configure_editor(ui, editor, active, submit);
     let focus_ticket = stored(ui.editor_focus.get_untracked());
     effect(move || {
         let ticket = ui.editor_focus.get();
@@ -37,13 +58,18 @@ pub fn body(
             });
         }
     });
-    let (source, reference_error) = crate::references::source(
+    let (source, reference_error) = crate::references::attach(
         ui,
         editor,
+        editor.source(
+            text,
+            "Task description",
+            "Describe the task in Markdown… @Agent, #Card or #tag",
+        ),
         text,
         project,
-        "Task description",
-        "Describe the task in Markdown… @Agent, #Card or #tag",
+        crate::references::ReferenceFormat::Markdown,
+        on_mention,
     );
     let body = editor.render_with_preview(text, source, false, height, move || {
         reader(ui, move || text.get()).into_element()
@@ -55,6 +81,91 @@ pub fn body(
             move || notice(move || reference_error.get(), Tone::Attention),
         )),
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn title(
+    ui: Ui,
+    text: Signal<String>,
+    project: Memo<String>,
+    active: Memo<bool>,
+    auto_focus: bool,
+    disabled: impl Fn() -> bool + 'static,
+    submit: impl Fn() + 'static,
+    on_mention: Option<std::rc::Rc<dyn Fn(String)>>,
+) -> (MarkdownInput, impl IntoElement) {
+    let disabled = std::rc::Rc::new(disabled);
+    let editor = MarkdownInput::new();
+    configure_editor(ui, editor, active, submit);
+    let disabled_src = disabled.clone();
+    let element = editor
+        .line_source(
+            text,
+            "Card title",
+            "Card title · @Agent, #Card or #tag",
+            move || disabled_src(),
+        )
+        .auto_focus(auto_focus);
+    let (source, reference_error) = crate::references::attach(
+        ui,
+        editor,
+        element,
+        text,
+        project,
+        crate::references::ReferenceFormat::PlainText,
+        on_mention,
+    );
+    let disabled_view = disabled;
+    let field = editor.render_line(source, move || disabled_view());
+    (
+        editor,
+        view().gap_1().child(field).child(when(
+            move || !reference_error.get().is_empty(),
+            move || notice(move || reference_error.get(), Tone::Attention),
+        )),
+    )
+}
+
+pub fn recipient_chips(
+    ui: Ui,
+    sources: Vec<Signal<String>>,
+    explicit: impl Fn() -> Vec<String> + 'static,
+    suppressed: impl Fn() -> Vec<String> + 'static,
+    on_dismiss: impl Fn(String, bool) + 'static,
+) -> impl IntoElement {
+    let on_dismiss = std::rc::Rc::new(on_dismiss);
+    dynamic(move || {
+        let profiles = ui.profiles.get();
+        let texts: Vec<String> = sources.iter().map(|s| s.get()).collect();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let recipients =
+            crate::profiles::active_recipients(&refs, &explicit(), &suppressed(), &profiles);
+        view().flex_row().flex_wrap().gap_1().children(
+            recipients
+                .into_iter()
+                .map(|id| {
+                    let sources = sources.clone();
+                    let on_dismiss = on_dismiss.clone();
+                    action(format!("@{id} ×"), Variant::Quiet, move |_| {
+                        let profiles = ui.profiles.get_untracked();
+                        let mut still_in_prose = false;
+                        for src in &sources {
+                            let cur = src.get_untracked();
+                            let updated = crate::profiles::remove_address(&cur, &id, &profiles);
+                            if updated != cur {
+                                src.set(updated.clone());
+                            }
+                            if crate::profiles::addressed(&updated, &profiles).contains(&id) {
+                                still_in_prose = true;
+                            }
+                        }
+                        on_dismiss(id.clone(), still_in_prose);
+                    })
+                    .into_element()
+                })
+                .collect::<Vec<_>>(),
+        )
+    })
 }
 pub fn reader(ui: Ui, body: impl Fn() -> String + 'static) -> nsh_base::TextViewElement {
     crate::links::reader(ui, body)

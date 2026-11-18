@@ -4117,3 +4117,110 @@ fn pr_card_worktree_tracks_pr_branch_and_review_drafts_roundtrip_with_fallback()
         .unwrap();
     assert!(app.snapshot().unwrap().review_drafts.is_empty());
 }
+
+#[test]
+fn card_create_mentions_launch_interactive_sessions_while_card_update_never_triggers() {
+    let (_d, app, project, existing) = setup();
+
+    // 1. Implicit prose mentions across title and body launch interactive sessions even in backlog.
+    let created: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({
+                "view": "full",
+                "project_id": project.id,
+                "title": "@developer Investigate title mention",
+                "body": "Please coordinate with @reviewer before coding."
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(created.stage, "backlog");
+    let snap = app.snapshot().unwrap();
+    let created_terminals: Vec<_> = snap
+        .terminals
+        .iter()
+        .filter_map(|t| t.agent.as_ref().filter(|a| a.card_id == created.id))
+        .collect();
+    assert_eq!(created_terminals.len(), 2);
+    for run in &created_terminals {
+        assert_eq!(run.trigger, ExecutionTrigger::Interactive);
+        assert_eq!(run.state, "queued");
+        assert!(
+            run.instruction
+                .contains("sent this Card to you for discussion")
+        );
+    }
+    assert!(
+        created_terminals
+            .iter()
+            .any(|r| r.profile.id == "developer")
+    );
+    assert!(created_terminals.iter().any(|r| r.profile.id == "reviewer"));
+
+    // 2. Explicit `mentions` overrides prose scanning on `card.create`.
+    let explicit_card: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({
+                "view": "full",
+                "project_id": project.id,
+                "title": "Ask @developer about @reviewer",
+                "body": "Body mentions @developer",
+                "mentions": ["reviewer"]
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    let explicit_terminals: Vec<_> = snap
+        .terminals
+        .iter()
+        .filter_map(|t| t.agent.as_ref().filter(|a| a.card_id == explicit_card.id))
+        .collect();
+    assert_eq!(explicit_terminals.len(), 1);
+    assert_eq!(explicit_terminals[0].profile.id, "reviewer");
+    assert_eq!(explicit_terminals[0].trigger, ExecutionTrigger::Interactive);
+
+    // 3. Explicit empty `mentions: []` suppresses prose scanning on `card.create`.
+    let suppressed_card: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({
+                "view": "full",
+                "project_id": project.id,
+                "title": "Discuss @developer behavior",
+                "body": "Mention @reviewer only in docs",
+                "mentions": []
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    assert!(snap.terminals.iter().all(|t| {
+        t.agent
+            .as_ref()
+            .is_none_or(|a| a.card_id != suppressed_card.id)
+    }));
+
+    // 4. Editing a Card (`card.update`) never triggers or launches agents.
+    app.call(
+        "card.update",
+        json!({
+            "card_id": existing.id,
+            "revision": existing.revision,
+            "title": "@developer @reviewer Updated title",
+            "body": "Updated body mentioning @developer"
+        }),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    assert!(
+        snap.terminals
+            .iter()
+            .all(|t| t.agent.as_ref().is_none_or(|a| a.card_id != existing.id))
+    );
+}

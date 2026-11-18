@@ -2,6 +2,8 @@
 mod adapters;
 pub mod launch;
 pub use launch::{LaunchRequest, LaunchSpec, prepare_launch};
+pub mod mentions;
+pub use mentions::{addressed, remove_address};
 pub mod catalog;
 pub use catalog::{
     CatalogEntry, ModelOption, builtin_catalog, catalog_entry_for_profile, collapse_agy_models,

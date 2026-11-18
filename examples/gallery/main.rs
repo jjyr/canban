@@ -118,6 +118,8 @@ fn controls() -> impl IntoElement {
         error: String::new(),
     });
     let markdown = canban_ui_kit::markdown::MarkdownInput::new();
+    let title_line = canban_ui_kit::markdown::MarkdownInput::new();
+    let title_text = signal(String::from("@developer Fix #ui-kit title completion"));
     let group_open = signal(true);
     let nav_selected = signal(0_usize);
     let gutter_scroll = element_ref();
@@ -403,6 +405,15 @@ fn controls() -> impl IntoElement {
                 .child(
                     panel()
                         .child(label("Markdown editor / shared reading styles"))
+                        .child(title_line.render_line(
+                            title_line.line_source(
+                                title_text,
+                                "Gallery single-line title",
+                                "Card title · @Agent, #Card or #tag",
+                                || false,
+                            ),
+                            || false,
+                        ))
                         .child(markdown.render(input, markdown.source(input, "Gallery Markdown", "Write Markdown…"), false, signal(220.)))
                         .child(canban_ui_kit::markdown::reader(move || input.get())),
                 )

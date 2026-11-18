@@ -371,3 +371,72 @@ fn delivery_review_gate_does_not_block_github_remote_actions() {
         .to_string();
     assert_eq!(busy_err, "Another GitHub action is pending");
 }
+
+#[test]
+fn github_issue_upsert_triggers_only_from_local_instructions_not_remote_issue_body() {
+    let (_d, app, p, _c) = setup();
+    let config = app.config();
+    let issue: canban_github::models::Issue = serde_json::from_value(json!({
+        "id": 4201,
+        "node_id": "I_kwDO42",
+        "number": 42,
+        "title": "Remote @reviewer mention should not trigger",
+        "body": "Remote body mentions @planner",
+        "state": "open",
+        "html_url": "https://github.com/jjyr/canban/issues/42",
+        "user": {"id": 1, "login": "octocat"},
+        "labels": [],
+        "assignees": [],
+        "updated_at": "2026-11-01T00:00:00Z"
+    }))
+    .unwrap();
+    let mut project = p;
+    project.github = Some(
+        serde_json::from_value(json!({
+            "repository": "jjyr/canban",
+            "repository_id": 777,
+            "generation": "g1",
+            "intake": "off"
+        }))
+        .unwrap(),
+    );
+
+    let card_id = app
+        .store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            db.save(&project)?;
+            let instructions = "@developer Investigate locally";
+            let mut card = canban_kanban::github::upsert(
+                db,
+                &project,
+                canban_kanban::github::Change {
+                    issue,
+                    comments: Vec::new(),
+                },
+                true,
+                instructions,
+            )?;
+            crate::sessions::queue_interactive_mentions(
+                db,
+                &config,
+                &mut card,
+                &project,
+                &json!({}),
+                &[instructions],
+            )?;
+            Ok(card.id)
+        })
+        .unwrap();
+
+    let snap = app.snapshot().unwrap();
+    let runs: Vec<_> = snap
+        .terminals
+        .iter()
+        .filter_map(|t| t.agent.as_ref().filter(|a| a.card_id == card_id))
+        .collect();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].profile.id, "developer");
+    assert_eq!(runs[0].trigger, ExecutionTrigger::Interactive);
+}

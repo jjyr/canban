@@ -1183,6 +1183,7 @@ impl AppServer {
                         "project_id": project_id,
                         "title": title,
                         "body": formatted,
+                        "mentions": [],
                         "request_key": create_key,
                     }),
                 )?;

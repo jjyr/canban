@@ -61,6 +61,7 @@ impl Draft {
             !self.title.is_empty()
                 || !self.body.is_empty()
                 || !self.instructions.is_empty()
+                || !self.recipients.is_empty()
                 || self.selected_issue.is_some()
         } else {
             key.starts_with("card:")

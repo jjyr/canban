@@ -77,6 +77,17 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         && ui.card_id() == ui.card.get()
                         && !ui.card_terminal_focused.get()
                 });
+                let title = title_proxy(draft);
+                let (_title_editor, title_view) = crate::editor::title(
+                    ui,
+                    title,
+                    computed(move || draft.with(|d| d.project_id.clone())),
+                    current,
+                    false,
+                    move || github,
+                    move || ui.task_submit.update(|n| *n += 1),
+                    None,
+                );
                 let (editor, body_view) = crate::editor::body(
                     ui,
                     body,
@@ -107,14 +118,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         }
                     })
                     .gap_2()
-                    .child(
-                        bound_field(
-                            move || draft.get().title,
-                            move |v| draft.update(|d| d.title = v.into()),
-                            "Card title",
-                        )
-                        .disabled(github),
-                    )
+                    .child(title_view)
                     .child(body_view)
                     .child(super::attachments::controls(
                         ui, draft, editor, false, paste,

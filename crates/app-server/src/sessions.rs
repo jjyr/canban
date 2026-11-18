@@ -19,6 +19,79 @@ pub(super) fn conversation(db: Db<'_>, card: &Card, profile: &Profile) -> Result
     Ok(item)
 }
 
+pub(super) fn enqueue_interactive(
+    db: Db<'_>,
+    config: &Config,
+    card: &mut Card,
+    project: &Project,
+    profile_id: &str,
+) -> Result<TerminalEntry> {
+    let stage = canban_workflow_engine::stage(&project.workflow, &card.stage)?;
+    let init_prompt = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../prompts/runtime/interactive_init.txt"
+    ))
+    .trim_end()
+    .to_owned();
+    enqueue(
+        db,
+        config,
+        card,
+        project,
+        stage,
+        ExecutionTrigger::Interactive,
+        Some(profile_id),
+        Some(init_prompt),
+    )?
+    .context("Agent was not queued")
+}
+
+pub(super) fn queue_interactive_mentions(
+    db: Db<'_>,
+    config: &Config,
+    card: &mut Card,
+    project: &Project,
+    p: &Value,
+    prose_sources: &[&str],
+) -> Result<()> {
+    let mut mentions = strings(p, "mentions");
+    // Explicit recipients distinguish addressing an Agent from discussing its name.
+    if p.get("mentions").is_none() {
+        for source in prose_sources {
+            for name in canban_profiles::addressed(source, &config.profiles) {
+                if !mentions.contains(&name) {
+                    mentions.push(name);
+                }
+            }
+        }
+    }
+    mentions.sort();
+    mentions.dedup();
+    for agent in mentions {
+        let profile = canban_scheduler::select_in_project(config, Some(project), Some(&agent))?;
+        let context = conversation(db, card, &profile)?;
+        if let Ok(existing) = db.get::<TerminalEntry>(&context.id)
+            && let Some(att) = &existing.agent
+        {
+            let live = att.terminal.is_some()
+                && att
+                    .observed
+                    .as_ref()
+                    .is_none_or(|v| v["state"] != "finished");
+            if (matches!(att.state.as_str(), "queued" | "starting" | "unknown")
+                && !(card.human_gate.is_some()
+                    && att.state == "queued"
+                    && canban_scheduler::automatic(att)))
+                || live
+            {
+                continue;
+            }
+        }
+        enqueue_interactive(db, config, card, project, &profile.id)?;
+    }
+    Ok(())
+}
+
 pub(super) fn retry_agent(db: Db<'_>, card: &Card, entry: &mut TerminalEntry) -> Result<()> {
     let previous = entry
         .agent
@@ -239,24 +312,7 @@ impl AppServer {
                 context.provider = profile.command_name();
                 db.save(&context)?;
             }
-            let stage = canban_workflow_engine::stage(&project.workflow, &card.stage)?;
-            let init_prompt = include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../prompts/runtime/interactive_init.txt"
-            ))
-            .trim_end()
-            .to_owned();
-            let entry = enqueue(
-                db,
-                &config,
-                &mut card,
-                &project,
-                stage,
-                ExecutionTrigger::Interactive,
-                Some(&profile.id),
-                Some(init_prompt),
-            )?
-            .context("Agent was not queued")?;
+            let entry = enqueue_interactive(db, &config, &mut card, &project, &profile.id)?;
             Ok(json!({"terminal_id":entry.id,"reused":false,"terminal":entry}))
         })
     }

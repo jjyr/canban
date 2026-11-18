@@ -193,11 +193,9 @@ impl MarkdownInput {
             api.blur();
         }
     }
-    pub fn source(self, value: Signal<String>, name: &str, placeholder: &str) -> EditorElement {
+    fn base_editor(self, name: &str, placeholder: &str) -> EditorElement {
         nsh_base::editor()
             .language("canban-markdown")
-            .value(move || Some(value.get().into()))
-            .on_change(move |v: &SharedString| value.set(v.to_string()))
             .on_focus(move |_: &()| {
                 self.active.set(true);
                 self.focused.set(true);
@@ -208,21 +206,121 @@ impl MarkdownInput {
             .placeholder(placeholder.to_owned())
             .line_numbers(false)
             .folding(false)
-            .soft_wrap(true)
             .active_line(false)
             .indent_guides(false)
             .auto_close(false)
             .auto_indent(false)
             .highlighting(false)
-            .read_only(move || self.preview.get())
             .font_family(MONO_FONT)
             .font_size(px(13.))
             .line_height(px(20.))
-            .text_color(TEXT)
             .px_2()
-            .py_1()
             .component_ref(&self.editor)
+    }
+    pub fn source(self, value: Signal<String>, name: &str, placeholder: &str) -> EditorElement {
+        self.base_editor(name, placeholder)
+            .value(move || Some(value.get().into()))
+            .on_change(move |v: &SharedString| value.set(v.to_string()))
+            .soft_wrap(true)
+            .read_only(move || self.preview.get())
+            .text_color(TEXT)
+            .py_1()
             .size_full()
+    }
+    /// Single-line rope editor source supporting caret completion (`@` / `#`)
+    /// without newlines or Tab indentation.
+    pub fn line_source(
+        self,
+        value: Signal<String>,
+        name: &str,
+        placeholder: &str,
+        disabled: impl Fn() -> bool + 'static,
+    ) -> EditorElement {
+        let disabled = std::rc::Rc::new(disabled);
+        let disabled_ro = disabled.clone();
+        let disabled_color = disabled.clone();
+        let disabled_keys = disabled;
+        effect(move || {
+            let _ = self.focus_epoch.get();
+            if !self.active.get() || self.held.get() || disabled_keys() {
+                return;
+            }
+            set_timeout(std::time::Duration::ZERO, move || {
+                for key in ["enter", "shift+enter", "mod+shift+enter", "tab"] {
+                    on_key_with(
+                        key,
+                        KeyOptions {
+                            when: nsh_core::keymap::When::Always,
+                            ..Default::default()
+                        },
+                        |_| {},
+                    );
+                }
+            });
+        });
+        self.base_editor(name, placeholder)
+            .value(move || Some(value.get().into()))
+            .on_change(move |v: &SharedString| {
+                let raw = v.as_str();
+                let clean = if raw.contains(['\r', '\n']) {
+                    raw.replace("\r\n", " ").replace(['\r', '\n'], " ")
+                } else {
+                    raw.to_owned()
+                };
+                if value.get_untracked() != clean {
+                    value.set(clean);
+                }
+            })
+            .soft_wrap(false)
+            .min_rows(Some(1))
+            .max_rows(Some(1))
+            .scroll_beyond_last_line(false)
+            .read_only(move || disabled_ro())
+            .text_color(move || {
+                if disabled_color() {
+                    MUTED.resolve()
+                } else {
+                    TEXT.resolve()
+                }
+            })
+            .py_1p5()
+            .w_full()
+    }
+    /// Styled single-line container matching `bound_field` chrome for a `line_source`.
+    pub fn render_line(
+        self,
+        source: impl IntoElement,
+        disabled: impl Fn() -> bool + 'static,
+    ) -> View {
+        let disabled = std::rc::Rc::new(disabled);
+        let disabled_bg = disabled.clone();
+        let disabled_touch = disabled;
+        let root = element_ref();
+        root.on_focus_in(move || self.active.set(true));
+        root.on_focus_out(move || {
+            if !self.held.get_untracked() {
+                self.active.set(false);
+            }
+        });
+        view()
+            .element_ref(&root)
+            .on_touch(move |e: &nsh_core::TouchEvent| {
+                if e.phase == nsh_core::TouchPhase::Start
+                    && !disabled_touch()
+                    && !self.focused.get_untracked()
+                {
+                    self.focus();
+                }
+            })
+            .min_w(px(0.))
+            .min_h(px(CONTROL_HEIGHT))
+            .rounded(px(RADIUS))
+            .border_1()
+            .border_color(move || if self.focused.get() { ACCENT } else { BORDER })
+            .bg(move || if disabled_bg() { INSET } else { SURFACE })
+            .overflow_hidden()
+            .justify_center()
+            .child(source)
     }
     pub fn render(
         self,
