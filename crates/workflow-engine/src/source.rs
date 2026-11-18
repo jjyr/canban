@@ -12,6 +12,8 @@ pub struct Document {
     pub schema: u32,
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "is_default_workflow_scope")]
+    pub scope: WorkflowScope,
     #[serde(default = "yes")]
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -572,6 +574,7 @@ impl Document {
         Ok(WorkflowDefinition {
             id: self.id.clone(),
             name: self.name.clone(),
+            scope: self.scope,
             columns: self.columns.clone(),
             env: self.env.clone(),
             entries,
@@ -794,6 +797,7 @@ pub fn default_document(workflow_id: impl Into<String>, workspace: WorkspaceSett
         schema: crate::migrations::CURRENT,
         id: workflow_id.into(),
         name: "Development".into(),
+        scope: WorkflowScope::Project,
         enabled: true,
         columns: vec![
             WorkflowColumn {
@@ -2566,6 +2570,22 @@ pub fn validate_schedules(
     flow: &WorkflowDefinition,
     effective_columns: &[String],
 ) -> Result<()> {
+    if doc.scope.is_global() {
+        ensure!(
+            doc.columns.is_empty(),
+            "Global workflows cannot declare Board `columns`"
+        );
+        for (rule_id, rule) in &doc.on {
+            ensure!(
+                rule.is_schedule() || rule.event == "manual",
+                "Global workflow rule `{rule_id}` only supports `schedule` or `manual` triggers"
+            );
+            ensure!(
+                rule.card.is_none(),
+                "Global scheduled rule `{rule_id}` cannot configure `card:`; choose a Project to create Board Cards"
+            );
+        }
+    }
     for (rule_id, rule) in &doc.on {
         if !rule.is_schedule() {
             ensure!(
@@ -2694,24 +2714,191 @@ pub fn schedule_agent_profile(def: &WorkflowDefinition, rule_id: &str) -> Option
     None
 }
 
-/// Builds a fresh standalone scheduled workflow YAML document.
-pub fn default_scheduled_document(
-    workflow_id: impl Into<String>,
-    name: impl Into<String>,
-    profile: Option<&str>,
-) -> Document {
-    let mut with = BTreeMap::new();
-    if let Some(p) = profile.map(str::trim).filter(|s| !s.is_empty()) {
-        with.insert("profile".into(), json!(p));
+/// Returns `true` when `rule_id` in `def` starts directly at a `WorkflowStep::Script` step.
+pub fn schedule_starts_with_script(def: &WorkflowDefinition, rule_id: &str) -> bool {
+    def.entries
+        .get(rule_id)
+        .and_then(|sid| def.steps.get(sid))
+        .is_some_and(|s| matches!(s, WorkflowStep::Script { .. }))
+}
+
+/// Execution mode template for creating a new scheduled workflow document.
+#[derive(Clone, Debug)]
+pub enum ScheduledWorkflowMode {
+    ScriptOnly {
+        run: String,
+        shell: Option<String>,
+        working_directory: Option<String>,
+        timeout_minutes: Option<u32>,
+    },
+    ScriptWithAgentFallback {
+        run: String,
+        shell: Option<String>,
+        working_directory: Option<String>,
+        timeout_minutes: Option<u32>,
+        profile: Option<String>,
+        instruction: String,
+    },
+    AgentOnly {
+        profile: Option<String>,
+        instruction: String,
+    },
+    CreateCard {
+        column: Option<String>,
+        title: Option<String>,
+        body: Option<String>,
+        profile: Option<String>,
+        instruction: String,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct ScheduledWorkflowSpec {
+    pub workflow_id: String,
+    pub name: String,
+    pub scope: WorkflowScope,
+    pub cron: String,
+    pub timezone: Option<String>,
+    pub overlap: ScheduleOverlap,
+    pub enabled: bool,
+    pub mode: ScheduledWorkflowMode,
+}
+
+/// Builds a scheduled workflow YAML [`Document`] supporting all 4 execution modes and Global/Project scope.
+pub fn build_scheduled_workflow_document(spec: ScheduledWorkflowSpec) -> Document {
+    let mut steps = Vec::new();
+    let mut card_cfg = None;
+    let start_at;
+
+    match spec.mode {
+        ScheduledWorkflowMode::ScriptOnly {
+            run,
+            shell,
+            working_directory,
+            timeout_minutes,
+        } => {
+            start_at = "run_script".to_owned();
+            steps.push(Step {
+                id: "run_script".into(),
+                name: Some("Run Script".into()),
+                uses: "script".into(),
+                run: Some(run),
+                shell: shell.filter(|s| !s.trim().is_empty()),
+                working_directory: working_directory.filter(|s| !s.trim().is_empty()),
+                timeout_minutes,
+                next: Some("__end".into()),
+                ..Default::default()
+            });
+        }
+        ScheduledWorkflowMode::ScriptWithAgentFallback {
+            run,
+            shell,
+            working_directory,
+            timeout_minutes,
+            profile,
+            instruction,
+        } => {
+            start_at = "run_script".to_owned();
+            steps.push(Step {
+                id: "run_script".into(),
+                name: Some("Check Script".into()),
+                uses: "script".into(),
+                run: Some(run),
+                shell: shell.filter(|s| !s.trim().is_empty()),
+                working_directory: working_directory.filter(|s| !s.trim().is_empty()),
+                timeout_minutes,
+                next: Some("__end".into()),
+                on_failure: Some("ask_agent".into()),
+                ..Default::default()
+            });
+            let mut with = BTreeMap::new();
+            if let Some(p) = profile.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                with.insert("profile".into(), json!(p));
+            }
+            let inst = if instruction.trim().is_empty() {
+                "The scheduled script failed or flagged items needing review. Inspect the preceding script output and environment, resolve safe items, or report `--state blocked` to ask the user in this terminal.".to_owned()
+            } else {
+                instruction
+            };
+            with.insert("instruction".into(), json!(inst));
+            steps.push(Step {
+                id: "ask_agent".into(),
+                name: Some("Inspect & Ask User".into()),
+                uses: "agent".into(),
+                with,
+                next: Some("__end".into()),
+                ..Default::default()
+            });
+        }
+        ScheduledWorkflowMode::AgentOnly {
+            profile,
+            instruction,
+        } => {
+            start_at = "agent:run".to_owned();
+            let mut with = BTreeMap::new();
+            if let Some(p) = profile.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                with.insert("profile".into(), json!(p));
+            }
+            let inst = if instruction.trim().is_empty() {
+                "Inspect the workspace health, run relevant checks, and summarize findings in your report.".to_owned()
+            } else {
+                instruction
+            };
+            with.insert("instruction".into(), json!(inst));
+            steps.push(Step {
+                id: "agent:run".into(),
+                name: Some("Scheduled Agent".into()),
+                uses: "agent".into(),
+                with,
+                next: Some("__end".into()),
+                ..Default::default()
+            });
+        }
+        ScheduledWorkflowMode::CreateCard {
+            column,
+            title,
+            body,
+            profile,
+            instruction,
+        } => {
+            start_at = "agent:run".to_owned();
+            card_cfg = Some(ScheduleCardConfig {
+                column: column.filter(|s| !s.trim().is_empty()),
+                title: title.filter(|s| !s.trim().is_empty()),
+                body: body.filter(|s| !s.trim().is_empty()),
+            });
+            let mut with = BTreeMap::new();
+            if let Some(p) = profile.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                with.insert("profile".into(), json!(p));
+            }
+            let inst = if instruction.trim().is_empty() {
+                "Evaluate and complete this scheduled Card task, then report your outcome."
+                    .to_owned()
+            } else {
+                instruction
+            };
+            with.insert("instruction".into(), json!(inst));
+            steps.push(Step {
+                id: "agent:run".into(),
+                name: Some("Scheduled Card Agent".into()),
+                uses: "agent".into(),
+                with,
+                next: Some("__end".into()),
+                ..Default::default()
+            });
+        }
     }
-    with.insert(
-        "instruction".into(),
-        json!("Inspect the repository health, run relevant checks, and summarize findings in your report."),
-    );
+    steps.push(Step {
+        id: "__end".into(),
+        uses: "complete".into(),
+        ..Default::default()
+    });
+
     Document {
         schema: crate::migrations::CURRENT,
-        id: workflow_id.into(),
-        name: name.into(),
+        id: spec.workflow_id,
+        name: spec.name,
+        scope: spec.scope,
         enabled: true,
         columns: Vec::new(),
         env: BTreeMap::new(),
@@ -2719,30 +2906,40 @@ pub fn default_scheduled_document(
             "schedule".into(),
             WorkflowRule {
                 event: "schedule".into(),
-                start_at: "agent:run".into(),
-                cron: Some("0 9 * * 1-5".into()),
-                enabled: true,
+                start_at,
+                cron: Some(spec.cron),
+                timezone: spec.timezone.filter(|s| !s.trim().is_empty()),
+                overlap: spec.overlap,
+                card: card_cfg,
+                enabled: spec.enabled,
                 ..Default::default()
             },
         )]),
-        steps: vec![
-            Step {
-                id: "agent:run".into(),
-                name: Some("Scheduled Agent".into()),
-                uses: "agent".into(),
-                with,
-                next: Some("__end".into()),
-                ..Default::default()
-            },
-            Step {
-                id: "__end".into(),
-                uses: "complete".into(),
-                ..Default::default()
-            },
-        ],
+        steps,
         workspace: WorkspaceSettings::default(),
         max_steps: 100,
     }
+}
+
+/// Builds a fresh standalone scheduled workflow YAML document.
+pub fn default_scheduled_document(
+    workflow_id: impl Into<String>,
+    name: impl Into<String>,
+    profile: Option<&str>,
+) -> Document {
+    build_scheduled_workflow_document(ScheduledWorkflowSpec {
+        workflow_id: workflow_id.into(),
+        name: name.into(),
+        scope: WorkflowScope::Project,
+        cron: "0 9 * * 1-5".into(),
+        timezone: None,
+        overlap: ScheduleOverlap::Skip,
+        enabled: true,
+        mode: ScheduledWorkflowMode::AgentOnly {
+            profile: profile.map(str::to_owned),
+            instruction: "Inspect the repository health, run relevant checks, and summarize findings in your report.".into(),
+        },
+    })
 }
 
 #[cfg(test)]

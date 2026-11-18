@@ -30,6 +30,10 @@ impl Ops {
         );
         Ok(String::from_utf8(out.stdout)?.trim_end_matches('\n').into())
     }
+    pub fn branch_merged(&self, dir: &Path, branch: &str, base: &str) -> bool {
+        self.git(dir, &["merge-base", "--is-ancestor", branch, base])
+            .is_ok_and(|out| out.status.success())
+    }
 }
 mod names;
 

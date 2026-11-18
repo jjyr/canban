@@ -79,6 +79,13 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
         move |_| ui.navigate("github"),
     ))
     .child(icon_action(
+        Icon::Clock,
+        "Schedules".into(),
+        move || ui.page.get() == "schedules",
+        move || crate::schedules::attention_count(ui),
+        move |_| crate::schedules::open(ui, None, None),
+    ))
+    .child(icon_action(
         Icon::Insights,
         "Insights".into(),
         move || ui.page.get() == "insights",

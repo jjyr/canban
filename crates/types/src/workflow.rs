@@ -4,6 +4,39 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+/// Reserved `project_id` used for host-level Global workflows and schedules.
+pub const GLOBAL_PROJECT_ID: &str = "__global";
+
+/// Returns `true` when `project_id` identifies host-level Global scope (`"__global"`).
+pub fn is_global_project_id(project_id: &str) -> bool {
+    project_id.trim() == GLOBAL_PROJECT_ID
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowScope {
+    #[default]
+    Project,
+    Global,
+}
+
+impl WorkflowScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::Global => "global",
+        }
+    }
+
+    pub fn is_global(self) -> bool {
+        self == Self::Global
+    }
+}
+
+pub fn is_default_workflow_scope(v: &WorkflowScope) -> bool {
+    *v == WorkflowScope::Project
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowColumn {
@@ -16,6 +49,8 @@ pub struct WorkflowColumn {
 pub struct WorkflowDefinition {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "is_default_workflow_scope")]
+    pub scope: WorkflowScope,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<WorkflowColumn>,
     pub entries: BTreeMap<String, String>,
@@ -557,6 +592,8 @@ pub struct ScheduleState {
     #[serde(default)]
     pub overlap: ScheduleOverlap,
     pub creates_card: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub starts_with_script: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_column: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -573,6 +610,26 @@ pub struct ScheduleState {
     #[serde(default)]
     pub queued_triggers: u32,
     pub updated_at: u64,
+}
+
+/// Per-step execution trace entry recorded inside a Cardless [`ScheduledRun`].
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScheduledStepRecord {
+    pub step_id: String,
+    /// `"script"` | `"agent"` | `"notify"` | `"complete"`.
+    pub kind: String,
+    /// `"running"` | `"completed"` | `"failed"` | `"blocked"` | `"skipped"`.
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 /// Persistent execution record for a scheduled workflow trigger (Card-creating or Cardless Terminal Agent).
@@ -618,6 +675,8 @@ pub struct ScheduledRun {
     pub output_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<ScheduledStepRecord>,
     pub scheduled_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<u64>,

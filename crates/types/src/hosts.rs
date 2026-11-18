@@ -381,6 +381,12 @@ impl Snapshot {
         for mb in &self.merge_batches {
             self.entity_hosts.insert(mb.id.clone(), h.clone());
         }
+        for st in &self.schedule_states {
+            self.entity_hosts.insert(st.id.clone(), h.clone());
+        }
+        for sr in &self.scheduled_runs {
+            self.entity_hosts.insert(sr.id.clone(), h.clone());
+        }
     }
 
     pub fn merge_remote_snapshot(&mut self, mut remote: Snapshot, summary: HostSummary) {
@@ -430,6 +436,8 @@ impl Snapshot {
         self.configuration_sessions
             .extend(remote.configuration_sessions);
         self.merge_batches.extend(remote.merge_batches);
+        self.schedule_states.extend(remote.schedule_states);
+        self.scheduled_runs.extend(remote.scheduled_runs);
         self.card_reads.extend(remote.card_reads);
         self.github_issues.extend(remote.github_issues);
         self.events.extend(remote.events);

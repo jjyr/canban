@@ -329,8 +329,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                             .find(|r| r.id == sel)
                             .map(|r| (r.project_id.clone(), r.schedule_id.clone()))
                     }) {
-                        ui.project.set(project);
-                        crate::workflows::open_schedules(ui, Some(sid));
+                        crate::schedules::open(ui, Some(project), Some(sid));
                     }
                 })
             },

@@ -2,6 +2,26 @@
 //! admission and Terminal transport, without manufacturing a business Card.
 use super::*;
 impl AppServer {
+    pub(super) fn global_workflow_prompt(&self) -> String {
+        let cli_str = self.cli.display().to_string();
+        let home_str = self.home.display().to_string();
+        let endpoint_str = self.endpoint().display().to_string();
+        canban_context::render_template(
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../prompts/runtime/workflow_assistant.txt"
+            )),
+            &[
+                ("project_name", "Global (Host)"),
+                ("project_id", GLOBAL_PROJECT_ID),
+                ("project_directory", &home_str),
+                ("cli", &cli_str),
+                ("home", &home_str),
+                ("endpoint", &endpoint_str),
+            ],
+        )
+    }
+
     pub(super) fn workflow_prompt(&self, project: &Project) -> String {
         let cli_str = self.cli.display().to_string();
         let home_str = self.home.display().to_string();
@@ -32,11 +52,22 @@ impl AppServer {
                 session.provider_session_id=Some(id.into());db.save(&session)?;Ok(json!({"bound":true}))
             }),
             "configuration.open" => self.mutate(method,&p,|db| {
-                let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;
-                let project:Project=db.get(&pid)?;
+                let scope_id = if p["scope"]
+                    .as_str()
+                    .is_some_and(|s| s.trim().eq_ignore_ascii_case("global"))
+                {
+                    GLOBAL_PROJECT_ID.to_owned()
+                } else {
+                    super::resolve_workflow_scope(db, strp(&p, "project_id")?)?
+                };
+                let project_opt = if is_global_project_id(&scope_id) {
+                    None
+                } else {
+                    Some(db.get::<Project>(&scope_id)?)
+                };
                 let explicit_profile=p["profile_id"].as_str().map(str::trim).filter(|s|!s.is_empty());
-                let profile=canban_scheduler::select_in_project(&self.config(),Some(&project),explicit_profile)?;
-                let key=format!("configuration:{}:workflows:{}",project.id,profile.id);
+                let profile=canban_scheduler::select_in_project(&self.config(),project_opt.as_ref(),explicit_profile)?;
+                let key=format!("configuration:{scope_id}:workflows:{}",profile.id);
                 let old=db.get::<ConfigurationSession>(&key).ok();
                 let mut fresh=p["fresh"]==true || old.is_none();
                 if let Some(old)=&old {
@@ -51,10 +82,19 @@ impl AppServer {
                     ensure!(old.provider_session_id.is_some() || fresh,"Exact provider history unavailable; explicitly start a new conversation");
                     ensure!(fresh || !profile.resume_command().is_empty(),"Profile does not support Resume");
                 }
-                let prompt=self.workflow_prompt(&project);
+                let prompt=match project_opt.as_ref() {
+                    Some(project) => self.workflow_prompt(project),
+                    None => self.global_workflow_prompt(),
+                };
                 if p["prompt"].is_string() {ensure!(p["prompt"]==prompt,"Prompt context changed; reopen Edit with agent to review it");}
-                let session=ConfigurationSession {id:key.clone(),project_id:project.id,profile_id:profile.id,provider_session_id:if fresh {None}else{old.as_ref().and_then(|s|s.provider_session_id.clone())},generation:old.as_ref().map_or(1,|s|s.generation+1),state:"queued".into(),prompt,error:None};
-                let mut terminal=db.get::<TerminalEntry>(&key).unwrap_or(TerminalEntry {id:key.clone(),conversation_id:None,number:db.counter("terminal-number")?,name:Some(format!("Workflows · {}",session.profile_id)),origin_project_id:Some(session.project_id.clone()),origin_card_id:None,agent_engine:None,runtime:None,agent:None,created_at:now()});
+                let session=ConfigurationSession {id:key.clone(),project_id:scope_id.clone(),profile_id:profile.id,provider_session_id:if fresh {None}else{old.as_ref().and_then(|s|s.provider_session_id.clone())},generation:old.as_ref().map_or(1,|s|s.generation+1),state:"queued".into(),prompt,error:None};
+                let term_name = if is_global_project_id(&scope_id) {
+                    format!("Global Workflows · {}", session.profile_id)
+                } else {
+                    format!("Workflows · {}", session.profile_id)
+                };
+                let origin_project_id = (!is_global_project_id(&scope_id)).then_some(scope_id);
+                let mut terminal=db.get::<TerminalEntry>(&key).unwrap_or(TerminalEntry {id:key.clone(),conversation_id:None,number:db.counter("terminal-number")?,name:Some(term_name),origin_project_id,origin_card_id:None,agent_engine:None,runtime:None,agent:None,created_at:now()});
                 terminal.created_at=now();
                 terminal.runtime=None;db.save(&terminal)?;db.save(&session)?;
                 Ok(json!({"terminal_id":key,"reused":false,"state":"queued"}))
@@ -175,13 +215,18 @@ impl AppServer {
                 } else {
                     "Continue the existing Project Workflows configuration conversation. Re-read current sources and active revisions before any modification. Wait for the user's next instruction.".into()
                 };
-                let cwd = self.home.join("projects").join(&session.project_id);
+                let cwd = if is_global_project_id(&session.project_id) {
+                    self.home.join("global")
+                } else {
+                    self.home.join("projects").join(&session.project_id)
+                };
                 std::fs::create_dir_all(&cwd)?;
                 let cwd_str = cwd.to_string_lossy().into_owned();
+                let home_str = self.home.to_string_lossy().into_owned();
                 let project_dir = project
                     .as_ref()
                     .map(|p| p.directory.as_str())
-                    .unwrap_or(cwd_str.as_str());
+                    .unwrap_or(home_str.as_str());
                 let mut argv = canban_profiles::command(
                     &profile,
                     session.provider_session_id.as_deref(),

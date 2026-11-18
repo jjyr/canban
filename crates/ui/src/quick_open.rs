@@ -220,17 +220,28 @@ fn contextual_commands(ui: Ui, raw_query: &str) -> Vec<(usize, SearchChoice)> {
         });
     }
     for st in &snapshot.schedule_states {
-        let project_name = snapshot
-            .projects
-            .iter()
-            .find(|p| p.id == st.project_id)
-            .map(|p| p.name.as_str())
-            .unwrap_or("Project");
+        let project_name = if canban_types::is_global_project_id(&st.project_id) {
+            "Global · Host"
+        } else {
+            snapshot
+                .projects
+                .iter()
+                .find(|p| p.id == st.project_id)
+                .map(|p| p.name.as_str())
+                .unwrap_or("Project")
+        };
         let name = if st.rule_id == "schedule" {
             st.workflow_name.clone()
         } else {
             format!("{} / {}", st.workflow_name, st.rule_id)
         };
+        dynamic_cmds.push(DynamicCommand {
+            id: format!("cmd:schedule-open:{}", st.id),
+            title: format!("Open Schedule: {name}"),
+            detail: format!("{project_name} · {}", st.cron),
+            icon: Icon::Clock,
+            keywords: format!("schedule cron open history {} {}", name, st.filename),
+        });
         dynamic_cmds.push(DynamicCommand {
             id: format!("cmd:schedule-run:{}", st.id),
             title: format!("Run Schedule Now: {name}"),
@@ -420,6 +431,7 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                             "Card" => Icon::Board,
                             "Terminal" => Icon::Terminal,
                             "Worktree" => Icon::Branch,
+                            "Schedule" => Icon::Clock,
                             _ => Icon::Agent,
                         },
                     })
@@ -461,7 +473,7 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                     if ui.project_picker.get() {
                         "Search projects…".into()
                     } else {
-                        "Search projects, cards, #tags, worktrees, agents… or type > for commands"
+                        "Search projects, cards, schedules, #tags, worktrees, agents… or type > for commands"
                             .into()
                     }
                 },
@@ -513,6 +525,15 @@ pub fn activate(ui: Ui, row: Candidate) {
                 ui,
                 &crate::terminals::worktrees::WorktreeScope::ManagedWorktree(wt_id),
             );
+        }
+        Target::Schedule(sid) => {
+            let scope = ui.snapshot.with_untracked(|s| {
+                s.schedule_states
+                    .iter()
+                    .find(|st| st.id == sid)
+                    .map(|st| st.project_id.clone())
+            });
+            crate::schedules::open(ui, scope, Some(sid));
         }
     }
 }

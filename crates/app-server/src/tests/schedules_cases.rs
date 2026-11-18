@@ -386,3 +386,459 @@ steps:
     assert!(!after.terminal_is_live(entry));
     assert_eq!(canban_scheduler::active_count(&after), 0);
 }
+
+#[test]
+fn global_schedule_create_toggle_delete_and_validation() {
+    let (_dir, app, _p, _c) = setup();
+
+    // Global schedules cannot create Board Cards.
+    let card_err = app
+        .call(
+            "schedule.create",
+            json!({
+                "scope": "global",
+                "name": "Invalid Global Card",
+                "cron": "0 3 * * *",
+                "mode": "card",
+                "card_column": "develop",
+                "request_key": "global-card-err"
+            }),
+        )
+        .unwrap_err();
+    assert!(
+        card_err
+            .to_string()
+            .contains("Global schedules cannot create Board Cards"),
+        "unexpected error: {card_err:#}"
+    );
+
+    // Create a Global script -> agent escalation schedule.
+    let created = app
+        .call(
+            "schedule.create",
+            json!({
+                "scope": "global",
+                "name": "Worktree GC",
+                "cron": "0 3 * * *",
+                "timezone": "Local",
+                "overlap": "skip",
+                "mode": "script_agent",
+                "script": "echo clean",
+                "profile_id": "developer",
+                "instruction": "Ask the user when dirty worktrees remain.",
+                "request_key": "global-create-1"
+            }),
+        )
+        .unwrap();
+    let sched: ScheduleState = serde_json::from_value(created["schedule"].clone()).unwrap();
+    assert_eq!(sched.project_id, canban_types::GLOBAL_PROJECT_ID);
+    assert!(sched.starts_with_script);
+    assert!(sched.enabled);
+
+    // Global list filter returns only global schedules.
+    let global_list = app
+        .call("schedule.list", json!({"scope": "global"}))
+        .unwrap();
+    assert_eq!(global_list["schedules"].as_array().unwrap().len(), 1);
+
+    // Toggle off and back on.
+    let toggled_off = app
+        .call(
+            "schedule.toggle",
+            json!({
+                "schedule_id": sched.id,
+                "enabled": false,
+                "request_key": "global-toggle-off"
+            }),
+        )
+        .unwrap();
+    assert_eq!(toggled_off["enabled"], json!(false));
+
+    // Direct workflow authoring under `__global` rejects columns.
+    let src = app
+        .call(
+            "workflow.sources",
+            json!({"project_id": canban_types::GLOBAL_PROJECT_ID}),
+        )
+        .unwrap();
+    let col_err = app
+        .call(
+            "workflow.apply",
+            json!({
+                "project_id": canban_types::GLOBAL_PROJECT_ID,
+                "revision": src["revision"],
+                "sources": [{
+                    "filename": "bad.yaml",
+                    "source": "schema: 9\nid: bad\nname: Bad Global\nscope: global\ncolumns:\n  - id: backlog\n    name: Backlog\non:\n  schedule:\n    - cron: '0 3 * * *'\nsteps:\n  - id: done\n    uses: complete\n"
+                }]
+            }),
+        )
+        .unwrap_err();
+    assert!(
+        format!("{col_err:#}").contains("Global workflows cannot declare Board `columns`"),
+        "unexpected error: {col_err:#}"
+    );
+
+    // Delete drops the standalone global schedule file cleanly.
+    let deleted = app
+        .call(
+            "schedule.delete",
+            json!({
+                "schedule_id": sched.id,
+                "request_key": "global-delete-1"
+            }),
+        )
+        .unwrap();
+    assert_eq!(deleted["deleted"], json!(true));
+    let after = app
+        .call("schedule.list", json!({"scope": "global"}))
+        .unwrap();
+    assert!(after["schedules"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn script_lazy_admission_zero_pty_on_success_and_escalates_on_failure() {
+    let (_dir, app, _p, _c) = setup();
+
+    // 1. Clean script run finishes without creating any TerminalEntry or consuming agent slots.
+    let ok_sched = app
+        .call(
+            "schedule.create",
+            json!({
+                "scope": "global",
+                "name": "Clean Check",
+                "cron": "0 4 * * *",
+                "mode": "script",
+                "script": "printf 'all clean\\n'",
+                "request_key": "lazy-ok-create"
+            }),
+        )
+        .unwrap();
+    let ok_id = ok_sched["schedule"]["id"].as_str().unwrap().to_owned();
+    let ok_run: ScheduledRun = serde_json::from_value(
+        app.call(
+            "schedule.trigger",
+            json!({"schedule_id": ok_id, "request_key": "lazy-ok-trigger"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(ok_run.terminal_id.is_none());
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let finished_ok = loop {
+        app.pump_schedules().unwrap();
+        let snap = app.snapshot().unwrap();
+        let cur = snap
+            .scheduled_runs
+            .iter()
+            .find(|r| r.id == ok_run.id)
+            .unwrap()
+            .clone();
+        if matches!(
+            cur.state.as_str(),
+            "completed" | "failed" | "skipped" | "canceled"
+        ) {
+            break (snap, cur);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Timed out waiting for script-only schedule run: {cur:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    };
+    assert_eq!(finished_ok.1.state, "completed");
+    assert!(finished_ok.1.terminal_id.is_none());
+    assert!(
+        finished_ok.0.terminals.iter().all(|t| t.id != ok_run.id),
+        "Script-only run must not allocate a TerminalEntry"
+    );
+    assert_eq!(finished_ok.1.steps.len(), 1);
+    assert_eq!(finished_ok.1.steps[0].kind, "script");
+    assert_eq!(finished_ok.1.steps[0].state, "completed");
+
+    // 2. Failing script with `on_failure: ask_agent` lazily allocates TerminalEntry during failure transition.
+    let fail_sched = app
+        .call(
+            "schedule.create",
+            json!({
+                "scope": "global",
+                "name": "Dirty Escalation",
+                "cron": "0 5 * * *",
+                "mode": "script_agent",
+                "script": "echo 'dirty worktree found' >&2; exit 2",
+                "profile_id": "developer",
+                "instruction": "Inspect dirty paths and decide.",
+                "request_key": "lazy-fail-create"
+            }),
+        )
+        .unwrap();
+    let fail_id = fail_sched["schedule"]["id"].as_str().unwrap().to_owned();
+    let fail_run: ScheduledRun = serde_json::from_value(
+        app.call(
+            "schedule.trigger",
+            json!({"schedule_id": fail_id, "request_key": "lazy-fail-trigger"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(fail_run.terminal_id.is_none());
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let escalated = loop {
+        app.pump_schedules().unwrap();
+        let snap = app.snapshot().unwrap();
+        let cur = snap
+            .scheduled_runs
+            .iter()
+            .find(|r| r.id == fail_run.id)
+            .unwrap()
+            .clone();
+        if cur.terminal_id.is_some() {
+            break (snap, cur);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Timed out waiting for on_failure lazy TerminalEntry allocation: {cur:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    };
+    assert!(
+        escalated.0.terminals.iter().any(|t| t.id == fail_run.id
+            && t.origin_project_id
+                .as_deref()
+                .is_some_and(canban_types::is_global_project_id)),
+        "Escalation to agent step must allocate a Global TerminalEntry"
+    );
+    assert!(
+        escalated
+            .1
+            .steps
+            .iter()
+            .any(|s| s.kind == "script" && s.state == "failed" && s.exit_code == Some(2))
+    );
+}
+
+#[test]
+fn cardless_blocked_report_keeps_pty_alive_until_completed() {
+    let (_dir, app, p, _c) = setup();
+    let created = app
+        .call(
+            "schedule.create",
+            json!({
+                "project_id": p.id,
+                "name": "Ask User Task",
+                "cron": "0 6 * * *",
+                "mode": "agent",
+                "profile_id": "developer",
+                "instruction": "Ask the user when unsure.",
+                "request_key": "blocked-pty-create"
+            }),
+        )
+        .unwrap();
+    let sid = created["schedule"]["id"].as_str().unwrap().to_owned();
+    let run: ScheduledRun = serde_json::from_value(
+        app.call(
+            "schedule.trigger",
+            json!({"schedule_id": sid, "request_key": "blocked-pty-trigger"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let now_ms = canban_types::now();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut cur: ScheduledRun = db.get(&run.id)?;
+            cur.state = "running".into();
+            cur.started_at = Some(now_ms);
+            db.save(&cur)?;
+            let mut entry: TerminalEntry = db.get(&run.id)?;
+            entry.runtime = Some(TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: Some("offline-core".into()),
+                core_id: Some("offline-core".into()),
+                terminal: Some("pty-blocked-1".into()),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: Some("idle".into()),
+                agent_turn: None,
+                observed_agent: None,
+                waiting: None,
+            });
+            db.save(&entry)
+        })
+        .unwrap();
+
+    // Reporting `blocked` preserves the live PTY across pump_schedules().
+    app.call(
+        "execution.report",
+        json!({
+            "schedule_run_id": run.id,
+            "request_key": "blocked-report-1",
+            "state": "blocked",
+            "message": "Found dirty worktree with untracked patch; keep or reset?"
+        }),
+    )
+    .unwrap();
+    app.pump_schedules().unwrap();
+    let mid = app.snapshot().unwrap();
+    let mid_run = mid.scheduled_runs.iter().find(|r| r.id == run.id).unwrap();
+    let mid_term = mid.terminals.iter().find(|t| t.id == run.id).unwrap();
+    assert_eq!(mid_run.state, "blocked");
+    assert_eq!(mid_term.runtime.as_ref().unwrap().state, "running");
+    assert!(mid.terminal_is_live(mid_term));
+
+    // Reporting `completed` after user answers allows PTY reclamation.
+    app.call(
+        "execution.report",
+        json!({
+            "schedule_run_id": run.id,
+            "request_key": "blocked-report-2",
+            "state": "completed",
+            "message": "User chose to keep; done."
+        }),
+    )
+    .unwrap();
+    app.pump_schedules().unwrap();
+    let done = app.snapshot().unwrap();
+    let done_run = done.scheduled_runs.iter().find(|r| r.id == run.id).unwrap();
+    let done_term = done.terminals.iter().find(|t| t.id == run.id).unwrap();
+    assert_eq!(done_run.state, "completed");
+    assert_eq!(done_term.runtime.as_ref().unwrap().state, "finished");
+    assert!(!done.terminal_is_live(done_term));
+}
+
+#[test]
+fn worktree_gc_removes_clean_old_merged_and_preserves_dirty() {
+    let (dir, app, _p, _c) = setup();
+    let repo_dir = dir.path().join("gc_repo");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-b", "main"]);
+    git(&["config", "user.name", "Canban Test"]);
+    git(&["config", "user.email", "test@canban.local"]);
+    std::fs::write(repo_dir.join("README.md"), "init\n").unwrap();
+    git(&["add", "README.md"]);
+    git(&["commit", "-m", "init"]);
+
+    let wt_root = dir.path().join("home").join("worktrees").join("gc");
+    std::fs::create_dir_all(&wt_root).unwrap();
+    let clean_wt = wt_root.join("wt_clean");
+    let dirty_wt = wt_root.join("wt_dirty");
+    git(&[
+        "worktree",
+        "add",
+        "-b",
+        "feat/clean",
+        clean_wt.to_str().unwrap(),
+        "main",
+    ]);
+    git(&[
+        "worktree",
+        "add",
+        "-b",
+        "feat/dirty",
+        dirty_wt.to_str().unwrap(),
+        "main",
+    ]);
+    std::fs::write(dirty_wt.join("UNCOMMITTED.txt"), "wip changes\n").unwrap();
+
+    let proj: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "GC Repo", "directory": repo_dir}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let old_merged_at = canban_types::now().saturating_sub(10 * 24 * 60 * 60 * 1_000);
+
+    let mut clean_card: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"view": "full", "project_id": proj.id, "title": "Clean merged"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut dirty_card: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"view": "full", "project_id": proj.id, "title": "Dirty merged"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            clean_card.worktree = Some(clean_wt.to_string_lossy().into_owned());
+            clean_card.branch = Some("feat/clean".into());
+            clean_card.delivery = Some(canban_types::Delivery {
+                target_branch: "main".into(),
+                commit: "0000000".into(),
+                request_key: "gc-clean".into(),
+                merged_at: old_merged_at,
+            });
+            db.save(&clean_card)?;
+
+            dirty_card.worktree = Some(dirty_wt.to_string_lossy().into_owned());
+            dirty_card.branch = Some("feat/dirty".into());
+            dirty_card.delivery = Some(canban_types::Delivery {
+                target_branch: "main".into(),
+                commit: "0000000".into(),
+                request_key: "gc-dirty".into(),
+                merged_at: old_merged_at,
+            });
+            db.save(&dirty_card)
+        })
+        .unwrap();
+
+    let gc = app
+        .call(
+            "worktree.gc",
+            json!({
+                "merged_before": "7d",
+                "project_id": proj.id
+            }),
+        )
+        .unwrap();
+    let removed = gc["removed"].as_array().unwrap();
+    let dirty = gc["dirty"].as_array().unwrap();
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0]["card_id"], json!(clean_card.id));
+    assert!(
+        !clean_wt.exists(),
+        "Clean old merged worktree must be removed"
+    );
+
+    assert_eq!(dirty.len(), 1);
+    assert_eq!(dirty[0]["card_id"], json!(dirty_card.id));
+    assert_eq!(dirty[0]["reason"], json!("uncommitted_changes"));
+    assert!(
+        dirty_wt.exists(),
+        "Dirty worktree must be preserved for agent/user"
+    );
+
+    let snap = app.snapshot().unwrap();
+    let updated_clean = snap.cards.iter().find(|c| c.id == clean_card.id).unwrap();
+    assert!(updated_clean.worktree.is_none());
+}

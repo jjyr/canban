@@ -3606,6 +3606,7 @@ mod tests {
             timezone: Some("UTC".into()),
             overlap: canban_types::ScheduleOverlap::Skip,
             creates_card: false,
+            starts_with_script: false,
             target_column: None,
             profile_id: Some("developer".into()),
             enabled: true,

@@ -95,12 +95,19 @@ pub fn mark_all_read(ui: Ui, project_scope: Option<String>) {
     );
 }
 
-fn standalone_terminal_needs_you(e: &crate::terminals::Entry) -> bool {
-    e.agent.is_none() && e.listed() && (e.needs_attention() || e.herdr_status().is_attention())
+fn standalone_terminal_needs_you(s: &canban_types::Snapshot, e: &crate::terminals::Entry) -> bool {
+    e.agent.is_none()
+        && e.listed()
+        && (e.needs_attention()
+            || e.herdr_status().is_attention()
+            || (!e.ended()
+                && s.scheduled_runs
+                    .iter()
+                    .any(|r| r.id == e.saved.id && r.state == "blocked")))
 }
 
 fn standalone_terminal_is_running(s: &canban_types::Snapshot, e: &crate::terminals::Entry) -> bool {
-    if e.agent.is_some() || !e.listed() || standalone_terminal_needs_you(e) {
+    if e.agent.is_some() || !e.listed() || standalone_terminal_needs_you(s, e) {
         return false;
     }
     let is_special_active = s
@@ -158,7 +165,7 @@ fn attention_summary(ui: Ui) -> (usize, usize, usize) {
         ui.terminal_entries.with(|entries| {
             let alerts = entries
                 .iter()
-                .filter(|e| standalone_terminal_needs_you(e))
+                .filter(|e| standalone_terminal_needs_you(s, e))
                 .count();
             let running = entries
                 .iter()
@@ -337,7 +344,8 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                     let entries = ui.terminal_entries.get();
                                     let scope = project_scope.get();
                                     let valid_scope = if !scope.is_empty()
-                                        && s.projects.iter().any(|p| p.id == scope)
+                                        && (canban_types::is_global_project_id(&scope)
+                                            || s.projects.iter().any(|p| p.id == scope))
                                     {
                                         Some(scope)
                                     } else {
@@ -409,7 +417,16 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                     ));
                                     top = top.child(right);
 
-                                    if s.projects.len() > 1 {
+                                    let has_global = entries.iter().any(|e| {
+                                        e.listed()
+                                            && e.project_id
+                                                .as_deref()
+                                                .is_some_and(canban_types::is_global_project_id)
+                                    }) || s.scheduled_runs.iter().any(|r| {
+                                        canban_types::is_global_project_id(&r.project_id)
+                                            && (r.active() || r.state == "blocked")
+                                    });
+                                    if s.projects.len() > 1 || has_global {
                                         let all_selected = valid_scope.is_none();
                                         let mut filter_seg = segmented().child(compact_segment(
                                             "All",
@@ -417,6 +434,33 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                             move || all_selected,
                                             move |_| project_scope.set(String::new()),
                                         ));
+                                        if has_global {
+                                            let global_selected = valid_scope
+                                                .as_deref()
+                                                .is_some_and(canban_types::is_global_project_id);
+                                            let global_alerts = entries
+                                                .iter()
+                                                .filter(|e| {
+                                                    e.project_id.as_deref().is_some_and(
+                                                        canban_types::is_global_project_id,
+                                                    ) && standalone_terminal_needs_you(&s, e)
+                                                })
+                                                .count();
+                                            let glabel = if global_alerts > 0 {
+                                                format!("Global · {global_alerts}")
+                                            } else {
+                                                "Global".into()
+                                            };
+                                            filter_seg = filter_seg.child(compact_segment(
+                                                glabel,
+                                                None,
+                                                move || global_selected,
+                                                move |_| {
+                                                    project_scope
+                                                        .set(canban_types::GLOBAL_PROJECT_ID.into())
+                                                },
+                                            ));
+                                        }
                                         for p in &s.projects {
                                             let pid = p.id.clone();
                                             let is_selected =
@@ -440,7 +484,7 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                                     .filter(|e| {
                                                         e.project_id.as_deref()
                                                             == Some(pid.as_str())
-                                                            && standalone_terminal_needs_you(e)
+                                                            && standalone_terminal_needs_you(&s, e)
                                                     })
                                                     .count()
                                                 + s.cards
@@ -1177,7 +1221,10 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             let all_rows = ui.overview_rows.get();
             let entries = ui.terminal_entries.get();
             let scope = project_scope.get();
-            let valid_scope = if !scope.is_empty() && !s.projects.iter().any(|p| p.id == scope) {
+            let valid_scope = if !scope.is_empty()
+                && !canban_types::is_global_project_id(&scope)
+                && !s.projects.iter().any(|p| p.id == scope)
+            {
                 String::new()
             } else {
                 scope
@@ -1191,7 +1238,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     .iter()
                     .filter(|e| {
                         scope_opt.is_none_or(|pid| e.project_id.as_deref() == Some(pid))
-                            && standalone_terminal_needs_you(e)
+                            && standalone_terminal_needs_you(&s, e)
                     })
                     .count();
             let running_count = running_agents_count_from(&s, &all_rows, &entries, scope_opt);
@@ -1243,14 +1290,32 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         .child(pills),
                 );
 
-            if s.projects.len() > 1 {
+            let has_global = entries.iter().any(|e| {
+                e.listed()
+                    && e.project_id
+                        .as_deref()
+                        .is_some_and(canban_types::is_global_project_id)
+            }) || s.scheduled_runs.iter().any(|r| {
+                canban_types::is_global_project_id(&r.project_id)
+                    && (r.active() || r.state == "blocked")
+            });
+            if s.projects.len() > 1 || has_global {
                 let all_selected = valid_scope.is_empty();
                 let mut filter_seg = segmented().child(compact_segment(
-                    "All projects",
+                    "All",
                     None,
                     move || all_selected,
                     move |_| project_scope.set(String::new()),
                 ));
+                if has_global {
+                    let global_selected = canban_types::is_global_project_id(&valid_scope);
+                    filter_seg = filter_seg.child(compact_segment(
+                        "Global",
+                        None,
+                        move || global_selected,
+                        move |_| project_scope.set(canban_types::GLOBAL_PROJECT_ID.into()),
+                    ));
+                }
                 for p in &s.projects {
                     let pid = p.id.clone();
                     let is_selected = valid_scope == pid;
@@ -1332,7 +1397,7 @@ fn activity_body(
                         .as_deref()
                         .is_none_or(|pid| e.project_id.as_deref() == Some(pid))
                         && if group == "Needs you" {
-                            standalone_terminal_needs_you(e)
+                            standalone_terminal_needs_you(&s, e)
                         } else {
                             standalone_terminal_is_running(&s, e)
                         }
@@ -1430,8 +1495,23 @@ fn describe_standalone_terminal(
     entry: &crate::terminals::Entry,
     is_config: bool,
     merge_batch: Option<&canban_types::MergeBatch>,
+    scheduled_run: Option<&canban_types::ScheduledRun>,
 ) -> RowEvent {
     use canban_types::HerdrStatus;
+    if let Some(sr) = scheduled_run
+        && sr.state == "blocked"
+    {
+        return RowEvent {
+            icon: Icon::CirclePause,
+            tone: Tone::Attention,
+            live: false,
+            headline: "Needs decision · Scheduled Task".into(),
+            detail: sr
+                .summary
+                .clone()
+                .or_else(|| Some("Open terminal to respond to this scheduled task".into())),
+        };
+    }
     let herdr = entry.herdr_status();
     if herdr == HerdrStatus::Blocked {
         let (icon, tone, headline, detail) = if let Some(w) = entry.runtime_wait() {
@@ -1516,14 +1596,20 @@ fn config_session_row(
 ) -> impl IntoElement {
     let id = entry.saved.id.clone();
     let id_btn = id.clone();
-    let (is_config, merge_batch) = ui.snapshot.with_untracked(|s| {
+    let (is_config, merge_batch, scheduled_run, needs_attn) = ui.snapshot.with_untracked(|s| {
         (
             s.configuration_sessions.iter().any(|c| c.id == id),
             s.merge_batches.iter().find(|b| b.id == id).cloned(),
+            s.scheduled_runs.iter().find(|r| r.id == id).cloned(),
+            standalone_terminal_needs_you(s, &entry),
         )
     });
-    let needs_attn = standalone_terminal_needs_you(&entry);
-    let event = describe_standalone_terminal(&entry, is_config, merge_batch.as_ref());
+    let event = describe_standalone_terminal(
+        &entry,
+        is_config,
+        merge_batch.as_ref(),
+        scheduled_run.as_ref(),
+    );
     let waiting_age = entry
         .runtime_wait()
         .map(|w| w.since)
@@ -2356,18 +2442,18 @@ mod tests {
 
         assert_eq!(canban_scheduler::active_count(&s), 0);
         let entries = crate::terminals::entries(&s);
-        assert!(!standalone_terminal_needs_you(&entries[0]));
+        assert!(!standalone_terminal_needs_you(&s, &entries[0]));
         assert!(!standalone_terminal_is_running(&s, &entries[0]));
 
-        assert!(!standalone_terminal_needs_you(&entries[1]));
+        assert!(!standalone_terminal_needs_you(&s, &entries[1]));
         assert!(standalone_terminal_is_running(&s, &entries[1]));
-        let working_ev = describe_standalone_terminal(&entries[1], false, None);
+        let working_ev = describe_standalone_terminal(&entries[1], false, None, None);
         assert_eq!(working_ev.headline, "Working");
         assert!(working_ev.live);
 
-        assert!(standalone_terminal_needs_you(&entries[2]));
+        assert!(standalone_terminal_needs_you(&s, &entries[2]));
         assert!(!standalone_terminal_is_running(&s, &entries[2]));
-        let blocked_ev = describe_standalone_terminal(&entries[2], false, None);
+        let blocked_ev = describe_standalone_terminal(&entries[2], false, None, None);
         assert_eq!(blocked_ev.icon, Icon::ShieldAlert);
         assert_eq!(blocked_ev.tone, Tone::Attention);
         assert_eq!(blocked_ev.headline, "Permission required");

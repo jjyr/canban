@@ -520,7 +520,16 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
             })
         };
         // Presentation follows observed location; Agent/Card ownership remains on `agent`.
-        let project_id = location.as_ref().and_then(|c| c.project_id.clone());
+        let project_id = location
+            .as_ref()
+            .and_then(|c| c.project_id.clone())
+            .or_else(|| scheduled_run.as_ref().map(|r| r.project_id.clone()))
+            .or_else(|| {
+                t.origin_project_id
+                    .as_deref()
+                    .filter(|id| is_global_project_id(id))
+                    .map(str::to_owned)
+            });
         let inferred_card = agent.is_none() && t.origin_card_id.is_none() && card.is_some();
         let stage = agent.as_ref().and_then(|a| a.agent()).map(|att| {
             s.projects
@@ -539,6 +548,7 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
             .or_else(|| {
                 project_id
                     .as_deref()
+                    .filter(|pid| !is_global_project_id(pid))
                     .map(|pid| s.project_host(pid))
                     .filter(|h| *h != "local")
             })
@@ -546,11 +556,16 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
             .to_owned();
         out.push(Entry {
             host_id,
-            project_name: project_id
-                .as_ref()
-                .and_then(|id| s.projects.iter().find(|p| &p.id == id))
-                .map(|p| p.name.clone())
-                .unwrap_or_else(|| "Other".into()),
+            project_name: match project_id.as_deref() {
+                Some(id) if is_global_project_id(id) => "Global · Host".into(),
+                Some(id) => s
+                    .projects
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| "Other".into()),
+                None => "Other".into(),
+            },
             project_id,
             card,
             inferred_card,

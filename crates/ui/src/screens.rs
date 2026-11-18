@@ -16,6 +16,7 @@ pub fn screen(ui: Ui, page: &str) -> AnyElement {
         "archive" => crate::archive::screen(ui).into_element(),
         "settings" => crate::settings::screen(ui).into_element(),
         "insights" => crate::insights::screen(ui).into_element(),
+        "schedules" => crate::schedules::screen(ui),
         "github" => crate::github::screen(ui).into_element(),
         "github-account" => crate::github::account(ui).into_element(),
         "github-repository" => crate::github::repository_screen(ui).into_element(),

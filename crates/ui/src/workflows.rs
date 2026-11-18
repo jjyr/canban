@@ -1,14 +1,13 @@
 //! Project Workflows owns source drafts. Source editors and Prompt preview use
 //! native NSH selection/editing; launching is a separate explicit intent.
-pub mod schedules;
+pub use crate::schedules::{
+    add_schedule_rule_to_file, collect_project_schedules, new_scheduled_workflow, open_schedules,
+    project_schedule_count, toggle_schedule_by_id, trigger_schedule_by_id,
+};
 mod studio;
 use crate::presenter::*;
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
-pub use schedules::{
-    add_schedule_rule_to_file, collect_project_schedules, new_scheduled_workflow, open_schedules,
-    project_schedule_count, toggle_schedule_by_id, trigger_schedule_by_id,
-};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -18,7 +17,7 @@ pub struct Draft {
     pub selected: String,
 }
 impl Draft {
-    fn dirty(&self) -> bool {
+    pub(crate) fn dirty(&self) -> bool {
         self.inputs()
             != self.base["sources"]
                 .as_array()
@@ -27,13 +26,13 @@ impl Draft {
                 .map(|v| json!({"filename":v["filename"],"source":v["source"]}))
                 .collect::<Vec<_>>()
     }
-    fn needs_apply(&self) -> bool {
+    pub(crate) fn needs_apply(&self) -> bool {
         self.dirty()
             || self.base["sources"]
                 .as_array()
                 .is_some_and(|files| files.iter().any(|f| f["unpublished"] == true))
     }
-    fn inputs(&self) -> Vec<Value> {
+    pub(crate) fn inputs(&self) -> Vec<Value> {
         self.sources
             .iter()
             .map(|(name, source)| json!({"filename":name,"source":source}))
@@ -46,7 +45,7 @@ impl Draft {
             self.base = value;
         }
     }
-    fn accept(&mut self, value: Value) {
+    pub(crate) fn accept(&mut self, value: Value) {
         self.sources = value["sources"]
             .as_array()
             .into_iter()
@@ -72,7 +71,7 @@ pub struct State {
     pub new_column_name: Signal<String>,
     pub studio_doc: Signal<Option<canban_workflow_engine::source::Document>>,
     pub studio_error: Signal<String>,
-    studio_synced: Stored<(String, String, String)>,
+    pub(crate) studio_synced: Stored<(String, String, String)>,
     stamps: Stored<BTreeMap<String, SourceStamp>>,
     pub error: Signal<String>,
     pub latest: Signal<Value>,
@@ -124,7 +123,7 @@ impl Default for State {
 }
 pub fn chrome_bar(ui: Ui) -> impl IntoElement {
     let state = ui.workflows;
-    let sched_count = computed(move || schedules::project_schedule_count(ui));
+    let sched_count = computed(move || crate::schedules::project_schedule_count(ui));
     view()
         .flex_1()
         .min_w(px(0.))
@@ -147,37 +146,14 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
                 .child(
                     label(move || {
                         format!(
-                            "{} / {}",
-                            ui.current_project().map(|p| p.name).unwrap_or_default(),
-                            if state.section.get() == "schedules" {
-                                "Schedules"
-                            } else {
-                                "Workflows"
-                            }
+                            "{} / Workflows",
+                            ui.current_project().map(|p| p.name).unwrap_or_default()
                         )
                     })
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_size(px(13.5))
                     .truncate()
                     .min_w(px(0.)),
-                )
-                .child(
-                    segmented()
-                        .child(segment(
-                            "Workflows",
-                            Some(Icon::Trigger),
-                            move || state.section.get() != "schedules",
-                            move |_| state.section.set("workflows".into()),
-                        ))
-                        .child(
-                            segment(
-                                "Schedules",
-                                Some(Icon::Clock),
-                                move || state.section.get() == "schedules",
-                                move |_| state.section.set("schedules".into()),
-                            )
-                            .child(reminder_count(move || sched_count.get(), || false)),
-                        ),
                 ),
         )
         .child(view().flex_1().h_full().window_drag(true))
@@ -188,6 +164,13 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
                 .gap_1p5()
                 .flex_shrink_0()
                 .window_drag(false)
+                .child(compact_action(
+                    move || format!("Schedules ({})", sched_count.get()),
+                    Variant::Quiet,
+                    move |_| {
+                        crate::schedules::open(ui, Some(ui.project.get_untracked()), None);
+                    },
+                ))
                 .child(compact_action(
                     "Project Agents",
                     Variant::Quiet,
@@ -200,7 +183,7 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
         )
 }
 
-fn project_template_files_from_snapshot(
+pub(crate) fn project_template_files_from_snapshot(
     snapshot: &canban_types::Snapshot,
     project_id: &str,
 ) -> Vec<canban_types::WorkflowTemplateFile> {
@@ -327,7 +310,7 @@ fn project_source_stamp(ui: Ui, project: &str) -> SourceStamp {
             .collect()
     })
 }
-fn load(ui: Ui, discard: bool) {
+pub(crate) fn load(ui: Ui, discard: bool) {
     if crate::APP.get().is_none() {
         return;
     }
@@ -392,7 +375,7 @@ fn load(ui: Ui, discard: bool) {
         }
     });
 }
-fn save(ui: Ui) {
+pub(crate) fn save(ui: Ui) {
     let state = ui.workflows;
     let project = ui.project.get_untracked();
     let Some(draft) = state.drafts.with_untracked(|d| d.get(&project).cloned()) else {
@@ -449,7 +432,7 @@ fn save(ui: Ui) {
             });
             current.accept_publication(v, &draft.sources);
         });
-        schedules::offline_save_schedules(ui, &project);
+        crate::schedules::offline_save_schedules(ui, &project);
         state.latest.set(Value::Null);
         ui.notify("Workflow saved");
         return;
@@ -810,16 +793,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
     };
     view().flex_1().min_h(px(0.)).min_w(px(0.)).p_5().gap_4()
         .child(when(move || !state.error.get().is_empty(), move || notice(move || state.error.get(), Tone::Attention)))
-        .child(when(move || state.section.get() == "schedules", move || {
-            view()
-                .flex_1()
-                .min_h(px(0.))
-                .min_w(px(0.))
-                .gap_3()
-                .child(schedules::render(ui))
-                .child(save_bar())
-        }))
-        .child(when(move || state.section.get() != "schedules", move || view().flex_1().min_h(px(0.)).flex_row().gap_4()
+        .child(view().flex_1().min_h(px(0.)).flex_row().gap_4()
             .child(view().w(px(200.)).flex_shrink_0().min_h(px(0.)).gap_2()
                 .child(scroll().min_h(px(0.)).child(view().gap_1().child(each(move || names.get(), |name| name.clone(), move |name, _| {
                     let name = name.get_untracked();
@@ -881,11 +855,11 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         untracked(|| visual_studio(ui))
                     }
                 }))
-                .child(save_bar()))))
+                .child(save_bar())))
         .child(when(move || state.agent.get(), move || agent_panel(ui)))
         .child(when(move || state.history_open.get(), move || history_panel(ui)))
 }
-fn source_dirty(draft: &Draft, name: &str) -> bool {
+pub(crate) fn source_dirty(draft: &Draft, name: &str) -> bool {
     let original = draft.base["sources"]
         .as_array()
         .and_then(|rows| rows.iter().find(|r| r["filename"] == name));
@@ -1012,7 +986,7 @@ fn source_editor(ui: Ui) -> AnyElement {
         .into_element()
 }
 /// Real native modal surface: editor layers behind it cannot paint through it.
-pub(super) fn workflow_dialog(
+pub(crate) fn workflow_dialog(
     content: impl IntoElement,
     close: impl Fn() + Copy + 'static,
 ) -> impl IntoElement {

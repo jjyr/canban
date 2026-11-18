@@ -21,7 +21,7 @@ impl AppServer {
             }
             if let Ok(mut sched) = db.get::<canban_types::ScheduledRun>(terminal_id)
                 && !sched.creates_card
-                && sched.active()
+                && (sched.active() || sched.state == "blocked")
             {
                 self.cancel_scheduled_run_from_terminal_close(db, &mut sched, &mut item)?;
             }

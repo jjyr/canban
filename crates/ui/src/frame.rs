@@ -143,6 +143,7 @@ fn route_chrome(ui: Ui) -> impl IntoElement {
                 .into_element(),
             ChromeMode::Subpage(p) => match p.as_str() {
                 "insights" => crate::insights::chrome_bar(ui).into_element(),
+                "schedules" => crate::schedules::chrome_bar(ui).into_element(),
                 "github" => crate::github::workspace::chrome_bar(ui).into_element(),
                 "github-account" => subpage_chrome(
                     ui,
@@ -260,6 +261,7 @@ fn is_workspace_page(page: &str) -> bool {
                 | "archive"
                 | "settings"
                 | "insights"
+                | "schedules"
                 | "github"
                 | "github-account"
                 | "github-repository"

@@ -50,6 +50,7 @@ pub struct Ui {
     pub owner: Owner,
     pub github: crate::github::Browser,
     pub insights: crate::insights::State,
+    pub schedules: crate::schedules::State,
     pub workflows: crate::workflows::State,
     pub review_state: crate::review::State,
     /// Optional host adapter for the reusable Board drop intent (Gallery uses local fixtures).
@@ -357,6 +358,10 @@ impl Ui {
             || self.worktree_promote.get_untracked().is_some()
             || self.worktree_remove_confirm.get_untracked().is_some()
             || self.review_state.discard_confirm.get_untracked().is_some()
+            || self.schedules.create_modal.get_untracked()
+            || self.schedules.yaml_open.get_untracked()
+            || self.schedules.agent_open.get_untracked()
+            || self.schedules.artifact.with_untracked(Option::is_some)
     }
     pub fn close_card(self) {
         batch(move || {
@@ -401,6 +406,7 @@ impl Ui {
             owner: Owner::current(),
             github: crate::github::Browser::new(),
             insights: crate::insights::State::new(),
+            schedules: crate::schedules::State::new(),
             workflows: crate::workflows::State::new(),
             review_state: crate::review::State::new(),
             board_move: stored(None),

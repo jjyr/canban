@@ -139,6 +139,7 @@ pub fn active_count(snapshot: &canban_types::Snapshot) -> usize {
             .iter()
             .filter(|r| {
                 !r.creates_card
+                    && r.terminal_id.is_some()
                     && matches!(
                         r.state.as_str(),
                         "starting" | "unknown" | "running" | "working"
@@ -531,6 +532,7 @@ mod tests {
         let mut def = canban_types::WorkflowDefinition {
             id: "dev".into(),
             name: "Dev".into(),
+            scope: Default::default(),
             columns: vec![],
             entries: Default::default(),
             steps: Default::default(),

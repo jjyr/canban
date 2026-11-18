@@ -34,6 +34,7 @@ pub use rail::sidebar;
 pub use screens::screen;
 pub mod quick_open;
 pub mod reminders;
+pub mod schedules;
 pub mod sessions;
 pub mod settings;
 pub mod startup;

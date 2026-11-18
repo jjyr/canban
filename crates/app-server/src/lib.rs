@@ -208,6 +208,14 @@ fn path_within(root: &str, target: &str) -> bool {
     let t = std::fs::canonicalize(target).unwrap_or_else(|_| PathBuf::from(target));
     t.starts_with(&r)
 }
+pub(crate) fn resolve_workflow_scope(db: Db<'_>, raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.eq_ignore_ascii_case("global") || is_global_project_id(trimmed) {
+        return Ok(GLOBAL_PROJECT_ID.into());
+    }
+    resolve_project_id(db, trimmed)
+}
+
 pub(crate) fn resolve_project_id(db: Db<'_>, raw: &str) -> Result<String> {
     let raw = raw.trim();
     ensure!(!raw.is_empty(), "Missing project_id");
@@ -617,6 +625,7 @@ impl AppServer {
             for project in db.list::<Project>()? {
                 authoring::initialize(&home, db, &config, &project)?;
             }
+            authoring::initialize_global(&home, db, &config)?;
             schedules::reconcile_startup(db)?;
             Ok(())
         })?;

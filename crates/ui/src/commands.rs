@@ -640,17 +640,33 @@ pub const CATALOG: &[Command] = &[
         id: "go-schedules",
         title: "Open Scheduled Tasks",
         key: "",
-        display: "Workflows",
-        context: "Navigation",
-        keywords: "cron timer schedule workflows periodic automation",
+        display: "Schedules",
+        context: "Global",
+        keywords: "cron timer schedule global host periodic automation",
+    },
+    Command {
+        id: "go-schedules-global",
+        title: "Open Global Host Schedules",
+        key: "",
+        display: "Schedules",
+        context: "Global",
+        keywords: "cron global host cleanup worktree periodic",
+    },
+    Command {
+        id: "go-schedules-attention",
+        title: "Open Schedules Needing Attention",
+        key: "",
+        display: "Schedules",
+        context: "Global",
+        keywords: "cron blocked failed attention needs you",
     },
     Command {
         id: "new-scheduled-workflow",
-        title: "New Scheduled Workflow",
+        title: "New Scheduled Task",
         key: "",
         display: "Schedules",
-        context: "Project",
-        keywords: "cron timer schedule workflow create periodic",
+        context: "Schedules",
+        keywords: "cron timer schedule workflow create global project periodic",
     },
     Command {
         id: "edit-workflow-agent",
@@ -1179,6 +1195,16 @@ pub fn execute(ui: Ui, id: &str) {
         }
         return;
     }
+    if let Some(sched_id) = id.strip_prefix("schedule-open:") {
+        let scope = ui.snapshot.with_untracked(|s| {
+            s.schedule_states
+                .iter()
+                .find(|st| st.id == sched_id)
+                .map(|st| st.project_id.clone())
+        });
+        crate::schedules::open(ui, scope, Some(sched_id.to_owned()));
+        return;
+    }
     if let Some(sched_id) = id.strip_prefix("schedule-run:") {
         crate::workflows::trigger_schedule_by_id(ui, sched_id);
         return;
@@ -1355,8 +1381,15 @@ pub fn execute(ui: Ui, id: &str) {
             ui.workflows.section.set("workflows".into());
             ui.navigate("workflows");
         }
-        "go-schedules" => crate::workflows::open_schedules(ui, None),
-        "new-scheduled-workflow" => crate::workflows::new_scheduled_workflow(ui),
+        "go-schedules" => crate::schedules::open(ui, None, None),
+        "go-schedules-global" => {
+            crate::schedules::open(ui, Some(canban_types::GLOBAL_PROJECT_ID.into()), None)
+        }
+        "go-schedules-attention" => {
+            crate::schedules::open(ui, None, None);
+            ui.schedules.status_filter.set("attention".into());
+        }
+        "new-scheduled-workflow" => crate::schedules::new_scheduled_workflow(ui),
         "edit-workflow-agent" => crate::workflows::edit_agent(ui),
         "set-default-workflow" => crate::workflows::set_default_workflow(ui),
         "reset-default-workflow" => crate::workflows::reset_default_workflow(ui),

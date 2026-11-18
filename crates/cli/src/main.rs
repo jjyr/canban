@@ -173,10 +173,15 @@ enum Cmd {
         #[arg(long)]
         request_key: Option<String>,
     },
-    /// Inspect, trigger, or toggle scheduled tasks configured in Project workflows.
+    /// Inspect, create, trigger, toggle, or delete Global and Project scheduled tasks.
     Schedule {
         #[command(subcommand)]
         command: ScheduleCmd,
+    },
+    /// Inspect or garbage-collect merged worktrees across projects.
+    Worktree {
+        #[command(subcommand)]
+        command: WorktreeCmd,
     },
     /// Batch merge queue reporting for a project `_merge_queue` Agent session.
     Batch {
@@ -202,24 +207,34 @@ enum ServiceCmd {
 enum ScheduleCmd {
     /// List configured scheduled tasks and recent runs.
     List {
-        #[arg(long, env = "CANBAN_PROJECT")]
+        #[arg(long, env = "CANBAN_PROJECT", conflicts_with = "global")]
         project_id: Option<String>,
+        /// Filter to Global (`__global`) host-level schedules.
+        #[arg(long)]
+        global: bool,
     },
     /// List recent execution history for scheduled tasks.
     Runs {
-        #[arg(long, env = "CANBAN_PROJECT")]
+        #[arg(long, env = "CANBAN_PROJECT", conflicts_with = "global")]
         project_id: Option<String>,
+        /// Filter to Global (`__global`) host-level schedules.
+        #[arg(long)]
+        global: bool,
         #[arg(long)]
         schedule_id: Option<String>,
         #[arg(long, default_value_t = 25)]
         limit: u64,
     },
+    /// Create a new Global or Project scheduled task workflow.
+    Create(Box<ScheduleCreateArgs>),
     /// Manually trigger a scheduled task immediately.
     Trigger {
         #[arg(long)]
         schedule_id: Option<String>,
-        #[arg(long, env = "CANBAN_PROJECT")]
+        #[arg(long, env = "CANBAN_PROJECT", conflicts_with = "global")]
         project_id: Option<String>,
+        #[arg(long)]
+        global: bool,
         #[arg(long)]
         filename: Option<String>,
         #[arg(long)]
@@ -233,8 +248,10 @@ enum ScheduleCmd {
     Toggle {
         #[arg(long)]
         schedule_id: Option<String>,
-        #[arg(long, env = "CANBAN_PROJECT")]
+        #[arg(long, env = "CANBAN_PROJECT", conflicts_with = "global")]
         project_id: Option<String>,
+        #[arg(long)]
+        global: bool,
         #[arg(long)]
         filename: Option<String>,
         #[arg(long, alias = "rule")]
@@ -247,6 +264,92 @@ enum ScheduleCmd {
         off: bool,
         #[arg(long)]
         request_key: Option<String>,
+    },
+    /// Remove a scheduled trigger rule (and standalone schedule file when empty).
+    Delete {
+        #[arg(long)]
+        schedule_id: Option<String>,
+        #[arg(long, env = "CANBAN_PROJECT", conflicts_with = "global")]
+        project_id: Option<String>,
+        #[arg(long)]
+        global: bool,
+        #[arg(long)]
+        filename: Option<String>,
+        #[arg(long, alias = "rule")]
+        rule_id: Option<String>,
+        #[arg(long)]
+        request_key: Option<String>,
+    },
+    /// Read a log or report artifact produced by a scheduled run.
+    Artifact {
+        #[arg(long, env = "CANBAN_SCHEDULE_RUN_ID")]
+        schedule_run_id: String,
+        #[arg(long)]
+        path: String,
+    },
+}
+#[derive(clap::Args)]
+struct ScheduleCreateArgs {
+    #[arg(long, env = "CANBAN_PROJECT", conflicts_with = "global")]
+    project_id: Option<String>,
+    /// Create under Global (`__global`) scope instead of a Project.
+    #[arg(long)]
+    global: bool,
+    #[arg(long)]
+    name: String,
+    #[arg(long)]
+    cron: String,
+    #[arg(long)]
+    timezone: Option<String>,
+    #[arg(long, default_value = "skip")]
+    overlap: String,
+    /// Mode: agent | script | script_agent | card.
+    #[arg(long, default_value = "agent")]
+    mode: String,
+    #[arg(long)]
+    script: Option<String>,
+    #[arg(long)]
+    shell: Option<String>,
+    #[arg(long)]
+    working_directory: Option<String>,
+    #[arg(long)]
+    timeout_minutes: Option<u32>,
+    #[arg(long)]
+    profile_id: Option<String>,
+    #[arg(long)]
+    instruction: Option<String>,
+    #[arg(long)]
+    card_column: Option<String>,
+    #[arg(long)]
+    card_title: Option<String>,
+    #[arg(long)]
+    card_body: Option<String>,
+    #[arg(long)]
+    filename: Option<String>,
+    #[arg(long)]
+    disabled: bool,
+    #[arg(long)]
+    request_key: Option<String>,
+}
+#[derive(Subcommand)]
+enum WorktreeCmd {
+    /// Remove clean worktrees for Cards merged before the retention window.
+    Gc {
+        /// Retention window (e.g. 7d, 24h, 30m).
+        #[arg(long, default_value = "7d")]
+        merged_before: String,
+        /// Restrict cleanup to a specific Project id.
+        #[arg(long)]
+        project_id: Option<String>,
+        /// Report candidates without deleting worktrees.
+        #[arg(long)]
+        dry_run: bool,
+        /// Write skipped dirty/active worktrees to $CANBAN_ENV under this variable name.
+        #[arg(long)]
+        env_dirty: Option<String>,
+        /// Exit non-zero if any dirty or active worktrees could not be removed.
+        #[arg(long)]
+        fail_on_dirty: bool,
     },
 }
 #[derive(Subcommand)]
@@ -378,9 +481,20 @@ fn main() {
 }
 #[derive(Subcommand)]
 enum WorkflowCmd {
-    Submit {
+    /// Inspect stored YAML sources and current revision for a Project or Global scope.
+    Sources {
+        #[arg(long, required_unless_present = "global", conflicts_with = "global")]
+        project_id: Option<String>,
+        /// Target Global (`__global`) workflows.
         #[arg(long)]
-        project_id: String,
+        global: bool,
+    },
+    Submit {
+        #[arg(long, required_unless_present = "global", conflicts_with = "global")]
+        project_id: Option<String>,
+        /// Target Global (`__global`) workflows.
+        #[arg(long)]
+        global: bool,
         #[arg(long)]
         revision: String,
         #[arg(long)]
@@ -391,8 +505,11 @@ enum WorkflowCmd {
         check: bool,
     },
     Export {
+        #[arg(long, required_unless_present = "global", conflicts_with = "global")]
+        project_id: Option<String>,
+        /// Target Global (`__global`) workflows.
         #[arg(long)]
-        project_id: String,
+        global: bool,
         #[arg(long)]
         name: String,
         #[arg(long)]
@@ -540,18 +657,38 @@ fn run() -> Result<()> {
     if let Cmd::Workflow { command } = &command {
         let mut selection = json!({});
         output.params("workflow.sources", &mut selection)?;
+        let workflow_scope_id = |project_id: &Option<String>, global: bool| -> Result<String> {
+            if global {
+                Ok(canban_types::GLOBAL_PROJECT_ID.to_owned())
+            } else {
+                project_id
+                    .clone()
+                    .context("Specify `--project-id <ID>` or `--global`")
+            }
+        };
         match command {
+            WorkflowCmd::Sources { project_id, global } => {
+                let scope_id = workflow_scope_id(project_id, *global)?;
+                let collection = canban_app_server::rpc(
+                    &endpoint,
+                    "workflow.sources",
+                    json!({"project_id": scope_id}),
+                )?;
+                println!("{}", output.encode(&collection)?);
+            }
             WorkflowCmd::Submit {
                 project_id,
+                global,
                 revision,
                 file,
                 name,
                 check,
             } => {
+                let scope_id = workflow_scope_id(project_id, *global)?;
                 let collection = canban_app_server::rpc(
                     &endpoint,
                     "workflow.sources",
-                    json!({"project_id":project_id}),
+                    json!({"project_id": scope_id}),
                 )?;
                 anyhow::ensure!(
                     collection["revision"].as_str() == Some(revision),
@@ -577,20 +714,22 @@ fn run() -> Result<()> {
                     } else {
                         "workflow.apply"
                     },
-                    json!({"project_id":project_id,"revision":revision,"sources":sources,"request_key":canban_types::id()}),
+                    json!({"project_id":scope_id,"revision":revision,"sources":sources,"request_key":canban_types::id()}),
                 )?;
                 println!("{}", output.encode(&value)?);
             }
             WorkflowCmd::Export {
                 project_id,
+                global,
                 name,
                 output,
             } => {
                 use std::io::Write;
+                let scope_id = workflow_scope_id(project_id, *global)?;
                 let collection = canban_app_server::rpc(
                     &endpoint,
                     "workflow.sources",
-                    json!({"project_id":project_id}),
+                    json!({"project_id": scope_id}),
                 )?;
                 let source = collection["sources"]
                     .as_array()
@@ -818,20 +957,55 @@ fn run() -> Result<()> {
             }
         }
         Cmd::Schedule { command } => match command {
-            ScheduleCmd::List { project_id } => {
-                ("schedule.list".into(), json!({ "project_id": project_id }))
-            }
+            ScheduleCmd::List { project_id, global } => (
+                "schedule.list".into(),
+                json!({
+                    "project_id": project_id,
+                    "scope": if global { Some("global") } else { None },
+                }),
+            ),
             ScheduleCmd::Runs {
                 project_id,
+                global,
                 schedule_id,
                 limit,
             } => (
                 "schedule.runs".into(),
-                json!({ "project_id": project_id, "schedule_id": schedule_id, "limit": limit }),
+                json!({
+                    "project_id": project_id,
+                    "scope": if global { Some("global") } else { None },
+                    "schedule_id": schedule_id,
+                    "limit": limit,
+                }),
+            ),
+            ScheduleCmd::Create(args) => (
+                "schedule.create".into(),
+                json!({
+                    "project_id": args.project_id,
+                    "scope": if args.global || args.project_id.is_none() { "global" } else { "project" },
+                    "name": args.name,
+                    "cron": args.cron,
+                    "timezone": args.timezone,
+                    "overlap": args.overlap,
+                    "mode": args.mode,
+                    "script": args.script,
+                    "shell": args.shell,
+                    "working_directory": args.working_directory,
+                    "timeout_minutes": args.timeout_minutes,
+                    "profile_id": args.profile_id,
+                    "instruction": args.instruction,
+                    "card_column": args.card_column,
+                    "card_title": args.card_title,
+                    "card_body": args.card_body,
+                    "filename": args.filename,
+                    "enabled": !args.disabled,
+                    "request_key": args.request_key.unwrap_or_else(canban_types::id),
+                }),
             ),
             ScheduleCmd::Trigger {
                 schedule_id,
                 project_id,
+                global,
                 filename,
                 workflow_id,
                 rule_id,
@@ -841,6 +1015,7 @@ fn run() -> Result<()> {
                 json!({
                     "schedule_id": schedule_id,
                     "project_id": project_id,
+                    "scope": if global { Some("global") } else { None },
                     "filename": filename,
                     "workflow_id": workflow_id,
                     "rule_id": rule_id,
@@ -850,6 +1025,7 @@ fn run() -> Result<()> {
             ScheduleCmd::Toggle {
                 schedule_id,
                 project_id,
+                global,
                 filename,
                 rule_id,
                 enabled,
@@ -871,12 +1047,87 @@ fn run() -> Result<()> {
                     json!({
                         "schedule_id": schedule_id,
                         "project_id": project_id,
+                        "scope": if global { Some("global") } else { None },
                         "filename": filename,
                         "rule_id": rule_id,
                         "enabled": target_enabled,
                         "request_key": request_key.unwrap_or_else(canban_types::id),
                     }),
                 )
+            }
+            ScheduleCmd::Delete {
+                schedule_id,
+                project_id,
+                global,
+                filename,
+                rule_id,
+                request_key,
+            } => (
+                "schedule.delete".into(),
+                json!({
+                    "schedule_id": schedule_id,
+                    "project_id": project_id,
+                    "scope": if global { Some("global") } else { None },
+                    "filename": filename,
+                    "rule_id": rule_id,
+                    "request_key": request_key.unwrap_or_else(canban_types::id),
+                }),
+            ),
+            ScheduleCmd::Artifact {
+                schedule_run_id,
+                path,
+            } => (
+                "schedule.read_artifact".into(),
+                json!({
+                    "schedule_run_id": schedule_run_id,
+                    "path": path,
+                }),
+            ),
+        },
+        Cmd::Worktree { command } => match command {
+            WorktreeCmd::Gc {
+                merged_before,
+                project_id,
+                dry_run,
+                env_dirty,
+                fail_on_dirty,
+            } => {
+                let mut params = json!({
+                    "merged_before": merged_before,
+                    "project_id": project_id,
+                    "dry_run": dry_run,
+                });
+                output.params("worktree.gc", &mut params)?;
+                let value = canban_app_server::rpc(&endpoint, "worktree.gc", params)?;
+                let dirty = value["dirty"].as_array().cloned().unwrap_or_default();
+                if let Some(env_key) = env_dirty
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    && !dirty.is_empty()
+                {
+                    use std::io::Write;
+                    let serialized = serde_json::to_string(&dirty)?;
+                    if let Ok(env_file) = std::env::var("CANBAN_ENV")
+                        && !env_file.trim().is_empty()
+                    {
+                        let mut f = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(env_file)?;
+                        writeln!(f, "{env_key}={serialized}")?;
+                    } else if env_key.contains('/') || env_key.contains('\\') {
+                        std::fs::write(env_key, format!("{serialized}\n"))?;
+                    }
+                }
+                println!("{}", output.encode(&value)?);
+                if fail_on_dirty && !dirty.is_empty() {
+                    anyhow::bail!(
+                        "{} dirty or active worktree(s) prevented full cleanup",
+                        dirty.len()
+                    );
+                }
+                return Ok(());
             }
         },
         Cmd::Batch { command } => match command {
@@ -951,8 +1202,10 @@ fn run() -> Result<()> {
             | "workflow.decide"
             | "workflow.deliver"
             | "workflow.stop"
+            | "schedule.create"
             | "schedule.trigger"
             | "schedule.toggle"
+            | "schedule.delete"
             | "card.hold_auto_merge"
     ) && p.get("execution").is_none()
         && let Ok(profile) = std::env::var("CANBAN_PROFILE_ID")

@@ -1360,6 +1360,8 @@ impl HostRegistry {
         for key in [
             "card_id",
             "project_id",
+            "schedule_id",
+            "schedule_run_id",
             "terminal_id",
             "worktree_id",
             "inherit_terminal_id",

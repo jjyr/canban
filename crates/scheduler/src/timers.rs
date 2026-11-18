@@ -161,15 +161,24 @@ pub fn next_schedule_deadline(states: &[ScheduleState]) -> Option<u64> {
         .min()
 }
 
-/// Next queued Cardless `ScheduledRun` eligible for automatic Agent slot admission.
+/// Next queued Cardless `ScheduledRun` eligible for execution or Agent slot admission.
+/// Script-starting runs (`terminal_id.is_none()`) execute without consuming an Agent slot.
 pub fn next_scheduled_run(snapshot: &Snapshot, max_agents: usize) -> Option<ScheduledRun> {
+    if let Some(script_run) = snapshot
+        .scheduled_runs
+        .iter()
+        .filter(|r| !r.creates_card && r.state == "queued" && r.terminal_id.is_none())
+        .min_by_key(|r| (r.scheduled_at, r.number))
+    {
+        return Some(script_run.clone());
+    }
     if crate::active_count(snapshot) >= max_agents {
         return None;
     }
     snapshot
         .scheduled_runs
         .iter()
-        .filter(|r| !r.creates_card && r.state == "queued")
+        .filter(|r| !r.creates_card && r.state == "queued" && r.terminal_id.is_some())
         .min_by_key(|r| (r.scheduled_at, r.number))
         .cloned()
 }
@@ -195,6 +204,7 @@ mod tests {
             timezone: Some("UTC".into()),
             overlap,
             creates_card: false,
+            starts_with_script: false,
             target_column: None,
             profile_id: Some("developer".into()),
             enabled: true,
@@ -258,6 +268,7 @@ mod tests {
             report_path: None,
             output_path: None,
             error: None,
+            steps: Vec::new(),
             scheduled_at: due - 3_600_000,
             started_at: Some(due - 3_600_000),
             completed_at: None,

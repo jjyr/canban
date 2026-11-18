@@ -515,3 +515,77 @@ fn hash_tag_search_matches_tagged_cards_without_false_matching_title_subsequence
     let after_ids: Vec<_> = matched_after.iter().map(|r| r.id.as_str()).collect();
     assert_eq!(after_ids, vec!["card:c2", "card:c3"]);
 }
+
+#[test]
+fn quick_open_indexes_global_and_project_schedules() {
+    let mut s = fixture();
+    s.schedule_states.push(ScheduleState {
+        id: "sched-global-gc".into(),
+        project_id: GLOBAL_PROJECT_ID.into(),
+        workflow_id: "global:worktree-gc".into(),
+        workflow_name: "Worktree GC (7d)".into(),
+        filename: "worktree-gc.yaml".into(),
+        rule_id: "schedule".into(),
+        cron: "0 3 * * *".into(),
+        timezone: None,
+        overlap: ScheduleOverlap::Skip,
+        creates_card: false,
+        starts_with_script: true,
+        target_column: None,
+        profile_id: Some("developer".into()),
+        enabled: true,
+        last_scheduled_at: None,
+        next_run_at: Some(1_000_000),
+        last_run_id: Some("run-blocked".into()),
+        run_count: 1,
+        queued_triggers: 0,
+        updated_at: 100,
+    });
+    s.scheduled_runs.push(ScheduledRun {
+        id: "run-blocked".into(),
+        schedule_id: "sched-global-gc".into(),
+        project_id: GLOBAL_PROJECT_ID.into(),
+        workflow_id: "global:worktree-gc".into(),
+        workflow_name: "Worktree GC (7d)".into(),
+        filename: "worktree-gc.yaml".into(),
+        rule_id: "schedule".into(),
+        cron: "0 3 * * *".into(),
+        number: 1,
+        trigger_kind: "cron".into(),
+        creates_card: false,
+        card_id: None,
+        card_number: None,
+        workflow_run_id: None,
+        start_step: Some("gc".into()),
+        current_step: Some("ask_agent".into()),
+        profile_id: Some("developer".into()),
+        provider_session_id: None,
+        terminal_id: Some("run-blocked".into()),
+        cwd: "/tmp".into(),
+        state: "blocked".into(),
+        summary: Some("Dirty worktree needs decision".into()),
+        report_path: None,
+        output_path: None,
+        error: None,
+        steps: Vec::new(),
+        scheduled_at: 100,
+        started_at: Some(100),
+        completed_at: None,
+        close_requested_at: None,
+        updated_at: 100,
+    });
+
+    let rows = candidates(&s);
+    let gc_hits = ranked(&rows, "worktree gc", &[], false);
+    assert_eq!(gc_hits[0].kind, "Schedule");
+    assert_eq!(
+        gc_hits[0].target,
+        Target::Schedule("sched-global-gc".into())
+    );
+    assert!(gc_hits[0].detail.contains("Global · Host"));
+    assert!(gc_hits[0].detail.contains("Script → Agent"));
+    assert!(gc_hits[0].detail.contains("Needs you"));
+
+    let global_hits = ranked(&rows, "global cron", &[], false);
+    assert_eq!(global_hits[0].id, "schedule:sched-global-gc");
+}

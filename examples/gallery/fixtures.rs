@@ -2795,7 +2795,81 @@ steps:
         .ok()
         .and_then(|(sc, tz)| sc.next_after_ms(now_ms, tz));
 
+    let sid_global_gc = format!(
+        "schedule:{}:global:worktree-gc:schedule",
+        canban_types::GLOBAL_PROJECT_ID
+    );
+    let global_gc_yaml = "schema: 9
+id: global:worktree-gc
+name: Worktree GC (7d)
+scope: global
+on:
+  schedule:
+    - cron: '0 3 * * *'
+      timezone: Local
+      overlap: skip
+steps:
+  - id: gc
+    run: |
+      \"$CANBAN_CLI\" worktree gc --merged-before 7d --fail-on-dirty --env-dirty DIRTY_WORKTREES
+    on_failure: ask_agent
+    next: done
+  - id: ask_agent
+    uses: agent
+    with:
+      profile: developer
+      instruction: Inspect dirty worktrees and ask the user whether to clean or keep them.
+    next: done
+  - id: done
+    uses: complete
+";
+    let global_gc_doc = canban_workflow_engine::source::parse(global_gc_yaml).unwrap();
+    let global_gc_def = global_gc_doc.compile().unwrap();
+    s.workflow_sources.push(WorkflowSource {
+        id: format!("{}:worktree-gc.yaml", canban_types::GLOBAL_PROJECT_ID),
+        project_id: canban_types::GLOBAL_PROJECT_ID.into(),
+        filename: "worktree-gc.yaml".into(),
+        workflow_id: global_gc_def.id.clone(),
+        revision: 1,
+        hash: "global:worktree-gc:1".into(),
+        revision_id: "global:worktree-gc:1".into(),
+        enabled: true,
+        columns: global_gc_def.columns.clone(),
+        rules: global_gc_doc.on.clone(),
+    });
+    s.workflow_revisions.push(WorkflowRevision {
+        source_yaml: Some(global_gc_yaml.into()),
+        id: "global:worktree-gc:1".into(),
+        project_id: canban_types::GLOBAL_PROJECT_ID.into(),
+        workflow_id: global_gc_def.id.clone(),
+        revision: 1,
+        definition: global_gc_def,
+        created_at: now_ms,
+    });
+
     s.schedule_states = vec![
+        ScheduleState {
+            id: sid_global_gc.clone(),
+            project_id: canban_types::GLOBAL_PROJECT_ID.into(),
+            workflow_id: "global:worktree-gc".into(),
+            workflow_name: "Worktree GC (7d)".into(),
+            filename: "worktree-gc.yaml".into(),
+            rule_id: "schedule".into(),
+            cron: "0 3 * * *".into(),
+            timezone: Some("Local".into()),
+            overlap: ScheduleOverlap::Skip,
+            creates_card: false,
+            starts_with_script: true,
+            target_column: None,
+            profile_id: Some("developer".into()),
+            enabled: true,
+            last_scheduled_at: Some(now_ms.saturating_sub(90_000)),
+            next_run_at: next_audit,
+            last_run_id: Some("scheduled:global:gc12".into()),
+            run_count: 12,
+            queued_triggers: 0,
+            updated_at: now_ms,
+        },
         ScheduleState {
             id: sid_audit.clone(),
             project_id: project_id.clone(),
@@ -2807,6 +2881,7 @@ steps:
             timezone: Some("Asia/Shanghai".into()),
             overlap: ScheduleOverlap::Skip,
             creates_card: false,
+            starts_with_script: false,
             target_column: None,
             profile_id: Some("developer".into()),
             enabled: true,
@@ -2828,6 +2903,7 @@ steps:
             timezone: None,
             overlap: ScheduleOverlap::Queue,
             creates_card: true,
+            starts_with_script: false,
             target_column: Some("develop".into()),
             profile_id: None,
             enabled: true,
@@ -2849,6 +2925,7 @@ steps:
             timezone: Some("UTC".into()),
             overlap: ScheduleOverlap::Skip,
             creates_card: false,
+            starts_with_script: false,
             target_column: None,
             profile_id: Some("developer".into()),
             enabled: false,
@@ -2932,7 +3009,96 @@ steps:
         created_at: now_ms.saturating_sub(180_000),
     });
 
+    s.terminals.push(TerminalEntry {
+        id: "scheduled:global:gc12".into(),
+        conversation_id: None,
+        number: 13,
+        name: Some("Worktree GC (7d) #12".into()),
+        origin_project_id: Some(canban_types::GLOBAL_PROJECT_ID.into()),
+        origin_card_id: None,
+        agent_engine: Some("agy".into()),
+        runtime: Some(TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: Some("local".into()),
+            core_id: Some("local".into()),
+            terminal: Some("pty-sched-gc12".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: Some("blocked".into()),
+            agent_turn: Some(1),
+            observed_agent: Some("agy".into()),
+            waiting: Some(RuntimeWait {
+                id: "wait-gc-12".into(),
+                kind: "question".into(),
+                title: "Dirty worktree found".into(),
+                message: "Worktree feat/legacy has 2 uncommitted files. Force remove or keep?"
+                    .into(),
+                since: now_ms.saturating_sub(60_000),
+            }),
+        }),
+        agent: None,
+        created_at: now_ms.saturating_sub(90_000),
+    });
+
     s.scheduled_runs = vec![
+        ScheduledRun {
+            id: "scheduled:global:gc12".into(),
+            schedule_id: sid_global_gc,
+            project_id: canban_types::GLOBAL_PROJECT_ID.into(),
+            workflow_id: "global:worktree-gc".into(),
+            workflow_name: "Worktree GC (7d)".into(),
+            filename: "worktree-gc.yaml".into(),
+            rule_id: "schedule".into(),
+            cron: "0 3 * * *".into(),
+            number: 12,
+            trigger_kind: "cron".into(),
+            creates_card: false,
+            card_id: None,
+            card_number: None,
+            workflow_run_id: None,
+            start_step: Some("gc".into()),
+            current_step: Some("ask_agent".into()),
+            profile_id: Some("developer".into()),
+            provider_session_id: None,
+            terminal_id: Some("scheduled:global:gc12".into()),
+            cwd: "/Users/example/.canban".into(),
+            state: "blocked".into(),
+            summary: Some(
+                "Removed 3 clean merged worktrees; 1 dirty worktree (`feat/legacy`) needs decision in Terminal."
+                    .into(),
+            ),
+            report_path: None,
+            output_path: Some("global/schedules/gc12/gc.log".into()),
+            error: None,
+            steps: vec![
+                ScheduledStepRecord {
+                    step_id: "gc".into(),
+                    kind: "script".into(),
+                    state: "failed".into(),
+                    profile_id: None,
+                    exit_code: Some(1),
+                    duration_ms: Some(420),
+                    log_path: Some("global/schedules/gc12/gc.log".into()),
+                    summary: Some("1 dirty worktree skipped".into()),
+                },
+                ScheduledStepRecord {
+                    step_id: "ask_agent".into(),
+                    kind: "agent".into(),
+                    state: "blocked".into(),
+                    profile_id: Some("developer".into()),
+                    exit_code: None,
+                    duration_ms: None,
+                    log_path: None,
+                    summary: Some("Waiting for decision in Terminal".into()),
+                },
+            ],
+            scheduled_at: now_ms.saturating_sub(90_000),
+            started_at: Some(now_ms.saturating_sub(90_000)),
+            completed_at: None,
+            close_requested_at: None,
+            updated_at: now_ms.saturating_sub(30_000),
+        },
         ScheduledRun {
             id: "scheduled:gallery-project:run42".into(),
             schedule_id: sid_audit.clone(),
@@ -2959,6 +3125,7 @@ steps:
             report_path: None,
             output_path: None,
             error: None,
+            steps: Vec::new(),
             scheduled_at: now_ms.saturating_sub(180_000),
             started_at: Some(now_ms.saturating_sub(180_000)),
             completed_at: None,
@@ -2994,6 +3161,7 @@ steps:
             report_path: Some("projects/gallery-project/schedules/run41/report.md".into()),
             output_path: None,
             error: None,
+            steps: Vec::new(),
             scheduled_at: now_ms.saturating_sub(86_400_000),
             started_at: Some(now_ms.saturating_sub(86_400_000)),
             completed_at: Some(now_ms.saturating_sub(86_350_000)),
@@ -3026,6 +3194,7 @@ steps:
             report_path: None,
             output_path: None,
             error: None,
+            steps: Vec::new(),
             scheduled_at: now_ms.saturating_sub(172_800_000),
             started_at: None,
             completed_at: Some(now_ms.saturating_sub(172_800_000)),
@@ -3058,6 +3227,7 @@ steps:
             report_path: None,
             output_path: None,
             error: None,
+            steps: Vec::new(),
             scheduled_at: now_ms.saturating_sub(3_600_000),
             started_at: Some(now_ms.saturating_sub(3_600_000)),
             completed_at: Some(now_ms.saturating_sub(3_200_000)),

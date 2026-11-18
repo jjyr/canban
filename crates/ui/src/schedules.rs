@@ -1,25 +1,88 @@
-//! Scheduled Tasks panel inside `Project / Workflows`: view, configure, toggle,
-//! trigger (`Run now`), and inspect execution history for cron-scheduled workflows.
+//! Unified Global and Project Scheduled Tasks workspace: view, filter, create,
+//! toggle, trigger (`Run now`), delete, and inspect script/agent execution history.
 
-use super::{Draft, source_dirty, workflow_dialog};
+pub mod modal;
+
 use crate::presenter::*;
 use canban_types::{
-    Card, ScheduleCardConfig, ScheduleOverlap, ScheduleSourceRef, ScheduleState, ScheduledRun,
-    WorkflowRule,
+    Card, GLOBAL_PROJECT_ID, ScheduleCardConfig, ScheduleOverlap, ScheduleSourceRef, ScheduleState,
+    ScheduledRun, Snapshot, WorkflowRevision, WorkflowRule, WorkflowSource, WorkflowTemplateFile,
     cron::{CronTimeZone, describe_cron, parse_schedule},
+    is_global_project_id,
 };
 use canban_ui_kit::{tokens::*, *};
 use canban_workflow_engine::source::{self, Document, Step};
 use nsh_core::prelude::*;
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+const ALL_SCOPES_OPTION: &str = "__all__";
+
+#[derive(Clone, Copy)]
+pub struct State {
+    /// Empty string = All Scopes; `GLOBAL_PROJECT_ID` = Global Host; otherwise a `Project.id`.
+    pub scope: Signal<String>,
+    /// `"all" | "attention" | "active" | "paused"`
+    pub status_filter: Signal<String>,
+    /// Canonical selection key (`<project_id>::<filename>::<rule_id>`) or `schedule_id`.
+    pub selected: Signal<String>,
+    /// Configuration drawer inside detail view is collapsed by default so History leads.
+    pub config_expanded: Signal<bool>,
+    pub artifact: Signal<Option<(String, String)>>,
+    pub create_modal: Signal<bool>,
+    pub modal: modal::ModalState,
+    pub yaml_open: Signal<bool>,
+    pub yaml_scope: Signal<String>,
+    pub yaml_filename: Signal<String>,
+    pub yaml_revision: Signal<String>,
+    pub yaml_source: Signal<String>,
+    pub yaml_error: Signal<String>,
+    pub agent_open: Signal<bool>,
+    pub agent_scope: Signal<String>,
+    pub agent_prompt: Signal<String>,
+    pub confirm_delete: Signal<Option<String>>,
+    pub error: Signal<String>,
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self {
+            scope: signal(String::new()),
+            status_filter: signal("all".into()),
+            selected: signal(String::new()),
+            config_expanded: signal(false),
+            artifact: signal(None),
+            create_modal: signal(false),
+            modal: modal::ModalState::new(),
+            yaml_open: signal(false),
+            yaml_scope: signal(String::new()),
+            yaml_filename: signal(String::new()),
+            yaml_revision: signal(String::new()),
+            yaml_source: signal(String::new()),
+            yaml_error: signal(String::new()),
+            agent_open: signal(false),
+            agent_scope: signal(GLOBAL_PROJECT_ID.into()),
+            agent_prompt: signal(String::new()),
+            confirm_delete: signal(None),
+            error: signal(String::new()),
+        }
+    }
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScheduleItem {
-    /// Canonical UI selection key: `<filename>::<rule_id>`.
+    /// Canonical UI selection key: `<project_id>::<filename>::<rule_id>`.
     pub key: String,
+    pub legacy_key: String,
     pub schedule_id: String,
     pub project_id: String,
+    pub scope_name: String,
     pub filename: String,
     pub workflow_id: String,
     pub workflow_name: String,
@@ -29,6 +92,7 @@ pub struct ScheduleItem {
     pub effective_enabled: bool,
     pub dirty: bool,
     pub published: bool,
+    pub starts_with_script: bool,
     pub profile_id: Option<String>,
     pub agent_step_id: Option<String>,
     pub agent_instruction: String,
@@ -36,11 +100,29 @@ pub struct ScheduleItem {
     pub last_scheduled_at: Option<u64>,
     pub run_count: u64,
     pub queued_triggers: u32,
+    pub latest_run: Option<ScheduledRun>,
+    pub active_blocked: bool,
 }
 
 impl ScheduleItem {
     pub fn cron_str(&self) -> &str {
         self.rule.cron.as_deref().unwrap_or("").trim()
+    }
+
+    pub fn is_global(&self) -> bool {
+        is_global_project_id(&self.project_id)
+    }
+
+    pub fn matches_selection(&self, sel: &str) -> bool {
+        !sel.is_empty() && (self.key == sel || self.schedule_id == sel || self.legacy_key == sel)
+    }
+
+    pub fn needs_attention(&self) -> bool {
+        self.active_blocked
+            || self
+                .latest_run
+                .as_ref()
+                .is_some_and(|r| matches!(r.state.as_str(), "blocked" | "failed"))
     }
 
     pub fn timezone_label(&self) -> String {
@@ -63,6 +145,12 @@ impl ScheduleItem {
                 .map(|(_, name)| name.as_str())
                 .unwrap_or(col_id);
             format!("Card → {col_name}")
+        } else if self.starts_with_script {
+            if let Some(prof) = &self.profile_id {
+                format!("Script → @{prof}")
+            } else {
+                "Script".into()
+            }
         } else if let Some(prof) = &self.profile_id {
             format!("Terminal Agent · @{prof}")
         } else {
@@ -71,28 +159,53 @@ impl ScheduleItem {
     }
 }
 
-pub fn schedule_key(filename: &str, rule_id: &str) -> String {
-    format!("{filename}::{rule_id}")
+pub fn schedule_key(project_id: &str, filename: &str, rule_id: &str) -> String {
+    format!("{project_id}::{filename}::{rule_id}")
 }
 
-fn find_agent_step_for_rule(
+pub fn scope_display_name(s: &Snapshot, project_id: &str) -> String {
+    if is_global_project_id(project_id) {
+        "Global · Host".into()
+    } else if project_id.trim().is_empty() {
+        "All Scopes".into()
+    } else {
+        s.projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "Project".into())
+    }
+}
+
+fn find_start_mode(
     doc: &Document,
     rule: &WorkflowRule,
-) -> Option<(String, Option<String>, String)> {
-    let start = if rule.start_at.trim().is_empty() {
-        doc.steps.first().map(|s| s.id.as_str())?
+) -> (bool, Option<String>, Option<String>, String) {
+    let Some(start) = (if rule.start_at.trim().is_empty() {
+        doc.steps.first().map(|s| s.id.as_str())
     } else {
-        rule.start_at.trim()
+        Some(rule.start_at.trim())
+    }) else {
+        return (false, None, None, String::new());
     };
+    let mut starts_with_script = false;
     let mut cur = Some(start.to_owned());
-    let mut seen = std::collections::BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    let mut first = true;
     while let Some(step_id) = cur {
         if !seen.insert(step_id.clone()) {
             break;
         }
-        let idx = doc.steps.iter().position(|s| s.id == step_id)?;
+        let Some(idx) = doc.steps.iter().position(|s| s.id == step_id) else {
+            break;
+        };
         let step = &doc.steps[idx];
-        if step.kind() == "agent" {
+        let kind = step.kind();
+        if first && kind == "script" {
+            starts_with_script = true;
+        }
+        first = false;
+        if kind == "agent" {
             let profile = step
                 .with
                 .get("profile")
@@ -106,17 +219,27 @@ fn find_agent_step_for_rule(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_owned();
-            return Some((step.id.clone(), profile, instruction));
+            return (
+                starts_with_script,
+                Some(step.id.clone()),
+                profile,
+                instruction,
+            );
         }
+        // Follow failure escalation targets if this is a script -> agent chain.
         cur = step
-            .next
+            .on_failure
             .clone()
+            .or_else(|| step.next.clone())
             .or_else(|| doc.steps.get(idx + 1).map(|s| s.id.clone()));
     }
-    None
+    (starts_with_script, None, None, String::new())
 }
 
 fn project_stages(ui: Ui, project_id: &str) -> Vec<(String, String)> {
+    if is_global_project_id(project_id) {
+        return Vec::new();
+    }
     ui.snapshot.with(|s| {
         s.projects
             .iter()
@@ -139,118 +262,258 @@ fn project_stages(ui: Ui, project_id: &str) -> Vec<(String, String)> {
     })
 }
 
-/// Collects all scheduled rules across the Project's current workflow draft (or saved snapshot).
+fn collect_scope_items(
+    s: &Snapshot,
+    drafts: &BTreeMap<String, crate::workflows::Draft>,
+    scope_id: &str,
+    now_ms: u64,
+    items: &mut Vec<ScheduleItem>,
+) {
+    let draft_opt = drafts.get(scope_id);
+    let scope_name = scope_display_name(s, scope_id);
+    let sources_map: BTreeMap<String, String> = if let Some(draft) = draft_opt
+        && !draft.sources.is_empty()
+    {
+        draft.sources.clone()
+    } else {
+        crate::workflows::project_template_files_from_snapshot(s, scope_id)
+            .into_iter()
+            .map(|f| (f.filename, f.source))
+            .collect()
+    };
+
+    let mut covered_state_ids = BTreeSet::new();
+    for (filename, raw) in &sources_map {
+        let dirty = draft_opt.is_some_and(|d| crate::workflows::source_dirty(d, filename));
+        let saved_src = s
+            .workflow_sources
+            .iter()
+            .find(|ws| ws.project_id == scope_id && &ws.filename == filename);
+        let Ok(doc) = source::parse(raw) else {
+            continue;
+        };
+        let wf_id = saved_src
+            .map(|ws| ws.workflow_id.clone())
+            .unwrap_or_else(|| doc.id.clone());
+        let wf_name = if doc.name.trim().is_empty() {
+            filename.trim_end_matches(".yaml").to_owned()
+        } else {
+            doc.name.clone()
+        };
+        for (rule_id, rule) in &doc.on {
+            if !rule.is_schedule() {
+                continue;
+            }
+            let sid = format!("schedule:{scope_id}:{wf_id}:{rule_id}");
+            let persisted = s.schedule_states.iter().find(|st| {
+                st.id == sid
+                    || (st.project_id == scope_id
+                        && st.filename == *filename
+                        && st.rule_id == *rule_id)
+            });
+            if let Some(p) = persisted {
+                covered_state_ids.insert(p.id.clone());
+            }
+            let actual_sid = persisted.map(|p| p.id.clone()).unwrap_or(sid);
+            let effective_enabled = doc.enabled && rule.enabled;
+            let (starts_with_script, agent_step_id, doc_profile, agent_instruction) =
+                find_start_mode(&doc, rule);
+            let computed_next = if effective_enabled {
+                parse_schedule(rule.cron.as_deref().unwrap_or(""), rule.timezone.as_deref())
+                    .ok()
+                    .and_then(|(sched, tz)| sched.next_after_ms(now_ms, tz))
+            } else {
+                None
+            };
+            let next_run_at = if !effective_enabled {
+                None
+            } else if dirty {
+                computed_next
+            } else {
+                persisted.and_then(|p| p.next_run_at).or(computed_next)
+            };
+            let latest_run = s
+                .scheduled_runs
+                .iter()
+                .filter(|r| {
+                    r.schedule_id == actual_sid
+                        || (r.project_id == scope_id
+                            && r.filename == *filename
+                            && r.rule_id == *rule_id)
+                })
+                .max_by_key(|r| (r.scheduled_at, r.number))
+                .cloned();
+            let active_blocked = s.scheduled_runs.iter().any(|r| {
+                (r.schedule_id == actual_sid
+                    || (r.project_id == scope_id
+                        && r.filename == *filename
+                        && r.rule_id == *rule_id))
+                    && r.state == "blocked"
+            });
+
+            items.push(ScheduleItem {
+                key: schedule_key(scope_id, filename, rule_id),
+                legacy_key: format!("{filename}::{rule_id}"),
+                schedule_id: actual_sid,
+                project_id: scope_id.to_owned(),
+                scope_name: scope_name.clone(),
+                filename: (*filename).clone(),
+                workflow_id: wf_id.clone(),
+                workflow_name: wf_name.clone(),
+                workflow_enabled: doc.enabled,
+                rule_id: rule_id.clone(),
+                rule: rule.clone(),
+                effective_enabled,
+                dirty,
+                published: persisted.is_some() && !dirty,
+                starts_with_script: persisted.map_or(starts_with_script, |p| {
+                    starts_with_script || p.starts_with_script
+                }),
+                profile_id: doc_profile.or_else(|| persisted.and_then(|p| p.profile_id.clone())),
+                agent_step_id,
+                agent_instruction,
+                next_run_at,
+                last_scheduled_at: persisted.and_then(|p| p.last_scheduled_at),
+                run_count: persisted.map_or(0, |p| p.run_count),
+                queued_triggers: persisted.map_or(0, |p| p.queued_triggers),
+                latest_run,
+                active_blocked,
+            });
+        }
+    }
+
+    // Fallback for any ScheduleState present in Snapshot whose WorkflowSource isn't mapped yet.
+    for st in s
+        .schedule_states
+        .iter()
+        .filter(|st| st.project_id == scope_id && !covered_state_ids.contains(&st.id))
+    {
+        let latest_run = s
+            .scheduled_runs
+            .iter()
+            .filter(|r| r.schedule_id == st.id)
+            .max_by_key(|r| (r.scheduled_at, r.number))
+            .cloned();
+        let active_blocked = s
+            .scheduled_runs
+            .iter()
+            .any(|r| r.schedule_id == st.id && r.state == "blocked");
+        items.push(ScheduleItem {
+            key: schedule_key(scope_id, &st.filename, &st.rule_id),
+            legacy_key: format!("{}::{}", st.filename, st.rule_id),
+            schedule_id: st.id.clone(),
+            project_id: st.project_id.clone(),
+            scope_name: scope_name.clone(),
+            filename: st.filename.clone(),
+            workflow_id: st.workflow_id.clone(),
+            workflow_name: st.workflow_name.clone(),
+            workflow_enabled: true,
+            rule_id: st.rule_id.clone(),
+            rule: WorkflowRule {
+                event: "schedule".into(),
+                cron: Some(st.cron.clone()),
+                timezone: st.timezone.clone(),
+                overlap: st.overlap,
+                card: st.creates_card.then(|| ScheduleCardConfig {
+                    column: st.target_column.clone(),
+                    title: None,
+                    body: None,
+                }),
+                enabled: st.enabled,
+                ..Default::default()
+            },
+            effective_enabled: st.enabled,
+            dirty: false,
+            published: true,
+            starts_with_script: st.starts_with_script,
+            profile_id: st.profile_id.clone(),
+            agent_step_id: None,
+            agent_instruction: String::new(),
+            next_run_at: st.next_run_at,
+            last_scheduled_at: st.last_scheduled_at,
+            run_count: st.run_count,
+            queued_triggers: st.queued_triggers,
+            latest_run,
+            active_blocked,
+        });
+    }
+}
+
+/// Collects scheduled tasks for Global and/or Project scopes.
+pub fn collect_schedules(ui: Ui, scope_filter: &str) -> Vec<ScheduleItem> {
+    let drafts = ui.workflows.drafts.get();
+    ui.snapshot.with(|s| {
+        let now_ms = canban_types::now();
+        let mut items = Vec::new();
+        if scope_filter.is_empty() || is_global_project_id(scope_filter) {
+            collect_scope_items(s, &drafts, GLOBAL_PROJECT_ID, now_ms, &mut items);
+        }
+        for p in &s.projects {
+            if scope_filter.is_empty() || scope_filter == p.id {
+                collect_scope_items(s, &drafts, &p.id, now_ms, &mut items);
+            }
+        }
+        items.sort_by(|a, b| {
+            b.needs_attention()
+                .cmp(&a.needs_attention())
+                .then_with(|| b.is_global().cmp(&a.is_global()))
+                .then_with(|| a.scope_name.cmp(&b.scope_name))
+                .then_with(|| a.workflow_name.cmp(&b.workflow_name))
+                .then_with(|| a.rule_id.cmp(&b.rule_id))
+        });
+        items
+    })
+}
+
+/// Collects all scheduled rules across the currently active Project (`ui.project`).
 pub fn collect_project_schedules(ui: Ui) -> Vec<ScheduleItem> {
     let project_id = ui.project.get();
     if project_id.is_empty() {
         return Vec::new();
     }
-    let state = ui.workflows;
-    let draft_opt = state.drafts.with(|d| d.get(&project_id).cloned());
-    ui.snapshot.with(|s| {
-        let mut items = Vec::new();
-        let now_ms = canban_types::now();
-        let sources_map: BTreeMap<String, String> = if let Some(draft) = &draft_opt
-            && !draft.sources.is_empty()
-        {
-            draft.sources.clone()
-        } else {
-            super::project_template_files_from_snapshot(s, &project_id)
-                .into_iter()
-                .map(|f| (f.filename, f.source))
-                .collect()
-        };
-
-        for (filename, raw) in &sources_map {
-            let dirty = draft_opt
-                .as_ref()
-                .is_some_and(|d| source_dirty(d, filename));
-            let saved_src = s
-                .workflow_sources
-                .iter()
-                .find(|ws| ws.project_id == project_id && &ws.filename == filename);
-            let Ok(doc) = source::parse(raw) else {
-                continue;
-            };
-            let wf_id = saved_src
-                .map(|ws| ws.workflow_id.clone())
-                .unwrap_or_else(|| doc.id.clone());
-            let wf_name = if doc.name.trim().is_empty() {
-                filename.trim_end_matches(".yaml").to_owned()
-            } else {
-                doc.name.clone()
-            };
-            for (rule_id, rule) in &doc.on {
-                if !rule.is_schedule() {
-                    continue;
-                }
-                let sid = format!("schedule:{project_id}:{wf_id}:{rule_id}");
-                let persisted = s.schedule_states.iter().find(|st| {
-                    st.id == sid
-                        || (st.project_id == project_id
-                            && st.filename == *filename
-                            && st.rule_id == *rule_id)
-                });
-                let effective_enabled = doc.enabled && rule.enabled;
-                let (agent_step_id, doc_profile, agent_instruction) =
-                    match find_agent_step_for_rule(&doc, rule) {
-                        Some((id, prof, inst)) => (Some(id), prof, inst),
-                        None => (None, None, String::new()),
-                    };
-                let computed_next = if effective_enabled {
-                    parse_schedule(rule.cron.as_deref().unwrap_or(""), rule.timezone.as_deref())
-                        .ok()
-                        .and_then(|(sched, tz)| sched.next_after_ms(now_ms, tz))
-                } else {
-                    None
-                };
-                let next_run_at = if !effective_enabled {
-                    None
-                } else if dirty {
-                    computed_next
-                } else {
-                    persisted.and_then(|p| p.next_run_at).or(computed_next)
-                };
-                items.push(ScheduleItem {
-                    key: schedule_key(filename, rule_id),
-                    schedule_id: persisted.map(|p| p.id.clone()).unwrap_or(sid),
-                    project_id: project_id.clone(),
-                    filename: filename.clone(),
-                    workflow_id: wf_id.clone(),
-                    workflow_name: wf_name.clone(),
-                    workflow_enabled: doc.enabled,
-                    rule_id: rule_id.clone(),
-                    rule: rule.clone(),
-                    effective_enabled,
-                    dirty,
-                    published: persisted.is_some() && !dirty,
-                    profile_id: doc_profile
-                        .or_else(|| persisted.and_then(|p| p.profile_id.clone())),
-                    agent_step_id,
-                    agent_instruction,
-                    next_run_at,
-                    last_scheduled_at: persisted.and_then(|p| p.last_scheduled_at),
-                    run_count: persisted.map_or(0, |p| p.run_count),
-                    queued_triggers: persisted.map_or(0, |p| p.queued_triggers),
-                });
-            }
-        }
-        items
-    })
+    collect_schedules(ui, &project_id)
 }
 
 pub fn project_schedule_count(ui: Ui) -> usize {
     collect_project_schedules(ui).len()
 }
 
+pub fn attention_count(ui: Ui) -> usize {
+    collect_schedules(ui, "")
+        .into_iter()
+        .filter(ScheduleItem::needs_attention)
+        .count()
+}
+
+pub fn open(ui: Ui, scope: Option<String>, select_schedule: Option<String>) {
+    batch(move || {
+        ui.schedules.scope.set(scope.unwrap_or_default());
+        ui.schedules.status_filter.set("all".into());
+        ui.schedules.config_expanded.set(false);
+        ui.schedules.confirm_delete.set(None);
+        if let Some(sel) = select_schedule {
+            ui.schedules.selected.set(sel);
+        }
+        if ui.page.get_untracked() != "schedules" {
+            ui.navigate("schedules");
+        }
+    });
+}
+
 pub fn open_schedules(ui: Ui, select_schedule: Option<String>) {
-    ui.workflows.section.set("schedules".into());
-    if let Some(sel) = select_schedule {
-        ui.workflows.selected_schedule.set(sel);
-    }
-    if ui.page.get_untracked() != "workflows" {
-        ui.navigate("workflows");
-    }
+    let scope = select_schedule
+        .as_deref()
+        .and_then(|sel| {
+            collect_schedules(ui, "")
+                .into_iter()
+                .find(|i| i.matches_selection(sel))
+                .map(|i| i.project_id)
+        })
+        .or_else(|| {
+            let pid = ui.project.get_untracked();
+            (!pid.is_empty()).then_some(pid)
+        });
+    open(ui, scope, select_schedule);
 }
 
 fn ensure_draft_initialized(ui: Ui, project_id: &str) {
@@ -259,9 +522,9 @@ fn ensure_draft_initialized(ui: Ui, project_id: &str) {
     if has {
         return;
     }
-    let files = ui
+    let files: Vec<WorkflowTemplateFile> = ui
         .snapshot
-        .with_untracked(|s| super::project_template_files_from_snapshot(s, project_id));
+        .with_untracked(|s| crate::workflows::project_template_files_from_snapshot(s, project_id));
     if files.is_empty() {
         return;
     }
@@ -277,43 +540,14 @@ fn ensure_draft_initialized(ui: Ui, project_id: &str) {
 }
 
 pub fn new_scheduled_workflow(ui: Ui) {
-    let project = ui.project.get_untracked();
-    if project.is_empty() {
-        ui.notify("Select or create a Project first");
-        return;
-    }
-    ensure_draft_initialized(ui, &project);
-    let state = ui.workflows;
-    let default_prof = crate::sessions::default_profile(ui);
-    let prof_opt = (!default_prof.is_empty()).then_some(default_prof.as_str());
-    let mut filename = String::new();
-    state.drafts.update(|d| {
-        let draft = d.entry(project.clone()).or_default();
-        let mut n = 1usize;
-        while draft.sources.contains_key(&format!("scheduled-{n}.yaml")) {
-            n += 1;
-        }
-        filename = format!("scheduled-{n}.yaml");
-        let doc = source::default_scheduled_document(
-            format!("scheduled-{n}:{project}"),
-            format!("Scheduled Task {n}"),
-            prof_opt,
-        );
-        if let Ok(yaml) = source::encode(&doc) {
-            draft.sources.insert(filename.clone(), yaml);
-            draft.selected = filename.clone();
-        }
-    });
-    if !filename.is_empty() {
-        state.selected.set(filename.clone());
-        state.section.set("schedules".into());
-        state
-            .selected_schedule
-            .set(schedule_key(&filename, "schedule"));
-    }
-    if ui.page.get_untracked() != "workflows" {
-        ui.navigate("workflows");
-    }
+    let scope = if ui.page.get_untracked() == "schedules" {
+        let cur = ui.schedules.scope.get_untracked();
+        (!cur.is_empty()).then_some(cur)
+    } else {
+        let pid = ui.project.get_untracked();
+        (!pid.is_empty()).then_some(pid)
+    };
+    modal::open_create_modal(ui, scope);
 }
 
 pub fn add_schedule_rule_to_file(ui: Ui, filename: &str) {
@@ -324,7 +558,7 @@ pub fn add_schedule_rule_to_file(ui: Ui, filename: &str) {
     ensure_draft_initialized(ui, &project);
     let default_prof = crate::sessions::default_profile(ui);
     let mut added_rule_id = String::new();
-    mutate_workflow_file(ui, filename, |doc| {
+    mutate_workflow_file(ui, &project, filename, |doc| {
         let mut idx = 1usize;
         let mut rule_id = "schedule".to_owned();
         while doc.on.contains_key(&rule_id) {
@@ -416,22 +650,27 @@ pub fn add_schedule_rule_to_file(ui: Ui, filename: &str) {
         added_rule_id = rule_id;
     });
     if !added_rule_id.is_empty() {
-        ui.workflows.section.set("schedules".into());
-        ui.workflows
-            .selected_schedule
-            .set(schedule_key(filename, &added_rule_id));
+        open(
+            ui,
+            Some(project.clone()),
+            Some(schedule_key(&project, filename, &added_rule_id)),
+        );
     }
 }
 
-pub(super) fn mutate_workflow_file(ui: Ui, filename: &str, mutate: impl FnOnce(&mut Document)) {
+pub(crate) fn mutate_workflow_file(
+    ui: Ui,
+    project: &str,
+    filename: &str,
+    mutate: impl FnOnce(&mut Document),
+) {
     let state = ui.workflows;
-    let project = ui.project.get_untracked();
     if project.is_empty() || filename.is_empty() {
         return;
     }
-    ensure_draft_initialized(ui, &project);
+    ensure_draft_initialized(ui, project);
     let Some(raw) = state.drafts.with_untracked(|d| {
-        d.get(&project)
+        d.get(project)
             .and_then(|dr| dr.sources.get(filename))
             .cloned()
     }) else {
@@ -447,12 +686,12 @@ pub(super) fn mutate_workflow_file(ui: Ui, filename: &str, mutate: impl FnOnce(&
     if state.selected.get_untracked() == filename {
         state
             .studio_synced
-            .replace((project.clone(), filename.to_owned(), encoded.clone()));
+            .replace((project.to_owned(), filename.to_owned(), encoded.clone()));
         state.studio_error.set(String::new());
         state.studio_doc.set(Some(doc));
     }
     state.drafts.update(|d| {
-        if let Some(dr) = d.get_mut(&project) {
+        if let Some(dr) = d.get_mut(project) {
             dr.sources.insert(filename.to_owned(), encoded);
         }
     });
@@ -464,14 +703,15 @@ pub fn toggle_schedule(ui: Ui, item: &ScheduleItem, enabled: bool) {
     let filename = item.filename.clone();
     let rule_id = item.rule_id.clone();
 
-    let draft_dirty = state
-        .drafts
-        .with_untracked(|d| d.get(&project).is_some_and(Draft::needs_apply));
+    let draft_dirty = state.drafts.with_untracked(|d| {
+        d.get(&project)
+            .is_some_and(crate::workflows::Draft::needs_apply)
+    });
 
     // If there are unsaved draft edits, or this schedule has not been published yet,
     // mutate the draft directly so the user's unsaved edits are never clobbered.
     if draft_dirty || !item.published {
-        mutate_workflow_file(ui, &filename, |doc| {
+        mutate_workflow_file(ui, &project, &filename, |doc| {
             if enabled {
                 doc.enabled = true;
             }
@@ -483,7 +723,7 @@ pub fn toggle_schedule(ui: Ui, item: &ScheduleItem, enabled: bool) {
     }
 
     if crate::APP.get().is_none() {
-        mutate_workflow_file(ui, &filename, |doc| {
+        mutate_workflow_file(ui, &project, &filename, |doc| {
             if enabled {
                 doc.enabled = true;
             }
@@ -533,7 +773,7 @@ pub fn toggle_schedule(ui: Ui, item: &ScheduleItem, enabled: bool) {
         }),
         move |res| match res {
             Ok(_) => {
-                super::load(ui, true);
+                crate::workflows::load(ui, true);
                 ui.notify(if enabled {
                     "Schedule enabled"
                 } else {
@@ -541,7 +781,65 @@ pub fn toggle_schedule(ui: Ui, item: &ScheduleItem, enabled: bool) {
                 });
             }
             Err(e) => {
-                state.error.set(e);
+                ui.schedules.error.set(e);
+                ui.operation_error.set(String::new());
+            }
+        },
+    );
+}
+
+pub fn delete_schedule(ui: Ui, item: &ScheduleItem) {
+    let project = item.project_id.clone();
+    let filename = item.filename.clone();
+    let rule_id = item.rule_id.clone();
+    let sid = item.schedule_id.clone();
+    ui.schedules.confirm_delete.set(None);
+
+    if crate::APP.get().is_none() || !item.published {
+        let mut empty_doc = false;
+        mutate_workflow_file(ui, &project, &filename, |doc| {
+            doc.on.remove(&rule_id);
+            empty_doc = doc.on.is_empty();
+        });
+        ui.workflows.drafts.update(|d| {
+            if let Some(dr) = d.get_mut(&project)
+                && empty_doc
+                && (is_global_project_id(&project) || dr.sources.len() > 1)
+            {
+                dr.sources.remove(&filename);
+                if dr.selected == filename {
+                    dr.selected = dr.sources.keys().next().cloned().unwrap_or_default();
+                }
+            }
+        });
+        ui.snapshot.update(|s| {
+            s.schedule_states.retain(|st| st.id != sid);
+            if empty_doc {
+                s.workflow_sources
+                    .retain(|ws| !(ws.project_id == project && ws.filename == filename));
+            }
+        });
+        ui.notify("Scheduled task removed");
+        return;
+    }
+
+    dispatch_complete(
+        ui,
+        "schedule.delete",
+        json!({
+            "schedule_id": sid,
+            "project_id": project,
+            "filename": filename,
+            "rule_id": rule_id,
+        }),
+        move |res| match res {
+            Ok(_) => {
+                ui.schedules.selected.set(String::new());
+                crate::workflows::load(ui, true);
+                ui.notify("Scheduled task deleted");
+            }
+            Err(e) => {
+                ui.schedules.error.set(e);
                 ui.operation_error.set(String::new());
             }
         },
@@ -551,9 +849,10 @@ pub fn toggle_schedule(ui: Ui, item: &ScheduleItem, enabled: bool) {
 pub fn trigger_schedule(ui: Ui, item: &ScheduleItem) {
     let state = ui.workflows;
     let project = item.project_id.clone();
-    let has_unsaved = state
-        .drafts
-        .with_untracked(|d| d.get(&project).is_some_and(Draft::needs_apply));
+    let has_unsaved = state.drafts.with_untracked(|d| {
+        d.get(&project)
+            .is_some_and(crate::workflows::Draft::needs_apply)
+    });
     if has_unsaved || !item.published {
         ui.notify(format!(
             "Save workflow changes first ({}) before running this schedule",
@@ -700,6 +999,7 @@ pub fn trigger_schedule(ui: Ui, item: &ScheduleItem) {
                     report_path: None,
                     output_path: None,
                     error: None,
+                    steps: Vec::new(),
                     scheduled_at: now_ms,
                     started_at: Some(now_ms),
                     completed_at: None,
@@ -732,7 +1032,7 @@ pub fn trigger_schedule(ui: Ui, item: &ScheduleItem) {
                 }
             }
             Err(e) => {
-                state.error.set(e);
+                ui.schedules.error.set(e);
                 ui.operation_error.set(String::new());
             }
         },
@@ -740,11 +1040,8 @@ pub fn trigger_schedule(ui: Ui, item: &ScheduleItem) {
 }
 
 pub fn trigger_schedule_by_id(ui: Ui, schedule_id: &str) {
-    let items = collect_project_schedules(ui);
-    if let Some(item) = items
-        .iter()
-        .find(|i| i.schedule_id == schedule_id || i.key == schedule_id)
-    {
+    let items = collect_schedules(ui, "");
+    if let Some(item) = items.iter().find(|i| i.matches_selection(schedule_id)) {
         trigger_schedule(ui, item);
         return;
     }
@@ -758,11 +1055,8 @@ pub fn trigger_schedule_by_id(ui: Ui, schedule_id: &str) {
 }
 
 pub fn toggle_schedule_by_id(ui: Ui, schedule_id: &str) {
-    let items = collect_project_schedules(ui);
-    if let Some(item) = items
-        .iter()
-        .find(|i| i.schedule_id == schedule_id || i.key == schedule_id)
-    {
+    let items = collect_schedules(ui, "");
+    if let Some(item) = items.iter().find(|i| i.matches_selection(schedule_id)) {
         toggle_schedule(ui, item, !item.effective_enabled);
         return;
     }
@@ -783,8 +1077,8 @@ pub fn toggle_schedule_by_id(ui: Ui, schedule_id: &str) {
     }
 }
 
-pub(super) fn offline_save_schedules(ui: Ui, project_id: &str) {
-    let items = collect_project_schedules(ui);
+pub(crate) fn offline_save_schedules(ui: Ui, project_id: &str) {
+    let items = collect_schedules(ui, project_id);
     let now_ms = canban_types::now();
     let stages = project_stages(ui, project_id);
     ui.snapshot.update(|s| {
@@ -819,6 +1113,7 @@ pub(super) fn offline_save_schedules(ui: Ui, project_id: &str) {
                 timezone: item.rule.timezone,
                 overlap: item.rule.overlap,
                 creates_card: item.rule.card.is_some(),
+                starts_with_script: item.starts_with_script,
                 target_column,
                 profile_id: item.profile_id,
                 enabled: item.effective_enabled,
@@ -833,7 +1128,7 @@ pub(super) fn offline_save_schedules(ui: Ui, project_id: &str) {
     });
 }
 
-fn format_run_ts(ts: u64, tz_raw: Option<&str>) -> String {
+pub(crate) fn format_run_ts(ts: u64, tz_raw: Option<&str>) -> String {
     let tz = CronTimeZone::parse(tz_raw).unwrap_or(CronTimeZone::Local);
     tz.format_timestamp(ts).1
 }
@@ -854,7 +1149,7 @@ fn run_label(state: &str) -> &'static str {
         "running" | "working" => "Running",
         "starting" => "Starting",
         "queued" => "Queued",
-        "blocked" => "Blocked",
+        "blocked" => "Needs you",
         "skipped" => "Skipped",
         "failed" => "Failed",
         "cancelled" => "Cancelled",
@@ -864,14 +1159,14 @@ fn run_label(state: &str) -> &'static str {
 }
 
 fn open_run_artifact(ui: Ui, run: &ScheduledRun, path: Option<&str>, title: String) {
-    let state = ui.workflows;
+    let s = ui.schedules;
     if crate::APP.get().is_none() || path.is_none() {
         let body = run
             .summary
             .clone()
             .or_else(|| run.error.clone())
             .unwrap_or_else(|| "No report text was recorded for this scheduled run.".into());
-        state.schedule_artifact.set(Some((title, body)));
+        s.artifact.set(Some((title, body)));
         return;
     }
     let run_id = run.id.clone();
@@ -892,58 +1187,295 @@ fn open_run_artifact(ui: Ui, run: &ScheduledRun, path: Option<&str>, title: Stri
                     .as_str()
                     .map(str::to_owned)
                     .unwrap_or_else(|| fallback.clone());
-                state.schedule_artifact.set(Some((title, body)));
+                s.artifact.set(Some((title, body)));
             }
             Ok(Err(e)) => {
                 if !fallback.is_empty() {
-                    state.schedule_artifact.set(Some((title, fallback)));
+                    s.artifact.set(Some((title, fallback)));
                 } else {
-                    state.error.set(format!("{e:#}"));
+                    s.error.set(format!("{e:#}"));
                 }
             }
-            Err(e) => state.error.set(e.to_string()),
+            Err(e) => s.error.set(e.to_string()),
         }
     });
 }
 
+fn filter_matches(item: &ScheduleItem, status_filter: &str) -> bool {
+    match status_filter {
+        "attention" => item.needs_attention(),
+        "active" => item.effective_enabled,
+        "paused" => !item.effective_enabled,
+        _ => true,
+    }
+}
+
+pub fn chrome_bar(ui: Ui) -> View {
+    let s = ui.schedules;
+    let scope_label = computed(move || {
+        let scope = s.scope.get();
+        ui.snapshot.with(|snap| scope_display_name(snap, &scope))
+    });
+    let attention_total = computed(move || attention_count(ui));
+    let all_items = computed(move || collect_schedules(ui, ""));
+
+    let scope_picker = search_popover(
+        press_target()
+            .h(px(28.))
+            .px_2p5()
+            .rounded(px(6.))
+            .border_1()
+            .border_color(BORDER)
+            .bg(INSET)
+            .hover(|st| st.bg(CARD_HOVER))
+            .focus(|st| st.border_color(ACCENT))
+            .active(|st| st.opacity(0.75))
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .accessibility_label(move || {
+                Some(format!("Schedule scope: {}", scope_label.get()).into())
+            })
+            .child(icon(Icon::Projects).w(px(13.)).h(px(13.)))
+            .child(
+                label(move || scope_label.get())
+                    .text_size(px(CAPTION_SIZE))
+                    .font_weight(FontWeight::MEDIUM)
+                    .max_w(px(180.))
+                    .truncate(),
+            )
+            .child(icon(Icon::ChevronDown).w(px(11.)).h(px(11.))),
+        move || {
+            let cur = s.scope.get();
+            let list = all_items.get();
+            let total_n = list.len();
+            let global_n = list.iter().filter(|i| i.is_global()).count();
+            ui.snapshot.with(|snap| {
+                let mut opts = Vec::with_capacity(snap.projects.len() + 2);
+                opts.push(
+                    PickerOption::new(ALL_SCOPES_OPTION, "All Scopes")
+                        .detail(format!("{total_n} total"))
+                        .icon(Icon::Projects)
+                        .selected(cur.is_empty()),
+                );
+                opts.push(
+                    PickerOption::new(GLOBAL_PROJECT_ID, "Global · Host")
+                        .detail(format!("{global_n} host tasks"))
+                        .icon(Icon::Server)
+                        .selected(is_global_project_id(&cur)),
+                );
+                for p in &snap.projects {
+                    let pn = list.iter().filter(|i| i.project_id == p.id).count();
+                    opts.push(
+                        PickerOption::new(p.id.clone(), p.name.clone())
+                            .group("Projects")
+                            .detail(format!("{pn} scheduled"))
+                            .icon(Icon::Folder)
+                            .selected(cur == p.id),
+                    );
+                }
+                opts
+            })
+        },
+        move |picked| {
+            if picked == ALL_SCOPES_OPTION {
+                s.scope.set(String::new());
+            } else {
+                s.scope.set(picked);
+            }
+        },
+    )
+    .placeholder("Filter Schedules by Scope…");
+
+    let status_seg = segmented()
+        .child(compact_segment(
+            "All",
+            None,
+            move || s.status_filter.get() == "all",
+            move |_| s.status_filter.set("all".into()),
+        ))
+        .child(
+            compact_segment(
+                "Attention",
+                None,
+                move || s.status_filter.get() == "attention",
+                move |_| s.status_filter.set("attention".into()),
+            )
+            .child(when(
+                move || attention_total.get() > 0,
+                move || reminder_count(move || attention_total.get(), || true),
+            )),
+        )
+        .child(compact_segment(
+            "Active",
+            None,
+            move || s.status_filter.get() == "active",
+            move |_| s.status_filter.set("active".into()),
+        ))
+        .child(compact_segment(
+            "Paused",
+            None,
+            move || s.status_filter.get() == "paused",
+            move |_| s.status_filter.set("paused".into()),
+        ));
+
+    view()
+        .flex_1()
+        .min_w(px(0.))
+        .h_full()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .pl_2()
+        .window_drag(true)
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .min_w(px(0.))
+                .window_drag(false)
+                .child(icon_tinted(Icon::Clock, ACCENT).w(px(15.)).h(px(15.)))
+                .child(
+                    label("Schedules")
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(13.5)),
+                )
+                .child(scope_picker)
+                .child(status_seg),
+        )
+        .child(view().flex_1().h_full().window_drag(true))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .window_drag(false)
+                .child(compact_action(
+                    "Describe with agent",
+                    Variant::Secondary,
+                    move |_| {
+                        let scope = s.scope.get_untracked();
+                        modal::describe_with_agent(ui, scope, None);
+                    },
+                ))
+                .child(action_with_icon(
+                    Icon::Plus,
+                    "New schedule",
+                    Variant::Primary,
+                    move |_| new_scheduled_workflow(ui),
+                )),
+        )
+}
+
+pub fn screen(ui: Ui) -> AnyElement {
+    let s = ui.schedules;
+    view()
+        .flex_1()
+        .min_h(px(0.))
+        .min_w(px(0.))
+        .p_5()
+        .gap_3()
+        .child(when(
+            move || !s.error.get().is_empty(),
+            move || notice(move || s.error.get(), Tone::Attention),
+        ))
+        .child(render(ui))
+        .into_element()
+}
+
 pub fn render(ui: Ui) -> AnyElement {
-    let state = ui.workflows;
-    let items = computed(move || collect_project_schedules(ui));
-    let stages = computed(move || {
-        let pid = ui.project.get();
-        project_stages(ui, &pid)
+    let s = ui.schedules;
+    let scoped_items = computed(move || {
+        let scope = s.scope.get();
+        collect_schedules(ui, &scope)
+    });
+    let filtered_items = computed(move || {
+        let status = s.status_filter.get();
+        scoped_items
+            .get()
+            .into_iter()
+            .filter(|it| filter_matches(it, &status))
+            .collect::<Vec<_>>()
     });
 
-    // Keep `selected_schedule` pointed at a valid schedule item when available.
     effect(move || {
-        let list = items.get();
-        let cur = state.selected_schedule.get_untracked();
+        let list = filtered_items.get();
+        let cur = s.selected.get_untracked();
         if list.is_empty() {
             return;
         }
-        let matches_cur = list.iter().any(|i| i.key == cur || i.schedule_id == cur);
-        if !matches_cur {
-            state.selected_schedule.set(list[0].key.clone());
+        if !list.iter().any(|i| i.matches_selection(&cur)) {
+            s.selected.set(list[0].key.clone());
         }
     });
 
     let selected_item = computed(move || {
-        let cur = state.selected_schedule.get();
-        let list = items.get();
-        list.into_iter()
-            .find(|i| i.key == cur || i.schedule_id == cur)
+        let cur = s.selected.get();
+        filtered_items
+            .get()
+            .into_iter()
+            .find(|i| i.matches_selection(&cur))
     });
+
+    let selected_dirty = computed(move || selected_item.get().is_some_and(|i| i.dirty));
 
     view()
         .flex_1()
         .min_h(px(0.))
         .min_w(px(0.))
+        .gap_3()
         .child(when(
-            move || items.with(Vec::is_empty),
+            move || selected_dirty.get(),
+            move || {
+                let item = selected_item.get();
+                let pid = item
+                    .as_ref()
+                    .map(|i| i.project_id.clone())
+                    .unwrap_or_default();
+                let scope_lbl = item
+                    .as_ref()
+                    .map(|i| i.scope_name.clone())
+                    .unwrap_or_default();
+                view()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .p_2p5()
+                    .rounded(px(RADIUS))
+                    .bg(SURFACE)
+                    .border_1()
+                    .border_color(ACCENT)
+                    .child(muted(format!(
+                        "Unsaved configuration edits for {scope_lbl}. Save before running."
+                    )))
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(compact_action("Discard", Variant::Quiet, {
+                                let p = pid.clone();
+                                move |_| {
+                                    ui.workflows.drafts.update(|d| {
+                                        d.remove(&p);
+                                    });
+                                }
+                            }))
+                            .child(compact_action("Save Changes", Variant::Primary, {
+                                let p = pid;
+                                move |_| save_scope_draft(ui, &p)
+                            })),
+                    )
+            },
+        ))
+        .child(when(
+            move || filtered_items.with(Vec::is_empty),
             move || empty_state(ui),
         ))
         .child(when(
-            move || !items.with(Vec::is_empty),
+            move || !filtered_items.with(Vec::is_empty),
             move || {
                 view()
                     .flex_1()
@@ -951,10 +1483,11 @@ pub fn render(ui: Ui) -> AnyElement {
                     .min_w(px(0.))
                     .flex_row()
                     .gap_4()
-                    .child(master_list(ui, items, stages))
+                    .child(master_list(ui, filtered_items))
                     .child(dynamic(move || {
                         if let Some(item) = selected_item.get() {
-                            detail_pane(ui, item, stages.get())
+                            let stages = project_stages(ui, &item.project_id);
+                            detail_pane(ui, item, stages)
                         } else {
                             view()
                                 .flex_1()
@@ -967,14 +1500,76 @@ pub fn render(ui: Ui) -> AnyElement {
             },
         ))
         .child(when(
-            move || state.schedule_artifact.get().is_some(),
+            move || s.artifact.get().is_some(),
             move || artifact_dialog(ui),
+        ))
+        .child(when(
+            move || s.create_modal.get(),
+            move || modal::create_modal(ui),
+        ))
+        .child(when(
+            move || s.yaml_open.get(),
+            move || modal::yaml_modal(ui),
+        ))
+        .child(when(
+            move || s.agent_open.get(),
+            move || modal::agent_modal(ui),
         ))
         .into_element()
 }
 
+fn save_scope_draft(ui: Ui, scope_id: &str) {
+    if crate::APP.get().is_none() {
+        offline_save_schedules(ui, scope_id);
+        ui.workflows.drafts.update(|d| {
+            if let Some(dr) = d.get_mut(scope_id) {
+                dr.base = json!({ "revision": "gallery", "sources": dr.inputs() });
+            }
+        });
+        ui.notify("Schedules saved");
+        return;
+    }
+    let Some(inputs) = ui
+        .workflows
+        .drafts
+        .with_untracked(|d| d.get(scope_id).map(crate::workflows::Draft::inputs))
+    else {
+        return;
+    };
+    let pid = scope_id.to_owned();
+    let remove_pid = scope_id.to_owned();
+    ui.spawn(async move {
+        let res = blocking(move || {
+            let col = crate::routed_call("workflow.sources", json!({"project_id": pid}), None)?;
+            let rev = col["revision"].as_str().unwrap_or("").to_owned();
+            crate::routed_call(
+                "workflow.apply",
+                json!({
+                    "project_id": pid,
+                    "revision": rev,
+                    "sources": inputs,
+                    "request_key": canban_types::id(),
+                }),
+                None,
+            )
+        })
+        .await;
+        match res {
+            Ok(Ok(_)) => {
+                ui.workflows.drafts.update(|d| {
+                    d.remove(&remove_pid);
+                });
+                ui.notify("Scheduled workflow published");
+            }
+            Ok(Err(e)) => ui.schedules.error.set(format!("{e:#}")),
+            Err(e) => ui.schedules.error.set(e.to_string()),
+        }
+    });
+}
+
 fn empty_state(ui: Ui) -> impl IntoElement {
-    let state = ui.workflows;
+    let scope = ui.schedules.scope.get();
+    let status = ui.schedules.status_filter.get();
     panel()
         .flex_1()
         .min_h(px(0.))
@@ -984,11 +1579,17 @@ fn empty_state(ui: Ui) -> impl IntoElement {
         .border_1()
         .border_color(BORDER)
         .child(tone_icon_badge(Icon::Clock, Tone::Info, false))
-        .child(heading("No Scheduled Tasks Configured"))
+        .child(heading(if status == "attention" {
+            "No Schedules Need Attention"
+        } else {
+            "No Scheduled Tasks Configured"
+        }))
         .child(
-            muted(
-                "Configure GitHub Actions-style cron triggers in Workflow YAML to launch periodic Terminal Agents or automatically create scheduled Cards.",
-            )
+            muted(if status == "attention" {
+                "No scheduled runs are currently blocked waiting for input or failed."
+            } else {
+                "Create Global host automation (like 7-day merged worktree cleanup) or Project-scoped cron workflows from here."
+            })
             .max_w(px(520.)),
         )
         .child(
@@ -997,39 +1598,25 @@ fn empty_state(ui: Ui) -> impl IntoElement {
                 .flex_wrap()
                 .items_center()
                 .gap_2()
-                .child(
-                    action_with_icon(
-                        Icon::Plus,
-                        "New scheduled workflow",
-                        Variant::Primary,
-                        move |_| new_scheduled_workflow(ui),
-                    )
-                    .disabled(move || ui.pending.get() || state.loading.get()),
-                )
+                .child(action_with_icon(
+                    Icon::Plus,
+                    "New scheduled workflow",
+                    Variant::Primary,
+                    move |_| new_scheduled_workflow(ui),
+                ))
                 .child(when(
-                    move || !state.selected.get().is_empty(),
+                    move || !scope.is_empty() && !is_global_project_id(&scope),
                     move || {
-                        let sel = state.selected.get();
-                        action_with_icon(
-                            Icon::Clock,
-                            format!("Add schedule to {sel}"),
-                            Variant::Secondary,
-                            move |_| {
-                                let cur = state.selected.get_untracked();
-                                add_schedule_rule_to_file(ui, &cur);
-                            },
-                        )
+                        compact_action("Show All Scopes", Variant::Secondary, move |_| {
+                            ui.schedules.scope.set(String::new());
+                        })
                     },
                 )),
         )
 }
 
-fn master_list(
-    ui: Ui,
-    items: Memo<Vec<ScheduleItem>>,
-    stages: Memo<Vec<(String, String)>>,
-) -> impl IntoElement {
-    let state = ui.workflows;
+fn master_list(ui: Ui, items: Memo<Vec<ScheduleItem>>) -> impl IntoElement {
+    let s = ui.schedules;
     view()
         .w(px(330.))
         .flex_shrink_0()
@@ -1045,12 +1632,11 @@ fn master_list(
                     label(move || format!("Scheduled Tasks ({})", items.with(Vec::len)))
                         .font_weight(FontWeight::SEMIBOLD),
                 )
-                .child(
-                    compact_action("+ New schedule", Variant::Secondary, move |_| {
-                        new_scheduled_workflow(ui);
-                    })
-                    .disabled(move || ui.pending.get() || state.loading.get()),
-                ),
+                .child(compact_action(
+                    "+ New schedule",
+                    Variant::Secondary,
+                    move |_| new_scheduled_workflow(ui),
+                )),
         )
         .child(
             scroll()
@@ -1058,17 +1644,30 @@ fn master_list(
                 .min_h(px(0.))
                 .child(view().gap_2().pr_1().child(each(
                     move || items.get(),
-                    |item| item.key.clone(),
+                    |item| {
+                        format!(
+                            "{}:{}:{}:{}",
+                            item.key,
+                            item.effective_enabled,
+                            item.active_blocked,
+                            item.latest_run.as_ref().map_or("", |r| r.state.as_str())
+                        )
+                    },
                     move |item_sig, _| {
                         let key = item_sig.with_untracked(|i| i.key.clone());
                         let sid = item_sig.with_untracked(|i| i.schedule_id.clone());
+                        let lkey = item_sig.with_untracked(|i| i.legacy_key.clone());
                         let select_key = key.clone();
                         let card_key = key.clone();
                         let card_sid = sid.clone();
+                        let card_lkey = lkey;
                         let is_selected = computed(move || {
-                            let cur = state.selected_schedule.get();
-                            cur == card_key || cur == card_sid
+                            let cur = s.selected.get();
+                            cur == card_key || cur == card_sid || cur == card_lkey
                         });
+                        let item_stages =
+                            project_stages(ui, &item_sig.with_untracked(|i| i.project_id.clone()));
+
                         press_target()
                             .w_full()
                             .p_3()
@@ -1077,13 +1676,14 @@ fn master_list(
                             .border_1()
                             .border_color(move || if is_selected.get() { ACCENT } else { BORDER })
                             .bg(move || if is_selected.get() { SELECTED } else { SURFACE })
-                            .hover(|s| s.border_color(ACCENT))
+                            .hover(|st| st.border_color(ACCENT))
                             .selected(move || is_selected.get())
                             .accessibility_label(move || {
                                 item_sig.with(|it| {
                                     Some(
                                         format!(
-                                            "{} · {} · {}",
+                                            "{} · {} · {} · {}",
+                                            it.scope_name,
                                             it.workflow_name,
                                             it.cron_str(),
                                             if it.effective_enabled {
@@ -1097,33 +1697,24 @@ fn master_list(
                                 })
                             })
                             .on_press(move || {
-                                let filename = item_sig.with_untracked(|i| i.filename.clone());
-                                let project = ui.project.get_untracked();
-                                state.drafts.update(|d| {
-                                    if let Some(dr) = d.get_mut(&project) {
-                                        dr.selected = filename.clone();
-                                    }
-                                });
-                                state.selected.set(filename);
-                                state.selected_schedule.set(select_key.clone());
+                                s.confirm_delete.set(None);
+                                s.selected.set(select_key.clone());
                             })
                             .child(
                                 view()
                                     .flex_row()
                                     .items_center()
-                                    .gap_2()
+                                    .gap_1p5()
                                     .min_w(px(0.))
-                                    .child(
-                                        icon_tinted(Icon::Clock, move || {
-                                            if item_sig.with(|i| i.effective_enabled) {
-                                                ACCENT
+                                    .child(badge(move || {
+                                        item_sig.with(|i| {
+                                            if i.is_global() {
+                                                "Global".to_owned()
                                             } else {
-                                                MUTED
+                                                i.scope_name.clone()
                                             }
                                         })
-                                        .w(px(15.))
-                                        .h(px(15.)),
-                                    )
+                                    }))
                                     .child(
                                         label(move || {
                                             item_sig.with(|i| {
@@ -1145,14 +1736,24 @@ fn master_list(
                                     )
                                     .child(dynamic(move || {
                                         let enabled = item_sig.with(|i| i.effective_enabled);
-                                        let active_run = ui.snapshot.with(|s| {
-                                            let sid = item_sig.with(|i| i.schedule_id.clone());
-                                            s.scheduled_runs
-                                                .iter()
-                                                .any(|r| r.schedule_id == sid && r.active())
+                                        let blocked = item_sig.with(|i| i.active_blocked);
+                                        let latest_failed = item_sig.with(|i| {
+                                            i.latest_run
+                                                .as_ref()
+                                                .is_some_and(|r| r.state == "failed")
                                         });
-                                        if active_run {
+                                        let active_run = ui.snapshot.with(|snap| {
+                                            let s_id = item_sig.with(|i| i.schedule_id.clone());
+                                            snap.scheduled_runs
+                                                .iter()
+                                                .any(|r| r.schedule_id == s_id && r.active())
+                                        });
+                                        if blocked {
+                                            live_status("Needs you", Tone::Attention).into_element()
+                                        } else if active_run {
                                             live_status("Running", Tone::Info).into_element()
+                                        } else if latest_failed {
+                                            status("Failed", Tone::Danger).into_element()
                                         } else if enabled {
                                             status("Active", Tone::Success).into_element()
                                         } else {
@@ -1176,9 +1777,9 @@ fn master_list(
                                             }
                                         })
                                     }))
-                                    .child(badge(move || {
-                                        let stg = stages.get();
-                                        item_sig.with(|i| i.mode_badge_text(&stg))
+                                    .child(badge({
+                                        let stg = item_stages.clone();
+                                        move || item_sig.with(|i| i.mode_badge_text(&stg))
                                     })),
                             )
                             .child(
@@ -1209,6 +1810,7 @@ fn detail_pane(ui: Ui, item: ScheduleItem, stages: Vec<(String, String)>) -> Any
     let schedule_id = item.schedule_id.clone();
     let item_for_toggle = item.clone();
     let item_for_run = item.clone();
+    let item_for_del = item.clone();
 
     let cron_validation = parse_schedule(item.cron_str(), item.rule.timezone.as_deref());
     let cron_error = cron_validation.as_ref().err().cloned();
@@ -1223,6 +1825,12 @@ fn detail_pane(ui: Ui, item: ScheduleItem, stages: Vec<(String, String)>) -> Any
             .iter()
             .find(|r| r.schedule_id == schedule_id && r.active())
             .and_then(|r| r.terminal_id.clone())
+    });
+    let blocked_run = ui.snapshot.with(|s| {
+        s.scheduled_runs
+            .iter()
+            .find(|r| r.schedule_id == schedule_id && r.state == "blocked")
+            .cloned()
     });
 
     let runs = computed({
@@ -1251,6 +1859,16 @@ fn detail_pane(ui: Ui, item: ScheduleItem, stages: Vec<(String, String)>) -> Any
         }
     });
 
+    let item_cfg = item.clone();
+    let cfg_desc = cron_desc.clone();
+    let cfg_next = next_preview.clone();
+    let cfg_cron_label = format!(
+        "{} · {} · {}",
+        item.cron_str(),
+        item.timezone_label(),
+        cron_desc
+    );
+
     scroll()
         .flex_1()
         .min_h(px(0.))
@@ -1264,32 +1882,133 @@ fn detail_pane(ui: Ui, item: ScheduleItem, stages: Vec<(String, String)>) -> Any
                     &item,
                     item_for_toggle,
                     item_for_run,
+                    item_for_del,
                     active_terminal_id,
+                    &cron_desc,
+                    next_preview.as_deref(),
                 ))
-                .child(config_panel(
-                    ui,
-                    &item,
-                    &stages,
-                    cron_error,
-                    cron_desc,
-                    next_preview,
-                ))
-                .child(history_panel_section(ui, &item, runs)),
+                .child(if let Some(br) = blocked_run {
+                    let msg = br.summary.clone().unwrap_or_else(|| {
+                        "This scheduled run is waiting for your input in Terminal.".into()
+                    });
+                    let tid = br.terminal_id.unwrap_or_else(|| br.id.clone());
+                    panel()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .border_1()
+                        .border_color(ACCENT)
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .min_w(px(0.))
+                                .flex_1()
+                                .child(tone_icon_badge(Icon::CirclePause, Tone::Attention, true))
+                                .child(
+                                    view()
+                                        .gap_0p5()
+                                        .min_w(px(0.))
+                                        .flex_1()
+                                        .child(
+                                            label(format!("Run #{} needs your input", br.number))
+                                                .font_weight(FontWeight::SEMIBOLD),
+                                        )
+                                        .child(muted(msg)),
+                                ),
+                        )
+                        .child(action_with_icon(
+                            Icon::Terminal,
+                            "Open Live Terminal →",
+                            Variant::Primary,
+                            move |_| ui.open_terminal(tid.clone()),
+                        ))
+                        .into_element()
+                } else {
+                    view().into_element()
+                })
+                .child(history_panel_section(ui, &item, runs))
+                .child(
+                    view()
+                        .gap_2()
+                        .child(
+                            press_target()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .p_2p5()
+                                .rounded(px(RADIUS))
+                                .bg(SURFACE)
+                                .border_1()
+                                .border_color(BORDER)
+                                .hover(|st| st.border_color(ACCENT))
+                                .on_press(move || {
+                                    ui.schedules
+                                        .config_expanded
+                                        .set(!ui.schedules.config_expanded.get_untracked());
+                                })
+                                .child(
+                                    view()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(icon(Icon::Edit).w(px(14.)).h(px(14.)))
+                                        .child(
+                                            label("Configuration & Schedule Rules")
+                                                .font_weight(FontWeight::SEMIBOLD),
+                                        )
+                                        .child(muted(cfg_cron_label)),
+                                )
+                                .child(label(move || {
+                                    if ui.schedules.config_expanded.get() {
+                                        "▾ Hide"
+                                    } else {
+                                        "▸ Edit"
+                                    }
+                                })),
+                        )
+                        .child(when(move || ui.schedules.config_expanded.get(), {
+                            let item_inner = item_cfg.clone();
+                            let stages_inner = stages.clone();
+                            let err_inner = cron_error.clone();
+                            let desc_inner = cfg_desc.clone();
+                            let next_inner = cfg_next.clone();
+                            move || {
+                                config_panel(
+                                    ui,
+                                    &item_inner,
+                                    &stages_inner,
+                                    err_inner.clone(),
+                                    desc_inner.clone(),
+                                    next_inner.clone(),
+                                )
+                            }
+                        })),
+                ),
         )
         .into_element()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn detail_header_card(
     ui: Ui,
     item: &ScheduleItem,
     item_for_toggle: ScheduleItem,
     item_for_run: ScheduleItem,
+    item_for_del: ScheduleItem,
     active_terminal_id: Option<String>,
+    cron_desc: &str,
+    next_preview: Option<&str>,
 ) -> impl IntoElement {
-    let state = ui.workflows;
     let filename = item.filename.clone();
     let filename_yaml = item.filename.clone();
     let filename_studio = item.filename.clone();
+    let scope_id_yaml = item.project_id.clone();
+    let scope_id_studio = item.project_id.clone();
+    let is_global = item.is_global();
     let enabled = item.effective_enabled;
     let wf_name = item.workflow_name.clone();
     let rule_id = item.rule_id.clone();
@@ -1297,6 +2016,23 @@ fn detail_header_card(
     let published = item.published;
     let queued = item.queued_triggers;
     let run_count = item.run_count;
+    let sid_del = item.schedule_id.clone();
+    let sid_del_confirm = item.schedule_id.clone();
+
+    let subtitle = if let Some(next_str) = next_preview {
+        format!(
+            "{cron_desc} · Next: {next_str} ({}) · {run_count} total run{}{}",
+            item.timezone_label(),
+            if run_count == 1 { "" } else { "s" },
+            if queued > 0 { " · 1 queued" } else { "" }
+        )
+    } else {
+        format!(
+            "{cron_desc} · {run_count} total run{}{}",
+            if run_count == 1 { "" } else { "s" },
+            if queued > 0 { " · 1 queued" } else { "" }
+        )
+    };
 
     panel().gap_2p5().border_1().border_color(BORDER).child(
         view()
@@ -1313,8 +2049,14 @@ fn detail_header_card(
                     .min_w(px(0.))
                     .child(tone_icon_badge(
                         Icon::Clock,
-                        if enabled { Tone::Info } else { Tone::Neutral },
-                        false,
+                        if item.active_blocked {
+                            Tone::Attention
+                        } else if enabled {
+                            Tone::Info
+                        } else {
+                            Tone::Neutral
+                        },
+                        item.active_blocked,
                     ))
                     .child(
                         view()
@@ -1323,8 +2065,10 @@ fn detail_header_card(
                             .child(
                                 view()
                                     .flex_row()
+                                    .flex_wrap()
                                     .items_center()
                                     .gap_2()
+                                    .child(badge(item.scope_name.clone()))
                                     .child(heading(if rule_id == "schedule" {
                                         wf_name.clone()
                                     } else {
@@ -1339,15 +2083,7 @@ fn detail_header_card(
                                         status("Paused", Tone::Neutral)
                                     }),
                             )
-                            .child(muted(format!(
-                                "{run_count} total run{}{}",
-                                if run_count == 1 { "" } else { "s" },
-                                if queued > 0 {
-                                    " · 1 queued overlap trigger"
-                                } else {
-                                    ""
-                                }
-                            ))),
+                            .child(muted(subtitle)),
                     ),
             )
             .child(
@@ -1376,33 +2112,55 @@ fn detail_header_card(
                             trigger_schedule(ui, &item_for_run)
                         })
                         .disabled(move || {
-                            ui.is_method_pending("schedule.trigger")
-                                || state.loading.get()
-                                || dirty
-                                || !published
+                            ui.is_method_pending("schedule.trigger") || dirty || !published
                         }),
                     )
-                    .child(compact_action("Open Studio", Variant::Quiet, move |_| {
-                        let p = ui.project.get_untracked();
-                        state.drafts.update(|d| {
-                            if let Some(dr) = d.get_mut(&p) {
-                                dr.selected = filename_studio.clone();
-                            }
-                        });
-                        state.selected.set(filename_studio.clone());
-                        state.mode.set("visual".into());
-                        state.section.set("workflows".into());
+                    .child(compact_action("Edit YAML", Variant::Quiet, move |_| {
+                        modal::open_yaml_editor(ui, scope_id_yaml.clone(), filename_yaml.clone());
                     }))
-                    .child(compact_action("YAML", Variant::Quiet, move |_| {
-                        let p = ui.project.get_untracked();
-                        state.drafts.update(|d| {
-                            if let Some(dr) = d.get_mut(&p) {
-                                dr.selected = filename_yaml.clone();
-                            }
-                        });
-                        state.selected.set(filename_yaml.clone());
-                        state.mode.set("yaml".into());
-                        state.section.set("workflows".into());
+                    .child(if !is_global {
+                        compact_action("Open Studio", Variant::Quiet, move |_| {
+                            ui.project.set(scope_id_studio.clone());
+                            ui.workflows.drafts.update(|d| {
+                                if let Some(dr) = d.get_mut(&scope_id_studio) {
+                                    dr.selected = filename_studio.clone();
+                                }
+                            });
+                            ui.workflows.selected.set(filename_studio.clone());
+                            ui.workflows.mode.set("visual".into());
+                            ui.navigate("workflows");
+                        })
+                        .into_element()
+                    } else {
+                        view().into_element()
+                    })
+                    .child(dynamic(move || {
+                        let confirming = ui
+                            .schedules
+                            .confirm_delete
+                            .with(|c| c.as_deref() == Some(sid_del.as_str()));
+                        if confirming {
+                            let del_item = item_for_del.clone();
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_1()
+                                .child(compact_action(
+                                    "Confirm Delete",
+                                    Variant::Danger,
+                                    move |_| delete_schedule(ui, &del_item),
+                                ))
+                                .child(compact_action("Cancel", Variant::Quiet, move |_| {
+                                    ui.schedules.confirm_delete.set(None);
+                                }))
+                                .into_element()
+                        } else {
+                            let s_click = sid_del_confirm.clone();
+                            compact_action("Delete", Variant::Quiet, move |_| {
+                                ui.schedules.confirm_delete.set(Some(s_click.clone()));
+                            })
+                            .into_element()
+                        }
                     })),
             ),
     )
@@ -1415,7 +2173,8 @@ fn config_panel(
     cron_error: Option<String>,
     cron_desc: String,
     next_preview: Option<String>,
-) -> impl IntoElement {
+) -> AnyElement {
+    let pid = item.project_id.clone();
     let filename = item.filename.clone();
     let rule_id = item.rule_id.clone();
     let cur_cron = item.cron_str().to_owned();
@@ -1430,15 +2189,20 @@ fn config_panel(
     let creates_card = item.rule.card.is_some();
     let wf_name_val = item.workflow_name.clone();
 
+    let pid_name = pid.clone();
     let fname_name = filename.clone();
+    let pid_cron = pid.clone();
     let fname_cron = filename.clone();
     let rid_cron = rule_id.clone();
+    let pid_tz = pid.clone();
     let fname_tz = filename.clone();
     let rid_tz = rule_id.clone();
+    let pid_ov = pid.clone();
     let fname_ov = filename.clone();
     let rid_ov = rule_id.clone();
     let fname_mode = filename.clone();
     let rid_mode = rule_id.clone();
+    let pid_del = pid.clone();
     let fname_del = filename.clone();
     let rid_del = rule_id.clone();
 
@@ -1477,14 +2241,13 @@ fn config_panel(
                     Variant::Quiet,
                     move |_| {
                         let mut empty_doc = false;
-                        mutate_workflow_file(ui, &fname_del, |doc| {
+                        mutate_workflow_file(ui, &pid_del, &fname_del, |doc| {
                             doc.on.remove(&rid_del);
                             empty_doc = doc.on.is_empty();
                         });
                         if empty_doc {
-                            let p = ui.project.get_untracked();
                             ui.workflows.drafts.update(|d| {
-                                if let Some(dr) = d.get_mut(&p)
+                                if let Some(dr) = d.get_mut(&pid_del)
                                     && dr.sources.len() > 1
                                 {
                                     dr.sources.remove(&fname_del);
@@ -1506,7 +2269,7 @@ fn config_panel(
                     move || wf_name_val.clone(),
                     move |v| {
                         let next = v.to_owned();
-                        mutate_workflow_file(ui, &fname_name, move |doc| {
+                        mutate_workflow_file(ui, &pid_name, &fname_name, move |doc| {
                             doc.name = next;
                         });
                     },
@@ -1531,12 +2294,13 @@ fn config_panel(
                                 .gap_1()
                                 .children(presets.iter().map(|(lbl, expr)| {
                                     let expr_str = (*expr).to_owned();
+                                    let p = pid_cron.clone();
                                     let f = fname_cron.clone();
                                     let r = rid_cron.clone();
                                     compact_action(*lbl, Variant::Secondary, move |_| {
                                         let e = expr_str.clone();
                                         let r_inner = r.clone();
-                                        mutate_workflow_file(ui, &f, move |doc| {
+                                        mutate_workflow_file(ui, &p, &f, move |doc| {
                                             if let Some(rule) = doc.on.get_mut(&r_inner) {
                                                 rule.cron = Some(e);
                                             }
@@ -1546,6 +2310,7 @@ fn config_panel(
                         ),
                 )
                 .child({
+                    let p = pid_cron.clone();
                     let f = fname_cron.clone();
                     let r = rid_cron.clone();
                     let cval = cur_cron.clone();
@@ -1554,7 +2319,7 @@ fn config_panel(
                         move |v| {
                             let next = v.to_owned();
                             let r_inner = r.clone();
-                            mutate_workflow_file(ui, &f, move |doc| {
+                            mutate_workflow_file(ui, &p, &f, move |doc| {
                                 if let Some(rule) = doc.on.get_mut(&r_inner) {
                                     rule.cron = Some(next);
                                 }
@@ -1593,6 +2358,7 @@ fn config_panel(
                                 let val = (*tz_val).to_owned();
                                 let selected_tz = cur_tz == val
                                     || (val.is_empty() && cur_tz.eq_ignore_ascii_case("local"));
+                                let p = pid_tz.clone();
                                 let f = fname_tz.clone();
                                 let r = rid_tz.clone();
                                 compact_action(
@@ -1605,7 +2371,7 @@ fn config_panel(
                                     move |_| {
                                         let next = val.clone();
                                         let r_inner = r.clone();
-                                        mutate_workflow_file(ui, &f, move |doc| {
+                                        mutate_workflow_file(ui, &p, &f, move |doc| {
                                             if let Some(rule) = doc.on.get_mut(&r_inner) {
                                                 rule.timezone = (!next.is_empty()).then_some(next);
                                             }
@@ -1615,6 +2381,7 @@ fn config_panel(
                             }),
                         ))
                         .child({
+                            let p = pid_tz.clone();
                             let f = fname_tz.clone();
                             let r = rid_tz.clone();
                             let tz_val = cur_tz.clone();
@@ -1623,7 +2390,7 @@ fn config_panel(
                                 move |v| {
                                     let trimmed = v.trim().to_owned();
                                     let r_inner = r.clone();
-                                    mutate_workflow_file(ui, &f, move |doc| {
+                                    mutate_workflow_file(ui, &p, &f, move |doc| {
                                         if let Some(rule) = doc.on.get_mut(&r_inner) {
                                             rule.timezone =
                                                 (!trimmed.is_empty()).then_some(trimmed);
@@ -1642,6 +2409,7 @@ fn config_panel(
                         .child(
                             segmented()
                                 .child({
+                                    let p = pid_ov.clone();
                                     let f = fname_ov.clone();
                                     let r = rid_ov.clone();
                                     compact_segment(
@@ -1649,7 +2417,7 @@ fn config_panel(
                                         None,
                                         move || cur_overlap == ScheduleOverlap::Skip,
                                         move |_| {
-                                            mutate_workflow_file(ui, &f, |doc| {
+                                            mutate_workflow_file(ui, &p, &f, |doc| {
                                                 if let Some(rule) = doc.on.get_mut(&r) {
                                                     rule.overlap = ScheduleOverlap::Skip;
                                                 }
@@ -1658,6 +2426,7 @@ fn config_panel(
                                     )
                                 })
                                 .child({
+                                    let p = pid_ov.clone();
                                     let f = fname_ov.clone();
                                     let r = rid_ov.clone();
                                     compact_segment(
@@ -1665,7 +2434,7 @@ fn config_panel(
                                         None,
                                         move || cur_overlap == ScheduleOverlap::Queue,
                                         move |_| {
-                                            mutate_workflow_file(ui, &f, |doc| {
+                                            mutate_workflow_file(ui, &p, &f, |doc| {
                                                 if let Some(rule) = doc.on.get_mut(&r) {
                                                     rule.overlap = ScheduleOverlap::Queue;
                                                 }
@@ -1674,6 +2443,7 @@ fn config_panel(
                                     )
                                 })
                                 .child({
+                                    let p = pid_ov.clone();
                                     let f = fname_ov.clone();
                                     let r = rid_ov.clone();
                                     compact_segment(
@@ -1681,7 +2451,7 @@ fn config_panel(
                                         None,
                                         move || cur_overlap == ScheduleOverlap::Allow,
                                         move |_| {
-                                            mutate_workflow_file(ui, &f, |doc| {
+                                            mutate_workflow_file(ui, &p, &f, |doc| {
                                                 if let Some(rule) = doc.on.get_mut(&r) {
                                                     rule.overlap = ScheduleOverlap::Allow;
                                                 }
@@ -1712,6 +2482,7 @@ fn config_panel(
             rid_mode,
             first_stage,
         ))
+        .into_element()
 }
 
 fn execution_mode_section(
@@ -1723,10 +2494,13 @@ fn execution_mode_section(
     rid_mode: String,
     first_stage: String,
 ) -> impl IntoElement {
+    let pid_agent = item.project_id.clone();
     let fname_agent = fname_mode.clone();
     let rid_agent = rid_mode.clone();
+    let pid_card = item.project_id.clone();
     let fname_card = fname_mode.clone();
     let rid_card = rid_mode.clone();
+    let is_global = item.is_global();
     let wf_title_default = format!("{} · {{{{date}}}}", item.workflow_name);
     let default_prof = crate::sessions::default_profile(ui);
 
@@ -1746,17 +2520,17 @@ fn execution_mode_section(
                 .child(
                     segmented()
                         .child(segment(
-                            "Terminal Agent only",
+                            "Cardless (Script / Agent)",
                             Some(Icon::Terminal),
                             move || !creates_card,
                             move |_| {
                                 let dprof = default_prof.clone();
                                 let rid_inner = rid_agent.clone();
-                                mutate_workflow_file(ui, &fname_agent, move |doc| {
+                                mutate_workflow_file(ui, &pid_agent, &fname_agent, move |doc| {
                                     let entry_agent = doc
                                         .steps
                                         .iter()
-                                        .find(|s| s.kind() == "agent")
+                                        .find(|s| s.kind() == "agent" || s.kind() == "script")
                                         .map(|s| s.id.clone())
                                         .unwrap_or_else(|| {
                                             let sid = "agent:run".to_owned();
@@ -1807,25 +2581,35 @@ fn execution_mode_section(
                                 });
                             },
                         ))
-                        .child(segment(
-                            "Create Card on each run",
-                            Some(Icon::Board),
-                            move || creates_card,
-                            move |_| {
+                        .child(when(
+                            move || !is_global,
+                            move || {
+                                let pid_c = pid_card.clone();
+                                let fname_c = fname_card.clone();
                                 let col = first_stage.clone();
                                 let tpl = wf_title_default.clone();
                                 let rid_inner = rid_card.clone();
-                                mutate_workflow_file(ui, &fname_card, move |doc| {
-                                    if let Some(rule) = doc.on.get_mut(&rid_inner)
-                                        && rule.card.is_none()
-                                    {
-                                        rule.card = Some(ScheduleCardConfig {
-                                            column: Some(col),
-                                            title: Some(tpl),
-                                            body: None,
+                                segment(
+                                    "Create Card on each run",
+                                    Some(Icon::Board),
+                                    move || creates_card,
+                                    move |_| {
+                                        let c = col.clone();
+                                        let t = tpl.clone();
+                                        let r = rid_inner.clone();
+                                        mutate_workflow_file(ui, &pid_c, &fname_c, move |doc| {
+                                            if let Some(rule) = doc.on.get_mut(&r)
+                                                && rule.card.is_none()
+                                            {
+                                                rule.card = Some(ScheduleCardConfig {
+                                                    column: Some(c),
+                                                    title: Some(t),
+                                                    body: None,
+                                                });
+                                            }
                                         });
-                                    }
-                                });
+                                    },
+                                )
                             },
                         )),
                 ),
@@ -1842,6 +2626,8 @@ fn cardless_mode_fields(ui: Ui, item: &ScheduleItem) -> impl IntoElement {
     let cur_prof = item.profile_id.clone().unwrap_or_default();
     let step_id = item.agent_step_id.clone();
     let instruction = item.agent_instruction.clone();
+    let pid = item.project_id.clone();
+    let pid_inst = item.project_id.clone();
     let fname = item.filename.clone();
     let fname_inst = item.filename.clone();
     let step_for_inst = step_id.clone();
@@ -1851,9 +2637,11 @@ fn cardless_mode_fields(ui: Ui, item: &ScheduleItem) -> impl IntoElement {
         .p_3()
         .rounded(px(RADIUS))
         .bg(INSET)
-        .child(muted(
-            "Launches a managed Terminal Agent directly in the Project root without creating a Board Card. Once the Agent reports completion and settles, its terminal automatically exits and reclaims cleanly.",
-        ))
+        .child(muted(if item.starts_with_script {
+            "Starts directly with a Script step (0 PTY / 0 Agent slot overhead when exiting 0). Escalates to the configured Agent step on non-zero failure, keeping its PTY open in Needs you on `--state blocked`."
+        } else {
+            "Launches a managed Terminal Agent without creating a Board Card. Once the Agent calls `report --state completed` and settles, its terminal reclaims cleanly."
+        }))
         .child(
             view()
                 .gap_1()
@@ -1864,8 +2652,9 @@ fn cardless_mode_fields(ui: Ui, item: &ScheduleItem) -> impl IntoElement {
                         .flex_wrap()
                         .gap_1p5()
                         .children(profiles.into_iter().map(|prof| {
-                            let pid = prof.id.clone();
-                            let selected = pid == cur_prof;
+                            let prof_id = prof.id.clone();
+                            let selected = prof_id == cur_prof;
+                            let scope = pid.clone();
                             let f = fname.clone();
                             let st = step_id.clone();
                             compact_action(
@@ -1876,9 +2665,9 @@ fn cardless_mode_fields(ui: Ui, item: &ScheduleItem) -> impl IntoElement {
                                     Variant::Secondary
                                 },
                                 move |_| {
-                                    let pval = pid.clone();
+                                    let pval = prof_id.clone();
                                     let target_step = st.clone();
-                                    mutate_workflow_file(ui, &f, move |doc| {
+                                    mutate_workflow_file(ui, &scope, &f, move |doc| {
                                         if let Some(sid) = target_step
                                             && let Some(step) =
                                                 doc.steps.iter_mut().find(|s| s.id == sid)
@@ -1900,7 +2689,7 @@ fn cardless_mode_fields(ui: Ui, item: &ScheduleItem) -> impl IntoElement {
                     move |v| {
                         let next = v.to_owned();
                         let target = sid.clone();
-                        mutate_workflow_file(ui, &fname_inst, move |doc| {
+                        mutate_workflow_file(ui, &pid_inst, &fname_inst, move |doc| {
                             if let Some(step) = doc.steps.iter_mut().find(|s| s.id == target) {
                                 step.with.insert("instruction".into(), json!(next));
                             }
@@ -1910,7 +2699,7 @@ fn cardless_mode_fields(ui: Ui, item: &ScheduleItem) -> impl IntoElement {
                 ))
                 .into_element()
         } else {
-            muted("Entry step is a script step; edit full step chain in Visual Studio or YAML.")
+            muted("Script-only workflow; edit step commands in Edit YAML.")
                 .into_element()
         })
 }
@@ -1921,6 +2710,9 @@ fn card_mode_fields(
     stages: &[(String, String)],
     card_cfg: ScheduleCardConfig,
 ) -> impl IntoElement {
+    let pid = item.project_id.clone();
+    let pid_title = item.project_id.clone();
+    let pid_body = item.project_id.clone();
     let fname = item.filename.clone();
     let rid = item.rule_id.clone();
     let cur_col = card_cfg
@@ -1957,6 +2749,7 @@ fn card_mode_fields(
                         .children(stages.iter().map(|(col_id, col_name)| {
                             let cid = col_id.clone();
                             let selected = cid == cur_col;
+                            let scope = pid.clone();
                             let f = fname.clone();
                             let r = rid.clone();
                             compact_action(
@@ -1969,7 +2762,7 @@ fn card_mode_fields(
                                 move |_| {
                                     let next_col = cid.clone();
                                     let r_inner = r.clone();
-                                    mutate_workflow_file(ui, &f, move |doc| {
+                                    mutate_workflow_file(ui, &scope, &f, move |doc| {
                                         let stage_entry = doc
                                             .column_entry(&next_col)
                                             .map(|(_, step)| step);
@@ -1997,7 +2790,7 @@ fn card_mode_fields(
                     move |v| {
                         let next = v.to_owned();
                         let r_inner = rid_title.clone();
-                        mutate_workflow_file(ui, &fname_title, move |doc| {
+                        mutate_workflow_file(ui, &pid_title, &fname_title, move |doc| {
                             if let Some(rule) = doc.on.get_mut(&r_inner) {
                                 let cfg = rule.card.get_or_insert_with(Default::default);
                                 cfg.title = (!next.trim().is_empty()).then_some(next);
@@ -2016,7 +2809,7 @@ fn card_mode_fields(
                     move |v| {
                         let next = v.to_owned();
                         let r_inner = rid_body.clone();
-                        mutate_workflow_file(ui, &fname_body, move |doc| {
+                        mutate_workflow_file(ui, &pid_body, &fname_body, move |doc| {
                             if let Some(rule) = doc.on.get_mut(&r_inner) {
                                 let cfg = rule.card.get_or_insert_with(Default::default);
                                 cfg.body = (!next.trim().is_empty()).then_some(next);
@@ -2208,6 +3001,38 @@ fn history_panel_section(
                                             }),
                                     ),
                             )
+                            .child(if !run.steps.is_empty() {
+                                view()
+                                    .flex_row()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .children(run.steps.iter().enumerate().map(|(idx, st)| {
+                                        let prefix = if idx > 0 { "→ " } else { "" };
+                                        let kind_lbl = if let Some(prof) = &st.profile_id {
+                                            format!("@{prof}")
+                                        } else {
+                                            st.step_id.clone()
+                                        };
+                                        let state_mark = match st.state.as_str() {
+                                            "completed" => "✓",
+                                            "failed" => "✗",
+                                            "blocked" => "⏸",
+                                            "running" => "●",
+                                            _ => "•",
+                                        };
+                                        let extra = match (st.exit_code, st.duration_ms) {
+                                            (Some(code), Some(ms)) => format!(" ({code} · {ms}ms)"),
+                                            (Some(code), None) => format!(" (exit {code})"),
+                                            (None, Some(ms)) => format!(" ({ms}ms)"),
+                                            (None, None) => String::new(),
+                                        };
+                                        badge(format!("{prefix}{state_mark} {kind_lbl}{extra}"))
+                                    }))
+                                    .into_element()
+                            } else {
+                                view().into_element()
+                            })
                             .child(if !summary_line.is_empty() {
                                 muted(summary_line).into_element()
                             } else {
@@ -2220,17 +3045,17 @@ fn history_panel_section(
 }
 
 fn artifact_dialog(ui: Ui) -> impl IntoElement {
-    let state = ui.workflows;
+    let s = ui.schedules;
     let editor = component_ref::<nsh_base::Editor>();
     spawn(async move {
         next_frame().await;
-        if state.schedule_artifact.with_untracked(Option::is_some)
+        if s.artifact.with_untracked(Option::is_some)
             && let Some(api) = editor.api::<nsh_base::EditorApi>()
         {
             api.focus();
         }
     });
-    workflow_dialog(
+    crate::workflows::workflow_dialog(
         view()
             .flex_1()
             .min_h(px(0.))
@@ -2242,15 +3067,14 @@ fn artifact_dialog(ui: Ui) -> impl IntoElement {
                     .gap_2()
                     .child(icon_tinted(Icon::Clock, ACCENT))
                     .child(heading(move || {
-                        state
-                            .schedule_artifact
+                        s.artifact
                             .with(|a| a.as_ref().map(|(t, _)| t.clone()).unwrap_or_default())
                     }))
                     .child(view().flex_1())
                     .child(chrome_button(
                         Icon::Close,
                         "Close scheduled run report",
-                        move |_| state.schedule_artifact.set(None),
+                        move |_| s.artifact.set(None),
                     )),
             )
             .child(
@@ -2264,8 +3088,7 @@ fn artifact_dialog(ui: Ui) -> impl IntoElement {
                         nsh_base::editor()
                             .value(move || {
                                 Some(
-                                    state
-                                        .schedule_artifact
+                                    s.artifact
                                         .with(|a| {
                                             a.as_ref().map(|(_, b)| b.clone()).unwrap_or_default()
                                         })
@@ -2285,16 +3108,57 @@ fn artifact_dialog(ui: Ui) -> impl IntoElement {
             .child(view().flex_row().justify_end().child(action(
                 "Close",
                 Variant::Secondary,
-                move |_| state.schedule_artifact.set(None),
+                move |_| s.artifact.set(None),
             ))),
-        move || state.schedule_artifact.set(None),
+        move || s.artifact.set(None),
     )
+}
+
+pub(crate) fn push_offline_workflow_source(
+    s: &mut Snapshot,
+    project_id: &str,
+    filename: &str,
+    yaml: &str,
+) -> Result<(String, u64), String> {
+    let doc = source::parse(yaml).map_err(|e| e.to_string())?;
+    let def = doc.compile().map_err(|e| format!("{e:#}"))?;
+    let wf_id = def.id.clone();
+    let rev = s
+        .workflow_sources
+        .iter()
+        .find(|ws| ws.project_id == project_id && ws.filename == filename)
+        .map_or(1, |ws| ws.revision + 1);
+    let rev_id = format!("{wf_id}:{rev}");
+    s.workflow_sources
+        .retain(|ws| !(ws.project_id == project_id && ws.filename == filename));
+    s.workflow_sources.push(WorkflowSource {
+        id: format!("{project_id}:{filename}"),
+        project_id: project_id.to_owned(),
+        filename: filename.to_owned(),
+        workflow_id: wf_id.clone(),
+        revision: rev,
+        hash: rev_id.clone(),
+        revision_id: rev_id.clone(),
+        enabled: doc.enabled,
+        columns: def.columns.clone(),
+        rules: doc.on.clone(),
+    });
+    s.workflow_revisions.push(WorkflowRevision {
+        source_yaml: Some(yaml.to_owned()),
+        id: rev_id,
+        project_id: project_id.to_owned(),
+        workflow_id: wf_id.clone(),
+        revision: rev,
+        definition: def,
+        created_at: canban_types::now(),
+    });
+    Ok((wf_id, rev))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use canban_types::{Project, Snapshot, Workflow};
+    use canban_types::{Project, ScheduledStepRecord, Snapshot, Workflow};
     use nsh_core::{ApproxTextEngine, Core, MountItem, geometry::size};
 
     fn fixture_ui() -> Ui {
@@ -2318,56 +3182,120 @@ mod tests {
         });
         ui.snapshot.set(snap);
         ui.project.set(pid);
-        ui.page.set("workflows".into());
+        ui.page.set("schedules".into());
         ui
     }
 
     #[test]
-    fn offline_new_scheduled_workflow_saves_triggers_and_toggles_both_modes() {
+    fn offline_global_and_project_schedules_mount_trigger_toggle_and_count_blocked() {
         #[component]
         fn SchedulesProbe() -> impl IntoElement {
             canban_ui_kit::tokens::install_theme();
             let ui = fixture_ui();
-            assert_eq!(collect_project_schedules(ui).len(), 0);
+            let pid = ui.project.get_untracked();
+            assert_eq!(collect_schedules(ui, "").len(), 0);
 
-            // 1. Create a new Cardless Terminal Agent schedule and save offline.
-            new_scheduled_workflow(ui);
-            assert_eq!(ui.workflows.section.get_untracked(), "schedules");
-            let items = collect_project_schedules(ui);
-            assert_eq!(items.len(), 1);
-            assert!(items[0].dirty);
-            assert_eq!(items[0].filename, "scheduled-1.yaml");
-            assert!(items[0].rule.card.is_none());
-
-            super::super::save(ui);
-            let items = collect_project_schedules(ui);
-            assert_eq!(items.len(), 1);
-            assert!(!items[0].dirty);
-            assert!(items[0].published);
-            assert!(items[0].effective_enabled);
-
-            // 2. Trigger Cardless run offline -> creates a ScheduledRun without creating a Card.
-            trigger_schedule(ui, &items[0]);
-            ui.snapshot.with_untracked(|s| {
-                assert_eq!(s.cards.len(), 0);
-                assert_eq!(s.scheduled_runs.len(), 1);
-                assert_eq!(s.scheduled_runs[0].trigger_kind, "manual");
-                assert!(s.scheduled_runs[0].card_id.is_none());
+            // 1. Seed a Global script -> agent schedule via the Worktree GC preset and save offline.
+            modal::open_create_modal(ui, Some(GLOBAL_PROJECT_ID.into()));
+            ui.schedules.modal.apply_worktree_gc_preset(ui);
+            let now_ms = canban_types::now();
+            ui.snapshot.update(|s| {
+                let global_yaml = "schema: 9\nid: global:worktree-gc\nname: Worktree GC (7d)\nscope: global\non:\n  schedule:\n    - cron: '0 3 * * *'\nsteps:\n  - id: gc\n    run: echo ok\n    on_failure: ask_agent\n  - id: ask_agent\n    uses: agent\n    with:\n      profile: developer\n      instruction: Check dirty worktrees\n";
+                push_offline_workflow_source(s, GLOBAL_PROJECT_ID, "worktree-gc.yaml", global_yaml)
+                    .unwrap();
+                s.schedule_states.push(ScheduleState {
+                    id: format!("schedule:{GLOBAL_PROJECT_ID}:global:worktree-gc:schedule"),
+                    project_id: GLOBAL_PROJECT_ID.into(),
+                    workflow_id: "global:worktree-gc".into(),
+                    workflow_name: "Worktree GC (7d)".into(),
+                    filename: "worktree-gc.yaml".into(),
+                    rule_id: "schedule".into(),
+                    cron: "0 3 * * *".into(),
+                    timezone: None,
+                    overlap: ScheduleOverlap::Skip,
+                    creates_card: false,
+                    starts_with_script: true,
+                    target_column: None,
+                    profile_id: Some("developer".into()),
+                    enabled: true,
+                    last_scheduled_at: Some(now_ms),
+                    next_run_at: Some(now_ms + 3_600_000),
+                    last_run_id: Some("sched-global-blocked".into()),
+                    run_count: 1,
+                    queued_triggers: 0,
+                    updated_at: now_ms,
+                });
+                s.scheduled_runs.push(ScheduledRun {
+                    id: "sched-global-blocked".into(),
+                    schedule_id: format!("schedule:{GLOBAL_PROJECT_ID}:global:worktree-gc:schedule"),
+                    project_id: GLOBAL_PROJECT_ID.into(),
+                    workflow_id: "global:worktree-gc".into(),
+                    workflow_name: "Worktree GC (7d)".into(),
+                    filename: "worktree-gc.yaml".into(),
+                    rule_id: "schedule".into(),
+                    cron: "0 3 * * *".into(),
+                    number: 1,
+                    trigger_kind: "cron".into(),
+                    creates_card: false,
+                    card_id: None,
+                    card_number: None,
+                    workflow_run_id: None,
+                    start_step: Some("gc".into()),
+                    current_step: Some("ask_agent".into()),
+                    profile_id: Some("developer".into()),
+                    provider_session_id: None,
+                    terminal_id: Some("sched-global-blocked".into()),
+                    cwd: "/tmp".into(),
+                    state: "blocked".into(),
+                    summary: Some("Dirty worktree needs decision".into()),
+                    report_path: None,
+                    output_path: None,
+                    error: None,
+                    steps: vec![
+                        ScheduledStepRecord {
+                            step_id: "gc".into(),
+                            kind: "script".into(),
+                            state: "failed".into(),
+                            profile_id: None,
+                            exit_code: Some(1),
+                            duration_ms: Some(120),
+                            log_path: None,
+                            summary: Some("1 dirty worktree".into()),
+                        },
+                        ScheduledStepRecord {
+                            step_id: "ask_agent".into(),
+                            kind: "agent".into(),
+                            state: "blocked".into(),
+                            profile_id: Some("developer".into()),
+                            exit_code: None,
+                            duration_ms: None,
+                            log_path: None,
+                            summary: Some("Waiting for input".into()),
+                        },
+                    ],
+                    scheduled_at: now_ms,
+                    started_at: Some(now_ms),
+                    completed_at: None,
+                    close_requested_at: None,
+                    updated_at: now_ms,
+                });
             });
+            ui.schedules.create_modal.set(false);
+            assert_eq!(attention_count(ui), 1);
 
-            // 3. Toggle pause / re-enable offline.
-            toggle_schedule(ui, &items[0], false);
-            let paused = collect_project_schedules(ui);
-            assert!(!paused[0].effective_enabled);
-            assert!(paused[0].next_run_at.is_none());
-
-            toggle_schedule(ui, &paused[0], true);
-            let resumed = collect_project_schedules(ui);
-            assert!(resumed[0].effective_enabled);
-            assert!(resumed[0].next_run_at.is_some());
-
-            // 4. Switch to Card-creating mode, save, and trigger -> creates a scheduled Card.
-            mutate_workflow_file(ui, "scheduled-1.yaml", |doc| {
+            // 2. Also ensure project draft -> Card mode toggle works in All Scopes.
+            ensure_draft_initialized(ui, &pid);
+            ui.workflows.drafts.update(|d| {
+                let dr = d.entry(pid.clone()).or_default();
+                let doc = source::default_scheduled_document(
+                    format!("scheduled-1:{pid}"),
+                    "Project Nightly",
+                    Some("developer"),
+                );
+                dr.sources
+                    .insert("scheduled-1.yaml".into(), source::encode(&doc).unwrap());
+            });
+            mutate_workflow_file(ui, &pid, "scheduled-1.yaml", |doc| {
                 if let Some(rule) = doc.on.get_mut("schedule") {
                     rule.card = Some(ScheduleCardConfig {
                         column: Some("develop".into()),
@@ -2376,7 +3304,7 @@ mod tests {
                     });
                 }
             });
-            super::super::save(ui);
+            offline_save_schedules(ui, &pid);
             let card_items = collect_project_schedules(ui);
             assert_eq!(
                 card_items[0].mode_badge_text(&[
@@ -2385,18 +3313,11 @@ mod tests {
                 ]),
                 "Card → Develop"
             );
-            trigger_schedule(ui, &card_items[0]);
-            ui.snapshot.with_untracked(|s| {
-                assert_eq!(s.cards.len(), 1);
-                assert_eq!(s.cards[0].stage, "develop");
-                assert!(s.cards[0].schedule_source.is_some());
-                assert_eq!(s.scheduled_runs.len(), 2);
-                assert_eq!(
-                    s.scheduled_runs[0].card_id.as_deref(),
-                    Some(s.cards[0].id.as_str())
-                );
-            });
-            view().w(px(1200.)).h(px(800.)).child(render(ui))
+            let all = collect_schedules(ui, "");
+            assert_eq!(all.len(), 2);
+            ui.schedules.selected.set(all[0].key.clone());
+
+            view().w(px(1200.)).h(px(800.)).child(screen(ui))
         }
 
         let mut core = Core::new(ApproxTextEngine, size(px(1200.), px(800.)));
@@ -2412,12 +3333,12 @@ mod tests {
             })
             .collect();
         assert!(
-            texts.iter().any(|t| t.contains("Scheduled Tasks (1)")),
-            "expected mounted Scheduled Tasks header, got {texts:?}"
+            texts.iter().any(|t| t.contains("Scheduled Tasks (2)")),
+            "expected mounted Scheduled Tasks (2) header, got {texts:?}"
         );
         assert!(
-            texts.iter().any(|t| t.contains("Card → Develop")),
-            "expected mounted Card → Develop mode badge, got {texts:?}"
+            texts.iter().any(|t| t.contains("Run #1 needs your input")),
+            "expected mounted blocked banner, got {texts:?}"
         );
     }
 }

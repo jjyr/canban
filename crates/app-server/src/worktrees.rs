@@ -3,15 +3,18 @@ use super::*;
 
 impl AppServer {
     pub(super) fn worktree_call(&self, method: &str, p: Value) -> Result<Value> {
-        ensure!(
-            p["execution"].is_null(),
-            "Managed worktree operations require a direct user action"
-        );
+        if method != "worktree.gc" {
+            ensure!(
+                p["execution"].is_null(),
+                "Managed worktree operations require a direct user action"
+            );
+        }
         match method {
             "worktree.create" => self.create_managed_worktree(p),
             "worktree.status" => self.managed_worktree_status(p),
             "worktree.promote" => self.promote_managed_worktree(p),
             "worktree.remove" => self.remove_managed_worktree(p),
+            "worktree.gc" => self.gc_worktrees(p),
             _ => bail!("Unknown worktree operation: {method}"),
         }
     }
@@ -207,5 +210,318 @@ impl AppServer {
         })?;
         self.git_changed(&wt.location.machine);
         Ok(res)
+    }
+
+    fn parse_duration_ms(raw: &str) -> Result<u64> {
+        let s = raw.trim().to_ascii_lowercase();
+        ensure!(!s.is_empty(), "Empty duration");
+        if let Some(num) = s.strip_suffix('d') {
+            let days: u64 = num.trim().parse().context("Invalid days duration")?;
+            return Ok(days.saturating_mul(24 * 60 * 60 * 1_000));
+        }
+        if let Some(num) = s.strip_suffix('h') {
+            let hours: u64 = num.trim().parse().context("Invalid hours duration")?;
+            return Ok(hours.saturating_mul(60 * 60 * 1_000));
+        }
+        if let Some(num) = s.strip_suffix('m') {
+            let mins: u64 = num.trim().parse().context("Invalid minutes duration")?;
+            return Ok(mins.saturating_mul(60 * 1_000));
+        }
+        if let Some(num) = s.strip_suffix('s') {
+            let secs: u64 = num.trim().parse().context("Invalid seconds duration")?;
+            return Ok(secs.saturating_mul(1_000));
+        }
+        let secs: u64 = s
+            .parse()
+            .context("Invalid duration; use e.g. 7d, 24h, 30m")?;
+        Ok(secs.saturating_mul(1_000))
+    }
+
+    fn gc_worktrees(&self, p: Value) -> Result<Value> {
+        let dry_run = p["dry_run"].as_bool().unwrap_or(false);
+        let merged_before_ms = if let Some(ms) = p["merged_before_ms"].as_u64() {
+            ms
+        } else if let Some(raw) = p["merged_before"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Self::parse_duration_ms(raw)?
+        } else {
+            7 * 24 * 60 * 60 * 1_000
+        };
+
+        let snapshot = self.snapshot()?;
+        let filter_pid = if let Some(raw) = p["project_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let store = self.store.lock().unwrap();
+            Some(super::resolve_project_id(store.db(), raw)?)
+        } else {
+            None
+        };
+
+        let now_ms = now();
+        let cutoff = now_ms.saturating_sub(merged_before_ms);
+        let mut removed = Vec::<Value>::new();
+        let mut dirty = Vec::<Value>::new();
+        let mut skipped = Vec::<Value>::new();
+        let mut cleared_card_ids = Vec::<String>::new();
+        let mut removed_wt_ids = Vec::<String>::new();
+        let mut changed_machines = std::collections::BTreeSet::<String>::new();
+
+        let has_live_terminal = |machine: &str, path: &str, ops: &canban_workspaces::Ops| -> bool {
+            snapshot.terminal_contexts.iter().any(|ctx| {
+                ctx.machine == machine
+                    && ctx
+                        .cwd
+                        .as_deref()
+                        .is_some_and(|cwd| ops.c_contains(path, cwd))
+                    && snapshot.terminals.iter().any(|t| {
+                        t.id == ctx.terminal_id
+                            && t.runtime.as_ref().is_some_and(|r| r.state != "finished")
+                    })
+            })
+        };
+
+        for card in &snapshot.cards {
+            if filter_pid
+                .as_deref()
+                .is_some_and(|pid| card.project_id != pid)
+            {
+                continue;
+            }
+            let Some(wt_path) = card.worktree.as_deref().filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            if !card.merged() {
+                continue;
+            }
+            let merged_at = card
+                .delivery
+                .as_ref()
+                .map(|d| d.merged_at)
+                .or(card.archived_at)
+                .unwrap_or(card.created_at);
+            if merged_at > cutoff {
+                skipped.push(json!({
+                    "kind": "card",
+                    "card_id": card.id,
+                    "card_number": card.number,
+                    "project_id": card.project_id,
+                    "path": wt_path,
+                    "reason": "merged_within_retention",
+                }));
+                continue;
+            }
+            let Some(project) = snapshot.projects.iter().find(|pr| pr.id == card.project_id) else {
+                continue;
+            };
+            let loc = card
+                .workspace
+                .as_ref()
+                .map(|w| w.location.clone())
+                .unwrap_or_else(|| project.work_location());
+            if loc.machine != "local" {
+                continue;
+            }
+            let ops = self.ops(&loc.machine);
+            if has_live_terminal(&loc.machine, wt_path, &ops) {
+                dirty.push(json!({
+                    "kind": "card",
+                    "card_id": card.id,
+                    "card_number": card.number,
+                    "project_id": card.project_id,
+                    "project_name": project.name,
+                    "branch": card.branch,
+                    "path": wt_path,
+                    "reason": "live_terminal_open",
+                }));
+                continue;
+            }
+            let (state, is_dirty, branch) = ops.worktree_status(Path::new(wt_path))?;
+            if state == "missing" {
+                if !dry_run {
+                    cleared_card_ids.push(card.id.clone());
+                }
+                removed.push(json!({
+                    "kind": "card",
+                    "card_id": card.id,
+                    "card_number": card.number,
+                    "project_id": card.project_id,
+                    "project_name": project.name,
+                    "branch": branch.or_else(|| card.branch.clone()),
+                    "path": wt_path,
+                    "dry_run": dry_run,
+                    "missing": true,
+                }));
+                continue;
+            }
+            if is_dirty {
+                dirty.push(json!({
+                    "kind": "card",
+                    "card_id": card.id,
+                    "card_number": card.number,
+                    "project_id": card.project_id,
+                    "project_name": project.name,
+                    "branch": branch.or_else(|| card.branch.clone()),
+                    "path": wt_path,
+                    "reason": "uncommitted_changes",
+                }));
+                continue;
+            }
+            let exec_home = self.execution_home(&loc.machine)?;
+            if !dry_run {
+                if let Err(err) = ops.remove_worktree(
+                    &exec_home,
+                    Path::new(&loc.directory),
+                    Path::new(wt_path),
+                    false,
+                ) {
+                    dirty.push(json!({
+                        "kind": "card",
+                        "card_id": card.id,
+                        "card_number": card.number,
+                        "project_id": card.project_id,
+                        "project_name": project.name,
+                        "branch": branch.or_else(|| card.branch.clone()),
+                        "path": wt_path,
+                        "reason": format!("{err:#}"),
+                    }));
+                    continue;
+                }
+                cleared_card_ids.push(card.id.clone());
+                changed_machines.insert(loc.machine.clone());
+            }
+            removed.push(json!({
+                "kind": "card",
+                "card_id": card.id,
+                "card_number": card.number,
+                "project_id": card.project_id,
+                "project_name": project.name,
+                "branch": branch.or_else(|| card.branch.clone()),
+                "path": wt_path,
+                "dry_run": dry_run,
+            }));
+        }
+
+        for wt in &snapshot.worktrees {
+            if filter_pid
+                .as_deref()
+                .is_some_and(|pid| wt.project_id != pid)
+            {
+                continue;
+            }
+            if wt.location.machine != "local" || wt.created_at > cutoff {
+                continue;
+            }
+            let ops = self.ops(&wt.location.machine);
+            let (state, is_dirty, branch) = ops.worktree_status(Path::new(&wt.path))?;
+            if state == "missing" {
+                if !dry_run {
+                    removed_wt_ids.push(wt.id.clone());
+                }
+                removed.push(json!({
+                    "kind": "managed_worktree",
+                    "worktree_id": wt.id,
+                    "project_id": wt.project_id,
+                    "branch": branch.unwrap_or_else(|| wt.branch.clone()),
+                    "path": wt.path,
+                    "dry_run": dry_run,
+                    "missing": true,
+                }));
+                continue;
+            }
+            // Only collect standalone managed worktrees whose HEAD is already merged into base_branch.
+            let merged_into_base = ops.branch_merged(
+                Path::new(&wt.location.directory),
+                &wt.branch,
+                &wt.base_branch,
+            );
+            if !merged_into_base {
+                continue;
+            }
+            if has_live_terminal(&wt.location.machine, &wt.path, &ops) {
+                dirty.push(json!({
+                    "kind": "managed_worktree",
+                    "worktree_id": wt.id,
+                    "project_id": wt.project_id,
+                    "branch": wt.branch,
+                    "path": wt.path,
+                    "reason": "live_terminal_open",
+                }));
+                continue;
+            }
+            if is_dirty {
+                dirty.push(json!({
+                    "kind": "managed_worktree",
+                    "worktree_id": wt.id,
+                    "project_id": wt.project_id,
+                    "branch": wt.branch,
+                    "path": wt.path,
+                    "reason": "uncommitted_changes",
+                }));
+                continue;
+            }
+            let exec_home = self.execution_home(&wt.location.machine)?;
+            if !dry_run {
+                if let Err(err) = ops.remove_worktree(
+                    &exec_home,
+                    Path::new(&wt.location.directory),
+                    Path::new(&wt.path),
+                    false,
+                ) {
+                    dirty.push(json!({
+                        "kind": "managed_worktree",
+                        "worktree_id": wt.id,
+                        "project_id": wt.project_id,
+                        "branch": wt.branch,
+                        "path": wt.path,
+                        "reason": format!("{err:#}"),
+                    }));
+                    continue;
+                }
+                removed_wt_ids.push(wt.id.clone());
+                changed_machines.insert(wt.location.machine.clone());
+            }
+            removed.push(json!({
+                "kind": "managed_worktree",
+                "worktree_id": wt.id,
+                "project_id": wt.project_id,
+                "branch": wt.branch,
+                "path": wt.path,
+                "dry_run": dry_run,
+            }));
+        }
+
+        if !dry_run && (!cleared_card_ids.is_empty() || !removed_wt_ids.is_empty()) {
+            self.store.lock().unwrap().write(|db| {
+                for cid in &cleared_card_ids {
+                    if let Ok(mut card) = db.get::<Card>(cid) {
+                        card.worktree = None;
+                        db.save(&card)?;
+                    }
+                }
+                for wid in &removed_wt_ids {
+                    db.conn
+                        .execute("DELETE FROM managed_worktrees WHERE id=?1", params![wid])?;
+                }
+                Ok(())
+            })?;
+            for m in changed_machines {
+                self.git_changed(&m);
+            }
+            self.emit("application", None);
+        }
+
+        Ok(json!({
+            "dry_run": dry_run,
+            "merged_before_ms": merged_before_ms,
+            "removed": removed,
+            "dirty": dirty,
+            "skipped": skipped,
+        }))
     }
 }

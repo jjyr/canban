@@ -101,7 +101,8 @@ impl Record for Report {
         &self.id
     }
     fn project(&self) -> Option<&str> {
-        (!self.project_id.is_empty()).then_some(self.project_id.as_str())
+        (!self.project_id.is_empty() && !is_global_project_id(&self.project_id))
+            .then_some(self.project_id.as_str())
     }
     fn card(&self) -> Option<&str> {
         (!self.card_id.is_empty()).then_some(self.card_id.as_str())
@@ -125,8 +126,8 @@ impl Record for TerminalEntry {
                     .or_else(|| self.id.strip_prefix("configuration:"))
                     .or_else(|| self.id.strip_prefix("scheduled:"))
                     .and_then(|rest| rest.split(':').next())
-                    .filter(|id| !id.is_empty())
             })
+            .filter(|id| !id.is_empty() && !is_global_project_id(id))
     }
     fn card(&self) -> Option<&str> {
         self.agent.as_ref().map(|a| a.card_id.as_str())
@@ -195,7 +196,8 @@ impl Record for Event {
         &self.id
     }
     fn project(&self) -> Option<&str> {
-        (!self.project_id.is_empty()).then_some(self.project_id.as_str())
+        (!self.project_id.is_empty() && !is_global_project_id(&self.project_id))
+            .then_some(self.project_id.as_str())
     }
     fn card(&self) -> Option<&str> {
         (!self.card_id.is_empty()).then_some(self.card_id.as_str())

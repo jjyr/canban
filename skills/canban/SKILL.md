@@ -163,47 +163,65 @@ Call any public AppServer JSON-RPC method via `"$CANBAN_CLI" call <METHOD> '<JSO
 
 ## Authoring Workflows (CLI)
 
-When asked to inspect or update a Project's Workflow YAML (`workflow.sources` is stored in SQLite, not Git files):
+When asked to inspect or update a Project's or Global (`__global`) Workflow YAML (`workflow.sources` is stored in SQLite, not Git files):
 
 ```sh
-"$CANBAN_CLI" call workflow.sources '{"project_id":"<PROJECT_ID>"}'
+# Project-scoped workflow collection
+"$CANBAN_CLI" workflow sources --project-id <PROJECT_ID>
 "$CANBAN_CLI" workflow export --project-id <PROJECT_ID> --name development.yaml --output "$CANBAN_RUN_DIR/development.yaml"
 "$CANBAN_CLI" workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file "$CANBAN_RUN_DIR/development.yaml" --check
 "$CANBAN_CLI" workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file "$CANBAN_RUN_DIR/development.yaml"
+
+# Global host-level workflow collection (`scope: global`, no Board columns or Cards)
+"$CANBAN_CLI" workflow sources --global
+"$CANBAN_CLI" workflow export --global --name cleanup.yaml --output "$CANBAN_RUN_DIR/cleanup.yaml"
+"$CANBAN_CLI" workflow submit --global --revision <REVISION> --file "$CANBAN_RUN_DIR/cleanup.yaml"
 ```
 
 ## Scheduled Workflows (Cron Tasks)
 
-Workflows support GitHub Actions-style cron triggers (`schema: 8`), running in either **Cardless Terminal Agent mode** (default when `card:` is omitted) or **Card-creating mode** (`card:`). Missed ticks while Canban was offline or asleep are skipped rather than replayed on wakeup.
+Workflows support GitHub Actions-style cron triggers (`schema: 9`) across two scopes:
+- **`scope: global`** (`project_id: __global`): Host-level schedules without Board columns or `card:` creation rules (ideal for maintenance, cleanup, cross-project checks).
+- **`scope: project`** (default): Project-scoped schedules running in either **Cardless Script/Agent mode** or **Card-creating mode** (`card:`).
 
-### 1. Cardless Terminal Agent mode (default)
+Missed ticks while Canban was offline or asleep are skipped rather than replayed on wakeup.
 
-Launches a Project-scoped Terminal Agent (`scheduled:<project_id>:<short_id>`) governed by `scheduler.max_agents` without creating a Kanban Card. Once the Agent calls `"$CANBAN_CLI" report` with a terminal state (`completed`, `blocked`, or `failed`) and its turn settles, Canban automatically reclaims and closes the PTY while preserving run history and reports in `Project / Workflows -> Schedules`.
+### 1. Script-First + On-Failure Agent Escalation (Lazy Admission)
 
-Both GitHub Actions `on.schedule` array shorthand and named schedule rules are supported:
+Scheduled workflows starting with `uses: script` (or top-level `run:` shorthand) run with **zero PTY and zero `scheduler.max_agents` slot overhead** when they succeed (`exit 0`). Only when `on_failure` transitions into an `uses: agent` step does Canban allocate a `TerminalEntry` and an Agent slot, handing off the failed step's exit code and stderr/stdout tail in the prompt.
+
+If that recovery Agent calls `"$CANBAN_CLI" report --state blocked --message "..."`, its **live PTY stays open** (never auto-reclaimed) and surfaces in **Activity & Notifications (`⌘I`) → Needs you** so a human can inspect or reply directly in the terminal. Reporting `completed` or `failed` reclaims the PTY after the turn settles.
 
 ```yaml
-schema: 8
-id: dep_audit:example
-name: Dependency Audit
+schema: 9
+scope: global
+id: global:worktree_gc
+name: Worktree GC (7d)
 on:
   schedule:
-    - cron: "0 2 * * *"
-      timezone: Asia/Shanghai
+    - cron: "0 3 * * *"
+      timezone: Local
       overlap: skip          # skip (default) | queue | allow
 steps:
-  - id: audit
+  - id: gc
+    run: |
+      "$CANBAN_CLI" worktree gc --merged-before 7d --fail-on-dirty --env-dirty DIRTY_WORKTREES
+    on_failure: ask_agent
+    next: finish
+  - id: ask_agent
     uses: agent
     with:
       profile: developer
       instruction: |
-        Check dependency security advisories and summarize findings.
+        Worktree cleanup found dirty or active worktrees ($DIRTY_WORKTREES).
+        Inspect the affected paths and call `$CANBAN_CLI report --state blocked --message "..."`
+        if human input is required, or clean safe items and report `--state completed`.
     next: finish
   - id: finish
     uses: complete
 ```
 
-Inside a Cardless scheduled Agent (`CANBAN_SCHEDULE_RUN_ID` is injected, `CANBAN_CARD` is unset), report your outcome with the standard `report` command:
+Inside a Cardless scheduled Agent (`CANBAN_SCHEDULE_RUN_ID` is injected, `CANBAN_CARD` is unset; Global runs inject `CANBAN_SCOPE=global`), report your outcome with:
 
 ```sh
 "$CANBAN_CLI" report \
@@ -212,12 +230,12 @@ Inside a Cardless scheduled Agent (`CANBAN_SCHEDULE_RUN_ID` is injected, `CANBAN
   [--file "$CANBAN_RUN_DIR/report.md"]
 ```
 
-### 2. Card-creating mode (`card:`)
+### 2. Card-Creating Mode (`scope: project` with `card:`)
 
 Creates a Card on each trigger with `schedule_source` provenance (`Scheduled · <Workflow> #<run_number>` badge on Board and Card Detail) and runs the workflow's step graph against that Card so execution logs, reports, and diffs attach to its Timeline:
 
 ```yaml
-schema: 8
+schema: 9
 id: nightly_qa:example
 name: Nightly QA
 on:
@@ -243,21 +261,28 @@ steps:
 
 Supported placeholders in `card.title` / `card.body`: `{{date}}`, `{{datetime}}`, `{{run_number}}`, `{{workflow}}`, `{{rule}}`. Supported `timezone` values: `Local` (default), `UTC`, fixed offsets (`+08:00`), or standard IANA names (`Asia/Shanghai`, `America/New_York`, `Europe/London`, `Asia/Tokyo`, etc.).
 
-### 3. Operating Schedules via CLI
+### 3. Operating Schedules & Worktree GC via CLI
 
 ```sh
-# List schedules and recent runs for a Project
-"$CANBAN_CLI" schedule list --project-id <PROJECT_ID>
-"$CANBAN_CLI" schedule runs --project-id <PROJECT_ID> [--schedule-id <SCHEDULE_ID>] [--limit 20]
+# List schedules and recent runs (all scopes, --global, or --project-id)
+"$CANBAN_CLI" schedule list
+"$CANBAN_CLI" schedule list --global
+"$CANBAN_CLI" schedule runs --global [--schedule-id <SCHEDULE_ID>] [--limit 20]
 
-# Manually trigger a schedule immediately ("Run now")
+# Create a Global or Project scheduled workflow directly
+"$CANBAN_CLI" schedule create --global --name "Worktree GC" --cron "0 3 * * *" \
+  --mode script_agent --script '"$CANBAN_CLI" worktree gc --merged-before 7d --fail-on-dirty --env-dirty DIRTY_WORKTREES' \
+  --profile-id developer --instruction "Inspect dirty worktrees and ask the user with --state blocked if needed."
+
+# Manually trigger ("Run now"), toggle, or delete a schedule
 "$CANBAN_CLI" schedule trigger --schedule-id <SCHEDULE_ID>
-"$CANBAN_CLI" schedule trigger --project-id <PROJECT_ID> --workflow-id <WORKFLOW_ID> --rule <RULE_ID>
+"$CANBAN_CLI" schedule toggle --schedule-id <SCHEDULE_ID> --off
+"$CANBAN_CLI" schedule toggle --schedule-id <SCHEDULE_ID> --on
+"$CANBAN_CLI" schedule delete --schedule-id <SCHEDULE_ID>
 
-# Enable or pause a schedule rule in place
-"$CANBAN_CLI" schedule toggle --schedule-id <SCHEDULE_ID> --enabled false
-"$CANBAN_CLI" schedule toggle --schedule-id <SCHEDULE_ID> --enabled true
+# Read a finished Cardless run's script log or report
+"$CANBAN_CLI" schedule artifact --schedule-run-id <RUN_ID> --path <REPORT_OR_OUTPUT_PATH>
 
-# Read a finished Cardless run's report or captured terminal output
-"$CANBAN_CLI" call schedule.read_artifact '{"schedule_run_id":"<RUN_ID>","path":"<REPORT_OR_OUTPUT_PATH>"}'
+# Garbage-collect merged clean worktrees older than a retention window
+"$CANBAN_CLI" worktree gc --merged-before 7d [--project-id <PROJECT_ID>] [--dry-run] [--fail-on-dirty] [--env-dirty DIRTY_WORKTREES]
 ```

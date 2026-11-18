@@ -16,11 +16,11 @@ fn filename(name: &str) -> Result<()> {
     );
     Ok(())
 }
-fn files(_home: &Path, db: Db<'_>, project: &Project) -> Result<Value> {
+fn files(_home: &Path, db: Db<'_>, scope_id: &str) -> Result<Value> {
     let mut active: Vec<_> = db
         .list::<WorkflowSource>()?
         .into_iter()
-        .filter(|s| s.project_id == project.id)
+        .filter(|s| s.project_id == scope_id)
         .collect();
     active.sort_by(|a, b| a.filename.cmp(&b.filename));
     let mut rows = Vec::new();
@@ -34,18 +34,27 @@ fn files(_home: &Path, db: Db<'_>, project: &Project) -> Result<Value> {
         rows.push(json!({"filename":item.filename,"source":raw,"hash":item.hash,"active":item}));
     }
     let revision = canban_context::digest(&serde_json::to_vec(&active)?);
-    Ok(json!({"project_id":project.id,"revision":revision,"sources":rows,"active":active}))
+    Ok(json!({"project_id":scope_id,"revision":revision,"sources":rows,"active":active}))
 }
 fn validate(
     db: Db<'_>,
     config: &Config,
-    project: &Project,
+    scope_id: &str,
+    project_opt: Option<&Project>,
     inputs: &[Value],
 ) -> Result<Vec<(String, String, source::Document, WorkflowDefinition)>> {
-    ensure!(
-        !inputs.is_empty() && inputs.len() <= 64,
-        "A Project needs 1..64 Workflow sources; use enabled: false to disable one"
-    );
+    let is_global = project_opt.is_none();
+    if is_global {
+        ensure!(
+            inputs.len() <= 64,
+            "Global scope supports at most 64 Workflow sources"
+        );
+    } else {
+        ensure!(
+            !inputs.is_empty() && inputs.len() <= 64,
+            "A Project needs 1..64 Workflow sources; use enabled: false to disable one"
+        );
+    }
     let mut names = BTreeSet::new();
     let mut ids = BTreeSet::new();
     let mut parsed_docs = Vec::new();
@@ -64,17 +73,24 @@ fn validate(
         }
         parsed_docs.push((name.to_owned(), canonical, doc));
     }
-    let effective_columns: Vec<String> = declared_columns
-        .as_ref()
-        .map(|cols| cols.iter().map(|c| c.id.clone()).collect())
-        .unwrap_or_else(|| {
-            project
-                .workflow
-                .stages
-                .iter()
-                .map(|s| s.id.clone())
-                .collect()
-        });
+    let effective_columns: Vec<String> = if is_global {
+        Vec::new()
+    } else {
+        declared_columns
+            .as_ref()
+            .map(|cols| cols.iter().map(|c| c.id.clone()).collect())
+            .unwrap_or_else(|| {
+                project_opt
+                    .map(|p| {
+                        p.workflow
+                            .stages
+                            .iter()
+                            .map(|s| s.id.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+    };
     // Removed columns are allowed: their active Cards return to the first column on publish.
     let mut out = Vec::new();
     for (name, raw, doc) in parsed_docs {
@@ -88,10 +104,21 @@ fn validate(
                 "Duplicate workflow ID {}",
                 doc.id
             );
+            if is_global {
+                ensure!(
+                    doc.scope.is_global(),
+                    "Global workflows must declare `scope: global`"
+                );
+            } else {
+                ensure!(
+                    !doc.scope.is_global(),
+                    "Global-scoped workflow (`scope: global`) must be published under Global scope (`__global`)"
+                );
+            }
             if let Ok(old) = super::workflow::published(db, &doc.id) {
                 ensure!(
-                    old.project_id == project.id,
-                    "Workflow ID belongs to another Project"
+                    old.project_id == scope_id,
+                    "Workflow ID belongs to another scope"
                 );
             }
             for rule in doc.on.values() {
@@ -103,7 +130,7 @@ fn validate(
                     rule.selector
                         .project_id
                         .as_deref()
-                        .is_none_or(|id| id == project.id),
+                        .is_none_or(|id| id == scope_id),
                     "Trigger cannot target another Project"
                 );
                 ensure!(
@@ -142,27 +169,37 @@ pub(super) fn publish_collection(
     config: &Config,
     inputs: &[Value],
 ) -> Result<()> {
-    publish(home, db, project, config, inputs)
+    publish_scope(home, db, &project.id, Some(project), config, inputs)
 }
 
-fn publish(
-    _home: &Path,
+pub(super) fn publish_global_collection(
+    home: &Path,
     db: Db<'_>,
-    project: &Project,
     config: &Config,
     inputs: &[Value],
 ) -> Result<()> {
-    let compiled = validate(db, config, project, inputs)?;
+    publish_scope(home, db, GLOBAL_PROJECT_ID, None, config, inputs)
+}
+
+fn publish_scope(
+    _home: &Path,
+    db: Db<'_>,
+    scope_id: &str,
+    project_opt: Option<&Project>,
+    config: &Config,
+    inputs: &[Value],
+) -> Result<()> {
+    let compiled = validate(db, config, scope_id, project_opt, inputs)?;
     let old: Vec<_> = db
         .list::<WorkflowSource>()?
         .into_iter()
-        .filter(|f| f.project_id == project.id)
+        .filter(|f| f.project_id == scope_id)
         .collect();
     // Retiring a source disables future triggers; captured receipts/runs keep their revision.
     for mut sub in db
         .list::<EventSubscription>()?
         .into_iter()
-        .filter(|s| s.id.starts_with(&format!("source:{}:", project.id)))
+        .filter(|s| s.id.starts_with(&format!("source:{scope_id}:")))
     {
         sub.enabled = false;
         db.save(&sub)?;
@@ -204,7 +241,7 @@ fn publish(
             db.save(&WorkflowRevision {
                 source_yaml: Some(raw.clone()),
                 id: format!("{}:{revision}", definition.id),
-                project_id: project.id.clone(),
+                project_id: scope_id.to_owned(),
                 workflow_id: definition.id.clone(),
                 revision,
                 definition: definition.clone(),
@@ -212,8 +249,8 @@ fn publish(
             })?;
         }
         let file = WorkflowSource {
-            id: format!("{}:{name}", project.id),
-            project_id: project.id.clone(),
+            id: format!("{scope_id}:{name}"),
+            project_id: scope_id.to_owned(),
             filename: name,
             workflow_id: definition.id.clone(),
             revision,
@@ -227,10 +264,10 @@ fn publish(
             if rule.event == "manual" || rule.is_schedule() {
                 continue;
             }
-            let sub_id = format!("source:{}:{}:{key}", project.id, definition.id);
+            let sub_id = format!("source:{scope_id}:{}:{key}", definition.id);
             let old_sub = db.get::<EventSubscription>(&sub_id).ok();
             let mut selector = rule.selector.clone();
-            selector.project_id = Some(project.id.clone());
+            selector.project_id = Some(scope_id.to_owned());
             selector.types = vec![rule.event.clone()];
             if matches!(
                 rule.event.as_str(),
@@ -267,86 +304,95 @@ fn publish(
         db.conn
             .execute("DELETE FROM workflow_sources WHERE id=?1", [&f.id])?;
     }
-    // Synchronize declared YAML columns and primary workspace settings to Project.
     let active_sources: Vec<_> = db
         .list::<WorkflowSource>()?
         .into_iter()
-        .filter(|f| f.project_id == project.id)
+        .filter(|f| f.project_id == scope_id)
         .collect();
-    if let Some(primary) = active_sources
-        .iter()
-        .find(|f| f.filename == "development.yaml")
-        .or_else(|| active_sources.iter().find(|f| !f.columns.is_empty()))
-        .or_else(|| active_sources.first())
-    {
-        let mut updated: Project = db.get(&project.id)?;
-        let mut changed = false;
-        if let Ok(rev) = db.get::<WorkflowRevision>(&primary.revision_id)
-            && updated.workflow.workspace != rev.definition.workspace
+    if let Some(project) = project_opt {
+        // Synchronize declared YAML columns and primary workspace settings to Project.
+        if let Some(primary) = active_sources
+            .iter()
+            .find(|f| f.filename == "development.yaml")
+            .or_else(|| active_sources.iter().find(|f| !f.columns.is_empty()))
+            .or_else(|| active_sources.first())
         {
-            updated.workflow.workspace = rev.definition.workspace;
-            changed = true;
-        }
-        if !primary.columns.is_empty() {
-            let new_stages: Vec<Stage> = primary
-                .columns
-                .iter()
-                .map(|col| {
-                    if let Some(mut existing) = updated
-                        .workflow
-                        .stages
-                        .iter()
-                        .find(|s| s.id == col.id)
-                        .cloned()
-                    {
-                        existing.name = col.name.clone();
-                        existing
-                    } else {
-                        Stage {
-                            id: col.id.clone(),
-                            name: col.name.clone(),
-                            execute: false,
-                            profile: None,
-                            instruction: String::new(),
-                            on_completed: None,
-                            require_human_review: false,
-                        }
-                    }
-                })
-                .collect();
-            if updated.workflow.stages != new_stages {
-                updated.workflow.stages = new_stages;
+            let mut updated: Project = db.get(&project.id)?;
+            let mut changed = false;
+            if let Ok(rev) = db.get::<WorkflowRevision>(&primary.revision_id)
+                && updated.workflow.workspace != rev.definition.workspace
+            {
+                updated.workflow.workspace = rev.definition.workspace;
                 changed = true;
             }
-        }
-        if changed {
-            db.save(&updated)?;
-        }
-        // Cards in removed columns return to the first column.
-        if let Some(first) = primary.columns.first() {
-            let ids: BTreeSet<_> = primary.columns.iter().map(|c| c.id.as_str()).collect();
-            for mut card in db.list::<Card>()?.into_iter().filter(|c| {
-                c.project_id == project.id && c.active() && !ids.contains(c.stage.as_str())
-            }) {
-                let from = std::mem::replace(&mut card.stage, first.id.clone());
-                card.board_order = None;
-                canban_kanban::order::place(db, &mut card, None)?;
-                card.revision += 1;
-                db.save(&card)?;
-                log(
-                    db,
-                    &card,
-                    "card.stage_changed",
-                    "system",
-                    &format!("{from} → {} (column removed)", card.stage),
-                    None,
-                    json!({"from":from,"to":card.stage,"reason":"column_removed"}),
-                )?;
+            if !primary.columns.is_empty() {
+                let new_stages: Vec<Stage> = primary
+                    .columns
+                    .iter()
+                    .map(|col| {
+                        if let Some(mut existing) = updated
+                            .workflow
+                            .stages
+                            .iter()
+                            .find(|s| s.id == col.id)
+                            .cloned()
+                        {
+                            existing.name = col.name.clone();
+                            existing
+                        } else {
+                            Stage {
+                                id: col.id.clone(),
+                                name: col.name.clone(),
+                                execute: false,
+                                profile: None,
+                                instruction: String::new(),
+                                on_completed: None,
+                                require_human_review: false,
+                            }
+                        }
+                    })
+                    .collect();
+                if updated.workflow.stages != new_stages {
+                    updated.workflow.stages = new_stages;
+                    changed = true;
+                }
+            }
+            if changed {
+                db.save(&updated)?;
+            }
+            // Cards in removed columns return to the first column.
+            if let Some(first) = primary.columns.first() {
+                let ids: BTreeSet<_> = primary.columns.iter().map(|c| c.id.as_str()).collect();
+                for mut card in db.list::<Card>()?.into_iter().filter(|c| {
+                    c.project_id == project.id && c.active() && !ids.contains(c.stage.as_str())
+                }) {
+                    let from = std::mem::replace(&mut card.stage, first.id.clone());
+                    card.board_order = None;
+                    canban_kanban::order::place(db, &mut card, None)?;
+                    card.revision += 1;
+                    db.save(&card)?;
+                    log(
+                        db,
+                        &card,
+                        "card.stage_changed",
+                        "system",
+                        &format!("{from} → {} (column removed)", card.stage),
+                        None,
+                        json!({"from":from,"to":card.stage,"reason":"column_removed"}),
+                    )?;
+                }
             }
         }
+        let updated_project: Project = db.get(&project.id)?;
+        super::schedules::sync_scope_schedules(
+            db,
+            &updated_project.id,
+            Some(&updated_project),
+            &active_sources,
+        )?;
+    } else {
+        super::schedules::sync_scope_schedules(db, GLOBAL_PROJECT_ID, None, &active_sources)?;
     }
-    let updated_project: Project = db.get(&project.id)?;
-    super::schedules::sync_project_schedules(db, &updated_project, &active_sources)?;
     Ok(())
 }
 /// How a newly created Project initializes its workflow source collection.
@@ -364,20 +410,16 @@ pub(super) enum NewProjectWorkflow<'a> {
     FromProject(String),
 }
 
-pub(super) fn project_template_files(
+pub(super) fn scope_template_files(
     db: Db<'_>,
-    project_id: &str,
+    scope_id: &str,
 ) -> Result<Vec<WorkflowTemplateFile>> {
     let mut active: Vec<_> = db
         .list::<WorkflowSource>()?
         .into_iter()
-        .filter(|s| s.project_id == project_id)
+        .filter(|s| s.project_id == scope_id)
         .collect();
     active.sort_by(|a, b| a.filename.cmp(&b.filename));
-    ensure!(
-        !active.is_empty(),
-        "Source Project has no published workflow sources"
-    );
     let mut out = Vec::with_capacity(active.len());
     for item in active {
         let rev: WorkflowRevision = db.get(&item.revision_id)?;
@@ -388,6 +430,18 @@ pub(super) fn project_template_files(
             source: canonical,
         });
     }
+    Ok(out)
+}
+
+pub(super) fn project_template_files(
+    db: Db<'_>,
+    project_id: &str,
+) -> Result<Vec<WorkflowTemplateFile>> {
+    let out = scope_template_files(db, project_id)?;
+    ensure!(
+        !out.is_empty(),
+        "Source Project has no published workflow sources"
+    );
     Ok(out)
 }
 
@@ -581,7 +635,40 @@ pub(super) fn initialize_new(
             vec![json!({"filename":"development.yaml","source":source::encode(&doc)?})]
         }
     };
-    publish(home, db, project, config, &inputs)
+    publish_scope(home, db, &project.id, Some(project), config, &inputs)
+}
+
+/// Migrate any active Global (`__global`) workflow sources on older schema versions to `CURRENT`
+/// and synchronize global `ScheduleState` timers.
+pub(super) fn initialize_global(home: &Path, db: Db<'_>, config: &Config) -> Result<()> {
+    let mut existing: Vec<_> = db
+        .list::<WorkflowSource>()?
+        .into_iter()
+        .filter(|f| f.project_id == GLOBAL_PROJECT_ID)
+        .collect();
+    if existing.is_empty() {
+        super::schedules::sync_scope_schedules(db, GLOBAL_PROJECT_ID, None, &existing)?;
+        return Ok(());
+    }
+    existing.sort_by(|a, b| a.filename.cmp(&b.filename));
+    let mut needs_upgrade = false;
+    let mut inputs = Vec::with_capacity(existing.len());
+    for item in &existing {
+        let rev: WorkflowRevision = db.get(&item.revision_id)?;
+        let raw = rev.source_yaml.context("Published YAML is missing")?;
+        if let Some(upgraded) = canban_workflow_engine::migrations::upgrade_yaml(&raw)? {
+            needs_upgrade = true;
+            inputs.push(json!({"filename": item.filename, "source": upgraded}));
+        } else {
+            inputs.push(json!({"filename": item.filename, "source": raw}));
+        }
+    }
+    if needs_upgrade {
+        publish_scope(home, db, GLOBAL_PROJECT_ID, None, config, &inputs)?;
+    } else {
+        super::schedules::sync_scope_schedules(db, GLOBAL_PROJECT_ID, None, &existing)?;
+    }
+    Ok(())
 }
 
 /// Ensure every Project has an initialized SQL YAML workflow collection,
@@ -614,12 +701,29 @@ pub(super) fn initialize(
         }
     }
     if needs_upgrade {
-        publish(home, db, project, config, &inputs)?;
+        publish_scope(home, db, &project.id, Some(project), config, &inputs)?;
     } else {
-        super::schedules::sync_project_schedules(db, project, &existing)?;
+        super::schedules::sync_scope_schedules(db, &project.id, Some(project), &existing)?;
     }
     Ok(())
 }
+
+fn scope_from_params(db: Db<'_>, p: &Value) -> Result<(String, Option<Project>)> {
+    if p["scope"]
+        .as_str()
+        .is_some_and(|s| s.trim().eq_ignore_ascii_case("global"))
+    {
+        return Ok((GLOBAL_PROJECT_ID.into(), None));
+    }
+    let sid = super::resolve_workflow_scope(db, strp(p, "project_id")?)?;
+    if is_global_project_id(&sid) {
+        Ok((sid, None))
+    } else {
+        let proj: Project = db.get(&sid)?;
+        Ok((sid, Some(proj)))
+    }
+}
+
 impl AppServer {
     pub(super) fn authoring_call(&self, method: &str, p: Value) -> Result<Value> {
         if method == "workflow.default.get" {
@@ -691,36 +795,48 @@ impl AppServer {
         if method == "workflow.sources" {
             let mut store = self.store.lock().unwrap();
             return store.write(|db| {
-                let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;
-                let project: Project = db.get(&pid)?;
-                initialize(&self.home, db, &self.config(), &project)?;
-                files(&self.home, db, &project)
+                let (sid, project_opt) = scope_from_params(db, &p)?;
+                if let Some(project) = &project_opt {
+                    initialize(&self.home, db, &self.config(), project)?;
+                } else {
+                    initialize_global(&self.home, db, &self.config())?;
+                }
+                files(&self.home, db, &sid)
             });
         }
         if method == "workflow.prompt" {
             let store = self.store.lock().unwrap();
             let db = store.db();
-            let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;
-            let project: Project = db.get(&pid)?;
-            return Ok(json!({"prompt":self.workflow_prompt(&project)}));
+            let (_, project_opt) = scope_from_params(db, &p)?;
+            let prompt = match project_opt.as_ref() {
+                Some(project) => self.workflow_prompt(project),
+                None => self.global_workflow_prompt(),
+            };
+            return Ok(json!({"prompt": prompt}));
         }
         self.mutate(method, &p, |db| {
-            let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;
-            let project: Project = db.get(&pid)?;
-            let current = files(&self.home, db, &project)?;
+            let (sid, project_opt) = scope_from_params(db, &p)?;
+            let current = files(&self.home, db, &sid)?;
             ensure!(
                 p["revision"] == current["revision"],
                 "revision_conflict: workflows changed; compare or reload the latest sources"
             );
             let inputs = p["sources"]
                 .as_array()
-                .context("sources must contain the entire Project collection")?;
-            validate(db, &self.config(), &project, inputs)?;
+                .context("sources must contain the entire workflow collection")?;
+            validate(db, &self.config(), &sid, project_opt.as_ref(), inputs)?;
             if method == "workflow.check" {
                 return Ok(json!({"valid":true}));
             }
-            publish(&self.home, db, &project, &self.config(), inputs)?;
-            files(&self.home, db, &project)
+            publish_scope(
+                &self.home,
+                db,
+                &sid,
+                project_opt.as_ref(),
+                &self.config(),
+                inputs,
+            )?;
+            files(&self.home, db, &sid)
         })
     }
 }

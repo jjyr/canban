@@ -872,7 +872,11 @@ fn schedule_triggers_banner(ctx: Ctx) -> impl IntoElement {
                                 "Terminal Agent".into()
                             };
                             (
-                                super::schedules::schedule_key(&filename, rid),
+                                crate::schedules::schedule_key(
+                                    &ctx.ui.project.get_untracked(),
+                                    &filename,
+                                    rid,
+                                ),
                                 rid.clone(),
                                 cron,
                                 desc,
@@ -911,10 +915,15 @@ fn schedule_triggers_banner(ctx: Ctx) -> impl IntoElement {
                                 .child(muted("Click a schedule to configure or run it")),
                         )
                         .child(compact_action(
-                            "Open Schedules Panel →",
+                            "Open Schedules →",
                             Variant::Quiet,
                             move |_| {
-                                state.section.set("schedules".into());
+                                let pid = ctx.ui.project.get_untracked();
+                                crate::schedules::open(
+                                    ctx.ui,
+                                    (!pid.is_empty()).then_some(pid),
+                                    None,
+                                );
                             },
                         )),
                 )
@@ -934,8 +943,12 @@ fn schedule_triggers_banner(ctx: Ctx) -> impl IntoElement {
                             ),
                             Variant::Secondary,
                             move |_| {
-                                state.selected_schedule.set(key.clone());
-                                state.section.set("schedules".into());
+                                let pid = ctx.ui.project.get_untracked();
+                                crate::schedules::open(
+                                    ctx.ui,
+                                    (!pid.is_empty()).then_some(pid),
+                                    Some(key.clone()),
+                                );
                             },
                         )
                     },
@@ -1042,7 +1055,7 @@ fn stage_canvas(ctx: Ctx) -> AnyElement {
                             Variant::Secondary,
                             move |_| {
                                 let sel = state.selected.get_untracked();
-                                super::schedules::add_schedule_rule_to_file(ctx.ui, &sel);
+                                crate::schedules::add_schedule_rule_to_file(ctx.ui, &sel);
                             },
                         ))
                         .child(compact_action(

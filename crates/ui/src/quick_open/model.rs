@@ -8,6 +8,7 @@ pub enum Target {
     Agent(String),
     Terminal(String),
     Worktree(String),
+    Schedule(String),
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Candidate {
@@ -158,6 +159,60 @@ pub fn candidates_with_tags(s: &Snapshot, local_tags: &BTreeSet<String>) -> Vec<
             tags: Vec::new(),
         });
     }
+    for st in &s.schedule_states {
+        let scope_label = if is_global_project_id(&st.project_id) {
+            "Global · Host".to_owned()
+        } else {
+            project(&st.project_id)
+        };
+        let title = if st.rule_id == "schedule" {
+            st.workflow_name.clone()
+        } else {
+            format!("{} / {}", st.workflow_name, st.rule_id)
+        };
+        let mode_label = if st.creates_card {
+            "Card"
+        } else if st.starts_with_script {
+            if st.profile_id.is_some() {
+                "Script → Agent"
+            } else {
+                "Script"
+            }
+        } else {
+            "Agent"
+        };
+        let state_label = if s
+            .scheduled_runs
+            .iter()
+            .any(|r| r.schedule_id == st.id && r.state == "blocked")
+        {
+            "Needs you"
+        } else if st.enabled {
+            "Active"
+        } else {
+            "Paused"
+        };
+        rows.push(Candidate {
+            id: format!("schedule:{}", st.id),
+            title: title.clone(),
+            detail: format!(
+                "Schedule · {scope_label} · {} · {mode_label} · {state_label}",
+                st.cron
+            ),
+            kind: "Schedule",
+            target: Target::Schedule(st.id.clone()),
+            fields: vec![
+                title,
+                scope_label,
+                st.cron.clone(),
+                st.filename.clone(),
+                mode_label.into(),
+                state_label.into(),
+                "cron".into(),
+            ],
+            tags: Vec::new(),
+        });
+    }
     for row in &mut rows {
         row.fields.push(row.kind.into());
     }
@@ -169,8 +224,9 @@ fn kind_rank(kind: &str) -> u8 {
         "Agent" => 1,
         "Card" => 2,
         "Worktree" => 3,
-        "Terminal" => 4,
-        _ => 5,
+        "Schedule" => 4,
+        "Terminal" => 5,
+        _ => 6,
     }
 }
 

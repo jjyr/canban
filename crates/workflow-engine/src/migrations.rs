@@ -7,7 +7,7 @@ use crate::source::Document;
 use anyhow::{Result, ensure};
 
 pub const BASELINE: u32 = 1;
-pub const CURRENT: u32 = 8;
+pub const CURRENT: u32 = 9;
 
 pub struct Migration {
     pub version: u32,
@@ -42,6 +42,10 @@ const STEPS: &[Migration] = &[
     Migration {
         version: 8,
         up: v8_schedules,
+    },
+    Migration {
+        version: 9,
+        up: v9_global_scope,
     },
 ];
 
@@ -273,6 +277,15 @@ fn v8_schedules(doc: &mut Document) -> Result<()> {
         {
             rule.start_at = first.clone();
         }
+    }
+    Ok(())
+}
+
+/// Schema 9: Host-level Global workflow scope (`scope: global`). Global workflows omit Board
+/// columns and card-creating schedule rules; Project workflows omit `scope:` in canonical YAML.
+fn v9_global_scope(doc: &mut Document) -> Result<()> {
+    if doc.scope == canban_types::WorkflowScope::Global {
+        doc.columns.clear();
     }
     Ok(())
 }
