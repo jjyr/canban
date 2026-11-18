@@ -1,13 +1,39 @@
 //! Read-your-writes while a background (possibly cached remote) snapshot catches up.
 //! Only server-confirmed replies enter this overlay; failed submissions never do.
-use canban_types::{Card, Event, Snapshot, TerminalContext, TerminalEntry};
-use serde_json::Value;
-use std::collections::BTreeMap;
+use canban_types::{
+    Card, CardRead, Event, ScheduleState, Snapshot, TerminalContext, TerminalEntry,
+};
+use serde_json::{Value, json};
+use std::collections::{BTreeMap, BTreeSet};
+
+pub(super) fn config_only(method: &str) -> bool {
+    matches!(
+        method,
+        "config.agents.save"
+            | "agent.setup"
+            | "scheduler.configure"
+            | "utilities.configure"
+            | "utilities.awake"
+            | "github.notification.read"
+            | "github.notification.done"
+    )
+}
 
 pub(super) fn immediate(method: &str) -> bool {
     matches!(
         method,
-        "card.create" | "comment.add" | "github.issue.add" | "github.item.add" | "terminal.create"
+        "card.create"
+            | "card.move"
+            | "card.hold_auto_merge"
+            | "comment.add"
+            | "comment.update"
+            | "comment.delete"
+            | "notifications.read"
+            | "notifications.read_all"
+            | "schedule.toggle"
+            | "github.issue.add"
+            | "github.item.add"
+            | "terminal.create"
     )
 }
 
@@ -15,8 +41,15 @@ pub(super) fn immediate(method: &str) -> bool {
 pub(crate) struct CommittedWrites {
     cards: BTreeMap<String, Card>,
     comments: BTreeMap<String, Event>,
+    deleted_comments: BTreeSet<String>,
+    card_reads: BTreeMap<String, CardRead>,
+    schedule_states: BTreeMap<String, ScheduleState>,
     terminals: BTreeMap<String, (TerminalEntry, String)>,
     terminal_hints: BTreeMap<String, TerminalContext>,
+}
+
+fn event_revision(event: &Event) -> u64 {
+    event.data["revision"].as_u64().unwrap_or(1)
 }
 
 impl CommittedWrites {
@@ -24,28 +57,64 @@ impl CommittedWrites {
         self.terminal_hints.insert(hint.terminal_id.clone(), hint);
     }
 
+    pub(crate) fn record_card_reads(&mut self, reads: &[CardRead]) {
+        for read in reads {
+            self.card_reads
+                .entry(read.card_id.clone())
+                .and_modify(|cur| cur.sequence = cur.sequence.max(read.sequence))
+                .or_insert_with(|| read.clone());
+        }
+    }
+
     pub(super) fn record(&mut self, method: &str, reply: &Value, host: &str) {
         if method == "card.remove" && reply["removed"] == true {
             if let Some(id) = reply["card_id"].as_str() {
                 self.cards.remove(id);
                 self.comments.retain(|_, event| event.card_id != id);
+                self.card_reads.remove(id);
             }
             return;
         }
         if !immediate(method) {
             return;
         }
-        if method == "terminal.create" {
-            if let Ok(terminal) = serde_json::from_value::<TerminalEntry>(reply.clone()) {
-                self.terminals
-                    .insert(terminal.id.clone(), (terminal, host.into()));
+        match method {
+            "terminal.create" => {
+                if let Ok(terminal) = serde_json::from_value::<TerminalEntry>(reply.clone()) {
+                    self.terminals
+                        .insert(terminal.id.clone(), (terminal, host.into()));
+                }
             }
-        } else if method == "comment.add" {
-            if let Ok(event) = serde_json::from_value::<Event>(reply.clone()) {
-                self.comments.insert(event.id.clone(), event);
+            "comment.add" | "comment.update" => {
+                if let Ok(event) = serde_json::from_value::<Event>(reply.clone()) {
+                    self.deleted_comments.remove(&event.id);
+                    self.comments.insert(event.id.clone(), event);
+                }
             }
-        } else if let Ok(card) = serde_json::from_value::<Card>(reply.clone()) {
-            self.cards.insert(card.id.clone(), card);
+            "comment.delete" => {
+                if reply["deleted"] == true
+                    && let Some(cid) = reply["comment_id"].as_str()
+                {
+                    self.comments.remove(cid);
+                    self.deleted_comments.insert(cid.to_owned());
+                }
+            }
+            "notifications.read" => {
+                if let Ok(read) = serde_json::from_value::<CardRead>(reply.clone()) {
+                    self.record_card_reads(&[read]);
+                }
+            }
+            "schedule.toggle" => {
+                if let Ok(state) = serde_json::from_value::<ScheduleState>(reply.clone()) {
+                    self.schedule_states.insert(state.id.clone(), state);
+                }
+            }
+            "notifications.read_all" => {}
+            _ => {
+                if let Ok(card) = serde_json::from_value::<Card>(reply.clone()) {
+                    self.cards.insert(card.id.clone(), card);
+                }
+            }
         }
     }
 
@@ -89,8 +158,42 @@ impl CommittedWrites {
             snapshot.entity_hosts.insert(card.id.clone(), host);
         }
         for event in self.comments.values() {
-            if !snapshot.events.iter().any(|e| e.id == event.id) {
+            if let Some(saved) = snapshot.events.iter_mut().find(|e| e.id == event.id) {
+                if saved.kind != "comment.deleted" && event_revision(event) > event_revision(saved)
+                {
+                    *saved = event.clone();
+                }
+            } else {
                 snapshot.events.push(event.clone());
+            }
+        }
+        if !self.deleted_comments.is_empty() {
+            for ev in &mut snapshot.events {
+                if self.deleted_comments.contains(&ev.id) && ev.kind != "comment.deleted" {
+                    ev.kind = "comment.deleted".into();
+                    ev.message = "Comment deleted".into();
+                    ev.data["comment_id"] = json!(ev.id);
+                }
+            }
+        }
+        for read in self.card_reads.values() {
+            if let Some(existing) = snapshot
+                .card_reads
+                .iter_mut()
+                .find(|r| r.card_id == read.card_id)
+            {
+                existing.sequence = existing.sequence.max(read.sequence);
+            } else {
+                snapshot.card_reads.push(read.clone());
+            }
+        }
+        for st in self.schedule_states.values() {
+            if let Some(existing) = snapshot.schedule_states.iter_mut().find(|s| s.id == st.id) {
+                if st.updated_at >= existing.updated_at {
+                    *existing = st.clone();
+                }
+            } else {
+                snapshot.schedule_states.push(st.clone());
             }
         }
     }
@@ -113,8 +216,30 @@ impl CommittedWrites {
                 .iter()
                 .any(|c| &c.id == id && c.revision >= card.revision)
         });
-        self.comments
-            .retain(|id, _| !snapshot.events.iter().any(|e| &e.id == id));
+        self.comments.retain(|id, ev| {
+            !snapshot.events.iter().any(|e| {
+                &e.id == id
+                    && (event_revision(e) >= event_revision(ev) || e.kind == "comment.deleted")
+            })
+        });
+        self.deleted_comments.retain(|id| {
+            snapshot
+                .events
+                .iter()
+                .any(|e| &e.id == id && e.kind != "comment.deleted")
+        });
+        self.card_reads.retain(|id, read| {
+            !snapshot
+                .card_reads
+                .iter()
+                .any(|r| &r.card_id == id && r.sequence >= read.sequence)
+        });
+        self.schedule_states.retain(|id, st| {
+            !snapshot
+                .schedule_states
+                .iter()
+                .any(|s| &s.id == id && s.updated_at >= st.updated_at)
+        });
         self.overlay(snapshot);
     }
 }
@@ -310,5 +435,129 @@ mod tests {
         let mut removed = Snapshot::default();
         writes.reconcile(&mut removed);
         assert!(removed.cards.is_empty());
+    }
+
+    #[test]
+    fn immediate_mutations_overlay_and_reconcile_across_cards_comments_reads_and_schedules() {
+        assert!(config_only("config.agents.save"));
+        assert!(config_only("utilities.configure"));
+        assert!(config_only("utilities.awake"));
+        assert!(config_only("scheduler.configure"));
+        assert!(immediate("card.move"));
+        assert!(immediate("card.hold_auto_merge"));
+        assert!(immediate("comment.update"));
+        assert!(immediate("comment.delete"));
+        assert!(immediate("notifications.read"));
+        assert!(immediate("schedule.toggle"));
+
+        let mut writes = CommittedWrites::default();
+        let mut moved = card(2);
+        moved.stage = "develop".into();
+        moved.hold_auto_merge = true;
+        writes.record(
+            "card.move",
+            &serde_json::to_value(&moved).unwrap(),
+            "remote",
+        );
+
+        let updated_event = Event {
+            id: "ev1".into(),
+            project_id: "p1".into(),
+            card_id: "c1".into(),
+            sequence: 2,
+            kind: "comment.created".into(),
+            actor: "user".into(),
+            message: "Edited".into(),
+            data: json!({"body":"Edited","revision":2}),
+            created_at: 2,
+        };
+        writes.record(
+            "comment.update",
+            &serde_json::to_value(&updated_event).unwrap(),
+            "remote",
+        );
+
+        writes.record(
+            "notifications.read",
+            &json!({"id":"c1","project_id":"p1","card_id":"c1","sequence":2}),
+            "local",
+        );
+        writes.record(
+            "schedule.toggle",
+            &json!({
+                "id":"sched1",
+                "project_id":"p1",
+                "filename":"nightly.yaml",
+                "workflow_id":"nightly",
+                "workflow_name":"Nightly",
+                "rule_id":"nightly",
+                "cron":"0 0 * * *",
+                "creates_card":true,
+                "enabled":false,
+                "updated_at":200
+            }),
+            "local",
+        );
+
+        let mut stale = Snapshot {
+            cards: vec![card(1)],
+            events: vec![Event {
+                id: "ev1".into(),
+                project_id: "p1".into(),
+                card_id: "c1".into(),
+                sequence: 2,
+                kind: "comment.created".into(),
+                actor: "user".into(),
+                message: "Original".into(),
+                data: json!({"body":"Original","revision":1}),
+                created_at: 2,
+            }],
+            card_reads: vec![CardRead {
+                id: "c1".into(),
+                project_id: "p1".into(),
+                card_id: "c1".into(),
+                sequence: 1,
+            }],
+            schedule_states: vec![
+                serde_json::from_value(json!({
+                    "id":"sched1",
+                    "project_id":"p1",
+                    "filename":"nightly.yaml",
+                    "workflow_id":"nightly",
+                    "workflow_name":"Nightly",
+                    "rule_id":"nightly",
+                    "cron":"0 0 * * *",
+                    "creates_card":true,
+                    "enabled":true,
+                    "next_run_at":999,
+                    "updated_at":100
+                }))
+                .unwrap(),
+            ],
+            ..Default::default()
+        };
+        writes.reconcile(&mut stale);
+        assert_eq!(stale.cards[0].stage, "develop");
+        assert!(stale.cards[0].hold_auto_merge);
+        assert_eq!(stale.events[0].message, "Edited");
+        assert_eq!(stale.card_reads[0].sequence, 2);
+        assert!(!stale.schedule_states[0].enabled);
+
+        writes.record(
+            "comment.delete",
+            &json!({"deleted":true,"comment_id":"ev1","card_id":"c1","revision":3}),
+            "local",
+        );
+        writes.overlay(&mut stale);
+        assert_eq!(stale.events[0].kind, "comment.deleted");
+
+        let mut fresh = stale.clone();
+        fresh.schedule_states[0].updated_at = 200;
+        writes.reconcile(&mut fresh);
+        assert!(writes.cards.is_empty());
+        assert!(writes.comments.is_empty());
+        assert!(writes.deleted_comments.is_empty());
+        assert!(writes.card_reads.is_empty());
+        assert!(writes.schedule_states.is_empty());
     }
 }

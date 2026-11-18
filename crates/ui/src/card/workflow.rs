@@ -234,13 +234,7 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         "Hold auto-merge"
                     },
                     Variant::Secondary,
-                    move |_| {
-                        dispatch(
-                            ui,
-                            "card.hold_auto_merge",
-                            json!({"card_id":hold_cid,"revision":rev,"hold":!held}),
-                        )
-                    },
+                    move |_| crate::presenter::hold_auto_merge(ui, &hold_cid, rev, !held),
                 )
                 .disabled(delivering || ui.is_method_pending("card.hold_auto_merge")),
             );
@@ -472,11 +466,7 @@ pub fn render(ui: Ui) -> impl IntoElement {
                                         Variant::Secondary
                                     },
                                     move |_| {
-                                        dispatch(
-                                            ui,
-                                            "card.hold_auto_merge",
-                                            json!({"card_id":cid,"revision":rev,"hold":!held}),
-                                        )
+                                        crate::presenter::hold_auto_merge(ui, &cid, rev, !held)
                                     },
                                 )
                                 .disabled(pending_action),

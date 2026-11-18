@@ -464,8 +464,8 @@ impl AppClient {
     }
 
     pub fn call(&self, method: &str, params: Value) -> Result<Value> {
-        match self.pooled_rpc(method, &params) {
-            Ok(v) => Ok(v),
+        let value = match self.pooled_rpc(method, &params) {
+            Ok(v) => v,
             Err(first_err) => {
                 let ClientEndpoint::Unix(sock_path) = &self.endpoint else {
                     return Err(first_err);
@@ -506,8 +506,26 @@ impl AppClient {
                         std::thread::sleep(Duration::from_millis(100));
                     }
                 }
-                self.pooled_rpc(method, &params)
+                self.pooled_rpc(method, &params)?
             }
+        };
+        self.cache_config_reply(method, &value);
+        Ok(value)
+    }
+
+    fn cache_config_reply(&self, method: &str, value: &Value) {
+        match method {
+            "config.agents.save" | "agent.setup" => {
+                if let Ok(cfg) = serde_json::from_value::<Config>(value.clone()) {
+                    self.set_cached_config(cfg);
+                }
+            }
+            "scheduler.configure" => {
+                if let Ok(settings) = serde_json::from_value::<SchedulerSettings>(value.clone()) {
+                    self.config.write().unwrap().scheduler = settings;
+                }
+            }
+            _ => {}
         }
     }
 

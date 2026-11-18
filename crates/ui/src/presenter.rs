@@ -120,6 +120,11 @@ pub struct Ui {
     pub onboarded: Signal<bool>,
     pub agent_catalog: Signal<Value>,
     pub agent_catalog_loading: Signal<bool>,
+    pub agent_config_epoch: Signal<u64>,
+    pub agent_catalog_epoch: Signal<u64>,
+    pub(crate) agent_catalog_loading_host: Stored<Option<String>>,
+    pub(crate) agent_catalog_requested: Stored<Option<String>>,
+    pub(crate) pending_catalog_ops: Stored<Vec<(u64, Value)>>,
     pub max_agents: Signal<usize>,
     pub idle_minutes: Signal<u64>,
     pub overview_selection: Signal<String>,
@@ -242,6 +247,18 @@ impl Ui {
                 .set(ordered_enabled_profiles(&cfg.profiles, &cfg.default_agent));
             self.max_agents.set(cfg.scheduler.max_agents);
             self.idle_minutes.set(cfg.scheduler.idle_minutes);
+        });
+    }
+
+    pub(crate) fn update_profiles(self, f: impl FnOnce(&mut Vec<Profile>, &mut String)) {
+        let mut all = self.all_profiles.get_untracked();
+        let mut def = self.default_agent.get_untracked();
+        f(&mut all, &mut def);
+        let enabled = ordered_enabled_profiles(&all, &def);
+        batch(move || {
+            self.default_agent.set(def);
+            self.all_profiles.set(all);
+            self.profiles.set(enabled);
         });
     }
     pub fn active_project_host(self) -> String {
@@ -513,6 +530,11 @@ impl Ui {
             ),
             agent_catalog: signal(Value::Null),
             agent_catalog_loading: signal(false),
+            agent_config_epoch: signal(0),
+            agent_catalog_epoch: signal(0),
+            agent_catalog_loading_host: stored(None),
+            agent_catalog_requested: stored(None),
+            pending_catalog_ops: stored(Vec::new()),
             project: signal(String::new()),
             archive_query: signal(String::new()),
             archive_folds: signal(BTreeSet::new()),
@@ -1086,13 +1108,15 @@ pub fn dispatch_complete(
         .map(|hosts| hosts.resolve_target_host(method, &params, Some(active_project.as_str())))
         .unwrap_or_else(|| "local".into());
     let cfg_host = ui.effective_config_host();
+    let config_only = submission::config_only(method);
     let immediate = submission::immediate(method);
+    let skip_snapshot = immediate || config_only;
     let terminal_launch = (method == "terminal.create").then(|| params.clone());
     let epoch = ui.snapshot_epoch.get_untracked();
     ui.spawn(async move {
         let result = blocking(move || {
             let value = crate::routed_call(method, params, Some(active_project.as_str()))?;
-            let refreshed = if immediate {
+            let refreshed = if skip_snapshot {
                 None
             } else {
                 Some((crate::merged_snapshot()?, crate::config_for_host(&cfg_host)))
@@ -1114,9 +1138,11 @@ pub fn dispatch_complete(
             Ok(Ok((value, refreshed))) => {
                 let stale = ui.snapshot_epoch.get_untracked() != epoch;
                 batch(|| {
-                    ui.snapshot_epoch.update(|v| *v += 1);
-                    ui.committed_writes
-                        .with(|writes| writes.record(method, &value, &target_host));
+                    if !config_only {
+                        ui.snapshot_epoch.update(|v| *v += 1);
+                        ui.committed_writes
+                            .with(|writes| writes.record(method, &value, &target_host));
+                    }
                     if let Some(params) = terminal_launch.as_ref()
                         && let Ok(terminal) = serde_json::from_value(value.clone())
                         && let Some(hint) = ui.snapshot.with_untracked(|s| {
@@ -1134,7 +1160,28 @@ pub fn dispatch_complete(
                         ui.committed_writes
                             .with(|writes| writes.record_terminal_hint(hint));
                     }
-                    if let Some((mut snapshot, config)) = refreshed.filter(|_| !stale) {
+                    if config_only {
+                        match method {
+                            "config.agents.save" | "agent.setup" => {
+                                if let Ok(cfg) = serde_json::from_value::<Config>(value.clone()) {
+                                    ui.apply_config(&cfg);
+                                }
+                            }
+                            "scheduler.configure" => {
+                                if let Ok(settings) =
+                                    serde_json::from_value::<SchedulerSettings>(value.clone())
+                                {
+                                    ui.max_agents.set(settings.max_agents);
+                                    ui.idle_minutes.set(settings.idle_minutes);
+                                }
+                            }
+                            "utilities.configure" | "utilities.awake" => {
+                                ui.utility_epoch.update(|n| *n += 1);
+                                ui.utility.set(value.clone());
+                            }
+                            _ => {}
+                        }
+                    } else if let Some((mut snapshot, config)) = refreshed.filter(|_| !stale) {
                         ui.committed_writes
                             .with(|writes| writes.reconcile(&mut snapshot));
                         let summaries = snapshot_summaries(&snapshot);
@@ -1150,7 +1197,7 @@ pub fn dispatch_complete(
                     }
                     ui.runtime_clock.set(now());
                 });
-                if !immediate && !stale {
+                if !skip_snapshot && !stale {
                     ui.prefetch_active_reports();
                 }
                 let failed = matches!(value["state"].as_str(), Some("failed" | "unknown"));
@@ -1289,7 +1336,7 @@ pub fn dispatch_complete(
                     _ => {}
                 }
                 after(Ok(value));
-                if immediate || stale {
+                if immediate || (!config_only && stale) {
                     refresh(ui);
                 }
             }
@@ -1313,12 +1360,87 @@ pub fn move_card(ui: Ui, card_id: &str, target: &str) {
         .snapshot
         .with_untracked(|s| s.cards.iter().find(|c| c.id == card_id).cloned());
     if let Some(c) = card {
-        dispatch(
+        let prev = c.clone();
+        let target_stage = target.to_owned();
+        if crate::APP.get().is_none() {
+            ui.snapshot.update(|s| {
+                if let Some(cur) = s.cards.iter_mut().find(|x| x.id == prev.id) {
+                    cur.stage = target_stage;
+                    cur.attention = None;
+                    cur.human_gate = None;
+                    cur.revision += 1;
+                }
+            });
+            return;
+        }
+        if ui.is_method_pending("card.move") {
+            return;
+        }
+        ui.snapshot.update(|s| {
+            if let Some(cur) = s.cards.iter_mut().find(|x| x.id == prev.id) {
+                cur.stage = target_stage;
+                cur.attention = None;
+                cur.human_gate = None;
+            }
+        });
+        dispatch_complete(
             ui,
             "card.move",
             json!({"card_id":c.id,"revision":c.revision,"stage":target}),
+            move |res| {
+                if res.is_err() {
+                    ui.snapshot.update(|s| {
+                        if let Some(cur) = s.cards.iter_mut().find(|x| x.id == prev.id)
+                            && cur.revision == prev.revision
+                        {
+                            *cur = prev;
+                        }
+                    });
+                }
+            },
         );
     }
+}
+pub fn hold_auto_merge(ui: Ui, card_id: &str, revision: u64, hold: bool) {
+    let prev = ui
+        .snapshot
+        .with_untracked(|s| s.cards.iter().find(|c| c.id == card_id).cloned());
+    if crate::APP.get().is_none() {
+        ui.snapshot.update(|s| {
+            if let Some(cur) = s.cards.iter_mut().find(|x| x.id == card_id) {
+                cur.hold_auto_merge = hold;
+                cur.revision += 1;
+            }
+        });
+        return;
+    }
+    if ui.is_method_pending("card.hold_auto_merge") {
+        return;
+    }
+    ui.snapshot.update(|s| {
+        if let Some(cur) = s.cards.iter_mut().find(|x| x.id == card_id) {
+            cur.hold_auto_merge = hold;
+        }
+    });
+    let cid = card_id.to_owned();
+    dispatch_complete(
+        ui,
+        "card.hold_auto_merge",
+        json!({"card_id":cid,"revision":revision,"hold":hold}),
+        move |res| {
+            if res.is_err()
+                && let Some(prev_card) = prev
+            {
+                ui.snapshot.update(|s| {
+                    if let Some(cur) = s.cards.iter_mut().find(|x| x.id == prev_card.id)
+                        && cur.revision == prev_card.revision
+                    {
+                        *cur = prev_card;
+                    }
+                });
+            }
+        },
+    );
 }
 pub fn load_text(ui: Ui, method: &'static str, params: Value) {
     let generation = ui.output_request.get_untracked() + 1;

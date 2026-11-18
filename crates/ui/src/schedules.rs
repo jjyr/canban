@@ -41,6 +41,7 @@ pub struct State {
     pub agent_scope: Signal<String>,
     pub agent_prompt: Signal<String>,
     pub confirm_delete: Signal<Option<String>>,
+    pending_toggle: Signal<Option<(String, bool)>>,
     pub error: Signal<String>,
 }
 
@@ -64,6 +65,7 @@ impl State {
             agent_scope: signal(GLOBAL_PROJECT_ID.into()),
             agent_prompt: signal(String::new()),
             confirm_delete: signal(None),
+            pending_toggle: signal(None),
             error: signal(String::new()),
         }
     }
@@ -315,7 +317,9 @@ fn collect_scope_items(
                 covered_state_ids.insert(p.id.clone());
             }
             let actual_sid = persisted.map(|p| p.id.clone()).unwrap_or(sid);
-            let effective_enabled = doc.enabled && rule.enabled;
+            let effective_enabled = persisted
+                .filter(|_| !dirty)
+                .map_or(doc.enabled && rule.enabled, |state| state.enabled);
             let (starts_with_script, agent_step_id, doc_profile, agent_instruction) =
                 find_start_mode(&doc, rule);
             let computed_next = if effective_enabled {
@@ -442,6 +446,7 @@ fn collect_scope_items(
 /// Collects scheduled tasks for Global and/or Project scopes.
 pub fn collect_schedules(ui: Ui, scope_filter: &str) -> Vec<ScheduleItem> {
     let drafts = ui.workflows.drafts.get();
+    let pending_toggle = ui.schedules.pending_toggle.get();
     ui.snapshot.with(|s| {
         let now_ms = canban_types::now();
         let mut items = Vec::new();
@@ -452,6 +457,20 @@ pub fn collect_schedules(ui: Ui, scope_filter: &str) -> Vec<ScheduleItem> {
             if scope_filter.is_empty() || scope_filter == p.id {
                 collect_scope_items(s, &drafts, &p.id, now_ms, &mut items);
             }
+        }
+        if let Some((id, enabled)) = pending_toggle.as_ref()
+            && let Some(item) = items
+                .iter_mut()
+                .find(|item| item.schedule_id == *id && item.published)
+        {
+            item.effective_enabled = *enabled;
+            item.next_run_at = enabled
+                .then(|| {
+                    parse_schedule(item.cron_str(), item.rule.timezone.as_deref())
+                        .ok()
+                        .and_then(|(schedule, tz)| schedule.next_after_ms(now_ms, tz))
+                })
+                .flatten();
         }
         items.sort_by(|a, b| {
             b.needs_attention()
@@ -697,6 +716,46 @@ pub(crate) fn mutate_workflow_file(
     });
 }
 
+fn toggle_gallery_schedule(
+    ui: Ui,
+    project: &str,
+    filename: &str,
+    rule_id: &str,
+    sid: &str,
+    enabled: bool,
+) {
+    mutate_workflow_file(ui, project, filename, |doc| {
+        if enabled {
+            doc.enabled = true;
+        }
+        if let Some(rule) = doc.on.get_mut(rule_id) {
+            rule.enabled = enabled;
+        }
+    });
+    let now_ms = canban_types::now();
+    ui.workflows.drafts.update(|d| {
+        if let Some(dr) = d.get_mut(project) {
+            dr.base = json!({
+                "revision": "gallery",
+                "sources": dr.inputs(),
+            });
+        }
+    });
+    ui.snapshot.update(|s| {
+        if let Some(st) = s.schedule_states.iter_mut().find(|st| st.id == sid) {
+            st.enabled = enabled;
+            st.next_run_at = if enabled {
+                parse_schedule(&st.cron, st.timezone.as_deref())
+                    .ok()
+                    .and_then(|(sched, tz)| sched.next_after_ms(now_ms, tz))
+            } else {
+                None
+            };
+            st.updated_at = now_ms;
+        }
+    });
+}
+
 pub fn toggle_schedule(ui: Ui, item: &ScheduleItem, enabled: bool) {
     let state = ui.workflows;
     let project = item.project_id.clone();
@@ -722,39 +781,9 @@ pub fn toggle_schedule(ui: Ui, item: &ScheduleItem, enabled: bool) {
         return;
     }
 
+    let sid = item.schedule_id.clone();
     if crate::APP.get().is_none() {
-        mutate_workflow_file(ui, &project, &filename, |doc| {
-            if enabled {
-                doc.enabled = true;
-            }
-            if let Some(rule) = doc.on.get_mut(&rule_id) {
-                rule.enabled = enabled;
-            }
-        });
-        // Mark draft clean in offline Gallery mode and sync ScheduleState.
-        let now_ms = canban_types::now();
-        state.drafts.update(|d| {
-            if let Some(dr) = d.get_mut(&project) {
-                dr.base = json!({
-                    "revision": "gallery",
-                    "sources": dr.inputs(),
-                });
-            }
-        });
-        let sid = item.schedule_id.clone();
-        ui.snapshot.update(|s| {
-            if let Some(st) = s.schedule_states.iter_mut().find(|st| st.id == sid) {
-                st.enabled = enabled;
-                st.next_run_at = if enabled {
-                    parse_schedule(&st.cron, st.timezone.as_deref())
-                        .ok()
-                        .and_then(|(sched, tz)| sched.next_after_ms(now_ms, tz))
-                } else {
-                    None
-                };
-                st.updated_at = now_ms;
-            }
-        });
+        toggle_gallery_schedule(ui, &project, &filename, &rule_id, &sid, enabled);
         ui.notify(if enabled {
             "Schedule enabled"
         } else {
@@ -763,7 +792,12 @@ pub fn toggle_schedule(ui: Ui, item: &ScheduleItem, enabled: bool) {
         return;
     }
 
-    let sid = item.schedule_id.clone();
+    if ui.is_method_pending("schedule.toggle") {
+        return;
+    }
+    ui.schedules
+        .pending_toggle
+        .set(Some((sid.clone(), enabled)));
     dispatch_complete(
         ui,
         "schedule.toggle",
@@ -771,18 +805,23 @@ pub fn toggle_schedule(ui: Ui, item: &ScheduleItem, enabled: bool) {
             "schedule_id": sid,
             "enabled": enabled,
         }),
-        move |res| match res {
-            Ok(_) => {
-                crate::workflows::load(ui, true);
-                ui.notify(if enabled {
-                    "Schedule enabled"
-                } else {
-                    "Schedule paused"
-                });
-            }
-            Err(e) => {
-                ui.schedules.error.set(e);
-                ui.operation_error.set(String::new());
+        move |res| {
+            ui.schedules.pending_toggle.set(None);
+            match res {
+                Ok(_) => {
+                    if ui.project.get_untracked() == project {
+                        crate::workflows::load(ui, false);
+                    }
+                    ui.notify(if enabled {
+                        "Schedule enabled"
+                    } else {
+                        "Schedule paused"
+                    });
+                }
+                Err(e) => {
+                    ui.schedules.error.set(e);
+                    ui.operation_error.set(String::new());
+                }
             }
         },
     );
@@ -3275,6 +3314,19 @@ mod tests {
             });
             ui.schedules.create_modal.set(false);
             assert_eq!(attention_count(ui), 1);
+
+            let global = || collect_schedules(ui, GLOBAL_PROJECT_ID).remove(0);
+            let id = global().schedule_id;
+            ui.schedules.pending_toggle.set(Some((id, false)));
+            assert!(!global().effective_enabled);
+            assert_eq!(global().next_run_at, None);
+            ui.schedules.pending_toggle.set(None);
+            assert!(global().effective_enabled);
+            assert!(
+                ui.workflows
+                    .drafts
+                    .with(|d| !d.contains_key(GLOBAL_PROJECT_ID))
+            );
 
             // 2. Also ensure project draft -> Card mode toggle works in All Scopes.
             ensure_draft_initialized(ui, &pid);

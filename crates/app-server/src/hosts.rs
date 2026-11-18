@@ -1477,16 +1477,50 @@ impl HostRegistry {
         {
             if matches!(
                 method,
+                "config.agents.save" | "agent.setup" | "scheduler.configure"
+            ) {
+                let mut guard = self.remotes.lock().unwrap();
+                if let Some(slot) = guard.get_mut(&host_id)
+                    && let Some(cached) = &mut slot.cached
+                {
+                    match method {
+                        "config.agents.save" | "agent.setup" => {
+                            if let Ok(cfg) = serde_json::from_value::<Config>(res.clone()) {
+                                cached.config = cfg;
+                            }
+                        }
+                        "scheduler.configure" => {
+                            if let Ok(settings) =
+                                serde_json::from_value::<SchedulerSettings>(res.clone())
+                            {
+                                cached.config.scheduler = settings;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                drop(guard);
+                self.wake();
+            } else if matches!(
+                method,
                 "card.create"
+                    | "card.move"
+                    | "card.hold_auto_merge"
                     | "comment.add"
+                    | "comment.update"
+                    | "comment.delete"
+                    | "notifications.read"
+                    | "schedule.toggle"
                     | "github.issue.add"
                     | "github.item.add"
                     | "terminal.create"
             ) {
-                // These replies contain the committed Card/Event/Terminal. Do not make
+                // These replies contain the committed entity/receipt. Do not make
                 // acknowledgement wait for a second full remote state transfer.
-                if method != "comment.add"
-                    && let Some(id) = res["id"].as_str()
+                if matches!(
+                    method,
+                    "card.create" | "github.issue.add" | "github.item.add" | "terminal.create"
+                ) && let Some(id) = res["id"].as_str()
                 {
                     self.acknowledged_owners
                         .lock()

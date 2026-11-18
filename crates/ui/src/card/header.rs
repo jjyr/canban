@@ -217,13 +217,7 @@ fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
                 } else {
                     "Hold auto-merge"
                 })
-                .on_select(move || {
-                    dispatch(
-                        ui,
-                        "card.hold_auto_merge",
-                        json!({"card_id":cid,"revision":rev,"hold":!held}),
-                    )
-                }),
+                .on_select(move || crate::presenter::hold_auto_merge(ui, &cid, rev, !held)),
             );
         }
         items.push(MenuItem::separator());

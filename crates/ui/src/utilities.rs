@@ -87,29 +87,37 @@ pub const DEFAULT_TERMINAL_FONT_SIZE: u16 = 13;
 pub const MIN_TERMINAL_FONT_SIZE: u16 = 9;
 pub const MAX_TERMINAL_FONT_SIZE: u16 = 32;
 
+fn apply_preferences_patch(state: &mut Value, patch: &Value) {
+    if let Some(obj) = patch.as_object() {
+        for (k, val) in obj {
+            if val.is_null() {
+                if let Some(prefs) = state["preferences"].as_object_mut() {
+                    prefs.remove(k);
+                }
+            } else {
+                state["preferences"][k] = val.clone();
+            }
+        }
+    }
+}
+
 pub fn configure_preferences(ui: Ui, patch: Value) {
     if crate::APP.get().is_none() {
-        ui.utility.update(|v| {
-            if let Some(obj) = patch.as_object() {
-                for (k, val) in obj {
-                    if val.is_null() {
-                        if let Some(prefs) = v["preferences"].as_object_mut() {
-                            prefs.remove(k);
-                        }
-                    } else {
-                        v["preferences"][k] = val.clone();
-                    }
-                }
-            }
-        });
+        ui.utility.update(|v| apply_preferences_patch(v, &patch));
         return;
     }
+    if ui.is_method_pending("utilities.configure") {
+        return;
+    }
+    let prev = ui.utility.get_untracked();
     ui.utility_epoch.update(|n| *n += 1);
+    ui.utility.update(|v| apply_preferences_patch(v, &patch));
     dispatch_complete(ui, "utilities.configure", patch, move |r| {
         if let Ok(v) = r {
             ui.utility_epoch.update(|n| *n += 1);
             ui.utility.set(v);
         } else {
+            ui.utility.set(prev);
             ui.theme_preview.set(None);
         }
     });
@@ -203,7 +211,7 @@ pub fn terminal_settings(ui: Ui) -> impl IntoElement {
                     move |_| open(ui, "terminal-font"),
                 )
                 .accessibility_label("Choose terminal font family")
-                .disabled(move || ui.pending.get()),
+                .disabled(move || ui.is_method_pending("utilities.configure")),
             )
             .child(when(
                 move || {
@@ -217,7 +225,7 @@ pub fn terminal_settings(ui: Ui) -> impl IntoElement {
                     compact_action("Use System Mono", Variant::Quiet, move |_| {
                         configure_preferences(ui, json!({"terminal_font_family":null}));
                     })
-                    .disabled(move || ui.pending.get())
+                    .disabled(move || ui.is_method_pending("utilities.configure"))
                 },
             )),
     ))
@@ -231,7 +239,7 @@ pub fn terminal_settings(ui: Ui) -> impl IntoElement {
             .child(
                 compact_action("−", Variant::Secondary, move |_| adjust_size(-1)).disabled(
                     move || {
-                        ui.pending.get()
+                        ui.is_method_pending("utilities.configure")
                             || ui.utility.with(|v| {
                                 v["preferences"]["terminal_font_size"]
                                     .as_u64()
@@ -252,7 +260,7 @@ pub fn terminal_settings(ui: Ui) -> impl IntoElement {
             .child(
                 compact_action("+", Variant::Secondary, move |_| adjust_size(1)).disabled(
                     move || {
-                        ui.pending.get()
+                        ui.is_method_pending("utilities.configure")
                             || ui.utility.with(|v| {
                                 v["preferences"]["terminal_font_size"]
                                     .as_u64()
@@ -270,7 +278,7 @@ pub fn terminal_settings(ui: Ui) -> impl IntoElement {
                     );
                 })
                 .disabled(move || {
-                    ui.pending.get()
+                    ui.is_method_pending("utilities.configure")
                         || ui.utility.with(|v| {
                             v["preferences"]["terminal_font_family"].is_null()
                                 && v["preferences"]["terminal_font_size"].is_null()
@@ -347,11 +355,15 @@ pub fn toggle_awake(ui: Ui) {
         ui.utility.update(|v| v["awake"] = json!(!on));
         return;
     }
+    let prev = ui.utility.get_untracked();
     ui.utility_epoch.update(|n| *n += 1);
+    ui.utility.update(|v| v["awake"] = json!(!on));
     dispatch_complete(ui, "utilities.awake", json!({"enabled":!on}), move |r| {
         if let Ok(v) = r {
             ui.utility_epoch.update(|n| *n += 1);
             ui.utility.set(v);
+        } else {
+            ui.utility.set(prev);
         }
     });
 }
@@ -556,22 +568,8 @@ pub fn settings(ui: Ui) -> impl IntoElement {
     .child(
         checkbox("Notification sounds".into(), sounds, move |enabled| {
             let enabled = *enabled;
-            if crate::APP.get().is_none() {
-                ui.utility
-                    .update(|v| v["preferences"]["notification_sound"] = json!(enabled));
-                return;
-            }
-            dispatch_complete(
-                ui,
-                "utilities.configure",
-                json!({"notification_sound":enabled}),
-                move |result| {
-                    if let Ok(state) = result {
-                        ui.utility_epoch.update(|v| *v += 1);
-                        ui.utility.set(state);
-                    }
-                },
-            );
+            sounds.set(enabled);
+            configure_preferences(ui, json!({"notification_sound":enabled}));
         })
         .disabled(move || ui.is_method_pending("utilities.configure")),
     )
@@ -639,5 +637,18 @@ mod tests {
         );
         window["resets_at"] = json!("invalid");
         assert_eq!(window_summary(&window, now, false), "22%");
+    }
+
+    #[test]
+    fn preferences_patch_updates_and_clears_keys_immediately() {
+        let mut state =
+            json!({"awake": false, "preferences": {"theme": "nord", "terminal_font_size": 14}});
+        apply_preferences_patch(
+            &mut state,
+            &json!({"theme": "dracula", "notification_sound": false, "terminal_font_size": null}),
+        );
+        assert_eq!(state["preferences"]["theme"], json!("dracula"));
+        assert_eq!(state["preferences"]["notification_sound"], json!(false));
+        assert!(state["preferences"].get("terminal_font_size").is_none());
     }
 }

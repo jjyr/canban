@@ -18,80 +18,131 @@ pub fn close(ui: Ui) {
     }
 }
 
+fn apply_card_read_local(ui: Ui, card_id: &str, sequence: u64) {
+    ui.snapshot.update(|s| {
+        if let Some(existing) = s.card_reads.iter_mut().find(|r| r.card_id == card_id) {
+            existing.sequence = existing.sequence.max(sequence);
+        } else {
+            let pid = s
+                .cards
+                .iter()
+                .find(|c| c.id == card_id)
+                .map(|c| c.project_id.clone())
+                .unwrap_or_default();
+            s.card_reads.push(canban_types::CardRead {
+                id: card_id.to_owned(),
+                project_id: pid,
+                card_id: card_id.to_owned(),
+                sequence,
+            });
+        }
+    });
+}
+
+fn apply_all_cards_read_local(ui: Ui, project_scope: Option<&str>) -> Vec<canban_types::CardRead> {
+    let mut updated = Vec::new();
+    ui.snapshot.update(|s| {
+        let cards: Vec<_> = s
+            .cards
+            .iter()
+            .filter(|c| {
+                c.removed_at.is_none() && project_scope.is_none_or(|pid| c.project_id == pid)
+            })
+            .map(|c| (c.id.clone(), c.project_id.clone()))
+            .collect();
+        for (cid, pid) in cards {
+            let max_seq = s
+                .events
+                .iter()
+                .filter(|e| e.card_id == cid)
+                .map(|e| e.sequence)
+                .max()
+                .unwrap_or(0);
+            if max_seq == 0 {
+                continue;
+            }
+            let read = if let Some(existing) = s.card_reads.iter_mut().find(|r| r.card_id == cid) {
+                existing.sequence = existing.sequence.max(max_seq);
+                existing.clone()
+            } else {
+                let entry = canban_types::CardRead {
+                    id: cid.clone(),
+                    project_id: pid,
+                    card_id: cid,
+                    sequence: max_seq,
+                };
+                s.card_reads.push(entry.clone());
+                entry
+            };
+            updated.push(read);
+        }
+    });
+    updated
+}
+
 pub fn mark_card_read(ui: Ui, card_id: String, sequence: u64) {
     if crate::APP.get().is_none() {
-        ui.snapshot.update(|s| {
-            if let Some(existing) = s.card_reads.iter_mut().find(|r| r.card_id == card_id) {
-                existing.sequence = existing.sequence.max(sequence);
-            } else {
-                let pid = s
-                    .cards
-                    .iter()
-                    .find(|c| c.id == card_id)
-                    .map(|c| c.project_id.clone())
-                    .unwrap_or_default();
-                s.card_reads.push(canban_types::CardRead {
-                    id: card_id.clone(),
-                    project_id: pid,
-                    card_id,
-                    sequence,
-                });
-            }
-        });
+        apply_card_read_local(ui, &card_id, sequence);
         return;
     }
-    dispatch(
+    if ui.is_method_pending("notifications.read") {
+        return;
+    }
+    let prev = ui
+        .snapshot
+        .with_untracked(|s| s.card_reads.iter().find(|r| r.card_id == card_id).cloned());
+    apply_card_read_local(ui, &card_id, sequence);
+    let rollback_id = card_id.clone();
+    dispatch_complete(
         ui,
         "notifications.read",
         json!({"card_id": card_id, "sequence": sequence}),
+        move |res| {
+            if res.is_err() {
+                ui.snapshot.update(|s| {
+                    if let Some(prev_read) = prev {
+                        if let Some(cur) =
+                            s.card_reads.iter_mut().find(|r| r.card_id == rollback_id)
+                        {
+                            *cur = prev_read;
+                        } else {
+                            s.card_reads.push(prev_read);
+                        }
+                    } else {
+                        s.card_reads.retain(|r| r.card_id != rollback_id);
+                    }
+                });
+            }
+        },
     );
 }
 
 pub fn mark_all_read(ui: Ui, project_scope: Option<String>) {
     if crate::APP.get().is_none() {
-        ui.snapshot.update(|s| {
-            let cards: Vec<_> = s
-                .cards
-                .iter()
-                .filter(|c| {
-                    c.removed_at.is_none()
-                        && project_scope
-                            .as_deref()
-                            .is_none_or(|pid| c.project_id == pid)
-                })
-                .map(|c| (c.id.clone(), c.project_id.clone()))
-                .collect();
-            for (cid, pid) in cards {
-                let max_seq = s
-                    .events
-                    .iter()
-                    .filter(|e| e.card_id == cid)
-                    .map(|e| e.sequence)
-                    .max()
-                    .unwrap_or(0);
-                if max_seq == 0 {
-                    continue;
-                }
-                if let Some(existing) = s.card_reads.iter_mut().find(|r| r.card_id == cid) {
-                    existing.sequence = existing.sequence.max(max_seq);
-                } else {
-                    s.card_reads.push(canban_types::CardRead {
-                        id: cid.clone(),
-                        project_id: pid,
-                        card_id: cid,
-                        sequence: max_seq,
-                    });
-                }
-            }
-        });
+        apply_all_cards_read_local(ui, project_scope.as_deref());
         ui.notify("Marked updates read");
         return;
     }
-    dispatch_then(
+    if ui.is_method_pending("notifications.read_all") {
+        return;
+    }
+    let prev_reads = ui.snapshot.with_untracked(|s| s.card_reads.clone());
+    let updated_reads = apply_all_cards_read_local(ui, project_scope.as_deref());
+    dispatch_complete(
         ui,
         "notifications.read_all",
         json!({"project_id": project_scope}),
-        move |_| ui.notify("Marked updates read"),
+        move |res| match res {
+            Ok(_) => {
+                let _ = ui
+                    .committed_writes
+                    .try_with(|w| w.record_card_reads(&updated_reads));
+                ui.notify("Marked updates read");
+            }
+            Err(_) => {
+                ui.snapshot.update(|s| s.card_reads = prev_reads);
+            }
+        },
     );
 }
 

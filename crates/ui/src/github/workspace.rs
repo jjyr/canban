@@ -1061,21 +1061,57 @@ fn list_row(ui: Ui, row: Value) -> AnyElement {
         if is_unread {
             let read_id = thread.clone();
             trailing = trailing.child(compact_action("Read", Variant::Quiet, move |_| {
-                dispatch_then(
+                if ui.is_method_pending("github.notification.read") {
+                    return;
+                }
+                let prev = b.list.get_untracked();
+                b.list.update(|list| {
+                    if let Some(items) = list["items"].as_array_mut() {
+                        for row in items.iter_mut() {
+                            if row["item"]["id"].as_str() == Some(read_id.as_str()) {
+                                row["item"]["unread"] = json!(false);
+                            }
+                        }
+                    }
+                });
+                dispatch_complete(
                     ui,
                     "github.notification.read",
                     json!({"thread_id": read_id}),
-                    move |_| load(ui, false),
+                    move |res| {
+                        let ok = matches!(&res, Ok(v) if !matches!(v["state"].as_str(), Some("failed" | "unknown")));
+                        if ok {
+                            load(ui, false);
+                        } else {
+                            b.list.set(prev);
+                        }
+                    },
                 )
             }));
         }
         let done_id = thread;
         trailing = trailing.child(compact_action("Done", Variant::Quiet, move |_| {
-            dispatch_then(
+            if ui.is_method_pending("github.notification.done") {
+                return;
+            }
+            let prev = b.list.get_untracked();
+            b.list.update(|list| {
+                if let Some(items) = list["items"].as_array_mut() {
+                    items.retain(|row| row["item"]["id"].as_str() != Some(done_id.as_str()));
+                }
+            });
+            dispatch_complete(
                 ui,
                 "github.notification.done",
                 json!({"thread_id": done_id}),
-                move |_| load(ui, false),
+                move |res| {
+                    let ok = matches!(&res, Ok(v) if !matches!(v["state"].as_str(), Some("failed" | "unknown")));
+                    if ok {
+                        load(ui, false);
+                    } else {
+                        b.list.set(prev);
+                    }
+                },
             )
         }));
     }

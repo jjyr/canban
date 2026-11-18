@@ -11,6 +11,7 @@ use std::{
 };
 
 static DONE: AtomicBool = AtomicBool::new(false);
+static CATALOG_REPLAYED: AtomicBool = AtomicBool::new(false);
 
 #[test]
 fn submissions_finish_before_refresh_and_refresh_failure_does_not_fail_the_write() {
@@ -22,18 +23,37 @@ fn submissions_finish_before_refresh_and_refresh_failure_does_not_fail_the_write
     let stopped = Arc::new(AtomicBool::new(false));
     let refresh_entered = Arc::new(AtomicBool::new(false));
     let release_refresh = Arc::new(AtomicBool::new(false));
+    let catalog_entered = Arc::new(AtomicBool::new(false));
+    let release_catalog = Arc::new(AtomicBool::new(false));
     let reads = Arc::new(AtomicUsize::new(0));
     let creates = Arc::new(AtomicUsize::new(0));
     let comments = Arc::new(AtomicUsize::new(0));
+    let config_saves = Arc::new(AtomicUsize::new(0));
+    let utility_saves = Arc::new(AtomicUsize::new(0));
     let card = json!({"id":"c1","project_id":"p1","number":1,"title":"First","body":"","stage":"backlog","revision":1,"created_at":1});
     let server = std::thread::spawn({
-        let (stopped, entered, release, reads, creates, comments) = (
+        let (
+            stopped,
+            entered,
+            release,
+            cat_entered,
+            cat_release,
+            reads,
+            creates,
+            comments,
+            config_saves,
+            utility_saves,
+        ) = (
             stopped.clone(),
             refresh_entered.clone(),
             release_refresh.clone(),
+            catalog_entered.clone(),
+            release_catalog.clone(),
             reads.clone(),
             creates.clone(),
             comments.clone(),
+            config_saves.clone(),
+            utility_saves.clone(),
         );
         move || {
             while !stopped.load(Ordering::SeqCst) {
@@ -41,13 +61,29 @@ fn submissions_finish_before_refresh_and_refresh_failure_does_not_fail_the_write
                     std::thread::sleep(Duration::from_millis(2));
                     continue;
                 };
-                let (stopped, entered, release, reads, creates, comments, card) = (
+                let (
+                    stopped,
+                    entered,
+                    release,
+                    cat_entered,
+                    cat_release,
+                    reads,
+                    creates,
+                    comments,
+                    config_saves,
+                    utility_saves,
+                    card,
+                ) = (
                     stopped.clone(),
                     entered.clone(),
                     release.clone(),
+                    cat_entered.clone(),
+                    cat_release.clone(),
                     reads.clone(),
                     creates.clone(),
                     comments.clone(),
+                    config_saves.clone(),
+                    utility_saves.clone(),
                     card.clone(),
                 );
                 std::thread::spawn(move || {
@@ -86,9 +122,61 @@ fn submissions_finish_before_refresh_and_refresh_failure_does_not_fail_the_write
                                 }
                                 json!({"home":"/tmp/fixture","config":Config::default(),"snapshot":Snapshot::default()})
                             }
+                            "agent.catalog" => {
+                                cat_entered.store(true, Ordering::SeqCst);
+                                while !cat_release.load(Ordering::SeqCst)
+                                    && !stopped.load(Ordering::SeqCst)
+                                {
+                                    std::thread::sleep(Duration::from_millis(2));
+                                }
+                                json!({
+                                    "machine": "local",
+                                    "agents": [{"id":"codex","enabled":true,"configured":true,"installed":true}],
+                                    "raw_profiles": [
+                                        {"id":"codex","enabled":true,"identity":false,"preset":"codex","model":"gpt-5.4"},
+                                        {"id":"developer","enabled":true,"identity":true,"preset":"codex"}
+                                    ]
+                                })
+                            }
+                            "config.agents.save" => {
+                                config_saves.fetch_add(1, Ordering::SeqCst);
+                                let mut cfg = Config::default();
+                                if let Some(dev) =
+                                    cfg.profiles.iter_mut().find(|p| p.id == "developer")
+                                {
+                                    dev.model = Some("gpt-5.4-mini".into());
+                                } else {
+                                    cfg.profiles.push(Profile {
+                                        id: "developer".into(),
+                                        enabled: true,
+                                        identity: true,
+                                        preset: Some("codex".into()),
+                                        model: Some("gpt-5.4-mini".into()),
+                                        ..Default::default()
+                                    });
+                                }
+                                serde_json::to_value(cfg).unwrap()
+                            }
+                            "utilities.configure" => {
+                                utility_saves.fetch_add(1, Ordering::SeqCst);
+                                json!({"awake":false,"preferences":{"theme":"dracula"}})
+                            }
                             "card.create" => {
                                 creates.fetch_add(1, Ordering::SeqCst);
                                 card.clone()
+                            }
+                            "card.move" => {
+                                let mut moved = card.clone();
+                                moved["stage"] = req["params"]["stage"].clone();
+                                moved["revision"] = json!(2);
+                                moved
+                            }
+                            "card.hold_auto_merge" => {
+                                let mut held = card.clone();
+                                held["stage"] = json!("develop");
+                                held["hold_auto_merge"] = req["params"]["hold"].clone();
+                                held["revision"] = json!(3);
+                                held
                             }
                             "comment.add" => {
                                 comments.fetch_add(1, Ordering::SeqCst);
@@ -112,11 +200,54 @@ fn submissions_finish_before_refresh_and_refresh_failure_does_not_fail_the_write
     #[component]
     fn ProbeRoot() -> impl IntoElement {
         let ui = Ui::new();
+        effect(move || {
+            let replayed = ui.agent_catalog.with(|c| {
+                c["raw_profiles"].as_array().is_some_and(|arr| {
+                    arr.iter()
+                        .any(|p| p["id"] == "developer" && p["model"] == "gpt-5.4-mini")
+                })
+            });
+            if replayed {
+                CATALOG_REPLAYED.store(true, Ordering::SeqCst);
+            }
+        });
         ui.project.set("p1".into());
         let origin = ui.location();
         ui.history.update(|h| h.visit(origin.clone()));
         ui.page.set("new-card".into());
         ui.history.update(|h| h.visit(ui.location()));
+
+        // Start a slow `agent.catalog` load, then save a model change while it is in flight.
+        crate::agents_setup::refresh_catalog(ui);
+        crate::agents_setup::dispatch_agents_save(
+            ui,
+            json!({"op":"set_profile_options","id":"developer","model":"gpt-5.4-mini"}),
+            move |cfg| {
+                assert_eq!(
+                    cfg.profiles
+                        .iter()
+                        .find(|p| p.id == "developer")
+                        .and_then(|p| p.model.as_deref()),
+                    Some("gpt-5.4-mini")
+                );
+            },
+        );
+        // Optimistic update took effect synchronously before RPC completed.
+        assert_eq!(
+            ui.all_profiles.with_untracked(|ps| ps
+                .iter()
+                .find(|p| p.id == "developer")
+                .and_then(|p| p.model.clone())),
+            Some("gpt-5.4-mini".into())
+        );
+
+        crate::utilities::configure_preferences(ui, json!({"theme":"dracula"}));
+        assert_eq!(
+            ui.utility
+                .with_untracked(|v| v["preferences"]["theme"].clone()),
+            json!("dracula")
+        );
+
         dispatch_complete(
             ui,
             "card.create",
@@ -130,6 +261,13 @@ fn submissions_finish_before_refresh_and_refresh_failure_does_not_fail_the_write
                 assert_eq!(ui.history.with(|h| h.entries.len()), 2);
                 assert_eq!(ui.history.with(|h| h.entries[0].clone()), origin);
                 assert_eq!(ui.history.with(|h| h.entries[1].clone()), ui.location());
+                move_card(ui, "c1", "develop");
+                assert_eq!(
+                    ui.snapshot.with_untracked(|s| s.cards[0].stage.clone()),
+                    "develop"
+                );
+                hold_auto_merge(ui, "c1", 2, true);
+                assert!(ui.snapshot.with_untracked(|s| s.cards[0].hold_auto_merge));
                 // A second write must be admitted while the previous refresh is stalled.
                 dispatch_complete(
                     ui,
@@ -173,23 +311,35 @@ fn submissions_finish_before_refresh_and_refresh_failure_does_not_fail_the_write
     core.mount_root(&nsh_core::element::Root::of::<ProbeRoot>());
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline
-        && !(DONE.load(Ordering::SeqCst) && refresh_entered.load(Ordering::SeqCst))
+        && !(DONE.load(Ordering::SeqCst)
+            && refresh_entered.load(Ordering::SeqCst)
+            && catalog_entered.load(Ordering::SeqCst))
     {
         core.run_component_tasks();
         core.commit();
         std::thread::sleep(Duration::from_millis(2));
     }
     let finished_before_refresh = DONE.load(Ordering::SeqCst);
+    // Neither `config.agents.save` nor `utilities.configure` nor `card.move` waited on `app.state`.
+    assert_eq!(config_saves.load(Ordering::SeqCst), 1);
+    assert_eq!(utility_saves.load(Ordering::SeqCst), 1);
+    release_catalog.store(true, Ordering::SeqCst);
     release_refresh.store(true, Ordering::SeqCst);
     // Drive both the failed refresh and the coalesced follow-up through the UI.
     let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline && reads.load(Ordering::SeqCst) < 3 {
+    while Instant::now() < deadline
+        && (reads.load(Ordering::SeqCst) < 3 || !CATALOG_REPLAYED.load(Ordering::SeqCst))
+    {
         core.run_component_tasks();
         core.commit();
         std::thread::sleep(Duration::from_millis(2));
     }
     stopped.store(true, Ordering::SeqCst);
     server.join().unwrap();
+    assert!(
+        CATALOG_REPLAYED.load(Ordering::SeqCst),
+        "stale agent.catalog response must replay concurrent config.agents.save edits"
+    );
     assert!(
         finished_before_refresh,
         "write callbacks waited for the blocked snapshot"

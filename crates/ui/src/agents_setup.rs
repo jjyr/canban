@@ -140,14 +140,34 @@ pub fn refresh_catalog(ui: Ui) {
 
 /// Refresh `ui.agent_catalog` for a specific `canband` host (`"local"` or remote `host_id`).
 pub fn refresh_catalog_for_host(ui: Ui, host_id: &str) {
-    if ui.agent_catalog_loading.get_untracked() {
-        return;
-    }
     if crate::APP.get().is_none() {
         return;
     }
-    let target_host = host_id.to_owned();
+    let target_host = if host_id.trim().is_empty() {
+        "local".to_owned()
+    } else {
+        host_id.trim().to_owned()
+    };
+    if ui.agent_catalog_loading.get_untracked() {
+        let same_host = ui
+            .agent_catalog_loading_host
+            .try_with(|h| h.as_deref() == Some(target_host.as_str()))
+            .unwrap_or(false);
+        if same_host {
+            let _ = ui
+                .agent_catalog_requested
+                .try_with(|r| *r = Some(target_host));
+            return;
+        }
+    }
+    let catalog_epoch = ui.agent_catalog_epoch.get_untracked() + 1;
+    ui.agent_catalog_epoch.set(catalog_epoch);
     ui.agent_catalog_loading.set(true);
+    let _ = ui
+        .agent_catalog_loading_host
+        .try_with(|h| *h = Some(target_host.clone()));
+    let _ = ui.agent_catalog_requested.try_with(|r| *r = None);
+    let start_cfg_epoch = ui.agent_config_epoch.get_untracked();
     ui.spawn(async move {
         let req_host = target_host.clone();
         let result = blocking(move || {
@@ -158,9 +178,30 @@ pub fn refresh_catalog_for_host(ui: Ui, host_id: &str) {
             )
         })
         .await;
+        if ui.agent_catalog_epoch.try_get() != Some(catalog_epoch) {
+            return;
+        }
         let _ = ui.agent_catalog_loading.try_set(false);
+        let _ = ui.agent_catalog_loading_host.try_with(|h| *h = None);
         match result {
-            Ok(Ok(val)) => {
+            Ok(Ok(mut val)) => {
+                let cur_profiles = ui.all_profiles.try_get().unwrap_or_default();
+                let ops: Vec<Value> = ui
+                    .pending_catalog_ops
+                    .try_with(|list| {
+                        let ops = list
+                            .iter()
+                            .filter(|(ep, _)| *ep > start_cfg_epoch)
+                            .map(|(_, p)| p.clone())
+                            .collect::<Vec<_>>();
+                        list.clear();
+                        ops
+                    })
+                    .unwrap_or_default();
+                for op in &ops {
+                    apply_op_to_catalog(&mut val, op, None);
+                }
+                sync_catalog_agents_with_profiles(&mut val, &cur_profiles);
                 let _ = ui.agent_catalog.try_set(val);
             }
             Ok(Err(e)) => {
@@ -169,6 +210,555 @@ pub fn refresh_catalog_for_host(ui: Ui, host_id: &str) {
             Err(e) => {
                 let _ = ui.operation_error.try_set(e.to_string());
             }
+        }
+        let follow_up = ui.agent_catalog_requested.try_with(|r| r.take()).flatten();
+        if let Some(next_host) = follow_up {
+            refresh_catalog_for_host(ui, &next_host);
+        }
+    });
+}
+
+fn sync_catalog_agents_with_profiles(cat: &mut Value, profiles: &[Profile]) {
+    let Some(agents) = cat["agents"].as_array_mut() else {
+        return;
+    };
+    for row in agents.iter_mut() {
+        let Some(id) = row["id"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        let prof = profiles.iter().find(|p| p.id == id && !p.is_identity());
+        row["configured"] = json!(prof.is_some());
+        row["enabled"] = json!(prof.is_some_and(|p| p.enabled));
+        if let Some(p) = prof {
+            if let Some(name) = &p.name {
+                row["display_name"] = json!(name);
+            }
+            if let Some(bin) = p.command().first() {
+                row["binary"] = json!(bin);
+            }
+        }
+    }
+}
+
+fn trim_non_empty(val: Option<&Value>) -> Option<String> {
+    val.and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+fn apply_op_to_catalog(cat: &mut Value, payload: &Value, resolved_cfg: Option<&Config>) {
+    if cat.is_null() {
+        if let Some(cfg) = resolved_cfg {
+            sync_catalog_agents_with_profiles(cat, &cfg.profiles);
+        }
+        return;
+    }
+    let op = payload["op"].as_str().unwrap_or("");
+    match op {
+        "set_profile_options" => {
+            if let Some(id) = payload["id"]
+                .as_str()
+                .map(|s| s.trim().trim_start_matches('@'))
+                .filter(|s| !s.is_empty())
+                && let Some(arr) = cat["raw_profiles"].as_array_mut()
+            {
+                let item =
+                    if let Some(existing) = arr.iter_mut().find(|v| v["id"].as_str() == Some(id)) {
+                        existing
+                    } else {
+                        arr.push(json!({ "id": id }));
+                        arr.last_mut().unwrap()
+                    };
+                if let Some(obj) = item.as_object_mut() {
+                    if let Some(m) = payload.get("model") {
+                        match trim_non_empty(Some(m)) {
+                            Some(s) => {
+                                obj.insert("model".into(), json!(s));
+                            }
+                            None => {
+                                obj.remove("model");
+                            }
+                        }
+                    }
+                    if let Some(e) = payload.get("effort") {
+                        match trim_non_empty(Some(e)) {
+                            Some(s) => {
+                                obj.insert("effort".into(), json!(s));
+                            }
+                            None => {
+                                obj.remove("effort");
+                            }
+                        }
+                    }
+                    if let Some(argv) = payload.get("argv") {
+                        if argv.is_null() {
+                            obj.remove("argv");
+                        } else {
+                            obj.insert("argv".into(), argv.clone());
+                        }
+                    }
+                }
+            }
+        }
+        "toggle_agent" => {
+            if let Some(id) = payload["id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let enabled = payload["enabled"].as_bool().unwrap_or(true);
+                if let Some(arr) = cat["raw_profiles"].as_array_mut() {
+                    if let Some(existing) = arr.iter_mut().find(|v| v["id"].as_str() == Some(id)) {
+                        existing["enabled"] = json!(enabled);
+                    } else if enabled {
+                        arr.push(json!({
+                            "id": id,
+                            "enabled": true,
+                            "identity": false,
+                            "preset": id,
+                        }));
+                    }
+                }
+                if let Some(agents) = cat["agents"].as_array_mut()
+                    && let Some(row) = agents.iter_mut().find(|r| r["id"].as_str() == Some(id))
+                {
+                    row["enabled"] = json!(enabled);
+                    if enabled {
+                        row["configured"] = json!(true);
+                    }
+                }
+            }
+        }
+        "upsert_identity" => {
+            if let Some(id) = payload["id"]
+                .as_str()
+                .map(|s| s.trim().trim_start_matches('@'))
+                .filter(|s| !s.is_empty())
+                && let Some(arr) = cat["raw_profiles"].as_array_mut()
+            {
+                let engine = trim_non_empty(payload.get("engine"));
+                let item =
+                    if let Some(existing) = arr.iter_mut().find(|v| v["id"].as_str() == Some(id)) {
+                        existing
+                    } else {
+                        arr.push(json!({ "id": id, "identity": true }));
+                        arr.last_mut().unwrap()
+                    };
+                if let Some(obj) = item.as_object_mut() {
+                    let prev_preset = obj.get("preset").and_then(Value::as_str).map(str::to_owned);
+                    let engine_changed = engine.as_deref() != prev_preset.as_deref();
+                    obj.insert("identity".into(), json!(true));
+                    obj.insert(
+                        "enabled".into(),
+                        json!(payload["enabled"].as_bool().unwrap_or(true)),
+                    );
+                    if let Some(eng) = engine {
+                        obj.insert("preset".into(), json!(eng));
+                    }
+                    if let Some(m) = payload.get("model") {
+                        match trim_non_empty(Some(m)) {
+                            Some(s) => {
+                                obj.insert("model".into(), json!(s));
+                            }
+                            None => {
+                                obj.remove("model");
+                            }
+                        }
+                    } else if engine_changed {
+                        obj.remove("model");
+                    }
+                    if let Some(e) = payload.get("effort") {
+                        match trim_non_empty(Some(e)) {
+                            Some(s) => {
+                                obj.insert("effort".into(), json!(s));
+                            }
+                            None => {
+                                obj.remove("effort");
+                            }
+                        }
+                    } else if engine_changed {
+                        obj.remove("effort");
+                    }
+                    if let Some(instr) = payload.get("role_instruction") {
+                        obj.insert("role_instruction".into(), instr.clone());
+                    }
+                }
+            }
+        }
+        "delete_profile" => {
+            if let Some(id) = payload["id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                if let Some(arr) = cat["raw_profiles"].as_array_mut() {
+                    arr.retain(|v| v["id"].as_str() != Some(id));
+                }
+                if let Some(agents) = cat["agents"].as_array_mut() {
+                    agents.retain(|r| !(r["id"].as_str() == Some(id) && r["kind"] == "custom"));
+                    for r in agents.iter_mut() {
+                        if r["id"].as_str() == Some(id) {
+                            r["enabled"] = json!(false);
+                            r["configured"] = json!(false);
+                        }
+                    }
+                }
+            }
+        }
+        "upsert_custom_agent" => {
+            if let Some(id) = payload["id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let enabled = payload["enabled"].as_bool().unwrap_or(true);
+                let argv: Vec<String> = payload["argv"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let bin = argv.first().cloned().unwrap_or_else(|| id.to_owned());
+                if let Some(arr) = cat["raw_profiles"].as_array_mut() {
+                    if let Some(existing) = arr.iter_mut().find(|v| v["id"].as_str() == Some(id)) {
+                        existing["enabled"] = json!(enabled);
+                        existing["argv"] = json!(argv);
+                    } else {
+                        arr.push(json!({
+                            "id": id,
+                            "enabled": enabled,
+                            "identity": false,
+                            "argv": argv,
+                        }));
+                    }
+                }
+                if let Some(agents) = cat["agents"].as_array_mut() {
+                    if let Some(row) = agents.iter_mut().find(|r| r["id"].as_str() == Some(id)) {
+                        row["enabled"] = json!(enabled);
+                        row["configured"] = json!(true);
+                        row["binary"] = json!(bin);
+                    } else {
+                        let supports_effort = argv.iter().any(|a| a.contains("{effort}"));
+                        agents.push(json!({
+                            "id": id,
+                            "display_name": trim_non_empty(payload.get("name")).unwrap_or_else(|| id.to_owned()),
+                            "binary": bin,
+                            "default_argv": argv,
+                            "kind": "custom",
+                            "resumable": false,
+                            "installed": true,
+                            "path": Value::Null,
+                            "configured": true,
+                            "enabled": enabled,
+                            "models": [],
+                            "supported_efforts": [],
+                            "supports_model": true,
+                            "supports_effort": supports_effort,
+                        }));
+                    }
+                }
+            }
+        }
+        "replace_profiles" if payload["profiles"].is_array() => {
+            cat["raw_profiles"] = payload["profiles"].clone();
+        }
+        _ => {}
+    }
+    if let Some(cfg) = resolved_cfg {
+        sync_catalog_agents_with_profiles(cat, &cfg.profiles);
+    }
+}
+
+fn builtin_profile_seed(id: &str) -> Option<Profile> {
+    canban_profiles::builtin_catalog()
+        .into_iter()
+        .find(|e| e.id == id)
+        .map(|entry| Profile {
+            id: entry.id.clone(),
+            name: Some(entry.display_name),
+            enabled: true,
+            identity: false,
+            preset: Some(entry.id),
+            argv: Some(entry.argv),
+            ..Default::default()
+        })
+}
+
+fn peer_inherited_options(all: &[Profile], prof: &Profile) -> (Option<String>, Option<String>) {
+    let Some(preset) = prof.preset.as_deref() else {
+        return (None, None);
+    };
+    let peer = all.iter().find(|p| p.id == preset && !p.is_identity());
+    let peer_model = peer.and_then(|p| p.model.clone());
+    let peer_effort = peer.and_then(|p| p.effort.clone());
+    (peer_model, peer_effort)
+}
+
+fn fallback_default_agent(all: &[Profile], default_agent: &mut String) {
+    if !all.iter().any(|p| p.id == *default_agent && p.enabled)
+        && let Some(fallback) = all
+            .iter()
+            .find(|p| p.id == "developer" && p.enabled)
+            .or_else(|| all.iter().find(|p| p.enabled))
+    {
+        *default_agent = fallback.id.clone();
+    }
+}
+
+fn apply_op_to_profiles(
+    all: &mut Vec<Profile>,
+    default_agent: &mut String,
+    payload: &Value,
+    raw_catalog: &Value,
+) {
+    let op = payload["op"].as_str().unwrap_or("");
+    match op {
+        "set_default" => {
+            if let Some(target) = trim_non_empty(payload.get("default_agent")) {
+                *default_agent = target;
+            }
+        }
+        "toggle_agent" => {
+            if let Some(id) = trim_non_empty(payload.get("id")) {
+                let enabled = payload["enabled"].as_bool().unwrap_or(true);
+                if let Some(existing) = all.iter_mut().find(|p| p.id == id) {
+                    existing.enabled = enabled;
+                } else if enabled && let Some(seed) = builtin_profile_seed(&id) {
+                    all.push(seed);
+                }
+                fallback_default_agent(all, default_agent);
+            }
+        }
+        "set_profile_options" => {
+            if let Some(id) = payload["id"]
+                .as_str()
+                .map(|s| s.trim().trim_start_matches('@').to_owned())
+                .filter(|s| !s.is_empty())
+            {
+                if !all.iter().any(|p| p.id == id)
+                    && let Some(seed) = builtin_profile_seed(&id)
+                {
+                    all.push(seed);
+                }
+                let snapshot_all = all.clone();
+                if let Some(prof) = all.iter_mut().find(|p| p.id == id) {
+                    let (peer_m, peer_e) = peer_inherited_options(&snapshot_all, prof);
+                    if let Some(m) = payload.get("model") {
+                        prof.model = trim_non_empty(Some(m))
+                            .or_else(|| if prof.is_identity() { peer_m } else { None });
+                    }
+                    if let Some(e) = payload.get("effort") {
+                        prof.effort = trim_non_empty(Some(e))
+                            .or_else(|| if prof.is_identity() { peer_e } else { None });
+                    }
+                    if let Some(argv_val) = payload.get("argv") {
+                        if argv_val.is_null() {
+                            if let Some(preset) = prof.preset.as_deref()
+                                && let Some(entry) = canban_profiles::builtin_catalog()
+                                    .into_iter()
+                                    .find(|e| e.id == preset)
+                            {
+                                prof.argv = Some(entry.argv);
+                            }
+                        } else if let Some(arr) = argv_val.as_array() {
+                            let parsed: Vec<String> = arr
+                                .iter()
+                                .filter_map(|v| v.as_str().map(str::to_owned))
+                                .collect();
+                            if !parsed.is_empty() {
+                                prof.argv = Some(parsed);
+                            }
+                        }
+                    }
+                    // Propagate direct agent defaults to inheriting identities immediately.
+                    if !prof.is_identity() {
+                        let updated_id = prof.id.clone();
+                        let updated_m = prof.model.clone();
+                        let updated_e = prof.effort.clone();
+                        for child in all.iter_mut() {
+                            if child.is_identity()
+                                && child.preset.as_deref() == Some(updated_id.as_str())
+                            {
+                                let raw_opts = raw_profile_options(raw_catalog, &child.id);
+                                if payload.get("model").is_some()
+                                    && raw_opts.as_ref().is_none_or(|(m, _)| m.is_none())
+                                {
+                                    child.model = updated_m.clone();
+                                }
+                                if payload.get("effort").is_some()
+                                    && raw_opts.as_ref().is_none_or(|(_, e)| e.is_none())
+                                {
+                                    child.effort = updated_e.clone();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        "upsert_identity" => {
+            if let Some(id) = payload["id"]
+                .as_str()
+                .map(|s| s.trim().trim_start_matches('@').to_owned())
+                .filter(|s| !s.is_empty())
+                && let Some(engine) = trim_non_empty(payload.get("engine"))
+            {
+                if !all.iter().any(|p| p.id == engine && !p.is_identity())
+                    && let Some(seed) = builtin_profile_seed(&engine)
+                {
+                    all.push(seed);
+                }
+                let peer = all
+                    .iter()
+                    .find(|p| p.id == engine && !p.is_identity())
+                    .cloned();
+                let preset_ref = peer
+                    .as_ref()
+                    .and_then(|p| p.preset.clone())
+                    .unwrap_or_else(|| engine.clone());
+                let enabled = payload["enabled"].as_bool().unwrap_or(true);
+                if let Some(existing) = all.iter_mut().find(|p| p.id == id) {
+                    let engine_changed = existing.preset.as_deref() != Some(preset_ref.as_str());
+                    existing.identity = true;
+                    existing.enabled = enabled;
+                    existing.preset = Some(preset_ref);
+                    if let Some(peer_p) = &peer {
+                        existing.argv = peer_p.argv.clone();
+                    }
+                    if let Some(m) = payload.get("model") {
+                        existing.model = trim_non_empty(Some(m))
+                            .or_else(|| peer.as_ref().and_then(|p| p.model.clone()));
+                    } else if engine_changed {
+                        existing.model = peer.as_ref().and_then(|p| p.model.clone());
+                    }
+                    if let Some(e) = payload.get("effort") {
+                        existing.effort = trim_non_empty(Some(e))
+                            .or_else(|| peer.as_ref().and_then(|p| p.effort.clone()));
+                    } else if engine_changed {
+                        existing.effort = peer.as_ref().and_then(|p| p.effort.clone());
+                    }
+                    if let Some(instr) = payload["role_instruction"].as_str() {
+                        existing.role_instruction = instr.trim().to_owned();
+                    }
+                } else {
+                    all.push(Profile {
+                        id: id.clone(),
+                        name: trim_non_empty(payload.get("name")),
+                        enabled,
+                        identity: true,
+                        preset: Some(preset_ref),
+                        model: trim_non_empty(payload.get("model"))
+                            .or_else(|| peer.as_ref().and_then(|p| p.model.clone())),
+                        effort: trim_non_empty(payload.get("effort"))
+                            .or_else(|| peer.as_ref().and_then(|p| p.effort.clone())),
+                        role_instruction: payload["role_instruction"]
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| format!("You are the Card's {id} Agent.")),
+                        argv: peer.and_then(|p| p.argv),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+        "delete_profile" => {
+            if let Some(id) = trim_non_empty(payload.get("id")) {
+                all.retain(|p| p.id != id);
+                fallback_default_agent(all, default_agent);
+            }
+        }
+        "upsert_custom_agent" => {
+            if let Some(id) = trim_non_empty(payload.get("id")) {
+                let argv: Vec<String> = payload["argv"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let new_prof = Profile {
+                    id: id.clone(),
+                    name: trim_non_empty(payload.get("name")),
+                    enabled: payload["enabled"].as_bool().unwrap_or(true),
+                    identity: false,
+                    preset: None,
+                    model: trim_non_empty(payload.get("model")),
+                    effort: trim_non_empty(payload.get("effort")),
+                    role_instruction: String::new(),
+                    argv: (!argv.is_empty()).then_some(argv),
+                    resume_argv: None,
+                    exit: Some(ExitAction::Manual),
+                    session_instruction: None,
+                };
+                if let Some(existing) = all.iter_mut().find(|p| p.id == id) {
+                    *existing = new_prof;
+                } else {
+                    all.push(new_prof);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn dispatch_agents_save(ui: Ui, payload: Value, on_ok: impl FnOnce(&Config) + 'static) {
+    let raw_cat = ui.agent_catalog.get_untracked();
+    if crate::APP.get().is_none() {
+        ui.update_profiles(|all, def| apply_op_to_profiles(all, def, &payload, &raw_cat));
+        ui.agent_catalog
+            .update(|cat| apply_op_to_catalog(cat, &payload, None));
+        let cfg = Config {
+            default_agent: ui.default_agent.get_untracked(),
+            onboarded: ui.onboarded.get_untracked(),
+            profiles: ui.all_profiles.get_untracked(),
+            ..Default::default()
+        };
+        on_ok(&cfg);
+        return;
+    }
+    if ui.is_method_pending("config.agents.save") {
+        return;
+    }
+    let prev_all = ui.all_profiles.get_untracked();
+    let prev_def = ui.default_agent.get_untracked();
+    let prev_onboarded = ui.onboarded.get_untracked();
+    let prev_cat = raw_cat.clone();
+
+    let next_epoch = ui.agent_config_epoch.get_untracked() + 1;
+    ui.agent_config_epoch.set(next_epoch);
+    if ui.agent_catalog_loading.get_untracked() || prev_cat.is_null() {
+        let _ = ui
+            .pending_catalog_ops
+            .try_with(|list| list.push((next_epoch, payload.clone())));
+    }
+    ui.update_profiles(|all, def| apply_op_to_profiles(all, def, &payload, &raw_cat));
+    ui.agent_catalog
+        .update(|cat| apply_op_to_catalog(cat, &payload, None));
+
+    let payload_for_cb = payload.clone();
+    dispatch_complete(ui, "config.agents.save", payload, move |res| match res {
+        Ok(val) => {
+            let cfg = serde_json::from_value::<Config>(val)
+                .unwrap_or_else(|_| crate::config_for_host(&ui.effective_config_host()));
+            ui.agent_catalog
+                .update(|cat| apply_op_to_catalog(cat, &payload_for_cb, Some(&cfg)));
+            on_ok(&cfg);
+        }
+        Err(_) => {
+            batch(|| {
+                ui.update_profiles(|all, def| {
+                    *all = prev_all;
+                    *def = prev_def;
+                });
+                ui.onboarded.set(prev_onboarded);
+                ui.agent_catalog.set(prev_cat);
+            });
         }
     });
 }
@@ -540,55 +1130,26 @@ fn agent_command_inline_editor(
                             compact_action("Reset", Variant::Quiet, move |_| {
                                 let id_c = reset_id.clone();
                                 let def_c = preset_for_reset.clone();
-                                if crate::APP.get().is_none() {
-                                    if let Some(def) = def_c {
-                                        let next_bin = def.first().cloned().unwrap_or_default();
-                                        let next_args = if def.len() > 1 {
-                                            canban_profiles::join_posix_words(&def[1..])
-                                        } else {
-                                            String::new()
-                                        };
-                                        command_bin_draft.set(next_bin);
-                                        command_args_draft.set(next_args);
-                                        command_error.set(String::new());
-                                        ui.all_profiles.update(|list| {
-                                            if let Some(p) = list.iter_mut().find(|x| x.id == id_c)
-                                            {
-                                                p.argv = Some(def.clone());
-                                            }
-                                        });
-                                        ui.profiles.update(|list| {
-                                            if let Some(p) = list.iter_mut().find(|x| x.id == id_c)
-                                            {
-                                                p.argv = Some(def);
-                                            }
-                                        });
-                                        ui.agent_catalog.update(|cat| {
-                                            if let Some(arr) = cat["raw_profiles"].as_array_mut()
-                                                && let Some(item) = arr.iter_mut().find(|v| {
-                                                    v["id"].as_str() == Some(id_c.as_str())
-                                                })
-                                                && let Some(obj) = item.as_object_mut()
-                                            {
-                                                obj.remove("argv");
-                                            }
-                                        });
-                                    }
-                                    command_target.set(None);
-                                    return;
-                                }
-                                dispatch_then(
+                                dispatch_agents_save(
                                     ui,
-                                    "config.agents.save",
                                     json!({
                                         "op": "set_profile_options",
                                         "id": id_c,
                                         "argv": Value::Null,
                                     }),
                                     move |_| {
+                                        if let Some(def) = def_c.as_ref() {
+                                            let next_bin = def.first().cloned().unwrap_or_default();
+                                            let next_args = if def.len() > 1 {
+                                                canban_profiles::join_posix_words(&def[1..])
+                                            } else {
+                                                String::new()
+                                            };
+                                            command_bin_draft.set(next_bin);
+                                            command_args_draft.set(next_args);
+                                        }
                                         command_error.set(String::new());
                                         command_target.set(None);
-                                        refresh_catalog(ui);
                                     },
                                 );
                             })
@@ -607,36 +1168,8 @@ fn agent_command_inline_editor(
                                 }
                             };
                             let id_c = save_id.clone();
-                            if crate::APP.get().is_none() {
-                                ui.all_profiles.update(|list| {
-                                    if let Some(p) = list.iter_mut().find(|x| x.id == id_c) {
-                                        p.argv = Some(argv.clone());
-                                    }
-                                });
-                                ui.profiles.update(|list| {
-                                    if let Some(p) = list.iter_mut().find(|x| x.id == id_c) {
-                                        p.argv = Some(argv.clone());
-                                    }
-                                });
-                                ui.agent_catalog.update(|cat| {
-                                    if let Some(arr) = cat["raw_profiles"].as_array_mut() {
-                                        if let Some(item) = arr
-                                            .iter_mut()
-                                            .find(|v| v["id"].as_str() == Some(id_c.as_str()))
-                                        {
-                                            item["argv"] = json!(argv);
-                                        } else {
-                                            arr.push(json!({ "id": id_c, "argv": argv }));
-                                        }
-                                    }
-                                });
-                                command_error.set(String::new());
-                                command_target.set(None);
-                                return;
-                            }
-                            dispatch_then(
+                            dispatch_agents_save(
                                 ui,
-                                "config.agents.save",
                                 json!({
                                     "op": "set_profile_options",
                                     "id": id_c,
@@ -645,7 +1178,6 @@ fn agent_command_inline_editor(
                                 move |_| {
                                     command_error.set(String::new());
                                     command_target.set(None);
-                                    refresh_catalog(ui);
                                 },
                             );
                         })),
@@ -739,15 +1271,14 @@ fn profile_model_effort_buttons(
                     let clear_id = p_id.clone();
                     items.push(MenuItem::new(def_label).on_select(move || {
                         custom_model_target.set(None);
-                        dispatch_then(
+                        dispatch_agents_save(
                             ui,
-                            "config.agents.save",
                             json!({
                                 "op": "set_profile_options",
                                 "id": clear_id,
                                 "model": Value::Null,
                             }),
-                            move |_| refresh_catalog(ui),
+                            |_| {},
                         );
                     }));
                     items.push(MenuItem::separator());
@@ -775,9 +1306,7 @@ fn profile_model_effort_buttons(
                             if let Some(clear_eff) = &cleaned_eff {
                                 payload["effort"] = clear_eff.clone();
                             }
-                            dispatch_then(ui, "config.agents.save", payload, move |_| {
-                                refresh_catalog(ui)
-                            });
+                            dispatch_agents_save(ui, payload, |_| {});
                         }));
                     }
                     items.push(MenuItem::separator());
@@ -839,15 +1368,14 @@ fn profile_model_effort_buttons(
                     };
                     let clear_id = p_id.clone();
                     items.push(MenuItem::new(def_label).on_select(move || {
-                        dispatch_then(
+                        dispatch_agents_save(
                             ui,
-                            "config.agents.save",
                             json!({
                                 "op": "set_profile_options",
                                 "id": clear_id,
                                 "effort": Value::Null,
                             }),
-                            move |_| refresh_catalog(ui),
+                            |_| {},
                         );
                     }));
                     items.push(MenuItem::separator());
@@ -861,15 +1389,14 @@ fn profile_model_effort_buttons(
                         let set_id = p_id.clone();
                         let chosen = eff.clone();
                         items.push(MenuItem::new(title).on_select(move || {
-                            dispatch_then(
+                            dispatch_agents_save(
                                 ui,
-                                "config.agents.save",
                                 json!({
                                     "op": "set_profile_options",
                                     "id": set_id,
                                     "effort": chosen,
                                 }),
-                                move |_| refresh_catalog(ui),
+                                |_| {},
                             );
                         }));
                     }
@@ -934,16 +1461,14 @@ fn custom_model_inline_editor(
             if let Some(clear_eff) = cleaned_eff {
                 payload["effort"] = clear_eff;
             }
-            dispatch_then(ui, "config.agents.save", payload, move |_| {
+            dispatch_agents_save(ui, payload, move |_| {
                 custom_model_target.set(None);
-                refresh_catalog(ui);
             });
         }))
         .child(compact_action("Reset default", Variant::Quiet, move |_| {
             let id_c = clear_id.clone();
-            dispatch_then(
+            dispatch_agents_save(
                 ui,
-                "config.agents.save",
                 json!({
                     "op": "set_profile_options",
                     "id": id_c,
@@ -951,7 +1476,6 @@ fn custom_model_inline_editor(
                 }),
                 move |_| {
                     custom_model_target.set(None);
-                    refresh_catalog(ui);
                 },
             );
         }))
@@ -1514,6 +2038,7 @@ pub fn onboarding_screen(ui: Ui) -> impl IntoElement {
                                         enabled_set.get_untracked().into_iter().collect();
                                     let primary = primary_engine.get_untracked();
                                     let roles = role_engines.get_untracked();
+                                    let roles_for_cb = roles.clone();
                                     dispatch_then(
                                         ui,
                                         "agent.setup",
@@ -1522,8 +2047,41 @@ pub fn onboarding_screen(ui: Ui) -> impl IntoElement {
                                             "default_engine": primary,
                                             "identity_engines": roles,
                                         }),
-                                        move |_| {
-                                            refresh_catalog(ui);
+                                        move |val| {
+                                            let next_ep = ui.agent_config_epoch.get_untracked() + 1;
+                                            ui.agent_config_epoch.set(next_ep);
+                                            if let Ok(cfg) = serde_json::from_value::<Config>(val) {
+                                                ui.agent_catalog.update(|cat| {
+                                                    if cat.is_null() {
+                                                        return;
+                                                    }
+                                                    if let Some(arr) =
+                                                        cat["raw_profiles"].as_array_mut()
+                                                    {
+                                                        for item in arr.iter_mut() {
+                                                            let Some(id) = item["id"].as_str().map(str::to_owned) else {
+                                                                continue;
+                                                            };
+                                                            if let Some(prof) = cfg.profiles.iter().find(|p| p.id == id) {
+                                                                item["enabled"] = json!(prof.enabled);
+                                                                if prof.is_identity() {
+                                                                    let new_eng = roles_for_cb.get(&id).cloned().or_else(|| prof.preset.clone());
+                                                                    if let Some(eng) = new_eng {
+                                                                        if item["preset"].as_str() != Some(eng.as_str())
+                                                                            && let Some(obj) = item.as_object_mut()
+                                                                        {
+                                                                            obj.remove("model");
+                                                                            obj.remove("effort");
+                                                                        }
+                                                                        item["preset"] = json!(eng);
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    sync_catalog_agents_with_profiles(cat, &cfg.profiles);
+                                                });
+                                            }
                                             ui.navigate(back_target);
                                         },
                                     );
@@ -1584,9 +2142,8 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                         move |_| {
                             let target = ui.settings_host.get_untracked();
                             let local_cfg = crate::config_for_host("local");
-                            dispatch_then(
+                            dispatch_agents_save(
                                 ui,
-                                "config.agents.save",
                                 json!({
                                     "host_id": target,
                                     "op": "replace_profiles",
@@ -1612,6 +2169,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
             ))
             .child(compact_action("Reload", Variant::Quiet, move |_| {
                 dispatch_then(ui, "config.reload", json!({}), move |_| {
+                    ui.agent_config_epoch.update(|v| *v += 1);
                     refresh_catalog(ui);
                 });
             })),
@@ -1656,10 +2214,10 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                     let (_, prov) = crate::profiles::provider(&p);
                                     MenuItem::new(format!("@{} · {prov}", p.id)).on_select(
                                         move || {
-                                            dispatch(
+                                            dispatch_agents_save(
                                                 ui,
-                                                "config.agents.save",
                                                 json!({"op": "set_default", "default_agent": pid}),
+                                                |_| {},
                                             );
                                         },
                                     )
@@ -1768,9 +2326,8 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                         let id = new_role_id.get_untracked();
                                         let eng = new_role_engine.get_untracked();
                                         let prompt = new_role_prompt.get_untracked();
-                                        dispatch_then(
+                                        dispatch_agents_save(
                                             ui,
-                                            "config.agents.save",
                                             json!({
                                                 "op": "upsert_identity",
                                                 "id": id,
@@ -1779,7 +2336,6 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                             }),
                                             move |_| {
                                                 adding_identity.set(false);
-                                                refresh_catalog(ui);
                                             },
                                         );
                                     },
@@ -1896,18 +2452,15 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                                     "{ename} (@{eid})"
                                                                 ))
                                                                 .on_select(move || {
-                                                                    dispatch_then(
+                                                                    dispatch_agents_save(
                                                                         ui,
-                                                                        "config.agents.save",
                                                                         json!({
                                                                             "op": "upsert_identity",
                                                                             "id": r,
                                                                             "engine": eid,
                                                                             "enabled": true,
                                                                         }),
-                                                                        move |_| {
-                                                                            refresh_catalog(ui)
-                                                                        },
+                                                                        |_| {},
                                                                     );
                                                                 })
                                                             })
@@ -1948,15 +2501,14 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                 if prof_enabled { "Disable" } else { "Enable" },
                                                 Variant::Quiet,
                                                 move |_| {
-                                                    dispatch_then(
+                                                    dispatch_agents_save(
                                                         ui,
-                                                        "config.agents.save",
                                                         json!({
                                                             "op": "toggle_agent",
                                                             "id": toggle_pid,
                                                             "enabled": !prof_enabled,
                                                         }),
-                                                        move |_| refresh_catalog(ui),
+                                                        |_| {},
                                                     );
                                                 },
                                             ))
@@ -1968,16 +2520,13 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                         "Delete",
                                                         Variant::Danger,
                                                         move |_| {
-                                                            dispatch_then(
+                                                            dispatch_agents_save(
                                                                 ui,
-                                                                "config.agents.save",
                                                                 json!({
                                                                     "op": "delete_profile",
                                                                     "id": d,
                                                                 }),
-                                                                move |_| {
-                                                                    refresh_catalog(ui)
-                                                                },
+                                                                |_| {},
                                                             );
                                                         },
                                                     )
@@ -2019,9 +2568,8 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                             let next_prompt = editing_prompt.get_untracked();
                                             let id_c = save_id.clone();
                                             let eng_c = cur_engine.clone();
-                                            dispatch_then(
+                                            dispatch_agents_save(
                                                 ui,
-                                                "config.agents.save",
                                                 json!({
                                                     "op": "upsert_identity",
                                                     "id": id_c,
@@ -2031,7 +2579,6 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                 }),
                                                 move |_| {
                                                     editing_role.set(None);
-                                                    refresh_catalog(ui);
                                                 },
                                             );
                                         },
@@ -2166,9 +2713,8 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                 return;
                                             }
                                         };
-                                        dispatch_then(
+                                        dispatch_agents_save(
                                             ui,
-                                            "config.agents.save",
                                             json!({
                                                 "op": "upsert_custom_agent",
                                                 "id": id,
@@ -2218,15 +2764,14 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                     let installed = row["installed"] == true;
                     let toggle_id = id.clone();
                     agent_tile(id, display, installed, enabled, move || {
-                        dispatch_then(
+                        dispatch_agents_save(
                             ui,
-                            "config.agents.save",
                             json!({
                                 "op": "toggle_agent",
                                 "id": toggle_id,
                                 "enabled": !enabled,
                             }),
-                            move |_| refresh_catalog(ui),
+                            |_| {},
                         );
                     })
                 };
@@ -2412,18 +2957,13 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                                         "Delete",
                                                                         Variant::Danger,
                                                                         move |_| {
-                                                                            dispatch_then(
+                                                                            dispatch_agents_save(
                                                                                 ui,
-                                                                                "config.agents.save",
                                                                                 json!({
                                                                                     "op": "delete_profile",
                                                                                     "id": d,
                                                                                 }),
-                                                                                move |_| {
-                                                                                    refresh_catalog(
-                                                                                        ui,
-                                                                                    )
-                                                                                },
+                                                                                |_| {},
                                                                             );
                                                                         },
                                                                     )
@@ -3183,4 +3723,105 @@ pub fn project_agents_screen(ui: Ui) -> impl IntoElement {
                     ),
             ),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn optimistic_agent_and_catalog_ops_update_explicit_and_inherited_options_without_rescan() {
+        let mut catalog = json!({
+            "agents": [
+                {"id": "codex", "enabled": true, "configured": true, "installed": true},
+                {"id": "agy", "enabled": false, "configured": false, "installed": true},
+            ],
+            "raw_profiles": [
+                {"id": "codex", "enabled": true, "identity": false, "preset": "codex", "model": "gpt-5.4", "effort": "medium"},
+                {"id": "developer", "enabled": true, "identity": true, "preset": "codex"}
+            ]
+        });
+        let mut profiles = vec![
+            Profile {
+                id: "codex".into(),
+                enabled: true,
+                identity: false,
+                preset: Some("codex".into()),
+                model: Some("gpt-5.4".into()),
+                effort: Some("medium".into()),
+                ..Default::default()
+            },
+            Profile {
+                id: "developer".into(),
+                enabled: true,
+                identity: true,
+                preset: Some("codex".into()),
+                model: Some("gpt-5.4".into()),
+                effort: Some("medium".into()),
+                ..Default::default()
+            },
+        ];
+        let mut default_agent = "developer".to_owned();
+
+        // 1. Set explicit model on @developer -> updates both `profiles` and `raw_profiles` immediately.
+        let set_model = json!({
+            "op": "set_profile_options",
+            "id": "developer",
+            "model": "gpt-5.4-mini",
+        });
+        apply_op_to_profiles(&mut profiles, &mut default_agent, &set_model, &catalog);
+        apply_op_to_catalog(&mut catalog, &set_model, None);
+        assert_eq!(
+            raw_profile_options(&catalog, "developer"),
+            Some((Some("gpt-5.4-mini".into()), None))
+        );
+        assert_eq!(profiles[1].model.as_deref(), Some("gpt-5.4-mini"));
+
+        // 2. Clear explicit model on @developer -> `raw_profiles` becomes None while `profiles` inherits peer model.
+        let clear_model = json!({
+            "op": "set_profile_options",
+            "id": "developer",
+            "model": Value::Null,
+        });
+        apply_op_to_profiles(&mut profiles, &mut default_agent, &clear_model, &catalog);
+        apply_op_to_catalog(&mut catalog, &clear_model, None);
+        assert_eq!(
+            raw_profile_options(&catalog, "developer"),
+            Some((None, None))
+        );
+        assert_eq!(profiles[1].model.as_deref(), Some("gpt-5.4"));
+
+        // 3. Toggle @agy enabled -> both `profiles` and `catalog["agents"]` reflect enabled immediately.
+        let enable_agy = json!({
+            "op": "toggle_agent",
+            "id": "agy",
+            "enabled": true,
+        });
+        apply_op_to_profiles(&mut profiles, &mut default_agent, &enable_agy, &catalog);
+        apply_op_to_catalog(&mut catalog, &enable_agy, None);
+        assert!(profiles.iter().any(|p| p.id == "agy" && p.enabled));
+        assert_eq!(catalog["agents"][1]["enabled"], json!(true));
+        assert_eq!(catalog["agents"][1]["configured"], json!(true));
+
+        // 4. Switch @developer backing engine to agy -> clears stale explicit options and switches preset.
+        let switch_eng = json!({
+            "op": "upsert_identity",
+            "id": "developer",
+            "engine": "agy",
+            "enabled": true,
+        });
+        apply_op_to_profiles(&mut profiles, &mut default_agent, &switch_eng, &catalog);
+        apply_op_to_catalog(&mut catalog, &switch_eng, None);
+        assert_eq!(
+            profiles
+                .iter()
+                .find(|p| p.id == "developer")
+                .and_then(|p| p.preset.as_deref()),
+            Some("agy")
+        );
+        assert_eq!(
+            raw_profile_options(&catalog, "developer"),
+            Some((None, None))
+        );
+    }
 }
