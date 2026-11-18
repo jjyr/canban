@@ -8,7 +8,7 @@ Static product site for [https://canban.dev/](https://canban.dev/), deployed via
 - `/install/` and `/zh/install/` contain desktop/headless installation, prerequisites, Linux runtime dependencies, updates, source installation links, and six visible FAQs. Agent support follows Herdr support.
 - `/changelog/` and `/zh/changelog/` show published GitHub Releases in descending version order (`YYYYMMDD-N`, comparing the daily sequence numerically), preserving the original release-note language. Historical prereleases are labeled; drafts and records without a publication date are excluded.
 - Each page has its own canonical URL, localized metadata and reciprocal `en`, `zh-CN`, and `x-default` alternates. The sitemap includes all six URLs. Language links preserve the current page; legacy `?lang=zh`, `?lang=zh-CN`, and `?lang=en` links redirect in the browser while preserving other parameters and channel hashes. Browser preferences do not override the URL's language.
-- The original homepage title and formula heading remain. The subtitle is “A native Kanban and terminal workbench for AI coding agents” (localized on `/zh/`). The homepage retains `WebSite` and `SoftwareApplication` JSON-LD; FAQ-only structured data has been removed.
+- The homepage leads with the Canban formula, followed by a localized subtitle and a short description of native agent CLI support, task context, isolated Git worktrees, and merging. The homepage includes `WebSite` and `SoftwareApplication` JSON-LD.
 
 ## Source structure
 

@@ -2,12 +2,13 @@
   <img src="crates/ui/assets/app-icon.svg" width="84" alt="Canban icon" />
 </p>
 
-<h1 align="center">Canban</h1>
+# Canban
 
-<p align="center">
-  <strong>Focus on Human Context.</strong><br />
-  Canban = Kanban + Workflow + Herdr
-</p>
+**Turn Kanban cards into automated coding workflows, without replacing your native agent CLIs.**
+
+Canban = Kanban + Workflow + Herdr
+
+Discuss features on Kanban cards, dispatch coding agents through customizable workflows, and merge changes from isolated Git worktrees, all while keeping task context and progress in one place.
 
 <p align="center">
   <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a>
