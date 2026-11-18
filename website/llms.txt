@@ -8,18 +8,17 @@ Canban organizes human task context on Kanban cards, automates isolated Git work
 
 ## Full LLM Context
 
-- [Complete Documentation & CLI Reference (`llms-full.txt`)](https://canban.dev/llms-full.txt): Consolidated single-file context including architecture, all 24 built-in agent CLIs, workflow engine `schema: 10` specs and copyable templates, remote Tailscale/SSH `canband` guides, architectural comparisons, FAQs, and the `canban` CLI skill reference.
+- [Complete Documentation & CLI Reference (`llms-full.txt`)](https://canban.dev/llms-full.txt): Consolidated single-file context including architecture, workflow engine `schema: 10` syntax and execution semantics, all 24 built-in agent CLIs, the Agent-first `canban` CLI and `--human` guide, remote Tailscale/SSH `canband` guides, FAQs, and `skills/canban/SKILL.md`.
 
 ## Markdown Documentation Endpoints (`.md`)
 
 - [Home / Workbench (EN)](https://canban.dev/index.md) · [中文](https://canban.dev/zh/index.md)
 - [Install & FAQ (EN)](https://canban.dev/install.md) · [中文](https://canban.dev/zh/install.md)
 - [Docs Hub (EN)](https://canban.dev/docs.md) · [中文](https://canban.dev/zh/docs.md)
-- [Workflows, Visual Studio & Queue Merge (EN)](https://canban.dev/docs/workflows.md) · [中文](https://canban.dev/zh/docs/workflows.md)
-- [24 Agent CLIs, Herdr PTYs & canban CLI (EN)](https://canban.dev/docs/agents.md) · [中文](https://canban.dev/zh/docs/agents.md)
+- [Workflow YAML Syntax & Execution Semantics (EN)](https://canban.dev/docs/workflows.md) · [中文](https://canban.dev/zh/docs/workflows.md)
+- [Canban CLI, Agent Optimization & --human (EN)](https://canban.dev/docs/cli.md) · [中文](https://canban.dev/zh/docs/cli.md)
+- [24 Agent CLIs & Herdr PTYs (EN)](https://canban.dev/docs/agents.md) · [中文](https://canban.dev/zh/docs/agents.md)
 - [Remote Linux Hosts, Tailscale & SSH (EN)](https://canban.dev/docs/remote-hosts.md) · [中文](https://canban.dev/zh/docs/remote-hosts.md)
-- [Workflow YAML Templates (EN)](https://canban.dev/workflows.md) · [中文](https://canban.dev/zh/workflows.md)
-- [Architectural Comparisons (EN)](https://canban.dev/compare.md) · [中文](https://canban.dev/zh/compare.md)
 - [Changelog (EN)](https://canban.dev/changelog.md) · [中文](https://canban.dev/zh/changelog.md)
 
 ## Installation (macOS 13.0+ Apple Silicon & Linux x86_64 / arm64)

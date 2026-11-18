@@ -111,8 +111,8 @@ class WebsiteTest(unittest.TestCase):
                     self.assertEqual(md_alts[0]["href"], website.ORIGIN + website.md_route(lang, section))
                     self.assertEqual(page.attrs("meta", property="og:url")[0]["content"], website.ORIGIN + route)
                     self.assertEqual(page.attrs("meta", property="og:locale")[0]["content"], "zh_CN" if lang == "zh" else "en_US")
-                    self.assertIsNone(re.search(r"\{\{(?:en|zh|install|docs|workflows|compare|changelog)_url\}\}", text))
-                    if section != "workflows":
+                    self.assertIsNone(re.search(r"\{\{(?:en|zh|install|docs|workflows|cli|changelog)_url\}\}", text))
+                    if section != "docs/workflows":
                         self.assertNotIn("{{", text)
                     self.assertNotIn("localStorage", text)
 
@@ -180,7 +180,7 @@ class WebsiteTest(unittest.TestCase):
                         self.assertIn("Kanban + Workflow + Herdr", text)
                         expected_ch1 = {
                             website.route(lang, hub)
-                            for hub in ("install", "docs", "workflows", "compare", "changelog")
+                            for hub in ("install", "docs", "docs/workflows", "docs/cli", "changelog")
                         }
                         self.assertEqual(set(page.ch1_links), expected_ch1)
                         self.assertFalse([img for img in page.attrs("img") if img.get("src", "").startswith("/screenshots/")])
@@ -190,7 +190,6 @@ class WebsiteTest(unittest.TestCase):
                         "docs": ("/screenshots/review-diff.png", True),
                         "docs/workflows": ("/screenshots/workflow-studio.png", True),
                         "docs/agents": ("/screenshots/board-terminal.png", True),
-                        "workflows": ("/screenshots/workflow-studio.png", True),
                     }
                     if section in expected_screenshots:
                         expected_src, expect_lazy = expected_screenshots[section]
@@ -203,6 +202,16 @@ class WebsiteTest(unittest.TestCase):
                             self.assertEqual(shot_imgs[0].get("loading"), "lazy", (lang, section))
                         else:
                             self.assertNotIn("loading", shot_imgs[0], (lang, section))
+
+    def test_removed_routes_are_not_generated(self):
+        self.assertEqual(len(website.PAGES), 8)
+        for removed in ("workflows", "zh/workflows", "compare", "zh/compare"):
+            self.assertFalse((self.output / removed / "index.html").exists(), removed)
+            self.assertFalse((self.output / f"{removed}.md").exists(), removed)
+        sitemap = (self.output / "sitemap.xml").read_text()
+        self.assertNotIn("/compare/", sitemap)
+        self.assertNotIn(f"{website.ORIGIN}/workflows/", sitemap)
+        self.assertNotIn(f"{website.ORIGIN}/zh/workflows/", sitemap)
 
     def test_markdown_mirrors_and_geo_files(self):
         for lang in ("en", "zh"):
@@ -221,28 +230,51 @@ class WebsiteTest(unittest.TestCase):
         self.assertIn("libghostty-vt", agents_md)
 
         workflows_doc_md = (self.output / "docs/workflows.md").read_text()
-        for term in ("development.yaml", "admit", "script", "deliver", "external_pr", "schema: 10"):
+        for term in (
+            "schema: 10", "development.yaml", "admit", "script", "deliver",
+            "condition", "approval", "card.move", "notify", "complete",
+            "external_pr", "on_changes_requested", "on_failure", "_merge_queue",
+        ):
             self.assertIn(term, workflows_doc_md)
+
+        cli_doc_md = (self.output / "docs/cli.md").read_text()
+        for term in (
+            "snapshot", "status", "call", "card show", "card adopt", "report",
+            "reply", "bind-session", "review draft", "workflow sources", "schedule",
+            "worktree gc", "batch report", "serve", "pair", "service", "skill",
+            "build-info", "--fields", "--full", "request_key", "CANBAN_CLI",
+            "CANBAN_RUN_DIR", "canban skill",
+            "npx skills add ~/.canban/skills --skill canban -g",
+            "canban --human snapshot",
+            "canban --human --fields number,title,stage card show",
+            "canban --human call project.list '{}'",
+        ):
+            self.assertIn(term, cli_doc_md)
+        zh_cli_doc_md = (self.output / "zh/docs/cli.md").read_text()
+        for term in (
+            "canban skill",
+            "npx skills add ~/.canban/skills --skill canban -g",
+            "canban --human snapshot",
+            "canban --human --fields number,title,stage card show",
+            "canban --human call project.list '{}'",
+        ):
+            self.assertIn(term, zh_cli_doc_md)
 
         remote_md = (self.output / "docs/remote-hosts.md").read_text()
         for term in ("canband", "Tailscale", "SSH", "--headless"):
             self.assertIn(term, remote_md)
 
-        workflows_md = (self.output / "workflows.md").read_text()
-        self.assertGreaterEqual(workflows_md.count("schema: 10"), 4)
-
-        compare_md = (self.output / "compare.md").read_text()
-        for competitor in ("Vibe Kanban", "Linear", "Cloud Coding Agents", "Terminal Tabs"):
-            self.assertIn(competitor, compare_md)
-
         llms_txt = (self.output / "llms.txt").read_text()
         self.assertIn("https://canban.dev/llms-full.txt", llms_txt)
         self.assertIn("Canban = Kanban + Workflow + Herdr", llms_txt)
-        for slug in ("install", "docs", "docs/workflows", "docs/agents", "docs/remote-hosts", "workflows", "compare", "changelog"):
+        for slug in ("install", "docs", "docs/workflows", "docs/cli", "docs/agents", "docs/remote-hosts", "changelog"):
             self.assertIn(f"https://canban.dev/{slug}.md", llms_txt)
+        self.assertNotIn("https://canban.dev/workflows.md", llms_txt)
+        self.assertNotIn("https://canban.dev/compare.md", llms_txt)
 
         llms_full = (self.output / "llms-full.txt").read_text()
         self.assertIn("Canban = Kanban + Workflow + Herdr", llms_full)
+        self.assertIn("canban --human snapshot", llms_full)
         self.assertIn("canban card adopt", llms_full)
         self.assertIn("batch report", llms_full)
         self.assertIn("review draft", llms_full)

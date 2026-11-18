@@ -21,14 +21,14 @@ REPOSITORY = "https://github.com/jjyr/canban"
 DESKTOP = "curl -fsSL https://canban.dev/install.sh | bash"
 HEADLESS = "curl -fsSL https://canban.dev/install.sh | bash -s -- --headless"
 
-DOC_PAGES = ("docs", "docs/workflows", "docs/agents", "docs/remote-hosts", "workflows", "compare")
+DOC_PAGES = ("docs", "docs/workflows", "docs/agents", "docs/cli", "docs/remote-hosts")
 PAGES = ("", "install", *DOC_PAGES, "changelog")
 NAV_PAGES = (
     ("", "home"),
     ("install", "install"),
     ("docs", "docs"),
-    ("workflows", "workflows"),
-    ("compare", "compare"),
+    ("docs/workflows", "workflows"),
+    ("docs/cli", "cli"),
     ("changelog", "changelog"),
 )
 
@@ -287,8 +287,8 @@ def localize_home(lang, strings):
         "zh_url": route("zh"),
         "install_url": route(lang, "install"),
         "docs_url": route(lang, "docs"),
-        "workflows_url": route(lang, "workflows"),
-        "compare_url": route(lang, "compare"),
+        "workflows_url": route(lang, "docs/workflows"),
+        "cli_url": route(lang, "docs/cli"),
         "changelog_url": route(lang, "changelog"),
     }.items():
         body = body.replace("{{" + key + "}}", value)
@@ -299,7 +299,9 @@ def localize_home(lang, strings):
 def nav_active(page, key):
     if page == key:
         return True
-    return key == "docs" and page.startswith("docs/")
+    return key == "docs" and page.startswith("docs/") and not any(
+        nav_key == page for nav_key, _ in NAV_PAGES
+    )
 
 
 def header(lang, page, labels):
@@ -347,8 +349,8 @@ def footer(lang, page, labels):
     return f'''<footer class="doc-footer"><span>Apache-2.0 · © 2026 JJy</span><nav class="page-links">
       <a href="{route(lang, 'install')}">{html.escape(labels['install'])}</a>
       <a href="{route(lang, 'docs')}">{html.escape(labels['docs'])}</a>
-      <a href="{route(lang, 'workflows')}">{html.escape(labels['workflows'])}</a>
-      <a href="{route(lang, 'compare')}">{html.escape(labels['compare'])}</a>
+      <a href="{route(lang, 'docs/workflows')}">{html.escape(labels['workflows'])}</a>
+      <a href="{route(lang, 'docs/cli')}">{html.escape(labels['cli'])}</a>
       <a href="{route(lang, 'changelog')}">{html.escape(labels['changelog'])}</a>
       <a href="{md_route(lang, page)}">{html.escape(labels['markdown_mirror'])}</a>
       <a href="/llms-full.txt">{html.escape(labels['llms_full'])}</a>
@@ -608,8 +610,8 @@ def render_home_markdown(lang, strings):
         "",
         f"- {strings['nav_install']}: {ORIGIN + route(lang, 'install')}",
         f"- {strings['nav_docs']}: {ORIGIN + route(lang, 'docs')}",
-        f"- {strings['nav_workflows']}: {ORIGIN + route(lang, 'workflows')}",
-        f"- {strings['nav_compare']}: {ORIGIN + route(lang, 'compare')}",
+        f"- {strings['nav_workflows']}: {ORIGIN + route(lang, 'docs/workflows')}",
+        f"- {strings['nav_cli']}: {ORIGIN + route(lang, 'docs/cli')}",
         f"- {strings['nav_changelog']}: {ORIGIN + route(lang, 'changelog')}",
         f"- GitHub: {REPOSITORY}",
     ]
