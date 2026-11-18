@@ -72,8 +72,24 @@ pub(super) struct BoardDrag {
     pub ghost: Signal<Option<(Card, f32, f32, f32)>>,
 }
 type MotionEnd = (Option<AnimationEnd>, Option<AnimationEnd>);
+#[derive(Default)]
+struct HitTest {
+    target: Option<Slot>,
+    scrolls: Vec<(String, ElementRef, f32)>,
+    horizontal: Option<f32>,
+}
+pub(super) fn should_short_circuit_settle(current: Option<(f32, f32)>, to: f32) -> bool {
+    current.is_some_and(|(cur, vel)| (to - cur).abs() < 0.5 && vel.abs() < 10.)
+}
 pub(super) fn settle(value: AnimatedValue, to: f32) -> Option<AnimationEnd> {
-    if reduce_motion() {
+    settle_if_needed(value, None, to)
+}
+fn settle_if_needed(
+    value: AnimatedValue,
+    current: Option<(f32, f32)>,
+    to: f32,
+) -> Option<AnimationEnd> {
+    if reduce_motion() || should_short_circuit_settle(current, to) {
         value.set(to);
         None
     } else {
@@ -240,6 +256,10 @@ impl BoardDrag {
             self.reflow();
         });
     }
+    pub fn is_ghost_active(self, id: &str) -> bool {
+        self.ghost
+            .with(|g| g.as_ref().is_some_and(|(c, ..)| c.id == id))
+    }
     pub fn visible(self, stage: &str) -> Vec<Card> {
         let (offset, height) = self
             .viewports
@@ -398,8 +418,25 @@ impl BoardDrag {
             self.y.set(0.);
         }
     }
-    async fn measure(self) {
-        if let Some(m) = self.root.measure().await {
+    /// Issue all layout measurements concurrently so NSH answers them in a single commit.
+    async fn measure_all(self, source_ref: Option<ElementRef>) -> Option<Measurement> {
+        let source_answer = source_ref.map(|r| r.measure());
+        let root_answer = self.root.measure();
+        let refs = self.metrics.with(|m| {
+            m.columns
+                .iter()
+                .map(|(s, c)| (s.clone(), c.reference))
+                .collect::<Vec<_>>()
+        });
+        let column_answers: Vec<_> = refs
+            .into_iter()
+            .map(|(stage, reference)| (stage, reference.measure()))
+            .collect();
+        let source = match source_answer {
+            Some(answer) => answer.await,
+            None => None,
+        };
+        if let Some(m) = root_answer.await {
             self.metrics.with(|g| {
                 g.root = Rect {
                     x: m.page.x.0,
@@ -409,14 +446,8 @@ impl BoardDrag {
                 }
             });
         }
-        let refs = self.metrics.with(|m| {
-            m.columns
-                .iter()
-                .map(|(s, c)| (s.clone(), c.reference))
-                .collect::<Vec<_>>()
-        });
-        for (stage, reference) in refs {
-            if let Some(b) = reference.measure().await {
+        for (stage, answer) in column_answers {
+            if let Some(b) = answer.await {
                 self.metrics.with(|m| {
                     let horizontal = m.horizontal;
                     if let Some(c) = m.columns.get_mut(&stage) {
@@ -431,6 +462,10 @@ impl BoardDrag {
             }
         }
         self.metrics.with(|m| m.dirty = false);
+        source
+    }
+    async fn measure(self) {
+        let _ = self.measure_all(None).await;
     }
     fn spawn_owned(self, future: impl std::future::Future<Output = ()> + 'static) {
         self.owner.run(|| {
@@ -483,11 +518,10 @@ impl BoardDrag {
             end: None,
         }));
         self.spawn_owned(async move {
-            let Some(source) = reference.measure().await else {
+            let Some(source) = self.measure_all(Some(reference)).await else {
                 self.clear();
                 return;
             };
-            self.measure().await;
             if self.phase.try_get() != Some(1) {
                 return;
             }
@@ -502,13 +536,23 @@ impl BoardDrag {
                 h: source.frame.size.height.0,
             };
             session.target = Some(session.original.clone());
+            let end = session.end.take();
+            if let Some(end) = end {
+                let hit = self.hit_test(&session, end.translation.x.0, end.translation.y.0, 0.);
+                if end.cancelled
+                    || hit.target.is_none()
+                    || hit.target.as_ref() == Some(&session.original)
+                {
+                    self.clear();
+                    return;
+                }
+            }
             self.ghost.set(Some((
                 session.card.clone(),
                 source.page.x.0 - root.x,
                 source.page.y.0 - root.y,
                 source.frame.size.width.0,
             )));
-            let end = session.end;
             self.session.replace(Some(session));
             self.reflow();
             self.phase.set(2);
@@ -539,18 +583,14 @@ impl BoardDrag {
             }
         });
     }
-    fn track(self, x: f32, y: f32, dt: f32) {
-        let began = Instant::now();
-        let Some(mut session) = self.session.get() else {
-            return;
-        };
+    fn hit_test(self, session: &Session, x: f32, y: f32, dt: f32) -> HitTest {
         let pointer = point(px(session.pointer.x.0 + x), px(session.pointer.y.0 + y));
-        let (target, scrolls, horizontal) = self.metrics.with(|m| {
+        self.metrics.with(|m| {
             let root = m.root;
             let px = pointer.x.0;
             let py = pointer.y.0;
             if px < root.x || px > root.x + root.w || py < root.y || py > root.y + root.h {
-                return (None, Vec::new(), None);
+                return HitTest::default();
             }
             let column = m
                 .columns
@@ -588,25 +628,32 @@ impl BoardDrag {
             });
             let next = (m.horizontal + model::edge_speed(px, root.x, root.w) * dt)
                 .clamp(0., (m.width - root.w).max(0.));
-            (
+            HitTest {
                 target,
                 scrolls,
-                ((next - m.horizontal).abs() > 0.1).then_some(next),
-            )
-        });
-        for (stage, reference, next) in scrolls {
+                horizontal: ((next - m.horizontal).abs() > 0.1).then_some(next),
+            }
+        })
+    }
+    fn track(self, x: f32, y: f32, dt: f32) {
+        let began = Instant::now();
+        let Some(mut session) = self.session.get() else {
+            return;
+        };
+        let hit = self.hit_test(&session, x, y, dt);
+        for (stage, reference, next) in hit.scrolls {
             self.scrolled(&stage, next);
             reference.scroll_to(point(px(0.), px(next)), false);
         }
-        if let Some(next) = horizontal {
+        if let Some(next) = hit.horizontal {
             self.horizontal_scroll(next);
             self.horizontal.scroll_to(point(px(next), px(0.)), false);
         }
-        if session.target != target {
+        if session.target != hit.target {
             if self.trace {
-                eprintln!("BOARD_DRAG_SLOT {:?}", target);
+                eprintln!("BOARD_DRAG_SLOT {:?}", hit.target);
             }
-            session.target = target;
+            session.target = hit.target;
             self.session.replace(Some(session));
             self.reflow();
         }
@@ -617,6 +664,10 @@ impl BoardDrag {
     }
     pub fn end(self, event: PanEvent) {
         if self.phase.get_untracked() == 1 {
+            if event.cancelled {
+                self.clear();
+                return;
+            }
             self.session.with(|s| {
                 if let Some(s) = s {
                     s.end = Some(event);
@@ -647,7 +698,7 @@ impl BoardDrag {
         };
         let unchanged = target.as_ref() == Some(&session.original);
         if target.is_none() || unchanged {
-            self.return_home();
+            self.return_home_with(Some(&event));
             return;
         }
         let target = target.unwrap();
@@ -662,7 +713,7 @@ impl BoardDrag {
             stage: target.stage,
             before_card_id: before,
         };
-        let motion = self.land();
+        let motion = self.land_with(Some(&event));
         let received = self.owner.run(|| signal(None::<bool>));
         if let Some(handler) = self.ui.board_move.get() {
             handler(intent);
@@ -692,39 +743,58 @@ impl BoardDrag {
             }
         });
     }
-    fn land(self) -> MotionEnd {
+    fn settle_to(
+        self,
+        event: Option<&PanEvent>,
+        stage: &str,
+        source_x: f32,
+        source_y: f32,
+        target_y: f32,
+    ) -> MotionEnd {
+        let Some(c) = self.metrics.with(|m| m.columns.get(stage).cloned()) else {
+            return (None, None);
+        };
+        let horizontal = self.metrics.with(|m| m.horizontal);
+        let cur_x = event.and_then(|e| e.value_x.map(|v| (v, e.velocity_x)));
+        let cur_y = event.and_then(|e| e.value_y.map(|v| (v, e.velocity_y)));
+        (
+            settle_if_needed(self.x, cur_x, c.rect.x - horizontal - source_x),
+            settle_if_needed(self.y, cur_y, c.rect.y - c.offset + target_y - source_y),
+        )
+    }
+    fn land_with(self, event: Option<&PanEvent>) -> MotionEnd {
         if let Some(s) = self.session.get()
             && let Some((stage, y, _)) = self.layout.with_untracked(|l| l.gap.clone())
-            && let Some(c) = self.metrics.with(|m| m.columns.get(&stage).cloned())
         {
-            let horizontal = self.metrics.with(|m| m.horizontal);
-            return (
-                settle(self.x, c.rect.x - horizontal - s.source.x),
-                settle(self.y, c.rect.y - c.offset + y - s.source.y),
-            );
+            return self.settle_to(event, &stage, s.source.x, s.source.y, y);
         }
         (None, None)
     }
     fn return_home(self) {
+        self.return_home_with(None);
+    }
+    fn return_home_with(self, event: Option<&PanEvent>) {
         self.session.with(|s| {
             if let Some(s) = s {
                 s.target = Some(s.original.clone());
             }
         });
         self.reflow();
-        let motion = if let Some(s) = self.session.get()
-            && let Some(c) = self
-                .metrics
-                .with(|m| m.columns.get(&s.original.stage).cloned())
-        {
-            let horizontal = self.metrics.with(|m| m.horizontal);
-            (
-                settle(self.x, c.rect.x - horizontal - s.source.x),
-                settle(self.y, c.rect.y - c.offset + s.original_y - s.source.y),
+        let motion = if let Some(s) = self.session.get() {
+            self.settle_to(
+                event,
+                &s.original.stage,
+                s.source.x,
+                s.source.y,
+                s.original_y,
             )
         } else {
             (None, None)
         };
+        if motion.0.is_none() && motion.1.is_none() {
+            self.clear();
+            return;
+        }
         self.spawn_owned(async move {
             wait_motion(motion).await;
             if self.phase.try_get().is_some() {
@@ -767,6 +837,195 @@ impl BoardDrag {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use canban_types::{Snapshot, Workflow};
+    use nsh_core::{
+        ApproxTextEngine, Core, MountBatch, MountItem, NodeId,
+        animation::{AnimationId, AnimationOp, Finished},
+        element::JsEvent,
+        geometry::size,
+    };
+    use std::collections::HashMap;
+
+    #[component]
+    fn DragBoardProbe() -> impl IntoElement {
+        canban_ui_kit::tokens::install_theme();
+        let ui = Ui::new();
+        let mut snapshot = Snapshot::default();
+        snapshot.projects.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "proj-drag",
+                "name": "Drag Probe",
+                "directory": "/tmp/drag-probe",
+                "workflow": Workflow::default(),
+                "created_at": 1
+            }))
+            .unwrap(),
+        );
+        for n in 1u64..=3 {
+            snapshot.cards.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": format!("c-{n}"),
+                    "project_id": "proj-drag",
+                    "number": n,
+                    "title": format!("Drag Card {n}"),
+                    "body": "",
+                    "stage": "backlog",
+                    "revision": 1,
+                    "created_at": n
+                }))
+                .unwrap(),
+            );
+        }
+        ui.snapshot.set(snapshot);
+        ui.project.set("proj-drag".into());
+        ui.page.set("board".into());
+        ui.onboarded.set(true);
+        view()
+            .w(px(1200.))
+            .h(px(760.))
+            .child(crate::board::screen(ui))
+    }
+
+    struct DragTree {
+        parents: HashMap<NodeId, NodeId>,
+        labels: HashMap<String, NodeId>,
+        texts: HashMap<NodeId, String>,
+        opacities: HashMap<NodeId, f32>,
+        started_animations: Vec<AnimationId>,
+    }
+
+    impl DragTree {
+        fn new() -> Self {
+            Self {
+                parents: HashMap::new(),
+                labels: HashMap::new(),
+                texts: HashMap::new(),
+                opacities: HashMap::new(),
+                started_animations: Vec::new(),
+            }
+        }
+
+        fn apply(&mut self, batch: &MountBatch) {
+            for item in &batch.items {
+                match item {
+                    MountItem::Insert { parent, child, .. } => {
+                        self.parents.insert(*child, *parent);
+                    }
+                    MountItem::Remove { id } => {
+                        self.parents.remove(id);
+                    }
+                    MountItem::Delete { id } => {
+                        self.parents.remove(id);
+                        self.texts.remove(id);
+                        self.opacities.remove(id);
+                        self.labels.retain(|_, node| node != id);
+                    }
+                    MountItem::Text { id, text, .. } => {
+                        self.texts.insert(*id, text.text.to_string());
+                    }
+                    MountItem::ViewProps { id, props } => {
+                        if let Some(label) = &props.accessibility.label {
+                            self.labels.insert(label.to_string(), *id);
+                        }
+                    }
+                    MountItem::ViewStyle { id, style } => {
+                        self.opacities.insert(*id, style.opacity);
+                    }
+                    MountItem::Animation(AnimationOp::Start { animation, .. }) => {
+                        self.started_animations.push(*animation);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        fn is_mounted(&self, mut id: NodeId) -> bool {
+            let mut guard = 0;
+            while id != nsh_core::ROOT_ID {
+                let Some(&parent) = self.parents.get(&id) else {
+                    return false;
+                };
+                id = parent;
+                guard += 1;
+                if guard > 256 {
+                    return false;
+                }
+            }
+            true
+        }
+
+        fn has_mounted_ghost(&self) -> bool {
+            self.texts
+                .iter()
+                .filter(|(id, text)| text.as_str() == "Drag Card 1" && self.is_mounted(**id))
+                .count()
+                == 2
+        }
+
+        fn row_opacity(&self, row_id: NodeId) -> f32 {
+            self.opacities.get(&row_id).copied().unwrap_or(1.0)
+        }
+    }
+
+    fn dispatch_core_events(core: &mut Core<ApproxTextEngine>) -> bool {
+        let mut events = Vec::new();
+        core.take_events(&mut events);
+        let mut dispatched = false;
+        for ev in events {
+            match ev {
+                JsEvent::Event(id, kind, payload) => {
+                    core.component_event(id, kind, &payload);
+                    dispatched = true;
+                }
+                JsEvent::LayoutListener {
+                    host,
+                    id,
+                    listener,
+                    frame,
+                } => {
+                    core.component_layout(host, id, &listener, frame);
+                    dispatched = true;
+                }
+                _ => {}
+            }
+        }
+        dispatched
+    }
+
+    fn pump_board(core: &mut Core<ApproxTextEngine>, tree: &mut DragTree) {
+        for _ in 0..16 {
+            core.run_frame(nsh_core::time::now());
+            core.run_component_tasks();
+            let had_batch = if let Some(batch) = core.commit() {
+                tree.apply(&batch);
+                true
+            } else {
+                false
+            };
+            let dispatched = dispatch_core_events(core);
+            if !had_batch && !dispatched && !core.wants_frame() {
+                break;
+            }
+        }
+    }
+
+    fn setup_board(
+        runtime: &tokio::runtime::Runtime,
+    ) -> (Core<ApproxTextEngine>, DragTree, NodeId, Point<Points>) {
+        let mut core = Core::new(ApproxTextEngine, size(px(1200.), px(760.)));
+        core.set_components(nsh_base::registry());
+        core.set_task_runtime(runtime.handle().clone());
+        core.mount_root(&nsh_core::element::Root::of::<DragBoardProbe>());
+        let mut tree = DragTree::new();
+        pump_board(&mut core, &mut tree);
+        let row_id = *tree
+            .labels
+            .get("Card #1 Drag Card 1")
+            .expect("first card row mounted");
+        let row_bounds = core.measure(row_id).expect("measured row bounds");
+        let press_pos = point(px(row_bounds.page.x.0 + 40.), px(row_bounds.page.y.0 + 10.));
+        (core, tree, row_id, press_pos)
+    }
 
     #[test]
     fn drag_eligibility_scopes_pending_check_to_card_move_and_idle_phase() {
@@ -795,5 +1054,182 @@ mod tests {
         assert!(!should_abort_unmounted_row(Some(0), Some("c1"), "c1"));
         assert!(!should_abort_unmounted_row(Some(2), Some("c1"), "c2"));
         assert!(!should_abort_unmounted_row(None, Some("c1"), "c1"));
+    }
+
+    #[test]
+    fn settle_short_circuits_axis_already_at_rest() {
+        assert!(should_short_circuit_settle(Some((0.0, 0.0)), 0.0));
+        assert!(should_short_circuit_settle(Some((0.4, -5.0)), 0.0));
+        assert!(!should_short_circuit_settle(Some((12.0, 0.0)), 0.0));
+        assert!(!should_short_circuit_settle(Some((0.0, 25.0)), 0.0));
+        assert!(!should_short_circuit_settle(None, 0.0));
+    }
+
+    #[test]
+    fn short_drag_releasing_during_phase_1_never_hides_card_or_flashes_ghost() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (mut core, mut tree, row_id, press_pos) = setup_board(&runtime);
+
+        assert!(core.component_event(
+            row_id,
+            EventKind::PressDown,
+            &EventPayload::Press(PressEvent {
+                position: point(px(40.), px(10.)),
+                page_position: press_pos,
+                ..Default::default()
+            }),
+        ));
+        assert!(core.component_event(
+            row_id,
+            EventKind::PanStart,
+            &EventPayload::Pan {
+                translation: point(px(0.), px(7.)),
+                velocity_x: 0.,
+                velocity_y: 40.,
+                value_x: Some(px(0.)),
+                value_y: Some(px(7.)),
+            },
+        ));
+        // Release slightly below start while measurements are still in phase 1.
+        assert!(core.component_event(
+            row_id,
+            EventKind::PanEnd,
+            &EventPayload::Pan {
+                translation: point(px(0.), px(12.)),
+                velocity_x: 0.,
+                velocity_y: 0.,
+                value_x: Some(px(0.)),
+                value_y: Some(px(12.)),
+            },
+        ));
+
+        for step_idx in 0..8 {
+            core.run_component_tasks();
+            if let Some(batch) = core.commit() {
+                tree.apply(&batch);
+            }
+            dispatch_core_events(&mut core);
+            assert_eq!(
+                tree.row_opacity(row_id),
+                1.0,
+                "step {step_idx}: original row must never vanish when a short drag ends in phase 1; has_ghost={} started_anims={:?}",
+                tree.has_mounted_ghost(),
+                tree.started_animations,
+            );
+            assert!(
+                !tree.has_mounted_ghost(),
+                "step {step_idx}: short unchanged drag ended in phase 1 should clear without flashing ghost"
+            );
+        }
+        assert!(
+            tree.started_animations.is_empty(),
+            "short unchanged drag ended in phase 1 must not wait on spring animations"
+        );
+    }
+
+    #[test]
+    fn drag_start_keeps_row_visible_until_single_commit_ghost_handoff_and_skips_zero_axis_spring() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (mut core, mut tree, row_id, press_pos) = setup_board(&runtime);
+
+        assert!(core.component_event(
+            row_id,
+            EventKind::PressDown,
+            &EventPayload::Press(PressEvent {
+                position: point(px(40.), px(10.)),
+                page_position: press_pos,
+                ..Default::default()
+            }),
+        ));
+        assert!(core.component_event(
+            row_id,
+            EventKind::PanStart,
+            &EventPayload::Pan {
+                translation: point(px(0.), px(7.)),
+                velocity_x: 0.,
+                velocity_y: 40.,
+                value_x: Some(px(0.)),
+                value_y: Some(px(7.)),
+            },
+        ));
+
+        // Run tasks once so start() issues all concurrent measure() requests, then commit 1:
+        // card stays visible at opacity 1.0 while measurements are in flight.
+        core.run_component_tasks();
+        if let Some(batch) = core.commit() {
+            tree.apply(&batch);
+        }
+        assert_eq!(
+            tree.row_opacity(row_id),
+            1.0,
+            "original row must stay visible during phase 1 before ghost mounts"
+        );
+        assert!(!tree.has_mounted_ghost());
+
+        // Commit 1 answered all concurrent measurements (source, root, and all columns);
+        // running tasks + Commit 2 atomically mounts ghost and hides the original row.
+        core.run_component_tasks();
+        if let Some(batch) = core.commit() {
+            tree.apply(&batch);
+        }
+        assert!(
+            tree.has_mounted_ghost(),
+            "ghost must mount after a single parallel measurement commit"
+        );
+        assert_eq!(
+            tree.row_opacity(row_id),
+            0.0,
+            "original row hides in the exact batch ghost mounts"
+        );
+
+        // Release slightly downward in phase 2: only Y should spring home (X is already 0.0).
+        tree.started_animations.clear();
+        assert!(core.component_event(
+            row_id,
+            EventKind::PanEnd,
+            &EventPayload::Pan {
+                translation: point(px(0.), px(14.)),
+                velocity_x: 0.,
+                velocity_y: 0.,
+                value_x: Some(px(0.)),
+                value_y: Some(px(14.)),
+            },
+        ));
+        pump_board(&mut core, &mut tree);
+        assert_eq!(
+            tree.started_animations.len(),
+            1,
+            "unchanged vertical drag should spring only Y and short-circuit zero-delta X; started={:?}",
+            tree.started_animations
+        );
+        assert!(tree.has_mounted_ghost());
+        assert_eq!(tree.row_opacity(row_id), 0.0);
+
+        let y_anim = tree.started_animations[0];
+        let mut finished = vec![Finished::new(y_anim, true)];
+        core.animations_finished(&mut finished);
+        let deadline = Instant::now() + Duration::from_millis(120);
+        while tree.has_mounted_ghost() && Instant::now() < deadline {
+            runtime.block_on(tokio::time::sleep(Duration::from_millis(5)));
+            pump_board(&mut core, &mut tree);
+        }
+
+        assert!(
+            !tree.has_mounted_ghost(),
+            "ghost must unmount once return-home motion completes"
+        );
+        assert_eq!(
+            tree.row_opacity(row_id),
+            1.0,
+            "original row must return to opacity 1.0 in the same clear batch"
+        );
     }
 }

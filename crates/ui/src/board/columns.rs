@@ -307,7 +307,7 @@ fn row(ui: Ui, state: BoardDrag, card: ReadSignal<Card>) -> impl IntoElement {
             label
         })
         .opacity(move || {
-            if state.lifted.get() == hidden_id {
+            if state.is_ghost_active(&hidden_id) {
                 0.0_f32
             } else {
                 1.0_f32
