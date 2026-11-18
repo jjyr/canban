@@ -6,9 +6,9 @@
 
 **Turn Kanban cards into automated coding workflows, without replacing your native agent CLIs.**
 
-Canban = Kanban + Workflow + Herdr
-
-Discuss features on Kanban cards, dispatch coding agents through customizable workflows, and merge changes from isolated Git worktrees, all while keeping task context and progress in one place.
+<p align="center">
+  <img src="docs/assets/canban_intro.gif" width="1000" alt="Canban demo: Kanban, Workflow, and Herdr" />
+</p>
 
 <p align="center">
   <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a>
@@ -23,10 +23,6 @@ Discuss features on Kanban cards, dispatch coding agents through customizable wo
   <a href="#license">License</a>
 </p>
 
-<p align="center">
-  <img src="docs/assets/readme-board.png" width="860" alt="Canban Board in Monokai theme" />
-</p>
-
 ---
 
 ## Philosophy
@@ -39,25 +35,19 @@ Discuss features on Kanban cards, dispatch coding agents through customizable wo
 
 ## Highlights
 
-### Kanban for Human
+- **Kanban for human context** — Keep feature specs, screenshots, agent discussions, and review decisions together on each card, with live agent progress visible on the board.
 
-Move Cards across customizable stages (`Backlog → Develop → Review`) with live `@developer`, `@reviewer`, and `@merger` status capsules right on the Board. Each Card combines Markdown specs, pasted screenshots, `#Card` / `#tag` links, `Cmd+O` (`Ctrl+Shift+O` on Linux) Quick Open, and GitHub Issue/PR sync with approval gates for external PRs.
+- **Automated coding workflows** — Drag a card into `Develop` to dispatch coding agents automatically. Build GitHub Actions-like workflows with custom scripts, conditions, and human approval steps.
 
-### GitHub Actions Style Workflows
+- **Isolated Git worktrees & merge queue** — Run tasks independently in per-card Git worktrees, then deliver changes through a serialized local merge queue with agent-assisted conflict resolution.
 
-Automate column transitions, `@agent` runs, custom scripts, conditions, human approvals, and serialized FIFO **Queue Merge** (`deliver` with automatic `@merger` conflict resolution) inside isolated per-Card Git worktrees — authored visually in Workflow Studio, in YAML, or via **Edit with agent**.
+- **Native agent CLIs** — Run Claude Code, Codex, Antigravity, Cursor CLI, and custom agents through Herdr, preserving their native TUIs, permissions, MCPs, and skills.
 
-<p align="center">
-  <img src="docs/assets/readme-workflow.png" width="840" alt="Canban Visual Workflow Studio in Monokai theme" />
-</p>
+- **Persistent agent sessions** — Keep agent sessions running across app restarts and upgrades without losing terminal state.
 
-### Herdr Terminal
+- **Local & remote execution** — Run agents locally or on remote machines through SSH/Tailscale, with headless Linux support for `canband` and `herdr-core`.
 
-Press `Cmd+J` (`Ctrl+Shift+J` on Linux) on any Card for a side-by-side terminal split or open the dedicated **Terminals** workspace. Built in Rust with `longbridge/nsh` (native AppKit/Metal on macOS, GTK4 on Linux) and `libghostty-vt` over local or remote SSH/Tailscale `canband` + `herdr-core`, running agent PTYs survive app restarts and upgrades across 17 built-in dark themes.
-
-<p align="center">
-  <img src="docs/assets/readme-card-terminal.png" width="840" alt="Canban Card Detail and Herdr Terminal split view in Monokai theme" />
-</p>
+- **GitHub integration** — Sync GitHub Issues and PRs with Kanban cards, including approval gates for external pull requests.
 
 ---
 

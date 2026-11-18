@@ -10,6 +10,10 @@
 </p>
 
 <p align="center">
+  <img src="docs/assets/canban_intro.gif" width="1000" alt="Canban 演示：看板、工作流与 Herdr 终端" />
+</p>
+
+<p align="center">
   <a href="README.md">English</a> · <strong>简体中文</strong>
 </p>
 
@@ -20,10 +24,6 @@
   <a href="#安装">安装</a> ·
   <a href="#相关软件与致谢">相关软件与致谢</a> ·
   <a href="#开源协议">开源协议</a>
-</p>
-
-<p align="center">
-  <img src="docs/assets/readme-board.png" width="860" alt="Monokai 主题下的 Canban 看板视图" />
 </p>
 
 ---
@@ -38,25 +38,19 @@
 
 ## 核心亮点
 
-### 面向人机协作的 Kanban 看板
+- **用看板保留任务上下文** — 每张卡片集中记录功能需求、截图、与 Agent 的讨论和评审决定。在看板上就能实时查看 Agent 的进度。
 
-Card 沿 `Backlog → Develop → Review`（或自定义列）流转，卡片上实时展示 `@developer`、`@reviewer`、`@merger` 运行状态胶囊；内置 Markdown 编辑预览、剪贴板粘贴图片、`#Card` / `#tag` 引用补全、`Cmd+O`（Linux 下 `Ctrl+Shift+O`）快速跳转，以及 GitHub Issues / PR 同步与外部 PR 审批门禁。
+- **自动化编码工作流** — 将卡片拖入 `Develop` 列，即可自动派发编码 Agent。像使用 GitHub Actions 一样，用自定义脚本、条件判断和人工审批步骤编排工作流。
 
-### 类 GitHub Actions 的声明式 Workflow
+- **独立的 Git 工作树与合并队列** — 每张卡片在独立的 Git 工作树中执行任务。变更通过本地合并队列依次合入，遇到冲突时由 Agent 协助解决。
 
-为每张 Card 自动隔离独立 Git Worktree，串联列流转、`@agent` 执行、自定义脚本、条件分支、人工审批与 FIFO **Queue Merge**（冲突时自动交由 `@merger` 处理）；支持在可视化 Workflow Studio、YAML 源码与 **Edit with agent** 之间随时切换。
+- **原生 Agent CLI** — 通过 Herdr 运行 Claude Code、Codex、Antigravity、Cursor CLI 和自定义 Agent，保留各自的终端界面、权限机制、MCP 和技能。
 
-<p align="center">
-  <img src="docs/assets/readme-workflow.png" width="840" alt="Monokai 主题下的 Canban 可视化 Workflow Studio" />
-</p>
+- **持久化 Agent 会话** — 应用重启或升级后，Agent 会话仍会继续运行，并保留终端状态。
 
-### 原生 Herdr Terminal
+- **本地与远程执行** — 可在本机运行 Agent，也可通过 SSH/Tailscale 在远程机器上运行。`canband` 和 `herdr-core` 均支持在无图形界面的 Linux 上运行。
 
-在任意 Card 中按 `Cmd+J`（Linux 下 `Ctrl+Shift+J`）即可并排打开终端分栏，或切到独立的 **Terminals** 工作区管理多分支会话。基于 Rust、`longbridge/nsh`（macOS 原生 AppKit / Metal，Linux 原生 GTK4）与 `libghostty-vt` 构建，支持同时连接本地与远程 SSH / Tailscale `canband` + `herdr-core`，重启或升级应用不会中断运行中的 Agent PTY，并内置 17 款暗色主题。
-
-<p align="center">
-  <img src="docs/assets/readme-card-terminal.png" width="840" alt="Monokai 主题下的 Card 详情与 Herdr Terminal 分栏视图" />
-</p>
+- **GitHub 集成** — 在 GitHub Issues、PR 与看板卡片之间同步信息，外部 PR 可经过人工审批。
 
 ---
 
