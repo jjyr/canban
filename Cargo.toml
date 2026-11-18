@@ -7,6 +7,11 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["JJy <jjyruby@gmail.com>"]
+description = "Turn Kanban cards into automated coding workflows without replacing your native agent CLIs."
+homepage = "https://canban.dev"
+repository = "https://github.com/jjyr/canban"
+keywords = ["kanban", "ai-agents", "workflow", "git-worktree", "terminal"]
+categories = ["development-tools", "command-line-utilities"]
 
 [workspace.dependencies]
 anyhow = "1"
