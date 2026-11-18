@@ -1,61 +1,197 @@
 //! Shared Terminal presentation: sidebar metadata and compact tab labels.
 use super::*;
-pub const SIDEBAR_TITLE_MAX_CHARS: usize = 32;
 
-/// Truncates a sidebar session title to at most `SIDEBAR_TITLE_MAX_CHARS` characters,
-/// collapsing internal whitespace/newlines onto a single line and appending `…` when exceeded.
-pub fn truncate_sidebar_title(title: &str) -> String {
-    let single_line = title.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut chars = single_line.chars();
-    let head: String = chars.by_ref().take(SIDEBAR_TITLE_MAX_CHARS).collect();
-    if chars.next().is_some() {
-        format!("{}…", head.trim_end())
-    } else {
-        head
-    }
-}
-
-/// Formats the left-side identity/machine caption for the second line of a Terminal sidebar row:
-/// - Card Role Agent: `@role · Local` (or remote machine name), omitting engine display name and Card stage;
-/// - Standalone Agent / Shell with observed Agent / Plain Shell: `Local` (or remote machine name).
-pub fn sidebar_meta_text(e: &Entry, machine: &str) -> String {
-    if let Some(profile) = e.profile().filter(|p| !p.is_empty()) {
-        format!("@{profile} · {machine}")
-    } else {
-        machine.to_owned()
-    }
-}
-
-/// Leading icon for the second line of a Terminal sidebar row: Agent brand mark when present,
+/// Leading icon for a Terminal sidebar row: Agent brand mark when present,
 /// otherwise the generic `Icon::Terminal` mark.
 pub fn sidebar_meta_icon(e: &Entry) -> Icon {
     e.provider().map(|(mark, _)| mark).unwrap_or(Icon::Terminal)
 }
 
-/// Sidebar metadata on the second row: `[Agent/Terminal Icon]` + `(@role · )Machine`, single-line truncated.
-pub fn sidebar_meta(e: &Entry, machine: &str) -> View {
-    let mark = sidebar_meta_icon(e);
-    let caption = sidebar_meta_text(e, machine);
-    view()
-        .flex_1()
-        .min_w(px(0.))
-        .flex_row()
-        .items_center()
-        .gap_1p5()
-        .child(icon(mark).w(px(13.)).h(px(13.)).flex_shrink_0())
-        .child(muted(caption).flex_1().min_w(px(0.)).truncate())
+/// Single-line title for compact 30px Terminal sidebar rows:
+/// - Card Role Agent inside its own `CardWorktree(#N)`: `@role` (or custom name), avoiding duplicating `#N` from the parent worktree header;
+/// - Card Role Agent `cd`'d into another worktree or directory: `#N @role` (or custom name);
+/// - Standalone CLI Agent / Shell with observed Agent / Plain Shell: `e.title()`.
+pub fn sidebar_row_title(e: &Entry, in_own_card_worktree: bool) -> String {
+    tab_label_text(e, !in_own_card_worktree)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-/// Right-aligned compact Herdr status indicator (`[status_mark] + [status_word]`) for the second line
-/// of a Terminal sidebar row. Plain idle Shells return `None` to stay quiet.
-pub fn sidebar_status(e: &Entry) -> Option<AnyElement> {
+/// Optional host badge for single-line sidebar rows: omitted for `local` terminals,
+/// returning the remote host display name otherwise.
+pub fn sidebar_host_badge(e: &Entry, machine: &str) -> Option<String> {
+    if e.host_id.is_empty() || e.host_id == "local" {
+        None
+    } else {
+        Some(machine.to_owned())
+    }
+}
+
+/// Right-aligned compact Herdr status indicator for a Terminal sidebar row.
+/// Plain idle Shells return `None` to stay quiet. When `show_word` is `false`
+/// (narrow sidebars `< 230px`), only the semantic status mark is rendered.
+pub fn sidebar_status_compact(e: &Entry, show_word: bool) -> Option<AnyElement> {
     let label_el = sidebar_status_label_raw(e)?;
     let mut group = view().flex_row().items_center().gap_1().flex_shrink_0();
     if let Some(mark_el) = status_mark(e) {
         group = group.child(mark_el);
     }
-    group = group.child(label_el);
+    if show_word {
+        group = group.child(label_el);
+    }
     Some(group.into_element())
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GroupStatusSummary {
+    pub total: usize,
+    pub error: usize,
+    pub blocked: usize,
+    pub attention: usize,
+    pub working: usize,
+    pub starting: usize,
+    pub done: usize,
+}
+
+/// Aggregates terminal counts and highest-priority runtime signals for collapsed Project/Worktree headers.
+pub fn group_status_summary<'a>(
+    entries: impl IntoIterator<Item = &'a Entry>,
+) -> GroupStatusSummary {
+    use canban_types::HerdrStatus;
+    let mut out = GroupStatusSummary::default();
+    for e in entries {
+        out.total += 1;
+        match e.herdr_status() {
+            HerdrStatus::Error | HerdrStatus::Disconnected => out.error += 1,
+            HerdrStatus::Blocked => out.blocked += 1,
+            HerdrStatus::Done if e.needs_attention() => out.attention += 1,
+            HerdrStatus::Idle if e.needs_attention() => out.attention += 1,
+            HerdrStatus::Working => out.working += 1,
+            HerdrStatus::Starting | HerdrStatus::Queued => out.starting += 1,
+            HerdrStatus::Done => out.done += 1,
+            HerdrStatus::PlainShell
+            | HerdrStatus::Idle
+            | HerdrStatus::Closing
+            | HerdrStatus::Ended => {}
+        }
+    }
+    out
+}
+
+pub fn group_summary_a11y(summary: GroupStatusSummary) -> String {
+    let mut parts = vec![format!(
+        "{} terminal{}",
+        summary.total,
+        if summary.total == 1 { "" } else { "s" }
+    )];
+    if summary.error > 0 {
+        parts.push(format!("{} error", summary.error));
+    }
+    if summary.blocked > 0 {
+        parts.push(format!("{} blocked", summary.blocked));
+    }
+    if summary.attention > 0 {
+        parts.push(format!("{} needs attention", summary.attention));
+    }
+    if summary.working > 0 {
+        parts.push(format!("{} working", summary.working));
+    }
+    if summary.error == 0
+        && summary.blocked == 0
+        && summary.attention == 0
+        && summary.working == 0
+        && summary.done > 0
+    {
+        parts.push(format!("{} done", summary.done));
+    }
+    parts.join(", ")
+}
+
+/// Compact `[count] [status marks]` badge shown on collapsed Project and Worktree headers.
+pub fn group_summary_badge(summary: GroupStatusSummary) -> Option<View> {
+    if summary.total == 0 {
+        return None;
+    }
+    let (pill_bg, pill_fg) = if summary.error > 0 {
+        (DANGER_SURFACE, DANGER)
+    } else if summary.blocked + summary.attention > 0 {
+        (ATTENTION_SURFACE, ATTENTION)
+    } else {
+        (INSET, MUTED)
+    };
+    let mut row = view()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .flex_shrink_0()
+        .child(
+            view()
+                .min_w(px(18.))
+                .h(px(18.))
+                .px_1()
+                .rounded(px(5.))
+                .bg(pill_bg)
+                .items_center()
+                .justify_center()
+                .child(
+                    text(summary.total.to_string())
+                        .text_size(px(10.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(pill_fg),
+                ),
+        );
+    if summary.error > 0 {
+        row = row.child(
+            icon_tinted(Icon::TriangleAlert, DANGER)
+                .w(px(12.))
+                .h(px(12.))
+                .flex_shrink_0(),
+        );
+    }
+    if summary.blocked > 0 {
+        row = row.child(
+            icon_tinted(Icon::ShieldAlert, ATTENTION)
+                .w(px(12.))
+                .h(px(12.))
+                .flex_shrink_0(),
+        );
+    } else if summary.attention > 0 {
+        row = row.child(
+            icon_tinted(Icon::Info, ATTENTION)
+                .w(px(12.))
+                .h(px(12.))
+                .flex_shrink_0(),
+        );
+    }
+    if summary.working > 0 {
+        row = row.child(live_dot(ACCENT));
+    } else if summary.error == 0
+        && summary.blocked == 0
+        && summary.attention == 0
+        && summary.done > 0
+    {
+        row = row.child(
+            icon_tinted(Icon::Check, SUCCESS)
+                .w(px(12.))
+                .h(px(12.))
+                .flex_shrink_0(),
+        );
+    } else if summary.error == 0
+        && summary.blocked == 0
+        && summary.attention == 0
+        && summary.starting > 0
+    {
+        row = row.child(
+            view()
+                .w(px(6.))
+                .h(px(6.))
+                .rounded_full()
+                .bg(MUTED)
+                .flex_shrink_0(),
+        );
+    }
+    Some(row)
 }
 
 pub fn sidebar_hint(e: &Entry, machine: &str) -> String {

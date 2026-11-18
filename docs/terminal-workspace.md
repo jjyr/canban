@@ -7,33 +7,26 @@ Multi-machine update, 2026-11-09: see [current execution/location and service co
 
 Implemented user-approved direction, 2026-11-08. Native/runtime acceptance is recorded below. This supersedes the Terminal portion of the earlier Card-focused split layout. Review retains its own delivery interface.
 
-## Product layout (updated 2026-11-15: Compact Two-Line Session Rows, Worktree-Scoped Tabs & Herdr Status)
+## Product layout (updated 2026-11-19: Two-Level Tree Folding & Single-Line 30pt Session Rows)
 
 ```text
 +--------------------------------------+-------------------------------------------------------------+
-| traffic lights [<] [>] [☰]           | [#42 ... x] [Terminal 1 x] [+] [▾] [🤖] #42 [⎇ canban/42] |
+| traffic lights [<] [>] [☰]           | [@agy x] [Antigravity 1 x] [Terminal 1 x] [+] [▾] #42 [⎇…]  |
 +--------------------------------------+-------------------------------------------------------------+
-| rail | Terminals                     |                                                             |
-|      | 📁 Canban          [⎇+] [+]   | Native Terminal (active worktree scope only)                |
-|      |   📂 main              ↓1 [+] |                                                             |
-|      |   │ Terminal 3                |                                                             |
-|      |   │ ❯_ Local                  |                                                             |
-|      |   │ Terminal 4                |                                                             |
-|      |   │ [Codex] Local   ● Working |                                                             |
-|      |   ⎇ canban/42 #42 +12 −3 [+][⋯]|                                                            |
-|      |   │ #42 Card title truncated… |                                                             |
-|      |   │ [Agy] @agy · Local 🛡 Blocked|                                                          |
-|      |   │ Antigravity 1             |                                                             |
-|      |   │ [Agy] Local        ✓ Done |                                                             |
-|      |   │ Terminal 1                |                                                             |
-|      |   │ ❯_ Local                  |                                                             |
-|      |   ⎇ feat/login    ↑2   [+][⋯] | <-- Active ManagedWorktree (idle ones hidden from tree)     |
-|      |   │ Terminal 2                |                                                             |
-|      |   │ ❯_ Local                  |                                                             |
-|      | OTHER DIRECTORIES ─────────── | <-- Shown only when non-Project terminals exist             |
-|      | 📁 ~/Workspace/scratch    [+] | <-- Local $HOME compacted to ~ (full path in tooltip)       |
-|      |  │ Terminal 5                 |                                                             |
-|      |  │ ❯_ Local                   |                                                             |
+| rail | Terminals                [⊟]  |                                                             |
+|      | ▾ 📁 Canban         [⎇+] [+]  | Native Terminal (active worktree scope only)                |
+|      |  ▾ 📂 main            ↓1      |                                                             |
+|      |   │ ❯_ Terminal 3             |                                                             |
+|      |   │ [Codex] Terminal 4 ● Work.|                                                             |
+|      |  ▾ ⎇ canban/42 #42     +12 −3 |  (hover reveals [+][⋯] overlay on worktree header)          |
+|      |   │ [Agy] @agy      🛡 Blocked |  (deduped @role in own CardWorktree; hover reveals [×])     |
+|      |   │ [Agy] Antigravity 1 ✓ Done|                                                             |
+|      |   │ ❯_ Terminal 1      · dev  |  (remote host shown only when host != local)                |
+|      |  ▸ ⎇ feat/login  ↑2   [2] 🛡  |  (collapsed worktree: count + highest-priority status mark) |
+|      | ▸ 📁 Other Repo       [3] ●   |  (collapsed project: count + aggregated status mark)        |
+|      | OTHER DIRECTORIES ─────────── |  (Shown only when non-Project terminals exist)              |
+|      | ▾ 📁 ~/Workspace/scratch      |  (Local $HOME compacted to ~; full path in tooltip)         |
+|      |  │ ❯_ Terminal 5              |                                                             |
 +--------------------------------------+-------------------------------------------------------------+
 ```
 
@@ -184,10 +177,11 @@ Terminal's task identity.
 The Gallery `terminal-directory` scene includes `New in current` and `New unknown`
 actions for creation placement and fallback, alongside observed directory moves.
 
-- **Unified real-time Herdr status & notifications (2026-11-15):** Every Terminal—Card Role Agents (`AgentRun`), ephemeral CLI Agents (`agent_engine`), Configuration/Merge sessions, and interactive Shells where a user manually launches an Agent CLI (`observed_agent`)—projects a single real-time `HerdrStatus` (`Working`, `Starting`, `Queued`, `Blocked` with `RuntimeWait` details, `Done`, `Idle`, `Error`, `Disconnected`, or quiet `PlainShell`). Top/Card tab strips display compact leading status marks (`live_dot(ACCENT)` for `Working`, amber shield/help icon for `Blocked`, green check for `Done`, danger triangle for `Error`/`Offline`, and quiet plain Shells without status clutter; Worktree headers carry no aggregate status counts), while Terminal sidebar rows place `[status_mark] + [status_word]` on the right end of their second line (keeping detailed wait/error reasons in the row hover tooltip rather than adding a third line). When a manual CLI Agent exits back to its login Shell (`zsh`/`bash`), AppServer clears any residual PTY OSC 7501 `agent_status`, `agent_turn`, and `waiting` fields. Active (`Working`/`Starting`) standalone/manual Agent terminals appear in `⌘I` `Running` without consuming Scheduler `max_agents` slots, while `Blocked`/`Error`/`Disconnected` terminals surface in `⌘I` `Needs you`, increment the top-right alert pill and primary `Terminals` rail badge, and trigger audible chimes via `sound_items`.
-- **Compact fixed two-line sidebar session rows (2026-11-15):** Every session row in the `Terminals` sidebar tree (`crates/ui/src/terminals/tree.rs`) renders a uniform two-line compact layout (`h(px(46.))`) that never wraps or shifts height when selected, deselected, or blocked:
-  - **Line 1 (pure title):** Displays only the session title, capped at 32 characters (`SIDEBAR_TITLE_MAX_CHARS = 32`, whitespace-collapsed with trailing `…`) plus single-line container `.truncate()` whether selected or unselected. Card stages (`Column`), Agent brand icons, and status indicators are omitted from Line 1 so full horizontal space belongs to `#N Card title…`, `<AgentEngine> N`, or `Terminal N`.
-  - **Line 2 (left identity/machine · right Herdr status):** Left side renders `[Agent Icon] @role · Local` (or remote machine display name) for Card Role Agents—omitting redundant engine text names (`Antigravity`, `Codex`, `Claude`) and Card stages—`[Agent Icon] Local` (or remote machine) for standalone CLI Agents and Shells with an active observed Agent, and `[Terminal Icon] Local` (or remote machine) for plain Shells (`Local` is always retained). Right side renders the live Herdr status indicator (`● Working`, `🛡/? Blocked`, `✓ Done`, `ⓘ Needs you`, `● Idle`, `● Starting`, `● Queued`, `● Closing`, `▲ Error`, `▲ Offline`), leaving normal idle plain Shells blank on the right. Full untruncated titles, original `#N Card title` on renamed Agents, stage/engine details, and `Blocked`/`Error` reasons remain available in the row hover tooltip (`sidebar_hint`).
+- **Two-level sidebar folding & summary badges (2026-11-19):** Both **Project** (`project:{id}`) and **WorktreeScope** (`scope:{location_key}`) headers in `Terminals` support folding via `ui.terminal_folds` (`160ms` height/opacity transition, instant under Reduced Motion). Collapsed headers never swallow actionable signals: they render `[N]` (terminal count) alongside the highest-priority aggregated `HerdrStatus` marks (`Error`/`Offline` > `Blocked`/`Needs you` > `Working` > `Done`). On Worktree headers, clicking the left chevron (`▸`/`▾`) toggles fold state without changing terminal selection, whereas clicking the branch body activates the scope's remembered/first terminal while keeping a collapsed scope folded (Option A, using the top worktree-scoped tab strip for sub-terminal switching; cycling or clicking top tabs also preserves that scope's fold state). External jumps (`ui.open_terminal` from Card, Overview, Quick Open, or `New Terminal`) and `cd` regrouping automatically unfold the target Project and WorktreeScope. A header toggle (`[⊟]`/`[⊡]`) and Command Palette commands (`Terminals: Collapse Other Worktrees` / `Terminals: Expand All Worktrees`) collapse inactive worktrees or expand all groups in one click. Worktree `[+]` and `[⋯]` action buttons reveal on row hover as a right-aligned overlay so branch names and Git stats use the full row width by default.
+- **Unified real-time Herdr status & notifications (2026-11-15, refined 2026-11-19):** Every Terminal—Card Role Agents (`AgentRun`), ephemeral CLI Agents (`agent_engine`), Configuration/Merge sessions, and interactive Shells where a user manually launches an Agent CLI (`observed_agent`)—projects a single real-time `HerdrStatus` (`Working`, `Starting`, `Queued`, `Blocked` with `RuntimeWait` details, `Done`, `Idle`, `Error`, `Disconnected`, or quiet `PlainShell`). Top/Card tab strips display compact leading status marks (`live_dot(ACCENT)` for `Working`, amber shield/help icon for `Blocked`, green check for `Done`, danger triangle for `Error`/`Offline`, and quiet plain Shells without status clutter), while Terminal sidebar rows place `[status_mark] + [status_word]` (or `[status_mark]` alone in narrow `< 230px` sidebars) on the right end of their single-line row (replaced by `[×]` quick-close on hover, with detailed wait/error reasons in the row hover tooltip). When a manual CLI Agent exits back to its login Shell (`zsh`/`bash`), AppServer clears any residual PTY OSC 7501 `agent_status`, `agent_turn`, and `waiting` fields. Active (`Working`/`Starting`) standalone/manual Agent terminals appear in `⌘I` `Running` without consuming Scheduler `max_agents` slots, while `Blocked`/`Error`/`Disconnected` terminals surface in `⌘I` `Needs you`, increment the top-right alert pill and primary `Terminals` rail badge, and trigger audible chimes via `sound_items`.
+- **Compact single-line 30pt sidebar session rows (2026-11-19):** Every session row in the `Terminals` sidebar tree (`crates/ui/src/terminals/tree.rs`) renders a single-line compact layout (`h(px(30.))` inside a `32pt` wrapper) that never wraps or shifts height when selected, deselected, or blocked:
+  - **Left (icon + deduplicated title):** Leading `13pt` brand/terminal icon (`sidebar_meta_icon`) followed by the single-line truncated title (`sidebar_row_title`). Inside its own `CardWorktree(#N)`, a Card Role Agent displays `@role` (or its custom name, matching the top tab strip) instead of repeating `#N Card title`; if it `cd`s into another worktree or directory, it automatically falls back to `#N @role` so task ownership stays clear. Standalone Agents and Shells display their session name (`Antigravity 1`, `Terminal 1`, or custom name).
+  - **Right (optional remote host + Herdr status / hover `[×]`):** `Local` is omitted by default; remote hosts display a compact `· <host>` badge when sidebar width `>= 230pt`. Live Agents and Shells running an observed Agent display `[status_mark] [status_word]` (`>= 230pt`) or `[status_mark]` (`< 230pt`), while plain idle Shells stay quiet. Hovering any row reveals a `22pt` `[×]` close button (invoking `close_entry`, which still prompts before terminating non-done live Agents). Full untruncated titles, Card `#N Title`, stage/engine details, host, and `Blocked`/`Error` reasons remain in the row hover tooltip (`sidebar_hint`).
 
 The branch action opens Compare directly for the selected Terminal's observed directory, without a dropdown. Card worktrees use the Card comparison; standalone managed worktrees use their base branch through Working tree (including untracked files); Project roots use HEAD through Working tree. The branch retains working-tree line counts and upstream ahead/behind indicators. A non-Git or unresolved/unregistered checkout has a disabled action with an explanation. The action is also searchable as **View Terminal Changes in Git**. Workspace selection stays in the left tree; idle worktree discovery and management stay in Git's Workspace list and the Command Palette. Removing the old menu does not delete worktrees. See [direct change navigation](git-workbench.md#direct-change-navigation).
 

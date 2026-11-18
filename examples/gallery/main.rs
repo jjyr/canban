@@ -1825,6 +1825,38 @@ pub fn Gallery() -> impl IntoElement {
         ui.open_terminal("gallery-project-root-shell".into());
         return canban_ui::frame::screen(ui).into_element();
     }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("terminal-folds") {
+        canban_ui::frame::configure_window_chrome();
+        ui.snapshot.set(fixtures::terminal_workspace());
+        ui.open_terminal("gallery-project-root-shell".into());
+        ui.terminal_folds.update(|folds| {
+            folds.insert(
+                "scope:location:local:local:/tmp/gallery/worktrees/standalone-spike".into(),
+            );
+        });
+        return view()
+            .flex_1()
+            .min_h(px(0.))
+            .child(
+                view()
+                    .flex_row()
+                    .gap_2()
+                    .child(action("Collapse others", Variant::Secondary, move |_| {
+                        canban_ui::commands::execute(ui, "terminals-collapse-others");
+                    }))
+                    .child(action("Expand all", Variant::Secondary, move |_| {
+                        canban_ui::commands::execute(ui, "terminals-expand-all");
+                    }))
+                    .child(action("Narrow 210px", Variant::Secondary, move |_| {
+                        ui.terminal_width.set(210.);
+                    }))
+                    .child(action("Default 260px", Variant::Secondary, move |_| {
+                        ui.terminal_width.set(260.);
+                    })),
+            )
+            .child(canban_ui::frame::screen(ui))
+            .into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("terminal-close-confirm") {
         canban_ui::frame::configure_window_chrome();
         let mut s = fixtures::terminal_workspace();

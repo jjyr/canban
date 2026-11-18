@@ -2535,34 +2535,19 @@ fn mod_digit_shortcuts_select_numbered_tab_in_current_workspace_and_reset_labels
 }
 
 #[test]
-fn sidebar_rows_render_strict_two_line_compact_layout_without_engine_names_stages_or_selection_reflow()
- {
-    use crate::terminals::labels::{
-        SIDEBAR_TITLE_MAX_CHARS, sidebar_meta_icon, sidebar_meta_text, truncate_sidebar_title,
-    };
+fn sidebar_rows_render_single_line_compact_layout_with_dedup_and_remote_host_only() {
+    use crate::terminals::labels::{sidebar_host_badge, sidebar_meta_icon, sidebar_row_title};
     use canban_ui_kit::Icon;
     use nsh_core::{
-        ApproxTextEngine, Core, EventKind, EventPayload, MountItem, NodeId, element::JsEvent,
-        geometry::size, prelude::*,
+        ApproxTextEngine, Bounds, Core, EventKind, EventPayload, MountItem, NodeId, Points,
+        element::JsEvent, geometry::size, prelude::*,
     };
     use std::collections::{HashMap, HashSet};
 
-    // 1. Unit checks for title truncation and second-line metadata rules.
-    assert_eq!(truncate_sidebar_title("Terminal 1"), "Terminal 1");
-    let exact_32 = "a".repeat(SIDEBAR_TITLE_MAX_CHARS);
-    assert_eq!(truncate_sidebar_title(&exact_32), exact_32);
-    let long_cjk = "#86 Terminals 现在中间栏最多 3 行，能否紧凑些最多两行并且永远不折行";
-    let truncated = truncate_sidebar_title(long_cjk);
-    assert!(truncated.ends_with('…'), "expected ellipsis: {truncated}");
-    assert_eq!(
-        truncated.chars().count(),
-        SIDEBAR_TITLE_MAX_CHARS + 1,
-        "32 chars + 1 ellipsis: {truncated}"
-    );
-    assert_eq!(
-        truncate_sidebar_title("line1\n  line2\tline3"),
-        "line1 line2 line3"
-    );
+    // 1. Unit checks for single-line title whitespace collapsing and dedup.
+    let mut named_entry = crate::terminals::entries(&fixture())[0].clone();
+    named_entry.saved.name = Some("line1\n  line2\tline3".into());
+    assert_eq!(sidebar_row_title(&named_entry, true), "line1 line2 line3");
 
     #[component]
     fn SidebarProbe() -> impl IntoElement {
@@ -2579,6 +2564,9 @@ fn sidebar_rows_render_strict_two_line_compact_layout_without_engine_names_stage
 
         // Card Role Agent (Antigravity engine, @developer role, Blocked with RuntimeWait reason)
         {
+            let dev_id = Conversation::key("c1", "developer");
+            s.terminals[0].id = dev_id.clone();
+            s.terminals[0].conversation_id = Some(dev_id);
             let run = s.terminals[0].agent.as_mut().unwrap();
             run.profile.id = "developer".into();
             run.profile.preset = Some("agy".into());
@@ -2603,8 +2591,8 @@ fn sidebar_rows_render_strict_two_line_compact_layout_without_engine_names_stage
         // Finish p2's default agent so we focus on p1's four canonical session kinds + renamed Card Agent.
         s.terminals[1].agent.as_mut().unwrap().observed = Some(json!({"state": "finished"}));
 
-        // Renamed Card Role Agent on the same Card (#86) to verify selecting a renamed Agent
-        // never injects an extra original Card title line.
+        // Card Role Agent that cd'd into ProjectRoot (`@reviewer` -> custom name on gpu-box; also
+        // verify non-renamed `cd` falls back to `#86 @role`).
         let mut renamed_run = s.terminals[0].agent.clone().unwrap();
         renamed_run.profile.id = "reviewer".into();
         renamed_run.profile.preset = Some("claude".into());
@@ -2732,22 +2720,39 @@ fn sidebar_rows_render_strict_two_line_compact_layout_without_engine_names_stage
             created_at: 5,
         });
 
+        // Observe locations so Card #86 entries sit in `CardWorktree("c1")`, while `renamed_id`
+        // moves to ProjectRoot (`/repo/p1`) to exercise both in-worktree dedup and cd fallback.
+        observe_fixture_locations(&mut s);
+        if let Some(ctx) = s
+            .terminal_contexts
+            .iter_mut()
+            .find(|c| c.terminal_id == renamed_id)
+        {
+            ctx.cwd = Some("/repo/p1".into());
+            ctx.directory_root = Some("/repo/p1".into());
+            ctx.card_id = None;
+            ctx.branch = Some("main".into());
+        }
+
         let projected = crate::terminals::entries(&s);
         let card_dev = projected
             .iter()
             .find(|e| e.profile() == Some("developer"))
             .unwrap();
         assert_eq!(sidebar_meta_icon(card_dev), Icon::Agy);
-        assert_eq!(sidebar_meta_text(card_dev, "Local"), "@developer · Local");
+        assert_eq!(sidebar_row_title(card_dev, true), "@developer");
+        assert_eq!(sidebar_row_title(card_dev, false), "#86 @developer");
+        assert_eq!(sidebar_host_badge(card_dev, "Local"), None);
 
         let card_rev = projected
             .iter()
             .find(|e| e.profile() == Some("reviewer"))
             .unwrap();
         assert_eq!(sidebar_meta_icon(card_rev), Icon::Claude);
+        assert_eq!(sidebar_row_title(card_rev, false), "Custom Review Session");
         assert_eq!(
-            sidebar_meta_text(card_rev, "gpu-box"),
-            "@reviewer · gpu-box"
+            sidebar_host_badge(card_rev, "gpu-box").as_deref(),
+            Some("gpu-box")
         );
 
         let standalone = projected
@@ -2755,21 +2760,24 @@ fn sidebar_rows_render_strict_two_line_compact_layout_without_engine_names_stage
             .find(|e| e.saved.id == "standalone-agy")
             .unwrap();
         assert_eq!(sidebar_meta_icon(standalone), Icon::Agy);
-        assert_eq!(sidebar_meta_text(standalone, "Local"), "Local");
+        assert_eq!(sidebar_row_title(standalone, true), "Antigravity 1");
+        assert_eq!(sidebar_host_badge(standalone, "Local"), None);
 
         let shell_codex = projected
             .iter()
             .find(|e| e.saved.id == "shell-with-codex")
             .unwrap();
         assert_eq!(sidebar_meta_icon(shell_codex), Icon::Codex);
-        assert_eq!(sidebar_meta_text(shell_codex, "Local"), "Local");
+        assert_eq!(sidebar_row_title(shell_codex, true), "Terminal 4");
+        assert_eq!(sidebar_host_badge(shell_codex, "Local"), None);
 
         let plain = projected
             .iter()
             .find(|e| e.saved.id == "plain-shell")
             .unwrap();
         assert_eq!(sidebar_meta_icon(plain), Icon::Terminal);
-        assert_eq!(sidebar_meta_text(plain, "Local"), "Local");
+        assert_eq!(sidebar_row_title(plain, true), "Terminal 1");
+        assert_eq!(sidebar_host_badge(plain, "Local"), None);
 
         ui.snapshot.set(s);
         ui.snapshot_ready.set(true);
@@ -2778,6 +2786,7 @@ fn sidebar_rows_render_strict_two_line_compact_layout_without_engine_names_stage
         ui.open_terminal("plain-shell".into());
 
         let select_blocked_id = Conversation::key("c1", "developer");
+        let dev_cd_id = select_blocked_id.clone();
         view()
             .w(px(300.))
             .h(px(640.))
@@ -2791,6 +2800,28 @@ fn sidebar_rows_render_strict_two_line_compact_layout_without_engine_names_stage
                     .accessibility_label(Some("Select Renamed Card Agent".into()))
                     .on_press(move |_: &()| ui.open_terminal(renamed_id.clone())),
             )
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("CD Card Agent Out".into()))
+                    .on_press(move |_: &()| {
+                        ui.snapshot.update(|s| {
+                            if let Some(ctx) = s
+                                .terminal_contexts
+                                .iter_mut()
+                                .find(|c| c.terminal_id == dev_cd_id)
+                            {
+                                ctx.cwd = Some("/repo/p1".into());
+                                ctx.directory_root = Some("/repo/p1".into());
+                                ctx.card_id = None;
+                            }
+                        });
+                    }),
+            )
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("Narrow Sidebar".into()))
+                    .on_press(move |_: &()| ui.terminal_width.set(210.)),
+            )
             .child(crate::terminals::sidebar_for_test(ui))
     }
 
@@ -2799,6 +2830,8 @@ fn sidebar_rows_render_strict_two_line_compact_layout_without_engine_names_stage
         parents: HashMap<NodeId, NodeId>,
         texts: HashMap<NodeId, String>,
         labels: HashMap<String, NodeId>,
+        test_ids: HashMap<String, NodeId>,
+        frames: HashMap<NodeId, Bounds<Points>>,
     }
     impl MountedSidebar {
         fn new() -> Self {
@@ -2807,6 +2840,8 @@ fn sidebar_rows_render_strict_two_line_compact_layout_without_engine_names_stage
                 parents: HashMap::new(),
                 texts: HashMap::new(),
                 labels: HashMap::new(),
+                test_ids: HashMap::new(),
+                frames: HashMap::new(),
             }
         }
         fn apply(&mut self, batch: &nsh_core::MountBatch) {
@@ -2825,13 +2860,20 @@ fn sidebar_rows_render_strict_two_line_compact_layout_without_engine_names_stage
                         self.alive.remove(id);
                         self.parents.remove(id);
                         self.texts.remove(id);
+                        self.frames.remove(id);
                     }
                     MountItem::Text { id, text, .. } => {
                         self.texts.insert(*id, text.text.to_string());
                     }
+                    MountItem::Frame { id, frame } => {
+                        self.frames.insert(*id, *frame);
+                    }
                     MountItem::ViewProps { id, props } => {
                         if let Some(label) = &props.accessibility.label {
                             self.labels.insert(label.to_string(), *id);
+                        }
+                        if let Some(tid) = &props.test_id {
+                            self.test_ids.insert(tid.to_string(), *id);
                         }
                     }
                     _ => {}
@@ -2905,19 +2947,12 @@ fn sidebar_rows_render_strict_two_line_compact_layout_without_engine_names_stage
     let mut tree = MountedSidebar::new();
     pump(&mut core, &mut tree);
 
-    let check_invariants = |texts: &[String], phase: &str| {
-        let expected_truncated = truncate_sidebar_title(
-            "#86 Terminals 现在中间栏最多 3 行，能否紧凑些最多两行并且永远不折行",
-        );
-        assert!(
-            texts.iter().any(|t| t == &expected_truncated),
-            "[{phase}] Card #86 title must stay truncated to 32 chars + ellipsis: {texts:?}"
-        );
+    let check_invariants = |texts: &[String], phase: &str, expect_cd: bool| {
         assert!(
             !texts.iter().any(|t| t.contains("永远不折行")),
-            "[{phase}] full un-truncated Card #86 title must never render inline even when selected: {texts:?}"
+            "[{phase}] full Card #86 title must never render inline even when selected: {texts:?}"
         );
-        // Engine names and Card Stage labels must NOT appear in sidebar rows.
+        // Redundant Local label, engine names, and Card Stage labels must NOT appear in sidebar rows.
         for forbidden in [
             "Antigravity ·",
             "Claude ·",
@@ -2925,42 +2960,56 @@ fn sidebar_rows_render_strict_two_line_compact_layout_without_engine_names_stage
             "· Develop",
             "· Review",
             "Open",
+            "Local",
+            "@developer · Local",
         ] {
             assert!(
-                !texts.iter().any(|t| t.contains(forbidden)),
-                "[{phase}] forbidden legacy metadata `{forbidden}` rendered in sidebar: {texts:?}"
+                !texts.iter().any(|t| t == forbidden
+                    || t.contains("Antigravity ·")
+                    || t.contains("Claude ·")),
+                "[{phase}] redundant metadata `{forbidden}` rendered in sidebar: {texts:?}"
             );
         }
-        // Inline 3rd-line wait/error reasons must NOT render in the sidebar (kept in hover tooltip).
+        // Inline wait/error reasons stay in tooltip rather than sidebar row text.
         assert!(
             !texts
                 .iter()
                 .any(|t| t.contains("Permission required") || t.contains("cargo test")),
-            "[{phase}] Blocked wait detail must live in tooltip rather than a 3rd row line: {texts:?}"
+            "[{phase}] Blocked wait detail must live in tooltip rather than row text: {texts:?}"
         );
-        // Expected 2nd-line left captions and right Herdr status words:
+        let expected_dev = if expect_cd {
+            "#86 @developer"
+        } else {
+            "@developer"
+        };
         for required in [
-            "@developer · Local",
-            "@reviewer · gpu-box",
-            "Local",
+            expected_dev,
+            "Custom Review Session",
+            "· gpu-box",
             "Antigravity 1",
             "Terminal 4",
             "Terminal 1",
-            "Custom Review Session",
             "Blocked",
             "Working",
             "Done",
         ] {
             assert!(
                 texts.iter().any(|t| t == required),
-                "[{phase}] missing expected sidebar label `{required}` in {texts:?}"
+                "[{phase}] missing expected single-line sidebar label `{required}` in {texts:?}"
             );
         }
     };
 
-    // Initial state (`plain-shell` selected)
-    let initial_texts = tree.mounted_texts();
-    check_invariants(&initial_texts, "initial");
+    // Initial state: `@developer` sits under `#86` CardWorktree (deduplicated!), `Local` omitted,
+    // and each terminal row height is compact 32pt (30pt inner row).
+    check_invariants(&tree.mounted_texts(), "initial", false);
+    let dev_tid = format!("terminal:{}", Conversation::key("c1", "developer"));
+    let dev_row_node = *tree.test_ids.get(&dev_tid).expect("terminal row test_id");
+    let dev_frame = tree.frames.get(&dev_row_node).expect("terminal row frame");
+    assert!(
+        (dev_frame.size.height.0 - 32.0).abs() < 0.5,
+        "expected compact 32pt terminal row wrapper (30pt pill), got {dev_frame:?}"
+    );
     // Tooltip / accessibility label still retains full Card title & Permission required wait reason!
     assert!(
         tree.labels.keys().any(|lbl| lbl.contains("永远不折行")
@@ -2969,31 +3018,409 @@ fn sidebar_rows_render_strict_two_line_compact_layout_without_engine_names_stage
         tree.labels.keys().collect::<Vec<_>>()
     );
 
-    // Select Blocked Card Agent (`#86 @developer`) -> title stays truncated, no 3rd line appears!
-    let btn_blocked = *tree
-        .labels
-        .get("Select Blocked Card Agent")
-        .expect("Select Blocked Card Agent button");
+    // Select Blocked Card Agent -> stays compact without reflow or full Card title inline.
+    let btn_blocked = *tree.labels.get("Select Blocked Card Agent").unwrap();
     assert!(core.component_event(btn_blocked, EventKind::Press, &EventPayload::None));
     pump(&mut core, &mut tree);
-    check_invariants(&tree.mounted_texts(), "selected-blocked");
+    check_invariants(&tree.mounted_texts(), "selected-blocked", false);
 
-    // Select Renamed Card Agent (`Custom Review Session` / `@reviewer`) -> no extra original Card title line!
-    let btn_renamed = *tree
-        .labels
-        .get("Select Renamed Card Agent")
-        .expect("Select Renamed Card Agent button");
+    // Select Renamed Card Agent -> no duplicate `#86 ...` line.
+    let btn_renamed = *tree.labels.get("Select Renamed Card Agent").unwrap();
     assert!(core.component_event(btn_renamed, EventKind::Press, &EventPayload::None));
     pump(&mut core, &mut tree);
-    let renamed_texts = tree.mounted_texts();
-    check_invariants(&renamed_texts, "selected-renamed");
+    check_invariants(&tree.mounted_texts(), "selected-renamed", false);
+
+    // When @developer `cd`s out of CardWorktree(#86) into ProjectRoot, its label automatically
+    // includes `#86 @developer` so task ownership stays clear!
+    let btn_cd = *tree.labels.get("CD Card Agent Out").unwrap();
+    assert!(core.component_event(btn_cd, EventKind::Press, &EventPayload::None));
+    pump(&mut core, &mut tree);
+    check_invariants(&tree.mounted_texts(), "cd-out", true);
+
+    // Narrow sidebar (< 230pt): hides status words ("Blocked"/"Working"/"Done") and remote host text,
+    // leaving only icons and titles.
+    let btn_narrow = *tree.labels.get("Narrow Sidebar").unwrap();
+    assert!(core.component_event(btn_narrow, EventKind::Press, &EventPayload::None));
+    pump(&mut core, &mut tree);
+    let narrow_texts = tree.mounted_texts();
+    for hidden_in_narrow in ["Blocked", "Working", "Done", "· gpu-box"] {
+        assert!(
+            !narrow_texts.iter().any(|t| t == hidden_in_narrow),
+            "narrow sidebar (<230pt) must hide `{hidden_in_narrow}` to keep titles legible: {narrow_texts:?}"
+        );
+    }
+    assert!(narrow_texts.iter().any(|t| t == "#86 @developer"));
+}
+
+#[test]
+fn two_level_folding_hides_children_preserves_summary_badges_and_supports_option_a_activation() {
+    use crate::terminals::{
+        labels::{GroupStatusSummary, group_status_summary},
+        tree::{TreeNode, project_fold_key, scope_fold_key, visible_project_tree},
+        worktrees::location_key,
+    };
+    use nsh_core::{
+        ApproxTextEngine, Core, EventKind, EventPayload, MountItem, NodeId, element::JsEvent,
+        geometry::size, prelude::*,
+    };
+    use std::collections::{BTreeSet, HashMap, HashSet};
+
+    // 1. Pure unit tests for `visible_project_tree` and `group_status_summary`.
+    fn fold_probe_snapshot() -> Snapshot {
+        let mut s = fixture();
+        s.projects[0].name = "Alpha".into();
+        s.projects[0].directory = "/repo/p1".into();
+        s.projects[1].name = "Beta".into();
+        s.projects[1].directory = "/repo/p2".into();
+        s.cards[0].worktree = Some("/repo/p1-wt/c1".into());
+        s.cards[0].branch = Some("canban/1".into());
+        s.cards[1].worktree = Some("/repo/p2-wt/c2".into());
+        s.cards[1].branch = Some("canban/2".into());
+
+        // Add a second shell in Card #1's worktree and a shell in Alpha's ProjectRoot.
+        let mut root_shell = s.terminals[0].clone();
+        root_shell.id = "p1-root-shell".into();
+        root_shell.conversation_id = None;
+        root_shell.agent = None;
+        root_shell.name = Some("Terminal 1".into());
+        root_shell.origin_project_id = Some("p1".into());
+        root_shell.origin_card_id = None;
+        root_shell.runtime = Some(
+            serde_json::from_value(json!({
+                "machine":"local","state":"running","connection":"connected","core_id":"core","terminal":"pty-root"
+            }))
+            .unwrap(),
+        );
+        let mut c1_shell = root_shell.clone();
+        c1_shell.id = "c1-shell-2".into();
+        c1_shell.name = Some("Terminal 2".into());
+        c1_shell.origin_card_id = Some("c1".into());
+        c1_shell.runtime.as_mut().unwrap().terminal = Some("pty-c1-2".into());
+        s.terminals.extend([root_shell, c1_shell]);
+        observe_fixture_locations(&mut s);
+
+        // Make c1's agent Blocked and p2's agent Error for summary priority assertions.
+        s.terminals[0].agent.as_mut().unwrap().observed = Some(json!({
+            "state": "live",
+            "status": { "state": "blocked", "kind": "permission", "title": "Approve", "msg": "ls" }
+        }));
+        s.terminals[1].agent.as_mut().unwrap().observed = Some(json!({
+            "state": "live",
+            "status": { "state": "error" }
+        }));
+        s
+    }
+
+    let s = fold_probe_snapshot();
+
+    let rows = crate::terminals::entries(&s);
+    let c1_agent_id = s.terminals[0].id.clone();
+    let c1_agent_entry = rows.iter().find(|e| e.saved.id == c1_agent_id).unwrap();
+    let c1_loc = location_key(c1_agent_entry);
+    let p1_root_entry = rows.iter().find(|e| e.saved.id == "p1-root-shell").unwrap();
+    let p1_root_loc = location_key(p1_root_entry);
+
+    let summary = group_status_summary(rows.iter().filter(|e| location_key(e) == c1_loc));
     assert_eq!(
-        renamed_texts
+        summary,
+        GroupStatusSummary {
+            total: 2,
+            blocked: 1,
+            ..Default::default()
+        }
+    );
+
+    // Folding c1's WorktreeScope hides its 2 Terminal nodes while keeping Scope and other scopes visible.
+    let mut folds = BTreeSet::new();
+    folds.insert(scope_fold_key(&c1_loc));
+    let folded_scope_tree = visible_project_tree(&s, rows.iter().filter(|e| e.listed()), &folds);
+    assert!(folded_scope_tree.contains(&TreeNode::Scope(
+        c1_loc.clone(),
+        crate::terminals::worktrees::WorktreeScope::CardWorktree("c1".into()),
+    )));
+    assert!(!folded_scope_tree.contains(&TreeNode::Terminal(c1_agent_id.clone())));
+    assert!(!folded_scope_tree.contains(&TreeNode::Terminal("c1-shell-2".into())));
+    assert!(folded_scope_tree.contains(&TreeNode::Terminal("p1-root-shell".into())));
+
+    // Folding Project p1 hides both its Scopes and all their Terminals, while Beta stays visible.
+    folds.insert(project_fold_key("p1"));
+    let folded_proj_tree = visible_project_tree(&s, rows.iter().filter(|e| e.listed()), &folds);
+    assert!(folded_proj_tree.contains(&TreeNode::Project("p1".into())));
+    assert!(!folded_proj_tree.contains(&TreeNode::Scope(
+        c1_loc.clone(),
+        crate::terminals::worktrees::WorktreeScope::CardWorktree("c1".into()),
+    )));
+    assert!(!folded_proj_tree.contains(&TreeNode::Scope(
+        p1_root_loc.clone(),
+        crate::terminals::worktrees::WorktreeScope::ProjectRoot("p1".into()),
+    )));
+    assert!(folded_proj_tree.contains(&TreeNode::Project("p2".into())));
+    assert!(folded_proj_tree.contains(&TreeNode::Terminal(s.terminals[1].id.clone())));
+
+    // 2. Interactive mounted check for Option A, chevron fold toggle, top tab switch, and external reveal.
+    #[component]
+    fn FoldProbe() -> impl IntoElement {
+        canban_ui_kit::tokens::install_theme();
+        provide_context(canban_ui_kit::motion::ReducedMotion(signal(true)));
+        let ui = crate::presenter::Ui::new();
+        let s = fold_probe_snapshot();
+        let c1_agent_id = s.terminals[0].id.clone();
+        ui.snapshot.set(s);
+        ui.snapshot_ready.set(true);
+        ui.project.set("p1".into());
+        ui.page.set("terminals".into());
+        ui.open_terminal("p1-root-shell".into());
+        crate::terminals::tabs::context_updates(ui);
+
+        let ext_open_id = c1_agent_id;
+        view()
+            .w(px(800.))
+            .h(px(640.))
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("External Open C1 Agent".into()))
+                    .on_press(move |_: &()| ui.open_terminal(ext_open_id.clone())),
+            )
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("Cycle Tab Forward".into()))
+                    .on_press(move |_: &()| crate::terminals::cycle(ui, true)),
+            )
+            .child(crate::terminals::sidebar_for_test(ui))
+    }
+
+    struct Mounted {
+        alive: HashSet<NodeId>,
+        parents: HashMap<NodeId, NodeId>,
+        texts: HashMap<NodeId, String>,
+        labels: HashMap<String, NodeId>,
+        test_ids: HashMap<String, NodeId>,
+    }
+    impl Mounted {
+        fn new() -> Self {
+            Self {
+                alive: HashSet::new(),
+                parents: HashMap::new(),
+                texts: HashMap::new(),
+                labels: HashMap::new(),
+                test_ids: HashMap::new(),
+            }
+        }
+        fn apply(&mut self, batch: &nsh_core::MountBatch) {
+            for item in &batch.items {
+                match item {
+                    MountItem::Create { id, .. } => {
+                        self.alive.insert(*id);
+                    }
+                    MountItem::Insert { parent, child, .. } => {
+                        self.parents.insert(*child, *parent);
+                    }
+                    MountItem::Remove { id } => {
+                        self.parents.remove(id);
+                    }
+                    MountItem::Delete { id } => {
+                        self.alive.remove(id);
+                        self.parents.remove(id);
+                        self.texts.remove(id);
+                    }
+                    MountItem::Text { id, text, .. } => {
+                        self.texts.insert(*id, text.text.to_string());
+                    }
+                    MountItem::ViewProps { id, props } => {
+                        if let Some(label) = &props.accessibility.label {
+                            self.labels.insert(label.to_string(), *id);
+                        }
+                        if let Some(tid) = &props.test_id {
+                            self.test_ids.insert(tid.to_string(), *id);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        fn is_mounted(&self, mut id: NodeId) -> bool {
+            if !self.alive.contains(&id) {
+                return false;
+            }
+            let mut guard = 0;
+            while id != nsh_core::ROOT_ID {
+                let Some(&parent) = self.parents.get(&id) else {
+                    return false;
+                };
+                id = parent;
+                guard += 1;
+                if guard > 256 {
+                    return false;
+                }
+            }
+            true
+        }
+        fn mounted_texts(&self) -> Vec<String> {
+            self.texts
+                .iter()
+                .filter(|(id, _)| self.is_mounted(**id))
+                .map(|(_, v)| v.clone())
+                .collect()
+        }
+    }
+
+    fn pump(core: &mut Core<ApproxTextEngine>, m: &mut Mounted) {
+        for _ in 0..8 {
+            let had_batch = if let Some(batch) = core.commit() {
+                m.apply(&batch);
+                true
+            } else {
+                false
+            };
+            let mut events = Vec::new();
+            core.take_events(&mut events);
+            let mut dispatched = false;
+            for ev in events {
+                match ev {
+                    JsEvent::Event(id, kind, payload) => {
+                        core.component_event(id, kind, &payload);
+                        dispatched = true;
+                    }
+                    JsEvent::LayoutListener {
+                        host,
+                        id,
+                        listener,
+                        frame,
+                    } => {
+                        core.component_layout(host, id, &listener, frame);
+                        dispatched = true;
+                    }
+                    _ => {}
+                }
+            }
+            if !had_batch && !dispatched {
+                break;
+            }
+        }
+    }
+
+    // Use reduced motion in Core tests so fade-out removes collapsed rows immediately without timer waits.
+    let mut core = Core::new(ApproxTextEngine, size(px(800.), px(640.)));
+    core.set_components(nsh_base::registry());
+    core.mount_root(&nsh_core::element::Root::of::<FoldProbe>());
+    let mut tree = Mounted::new();
+    pump(&mut core, &mut tree);
+
+    // Collapse `canban/1` worktree via its chevron button -> Terminal rows leave mounted tree,
+    // and folded summary count `2` appears on the collapsed header.
+    let collapse_c1 = *tree
+        .labels
+        .get("Collapse worktree canban/1")
+        .expect("Collapse worktree canban/1 button");
+    assert!(core.component_event(collapse_c1, EventKind::Press, &EventPayload::None));
+    pump(&mut core, &mut tree);
+    assert!(
+        tree.labels.contains_key("Expand worktree canban/1"),
+        "chevron label must flip to Expand after folding"
+    );
+    let collapsed_texts = tree.mounted_texts();
+    assert!(
+        collapsed_texts.iter().any(|t| t == "2"),
+        "collapsed worktree header must display terminal count `2`: {collapsed_texts:?}"
+    );
+    assert!(
+        !collapsed_texts.iter().any(|t| t == "Terminal 2"),
+        "collapsed worktree children must be hidden from mounted texts: {collapsed_texts:?}"
+    );
+
+    // Option A: clicking the collapsed worktree body (`Worktree canban/1 · Collapsed · ...`)
+    // activates its terminal while KEEPING `canban/1` collapsed!
+    let scope_body_label = tree
+        .labels
+        .iter()
+        .find(|(k, id)| k.starts_with("Worktree canban/1 · Collapsed") && tree.is_mounted(**id))
+        .map(|(_, id)| *id)
+        .expect("collapsed worktree body button");
+    assert!(core.component_event(scope_body_label, EventKind::Press, &EventPayload::None));
+    pump(&mut core, &mut tree);
+    assert!(
+        tree.labels
+            .get("Expand worktree canban/1")
+            .is_some_and(|id| tree.is_mounted(*id)),
+        "Option A: activating a collapsed worktree via its body must keep the worktree collapsed"
+    );
+
+    // Cycling tabs within the collapsed worktree also keeps it collapsed!
+    let cycle_btn = *tree.labels.get("Cycle Tab Forward").unwrap();
+    assert!(core.component_event(cycle_btn, EventKind::Press, &EventPayload::None));
+    pump(&mut core, &mut tree);
+    assert!(
+        tree.labels
+            .get("Expand worktree canban/1")
+            .is_some_and(|id| tree.is_mounted(*id)),
+        "cycling tabs inside a collapsed worktree must keep it collapsed"
+    );
+
+    // Collapse Project `Alpha` -> hides `canban/1` and `main`, shows summary count `3` on Project Alpha.
+    let collapse_alpha = *tree
+        .labels
+        .get("Project Alpha")
+        .expect("Project Alpha fold button");
+    assert!(core.component_event(collapse_alpha, EventKind::Press, &EventPayload::None));
+    pump(&mut core, &mut tree);
+    assert!(
+        tree.labels
+            .keys()
+            .any(|k| k.starts_with("Project Alpha · Collapsed · 3 terminals")),
+        "collapsed Project Alpha must report 3 terminals: {:?}",
+        tree.labels.keys().collect::<Vec<_>>()
+    );
+
+    // External jump (`ui.open_terminal`) automatically unfolds BOTH Project Alpha and `canban/1`!
+    let ext_open = *tree.labels.get("External Open C1 Agent").unwrap();
+    assert!(core.component_event(ext_open, EventKind::Press, &EventPayload::None));
+    pump(&mut core, &mut tree);
+    assert!(
+        tree.labels
+            .get("Collapse worktree canban/1")
+            .is_some_and(|id| tree.is_mounted(*id)),
+        "external open_terminal must auto-reveal both Project and WorktreeScope"
+    );
+    assert!(
+        tree.mounted_texts().iter().any(|t| t == "Terminal 2"),
+        "expanded worktree must render its terminal rows again"
+    );
+
+    // Collapse other worktrees button collapses Beta and p1-root while keeping active `canban/1` open.
+    let collapse_others = *tree
+        .labels
+        .get("Collapse other worktrees")
+        .expect("Collapse other worktrees header button");
+    assert!(core.component_event(collapse_others, EventKind::Press, &EventPayload::None));
+    pump(&mut core, &mut tree);
+    assert!(
+        tree.labels
+            .get("Expand all worktrees")
+            .is_some_and(|id| tree.is_mounted(*id)),
+        "header button must switch to Expand all worktrees when others are collapsed"
+    );
+    assert!(
+        tree.labels
+            .get("Collapse worktree canban/1")
+            .is_some_and(|id| tree.is_mounted(*id)),
+        "active worktree canban/1 must remain expanded after Collapse other worktrees"
+    );
+    assert!(
+        tree.labels
             .iter()
-            .filter(|t| t.starts_with("#86 "))
-            .count(),
-        1,
-        "selecting a renamed Agent must NOT add a second `#86 ...` original Card title line: {renamed_texts:?}"
+            .any(|(k, id)| k.starts_with("Project Beta · Collapsed") && tree.is_mounted(*id)),
+        "other project Beta must be collapsed"
+    );
+
+    // Expand all worktrees restores everything.
+    let expand_all = *tree.labels.get("Expand all worktrees").unwrap();
+    assert!(core.component_event(expand_all, EventKind::Press, &EventPayload::None));
+    pump(&mut core, &mut tree);
+    assert!(
+        tree.labels
+            .get("Collapse other worktrees")
+            .is_some_and(|id| tree.is_mounted(*id)),
+        "header button must revert to Collapse other worktrees after Expand all"
     );
 }
 

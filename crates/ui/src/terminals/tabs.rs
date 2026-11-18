@@ -4,12 +4,27 @@ use super::*;
 use crate::components::git_workspace::compact;
 use nsh_core::element::desktop::{MenuItem, current_window, popup_menu, popup_menu_at};
 pub fn context_updates(ui: Ui) {
-    // Regrouping only reveals the selected row. It never changes the tab/viewer.
-    let group =
-        computed(move || current(ui).map(|e| (e.saved.id, e.project_id, e.card.map(|c| c.id))));
+    // Regrouping only reveals the selected row. It never changes the tab/viewer or unfolds
+    // an intentionally collapsed scope when switching terminals from the header/tabs.
+    let group = computed(move || {
+        current(ui).map(|e| {
+            let loc = super::worktrees::location_key(&e);
+            let pid = ui
+                .snapshot
+                .with(|s| super::worktrees::entry_scope(s, &e).project_id(s));
+            (e.saved.id, pid, loc)
+        })
+    });
+    let prev_group = stored(group.get_untracked());
     effect(move || {
-        if let Some((id, _, _)) = group.get() {
-            reveal_group(ui, &id);
+        let next = group.get();
+        let prev = prev_group.replace(next.clone());
+        if let (Some((prev_id, prev_pid, prev_loc)), Some((cur_id, cur_pid, cur_loc))) =
+            (prev, next)
+            && prev_id == cur_id
+            && (prev_pid != cur_pid || prev_loc != cur_loc)
+        {
+            reveal_group(ui, &cur_id);
         }
     });
     let title = computed(move || {
@@ -167,7 +182,7 @@ fn tab(ui: Ui, e: Entry, max_tab_w: Memo<f32>, show_card_number: bool) -> impl I
             .on_context_menu(move |event: &nsh_core::ContextMenuEvent| {
                 ui.spawn(menu(ui, context.clone(), Some(event.page_position)));
             })
-            .on_press(move |_: &nsh_core::PressEvent| ui.open_terminal(id.clone()));
+            .on_press(move |_: &nsh_core::PressEvent| ui.select_terminal_in_scope(id.clone()));
         let mut cell = view()
             .relative()
             .w(move || px(base_width.min(max_tab_w.get())))

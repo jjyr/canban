@@ -620,6 +620,13 @@ impl Ui {
         }
     }
     pub fn open_terminal(self, conversation: String) {
+        self.open_terminal_internal(conversation, true);
+    }
+    /// Activates a Terminal in the current WorktreeScope without unfolding a collapsed Scope header.
+    pub fn select_terminal_in_scope(self, conversation: String) {
+        self.open_terminal_internal(conversation, false);
+    }
+    fn open_terminal_internal(self, conversation: String, reveal_scope: bool) {
         if self
             .closing_terminals
             .with_untracked(|c| c.contains(&conversation))
@@ -665,7 +672,11 @@ impl Ui {
             }
         });
         self.terminal_selection.set(conversation.clone());
-        crate::terminals::reveal(self, &conversation);
+        if reveal_scope {
+            crate::terminals::reveal(self, &conversation);
+        } else {
+            crate::terminals::reveal_project(self, &conversation);
+        }
         self.page.set("terminals".into());
     }
     pub fn terminal_card(self, card: String, terminal: Option<String>) {

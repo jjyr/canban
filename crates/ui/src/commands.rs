@@ -1021,6 +1021,22 @@ pub const CATALOG: &[Command] = &[
         keywords: "tree panel hide show",
     },
     Command {
+        id: "terminals-collapse-others",
+        title: "Terminals: Collapse Other Worktrees",
+        key: "",
+        display: "Terminals",
+        context: "Terminals",
+        keywords: "fold collapse worktree project sidebar tree",
+    },
+    Command {
+        id: "terminals-expand-all",
+        title: "Terminals: Expand All Worktrees",
+        key: "",
+        display: "Terminals",
+        context: "Terminals",
+        keywords: "unfold expand worktree project sidebar tree",
+    },
+    Command {
         id: "rename-terminal",
         title: "Rename Current Terminal Tab…",
         key: "",
@@ -2029,6 +2045,16 @@ pub fn execute(ui: Ui, id: &str) {
         "toggle-terminal-sidebar" => {
             ui.navigate("terminals");
             ui.terminal_sidebar.update(|v| *v = !*v);
+        }
+        "terminals-collapse-others" => {
+            ui.navigate("terminals");
+            ui.terminal_sidebar.set(true);
+            crate::terminals::tree::collapse_other_worktrees(ui);
+        }
+        "terminals-expand-all" => {
+            ui.navigate("terminals");
+            ui.terminal_sidebar.set(true);
+            crate::terminals::tree::expand_all_worktrees(ui);
         }
         "rename-terminal" => {
             if ui.page.get_untracked() == "card" && ui.card_terminal_open.get_untracked() {

@@ -5,7 +5,7 @@ pub(crate) mod labels;
 pub mod model;
 pub mod navigation;
 pub(crate) mod tabs;
-mod tree;
+pub(crate) mod tree;
 pub(crate) mod viewer;
 pub mod worktrees;
 use crate::presenter::*;
@@ -318,16 +318,40 @@ pub fn reveal(ui: Ui, id: &str) {
         ui.terminal_sidebar.set(false);
     }
 }
-pub fn reveal_group(ui: Ui, id: &str) {
-    if let Some(row) = ui
-        .terminal_entries
-        .with_untracked(|rows| rows.iter().find(|r| r.saved.id == id).cloned())
-    {
+pub(crate) fn reveal_project(ui: Ui, id: &str) {
+    let pid = ui.snapshot.with_untracked(|s| {
+        ui.terminal_entries.with_untracked(|rows| {
+            rows.iter()
+                .find(|r| r.saved.id == id)
+                .and_then(|row| worktrees::entry_scope(s, row).project_id(s))
+        })
+    });
+    if let Some(pid) = pid {
         ui.terminal_folds.update(|folds| {
-            folds.remove(&format!("project:{}", row.project_id.unwrap_or_default()));
-            if let Some(card) = row.card.map(|c| c.id) {
-                folds.remove(&format!("card:{card}"));
+            folds.remove(&tree::project_fold_key(&pid));
+        });
+    }
+    if ui.narrow.get_untracked() {
+        ui.terminal_sidebar.set(false);
+    }
+}
+pub fn reveal_group(ui: Ui, id: &str) {
+    let keys = ui.snapshot.with_untracked(|s| {
+        ui.terminal_entries.with_untracked(|rows| {
+            rows.iter().find(|r| r.saved.id == id).map(|row| {
+                (
+                    worktrees::entry_scope(s, row).project_id(s),
+                    worktrees::location_key(row),
+                )
+            })
+        })
+    });
+    if let Some((pid, loc)) = keys {
+        ui.terminal_folds.update(|folds| {
+            if let Some(pid) = pid {
+                folds.remove(&tree::project_fold_key(&pid));
             }
+            folds.remove(&tree::scope_fold_key(&loc));
         });
     }
 }
@@ -1192,7 +1216,7 @@ pub fn cycle(ui: Ui, forward: bool) {
     } else {
         (old + tabs.len() - 1) % tabs.len()
     };
-    ui.open_terminal(tabs[next].clone());
+    ui.select_terminal_in_scope(tabs[next].clone());
 }
 pub fn select_tab_index(ui: Ui, index: usize) {
     if ui.page.get_untracked() == "card"
@@ -1213,7 +1237,7 @@ pub fn select_tab_index(ui: Ui, index: usize) {
         .map(|e| e.saved.id)
         .collect();
     if let Some(target) = tabs.get(index) {
-        ui.open_terminal(target.clone());
+        ui.select_terminal_in_scope(target.clone());
     }
 }
 
