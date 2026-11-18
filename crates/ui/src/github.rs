@@ -1242,4 +1242,114 @@ mod tests {
             .is_none()
         );
     }
+
+    #[test]
+    fn opening_new_card_focuses_title_editor() {
+        use nsh_core::{ApproxTextEngine, Command, Core, MountItem, NodeId, geometry::size};
+        use std::collections::HashMap;
+
+        #[component]
+        fn NewCardHost() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            ui.project.set("proj-1".into());
+            ui.snapshot.update(|s| {
+                s.projects.push(canban_types::Project {
+                    id: "proj-1".into(),
+                    name: "Canban".into(),
+                    directory: "/tmp/canban".into(),
+                    location: None,
+                    github: None,
+                    detected_github: None,
+                    github_disconnected: false,
+                    delivery_mode: Default::default(),
+                    agent_overrides: Default::default(),
+                    tags: Default::default(),
+                    workflow: canban_types::Workflow::default(),
+                    target_branch: Some("main".into()),
+                    created_at: 0,
+                });
+            });
+            view()
+                .w(px(1200.0))
+                .h(px(800.0))
+                .child(
+                    view()
+                        .test_id("open-new-card")
+                        .h(px(20.0))
+                        .on_press(move || ui.new_card()),
+                )
+                .child(crate::workspace::screen(ui))
+        }
+
+        fn drain(
+            core: &mut Core<ApproxTextEngine>,
+            labels: &mut HashMap<NodeId, Option<String>>,
+            open_btn: &mut Option<NodeId>,
+            focus_commands: &mut Vec<NodeId>,
+        ) {
+            for _ in 0..10 {
+                let mut events = Vec::new();
+                core.take_events(&mut events);
+                for ev in events {
+                    match ev {
+                        nsh_core::element::JsEvent::LayoutListener {
+                            host,
+                            id,
+                            listener,
+                            frame,
+                        } => core.component_layout(host, id, &listener, frame),
+                        nsh_core::element::JsEvent::Event(id, kind, payload) => {
+                            core.component_event(id, kind, &payload);
+                        }
+                        _ => {}
+                    }
+                }
+                let Some(batch) = core.commit() else {
+                    if !core.has_events() {
+                        break;
+                    }
+                    continue;
+                };
+                for item in batch.items {
+                    match item {
+                        MountItem::ViewProps { id, props } => {
+                            if props.test_id.as_deref() == Some("open-new-card") {
+                                *open_btn = Some(id);
+                            }
+                            labels.insert(id, props.accessibility.label.map(|s| s.to_string()));
+                        }
+                        MountItem::Command {
+                            id,
+                            command: Command::Focus,
+                        } => {
+                            focus_commands.push(id);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1200.0), px(800.0)));
+        core.mount_root(&nsh_core::element::Root::of::<NewCardHost>());
+        let mut labels = HashMap::new();
+        let mut open_btn = None;
+        let mut focus_commands = Vec::new();
+        drain(&mut core, &mut labels, &mut open_btn, &mut focus_commands);
+        assert!(focus_commands.is_empty());
+
+        core.component_event(
+            open_btn.expect("open-new-card button"),
+            nsh_core::EventKind::Press,
+            &nsh_core::EventPayload::None,
+        );
+        drain(&mut core, &mut labels, &mut open_btn, &mut focus_commands);
+
+        let focused_labels: Vec<_> = focus_commands
+            .iter()
+            .filter_map(|id| labels.get(id).and_then(|l| l.as_deref()))
+            .collect();
+        assert_eq!(focused_labels, vec!["Card title"]);
+    }
 }

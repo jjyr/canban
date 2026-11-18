@@ -115,8 +115,20 @@ pub fn title(
         crate::references::ReferenceFormat::PlainText,
         on_mention,
     );
-    let disabled_view = disabled;
+    let disabled_view = disabled.clone();
     let field = editor.render_line(source, move || disabled_view());
+    let field = if auto_focus {
+        let disabled_focus = disabled;
+        editor.focus_on_mount(field, move || {
+            active.get_untracked()
+                && !disabled_focus()
+                && !ui.quick_open.get_untracked()
+                && ui.utility_popup.get_untracked().is_empty()
+                && !ui.native_modal.get_untracked()
+        })
+    } else {
+        field
+    };
     (
         editor,
         view().gap_1().child(field).child(when(

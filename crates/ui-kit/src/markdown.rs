@@ -62,6 +62,21 @@ impl MarkdownInput {
             api.focus();
         }
     }
+    /// Focuses the editor once its host view lays out into a non-zero area and
+    /// `allowed` holds. `nsh_base::Editor`'s `auto_focus` prop runs during
+    /// construction before its underlying `input` sink is mounted.
+    pub fn focus_on_mount(self, view: View, allowed: impl Fn() -> bool + 'static) -> View {
+        let focused_once = stored(false);
+        view.on_layout(move |b: &Bounds<Points>| {
+            if b.size.width.0 > 0.0
+                && b.size.height.0 > 0.0
+                && allowed()
+                && !focused_once.replace(true)
+            {
+                self.focus();
+            }
+        })
+    }
     /// Restore a focused editor after a host overlay closes. NSH's editor sink
     /// rejects pointer targeting, so native modal restoration can skip it.
     /// Navigating away or selecting another document must never reclaim focus.
@@ -470,5 +485,116 @@ impl MarkdownInput {
                     self.focus();
                 }
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nsh_core::{ApproxTextEngine, Command, Core, MountItem, NodeId, geometry::size};
+    use std::collections::HashMap;
+
+    struct Drained {
+        labels: HashMap<NodeId, Option<String>>,
+        commands: Vec<(NodeId, Command)>,
+    }
+
+    fn drain_commands(core: &mut Core<ApproxTextEngine>) -> Drained {
+        let mut labels = HashMap::new();
+        let mut commands = Vec::new();
+        for _ in 0..8 {
+            let mut events = Vec::new();
+            core.take_events(&mut events);
+            for ev in events {
+                match ev {
+                    nsh_core::element::JsEvent::LayoutListener {
+                        host,
+                        id,
+                        listener,
+                        frame,
+                    } => core.component_layout(host, id, &listener, frame),
+                    nsh_core::element::JsEvent::Event(id, kind, payload) => {
+                        core.component_event(id, kind, &payload);
+                    }
+                    _ => {}
+                }
+            }
+            let Some(batch) = core.commit() else {
+                if !core.has_events() {
+                    break;
+                }
+                continue;
+            };
+            for item in batch.items {
+                match item {
+                    MountItem::ViewProps { id, props } => {
+                        labels.insert(id, props.accessibility.label.map(|s| s.to_string()));
+                    }
+                    MountItem::Command { id, command } => {
+                        commands.push((id, command));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Drained { labels, commands }
+    }
+
+    #[test]
+    fn focus_on_mount_focuses_visible_allowed_line_editor_once() {
+        #[component]
+        fn Host() -> impl IntoElement {
+            crate::tokens::install_theme();
+            let auto_text = signal(String::new());
+            let hidden_text = signal(String::new());
+            let blocked_text = signal(String::new());
+
+            let auto = MarkdownInput::new();
+            let hidden = MarkdownInput::new();
+            let blocked = MarkdownInput::new();
+
+            let auto_view = auto.focus_on_mount(
+                auto.render_line(
+                    auto.line_source(auto_text, "Auto", "Auto", || false),
+                    || false,
+                ),
+                || true,
+            );
+            let hidden_view = view().hidden().child(hidden.focus_on_mount(
+                hidden.render_line(
+                    hidden.line_source(hidden_text, "Hidden", "Hidden", || false),
+                    || false,
+                ),
+                || true,
+            ));
+            let blocked_view = blocked.focus_on_mount(
+                blocked.render_line(
+                    blocked.line_source(blocked_text, "Blocked", "Blocked", || false),
+                    || false,
+                ),
+                || false,
+            );
+
+            view()
+                .w(px(400.0))
+                .h(px(300.0))
+                .child(auto_view)
+                .child(hidden_view)
+                .child(blocked_view)
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(400.0), px(300.0)));
+        core.mount_root(&nsh_core::element::Root::of::<Host>());
+        let Drained { labels, commands } = drain_commands(&mut core);
+
+        let focused_labels: Vec<_> = commands
+            .iter()
+            .filter_map(|(id, cmd)| {
+                matches!(cmd, Command::Focus)
+                    .then(|| labels.get(id).and_then(|l| l.as_deref()))
+                    .flatten()
+            })
+            .collect();
+        assert_eq!(focused_labels, vec!["Auto"]);
     }
 }
