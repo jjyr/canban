@@ -96,8 +96,23 @@ fn contextual_commands(ui: Ui, raw_query: &str) -> Vec<(usize, SearchChoice)> {
         }
     }
     if let Some(card) = ui.current_card().filter(|c| c.active())
-        && let Some(project) = ui.current_project()
+        && let Some(project) = ui
+            .index
+            .with(|idx| idx.projects.get(&card.project_id).cloned())
+            .or_else(|| ui.current_project())
     {
+        if let Some(next) = crate::card::next_stage_for_ui(ui, &card) {
+            dynamic_cmds.push(DynamicCommand {
+                id: "cmd:advance-card-stage".into(),
+                title: format!("Advance Card #{} to {}", card.number, next.name),
+                detail: format!("{} · Next Stage", project.name),
+                icon: Icon::Board,
+                keywords: format!(
+                    "advance move next stage workflow {} #{}",
+                    next.name, card.number
+                ),
+            });
+        }
         for stage in &project.workflow.stages {
             if stage.id != card.stage {
                 dynamic_cmds.push(DynamicCommand {
@@ -283,6 +298,56 @@ fn contextual_commands(ui: Ui, raw_query: &str) -> Vec<(usize, SearchChoice)> {
         .collect()
 }
 
+pub(crate) fn command_mode_choices(ui: Ui, raw_query: &str) -> Vec<SearchChoice> {
+    let contextual = contextual_commands(ui, raw_query);
+    let has_dynamic_advance = contextual
+        .iter()
+        .any(|(_, ch)| ch.id == "cmd:advance-card-stage");
+    let mut scored: Vec<(usize, usize, SearchChoice)> = matching_commands_with_scores(raw_query)
+        .into_iter()
+        .filter(|(_, c)| !(has_dynamic_advance && c.id == "advance-card-stage"))
+        .enumerate()
+        .map(|(idx, (score, c))| {
+            (
+                score,
+                idx,
+                SearchChoice {
+                    attention: 0,
+                    selected: false,
+                    id: format!("cmd:{}", c.id),
+                    title: c.title.into(),
+                    detail: if c.display.is_empty() || c.display == c.context {
+                        c.context.into()
+                    } else {
+                        format!("{} · {}", c.display, c.context)
+                    },
+                    icon: if c.id.contains("insights") {
+                        Icon::Insights
+                    } else if c.id.contains("schedule") {
+                        Icon::Clock
+                    } else if c.id.contains("agent") {
+                        Icon::Agent
+                    } else if c.id.contains("worktree") {
+                        Icon::Branch
+                    } else if c.id.contains("terminal") {
+                        Icon::Terminal
+                    } else if c.id.contains("notifications") || c.id == "mark-all-read" {
+                        Icon::Overview
+                    } else {
+                        Icon::Keyboard
+                    },
+                },
+            )
+        })
+        .collect();
+    let base = scored.len();
+    for (offset, (score, choice)) in contextual.into_iter().enumerate() {
+        scored.push((score.saturating_add(1), base + offset, choice));
+    }
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    scored.into_iter().map(|(_, _, ch)| ch).collect()
+}
+
 pub fn bindings(ui: Ui) {
     on_key_with(
         crate::commands::shortcuts::QUICK_OPEN_KEY,
@@ -357,53 +422,7 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                 let raw_query = ui.search_query.get();
                 let command_mode = !ui.project_picker.get() && is_command_query(&raw_query);
                 if command_mode {
-                    let mut scored: Vec<(usize, usize, SearchChoice)> =
-                        matching_commands_with_scores(&raw_query)
-                            .into_iter()
-                            .enumerate()
-                            .map(|(idx, (score, c))| {
-                                (
-                                    score,
-                                    idx,
-                                    SearchChoice {
-                                        attention: 0,
-                                        selected: false,
-                                        id: format!("cmd:{}", c.id),
-                                        title: c.title.into(),
-                                        detail: if c.display.is_empty() || c.display == c.context {
-                                            c.context.into()
-                                        } else {
-                                            format!("{} · {}", c.display, c.context)
-                                        },
-                                        icon: if c.id.contains("insights") {
-                                            Icon::Insights
-                                        } else if c.id.contains("schedule") {
-                                            Icon::Clock
-                                        } else if c.id.contains("agent") {
-                                            Icon::Agent
-                                        } else if c.id.contains("worktree") {
-                                            Icon::Branch
-                                        } else if c.id.contains("terminal") {
-                                            Icon::Terminal
-                                        } else if c.id.contains("notifications")
-                                            || c.id == "mark-all-read"
-                                        {
-                                            Icon::Overview
-                                        } else {
-                                            Icon::Keyboard
-                                        },
-                                    },
-                                )
-                            })
-                            .collect();
-                    let base = scored.len();
-                    for (offset, (score, choice)) in
-                        contextual_commands(ui, &raw_query).into_iter().enumerate()
-                    {
-                        scored.push((score.saturating_add(1), base + offset, choice));
-                    }
-                    scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-                    return scored.into_iter().map(|(_, _, ch)| ch).collect();
+                    return command_mode_choices(ui, &raw_query);
                 }
                 rows.get()
                     .into_iter()

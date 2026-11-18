@@ -434,6 +434,9 @@ fn command_catalog_ids_are_unique_and_cover_notifications_card_terminal_and_work
 
     let merge = crate::quick_open::matching_commands(">quick merge");
     assert!(merge.iter().any(|c| c.id == "quick-merge-card"));
+
+    let advance = crate::quick_open::matching_commands(">advance");
+    assert!(advance.iter().any(|c| c.id == "advance-card-stage"));
 }
 
 #[test]

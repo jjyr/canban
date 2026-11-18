@@ -1584,6 +1584,56 @@ pub fn Gallery() -> impl IntoElement {
         }
         return canban_ui::frame::screen(ui).into_element();
     }
+    // Card header stage advance: covers Backlog -> Develop (Primary + ⚡),
+    // Develop -> Review (Secondary while WorkflowRun active vs Primary when idle),
+    // and final Review stage (advance button hidden).
+    if let Ok(
+        scene @ ("card-advance-backlog"
+        | "card-advance-develop-running"
+        | "card-advance-develop-idle"
+        | "card-advance-review"),
+    ) = std::env::var("CANBAN_GALLERY_SCENE").as_deref()
+    {
+        let mut snap = fixtures::automation_board();
+        if scene != "card-advance-develop-running" {
+            snap.workflow_runs.clear();
+            snap.terminals.clear();
+        } else {
+            snap.workflow_runs.push(
+                serde_json::from_value(json!({
+                    "id": "gallery-run-develop",
+                    "project_id": "gallery-project",
+                    "card_id": "card-1",
+                    "workflow_id": "delivery:gallery-project",
+                    "definition_revision": 1,
+                    "definition": snap.workflow_revisions[0].definition,
+                    "state": "waiting_agent",
+                    "step": "implement",
+                    "visit": 1,
+                    "input_digest": "gallery",
+                    "inputs": {},
+                    "outputs": {},
+                    "history": [],
+                    "created_at": 1,
+                    "updated_at": 1
+                }))
+                .unwrap(),
+            );
+        }
+        if let Some(card) = snap.cards.iter_mut().find(|c| c.id == "card-1") {
+            card.stage = match scene {
+                "card-advance-backlog" => "backlog",
+                "card-advance-develop-running" | "card-advance-develop-idle" => "develop",
+                _ => "review",
+            }
+            .into();
+        }
+        ui.snapshot.set(snap);
+        ui.card.set("card-1".into());
+        ui.page.set("card".into());
+        ui.card_standalone.set(true);
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if let Ok(
         scene @ ("card-changes"
         | "card-changes-loading"
@@ -2471,6 +2521,18 @@ pub fn Gallery() -> impl IntoElement {
                     ui.snapshot.set(fixtures::automation_board());
                     ui.card.set(String::new());
                     ui.page.set("board".into());
+                }))
+                .child(action("Card advance", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());
+                    let mut snap = fixtures::automation_board();
+                    snap.workflow_runs.clear();
+                    snap.terminals.clear();
+                    if let Some(card) = snap.cards.iter_mut().find(|c| c.id == "card-1") {
+                        card.stage = "backlog".into();
+                    }
+                    ui.snapshot.set(snap);
+                    ui.card.set("card-1".into());
+                    ui.page.set("card".into());
                 }))
                 .child(action("Usage fixtures", Variant::Quiet, move |_| {
                     ui.usage.set(json!({"machine":"local","updated_at":canban_types::now(),"readings":[{"provider":"codex","auth":"present","account":"demo@example.invalid","windows":[{"name":"Session","used":22,"resets_at":chrono::DateTime::from_timestamp((canban_types::now()/1000+5*86400) as i64,0).unwrap().to_rfc3339()}]},{"provider":"claude","auth":"present","account":"other@example.invalid","stale":true,"error":"HTTP 429","windows":[{"name":"Weekly","used":68,"resets_at":chrono::DateTime::from_timestamp((canban_types::now()/1000+7*86400) as i64,0).unwrap().to_rfc3339()}]}]}));

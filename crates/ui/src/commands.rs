@@ -917,6 +917,14 @@ pub const CATALOG: &[Command] = &[
         keywords: "discard clear review draft comments",
     },
     Command {
+        id: "advance-card-stage",
+        title: "Advance Card to Next Stage",
+        key: "",
+        display: "Card",
+        context: "Card",
+        keywords: "move next stage workflow pipeline column develop review",
+    },
+    Command {
         id: "quick-merge-card",
         title: "Quick Merge Current Card",
         key: "",
@@ -1616,6 +1624,7 @@ pub fn execute(ui: Ui, id: &str) {
                 ui.notify("Select a Card first");
             }
         }
+        "advance-card-stage" => crate::card::advance_stage(ui),
         "quick-merge-card" => {
             if let Some(c) = ui.current_card() {
                 let project = ui.current_project();
@@ -2224,6 +2233,7 @@ mod tests {
         assert!(CATALOG.iter().any(|c| c.id == "edit-last-comment"));
         assert!(CATALOG.iter().any(|c| c.id == "delete-last-comment"));
         assert!(CATALOG.iter().any(|c| c.id == "open-last-github-comment"));
+        assert!(CATALOG.iter().any(|c| c.id == "advance-card-stage"));
         assert!(CATALOG.iter().any(|c| c.id == "retry-auto-merge"));
         assert!(CATALOG.iter().any(|c| c.id == "go-insights"));
         assert!(CATALOG.iter().any(|c| c.id == "insights-range-30d"));

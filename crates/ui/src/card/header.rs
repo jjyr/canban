@@ -1,6 +1,114 @@
 use super::*;
 use nsh_core::element::desktop::{MenuItem, popup_menu};
 use serde_json::json;
+
+/// Returns the immediate next stage in `project`'s workflow when `card` is
+/// active, unmerged, not merging, and not already at the final stage.
+pub(crate) fn next_stage_for_card(
+    card: &canban_types::Card,
+    project: Option<&canban_types::Project>,
+    is_merging: bool,
+) -> Option<canban_types::Stage> {
+    if !card.active() || card.merged() || is_merging {
+        return None;
+    }
+    let stages = &project?.workflow.stages;
+    stages
+        .iter()
+        .position(|s| s.id == card.stage)
+        .and_then(|idx| stages.get(idx + 1))
+        .cloned()
+}
+
+pub(crate) fn next_stage_for_ui(ui: Ui, card: &canban_types::Card) -> Option<canban_types::Stage> {
+    let (project, snapshot_merging) = ui.index.with_untracked(|idx| {
+        (
+            idx.projects.get(&card.project_id).cloned(),
+            idx.card_status
+                .get(&card.id)
+                .is_some_and(|st| st.is_merging),
+        )
+    });
+    let ui_merging = ui
+        .merging_cards
+        .with_untracked(|ids| ids.contains(&card.id));
+    next_stage_for_card(card, project.as_ref(), snapshot_merging || ui_merging)
+}
+
+pub(crate) fn advance_stage(ui: Ui) {
+    let Some(card) = ui.current_card() else {
+        ui.notify("Select a Card first");
+        return;
+    };
+    if !card.active() {
+        ui.notify("Restore this Card before advancing its stage");
+        return;
+    }
+    if card.merged() {
+        ui.notify("Current Card is already merged");
+        return;
+    }
+    let (project, snapshot_merging) = ui.index.with_untracked(|idx| {
+        (
+            idx.projects.get(&card.project_id).cloned(),
+            idx.card_status
+                .get(&card.id)
+                .is_some_and(|st| st.is_merging),
+        )
+    });
+    let ui_merging = ui
+        .merging_cards
+        .with_untracked(|ids| ids.contains(&card.id));
+    if snapshot_merging || ui_merging {
+        ui.notify("Current Card is currently merging");
+        return;
+    }
+    let Some(next) = next_stage_for_card(&card, project.as_ref(), false) else {
+        ui.notify("Current Card is already in the final stage");
+        return;
+    };
+    crate::presenter::move_card(ui, &card.id, &next.id);
+}
+
+fn advance_button_variant(
+    has_other_primary: bool,
+    has_active_workflow: bool,
+    has_running_agent: bool,
+    has_human_gate: bool,
+    has_attention: bool,
+) -> Variant {
+    if has_other_primary
+        || has_active_workflow
+        || has_running_agent
+        || has_human_gate
+        || has_attention
+    {
+        Variant::Secondary
+    } else {
+        Variant::Primary
+    }
+}
+
+fn advance_tooltip(
+    next_name: &str,
+    automation: Option<&canban_workflow_engine::source::ColumnAutomation>,
+    has_active_workflow: bool,
+) -> String {
+    let mut sections = Vec::new();
+    if let Some(auto) = automation {
+        sections.push(format!("Move to {next_name} · ⚡ {}", auto.label));
+        if !auto.tooltip.is_empty() {
+            sections.push(auto.tooltip.clone());
+        }
+    } else {
+        sections.push(format!("Move to {next_name}"));
+    }
+    if has_active_workflow {
+        sections.push("A workflow run is currently active on this Card.".into());
+    }
+    sections.join("\n\n")
+}
+
 fn close(ui: Ui) {
     ui.close_card();
 }
@@ -377,17 +485,22 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             let ui_merging = c.active()
                 && !c.merged()
                 && ui.merging_cards.with(|ids| ids.contains(&c.id));
-            let (project, has_deliver_in_project, attachment_count, snapshot_merging) =
-                ui.index.with(|idx| {
-                    (
-                        idx.projects.get(&c.project_id).cloned(),
-                        idx.project_has_deliver.contains(&c.project_id),
-                        idx.artifact_counts.get(&c.id).copied().unwrap_or(0),
-                        idx.card_status
-                            .get(&c.id)
-                            .is_some_and(|st| st.is_merging),
-                    )
-                });
+            let (
+                project,
+                has_deliver_in_project,
+                attachment_count,
+                snapshot_merging,
+                has_running_agent,
+            ) = ui.index.with(|idx| {
+                let st = idx.card_status.get(&c.id);
+                (
+                    idx.projects.get(&c.project_id).cloned(),
+                    idx.project_has_deliver.contains(&c.project_id),
+                    idx.artifact_counts.get(&c.id).copied().unwrap_or(0),
+                    st.is_some_and(|s| s.is_merging),
+                    st.is_some_and(|s| !s.running.is_empty()),
+                )
+            });
             let project_stages = project
                 .as_ref()
                 .map(|p| p.workflow.stages.clone())
@@ -497,11 +610,29 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 || c.worktree.is_some()
                 || c.branch.as_ref().is_some_and(|b| !b.is_empty())
                 || is_pr;
-            let (review_draft, active_review) = ui.snapshot.with(|s| {
-                let d = ui.index.with(|idx| idx.review_draft(&c.id).cloned());
-                let r = crate::review::active_review_run(s, &c.id);
-                (d, r)
-            });
+            let next_stage =
+                next_stage_for_card(&c, project.as_ref(), snapshot_merging || ui_merging);
+            let (review_draft, active_review, has_active_workflow, next_automation) =
+                ui.snapshot.with(|s| {
+                    let d = ui.index.with(|idx| idx.review_draft(&c.id).cloned());
+                    let r = crate::review::active_review_run(s, &c.id);
+                    let active_wf = s.workflow_runs.iter().any(|run| run.card_id == c.id && run.active());
+                    let auto = next_stage.as_ref().and_then(|next| {
+                        let files: Vec<_> = s
+                            .workflow_sources
+                            .iter()
+                            .filter(|f| f.project_id == c.project_id)
+                            .cloned()
+                            .collect();
+                        canban_workflow_engine::source::column_automation(
+                            &next.id,
+                            &files,
+                            &s.workflow_revisions,
+                            &s.event_subscriptions,
+                        )
+                    });
+                    (d, r, active_wf, auto)
+                });
             if !review_mode && c.active() && !c.merged() && is_pr {
                 let st = ui.review_state;
                 if let Some((prof, started_at)) = active_review {
@@ -684,7 +815,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     .disabled(move || ui.is_method_pending("card.continue")),
                 );
             }
-            if let Some(reason) = c.attention.or_else(|| c.human_gate.map(|g| g.reason)) {
+            if let Some(reason) = c.attention.clone().or_else(|| c.human_gate.as_ref().map(|g| g.reason.clone())) {
                 row = row.child(
                     view()
                         .tooltip(hint_tooltip(reason))
@@ -697,6 +828,58 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                             })
                             .text_color(ATTENTION),
                         ),
+                );
+            }
+            if let Some(next) = next_stage {
+                let pr_primary = !review_mode
+                    && c.active()
+                    && !c.merged()
+                    && is_pr
+                    && (review_draft.is_some() || in_review_stage);
+                let diff_primary = !review_mode
+                    && !is_pr
+                    && can_review_diff
+                    && (in_review_stage || c.branch.as_ref().is_none_or(|b| b.is_empty()))
+                    && c.stage == "review";
+                let variant = advance_button_variant(
+                    pr_primary || diff_primary,
+                    has_active_workflow,
+                    has_running_agent,
+                    c.human_gate.is_some(),
+                    c.attention.is_some(),
+                );
+                let button_label = format!("{} →", next.name);
+                let a11y_label = match &next_automation {
+                    Some(auto) => format!("Move to {} · {}", next.name, auto.label),
+                    None => format!("Move to {}", next.name),
+                };
+                let cid = c.id.clone();
+                let target_stage = next.id.clone();
+                let btn = if next_automation.is_some() {
+                    compact_action_with_icon(Icon::Zap, button_label, variant, move |_| {
+                        crate::presenter::move_card(ui, &cid, &target_stage);
+                    })
+                } else {
+                    compact_action(button_label, variant, move |_| {
+                        crate::presenter::move_card(ui, &cid, &target_stage);
+                    })
+                }
+                .accessibility_label(move || Some(a11y_label.clone().into()))
+                .disabled(move || ui.is_method_pending("card.move"));
+                let tip = advance_tooltip(&next.name, next_automation.as_ref(), has_active_workflow);
+                row = row.child(
+                    view()
+                        .tooltip(
+                            tooltip_box()
+                                .placement(Placement::Bottom)
+                                .max_w(px(320.))
+                                .child(
+                                    text(tip)
+                                        .text_size(px(CAPTION_SIZE))
+                                        .text_color(TEXT),
+                                ),
+                        )
+                        .child(btn),
                 );
             }
             row
@@ -776,4 +959,144 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             },
         ))
         .child(quick_merge::confirm_dialog(ui))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn sample_project(stages: Vec<(&str, &str)>) -> canban_types::Project {
+        let mut project = canban_types::Project {
+            github: None,
+            detected_github: None,
+            github_disconnected: false,
+            delivery_mode: Default::default(),
+            agent_overrides: Default::default(),
+            tags: Default::default(),
+            location: None,
+            id: "p1".into(),
+            name: "Canban".into(),
+            directory: "/example/canban".into(),
+            workflow: canban_types::Workflow::default(),
+            target_branch: None,
+            created_at: 1,
+        };
+        if !stages.is_empty() {
+            project.workflow.stages = stages
+                .into_iter()
+                .map(|(id, name)| canban_types::Stage {
+                    id: id.into(),
+                    name: name.into(),
+                    execute: false,
+                    profile: None,
+                    instruction: String::new(),
+                    on_completed: None,
+                    require_human_review: false,
+                })
+                .collect();
+        }
+        project
+    }
+
+    fn sample_card(stage: &str) -> canban_types::Card {
+        serde_json::from_value(json!({
+            "id": "c1",
+            "project_id": "p1",
+            "number": 131,
+            "title": "Advance stage button",
+            "body": "",
+            "stage": stage,
+            "revision": 1,
+            "created_at": 1
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn next_stage_resolves_ordered_stages_and_respects_terminal_states() {
+        let project = sample_project(vec![]);
+        assert_eq!(
+            next_stage_for_card(&sample_card("backlog"), Some(&project), false).map(|s| s.id),
+            Some("develop".into())
+        );
+        assert_eq!(
+            next_stage_for_card(&sample_card("develop"), Some(&project), false).map(|s| s.id),
+            Some("review".into())
+        );
+        assert_eq!(
+            next_stage_for_card(&sample_card("review"), Some(&project), false),
+            None
+        );
+        assert_eq!(
+            next_stage_for_card(&sample_card("unknown"), Some(&project), false),
+            None
+        );
+
+        let custom = sample_project(vec![
+            ("design", "Design"),
+            ("develop", "Develop"),
+            ("qa", "QA"),
+            ("review", "Review"),
+        ]);
+        assert_eq!(
+            next_stage_for_card(&sample_card("develop"), Some(&custom), false).map(|s| s.name),
+            Some("QA".into())
+        );
+
+        assert_eq!(
+            next_stage_for_card(&sample_card("backlog"), Some(&project), true),
+            None
+        );
+        let mut archived = sample_card("backlog");
+        archived.archived_at = Some(10);
+        assert_eq!(next_stage_for_card(&archived, Some(&project), false), None);
+
+        let mut merged = sample_card("develop");
+        merged.delivery = Some(canban_types::Delivery {
+            target_branch: "main".into(),
+            commit: "abc1234".into(),
+            request_key: "req-1".into(),
+            merged_at: 10,
+        });
+        assert_eq!(next_stage_for_card(&merged, Some(&project), false), None);
+    }
+
+    #[test]
+    fn advance_button_variant_and_tooltip_reflect_automation_and_activity() {
+        assert!(matches!(
+            advance_button_variant(false, false, false, false, false),
+            Variant::Primary
+        ));
+        assert!(matches!(
+            advance_button_variant(true, false, false, false, false),
+            Variant::Secondary
+        ));
+        assert!(matches!(
+            advance_button_variant(false, true, false, false, false),
+            Variant::Secondary
+        ));
+        assert!(matches!(
+            advance_button_variant(false, false, true, false, false),
+            Variant::Secondary
+        ));
+        assert!(matches!(
+            advance_button_variant(false, false, false, true, false),
+            Variant::Secondary
+        ));
+        assert!(matches!(
+            advance_button_variant(false, false, false, false, true),
+            Variant::Secondary
+        ));
+
+        assert_eq!(advance_tooltip("QA", None, false), "Move to QA");
+        let auto = canban_workflow_engine::source::ColumnAutomation {
+            label: "Auto develop".into(),
+            tooltip: "Development (development.yaml)\n• Runs @developer".into(),
+        };
+        assert_eq!(
+            advance_tooltip("Develop", Some(&auto), true),
+            "Move to Develop · ⚡ Auto develop\n\nDevelopment (development.yaml)\n• Runs @developer\n\nA workflow run is currently active on this Card."
+        );
+    }
 }

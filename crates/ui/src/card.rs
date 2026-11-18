@@ -12,6 +12,7 @@ mod workflow;
 
 use crate::{drafts::*, presenter::*};
 use canban_ui_kit::{tokens::*, *};
+pub(crate) use header::{advance_stage, next_stage_for_ui};
 use nsh_core::{TouchEvent, TouchPhase, prelude::*};
 pub(crate) use quick_merge::{
     busy as quick_merge_busy, eligible as quick_merge_eligible, start as quick_merge_start,
