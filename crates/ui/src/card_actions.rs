@@ -91,8 +91,27 @@ pub fn items(ui: Ui, card: Card) -> Vec<MenuItem> {
             .on_select(move || crate::terminals::open_card_quick(ui, &terminal_card)),
     );
     insert_at += 1;
+    if !inactive && !card.resolved() {
+        let resolve_card = card.clone();
+        items.insert(
+            insert_at,
+            MenuItem::new("Mark as Resolved")
+                .disabled(crate::card::resolve_busy(ui) || ui.pending.get_untracked())
+                .on_select(move || crate::card::resolve_start(ui, resolve_card.clone())),
+        );
+        insert_at += 1;
+    } else if !inactive && card.resolved() && !card.merged() {
+        let reopen_card = card.clone();
+        items.insert(
+            insert_at,
+            MenuItem::new("Reopen Card")
+                .disabled(crate::card::resolve_busy(ui) || ui.pending.get_untracked())
+                .on_select(move || crate::card::resolve_reopen(ui, reopen_card.clone())),
+        );
+        insert_at += 1;
+    }
     if !inactive
-        && !card.merged()
+        && !card.resolved()
         && (crate::review::card_has_pr(&card) || card.worktree.is_some() || card.branch.is_some())
     {
         let default_prof = crate::sessions::default_review_profile(ui);

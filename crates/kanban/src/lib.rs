@@ -99,6 +99,7 @@ pub fn card(project: &Project, number: u64, title: &str, body: &str) -> Result<C
         base_commit: None,
         human_gate: None,
         delivery: None,
+        resolution: None,
         created_at: now(),
     })
 }

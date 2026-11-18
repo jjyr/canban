@@ -291,12 +291,12 @@ pub fn chrome_bar(ui: Ui) -> View {
                 let total_merged = s
                     .cards
                     .iter()
-                    .filter(|c| c.removed_at.is_none() && c.merged())
+                    .filter(|c| c.removed_at.is_none() && c.resolved())
                     .count();
                 let mut opts = Vec::with_capacity(s.projects.len() + 1);
                 opts.push(
                     PickerOption::new(ALL_PROJECTS_OPTION, "All Projects")
-                        .detail(format!("{total_merged} merged"))
+                        .detail(format!("{total_merged} resolved"))
                         .icon(Icon::Projects)
                         .selected(cur.is_empty()),
                 );
@@ -304,12 +304,12 @@ pub fn chrome_bar(ui: Ui) -> View {
                     let p_merged = s
                         .cards
                         .iter()
-                        .filter(|c| c.project_id == p.id && c.removed_at.is_none() && c.merged())
+                        .filter(|c| c.project_id == p.id && c.removed_at.is_none() && c.resolved())
                         .count();
                     opts.push(
                         PickerOption::new(p.id.clone(), p.name.clone())
                             .group("Projects")
-                            .detail(format!("{p_merged} merged"))
+                            .detail(format!("{p_merged} resolved"))
                             .icon(Icon::Folder)
                             .selected(cur == p.id),
                     );
@@ -487,7 +487,7 @@ fn metric_choices(ui: Ui, annual: bool) -> View {
     row()
         .child(choice(
             ui,
-            "Merged",
+            "Resolved",
             if annual {
                 "metric-merged"
             } else {
@@ -702,7 +702,7 @@ fn render_period_subbar(ui: Ui, dash: &Dashboard) -> View {
                             move |_| intent(ui, "cards-created"),
                         ))
                         .child(compact_action(
-                            format!("Merged Cards ({})", dash.merged_total),
+                            format!("Resolved Cards ({})", dash.merged_total),
                             if ui.insights.drilldown.get() == "merged" {
                                 Variant::Secondary
                             } else {
@@ -734,6 +734,14 @@ fn render_period_subbar(ui: Ui, dash: &Dashboard) -> View {
         ));
     }
     top
+}
+
+fn non_merge_breakdown(count: usize) -> String {
+    if count > 0 {
+        format!(" · {count} manual/agent")
+    } else {
+        String::new()
+    }
 }
 
 fn render_kpis(dash: &Dashboard, narrow: bool) -> View {
@@ -794,7 +802,7 @@ fn render_kpis(dash: &Dashboard, narrow: bool) -> View {
     let wf_share = dash.trigger_stats.first().map(|t| t.share_pct).unwrap_or(0);
     let touches_per_card = if dash.merged_total > 0 {
         format!(
-            "{:.1} asks/merge",
+            "{:.1} asks/resolution",
             dash.human_asks_period as f64 / dash.merged_total as f64
         )
     } else {
@@ -805,9 +813,9 @@ fn render_kpis(dash: &Dashboard, narrow: bool) -> View {
         KpiSpec {
             mark: Icon::GitMerge,
             mark_tint: SUCCESS,
-            eyebrow: "DELIVERY THROUGHPUT",
+            eyebrow: "RESOLUTION THROUGHPUT",
             hero: if known {
-                format!("{} merged", dash.merged_total)
+                format!("{} resolved", dash.merged_total)
             } else {
                 "—".into()
             },
@@ -815,14 +823,19 @@ fn render_kpis(dash: &Dashboard, narrow: bool) -> View {
             bar_segments: vec![
                 (dash.local_merges, SUCCESS.resolve()),
                 (dash.pr_merges, ACCENT.resolve()),
+                (dash.manual_resolutions, ATTENTION.resolve()),
             ],
             sub_primary: format!(
-                "{} local · {} PR · +{} created{}",
-                dash.local_merges, dash.pr_merges, dash.created_total, sync_suffix
+                "{} local merges · {} PR merges{} · +{} created{}",
+                dash.local_merges,
+                dash.pr_merges,
+                non_merge_breakdown(dash.manual_resolutions),
+                dash.created_total,
+                sync_suffix
             ),
             sub_secondary: if dash.range == RangeWindow::Today {
                 format!(
-                    "Prev: {} merged · {}",
+                    "Prev: {} resolved · {}",
                     if dash.baseline_known {
                         dash.prev_merged_total.to_string()
                     } else {
@@ -832,7 +845,7 @@ fn render_kpis(dash: &Dashboard, narrow: bool) -> View {
                 )
             } else {
                 format!(
-                    "Prev period: {} merged · {} created",
+                    "Prev period: {} resolved · {} created",
                     if dash.baseline_known {
                         dash.prev_merged_total.to_string()
                     } else {
@@ -1084,10 +1097,11 @@ fn render_daily_velocity_chart(ui: Ui, dash: &Dashboard) -> View {
             };
             let tip_title = format!("{} ({})", day.date_key, day.weekday_label);
             let tip_merged = format!(
-                "Merged: {} ({} local · {} PR) · Cycle p50: {}",
+                "Resolved: {} ({} local merges · {} PR merges{}) · Cycle p50: {}",
                 day.merged_cards,
                 day.local_merges,
                 day.pr_merges,
+                non_merge_breakdown(day.manual_resolutions),
                 day.cycle_p50_ms
                     .map(format_duration_compact)
                     .unwrap_or_else(|| "—".into())
@@ -1204,7 +1218,7 @@ fn render_daily_velocity_chart(ui: Ui, dash: &Dashboard) -> View {
                         .gap_0p5()
                         .child(heading("Recent daily flow"))
                         .child(note(
-                            "Daily created / merged · amber tick: 7-day complete mean · click bar to inspect day",
+                            "Daily created / resolved · amber tick: 7-day complete mean · click bar to inspect day",
                         )),
                 )
                 .child(
@@ -1241,7 +1255,7 @@ fn render_daily_velocity_chart(ui: Ui, dash: &Dashboard) -> View {
                 .child(
                     row()
                         .child(legend_swatch(move || alpha_tint(ACCENT, 0.45), "Created"))
-                        .child(legend_swatch(SUCCESS, "Merged"))
+                        .child(legend_swatch(SUCCESS, "Resolved"))
                         .child(legend_swatch(ATTENTION, "7D mean")),
                 ),
         )
@@ -1303,7 +1317,7 @@ fn render_weekly_velocity_chart(ui: Ui, dash: &Dashboard) -> View {
                 .map(|p| format!(" · Pace ~{p}/wk"))
                 .unwrap_or_default();
             let tip_merged = format!(
-                "Merged: {} ({:.1}/day{}) · Cycle p50: {}",
+                "Resolved: {} ({:.1}/day{}) · Cycle p50: {}",
                 wk.merged_cards,
                 wk.merges_per_day(),
                 proj_str,
@@ -1458,7 +1472,7 @@ fn render_weekly_velocity_chart(ui: Ui, dash: &Dashboard) -> View {
                 .child(
                     row()
                         .child(legend_swatch(move || alpha_tint(ACCENT, 0.45), "Created"))
-                        .child(legend_swatch(SUCCESS, "Merged"))
+                        .child(legend_swatch(SUCCESS, "Resolved"))
                         .child(legend_swatch(ATTENTION, "4W mean")),
                 ),
         )
@@ -1553,7 +1567,7 @@ fn render_efficiency_trajectory_panel(ui: Ui, dash: &Dashboard) -> View {
                 .flex_wrap()
                 .gap_3()
                 .child(note(format!(
-                    "Merged: {} vs {}",
+                    "Resolved: {} vs {}",
                     wow.current_merged, wow.previous_merged
                 )))
                 .child(note(format!(
@@ -1601,7 +1615,7 @@ fn render_efficiency_trajectory_panel(ui: Ui, dash: &Dashboard) -> View {
                     .unwrap_or_else(|| "—".into());
                 let asks_txt = wk
                     .touches_per_merge()
-                    .map(|t| format!("{t:.1}/m"))
+                    .map(|t| format!("{t:.1}/res"))
                     .unwrap_or_else(|| format!("{}a", wk.human_touches));
                 view()
                     .flex_row()
@@ -1621,7 +1635,7 @@ fn render_efficiency_trajectory_panel(ui: Ui, dash: &Dashboard) -> View {
                     )
                     .child(
                         mono_val(
-                            format!("{}m ({:.1}/d)", wk.merged_cards, wk.merges_per_day()),
+                            format!("{} ({:.1}/d)", wk.merged_cards, wk.merges_per_day()),
                             11.5,
                         )
                         .w(px(92.)),
@@ -1689,7 +1703,7 @@ fn render_efficiency_trajectory_panel(ui: Ui, dash: &Dashboard) -> View {
                         mono_val(format!("{} {}", d.short_label, d.weekday_label), 11.5).w(px(74.)),
                     )
                     .child(
-                        mono_val(format!("{}m / {}r", d.merged_cards, d.total_runs()), 11.5)
+                        mono_val(format!("{} / {}", d.merged_cards, d.total_runs()), 11.5)
                             .w(px(68.)),
                     )
                     .child(
@@ -1746,9 +1760,9 @@ fn render_efficiency_trajectory_panel(ui: Ui, dash: &Dashboard) -> View {
                         .items_center()
                         .justify_between()
                         .child(note(if is_weekly {
-                            "Recent 6 weeks (merges · cycle p50 bar · pass% · asks/merge)"
+                            "Recent 6 weeks (resolutions · cycle p50 bar · pass% · asks/resolution)"
                         } else {
-                            "Recent 7 days (merges/runs · cycle p50 bar · pass% · asks)"
+                            "Recent 7 days (resolutions/runs · cycle p50 bar · pass% · asks)"
                         })),
                 )
                 .children(rows),
@@ -2065,7 +2079,7 @@ fn render_projects(ui: Ui, dash: &Dashboard) -> View {
                         )
                         .child(
                             mono_val(
-                                format!("+{}{} / {}m ({share})", p.created, sync_tag, p.merged),
+                                format!("+{}{} / {} ({share})", p.created, sync_tag, p.merged),
                                 11.5,
                             )
                             .w(px(124.)),
@@ -2084,7 +2098,8 @@ fn render_projects(ui: Ui, dash: &Dashboard) -> View {
                                 .text_size(px(12.))
                                 .text_color(SUCCESS)
                                 .tooltip(
-                                    tooltip_box().child(note("Daily merges in the last 7 days")),
+                                    tooltip_box()
+                                        .child(note("Daily resolutions in the last 7 days")),
                                 ),
                         ),
                 )
@@ -2104,7 +2119,7 @@ fn render_projects(ui: Ui, dash: &Dashboard) -> View {
                 row()
                     .child(choice(
                         ui,
-                        "Merged",
+                        "Resolved",
                         "sort-merged",
                         sort_mode == ProjectSort::Merged,
                     ))
@@ -2127,7 +2142,7 @@ fn render_projects(ui: Ui, dash: &Dashboard) -> View {
         panel = panel.child(note("No Project activity or active WIP in this period."));
     }
     panel.children(rows).child(note(
-        "Columns: +Created / Merged (share) · WIP (Backlog/Develop/Review) · Agent starts · 7D merges. Click row to scope/unscope.",
+        "Columns: +Created / Resolved (share) · WIP (Backlog/Develop/Review) · Agent starts · 7D resolutions. Click row to scope/unscope.",
     ))
 }
 
@@ -2314,7 +2329,7 @@ fn render_heatmap_panel(ui: Ui, dash: &Dashboard) -> View {
                                 chrono::NaiveDate::parse_from_str(&c.date_key, "%Y-%m-%d").unwrap();
                             let title = if c.known {
                                 format!(
-                                    "{} · {} created · {} merged · {} Agent starts",
+                                    "{} · {} created · {} resolved · {} Agent starts",
                                     c.date_key, c.created_cards, c.merged_cards, c.total_runs
                                 )
                             } else {
@@ -2490,13 +2505,13 @@ fn render_efficiency(ui: Ui, dash: &Dashboard) -> View {
         );
     for (title, current, previous, p) in [
         (
-            "Execution → merge, p50",
+            "Execution → resolution, p50",
             &dash.efficiency.cycle,
             &dash.efficiency.previous_cycle,
             50,
         ),
         (
-            "Execution → merge, p90",
+            "Execution → resolution, p90",
             &dash.efficiency.cycle,
             &dash.efficiency.previous_cycle,
             90,
@@ -2548,7 +2563,7 @@ fn render_efficiency(ui: Ui, dash: &Dashboard) -> View {
         );
     }
     panel = panel.child(note(
-        "Cycle includes elapsed waiting between first execution and merge. Queue samples belong to runs started in the selected period.",
+        "Cycle includes elapsed waiting between first execution and resolution. Queue samples belong to runs started in the selected period.",
     ));
     let queue = ui.insights.queue_samples.get();
     let samples = if queue {
@@ -2561,7 +2576,7 @@ fn render_efficiency(ui: Ui, dash: &Dashboard) -> View {
     panel = panel
         .child(
             row()
-                .child(choice(ui, "Merged Card samples", "samples-cycle", !queue))
+                .child(choice(ui, "Resolved Card samples", "samples-cycle", !queue))
                 .child(choice(ui, "Queue samples", "samples-queue", queue)),
         )
         .child(note(format!(
@@ -2646,12 +2661,17 @@ fn render_card_drilldown(ui: Ui, dash: &Dashboard) -> View {
     } else {
         &dash.merged_ids
     };
+    let label_kind = if filter == "merged" {
+        "resolved"
+    } else {
+        &filter
+    };
     let mut panel = card_surface().child(
         view()
             .flex_row()
             .items_center()
             .justify_between()
-            .child(heading(&format!("{} {} Cards", ids.len(), filter)))
+            .child(heading(&format!("{} {} Cards", ids.len(), label_kind)))
             .child(compact_action(
                 "Close Card list",
                 Variant::Quiet,
@@ -2830,7 +2850,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                             });
                             content
                                 .child(note(format!(
-                                    "Retained history from {} · {} merged Cards have no reliable merge date and are excluded from date totals. {} Agent batches have no retained launch timestamp. Removed history may be unavailable.{}",
+                                    "Retained history from {} · {} resolved Cards have no reliable resolution date and are excluded from date totals. {} Agent batches have no retained launch timestamp. Removed history may be unavailable.{}",
                                     dash.history_start
                                         .map(|d| d.to_string())
                                         .unwrap_or_else(|| "—".into()),
@@ -3049,7 +3069,7 @@ mod tests {
         pump(&mut core, &mut tree);
 
         assert!(tree.has_mounted_text("Insights"));
-        assert!(tree.has_mounted_text("DELIVERY THROUGHPUT"));
+        assert!(tree.has_mounted_text("RESOLUTION THROUGHPUT"));
         assert!(tree.has_mounted_text("PIPELINE & WIP HEALTH"));
         assert!(tree.has_mounted_text("AGENT EXECUTION QUALITY"));
         assert!(tree.has_mounted_text("EFFICIENCY & AUTOMATION"));
@@ -3070,7 +3090,7 @@ mod tests {
         let toggle = *tree.labels.get("Toggle efficiency details").unwrap();
         assert!(core.component_event(toggle, EventKind::Press, &EventPayload::None));
         pump(&mut core, &mut tree);
-        assert!(tree.has_mounted_text("Execution → merge, p90"));
+        assert!(tree.has_mounted_text("Execution → resolution, p90"));
         assert!(tree.has_mounted_text("Queue → start, p90"));
         let sample_tab = *tree.labels.get("Queue samples").unwrap();
         assert!(core.component_event(sample_tab, EventKind::Press, &EventPayload::None));

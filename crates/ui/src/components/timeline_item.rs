@@ -48,10 +48,14 @@ pub fn is_alert_kind(kind: &str) -> bool {
 
 fn milestone_style(kind: &str) -> MilestoneStyle {
     match kind {
-        "card.stage_changed" | "card.restored" | "card.auto_merge_resumed" => MilestoneStyle::Stage,
-        "review.merged" | "github.pr_merged" | "github.pr_delivered" | "workflow.approved" => {
-            MilestoneStyle::Success
+        "card.stage_changed" | "card.restored" | "card.reopened" | "card.auto_merge_resumed" => {
+            MilestoneStyle::Stage
         }
+        "review.merged"
+        | "github.pr_merged"
+        | "github.pr_delivered"
+        | "workflow.approved"
+        | "card.resolved" => MilestoneStyle::Success,
         "execution.failed"
         | "execution.missing"
         | "review.merge_failed"

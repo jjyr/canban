@@ -193,7 +193,7 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
     let archive_card = card.clone();
     let hovered = signal(false);
     let active = card.active();
-    let merged = card.merged();
+    let resolved = card.resolved();
     let mut tile = panel()
         .px_3()
         .py_2p5()
@@ -206,14 +206,14 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
         .bg(move || {
             if is_selected.get() {
                 SELECTED.resolve()
-            } else if merged {
+            } else if resolved {
                 INSET.resolve()
             } else {
                 SURFACE.resolve()
             }
         })
         .hover(|s| s.bg(CARD_HOVER));
-    if merged {
+    if resolved {
         tile = tile.border_dashed().opacity(0.72);
     }
     tile = tile.child(
@@ -235,7 +235,7 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
                     .child(
                         text(card.title.clone())
                             .text_size(px(BODY_SIZE))
-                            .text_color(if merged { MUTED } else { TEXT })
+                            .text_color(if resolved { MUTED } else { TEXT })
                             .font_weight(FontWeight::SEMIBOLD)
                             .flex_1()
                             .min_w(px(0.)),
@@ -253,13 +253,13 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
                         move || count.get().pending > 0,
                     ))
                     .child(when(
-                        move || active && merged,
+                        move || active && resolved,
                         move || archive_button(ui, archive_card.clone()),
                     ))
                     // Default-visible Review icon on PR Cards so users discover Agent PR Review without hovering.
                     .child(when(
                         {
-                            let is_pr = active && !merged && crate::review::card_has_pr(&card);
+                            let is_pr = active && !resolved && crate::review::card_has_pr(&card);
                             move || is_pr
                         },
                         {

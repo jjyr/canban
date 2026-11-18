@@ -1533,6 +1533,7 @@ mod tests {
             base_commit: None,
             human_gate: None,
             delivery: None,
+            resolution: None,
             created_at: 0,
         };
         let ops = Ops::local();

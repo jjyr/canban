@@ -209,7 +209,7 @@ impl AppServer {
             db.save(&current_entry)
         })?;
         if matches!(status, "idle" | "done") {
-            let _ = self.try_auto_archive_merged(&card_id);
+            let _ = self.try_auto_archive_resolved(&card_id);
         }
         self.emit("runtime", Some(card_id));
         Ok(())

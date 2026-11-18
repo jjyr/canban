@@ -296,16 +296,14 @@ impl AppServer {
             let Some(wt_path) = card.worktree.as_deref().filter(|s| !s.is_empty()) else {
                 continue;
             };
-            if !card.merged() {
+            if !card.resolved() {
                 continue;
             }
-            let merged_at = card
-                .delivery
-                .as_ref()
-                .map(|d| d.merged_at)
+            let resolved_at = card
+                .resolved_at()
                 .or(card.archived_at)
                 .unwrap_or(card.created_at);
-            if merged_at > cutoff {
+            if resolved_at > cutoff {
                 skipped.push(json!({
                     "kind": "card",
                     "card_id": card.id,

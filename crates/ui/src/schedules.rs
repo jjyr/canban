@@ -992,6 +992,7 @@ pub fn trigger_schedule(ui: Ui, item: &ScheduleItem) {
                         base_commit: None,
                         human_gate: None,
                         delivery: None,
+                        resolution: None,
                         created_at: now_ms,
                     });
                     (

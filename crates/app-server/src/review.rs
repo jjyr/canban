@@ -181,8 +181,10 @@ impl AppServer {
             let mut current:Card=db.get(&card.id)?;
             let value=match result {
                 Ok(commit)=>{
+                    let resolved_at = now();
                     current.delivery_mode=Some(DeliveryMode::Local);
-                    current.delivery=Some(Delivery{target_branch:plan.target_branch.clone(),commit:commit.clone(),request_key:key.clone(),merged_at:now()});
+                    current.delivery=Some(Delivery{target_branch:plan.target_branch.clone(),commit:commit.clone(),request_key:key.clone(),merged_at:resolved_at});
+                    current.resolution=Some(CardResolution{resolved_at,kind:"merged".into(),reason:None,actor:"user".into()});
                     current.attention=None;
                     let gate = current.human_gate.take();
                     let mut completed_deliver = false;
@@ -230,18 +232,18 @@ impl AppServer {
         drop(_merging);
         drop(_gate);
         if value["state"] == "merged" {
-            let _ = self.try_auto_archive_merged(&card.id);
+            let _ = self.try_auto_archive_resolved(&card.id);
             self.request_deliveries();
             self.request_scripts();
         }
         self.emit("review", Some(card.id));
         Ok(value)
     }
-    pub(crate) fn try_auto_archive_merged(&self, card_id: &str) -> Result<bool> {
-        self.try_auto_archive_merged_at(card_id, now())
+    pub(crate) fn try_auto_archive_resolved(&self, card_id: &str) -> Result<bool> {
+        self.try_auto_archive_resolved_at(card_id, now())
     }
 
-    pub(crate) fn try_auto_archive_merged_at(&self, card_id: &str, now_ms: u64) -> Result<bool> {
+    pub(crate) fn try_auto_archive_resolved_at(&self, card_id: &str, now_ms: u64) -> Result<bool> {
         let (card, project) = {
             let store = self.store.lock().unwrap();
             let db = store.db();
@@ -249,7 +251,7 @@ impl AppServer {
                 return Ok(false);
             };
             if !card.active()
-                || !card.merged()
+                || !card.resolved()
                 || card.attention.is_some()
                 || card.human_gate.is_some()
                 || activity_warning(db, &card)?.is_some()
@@ -266,27 +268,29 @@ impl AppServer {
                             "review.merged"
                                 | "github.pr_merged"
                                 | "github.pr_delivered"
+                                | "card.resolved"
+                                | "card.reopened"
                                 | "card.restored"
                                 | "card.archived"
                         )
                 })
                 .max_by_key(|e| e.sequence);
-            if last_lifecycle
-                .as_ref()
-                .is_some_and(|e| matches!(e.kind.as_str(), "card.restored" | "card.archived"))
-            {
+            if last_lifecycle.as_ref().is_some_and(|e| {
+                matches!(
+                    e.kind.as_str(),
+                    "card.restored" | "card.archived" | "card.reopened"
+                )
+            }) {
                 return Ok(false);
             }
-            // Keep Cards merged today visible on the Board until the next local calendar day.
-            let merged_at = card
-                .delivery
-                .as_ref()
-                .map(|d| d.merged_at)
+            // Keep Cards resolved today visible on the Board until the next local calendar day.
+            let resolved_at = card
+                .resolved_at()
                 .or_else(|| last_lifecycle.as_ref().map(|e| e.created_at))
                 .unwrap_or(card.created_at);
             let same_local_day: bool = db.conn.query_row(
                 "SELECT date(?1 / 1000, 'unixepoch', 'localtime') >= date(?2 / 1000, 'unixepoch', 'localtime')",
-                params![merged_at as i64, now_ms as i64],
+                params![resolved_at as i64, now_ms as i64],
                 |r| r.get(0),
             )?;
             if same_local_day {
@@ -315,7 +319,7 @@ impl AppServer {
         Ok(true)
     }
 
-    pub(crate) fn pump_merged_archives(&self) -> Result<()> {
+    pub(crate) fn pump_resolved_archives(&self) -> Result<()> {
         let now_ms = now();
         let candidates: Vec<String> = {
             let store = self.store.lock().unwrap();
@@ -327,16 +331,16 @@ impl AppServer {
             )?;
             let mut ids = Vec::new();
             for c in db.list::<Card>()? {
-                if !c.active() || !c.merged() || c.attention.is_some() || c.human_gate.is_some() {
+                if !c.active() || !c.resolved() || c.attention.is_some() || c.human_gate.is_some() {
                     continue;
                 }
-                if let Some(d) = &c.delivery {
-                    let merged_day: String = db.conn.query_row(
+                if let Some(ts) = c.resolved_at() {
+                    let resolved_day: String = db.conn.query_row(
                         "SELECT date(?1 / 1000, 'unixepoch', 'localtime')",
-                        params![d.merged_at as i64],
+                        params![ts as i64],
                         |r| r.get(0),
                     )?;
-                    if merged_day >= today {
+                    if resolved_day >= today {
                         continue;
                     }
                 }
@@ -345,7 +349,7 @@ impl AppServer {
             ids
         };
         for id in candidates {
-            let _ = self.try_auto_archive_merged_at(&id, now_ms);
+            let _ = self.try_auto_archive_resolved_at(&id, now_ms);
         }
         Ok(())
     }
@@ -747,12 +751,19 @@ impl AppServer {
             }
             match result {
                 Ok(commit) => {
+                    let resolved_at = now();
                     current_card.delivery_mode = Some(DeliveryMode::Local);
                     current_card.delivery = Some(Delivery {
                         target_branch: plan.target_branch.clone(),
                         commit: commit.clone(),
                         request_key: key.clone(),
-                        merged_at: now(),
+                        merged_at: resolved_at,
+                    });
+                    current_card.resolution = Some(CardResolution {
+                        resolved_at,
+                        kind: "merged".into(),
+                        reason: None,
+                        actor: "system".into(),
                     });
                     current_card.attention = None;
                     current_card.human_gate = None;
@@ -915,7 +926,7 @@ impl AppServer {
         self.git_changed(&project.work_location().machine);
         drop(_merging);
         if merged_and_completed {
-            let _ = self.try_auto_archive_merged(&card.id);
+            let _ = self.try_auto_archive_resolved(&card.id);
         }
         self.emit("review", Some(card.id));
         Ok(advance_queue)
@@ -1808,7 +1819,7 @@ impl AppServer {
                 c.active(),
                 "Restore the Card before running an Agent review"
             );
-            ensure!(!c.merged(), "Merged Cards do not need a new PR review");
+            ensure!(!c.resolved(), "Resolved Cards do not need a new PR review");
             let proj: Project = db.get(&c.project_id)?;
             let bound = self.bound_project(&proj, &c);
             let explicit_profile = p["profile_id"]

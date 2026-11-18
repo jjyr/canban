@@ -430,11 +430,11 @@ pub const CATALOG: &[Command] = &[
     },
     Command {
         id: "insights-metric-merged",
-        title: "Insights: Chart Merged Cards",
+        title: "Insights: Chart Resolved Cards",
         key: "",
         display: "Insights",
         context: "Insights",
-        keywords: "statistics daily date comparison trend agents samples efficiency",
+        keywords: "statistics daily date comparison trend agents samples efficiency resolved merged",
     },
     Command {
         id: "insights-metric-created",
@@ -518,11 +518,11 @@ pub const CATALOG: &[Command] = &[
     },
     Command {
         id: "insights-sort-merged",
-        title: "Insights: Sort Projects by Merged",
+        title: "Insights: Sort Projects by Resolved",
         key: "",
         display: "Insights",
         context: "Insights",
-        keywords: "statistics daily date comparison trend agents samples efficiency",
+        keywords: "statistics daily date comparison trend agents samples efficiency resolved merged",
     },
     Command {
         id: "insights-cards-created",
@@ -534,11 +534,11 @@ pub const CATALOG: &[Command] = &[
     },
     Command {
         id: "insights-cards-merged",
-        title: "Insights: Inspect Merged Cards",
+        title: "Insights: Inspect Resolved Cards",
         key: "",
         display: "Insights",
         context: "Insights",
-        keywords: "statistics daily date comparison trend agents samples efficiency",
+        keywords: "statistics daily date comparison trend agents samples efficiency resolved merged",
     },
     Command {
         id: "insights-cards-close",
@@ -550,11 +550,11 @@ pub const CATALOG: &[Command] = &[
     },
     Command {
         id: "insights-hourly-merged",
-        title: "Insights: Hourly Merged Cards",
+        title: "Insights: Hourly Resolved Cards",
         key: "",
         display: "Insights",
         context: "Insights",
-        keywords: "hourly today chart",
+        keywords: "hourly today chart resolved merged",
     },
     Command {
         id: "insights-hourly-created",
@@ -987,6 +987,22 @@ pub const CATALOG: &[Command] = &[
         display: "Card",
         context: "Card",
         keywords: "files images upload",
+    },
+    Command {
+        id: "resolve-card",
+        title: "Mark Current Card as Resolved",
+        key: "",
+        display: "Card",
+        context: "Card",
+        keywords: "resolve done finish complete close outcome",
+    },
+    Command {
+        id: "reopen-card",
+        title: "Reopen Resolved Card",
+        key: "",
+        display: "Card",
+        context: "Card",
+        keywords: "reopen unresolve undo restore",
     },
     Command {
         id: "archive-card",
@@ -1604,7 +1620,7 @@ pub fn execute(ui: Ui, id: &str) {
         "agent-review-pr" => {
             if let Some(c) = ui.current_card() {
                 if c.active()
-                    && !c.merged()
+                    && !c.resolved()
                     && (crate::review::card_has_pr(&c)
                         || c.worktree.is_some()
                         || c.branch.is_some())
@@ -1653,7 +1669,7 @@ pub fn execute(ui: Ui, id: &str) {
                             .any(|r| r.card_id == c.id && r.active() && !r.step_is_deliver());
                         (has_deliver, non_deliver)
                     });
-                if !c.active() || c.merged() || c.worktree.is_none() || !has_deliver_in_project {
+                if !c.active() || c.resolved() || c.worktree.is_none() || !has_deliver_in_project {
                     ui.notify("Current Card cannot retry auto-merge");
                 } else if active_non_deliver {
                     ui.notify("Card workflow is currently active at another step");
@@ -1897,6 +1913,34 @@ pub fn execute(ui: Ui, id: &str) {
                     .unwrap_or_else(|| crate::drafts::Draft::card(&c));
                 d.details = !d.details;
                 crate::drafts::put(ui, key, d);
+            }
+        }
+        "resolve-card" => {
+            if let Some(c) = ui.current_card() {
+                if !c.active() {
+                    ui.notify("Restore the Card before resolving");
+                } else if c.resolved() {
+                    ui.notify("Card is already resolved");
+                } else {
+                    crate::card::resolve_start(ui, c);
+                }
+            } else {
+                ui.notify("Select a Card first");
+            }
+        }
+        "reopen-card" => {
+            if let Some(c) = ui.current_card() {
+                if !c.active() {
+                    ui.notify("Restore the Card before reopening");
+                } else if !c.resolved() {
+                    ui.notify("Card is not resolved");
+                } else if c.merged() {
+                    ui.notify("Cards with merged code cannot be reopened");
+                } else {
+                    crate::card::resolve_reopen(ui, c);
+                }
+            } else {
+                ui.notify("Select a Card first");
             }
         }
         "archive-card" => {

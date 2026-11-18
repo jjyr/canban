@@ -332,7 +332,7 @@ impl WorkflowRun {
     /// at the head of the queue (`waiting_agent` / `running` at `Deliver`).
     pub fn in_merge_queue(&self, card: &Card) -> bool {
         card.active()
-            && !card.merged()
+            && !card.resolved()
             && !card.hold_auto_merge
             && self.step_is_deliver()
             && matches!(

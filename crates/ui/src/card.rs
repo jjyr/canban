@@ -5,6 +5,7 @@ mod composer;
 mod details;
 mod header;
 mod quick_merge;
+mod resolve;
 mod task;
 pub mod terminal;
 pub(crate) mod timeline;
@@ -16,6 +17,9 @@ pub(crate) use header::{advance_stage, next_stage_for_ui};
 use nsh_core::{TouchEvent, TouchPhase, prelude::*};
 pub(crate) use quick_merge::{
     busy as quick_merge_busy, eligible as quick_merge_eligible, start as quick_merge_start,
+};
+pub(crate) use resolve::{
+    ResolveConfirm, busy as resolve_busy, reopen as resolve_reopen, start as resolve_start,
 };
 
 #[derive(Clone, Copy)]
@@ -775,5 +779,164 @@ mod tests {
             tree.mounted_node_for_text("Show less").is_some(),
             "expected expanded comment to show Show less at the end of the report"
         );
+    }
+
+    #[test]
+    fn header_resolve_controls_follow_scheme_1b1_and_reopen_rules() {
+        #[component]
+        fn HeaderHarness() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let mut snapshot = Snapshot::default();
+            snapshot.projects.push(Project {
+                id: "proj-1".into(),
+                name: "Canban".into(),
+                directory: "/tmp/canban".into(),
+                location: None,
+                github: None,
+                detected_github: None,
+                github_disconnected: false,
+                delivery_mode: Default::default(),
+                agent_overrides: Default::default(),
+                tags: Vec::new(),
+                workflow: Workflow::default(),
+                target_branch: Some("main".into()),
+                created_at: 1,
+            });
+            snapshot.cards.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "c-no-wt",
+                    "project_id": "proj-1",
+                    "number": 1,
+                    "title": "Discussion card",
+                    "body": "",
+                    "stage": "backlog",
+                    "revision": 1,
+                    "created_at": 1
+                }))
+                .unwrap(),
+            );
+            snapshot.cards.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "c-wt",
+                    "project_id": "proj-1",
+                    "number": 2,
+                    "title": "Code card",
+                    "body": "",
+                    "stage": "review",
+                    "worktree": "/tmp/wt-2",
+                    "branch": "canban/2",
+                    "revision": 1,
+                    "created_at": 2
+                }))
+                .unwrap(),
+            );
+            snapshot.cards.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "c-manual",
+                    "project_id": "proj-1",
+                    "number": 3,
+                    "title": "Manually resolved",
+                    "body": "",
+                    "stage": "backlog",
+                    "revision": 1,
+                    "created_at": 3,
+                    "resolution": {
+                        "resolved_at": 10,
+                        "kind": "manual",
+                        "reason": "Duplicate",
+                        "actor": "user"
+                    }
+                }))
+                .unwrap(),
+            );
+            snapshot.cards.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "c-merged",
+                    "project_id": "proj-1",
+                    "number": 4,
+                    "title": "Merged card",
+                    "body": "",
+                    "stage": "review",
+                    "revision": 1,
+                    "created_at": 4,
+                    "delivery": {
+                        "target_branch": "main",
+                        "commit": "abc1234",
+                        "request_key": "k1",
+                        "merged_at": 20
+                    }
+                }))
+                .unwrap(),
+            );
+            ui.snapshot.set(snapshot);
+            ui.project.set("proj-1".into());
+            ui.card.set("c-no-wt".into());
+            ui.page.set("card".into());
+            view()
+                .w(px(900.))
+                .h(px(600.))
+                .child(
+                    view()
+                        .flex_row()
+                        .child(
+                            canban_ui_kit::press_target()
+                                .on_press(move |_: &()| ui.card.set("c-wt".into()))
+                                .child(label("select-wt")),
+                        )
+                        .child(
+                            canban_ui_kit::press_target()
+                                .on_press(move |_: &()| ui.card.set("c-manual".into()))
+                                .child(label("select-manual")),
+                        )
+                        .child(
+                            canban_ui_kit::press_target()
+                                .on_press(move |_: &()| ui.card.set("c-merged".into()))
+                                .child(label("select-merged")),
+                        ),
+                )
+                .child(screen(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(900.), px(600.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<HeaderHarness>());
+        let mut tree = TreeState::default();
+        pump(&mut core, &mut tree);
+
+        // 1A: Card without worktree shows Resolve in Row 3 right.
+        assert!(tree.mounted_node_for_text("Resolve").is_some());
+        assert!(tree.mounted_node_for_text("Merge").is_none());
+        assert!(tree.mounted_node_for_text("Reopen").is_none());
+
+        let press = |core: &mut Core<ApproxTextEngine>, tree: &mut TreeState, name: &str| {
+            let mut id = tree.mounted_node_for_text(name).unwrap();
+            while id != nsh_core::ROOT_ID
+                && !tree
+                    .events
+                    .get(&id)
+                    .is_some_and(|m| m.contains(EventKind::Press))
+            {
+                id = tree.parents[&id];
+            }
+            assert!(core.component_event(id, EventKind::Press, &EventPayload::None));
+            pump(core, tree);
+        };
+
+        // 1B-1: Card with quick-merge eligible worktree hides Resolve in Row 3 right and shows Merge.
+        press(&mut core, &mut tree, "select-wt");
+        assert!(tree.mounted_node_for_text("Merge").is_some());
+        assert!(tree.mounted_node_for_text("Resolve").is_none());
+        assert!(tree.mounted_node_for_text("Reopen").is_none());
+
+        // 1C (manual): Shows Resolved badge and Reopen button.
+        press(&mut core, &mut tree, "select-manual");
+        assert!(tree.mounted_node_for_text("Resolved").is_some());
+        assert!(tree.mounted_node_for_text("Reopen").is_some());
+
+        // 1C (merged): Shows Resolved badge and hides Reopen button.
+        press(&mut core, &mut tree, "select-merged");
+        assert!(tree.mounted_node_for_text("Resolved").is_some());
+        assert!(tree.mounted_node_for_text("Reopen").is_none());
     }
 }

@@ -537,4 +537,239 @@ impl AppServer {
         })?;
         Ok(())
     }
+
+    pub(super) fn resolve_card_preview(&self, p: &Value) -> Result<Value> {
+        let (card, project, active_workflows, agent_warning) = {
+            let store = self.store.lock().unwrap();
+            let db = store.db();
+            let c = super::resolve_card(db, p)?;
+            let project: Project = db.get(&c.project_id)?;
+            let project = self.bound_project(&project, &c);
+            let active_workflows = db
+                .list::<WorkflowRun>()?
+                .into_iter()
+                .any(|r| r.card_id == c.id && r.active());
+            let agent_warning = crate::review::activity_warning(db, &c)?;
+            (c, project, active_workflows, agent_warning)
+        };
+        let mut warnings = Vec::<String>::new();
+        if active_workflows {
+            warnings.push("Active workflow run will be stopped".into());
+        }
+        if let Some(w) = &agent_warning {
+            warnings.push(w.clone());
+        }
+        if card.worktree.is_some() && !card.merged() {
+            let ops = self.ops(&project.work_location().machine);
+            if let Ok(info) = ops.info(&project, &card) {
+                if info.dirty || info.state == "conflict" {
+                    warnings.push("Worktree has uncommitted changes".into());
+                } else if info.state == "available" {
+                    let target = info.target_branch.as_deref().unwrap_or("");
+                    let branch = info.branch.as_deref().unwrap_or("");
+                    if !target.is_empty()
+                        && !branch.is_empty()
+                        && !ops.branch_merged(Path::new(&project.directory), branch, target)
+                    {
+                        warnings.push(format!(
+                            "Branch {branch} has unmerged changes against {target}"
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(json!({
+            "card_id": card.id,
+            "revision": card.revision,
+            "warnings": warnings,
+            "has_active_agent": agent_warning.is_some(),
+        }))
+    }
+
+    pub(super) fn resolve_card_action(&self, p: &Value) -> Result<Value> {
+        let config = self.config();
+        let mut emit_card = p["card_id"].as_str().map(str::to_owned);
+        let res = self.mutate("card.resolve", p, |db| {
+            let mut c = super::resolve_card(db, p)?;
+            if p.get("revision").is_some_and(|v| !v.is_null()) {
+                revise(&c, p)?;
+            }
+            ensure!(c.active(), "Restore the Card before resolving");
+            emit_card = Some(c.id.clone());
+            if c.resolved() {
+                return Ok(serde_json::to_value(c)?);
+            }
+            let profile_opt = p["profile_id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let runtime_terminal = p["runtime_terminal"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let is_agent = p["agent"] == true || profile_opt.is_some();
+            let terminals = db.list::<TerminalEntry>()?;
+            let active_entry = if is_agent {
+                runtime_terminal
+                    .and_then(|rt| {
+                        terminals.iter().find(|t| {
+                            t.agent.as_ref().is_some_and(|a| {
+                                a.card_id == c.id
+                                    && a.terminal.as_deref() == Some(rt)
+                                    && !a.finished()
+                            })
+                        })
+                    })
+                    .or_else(|| {
+                        terminals.iter().rev().find(|t| {
+                            t.agent.as_ref().is_some_and(|a| {
+                                a.card_id == c.id
+                                    && !a.finished()
+                                    && profile_opt.is_none_or(|pid| a.profile.id == pid)
+                            })
+                        })
+                    })
+                    .cloned()
+            } else {
+                None
+            };
+            let actor = if is_agent {
+                let pid = active_entry
+                    .as_ref()
+                    .and_then(|t| t.agent.as_ref())
+                    .map(|a| a.profile.id.as_str())
+                    .or(profile_opt)
+                    .unwrap_or(&config.default_agent);
+                format!("agent:{pid}")
+            } else {
+                "user".to_owned()
+            };
+            let reason = p["message"]
+                .as_str()
+                .or_else(|| p["reason"].as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+            let resolved_at = now();
+            let kind = if is_agent { "agent" } else { "manual" };
+            c.resolution = Some(CardResolution {
+                resolved_at,
+                kind: kind.into(),
+                reason: reason.clone(),
+                actor: actor.clone(),
+            });
+            c.attention = None;
+            c.human_gate = None;
+            c.revision += 1;
+            db.save(&c)?;
+
+            for mut n in db
+                .list::<Notice>()?
+                .into_iter()
+                .filter(|n| n.card_id == c.id && !n.read)
+            {
+                n.read = true;
+                db.save(&n)?;
+            }
+
+            crate::workflow::stop_card(db, &config, &c.id, "cancelled")?;
+            for mut entry in db.list::<TerminalEntry>()? {
+                if let Some(a) = &mut entry.agent
+                    && a.card_id == c.id
+                {
+                    let mut changed = false;
+                    if a.state == "queued" {
+                        a.state = "cancelled".into();
+                        changed = true;
+                    }
+                    if a.pending.take().is_some() {
+                        changed = true;
+                    }
+                    if let Some(caller) = &active_entry
+                        && entry.id == caller.id
+                        && matches!(
+                            a.state.as_str(),
+                            "starting" | "running" | "working" | "blocked" | "needs_report"
+                        )
+                    {
+                        a.state = "completed".into();
+                        a.completed_at = Some(resolved_at);
+                        a.updated_at = resolved_at;
+                        a.close_state = String::new();
+                        changed = true;
+                    }
+                    if changed {
+                        db.save(&entry)?;
+                    }
+                }
+            }
+
+            let event_msg = match &reason {
+                Some(r) => format!("Resolved: {r}"),
+                None => "Card resolved".into(),
+            };
+            log(
+                db,
+                &c,
+                "card.resolved",
+                &actor,
+                &event_msg,
+                active_entry.as_ref().map(|t| t.id.clone()),
+                json!({
+                    "kind": kind,
+                    "reason": reason,
+                    "resolved_at": resolved_at,
+                }),
+            )?;
+            Ok(serde_json::to_value(c)?)
+        })?;
+        if let Some(cid) = emit_card.as_deref() {
+            let _ = self.try_auto_archive_resolved(cid);
+        }
+        if p["card_id"].is_null()
+            && let Some(id) = emit_card
+        {
+            self.emit("application", Some(id));
+        }
+        Ok(res)
+    }
+
+    pub(super) fn reopen_card_action(&self, p: &Value) -> Result<Value> {
+        ensure!(
+            p["execution"].is_null(),
+            "Reopening a Card requires an explicit user decision"
+        );
+        let mut emit_card = p["card_id"].as_str().map(str::to_owned);
+        let res = self.mutate("card.reopen", p, |db| {
+            let mut c = super::resolve_card(db, p)?;
+            if p.get("revision").is_some_and(|v| !v.is_null()) {
+                revise(&c, p)?;
+            }
+            ensure!(c.active(), "Restore the Card before reopening");
+            ensure!(!c.merged(), "Cards with merged code cannot be reopened");
+            emit_card = Some(c.id.clone());
+            if c.resolution.is_none() {
+                return Ok(serde_json::to_value(c)?);
+            }
+            c.resolution = None;
+            c.revision += 1;
+            db.save(&c)?;
+            log(
+                db,
+                &c,
+                "card.reopened",
+                "user",
+                "Card reopened",
+                None,
+                json!({}),
+            )?;
+            Ok(serde_json::to_value(c)?)
+        })?;
+        if p["card_id"].is_null()
+            && let Some(id) = emit_card
+        {
+            self.emit("application", Some(id));
+        }
+        Ok(res)
+    }
 }

@@ -1024,7 +1024,7 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
 
     let mut right_controls = view().flex_row().flex_wrap().items_center().gap_1p5();
 
-    if c.active() && !c.merged() {
+    if c.active() && !c.resolved() {
         let active_review = ui.snapshot.with(|s| super::active_review_run(s, &c.id));
         if let Some((prof, started_at)) = active_review {
             let cid = c.id.clone();

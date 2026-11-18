@@ -97,7 +97,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
 fn row(ui: Ui, entry: model::Entry) -> impl IntoElement {
     let card = entry.card;
     let archive_error = card.archive_error.clone();
-    let merged = card.delivery.is_some() || card.pull_request.as_ref().is_some_and(|p| p.merged);
+    let resolved = card.resolved();
     let id = card.id.clone();
     let title = format!("#{} {}", card.number, card.title);
     let timestamp = card.archived_at.unwrap_or(card.created_at);
@@ -121,8 +121,8 @@ fn row(ui: Ui, entry: model::Entry) -> impl IntoElement {
                 .truncate()
                 .min_w(px(0.)),
         );
-    if merged {
-        header = header.child(status("Merged", Tone::Success));
+    if resolved {
+        header = header.child(status("Resolved", Tone::Success));
     }
     let content = view()
         .min_w(px(0.))

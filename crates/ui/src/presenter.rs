@@ -166,6 +166,8 @@ pub struct Ui {
     pub review_request: Signal<u64>,
     /// Card header quick merge awaiting confirmation of a preview warning.
     pub quick_merge: Signal<Option<ReviewPreview>>,
+    /// Card resolve action awaiting confirmation when active runs or unmerged branch changes exist.
+    pub resolve_confirm: Signal<Option<crate::card::ResolveConfirm>>,
     pub drafts: Stored<BTreeMap<String, Draft>>,
     pub scrolls: Stored<BTreeMap<String, Point<Points>>>,
     pub narrow: Signal<bool>,
@@ -369,6 +371,7 @@ impl Ui {
             || !self.utility_popup.get_untracked().is_empty()
             || self.native_modal.get_untracked()
             || self.quick_merge.get_untracked().is_some()
+            || self.resolve_confirm.get_untracked().is_some()
             || self.terminal_rename.get_untracked().is_some()
             || self.terminal_close_confirm.get_untracked().is_some()
             || self.worktree_modal.get_untracked().is_some()
@@ -561,6 +564,7 @@ impl Ui {
             review: signal(None),
             review_request: signal(0),
             quick_merge: signal(None),
+            resolve_confirm: signal(None),
             drafts: stored(crate::drafts::persistence::initial()),
             scrolls: stored(BTreeMap::new()),
             narrow: signal(false),
@@ -928,7 +932,7 @@ impl Ui {
     pub fn is_card_merging(self, snapshot: &Snapshot, card: &Card) -> bool {
         crate::components::activity::is_merging(snapshot, card)
             || card.active()
-                && !card.merged()
+                && !card.resolved()
                 && self.merging_cards.with(|ids| ids.contains(&card.id))
     }
     pub fn notify(self, message: impl Into<String>) {

@@ -321,7 +321,7 @@ fn row(ui: Ui, state: BoardDrag, card: ReadSignal<Card>) -> impl IntoElement {
             let ui_merging = ui.merging_cards.with(|ids| ids.contains(&c.id));
             let (merging, replies) = ui.index.with(|idx| {
                 let base_merging = idx.card_status.get(&c.id).is_some_and(|st| st.is_merging);
-                let merging = base_merging || (c.active() && !c.merged() && ui_merging);
+                let merging = base_merging || (c.active() && !c.resolved() && ui_merging);
                 (merging, idx.reply_count(&c.id))
             });
             let count = ui

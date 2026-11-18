@@ -225,7 +225,7 @@ pub fn eligible(snapshot: &canban_types::Snapshot, entry: &TerminalEntry) -> boo
     if card.removed_at.is_some()
         || card.archived_at.is_some()
         || (trigger.is_automatic()
-            && (card.merged()
+            && (card.resolved()
                 || card.human_gate.is_some()
                 || card.attention.is_some()
                 || card.stage != stage))
@@ -315,7 +315,7 @@ pub fn admissions(snapshot: &canban_types::Snapshot, max_agents: usize) -> Vec<S
         .filter(|r| r.active() && r.state == "waiting_capacity")
         .filter_map(|run| {
             let c = card(&run.card_id)?;
-            if !c.active() || c.merged() || c.human_gate.is_some() || c.attention.is_some() {
+            if !c.active() || c.resolved() || c.human_gate.is_some() || c.attention.is_some() {
                 return None;
             }
             let Some(WorkflowStep::Admit {
@@ -526,6 +526,7 @@ mod tests {
             base_commit: None,
             human_gate: None,
             delivery: None,
+            resolution: None,
             created_at: 1,
         };
 

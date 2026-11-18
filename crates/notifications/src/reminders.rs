@@ -279,6 +279,9 @@ pub fn sound_items_with_reminders(s: &Snapshot, reminder_items: &[Reminder]) -> 
                     .unwrap_or_else(|| format!("merged:{}:{}", e.card_id, e.id));
                 ids.insert(key);
             }
+            "card.resolved" if e.actor != "user" => {
+                ids.insert(format!("resolved:{}:{}", e.card_id, e.id));
+            }
             _ => {}
         }
     }

@@ -3,13 +3,13 @@ use nsh_core::element::desktop::{MenuItem, popup_menu};
 use serde_json::json;
 
 /// Returns the immediate next stage in `project`'s workflow when `card` is
-/// active, unmerged, not merging, and not already at the final stage.
+/// active and unresolved, with a later stage available and no merge in progress.
 pub(crate) fn next_stage_for_card(
     card: &canban_types::Card,
     project: Option<&canban_types::Project>,
     is_merging: bool,
 ) -> Option<canban_types::Stage> {
-    if !card.active() || card.merged() || is_merging {
+    if !card.active() || card.resolved() || is_merging {
         return None;
     }
     let stages = &project?.workflow.stages;
@@ -44,8 +44,8 @@ pub(crate) fn advance_stage(ui: Ui) {
         ui.notify("Restore this Card before advancing its stage");
         return;
     }
-    if card.merged() {
-        ui.notify("Current Card is already merged");
+    if card.resolved() {
+        ui.notify("Current Card is already resolved");
         return;
     }
     let (project, snapshot_merging) = ui.index.with_untracked(|idx| {
@@ -262,7 +262,10 @@ fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
                 items.push(
                     MenuItem::new(format!("Run {} · {}", workflow.definition.name, entry))
                         .disabled(
-                            active || !card.active() || card.merged() || card.human_gate.is_some(),
+                            active
+                                || !card.active()
+                                || card.resolved()
+                                || card.human_gate.is_some(),
                         )
                         .on_select(move || dispatch(ui, "workflow.start", params.clone())),
                 );
@@ -300,7 +303,7 @@ fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
             });
             (has_deliver, non_deliver)
         });
-        if has_deliver_in_project && card.active() && !card.merged() {
+        if has_deliver_in_project && card.active() && !card.resolved() {
             if card.worktree.is_some() {
                 let cid = card.id.clone();
                 let rev = card.revision;
@@ -450,7 +453,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     move || crate::editor::expand(ui),
                 ))
                 .child(when(
-                    move || ui.current_card().is_some_and(|c| c.active() && c.merged()),
+                    move || ui.current_card().is_some_and(|c| c.active() && c.resolved()),
                     move || {
                         chrome_button_disabled(
                             Icon::Archive,
@@ -483,7 +486,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             };
             let review_mode = is_review.get();
             let ui_merging = c.active()
-                && !c.merged()
+                && !c.resolved()
                 && ui.merging_cards.with(|ids| ids.contains(&c.id));
             let (
                 project,
@@ -565,12 +568,17 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                             });
                         }),
                 );
-            if c.merged() {
-                row = row.child(status("Merged", Tone::Success));
+            if c.resolved() {
+                let badge = status("Resolved", Tone::Success);
+                if let Some(tip) = resolve::tooltip(&c) {
+                    row = row.child(view().tooltip(hint_tooltip(tip)).child(badge));
+                } else {
+                    row = row.child(badge);
+                }
             } else if snapshot_merging || ui_merging {
                 row = row.child(live_status("Merging", Tone::Info));
             }
-            if c.active() && !c.merged() && has_deliver_in_project && c.hold_auto_merge {
+            if c.active() && !c.resolved() && has_deliver_in_project && c.hold_auto_merge {
                 row = row.child(status("Auto-merge held", Tone::Attention));
             }
             if let Some(branch) = c.branch.clone().filter(|b| !b.is_empty()) {
@@ -633,7 +641,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     });
                     (d, r, active_wf, auto)
                 });
-            if !review_mode && c.active() && !c.merged() && is_pr {
+            if !review_mode && c.active() && !c.resolved() && is_pr {
                 let st = ui.review_state;
                 if let Some((prof, started_at)) = active_review {
                     let now_ms = ui.runtime_clock.get();
@@ -772,7 +780,8 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     move |_| changes::open(ui),
                 ));
             }
-            if !review_mode && quick_merge::eligible(&c, project.as_ref()) {
+            let quick_merge_visible = !review_mode && quick_merge::eligible(&c, project.as_ref());
+            if quick_merge_visible {
                 let target = project
                     .as_ref()
                     .and_then(|p| p.target_branch.clone())
@@ -798,6 +807,40 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                             )
                             .accessibility_label(move || Some(a11y.clone().into()))
                             .disabled(move || quick_merge::busy(ui)),
+                        ),
+                );
+            } else if !review_mode && c.active() && !c.resolved() && !is_pr {
+                let card = c.clone();
+                row = row.child(
+                    view()
+                        .tooltip(hint_tooltip(
+                            "Mark this Card as resolved without merging code (auto-archives tomorrow)",
+                        ))
+                        .child(
+                            compact_action_with_icon(
+                                Icon::Check,
+                                "Resolve",
+                                Variant::Secondary,
+                                move |_| resolve::start(ui, card.clone()),
+                            )
+                            .accessibility_label(|| Some("Mark Card as resolved".into()))
+                            .disabled(move || resolve::busy(ui) || ui.pending.get()),
+                        ),
+                );
+            } else if !review_mode && c.active() && c.resolved() && !c.merged() {
+                let card = c.clone();
+                row = row.child(
+                    view()
+                        .tooltip(hint_tooltip("Reopen this resolved Card"))
+                        .child(
+                            compact_action_with_icon(
+                                Icon::Undo,
+                                "Reopen",
+                                Variant::Secondary,
+                                move |_| resolve::reopen(ui, card.clone()),
+                            )
+                            .accessibility_label(|| Some("Reopen resolved Card".into()))
+                            .disabled(move || resolve::busy(ui) || ui.pending.get()),
                         ),
                 );
             }
@@ -833,7 +876,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             if let Some(next) = next_stage {
                 let pr_primary = !review_mode
                     && c.active()
-                    && !c.merged()
+                    && !c.resolved()
                     && is_pr
                     && (review_draft.is_some() || in_review_stage);
                 let diff_primary = !review_mode
@@ -959,6 +1002,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             },
         ))
         .child(quick_merge::confirm_dialog(ui))
+        .child(resolve::confirm_dialog(ui))
 }
 
 #[cfg(test)]
@@ -1060,6 +1104,15 @@ mod tests {
             merged_at: 10,
         });
         assert_eq!(next_stage_for_card(&merged, Some(&project), false), None);
+
+        let mut resolved = sample_card("develop");
+        resolved.resolution = Some(canban_types::CardResolution {
+            resolved_at: 10,
+            kind: "manual".into(),
+            reason: None,
+            actor: "user".into(),
+        });
+        assert_eq!(next_stage_for_card(&resolved, Some(&project), false), None);
     }
 
     #[test]

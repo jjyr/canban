@@ -34,6 +34,7 @@ const CARD_FIELDS: &[&str] = &[
     "base_commit",
     "human_gate",
     "delivery",
+    "resolution",
 ];
 const CARD_SUMMARY: &[&str] = &["id", "number", "title", "stage", "revision"];
 const EVENT_FIELDS: &[&str] = &[
@@ -69,6 +70,8 @@ pub fn card_response(method: &str) -> bool {
             | "card.move"
             | "card.adopt"
             | "card.restore"
+            | "card.resolve"
+            | "card.reopen"
             | "card.context.update"
             | "card.hold_auto_merge"
     )

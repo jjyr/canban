@@ -643,7 +643,7 @@ impl AppServer {
                         revise(&c, &p)?;
                     }
                     ensure!(c.active(), "Restore the Card before adopting a stage");
-                    ensure!(!c.merged(), "Merged Cards cannot enter development");
+                    ensure!(!c.resolved(), "Resolved Cards cannot enter development");
                     ensure!(
                         c.human_gate.is_none(),
                         "Human review must be approved by the user before moving this Card"
@@ -1555,6 +1555,9 @@ impl AppServer {
             }
             "card.archive" => self.archive(&p),
             "card.restore" => self.restore(&p),
+            "card.resolve.preview" => self.resolve_card_preview(&p),
+            "card.resolve" => self.resolve_card_action(&p),
+            "card.reopen" => self.reopen_card_action(&p),
             _ => bail!("Unknown operation: {method}"),
         }
     }

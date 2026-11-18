@@ -117,6 +117,7 @@ pub struct DayBucket {
     pub merged_cards: usize,
     pub local_merges: usize,
     pub pr_merges: usize,
+    pub manual_resolutions: usize,
     pub completed_runs: usize,
     pub blocked_runs: usize,
     pub failed_runs: usize,
@@ -328,6 +329,7 @@ pub struct Dashboard {
     pub prev_merged_total: usize,
     pub local_merges: usize,
     pub pr_merges: usize,
+    pub manual_resolutions: usize,
     pub created_total: usize,
     pub initial_sync_period: usize,
     pub net_wip_delta: isize,
@@ -371,7 +373,7 @@ pub enum ActivityMetric {
 impl ActivityMetric {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Merged => "Merged",
+            Self::Merged => "Resolved",
             Self::Created => "Created",
             Self::Runs => "Agent starts",
         }
@@ -632,12 +634,7 @@ fn classify_card_intake(card: &Card, card_events: Option<&Vec<&Event>>) -> Intak
 }
 
 fn resolve_merged_at(card: &Card, card_events: Option<&Vec<&Event>>) -> Option<u64> {
-    if let Some(ts) = card
-        .delivery
-        .as_ref()
-        .map(|d| d.merged_at)
-        .filter(|&t| t > 0)
-    {
+    if let Some(ts) = card.resolved_at() {
         return Some(ts);
     }
     if let Some(events) = card_events
@@ -651,6 +648,7 @@ fn resolve_merged_at(card: &Card, card_events: Option<&Vec<&Event>>) -> Option<u
                         | "github.pr_merged"
                         | "github.pr_delivered"
                         | "github.pr.merged"
+                        | "card.resolved"
                 )
             })
             .map(|e| e.created_at)
@@ -1419,6 +1417,7 @@ pub fn compute_full<Tz: TimeZone>(
     let mut daily_initial_sync = BTreeMap::<NaiveDate, usize>::new();
     let mut daily_local = BTreeMap::<NaiveDate, usize>::new();
     let mut daily_pr = BTreeMap::<NaiveDate, usize>::new();
+    let mut daily_manual = BTreeMap::<NaiveDate, usize>::new();
     let mut daily_runs = BTreeMap::<NaiveDate, [usize; 4]>::new();
     let mut daily_cycles = BTreeMap::<NaiveDate, Vec<u64>>::new();
     let mut daily_touches = BTreeMap::<NaiveDate, usize>::new();
@@ -1433,6 +1432,7 @@ pub fn compute_full<Tz: TimeZone>(
     let mut prev_merged_total = 0;
     let mut local_merges = 0;
     let mut pr_merges = 0;
+    let mut manual_resolutions = 0;
     let mut unknown_merge_dates = 0;
     let mut created_times = Vec::new();
     let mut merge_times = Vec::new();
@@ -1479,7 +1479,7 @@ pub fn compute_full<Tz: TimeZone>(
                 ..Default::default()
             });
 
-        if card.active() && !card.merged() {
+        if card.active() && !card.resolved() {
             pipeline.active_wip += 1;
             match card.stage.as_str() {
                 "backlog" => {
@@ -1549,8 +1549,7 @@ pub fn compute_full<Tz: TimeZone>(
                 previous_created += 1;
             }
         }
-
-        if !card.merged() {
+        if !card.resolved() {
             continue;
         }
         let Some(merged_at) = resolve_merged_at(card, card_evs) else {
@@ -1563,11 +1562,15 @@ pub fn compute_full<Tz: TimeZone>(
         merge_times.push(merged_at);
         let d = local_date(merged_at, tz);
         let is_pr = card_is_pr_merge(card);
-        *if is_pr {
-            daily_pr.entry(d).or_default()
+        if card.merged() {
+            *if is_pr {
+                daily_pr.entry(d).or_default()
+            } else {
+                daily_local.entry(d).or_default()
+            } += 1;
         } else {
-            daily_local.entry(d).or_default()
-        } += 1;
+            *daily_manual.entry(d).or_default() += 1;
+        }
         *project_merges
             .entry(card.project_id.clone())
             .or_default()
@@ -1578,7 +1581,9 @@ pub fn compute_full<Tz: TimeZone>(
             merged_total += 1;
             p.merged += 1;
             p.cards.insert(card.id.clone());
-            if is_pr {
+            if !card.merged() {
+                manual_resolutions += 1;
+            } else if is_pr {
                 pr_merges += 1;
             } else {
                 local_merges += 1;
@@ -1819,7 +1824,9 @@ pub fn compute_full<Tz: TimeZone>(
         .collect::<BTreeSet<_>>()
         .len();
     let merged_on = |d: NaiveDate| {
-        daily_local.get(&d).copied().unwrap_or(0) + daily_pr.get(&d).copied().unwrap_or(0)
+        daily_local.get(&d).copied().unwrap_or(0)
+            + daily_pr.get(&d).copied().unwrap_or(0)
+            + daily_manual.get(&d).copied().unwrap_or(0)
     };
 
     let chart_days = if range == RangeWindow::Today {
@@ -1850,6 +1857,7 @@ pub fn compute_full<Tz: TimeZone>(
                 merged_cards: merged_on(d),
                 local_merges: daily_local.get(&d).copied().unwrap_or(0),
                 pr_merges: daily_pr.get(&d).copied().unwrap_or(0),
+                manual_resolutions: daily_manual.get(&d).copied().unwrap_or(0),
                 completed_runs: o[0],
                 blocked_runs: o[1],
                 failed_runs: o[2],
@@ -1886,6 +1894,7 @@ pub fn compute_full<Tz: TimeZone>(
             let mut w_sync = 0;
             let mut w_local = 0;
             let mut w_pr = 0;
+            let mut w_manual = 0;
             let mut w_runs = [0usize; 4];
             let mut w_touches = 0;
             let mut w_cycles = Vec::new();
@@ -1896,6 +1905,7 @@ pub fn compute_full<Tz: TimeZone>(
                 w_sync += daily_initial_sync.get(&d).copied().unwrap_or(0);
                 w_local += daily_local.get(&d).copied().unwrap_or(0);
                 w_pr += daily_pr.get(&d).copied().unwrap_or(0);
+                w_manual += daily_manual.get(&d).copied().unwrap_or(0);
                 let ro = daily_runs.get(&d).copied().unwrap_or_default();
                 for k in 0..4 {
                     w_runs[k] += ro[k];
@@ -1905,7 +1915,7 @@ pub fn compute_full<Tz: TimeZone>(
                     w_cycles.extend(cs.iter().copied());
                 }
             }
-            let w_merged = w_local + w_pr;
+            let w_merged = w_local + w_pr + w_manual;
             let resolved_r = w_runs[0] + w_runs[1] + w_runs[2];
             let total_r = resolved_r + w_runs[3];
             let projected_merges = if is_curr_partial && elapsed_days >= 0.25 && w_merged > 0 {
@@ -2315,6 +2325,7 @@ pub fn compute_full<Tz: TimeZone>(
         prev_merged_total,
         local_merges,
         pr_merges,
+        manual_resolutions,
         created_total,
         initial_sync_period,
         net_wip_delta: created_total as isize - merged_total as isize,
@@ -2459,18 +2470,32 @@ mod tests {
         });
         snap.cards.push(c_removed);
 
+        let mut c_manual = sample_card("c-manual", "p1", 5, ts_utc8(2026, 11, 15, 10, 0));
+        c_manual.resolution = Some(canban_types::CardResolution {
+            resolved_at: ts_utc8(2026, 11, 15, 13, 0),
+            kind: "manual".into(),
+            reason: Some("Duplicate".into()),
+            actor: "user".into(),
+        });
+        snap.cards.push(c_manual);
+
         let dash = compute(&snap, None, RangeWindow::Days7, now, &tz_plus_8());
-        assert_eq!(dash.merged_total, 2);
+        assert_eq!(dash.merged_total, 3);
         assert_eq!(dash.local_merges, 1);
         assert_eq!(dash.pr_merges, 1);
-        assert_eq!(dash.created_total, 3);
+        assert_eq!(dash.manual_resolutions, 1);
+        assert_eq!(dash.created_total, 4);
         assert_eq!(dash.net_wip_delta, 1);
+        assert_eq!(dash.pipeline.active_wip, 0);
+        assert_eq!(dash.weeks.last().unwrap().merged_cards, 3);
+        assert_eq!(dash.wow.current_merged, 3);
 
         let today_bucket = dash.days.last().unwrap();
         assert_eq!(today_bucket.date_key, "2026-11-15");
-        assert_eq!(today_bucket.merged_cards, 2);
+        assert_eq!(today_bucket.merged_cards, 3);
         assert_eq!(today_bucket.local_merges, 1);
         assert_eq!(today_bucket.pr_merges, 1);
+        assert_eq!(today_bucket.manual_resolutions, 1);
     }
 
     #[test]

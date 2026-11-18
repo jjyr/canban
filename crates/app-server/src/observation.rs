@@ -453,7 +453,7 @@ impl AppServer {
         })?;
         self.request_deliveries();
         self.request_scripts();
-        let _ = self.try_auto_archive_merged(&card_id);
+        let _ = self.try_auto_archive_resolved(&card_id);
         self.emit("runtime", Some(card_id));
         Ok(())
     }

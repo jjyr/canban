@@ -147,7 +147,7 @@ impl SnapshotIndex {
             let is_merging = crate::components::activity::is_merging_indexed(snapshot, c, queue);
             let specs_normal =
                 crate::components::activity::card_status_specs_indexed(snapshot, c, false, queue);
-            let specs_ui_merging = if c.merged() || is_merging {
+            let specs_ui_merging = if c.resolved() || is_merging {
                 specs_normal.clone()
             } else {
                 crate::components::activity::card_status_specs_indexed(snapshot, c, true, queue)

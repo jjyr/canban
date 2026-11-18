@@ -338,10 +338,10 @@ struct ScheduleCreateArgs {
 }
 #[derive(Subcommand)]
 enum WorktreeCmd {
-    /// Remove clean worktrees for Cards merged before the retention window.
+    /// Remove clean worktrees for Cards resolved or merged before the retention window.
     Gc {
         /// Retention window (e.g. 7d, 24h, 30m).
-        #[arg(long, default_value = "7d")]
+        #[arg(long, alias = "resolved-before", default_value = "7d")]
         merged_before: String,
         /// Restrict cleanup to a specific Project id.
         #[arg(long)]
@@ -433,6 +433,27 @@ enum CardCmd {
     Adopt {
         #[arg(long, default_value = "develop")]
         stage: String,
+        #[arg(long, env = "CANBAN_CARD")]
+        card: u64,
+        #[arg(long, env = "CANBAN_PROJECT")]
+        project: Option<String>,
+        #[arg(long)]
+        request_key: Option<String>,
+    },
+    /// Mark the Card as resolved (stops active runs and schedules next-day auto-archive).
+    Resolve {
+        /// Optional resolution reason or summary message.
+        #[arg(long, alias = "reason")]
+        message: Option<String>,
+        #[arg(long, env = "CANBAN_CARD")]
+        card: u64,
+        #[arg(long, env = "CANBAN_PROJECT")]
+        project: Option<String>,
+        #[arg(long)]
+        request_key: Option<String>,
+    },
+    /// Reopen a manually resolved Card (cannot reopen Cards with merged code).
+    Reopen {
         #[arg(long, env = "CANBAN_CARD")]
         card: u64,
         #[arg(long, env = "CANBAN_PROJECT")]
@@ -917,6 +938,33 @@ fn run() -> Result<()> {
                 }
                 ("card.adopt".into(), params)
             }
+            CardCmd::Resolve {
+                message,
+                card,
+                project,
+                request_key,
+            } => {
+                let mut params = card_scope(Some(card), project);
+                params["request_key"] = json!(request_key.unwrap_or_else(canban_types::id));
+                if let Some(msg) = message {
+                    params["message"] = json!(msg);
+                }
+                if let Ok(terminal) = std::env::var("HC_TERMINAL_ID")
+                    && !terminal.trim().is_empty()
+                {
+                    params["runtime_terminal"] = json!(terminal);
+                }
+                ("card.resolve".into(), params)
+            }
+            CardCmd::Reopen {
+                card,
+                project,
+                request_key,
+            } => {
+                let mut params = card_scope(Some(card), project);
+                params["request_key"] = json!(request_key.unwrap_or_else(canban_types::id));
+                ("card.reopen".into(), params)
+            }
         },
         Cmd::Note { command } => match command {
             NoteCmd::List { project_id } => ("note.list".into(), json!({"project_id":project_id})),
@@ -1278,6 +1326,7 @@ fn run() -> Result<()> {
             | "note.rename"
             | "card.continue"
             | "card.move"
+            | "card.reopen"
             | "execution.retry"
             | "review.merge"
             | "card.archive"
@@ -1499,6 +1548,46 @@ mod tests {
                 command: ScheduleCmd::Trigger { rule_id, .. },
             }) => assert_eq!(rule_id.as_deref(), Some("nightly")),
             _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parses_card_resolve_reopen_and_worktree_gc_alias() {
+        let res = Args::try_parse_from([
+            "canban",
+            "card",
+            "resolve",
+            "--card",
+            "132",
+            "--message",
+            "Fixed in #130",
+        ])
+        .unwrap();
+        match res.command {
+            Some(Cmd::Card {
+                command: CardCmd::Resolve { card, message, .. },
+            }) => {
+                assert_eq!(card, 132);
+                assert_eq!(message.as_deref(), Some("Fixed in #130"));
+            }
+            _ => panic!("expected card resolve"),
+        }
+
+        let reopen = Args::try_parse_from(["canban", "card", "reopen", "--card", "132"]).unwrap();
+        match reopen.command {
+            Some(Cmd::Card {
+                command: CardCmd::Reopen { card, .. },
+            }) => assert_eq!(card, 132),
+            _ => panic!("expected card reopen"),
+        }
+
+        let gc =
+            Args::try_parse_from(["canban", "worktree", "gc", "--resolved-before", "3d"]).unwrap();
+        match gc.command {
+            Some(Cmd::Worktree {
+                command: WorktreeCmd::Gc { merged_before, .. },
+            }) => assert_eq!(merged_before, "3d"),
+            _ => panic!("expected worktree gc"),
         }
     }
 }

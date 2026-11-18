@@ -1,7 +1,7 @@
 //! Unified Project -> Worktree -> Terminal hierarchy.
 //! Only worktree scopes with >= 1 live Terminal are displayed; all active rows stay expanded.
 use super::worktrees::{
-    WorktreeScope, create_in_scope, entry_scope, scope_git_summary, scope_merge_label,
+    WorktreeScope, create_in_scope, entry_scope, scope_git_summary, scope_resolution_label,
 };
 use super::*;
 use crate::drafts::{capture_scroll, scroll_position};
@@ -45,7 +45,7 @@ fn scope_header(
 ) -> impl IntoElement + use<> {
     let git = scope_git_summary(s, &scope, children);
     let display = scope.display_name(s, children, Some(ui));
-    let merge_label = scope_merge_label(s, &scope);
+    let resolution_label = scope_resolution_label(s, &scope);
     let scope_for_active = children.first().map(super::worktrees::location_key);
     let target_terminal = children.first().map(|e| e.saved.id.clone());
     let launch_params = children.first().and_then(|e| e.location.as_ref().map(|l| json!({
@@ -143,7 +143,7 @@ fn scope_header(
             (Icon::Terminal, None, tip)
         }
     };
-    if let Some(label) = &merge_label {
+    if let Some(label) = &resolution_label {
         tooltip_text.push_str(&format!("\n{label}"));
     }
 
@@ -172,7 +172,7 @@ fn scope_header(
         let more_anchor = element_ref();
 
         let has_git = git_now.dirty || git_now.ahead > 0 || git_now.behind > 0;
-        let stacked_git = merge_label.is_some() && has_git && ui.terminal_width.get() < 340.;
+        let stacked_git = resolution_label.is_some() && has_git && ui.terminal_width.get() < 340.;
         let mut title_row = view()
             .w_full()
             .min_w(px(0.))
@@ -200,9 +200,9 @@ fn scope_header(
         if let Some(b) = badge {
             title_row = title_row.child(muted(b).text_size(px(11.)).flex_shrink_0());
         }
-        if merge_label.is_some() {
+        if resolution_label.is_some() {
             title_row = title_row.child(
-                status("Merged", Tone::Highlight)
+                status("Resolved", Tone::Highlight)
                     .px_1()
                     .py(px(1.))
                     .flex_shrink_0(),
@@ -229,8 +229,8 @@ fn scope_header(
         }
         btn_row = btn_row
             .accessibility_label({
-                let lbl = match &merge_label {
-                    Some(merged) => format!("{display_label} · {merged}"),
+                let lbl = match &resolution_label {
+                    Some(resolved) => format!("{display_label} · {resolved}"),
                     None => display_label.clone(),
                 };
                 move || Some(format!("Worktree {lbl}").into())
@@ -426,7 +426,9 @@ impl TreeNode {
             Self::OtherHeader => 34.,
             Self::Scope(key, scope) => {
                 let stacked = ui.terminal_width.get() < 340.
-                    && ui.snapshot.with(|s| scope_merge_label(s, scope).is_some())
+                    && ui
+                        .snapshot
+                        .with(|s| scope_resolution_label(s, scope).is_some())
                     && ui.terminal_entries.with(|rows| {
                         rows.iter().any(|e| {
                             e.listed()
@@ -618,7 +620,7 @@ fn node_content(
                             scope.clone(),
                             scope.display_name(s, &children, Some(ui)),
                             scope_git_summary(s, &scope, &children),
-                            scope_merge_label(s, &scope),
+                            scope_resolution_label(s, &scope),
                             children
                                 .iter()
                                 .map(|e| e.saved.id.clone())

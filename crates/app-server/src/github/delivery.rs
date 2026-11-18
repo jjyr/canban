@@ -370,7 +370,11 @@ impl AppServer {
             }
             if next.merged && current.delivery.as_ref().is_none_or(|d|d.request_key!=format!("github:{}:{}",next.repository_id,next.number)){
                 newly_merged = true;
-                current.delivery=Some(Delivery{target_branch:next.base_branch.clone(),commit:remote["merge_commit_sha"].as_str().unwrap_or(&next.head).into(),request_key:format!("github:{}:{}",next.repository_id,next.number),merged_at:now()});
+                let resolved_at = now();
+                current.delivery=Some(Delivery{target_branch:next.base_branch.clone(),commit:remote["merge_commit_sha"].as_str().unwrap_or(&next.head).into(),request_key:format!("github:{}:{}",next.repository_id,next.number),merged_at:resolved_at});
+                if current.resolution.is_none() {
+                    current.resolution = Some(CardResolution { resolved_at, kind: "merged".into(), reason: None, actor: "github".into() });
+                }
                 current.attention=None;
                 if let Some(gate)=current.human_gate.clone() && let Some(id)=gate.terminal_id {let att:TerminalEntry=db.get(&id)?;if att.agent.as_ref().is_some_and(|a|a.state=="completed") {current.human_gate=None;crate::workflow::advance(db,&self.config(),&mut current,Some(&att))?;}}
                 log(db,&current,"github.pr_delivered","github","Delivery PR merged",None,json!({"number":next.number,"commit":current.delivery.as_ref().map(|d|&d.commit)}))?;
@@ -384,7 +388,7 @@ impl AppServer {
             self.sync_merged_target(&card, Some(&next.base_branch));
         }
         if next.merged {
-            let _ = self.try_auto_archive_merged(&card.id);
+            let _ = self.try_auto_archive_resolved(&card.id);
         }
         self.emit("github", Some(card.id));
         Ok(serde_json::to_value(next)?)
@@ -461,12 +465,21 @@ impl AppServer {
                     .as_ref()
                     .is_none_or(|d| d.request_key != request_key);
                 if newly_merged {
+                    let resolved_at = now();
                     current.delivery = Some(Delivery {
                         target_branch: base_branch.clone(),
                         commit: commit.clone(),
                         request_key,
-                        merged_at: now(),
+                        merged_at: resolved_at,
                     });
+                    if current.resolution.is_none() {
+                        current.resolution = Some(CardResolution {
+                            resolved_at,
+                            kind: "merged".into(),
+                            reason: None,
+                            actor: "github".into(),
+                        });
+                    }
                     current.attention = None;
                     if let Some(gate) = current.human_gate.clone()
                         && let Some(id) = gate.terminal_id
@@ -499,7 +512,7 @@ impl AppServer {
             if newly_merged {
                 self.sync_merged_target(&card, Some(&base_branch));
             }
-            let _ = self.try_auto_archive_merged(&card.id);
+            let _ = self.try_auto_archive_resolved(&card.id);
         }
         Ok(())
     }
@@ -564,11 +577,18 @@ impl AppServer {
                 let commit = value["commit"]
                     .as_str()
                     .context("GitHub returned no merge commit")?;
+                let resolved_at = now();
                 current.delivery = Some(Delivery {
                     target_branch: pr.base_branch.clone(),
                     commit: commit.into(),
                     request_key: format!("github:{}:{}", pr.repository_id, pr.number),
-                    merged_at: now(),
+                    merged_at: resolved_at,
+                });
+                current.resolution = Some(CardResolution {
+                    resolved_at,
+                    kind: "merged".into(),
+                    reason: None,
+                    actor: "user".into(),
                 });
                 if let Some(pr) = &mut current.pull_request {
                     pr.merged = true;
@@ -625,7 +645,7 @@ impl AppServer {
         drop(_guard);
         if value["state"] == "merged" {
             self.sync_merged_target(&card, Some(&pr.base_branch));
-            let _ = self.try_auto_archive_merged(&card.id);
+            let _ = self.try_auto_archive_resolved(&card.id);
         }
         self.github_sync_due.store(true, Ordering::SeqCst);
         self.emit("github", Some(strp(&p, "card_id")?.into()));

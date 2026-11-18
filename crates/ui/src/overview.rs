@@ -901,7 +901,8 @@ fn classify_reason(
                 || gate_text.eq_ignore_ascii_case("review changes")
                 || gate_text.eq_ignore_ascii_case("ready for review")
                 || gate_text.eq_ignore_ascii_case("review required");
-            if row.card.hold_auto_merge && !row.card.merged() || is_merge_gate_reason(&gate_text) {
+            if row.card.hold_auto_merge && !row.card.resolved() || is_merge_gate_reason(&gate_text)
+            {
                 let headline = if gate_text.to_lowercase().contains("conflict") {
                     "Merge conflict"
                 } else {
@@ -921,7 +922,7 @@ fn classify_reason(
                 .and_then(|tid| snapshot.terminals.iter().find(|t| t.id == tid))
                 .and_then(|t| t.agent.as_ref())
                 .map(|a| a.state.as_str());
-            if is_merge_gate_reason(&msg) || (row.card.hold_auto_merge && !row.card.merged()) {
+            if is_merge_gate_reason(&msg) || (row.card.hold_auto_merge && !row.card.resolved()) {
                 let is_fail = msg.to_lowercase().contains("fail");
                 let headline = if msg.to_lowercase().contains("conflict") {
                     "Merge conflict"

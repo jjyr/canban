@@ -535,7 +535,18 @@ pub struct Card {
     pub human_gate: Option<HumanGate>,
     #[serde(default)]
     pub delivery: Option<Delivery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<CardResolution>,
     pub created_at: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CardResolution {
+    pub resolved_at: u64,
+    /// e.g. "merged" | "manual" | "agent"
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub actor: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Delivery {
@@ -1692,14 +1703,29 @@ impl Card {
         })
     }
     pub fn board_cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.merged()
-            .cmp(&other.merged())
+        self.resolved()
+            .cmp(&other.resolved())
             .then_with(|| self.board_rank().cmp(&other.board_rank()))
             .then_with(|| self.number.cmp(&other.number))
             .then_with(|| self.id.cmp(&other.id))
     }
     pub fn merged(&self) -> bool {
         self.delivery.is_some() || self.pull_request.as_ref().is_some_and(|p| p.merged)
+    }
+    pub fn resolved(&self) -> bool {
+        self.resolution.is_some() || self.merged()
+    }
+    pub fn resolved_at(&self) -> Option<u64> {
+        self.resolution
+            .as_ref()
+            .map(|r| r.resolved_at)
+            .filter(|&t| t > 0)
+            .or_else(|| {
+                self.delivery
+                    .as_ref()
+                    .map(|d| d.merged_at)
+                    .filter(|&t| t > 0)
+            })
     }
     pub fn github_issue(&self) -> Option<&GitHubIssueRef> {
         match &self.content {
@@ -1879,10 +1905,22 @@ mod tests {
         }))
         .unwrap();
         assert!(merged.merged());
+        assert!(merged.resolved());
         assert!(!open.merged());
+        assert!(!open.resolved());
         assert_eq!(open.board_cmp(&merged), std::cmp::Ordering::Less);
         merged.delivery = None;
         assert_eq!(merged.board_cmp(&open), std::cmp::Ordering::Less);
+        merged.resolution = Some(CardResolution {
+            resolved_at: 200,
+            kind: "manual".into(),
+            reason: Some("Already fixed".into()),
+            actor: "user".into(),
+        });
+        assert!(!merged.merged());
+        assert!(merged.resolved());
+        assert_eq!(merged.resolved_at(), Some(200));
+        assert_eq!(open.board_cmp(&merged), std::cmp::Ordering::Less);
     }
 
     #[test]

@@ -30,7 +30,7 @@ pub(crate) fn location_hint(
         && !params["setup_argv"].is_array()
         && card.is_some_and(|c| {
             c.active()
-                && !c.merged()
+                && !c.resolved()
                 && c.worktree
                     .as_deref()
                     .is_none_or(|w| !Path::new(w).is_absolute())

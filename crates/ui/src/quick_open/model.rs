@@ -100,7 +100,7 @@ pub fn candidates_with_tags(s: &Snapshot, local_tags: &BTreeSet<String>) -> Vec<
             tags: Vec::new(),
         });
     }
-    for c in s.cards.iter().filter(|c| c.active() && !c.merged()) {
+    for c in s.cards.iter().filter(|c| c.active() && !c.resolved()) {
         let title = format!("#{} {}", c.number, c.title);
         let owner = project(&c.project_id);
         let tags = crate::tags::card_tags(c, &known_tags);
@@ -141,7 +141,7 @@ pub fn candidates_with_tags(s: &Snapshot, local_tags: &BTreeSet<String>) -> Vec<
     }
     for row in canban_notifications::overview(s)
         .into_iter()
-        .filter(|row| row.card.active() && !row.card.merged())
+        .filter(|row| row.card.active() && !row.card.resolved())
     {
         let Some((profile_id, command_name)) = row
             .agent()
@@ -173,7 +173,7 @@ pub fn candidates_with_tags(s: &Snapshot, local_tags: &BTreeSet<String>) -> Vec<
     for e in crate::terminals::entries(s).into_iter().filter(|e| {
         e.saved.conversation_id.is_none()
             && !e.ended()
-            && e.card.as_ref().is_none_or(|c| c.active() && !c.merged())
+            && e.card.as_ref().is_none_or(|c| c.active() && !c.resolved())
     }) {
         rows.push(Candidate {
             id: format!("terminal:{}", e.saved.id),

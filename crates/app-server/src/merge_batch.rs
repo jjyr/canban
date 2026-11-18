@@ -868,12 +868,19 @@ impl AppServer {
                 if !matches!(run.state.as_str(), "waiting_delivery" | "waiting_batch") {
                     continue;
                 }
+                let resolved_at = now();
                 card.delivery_mode = Some(DeliveryMode::Local);
                 card.delivery = Some(Delivery {
                     target_branch: target_branch.clone(),
                     commit: head_sha.to_owned(),
                     request_key: format!("batch:{short_id}:{}", card.number),
-                    merged_at: now(),
+                    merged_at: resolved_at,
+                });
+                card.resolution = Some(CardResolution {
+                    resolved_at,
+                    kind: "merged".into(),
+                    reason: None,
+                    actor: actor.into(),
                 });
                 card.attention = None;
                 card.human_gate = None;
@@ -937,7 +944,7 @@ impl AppServer {
         })?;
 
         for cid in merged_cards {
-            let _ = self.try_auto_archive_merged(&cid);
+            let _ = self.try_auto_archive_resolved(&cid);
         }
         self.git_changed("local");
         self.request_scripts();

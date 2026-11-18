@@ -36,7 +36,9 @@ def main():
     cs=cards.add_parser('show')
     cu=cards.add_parser('update');cu.add_argument('--title');cu.add_argument('--file');cu.add_argument('--request-key')
     ca=cards.add_parser('adopt');ca.add_argument('--stage',default='develop');ca.add_argument('--request-key')
-    for p in [cs,cu,ca]:
+    cr=cards.add_parser('resolve');cr.add_argument('--message','--reason',dest='message');cr.add_argument('--request-key')
+    cre=cards.add_parser('reopen');cre.add_argument('--request-key')
+    for p in [cs,cu,ca,cr,cre]:
         p.add_argument('--card',type=int,default=os.environ.get('CANBAN_CARD'),required=not bool(os.environ.get('CANBAN_CARD')))
         p.add_argument('--project',default=os.environ.get('CANBAN_PROJECT'))
     batch=sub.add_parser('batch');batches=batch.add_subparsers(dest='batch_op',required=True)
@@ -70,6 +72,13 @@ def main():
             if a.request_key:p['request_key']=a.request_key
             if a.title is not None:p['title']=a.title
             if a.file is not None:p['body']=body(a.file)
+        elif a.card_op=='resolve':
+            m='card.resolve';p=card_scope(a);p['request_key']=a.request_key or uuid.uuid4().hex
+            if a.message is not None:p['message']=a.message
+            if os.environ.get('HC_TERMINAL_ID','').strip():
+                p['runtime_terminal']=os.environ['HC_TERMINAL_ID']
+        elif a.card_op=='reopen':
+            m='card.reopen';p=card_scope(a);p['request_key']=a.request_key or uuid.uuid4().hex
         else:
             m='card.adopt';p=card_scope(a);p.update({'stage':a.stage,'request_key':a.request_key or uuid.uuid4().hex})
             if os.environ.get('HC_TERMINAL_ID','').strip():
@@ -90,7 +99,7 @@ def main():
     if m=='attachment.add' and 'source' in p:p['bytes']=list(pathlib.Path(p.pop('source')).read_bytes())
     if m not in ['app.snapshot','app.ping','config.get','herdr.status','herdr.templates','profile.presets','review.preview','resource.read','execution.output','card.show','card.get']:
         p.setdefault('request_key',uuid.uuid4().hex)
-    if m in ['note.save','note.write','note.rename','card.continue','card.move','execution.retry','review.merge','card.archive','update.install','update.daemon','workflow.decide','workflow.deliver','workflow.stop','card.hold_auto_merge'] and 'execution' not in p and os.environ.get('CANBAN_PROFILE_ID'):
+    if m in ['note.save','note.write','note.rename','card.continue','card.move','card.reopen','execution.retry','review.merge','card.archive','update.install','update.daemon','workflow.decide','workflow.deliver','workflow.stop','card.hold_auto_merge'] and 'execution' not in p and os.environ.get('CANBAN_PROFILE_ID'):
         ex={'agent':True,'profile_id':os.environ['CANBAN_PROFILE_ID'],'cwd':os.getcwd()}
         if os.environ.get('CANBAN_CARD'):ex['card']=int(os.environ['CANBAN_CARD'])
         if os.environ.get('CANBAN_PROJECT'):ex['project_id']=os.environ['CANBAN_PROJECT']

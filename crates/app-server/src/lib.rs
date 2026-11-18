@@ -857,7 +857,7 @@ impl AppServer {
                 snapshot
                     .cards
                     .iter()
-                    .any(|c| &c.id == *id && c.active() && !c.merged())
+                    .any(|c| &c.id == *id && c.active() && !c.resolved())
             })
             .cloned()
             .collect();

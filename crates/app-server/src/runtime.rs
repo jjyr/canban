@@ -459,7 +459,7 @@ impl AppServer {
             .write(|db| events::pump(db, &self.config()))?;
         self.request_deliveries();
         self.request_scripts();
-        let _ = self.pump_merged_archives();
+        let _ = self.pump_resolved_archives();
         self.observe_terminals()?;
         self.reconcile_merge_batches()?;
         self.pump_configuration()?;
@@ -578,18 +578,25 @@ impl AppServer {
                                 current.state.as_str(),
                                 "running" | "working" | "starting" | "needs_report"
                             ) {
-                                current.state = "failed".into();
-                                current.error =
-                                    Some("Agent exited without reporting an outcome".into());
-                                log(
-                                    db,
-                                    &db.get::<Card>(&card_id)?,
-                                    "execution.failed",
-                                    "system",
-                                    current.error.as_deref().unwrap(),
-                                    Some(entry.id.clone()),
-                                    json!({"run_number":run_number,"exit_code":observed["exit_code"]}),
-                                )?;
+                                let card = db.get::<Card>(&card_id)?;
+                                if card.resolved() {
+                                    current.state = "completed".into();
+                                    current.completed_at = Some(now());
+                                    current.close_state = String::new();
+                                } else {
+                                    current.state = "failed".into();
+                                    current.error =
+                                        Some("Agent exited without reporting an outcome".into());
+                                    log(
+                                        db,
+                                        &card,
+                                        "execution.failed",
+                                        "system",
+                                        current.error.as_deref().unwrap(),
+                                        Some(entry.id.clone()),
+                                        json!({"run_number":run_number,"exit_code":observed["exit_code"]}),
+                                    )?;
+                                }
                             }
                         }
                         db.save(&current_entry)
@@ -605,7 +612,7 @@ impl AppServer {
                         self.request_scripts();
                     }
                     if finished {
-                        let _ = self.try_auto_archive_merged(&card_id);
+                        let _ = self.try_auto_archive_resolved(&card_id);
                     }
                     self.emit("runtime", Some(card_id));
                 }

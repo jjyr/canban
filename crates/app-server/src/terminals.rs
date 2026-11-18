@@ -229,7 +229,7 @@ impl AppServer {
             }
             (c, bound)
         };
-        if !card.active() || card.merged() {
+        if !card.active() || card.resolved() {
             return Ok((card, project));
         }
         let location = card
@@ -364,7 +364,7 @@ impl AppServer {
                 let same = p["machine"].as_str().is_none_or(|m| m == loc.machine);
                 (c, same)
             };
-            if check_card.active() && !check_card.merged() && same_machine {
+            if check_card.active() && !check_card.resolved() && same_machine {
                 let _ = self.ensure_card_worktree(cid, None)?;
             }
         }

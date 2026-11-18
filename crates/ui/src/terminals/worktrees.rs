@@ -203,16 +203,16 @@ pub fn entry_scope(s: &Snapshot, e: &Entry) -> WorktreeScope {
     }
 }
 
-/// Delivery history of the Card at the observed location, independent of Git dirtiness
-/// and of the Terminal's task owner. No Git or network discovery is needed.
-pub fn scope_merge_label(s: &Snapshot, scope: &WorktreeScope) -> Option<String> {
+/// Resolution/delivery history of the Card at the observed location, independent of Git
+/// dirtiness and of the Terminal's task owner. No Git or network discovery is needed.
+pub fn scope_resolution_label(s: &Snapshot, scope: &WorktreeScope) -> Option<String> {
     let WorktreeScope::CardWorktree(id) = scope else {
         return None;
     };
     let card = s
         .cards
         .iter()
-        .find(|c| &c.id == id && c.archived_at.is_none() && c.merged())?;
+        .find(|c| &c.id == id && c.archived_at.is_none() && c.resolved())?;
     let target = card
         .delivery
         .as_ref()
@@ -225,8 +225,8 @@ pub fn scope_merge_label(s: &Snapshot, scope: &WorktreeScope) -> Option<String> 
                 .map(|p| p.base_branch.as_str())
         });
     Some(match target {
-        Some(target) => format!("Merged into {target}"),
-        None => "Merged".into(),
+        Some(target) => format!("Resolved (merged into {target})"),
+        None => "Resolved".into(),
     })
 }
 

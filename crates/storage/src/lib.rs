@@ -432,6 +432,8 @@ impl Db<'_> {
                 "card.restored" => Some("restoration"),
                 "card.archived" => Some("archive"),
                 "card.removed" => Some("removal"),
+                "card.resolved" => Some("resolution"),
+                "card.reopened" => Some("reopen"),
                 _ => None,
             };
             if let Some(reason) = reason {

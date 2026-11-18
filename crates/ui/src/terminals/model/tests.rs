@@ -3412,7 +3412,7 @@ fn shell_origin_does_not_override_observed_external_directory_and_status_does_no
 
 #[test]
 fn worktree_merge_badge_follows_observed_card_and_delivery_target() {
-    use crate::terminals::worktrees::{WorktreeScope, entry_scope, scope_merge_label};
+    use crate::terminals::worktrees::{WorktreeScope, entry_scope, scope_resolution_label};
     let mut s = fixture();
     observe_fixture_locations(&mut s);
     s.cards[0].delivery = Some(Delivery {
@@ -3439,19 +3439,19 @@ fn worktree_merge_badge_follows_observed_card_and_delivery_target() {
     let scope = entry_scope(&s, e);
     assert_eq!(scope, WorktreeScope::CardWorktree("c1".into()));
     assert_eq!(
-        scope_merge_label(&s, &scope).as_deref(),
-        Some("Merged into release")
+        scope_resolution_label(&s, &scope).as_deref(),
+        Some("Resolved (merged into release)")
     );
     assert_eq!(
-        scope_merge_label(&s, &WorktreeScope::ProjectRoot("p1".into())),
+        scope_resolution_label(&s, &WorktreeScope::ProjectRoot("p1".into())),
         None
     );
     assert_eq!(
-        scope_merge_label(&s, &WorktreeScope::ManagedWorktree("wt".into())),
+        scope_resolution_label(&s, &WorktreeScope::ManagedWorktree("wt".into())),
         None
     );
     assert_eq!(
-        scope_merge_label(&s, &WorktreeScope::CardWorktree("c2".into())),
+        scope_resolution_label(&s, &WorktreeScope::CardWorktree("c2".into())),
         None
     );
 
@@ -3466,8 +3466,8 @@ fn worktree_merge_badge_follows_observed_card_and_delivery_target() {
         .unwrap(),
     );
     assert_eq!(
-        scope_merge_label(&s, &scope).as_deref(),
-        Some("Merged into stable")
+        scope_resolution_label(&s, &scope).as_deref(),
+        Some("Resolved (merged into stable)")
     );
     s.cards[0]
         .pull_request
@@ -3475,16 +3475,30 @@ fn worktree_merge_badge_follows_observed_card_and_delivery_target() {
         .unwrap()
         .base_branch
         .clear();
-    assert_eq!(scope_merge_label(&s, &scope).as_deref(), Some("Merged"));
+    assert_eq!(
+        scope_resolution_label(&s, &scope).as_deref(),
+        Some("Resolved")
+    );
     s.cards[0].pull_request.as_mut().unwrap().merged = false;
     assert_eq!(
-        scope_merge_label(&s, &scope),
+        scope_resolution_label(&s, &scope),
         None,
         "closed PR is not merged"
     );
+    s.cards[0].resolution = Some(canban_types::CardResolution {
+        resolved_at: 2,
+        kind: "manual".into(),
+        reason: None,
+        actor: "user".into(),
+    });
+    assert_eq!(
+        scope_resolution_label(&s, &scope).as_deref(),
+        Some("Resolved")
+    );
+    s.cards[0].resolution = None;
     s.cards[0].pull_request.as_mut().unwrap().merged = true;
     s.cards[0].archived_at = Some(2);
-    assert_eq!(scope_merge_label(&s, &scope), None);
+    assert_eq!(scope_resolution_label(&s, &scope), None);
     assert!(
         !matches!(entry_scope(&s, e), WorktreeScope::CardWorktree(_)),
         "stale context must not match an archived Card"
@@ -3624,7 +3638,7 @@ fn retained_directory_rows_survive_cd_and_unrelated_status_updates() {
             assert!(
                 m.labels
                     .keys()
-                    .any(|l| l.ends_with(" · Merged into release")),
+                    .any(|l| l.ends_with(" · Resolved (merged into release)")),
                 "delivery-only snapshot change must update the mounted worktree header"
             );
         }

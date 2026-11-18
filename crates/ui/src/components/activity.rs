@@ -184,6 +184,8 @@ pub fn activity_header(actor: String, kind: &str, time: u64) -> impl IntoElement
         "review.merge_failed" | "github.pr_merge_attention" => "Merge failed",
         "review.batch_test_failed" => "Batch test failed",
         "review.batch_evicted" => "Evicted from batch",
+        "card.resolved" => "Card resolved",
+        "card.reopened" => "Card reopened",
         "card.archived" => "Card archived",
         "card.restored" => "Card restored",
         "execution.queued" => "Queued",
@@ -234,7 +236,7 @@ pub(crate) fn is_merging_indexed(
     card: &canban_types::Card,
     queue: QueueStatus<'_>,
 ) -> bool {
-    if !card.active() || card.merged() {
+    if !card.active() || card.resolved() {
         return false;
     }
     if snapshot.merging_cards.iter().any(|id| id == &card.id)
@@ -273,10 +275,10 @@ pub(crate) fn card_status_specs_indexed(
     queue: QueueStatus<'_>,
 ) -> Vec<(String, Tone, bool)> {
     let mut specs = Vec::new();
-    let merging =
-        is_merging_indexed(snapshot, card, queue) || card.active() && !card.merged() && ui_merging;
-    if card.merged() {
-        specs.push(("Merged".into(), Tone::Success, false));
+    let merging = is_merging_indexed(snapshot, card, queue)
+        || card.active() && !card.resolved() && ui_merging;
+    if card.resolved() {
+        specs.push(("Resolved".into(), Tone::Success, false));
     } else if card.active()
         && let Some((batch, _, _)) = snapshot.active_merge_batch_for_card(&card.id)
     {
@@ -311,7 +313,7 @@ pub(crate) fn card_status_specs_indexed(
     }
     if card.human_gate.is_some() || card.attention.is_some() {
         specs.push((
-            if card.hold_auto_merge && !card.merged() {
+            if card.hold_auto_merge && !card.resolved() {
                 "Merge held".into()
             } else if card.human_gate.is_some() && card.stage == "review" {
                 "Needs review".into()
@@ -321,7 +323,7 @@ pub(crate) fn card_status_specs_indexed(
             Tone::Attention,
             false,
         ));
-    } else if card.hold_auto_merge && !card.merged() {
+    } else if card.hold_auto_merge && !card.resolved() {
         specs.push(("Merge held".into(), Tone::Neutral, false));
     }
     let mut latest = std::collections::BTreeMap::new();
@@ -606,7 +608,7 @@ mod tests {
         assert!(!is_merging(&snapshot, &card));
         assert!(card_status_specs(&snapshot, &card, false).is_empty());
 
-        // Once merged, Merged takes precedence over any transient merging marker.
+        // Once resolved/merged, Resolved takes precedence over any transient merging marker.
         snapshot.merging_cards = vec!["c".into()];
         card.delivery = Some(canban_types::Delivery {
             target_branch: "main".into(),
@@ -617,7 +619,7 @@ mod tests {
         assert!(!is_merging(&snapshot, &card));
         assert_eq!(
             card_status_specs(&snapshot, &card, true),
-            vec![("Merged".into(), Tone::Success, false)]
+            vec![("Resolved".into(), Tone::Success, false)]
         );
 
         // Archived Cards never report as merging.

@@ -550,14 +550,59 @@ pub fn workspace() -> canban_types::Snapshot {
             request_key: "gallery-merged-today".into(),
             merged_at: now(),
         });
+        let resolution = (i == 4).then(|| CardResolution {
+            resolved_at: now(),
+            kind: "merged".into(),
+            reason: None,
+            actor: "system".into(),
+        });
         let tag_suffix = match i {
             1 => "\n\nTags: #search #ux #agent #bug",
             2 => "\n\nTags: #agent #terminal",
             3 => "\n\nTags: #ux",
             _ => "",
         };
-        s.cards.push(Card{schedule_source:None,source_trust:Some("local".into()),hold_auto_merge:false,github_links:vec![],created_by:"Gallery".into(),content:Default::default(),removed_at:None,pull_request:None,pull_request_history:Vec::new(),delivery_mode:None,workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,board_order:None,title:title.into(),body:format!("## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.{tag_suffix}"),context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),terminal_id:None,next_stage:None}),delivery,created_at:now()});
+        s.cards.push(Card{schedule_source:None,source_trust:Some("local".into()),hold_auto_merge:false,github_links:vec![],created_by:"Gallery".into(),content:Default::default(),removed_at:None,pull_request:None,pull_request_history:Vec::new(),delivery_mode:None,workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,board_order:None,title:title.into(),body:format!("## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.{tag_suffix}"),context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),terminal_id:None,next_stage:None}),delivery,resolution,created_at:now()});
     }
+    s.cards.push(Card {
+        schedule_source: None,
+        source_trust: Some("local".into()),
+        hold_auto_merge: false,
+        github_links: vec![],
+        created_by: "Gallery".into(),
+        content: Default::default(),
+        removed_at: None,
+        pull_request: None,
+        pull_request_history: Vec::new(),
+        delivery_mode: None,
+        workspace: None,
+        workspace_history: Vec::new(),
+        id: "card-resolved-manual".into(),
+        project_id: "gallery-project".into(),
+        number: 6,
+        board_order: None,
+        title: "Resolved manually · dashed border + Reopen".into(),
+        body: "Closed as duplicate without creating a branch.".into(),
+        context_notes: None,
+        stage: "backlog".into(),
+        revision: 1,
+        attention: None,
+        archived_at: None,
+        archive: None,
+        archive_error: None,
+        worktree: None,
+        branch: None,
+        base_commit: None,
+        human_gate: None,
+        delivery: None,
+        resolution: Some(CardResolution {
+            resolved_at: now(),
+            kind: "manual".into(),
+            reason: Some("Duplicate of #1".into()),
+            actor: "user".into(),
+        }),
+        created_at: now(),
+    });
     s.notes.push(Note{id:"note-1".into(),project_id:"gallery-project".into(),title:"Search ideas.md".into(),body:"# Search experience\n\nFind a Card without remembering its number.\n\nSee [Architecture](note:note-2).".into(),revision:1,created_at:now(),updated_at:now(),links:vec!["note-2".into()],card_ids:vec!["card-1".into()]});
     s.notes.push(Note {
         id: "note-2".into(),
@@ -3076,6 +3121,7 @@ steps:
         base_commit: Some("abcdef0123".into()),
         human_gate: None,
         delivery: None,
+        resolution: None,
         created_at: now_ms.saturating_sub(3_600_000),
     });
 
