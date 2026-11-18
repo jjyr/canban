@@ -1,5 +1,7 @@
 use super::*;
-use crate::components::timeline_item::{MilestoneFold, Spine, is_alert_kind, render_connected};
+use crate::components::timeline_item::{
+    MilestoneFold, Spine, is_alert_kind, render_connected_interactive,
+};
 use canban_types::Event;
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -327,6 +329,7 @@ fn execution(ui: Ui, reading: Reading, terminal_id: String) -> impl IntoElement 
 
 pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
     let expanded_groups = signal(BTreeSet::<u64>::new());
+    let pause_follow: Rc<dyn Fn()> = Rc::new(move || reading.pause_follow());
     let events = computed(move || {
         let cid = ui.card_id();
         ui.snapshot
@@ -347,6 +350,7 @@ pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
             move || rows.get(),
             |row| row.event.id.clone(),
             move |item, _| {
+                let pause_follow = pause_follow.clone();
                 dynamic(move || {
                     let row = item.get();
                     let sequence = row.event.sequence;
@@ -358,6 +362,7 @@ pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
                             expanded: spec.expanded,
                             hidden_alert: spec.hidden_alert,
                             toggle: Rc::new(move || {
+                                reading.pause_follow();
                                 expanded_groups.update(|set| {
                                     if !set.remove(&group_id) {
                                         set.insert(group_id);
@@ -408,13 +413,14 @@ pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
                                 }
                             });
                         })
-                        .child(render_connected(
+                        .child(render_connected_interactive(
                             ui,
                             row.event,
                             row.narrative,
                             row.spine,
                             fold,
                             trailing_detail,
+                            Some(pause_follow.clone()),
                         ))
                         .into_element()
                 })

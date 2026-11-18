@@ -135,10 +135,25 @@ pub fn render_connected(
     fold: Option<MilestoneFold>,
     trailing_detail: Option<AnyElement>,
 ) -> impl IntoElement {
+    render_connected_interactive(ui, event, narrative, spine, fold, trailing_detail, None)
+}
+
+/// Connected Card timeline item with an optional callback fired before inline
+/// disclosures expand or collapse (e.g. `Read full report` or `Details`), so a
+/// reader scroll container can pause tail-follow and keep the user's position.
+pub fn render_connected_interactive(
+    ui: Ui,
+    event: Event,
+    narrative: bool,
+    spine: Spine,
+    fold: Option<MilestoneFold>,
+    trailing_detail: Option<AnyElement>,
+    on_disclosure: Option<Rc<dyn Fn()>>,
+) -> impl IntoElement {
     if !narrative {
         return render_milestone(ui, event, spine, fold, trailing_detail).into_element();
     }
-    render_narrative(ui, event, spine, trailing_detail).into_element()
+    render_narrative(ui, event, spine, trailing_detail, on_disclosure).into_element()
 }
 
 fn milestone_badge(kind: &str) -> AnyElement {
@@ -359,6 +374,7 @@ fn render_narrative(
     event: Event,
     spine: Spine,
     trailing_detail: Option<AnyElement>,
+    on_disclosure: Option<Rc<dyn Fn()>>,
 ) -> impl IntoElement {
     let top_pad = if spine.first { 0. } else { 8. };
     let bottom_pad = if spine.last { 0. } else { 8. };
@@ -519,8 +535,12 @@ fn render_narrative(
     }
     if let Some(terminal_id) = event.data["terminal_id"].as_str().map(str::to_owned) {
         let details = terminal_id.clone();
+        let details_disclosure = on_disclosure.clone();
         heading = heading
             .child(compact_action("Details", Variant::Quiet, move |_| {
+                if let Some(cb) = &details_disclosure {
+                    cb();
+                }
                 ui.request.set(details.clone())
             }))
             .child(compact_action("Terminal ↗", Variant::Quiet, move |_| {
@@ -828,9 +848,10 @@ fn render_narrative(
                                 .child(crate::links::reader(ui, move || body.get())),
                         ),
                 )
-                .child(when(
-                    move || measured.get() > 256.,
+                .child(when(move || measured.get() > 256., {
+                    let toggle_disclosure = on_disclosure.clone();
                     move || {
+                        let toggle_disclosure = toggle_disclosure.clone();
                         action(
                             move || {
                                 if expanded.get() {
@@ -840,10 +861,15 @@ fn render_narrative(
                                 }
                             },
                             Variant::Quiet,
-                            move |_| expanded.update(|v| *v = !*v),
+                            move |_| {
+                                if let Some(cb) = &toggle_disclosure {
+                                    cb();
+                                }
+                                expanded.update(|v| *v = !*v);
+                            },
                         )
-                    },
-                ))
+                    }
+                }))
                 .child(when(
                     move || !error.get().is_empty(),
                     move || notice(error.get(), Tone::Attention),

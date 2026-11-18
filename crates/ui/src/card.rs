@@ -59,6 +59,11 @@ impl Reading {
         self.follow.set(false);
         self.scroll.scroll_to(Point::default(), false);
     }
+    pub(super) fn pause_follow(self) {
+        if self.follow.try_get().is_some() {
+            self.follow.set(false);
+        }
+    }
 }
 pub fn at(ui: Ui, id: String) -> impl IntoElement {
     if std::env::var_os("CANBAN_MOTION_TRACE").is_some() {
@@ -266,6 +271,8 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                     .on_layout(move |_: &Bounds<Points>| {
                                         if reading.follow.get_untracked()
                                             && !draft.with_untracked(|d| d.editing)
+                                            && ui.editing_comment.get_untracked().is_none()
+                                            && ui.deleting_comment.get_untracked().is_none()
                                         {
                                             reading.scroll.scroll_to_end(false);
                                         }
@@ -481,4 +488,274 @@ fn review_draft_banner(ui: Ui) -> impl IntoElement {
 /// Task previews, comments and references share one product reader.
 pub(super) fn markdown(ui: Ui, body: impl Fn() -> String + 'static) -> nsh_base::TextViewElement {
     crate::editor::reader(ui, body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use canban_types::{Card, Event, Project, Snapshot, Workflow};
+    use nsh_core::{
+        ApproxTextEngine, Command, Core, EventKind, EventMask, EventPayload, MountBatch, MountItem,
+        NodeId, ViewKind,
+        element::JsEvent,
+        geometry::{point, size},
+    };
+    use std::collections::{HashMap, HashSet};
+
+    #[derive(Default)]
+    struct TreeState {
+        alive: HashSet<NodeId>,
+        parents: HashMap<NodeId, NodeId>,
+        kinds: HashMap<NodeId, ViewKind>,
+        texts: HashMap<NodeId, String>,
+        events: HashMap<NodeId, EventMask>,
+        scroll_commands: Vec<(NodeId, f32)>,
+    }
+
+    impl TreeState {
+        fn apply(&mut self, batch: &MountBatch) {
+            for item in &batch.items {
+                match item {
+                    MountItem::Create { id, kind } => {
+                        self.alive.insert(*id);
+                        self.kinds.insert(*id, *kind);
+                    }
+                    MountItem::Insert { parent, child, .. } => {
+                        self.parents.insert(*child, *parent);
+                    }
+                    MountItem::Remove { id } => {
+                        self.parents.remove(id);
+                    }
+                    MountItem::Delete { id } => {
+                        self.alive.remove(id);
+                        self.parents.remove(id);
+                        self.kinds.remove(id);
+                        self.texts.remove(id);
+                        self.events.remove(id);
+                    }
+                    MountItem::Text { id, text, .. } => {
+                        self.texts.insert(*id, text.text.to_string());
+                    }
+                    MountItem::Events { id, events } => {
+                        self.events.insert(*id, *events);
+                    }
+                    MountItem::Command { id, command } => match command {
+                        Command::ScrollTo { y, .. } => self.scroll_commands.push((*id, y.0)),
+                        Command::ScrollToEnd { .. } => self.scroll_commands.push((*id, f32::MAX)),
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+        }
+
+        fn is_mounted(&self, mut id: NodeId) -> bool {
+            if !self.alive.contains(&id) {
+                return false;
+            }
+            let mut guard = 0;
+            while id != nsh_core::ROOT_ID {
+                let Some(&parent) = self.parents.get(&id) else {
+                    return false;
+                };
+                id = parent;
+                guard += 1;
+                if guard > 256 {
+                    return false;
+                }
+            }
+            true
+        }
+
+        fn mounted_node_for_text(&self, needle: &str) -> Option<NodeId> {
+            self.texts
+                .iter()
+                .find(|(id, t)| *t == needle && self.is_mounted(**id))
+                .map(|(id, _)| *id)
+        }
+    }
+
+    fn pump(core: &mut Core<ApproxTextEngine>, tree: &mut TreeState) {
+        for _ in 0..16 {
+            let had_batch = if let Some(batch) = core.commit() {
+                tree.apply(&batch);
+                true
+            } else {
+                false
+            };
+            let mut events = Vec::new();
+            core.take_events(&mut events);
+            let mut dispatched = false;
+            for ev in events {
+                match ev {
+                    JsEvent::Event(id, kind, payload) => {
+                        core.component_event(id, kind, &payload);
+                        dispatched = true;
+                    }
+                    JsEvent::LayoutListener {
+                        host,
+                        id,
+                        listener,
+                        frame,
+                    } => {
+                        core.component_layout(host, id, &listener, frame);
+                        dispatched = true;
+                    }
+                    _ => {}
+                }
+            }
+            if !had_batch && !dispatched {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn read_full_report_does_not_jump_to_tail_when_following_bottom() {
+        #[component]
+        fn CardHarness() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let mut snapshot = Snapshot::default();
+            snapshot.projects.push(Project {
+                id: "proj-1".into(),
+                name: "Canban".into(),
+                directory: "/tmp/canban".into(),
+                location: None,
+                github: None,
+                detected_github: None,
+                github_disconnected: false,
+                delivery_mode: Default::default(),
+                agent_overrides: Default::default(),
+                tags: Vec::new(),
+                workflow: Workflow::default(),
+                target_branch: Some("main".into()),
+                created_at: 1,
+            });
+            let card: Card = serde_json::from_value(serde_json::json!({
+                "id": "card-1",
+                "project_id": "proj-1",
+                "number": 128,
+                "title": "Test card",
+                "body": "Initial card description.\n\nLine two.\n\nLine three.",
+                "stage": "develop",
+                "revision": 1,
+                "created_at": 1
+            }))
+            .unwrap();
+            snapshot.cards.push(card);
+
+            let long_report = (1..=60)
+                .map(|i| format!("Report paragraph line {i}: detailed verification output."))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            snapshot.events.push(Event {
+                id: "ev-1".into(),
+                sequence: 1,
+                project_id: "proj-1".into(),
+                card_id: "card-1".into(),
+                kind: "comment.replied".into(),
+                actor: "agent:developer".into(),
+                message: long_report.clone(),
+                data: serde_json::json!({ "body": long_report }),
+                created_at: 2,
+            });
+
+            ui.snapshot.set(snapshot);
+            ui.project.set("proj-1".into());
+            ui.card.set("card-1".into());
+            ui.page.set("card".into());
+            view().w(px(800.)).h(px(600.)).child(screen(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(800.), px(600.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<CardHarness>());
+        let mut tree = TreeState::default();
+        pump(&mut core, &mut tree);
+
+        assert!(
+            tree.mounted_node_for_text("Read full report").is_some(),
+            "expected long report comment to show Read full report button"
+        );
+
+        let card_scroll = tree
+            .kinds
+            .iter()
+            .filter(|(id, kind)| **kind == ViewKind::Scroll && tree.is_mounted(**id))
+            .filter_map(|(id, _)| core.scroll_listener(*id).map(|info| (*id, info)))
+            .max_by(|a, b| a.1.1.height.0.total_cmp(&b.1.1.height.0))
+            .map(|(id, _)| id)
+            .expect("Card reader scroll view");
+
+        let (_, content_before, viewport_before, _) = core.scroll_listener(card_scroll).unwrap();
+        let bottom_y = (content_before.height.0 - viewport_before.height.0).max(0.);
+        core.set_scroll_offset(card_scroll, point(px(0.), px(bottom_y)), 0);
+        assert!(core.component_event(
+            card_scroll,
+            EventKind::Scroll,
+            &EventPayload::Scroll(point(px(0.), px(bottom_y))),
+        ));
+        pump(&mut core, &mut tree);
+
+        tree.scroll_commands.clear();
+
+        let mut press_target = tree
+            .mounted_node_for_text("Read full report")
+            .expect("Read full report text node");
+        while press_target != nsh_core::ROOT_ID
+            && !tree
+                .events
+                .get(&press_target)
+                .is_some_and(|m| m.contains(EventKind::Press))
+        {
+            let Some(&parent) = tree.parents.get(&press_target) else {
+                break;
+            };
+            press_target = parent;
+        }
+        assert!(
+            tree.events
+                .get(&press_target)
+                .is_some_and(|m| m.contains(EventKind::Press)),
+            "expected pressable ancestor for Read full report"
+        );
+        assert!(core.component_event(press_target, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+
+        let (_, content_after, viewport_after, _) = core.scroll_listener(card_scroll).unwrap();
+        assert!(
+            content_after.height.0 > content_before.height.0 + 1000.,
+            "expected expanded comment to grow scroll content (before={}, after={})",
+            content_before.height.0,
+            content_after.height.0
+        );
+        assert!(
+            !tree
+                .scroll_commands
+                .iter()
+                .any(|(id, _)| *id == card_scroll),
+            "clicking Read full report must not issue a scroll-to-end jump, got {:?}",
+            tree.scroll_commands
+        );
+        assert!(
+            tree.mounted_node_for_text("Report paragraph line 1: detailed verification output.")
+                .is_some(),
+            "top of the expanded report should remain visible in the viewport"
+        );
+
+        // Scrolling down to the end of the expanded report reveals the collapsed-toggle button.
+        let expanded_bottom_y = (content_after.height.0 - viewport_after.height.0).max(0.);
+        core.set_scroll_offset(card_scroll, point(px(0.), px(expanded_bottom_y)), 0);
+        assert!(core.component_event(
+            card_scroll,
+            EventKind::Scroll,
+            &EventPayload::Scroll(point(px(0.), px(expanded_bottom_y))),
+        ));
+        pump(&mut core, &mut tree);
+        assert!(
+            tree.mounted_node_for_text("Show less").is_some(),
+            "expected expanded comment to show Show less at the end of the report"
+        );
+    }
 }
