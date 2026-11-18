@@ -55,6 +55,7 @@ pub struct State {
     pub commits_open: Signal<bool>,
     /// "git" (ad-hoc Git comparison), "card_local" (Card worktree/branch), or "github_pr" (remote PR)
     pub mode: Signal<String>,
+    pub review_card_id: Signal<String>,
     pub base_ref: Signal<String>,
     pub compare_ref: Signal<String>,
     pub three_dot: Signal<bool>,
@@ -146,6 +147,7 @@ impl State {
             card_drawer_open: signal(false),
             commits_open: signal(false),
             mode: signal("git".into()),
+            review_card_id: signal(String::new()),
             base_ref: signal(String::new()),
             compare_ref: signal(String::new()),
             three_dot: signal(true),

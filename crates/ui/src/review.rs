@@ -452,11 +452,30 @@ pub fn open_compare(ui: Ui) {
         let value: Value = serde_json::from_str(key).unwrap_or_default();
         value[0] == ui.active_project_host() && value[1] == ui.project.get_untracked()
     });
-    if !same_project || st.mode.get_untracked() != "git" {
+    let mode = st.mode.get_untracked();
+    let retain_pr =
+        same_project && mode == "github_pr" && st.pr_target.with_untracked(Option::is_some);
+    let retain_card_local = same_project
+        && mode == "card_local"
+        && ui.snapshot.with_untracked(|s| {
+            let cid = st.review_card_id.get_untracked();
+            !cid.is_empty() && s.cards.iter().any(|c| c.id == cid)
+        });
+    if retain_pr || retain_card_local {
+        ui.card.set(st.review_card_id.get_untracked());
+        if retain_pr {
+            ui.review.set(None);
+        }
+        prepare_context(ui);
+        load_refs(ui);
+        refresh_active_diff(ui, false);
+    } else if !same_project || mode != "git" {
         reset_git_selection(st);
         git_ops::select_checkout(ui, String::new());
     } else {
         ui.card.set(String::new());
+        st.review_card_id.set(String::new());
+        st.pr_target.set(None);
         ui.review.set(None);
         load_refs_and_compare(ui, false);
     }
@@ -465,6 +484,7 @@ pub fn open_compare(ui: Ui) {
 
 fn reset_git_selection(st: State) {
     cancel_reads(st);
+    st.review_card_id.set(String::new());
     st.checkout_cwd.set(String::new());
     st.base_ref.set(String::new());
     st.compare_ref.set(String::new());
@@ -523,9 +543,12 @@ pub fn open_card_pr(ui: Ui, card_id: &str) {
         crate::navigation::checkpoint(ui);
         ui.project.set(card.project_id.clone());
         let st = ui.review_state;
+        let same_pr =
+            st.mode.get_untracked() == "github_pr" && st.review_card_id.get_untracked() == card.id;
         let cwd = card.worktree.clone().unwrap_or_default();
         batch(|| {
             ui.card.set(card.id.clone());
+            st.review_card_id.set(card.id.clone());
             ui.review.set(None);
             st.checkout_cwd.set(cwd);
             st.mode.set("github_pr".into());
@@ -536,7 +559,7 @@ pub fn open_card_pr(ui: Ui, card_id: &str) {
             st.compare_open.set(false);
             st.agent_review_open.set(false);
         });
-        hydrate_card_review_draft(ui, &card.id, true);
+        hydrate_card_review_draft(ui, &card.id, !same_pr);
         prepare_context(ui);
         load_refs(ui);
         refresh_active_diff(ui, false);
@@ -561,17 +584,49 @@ pub fn open_card(ui: Ui, card_id: &str) {
     }
     crate::navigation::checkpoint(ui);
     ui.project.set(card.project_id.clone());
+    let st = ui.review_state;
+    let same_project = st.read_context.with(|key| {
+        let value: Value = serde_json::from_str(key).unwrap_or_default();
+        value[0] == ui.active_project_host() && value[1] == card.project_id
+    });
     if let Some(path) = card.worktree.clone().filter(|p| !p.is_empty()) {
-        git_ops::select_checkout(ui, path);
+        let same_checkout = same_project
+            && st.mode.get_untracked() == "git"
+            && st.checkout_cwd.get_untracked() == path
+            && !st.base_ref.get_untracked().is_empty()
+            && !st.compare_ref.get_untracked().is_empty();
+        if same_checkout {
+            ui.card.set(String::new());
+            st.review_card_id.set(String::new());
+            ui.review.set(None);
+            load_refs_and_compare(ui, false);
+        } else {
+            git_ops::select_checkout(ui, path);
+        }
         if let Some((repository, number, url)) = card_pr_info(&card) {
             ui.card.set(card.id.clone());
-            ui.review_state.pr_target.set(Some(
+            st.review_card_id.set(card.id.clone());
+            st.pr_target.set(Some(
                 json!({"repository":repository, "number":number, "url":url}),
             ));
-            hydrate_card_review_draft(ui, &card.id, true);
+            if !same_checkout {
+                hydrate_card_review_draft(ui, &card.id, true);
+            }
         }
     } else {
-        git_ops::select_checkout(ui, String::new());
+        let same_checkout = same_project
+            && st.mode.get_untracked() == "git"
+            && st.checkout_cwd.get_untracked().is_empty()
+            && !st.base_ref.get_untracked().is_empty()
+            && !st.compare_ref.get_untracked().is_empty();
+        if same_checkout {
+            ui.card.set(String::new());
+            st.review_card_id.set(String::new());
+            ui.review.set(None);
+            load_refs_and_compare(ui, false);
+        } else {
+            git_ops::select_checkout(ui, String::new());
+        }
     }
     ui.navigate("review");
     crate::navigation::checkpoint(ui);
@@ -1080,6 +1135,7 @@ pub(crate) fn select_git_pair(ui: Ui, base: impl Into<String>, compare: impl Int
     batch(move || {
         ui.card.set(String::new());
         ui.review.set(None);
+        st.review_card_id.set(String::new());
         st.card_drawer_open.set(false);
         st.pr_target.set(None);
         st.range_backup.set(None);
@@ -1105,8 +1161,15 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             && !st.compare_loading.get_untracked()
             && st.compare_data.with_untracked(|v| v["files"].is_null())
         {
-            let cid = ui.card.get_untracked();
-            open_card(ui, &cid);
+            if st.mode.get_untracked() == "github_pr"
+                && st.pr_target.with_untracked(Option::is_some)
+            {
+                load_refs(ui);
+                refresh_active_diff(ui, false);
+            } else {
+                let cid = ui.card.get_untracked();
+                open_card(ui, &cid);
+            }
         } else if !has_card
             && !st.refs_loading.get_untracked()
             && st.base_ref.get_untracked().is_empty()
@@ -1334,5 +1397,115 @@ mod tests {
         assert!(!base_opts.iter().any(|o| o.id == "WORKDIR"));
         assert!(base_opts.iter().any(|o| o.id == "HEAD"));
         assert!(base_opts.iter().any(|o| o.id == "main" && o.selected));
+    }
+
+    #[test]
+    fn board_round_trip_retains_pr_and_card_worktree_comparison_context() {
+        let runtime = nsh_core::element::Runtime::default();
+        let _entered = runtime.enter();
+        let (_owner, ()) = nsh_core::element::create_root(|| {
+            let ui = Ui::new();
+            let st = ui.review_state;
+            ui.snapshot.update(|s| {
+                s.projects.push(
+                    serde_json::from_value(json!({
+                        "id":"p1","name":"p1","directory":"/repo/p1",
+                        "workflow":canban_types::Workflow::default(),"created_at":1
+                    }))
+                    .unwrap(),
+                );
+                s.cards.push(
+                    serde_json::from_value(json!({
+                        "id":"c-pr","project_id":"p1","number":10,"title":"PR card",
+                        "body":"","stage":"review","revision":1,"created_at":1,
+                        "worktree":"/repo/p1-wt-pr",
+                        "pull_request":{
+                            "repository":"org/repo","repository_id":1,"number":42,
+                            "url":"https://github.com/org/repo/pull/42","state":"open",
+                            "head":"abc123","head_branch":"pr-head","base_branch":"main",
+                            "merged":false,"checks":"",
+                            "workspace":{"location":{"machine":"local","directory":"/repo/p1"},"path":"/repo/p1-wt-pr"}
+                        }
+                    }))
+                    .unwrap(),
+                );
+                s.cards.push(
+                    serde_json::from_value(json!({
+                        "id":"c-wt","project_id":"p1","number":11,"title":"Local card",
+                        "body":"","stage":"develop","revision":1,"created_at":2,
+                        "worktree":"/repo/p1-wt-local"
+                    }))
+                    .unwrap(),
+                );
+            });
+            ui.select_project("p1".into());
+
+            // 1. Entering PR mode, navigating to Board, opening/closing another card,
+            // and returning via Git rail retains the PR context and card association.
+            open_card_pr(ui, "c-pr");
+            st.read_context.replace(cache::key(
+                "local",
+                "p1",
+                "checkout",
+                &json!("/repo/p1-wt-pr"),
+            ));
+            st.base_ref.set("main".into());
+            st.compare_ref.set("pr-head".into());
+            st.pending_comments.set(vec![PendingInlineComment {
+                id: "pc-pr".into(),
+                path: "src/lib.rs".into(),
+                section: String::new(),
+                line: 12,
+                side: "RIGHT".into(),
+                snippet: String::new(),
+                body: "Check PR edge case".into(),
+                author: None,
+                edited_by_user: false,
+            }]);
+
+            ui.open_board();
+            ui.open_card("c-wt".into());
+            ui.close_card();
+            assert!(ui.card.get_untracked().is_empty());
+
+            open_compare(ui);
+            assert_eq!(ui.page.get_untracked(), "review");
+            assert_eq!(st.mode.get_untracked(), "github_pr");
+            assert_eq!(ui.card.get_untracked(), "c-pr");
+            assert_eq!(st.pr_target.get_untracked().unwrap()["number"], 42);
+            assert_eq!(st.pending_comments.with_untracked(Vec::len), 1);
+
+            // 2. Inspecting a single commit on a Card worktree, visiting Board, and
+            // re-opening the same Card via `open_card` preserves the commit comparison.
+            open_card(ui, "c-wt");
+            st.read_context.replace(cache::key(
+                "local",
+                "p1",
+                "checkout",
+                &json!("/repo/p1-wt-local"),
+            ));
+            st.base_ref.set("abc1234~1".into());
+            st.compare_ref.set("abc1234".into());
+            st.pending_comments.set(vec![PendingInlineComment {
+                id: "pc-commit".into(),
+                path: "src/main.rs".into(),
+                section: String::new(),
+                line: 5,
+                side: "RIGHT".into(),
+                snippet: String::new(),
+                body: "Commit comment".into(),
+                author: None,
+                edited_by_user: false,
+            }]);
+
+            ui.open_board();
+            open_card(ui, "c-wt");
+            assert_eq!(ui.page.get_untracked(), "review");
+            assert_eq!(st.mode.get_untracked(), "git");
+            assert_eq!(st.checkout_cwd.get_untracked(), "/repo/p1-wt-local");
+            assert_eq!(st.base_ref.get_untracked(), "abc1234~1");
+            assert_eq!(st.compare_ref.get_untracked(), "abc1234");
+            assert_eq!(st.pending_comments.with_untracked(Vec::len), 1);
+        });
     }
 }

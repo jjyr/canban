@@ -9,6 +9,7 @@ use canban_ui_kit::tokens::*;
 use canban_ui_kit::*;
 use nsh_core::prelude::*;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 fn multiline_comment_input(
@@ -328,7 +329,12 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
             "" | "UNCOMMITTED" | "WORKDIR" | "STAGED" | "UNSTAGED"
         );
 
-    if files.is_empty() && commit_detail.is_none() && !is_workdir_mode {
+    if files.is_empty()
+        && commit_detail.is_none()
+        && !is_workdir_mode
+        && st.pending_comments.with(Vec::is_empty)
+        && st.active_line.with(Option::is_none)
+    {
         return view()
             .flex_1()
             .items_center()
@@ -523,24 +529,29 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
                 .child(
                     label(if is_workdir_mode {
                         "Working tree is clean"
-                    } else {
+                    } else if commit_detail.is_some() {
                         "No file changes in this commit"
+                    } else {
+                        "No file changes"
                     })
                     .font_weight(FontWeight::SEMIBOLD),
                 )
                 .child(muted(if is_workdir_mode {
                     "No modified or untracked files in this checkout. You can still pull, push, or amend the last commit."
-                } else {
+                } else if commit_detail.is_some() {
                     "This commit did not introduce net file content changes relative to the selected parent."
+                } else {
+                    "The selected base and compare references have identical file contents."
                 })),
         );
     }
 
     let total_files = files.len();
     let limit = st.visible_file_limit.get();
-    let visible_files: Vec<Value> = files.into_iter().take(limit).collect();
+    let file_keys: BTreeSet<_> = files.iter().map(super::model::file_key).collect();
+    let mut expanded_file_keys = BTreeSet::new();
 
-    for file in visible_files {
+    for file in files.into_iter().take(limit) {
         let path = file["filename"].as_str().unwrap_or("").to_owned();
         let section = file["section"].as_str().unwrap_or("").to_owned();
         let key = super::model::file_key(&file);
@@ -567,6 +578,8 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
             })
             .unwrap_or(false);
 
+        let pending_path = path.clone();
+        let pending_section = section.clone();
         let mut header = view()
             .flex_row()
             .flex_wrap()
@@ -606,6 +619,19 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
                     .font_weight(FontWeight::SEMIBOLD),
             )
             .child(badge(f_status.clone()))
+            .child(dynamic(move || {
+                let count = st.pending_comments.with(|comments| {
+                    comments
+                        .iter()
+                        .filter(|item| item.path == pending_path && item.section == pending_section)
+                        .count()
+                });
+                if count == 0 {
+                    view().into_element()
+                } else {
+                    status(format!("{count} pending"), Tone::Info).into_element()
+                }
+            }))
             .child(
                 label(format!("+{additions}"))
                     .text_size(px(11.5))
@@ -668,6 +694,7 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
             );
             continue;
         }
+        expanded_file_keys.insert(key.clone());
         let file_ctx = FileRenderContext {
             file: file.clone(),
             key: key.clone(),
@@ -698,26 +725,65 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
         );
     }
 
-    // Any remaining pending comments whose file is not in the visible diff list
-    let visible_paths: std::collections::BTreeSet<String> = st.compare_data.with_untracked(|v| {
-        v["files"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .take(limit)
-            .filter_map(|f| f["filename"].as_str().map(str::to_owned))
-            .collect()
-    });
+    // Expanded file bodies render every comment in their section, including comments
+    // outside the currently visible lines. Keep the remaining comments in the diff.
     diff_column = diff_column.child(dynamic(move || {
-        let pending_all = st.pending_comments.get();
-        let mut extra = view();
-        for item in pending_all
+        let pending = st.pending_comments.get();
+        let unrendered_comments: Vec<_> = pending
             .iter()
-            .filter(|c| !visible_paths.contains(&c.path))
-        {
-            extra = extra.child(render_pending_comment_card(ui, item));
+            .filter(|item| {
+                !expanded_file_keys.contains(&super::model::diff_key(&item.section, &item.path))
+            })
+            .collect();
+        let unrendered_composer = st.active_line.get().filter(|target| {
+            !expanded_file_keys.contains(&super::model::diff_key(&target.section, &target.path))
+        });
+        if unrendered_comments.is_empty() && unrendered_composer.is_none() {
+            return view();
         }
-        extra
+        let count = unrendered_comments.len();
+        let mut fallback_section = view()
+            .rounded(px(RADIUS))
+            .border_1()
+            .border_color(ACCENT)
+            .bg(SURFACE)
+            .overflow_hidden()
+            .child(
+                view()
+                    .px_3()
+                    .py_2()
+                    .bg(INSET)
+                    .border_b_1()
+                    .border_color(BORDER)
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        label(if count > 0 {
+                            format!("Other pending comments ({count})")
+                        } else {
+                            "Pending inline comment".into()
+                        })
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::SEMIBOLD),
+                    )
+                    .child(
+                        muted("From collapsed/hidden files or another comparison")
+                            .text_size(px(11.)),
+                    ),
+            );
+        for item in unrendered_comments {
+            let key = super::model::diff_key(&item.section, &item.path);
+            let jump_key = file_keys.contains(&key).then_some(key);
+            fallback_section =
+                fallback_section.child(render_pending_comment_card_with_jump(ui, item, jump_key));
+        }
+        if let Some(target) = unrendered_composer {
+            fallback_section = fallback_section.child(inline_composer_box(ui, target));
+        }
+        fallback_section
     }));
 
     if total_files > limit {
@@ -735,7 +801,10 @@ const RAW_DIFF_LINE_CAP: usize = 800;
 
 fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
     let st = ui.review_state;
-    let active_line = st.active_line.get();
+    let mut active_line = st
+        .active_line
+        .get()
+        .filter(|target| target.path == ctx.path && target.section == ctx.section);
     let pending_all = st.pending_comments.get();
     let editing_remote = st.editing_remote_comment.get();
     let deleting_remote = st.deleting_remote_comment.get();
@@ -748,7 +817,7 @@ fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
     let cached_file = st.file_lines_cache.with(|c| c.get(&cache_key));
     let cap_expanded = st.expanded_line_caps.with(|s| s.contains(&ctx.key));
 
-    let mut rendered_comment_ids = std::collections::BTreeSet::<String>::new();
+    let mut rendered_comment_ids = BTreeSet::new();
 
     let body = if ctx.patch.trim().is_empty() {
         view()
@@ -824,7 +893,7 @@ fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
                         ctx,
                         &dl,
                         None,
-                        active_line.as_ref(),
+                        &mut active_line,
                         &pending_all,
                         editing_remote,
                         deleting_remote,
@@ -869,7 +938,7 @@ fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
                         ctx,
                         dl,
                         line_ref,
-                        active_line.as_ref(),
+                        &mut active_line,
                         &pending_all,
                         editing_remote,
                         deleting_remote,
@@ -918,7 +987,7 @@ fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
                                 ctx,
                                 &dl,
                                 None,
-                                active_line.as_ref(),
+                                &mut active_line,
                                 &pending_all,
                                 editing_remote,
                                 deleting_remote,
@@ -970,7 +1039,7 @@ fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
                                 ctx,
                                 &dl,
                                 None,
-                                active_line.as_ref(),
+                                &mut active_line,
                                 &pending_all,
                                 editing_remote,
                                 deleting_remote,
@@ -1023,7 +1092,7 @@ fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
                             ctx,
                             &dl,
                             None,
-                            active_line.as_ref(),
+                            &mut active_line,
                             &pending_all,
                             editing_remote,
                             deleting_remote,
@@ -1070,15 +1139,9 @@ fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
         }
     };
 
-    let extra_composer = if let Some(ref target) = active_line
-        && target.path == ctx.path
-        && target.section == ctx.section
-        && ctx.patch.trim().is_empty()
-    {
-        inline_composer_box(ui, target.clone()).into_element()
-    } else {
-        view().into_element()
-    };
+    let extra_composer = active_line
+        .map(|target| inline_composer_box(ui, target).into_element())
+        .unwrap_or_else(|| view().into_element());
 
     let mut unanchored_for_file = view();
     for item in pending_all.iter().filter(|c| {
@@ -1118,12 +1181,12 @@ fn render_diff_line_row(
     ctx: &FileRenderContext,
     dl: &DiffLine,
     row_ref: Option<ElementRef>,
-    active_line: Option<&LineTarget>,
+    active_line: &mut Option<LineTarget>,
     pending_all: &[PendingInlineComment],
     editing_remote: Option<u64>,
     deleting_remote: Option<u64>,
     my_login: Option<&str>,
-    rendered_comment_ids: &mut std::collections::BTreeSet<String>,
+    rendered_comment_ids: &mut BTreeSet<String>,
     mut rows: View,
 ) -> View {
     let st = ui.review_state;
@@ -1348,24 +1411,32 @@ fn render_diff_line_row(
             && c.line == comment_line
             && c.side == comment_side
     }) {
-        rendered_comment_ids.insert(item.id.clone());
-        rows = rows.child(render_pending_comment_card(ui, item));
+        if rendered_comment_ids.insert(item.id.clone()) {
+            rows = rows.child(render_pending_comment_card(ui, item));
+        }
     }
 
     // Render active inline composer right beneath the clicked line
-    if let Some(target) = active_line
-        && target.path == ctx.path
-        && target.section == ctx.section
-        && target.line == comment_line
-        && target.side == comment_side
+    if active_line
+        .as_ref()
+        .is_some_and(|target| target.line == comment_line && target.side == comment_side)
+        && let Some(target) = active_line.take()
     {
-        rows = rows.child(inline_composer_box(ui, target.clone()));
+        rows = rows.child(inline_composer_box(ui, target));
     }
 
     rows
 }
 
 fn render_pending_comment_card(ui: Ui, item: &PendingInlineComment) -> View {
+    render_pending_comment_card_with_jump(ui, item, None)
+}
+
+fn render_pending_comment_card_with_jump(
+    ui: Ui,
+    item: &PendingInlineComment,
+    jump_key: Option<String>,
+) -> View {
     let st = ui.review_state;
     let item_id = item.id.clone();
     let edit_item = item.clone();
@@ -1381,6 +1452,56 @@ fn render_pending_comment_card(ui: Ui, item: &PendingInlineComment) -> View {
         Tone::Info
     };
     let side_note = if item.side == "LEFT" { " (LEFT)" } else { "" };
+    let section_note = if item.section.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", item.section)
+    };
+    let mut actions = view().flex_row().items_center().gap_1();
+    if let Some(key) = jump_key {
+        let jump_label = if item.section.is_empty() {
+            format!("Show {} in diff", item.path)
+        } else {
+            format!("Show {} {} in diff", item.section, item.path)
+        };
+        actions = actions.child(
+            compact_action("Show in diff", Variant::Quiet, move |_| {
+                super::focus_file(ui, key.clone());
+            })
+            .accessibility_label(jump_label),
+        );
+    }
+    let edit_label = if item.section.is_empty() {
+        format!("Edit comment on {}", item.path)
+    } else {
+        format!("Edit comment on {} ({})", item.path, item.section)
+    };
+    actions = actions
+        .child(
+            compact_action("Edit", Variant::Quiet, move |_| {
+                let cur = edit_item.clone();
+                st.pending_comments.update(|list| {
+                    list.retain(|x| x.id != cur.id);
+                });
+                st.active_line.set(Some(LineTarget {
+                    path: cur.path,
+                    section: cur.section,
+                    line: cur.line,
+                    side: cur.side,
+                    snippet: cur.snippet,
+                    editing_author: cur.author,
+                }));
+                st.line_draft.set(cur.body);
+            })
+            .accessibility_label(edit_label),
+        )
+        .child(compact_action("Discard ×", Variant::Quiet, move |_| {
+            let rm_id = item_id.clone();
+            st.pending_comments.update(|list| {
+                list.retain(|x| x.id != rm_id);
+            });
+            super::sync_pending_draft_to_server(ui);
+        }));
     view()
         .mx_4()
         .my_1p5()
@@ -1393,49 +1514,27 @@ fn render_pending_comment_card(ui: Ui, item: &PendingInlineComment) -> View {
         .child(
             view()
                 .flex_row()
+                .flex_wrap()
                 .items_center()
                 .justify_between()
                 .gap_2()
                 .child(
                     view()
                         .flex_row()
+                        .flex_wrap()
                         .items_center()
                         .gap_1p5()
                         .child(status(badge_label, tone))
                         .child(
-                            muted(format!("{}:{}{side_note}", item.path, item.line))
-                                .font_family(MONO_FONT)
-                                .text_size(px(11.)),
+                            muted(format!(
+                                "{}:{}{side_note}{section_note}",
+                                item.path, item.line
+                            ))
+                            .font_family(MONO_FONT)
+                            .text_size(px(11.)),
                         ),
                 )
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_1()
-                        .child(compact_action("Edit", Variant::Quiet, move |_| {
-                            let cur = edit_item.clone();
-                            st.pending_comments.update(|list| {
-                                list.retain(|x| x.id != cur.id);
-                            });
-                            st.active_line.set(Some(LineTarget {
-                                path: cur.path,
-                                section: cur.section,
-                                line: cur.line,
-                                side: cur.side,
-                                snippet: cur.snippet,
-                                editing_author: cur.author,
-                            }));
-                            st.line_draft.set(cur.body);
-                        }))
-                        .child(compact_action("Discard ×", Variant::Quiet, move |_| {
-                            let rm_id = item_id.clone();
-                            st.pending_comments.update(|list| {
-                                list.retain(|x| x.id != rm_id);
-                            });
-                            super::sync_pending_draft_to_server(ui);
-                        })),
-                ),
+                .child(actions),
         )
         .child(canban_ui_kit::markdown::reader(move || body_txt.clone()))
 }

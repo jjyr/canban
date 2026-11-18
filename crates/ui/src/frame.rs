@@ -1020,4 +1020,165 @@ mod tests {
         assert!(tree.mounted_node_for_text("+ index version").is_some());
         assert!(tree.mounted_node_for_text("+ disk version").is_some());
     }
+
+    #[test]
+    fn pending_inline_comments_never_disappear_across_sections_folding_or_empty_diffs() {
+        use crate::review::{PendingInlineComment, model::diff_key};
+
+        #[component]
+        fn PendingCommentFallbackHarness() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            ui.review_state.compare_ref.set("UNCOMMITTED".into());
+            let value = crate::review::cache::ReadValue::new(json!({
+                "status_files":[
+                    {"path":"a.rs","staged":true,"unstaged":true},
+                    {"path":"b.rs","staged":true},
+                    {"path":"c.rs","unstaged":true},
+                    {"path":"d.rs","unstaged":true},
+                    {"path":"e.rs","unstaged":true}
+                ],
+                "files":[
+                    {"filename":"a.rs","section":"staged","patch":"@@ -1 +1 @@\n-old\n+index version"},
+                    {"filename":"b.rs","section":"staged","patch":"@@ -1 +1 @@\n-b0\n+b1"},
+                    {"filename":"c.rs","section":"unstaged","patch":"@@ -1 +1 @@\n-c0\n+c1"},
+                    {"filename":"d.rs","section":"unstaged","patch":"@@ -1 +1 @@\n-d0\n+d1"},
+                    {"filename":"a.rs","section":"unstaged","patch":"@@ -1 +1 @@\n-index version\n+disk version"}
+                ]
+            }));
+            crate::review::apply_compare(ui, &value);
+            ui.review_state.pending_comments.set(vec![
+                // 1. Cross-section comment on a visible path (`section == ""` while diff shows `"staged"`/`"unstaged"`).
+                PendingInlineComment {
+                    id: "c-cross".into(),
+                    path: "a.rs".into(),
+                    section: String::new(),
+                    line: 1,
+                    side: "RIGHT".into(),
+                    snippet: String::new(),
+                    body: "Cross-section comment".into(),
+                    author: None,
+                    edited_by_user: false,
+                },
+                // 2. Comment on same path in `"unstaged"` beyond `visible_file_limit` (4), while `"staged"` `a.rs` is within limit.
+                PendingInlineComment {
+                    id: "c-beyond".into(),
+                    path: "a.rs".into(),
+                    section: "unstaged".into(),
+                    line: 1,
+                    side: "RIGHT".into(),
+                    snippet: String::new(),
+                    body: "Beyond limit comment".into(),
+                    author: None,
+                    edited_by_user: false,
+                },
+                // 3. Comment on a collapsed file (`staged` `b.rs`).
+                PendingInlineComment {
+                    id: "c-collapsed".into(),
+                    path: "b.rs".into(),
+                    section: "staged".into(),
+                    line: 1,
+                    side: "RIGHT".into(),
+                    snippet: String::new(),
+                    body: "Collapsed file comment".into(),
+                    author: None,
+                    edited_by_user: false,
+                },
+            ]);
+            ui.review_state.collapsed_files.update(|files| {
+                files.insert(diff_key("staged", "b.rs"));
+            });
+            view()
+                .w(px(1360.))
+                .h(px(900.))
+                .child(
+                    canban_ui_kit::press_target()
+                        .h(px(1.))
+                        .accessibility_label(|| Some("harness-empty-diff".into()))
+                        .on_press(move |_: &()| {
+                            ui.review_state.active_line.set(None);
+                            ui.review_state.compare_ref.set("main".into());
+                            let empty =
+                                crate::review::cache::ReadValue::new(json!({ "files": [] }));
+                            crate::review::apply_compare(ui, &empty);
+                        }),
+                )
+                .child(crate::review::diff::workbench(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1360.), px(900.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<PendingCommentFallbackHarness>());
+        let mut tree = TreeTracker::new();
+        pump(&mut core, &mut tree);
+
+        // All 3 comments must be rendered in the fallback section (and `b.rs` header shows `1 pending`).
+        assert!(
+            tree.mounted_node_for_text("Other pending comments (3)")
+                .is_some()
+        );
+        assert!(tree.mounted_node_for_text("1 pending").is_some());
+        assert!(
+            tree.mounted_node_for_text("Cross-section comment")
+                .is_some()
+        );
+        assert!(tree.mounted_node_for_text("Beyond limit comment").is_some());
+        assert!(
+            tree.mounted_node_for_text("Collapsed file comment")
+                .is_some()
+        );
+
+        // Expanding `b.rs` moves its comment inline so fallback drops to 2.
+        assert!(core.component_event(
+            tree.labels["Expand diff for staged b.rs"],
+            EventKind::Press,
+            &EventPayload::None
+        ));
+        pump(&mut core, &mut tree);
+        assert!(
+            tree.mounted_node_for_text("Other pending comments (2)")
+                .is_some()
+        );
+        assert!(
+            tree.mounted_node_for_text("Collapsed file comment")
+                .is_some()
+        );
+
+        // Clicking `Show in diff` on `unstaged a.rs` reveals it beyond `visible_file_limit`,
+        // moving `c-beyond` inline and dropping fallback to 1 (`c-cross`).
+        assert!(core.component_event(
+            tree.labels["Show unstaged a.rs in diff"],
+            EventKind::Press,
+            &EventPayload::None
+        ));
+        pump(&mut core, &mut tree);
+        assert!(tree.mounted_node_for_text("+ disk version").is_some());
+        assert!(
+            tree.mounted_node_for_text("Other pending comments (1)")
+                .is_some()
+        );
+        assert!(tree.mounted_node_for_text("Beyond limit comment").is_some());
+
+        // Clicking `Edit` on the fallback comment mounts the inline composer in the fallback card.
+        assert!(core.component_event(
+            tree.labels["Edit comment on a.rs"],
+            EventKind::Press,
+            &EventPayload::None
+        ));
+        pump(&mut core, &mut tree);
+        assert!(tree.labels.contains_key("Inline review comment"));
+
+        // Switching to a non-workdir comparison with zero file changes still renders pending comments.
+        assert!(core.component_event(
+            tree.labels["harness-empty-diff"],
+            EventKind::Press,
+            &EventPayload::None
+        ));
+        pump(&mut core, &mut tree);
+        assert!(tree.mounted_node_for_text("No file changes").is_some());
+        assert!(
+            tree.mounted_node_for_text("Other pending comments (2)")
+                .is_some()
+        );
+    }
 }

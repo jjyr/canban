@@ -176,6 +176,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                     batch(move || {
                                         ui.card.set(String::new());
                                         ui.review.set(None);
+                                        st.review_card_id.set(String::new());
                                         st.pr_target.set(Some(json!({
                                             "repository": repo_val,
                                             "number": num,

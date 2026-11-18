@@ -45,6 +45,7 @@ pub fn select_checkout(ui: Ui, cwd: String) {
     batch(move || {
         ui.card.set(String::new());
         ui.review.set(None);
+        st.review_card_id.set(String::new());
         st.card_drawer_open.set(false);
         st.pr_target.set(None);
         st.mode.set("git".into());
