@@ -3,6 +3,89 @@ use canban_types::Card;
 use std::collections::BTreeMap;
 pub const GAP: f32 = 12.;
 pub const DEFAULT_HEIGHT: f32 = 112.;
+const ORDER_GAP: i64 = 1024;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingMove {
+    pub card_id: String,
+    pub base_revision: u64,
+    pub target_stage: String,
+    pub before_card_id: Option<String>,
+}
+/// Optimistically projects `pending` onto `cards` using the same sparse rank
+/// rules as `canban_kanban::order::place` so visual order matches server commit.
+pub fn apply_pending_move(cards: &mut [Card], pending: &PendingMove) -> bool {
+    if pending.before_card_id.as_deref() == Some(pending.card_id.as_str()) {
+        return false;
+    }
+    let Some(card_idx) = cards
+        .iter()
+        .position(|c| c.id == pending.card_id && c.active())
+    else {
+        return false;
+    };
+    let project_id = cards[card_idx].project_id.clone();
+    let same_stage = cards[card_idx].stage == pending.target_stage;
+    let mut peer_indices: Vec<usize> = cards
+        .iter()
+        .enumerate()
+        .filter(|(i, c)| {
+            c.active()
+                && c.project_id == project_id
+                && c.stage == pending.target_stage
+                && *i != card_idx
+        })
+        .map(|(i, _)| i)
+        .collect();
+    peer_indices.sort_by(|&a, &b| cards[a].board_cmp(&cards[b]));
+    let insert_at = if let Some(before_id) = pending.before_card_id.as_deref() {
+        let Some(pos) = peer_indices.iter().position(|&i| cards[i].id == before_id) else {
+            return false;
+        };
+        pos
+    } else {
+        peer_indices.len()
+    };
+    if same_stage {
+        let mut current_indices = peer_indices.clone();
+        current_indices.push(card_idx);
+        current_indices.sort_by(|&a, &b| cards[a].board_cmp(&cards[b]));
+        let mut desired = peer_indices.clone();
+        desired.insert(insert_at, card_idx);
+        if current_indices == desired {
+            return true;
+        }
+    } else {
+        cards[card_idx].stage = pending.target_stage.clone();
+        cards[card_idx].board_order = None;
+        cards[card_idx].attention = None;
+        cards[card_idx].human_gate = None;
+    }
+    let calc_rank = |cards: &[Card], peers: &[usize]| -> Option<i64> {
+        let left = insert_at
+            .checked_sub(1)
+            .map(|i| cards[peers[i]].board_rank());
+        let right = peers.get(insert_at).map(|&i| cards[i].board_rank());
+        match (left, right) {
+            (None, None) => Some(0),
+            (None, Some(r)) => r.checked_sub(ORDER_GAP),
+            (Some(l), None) => l.checked_add(ORDER_GAP),
+            (Some(l), Some(r)) => r
+                .checked_sub(l)
+                .filter(|gap| *gap > 1)
+                .map(|gap| l + gap / 2),
+        }
+    };
+    let rank = if let Some(rank) = calc_rank(cards, &peer_indices) {
+        rank
+    } else {
+        for (i, &peer_idx) in peer_indices.iter().enumerate() {
+            cards[peer_idx].board_order = Some((i as i64) * ORDER_GAP);
+        }
+        calc_rank(cards, &peer_indices).unwrap_or(0)
+    };
+    cards[card_idx].board_order = Some(rank);
+    true
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Slot {
     pub stage: String,
@@ -293,5 +376,44 @@ mod tests {
         assert!(edge_speed(10., 0., 300.) < 0.);
         assert!(edge_speed(290., 0., 300.) > 0.);
         assert_eq!(edge_speed(150., 0., 300.), 0.);
+    }
+    #[test]
+    fn apply_pending_move_matches_server_sparse_order_across_stages_and_reorders() {
+        let mut cards = vec![
+            card("a", "backlog", 1),
+            card("b", "backlog", 2),
+            card("c", "develop", 3),
+            card("d", "develop", 4),
+        ];
+        // Move `a` into `develop` before `d` (between `c` at 3072 and `d` at 4096 -> 3584).
+        let pending = PendingMove {
+            card_id: "a".into(),
+            base_revision: 1,
+            target_stage: "develop".into(),
+            before_card_id: Some("d".into()),
+        };
+        assert!(apply_pending_move(&mut cards, &pending));
+        assert_eq!(cards[0].stage, "develop");
+        assert_eq!(cards[0].board_order, Some(3584));
+        let ordered: Vec<_> = super::cards(&cards, "develop", "")
+            .into_iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(ordered, vec!["c", "a", "d"]);
+
+        // Move `d` to top of `develop` before `c` (3072 - 1024 = 2048).
+        let reorder = PendingMove {
+            card_id: "d".into(),
+            base_revision: 1,
+            target_stage: "develop".into(),
+            before_card_id: Some("c".into()),
+        };
+        assert!(apply_pending_move(&mut cards, &reorder));
+        assert_eq!(cards[3].board_order, Some(2048));
+        let ordered2: Vec<_> = super::cards(&cards, "develop", "")
+            .into_iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(ordered2, vec!["d", "c", "a"]);
     }
 }

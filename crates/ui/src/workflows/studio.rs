@@ -660,8 +660,8 @@ impl StepDrag {
         let target = self.target.get_untracked();
         self.dragging.set(String::new());
         self.target.set(None);
-        x.set(0.);
-        y.set(0.);
+        let _ = canban_ui_kit::motion::spring(x, 0., canban_ui_kit::motion::settle_spring());
+        let _ = canban_ui_kit::motion::spring(y, 0., canban_ui_kit::motion::settle_spring());
         let Some((lane, after)) = target else { return };
         if id.is_empty() || after.as_deref() == Some(id.as_str()) {
             return;

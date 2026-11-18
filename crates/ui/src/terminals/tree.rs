@@ -774,26 +774,25 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                             move || desired_keys.with(|keys| keys.contains(&key))
                         });
                         let row_ref = element_ref();
-                        let opacity = animated_value(if canban_ui_kit::motion::reduced() {
-                            1.
-                        } else {
-                            0.
-                        });
-                        let generation = stored(0u64);
+                        let initial = present.get_untracked();
+                        let opacity = animated_value(if initial { 1. } else { 0. });
+                        let previous = stored((initial, canban_ui_kit::motion::reduced()));
                         effect(move || {
                             let visible = present.get();
                             let reduced = canban_ui_kit::motion::reduced();
-                            let ticket = generation.get().wrapping_add(1);
-                            generation.replace(ticket);
+                            if previous.replace((visible, reduced)) == (visible, reduced) {
+                                return;
+                            }
                             canban_ui_kit::motion::layout(row_ref, 160.);
-                            let end = opacity.timing(
+                            let end = canban_ui_kit::motion::timing(
+                                opacity,
                                 if visible { 1. } else { 0. },
-                                if reduced { 0. } else { 160. },
+                                160.,
                                 Easing::EaseOut,
                             );
                             let key = key.clone();
-                            spawn(async move {
-                                if end.await && generation.get() == ticket && !visible {
+                            canban_ui_kit::motion::when_done([end], move || {
+                                if !visible {
                                     retained.update(|rows| rows.retain(|n| n.key() != key));
                                 }
                             });

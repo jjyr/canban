@@ -656,7 +656,11 @@ fn controls() -> impl IntoElement {
     )
 }
 
-fn board_transitions_bar(ui: Ui, reduced_motion: Signal<bool>) -> impl IntoElement {
+fn board_transitions_bar(
+    ui: Ui,
+    reduced_motion: Signal<bool>,
+    reject_drop: Signal<bool>,
+) -> impl IntoElement {
     let next_id = signal(100_u64);
     let stages = ["backlog", "develop", "review"];
     view()
@@ -736,6 +740,17 @@ fn board_transitions_bar(ui: Ui, reduced_motion: Signal<bool>) -> impl IntoEleme
                 }
             });
         }))
+        .child(action(
+            move || {
+                if reject_drop.get() {
+                    SharedString::from("Drop rollback: On")
+                } else {
+                    SharedString::from("Drop rollback: Off")
+                }
+            },
+            Variant::Quiet,
+            move |_| reject_drop.set(!reject_drop.get_untracked()),
+        ))
         .child(action("Reset", Variant::Quiet, move |_| {
             ui.snapshot.set(fixtures::board_cards());
             ui.card.set(String::new());
@@ -762,8 +777,10 @@ pub fn Gallery() -> impl IntoElement {
     let ui = Ui::new();
     canban_ui::links::install(ui);
     let reduced_motion = signal(false);
+    let reject_drop = signal(false);
     provide_context(canban_ui_kit::motion::ReducedMotion(reduced_motion));
     ui.board_move.replace(Some(std::rc::Rc::new(move |drop| {
+        let previous = ui.snapshot.get_untracked();
         ui.snapshot.update(|s| {
             let Some(index) = s.cards.iter().position(|c| c.id == drop.card_id) else {
                 return;
@@ -795,6 +812,13 @@ pub fn Gallery() -> impl IntoElement {
                 }
             }
         });
+        if reject_drop.get_untracked() {
+            set_timeout(std::time::Duration::from_millis(240), move || {
+                ui.operation_error
+                    .set("Simulated RPC rejection: rolling Card back to previous slot".into());
+                ui.snapshot.set(previous);
+            });
+        }
     })));
     canban_ui::commands::bindings(ui);
     canban_ui::utilities::init(ui);
@@ -1574,7 +1598,7 @@ pub fn Gallery() -> impl IntoElement {
         return view()
             .flex_1()
             .min_h(px(0.0))
-            .child(board_transitions_bar(ui, reduced_motion))
+            .child(board_transitions_bar(ui, reduced_motion, reject_drop))
             .child(canban_ui::frame::screen(ui))
             .into_element();
     }
@@ -2902,7 +2926,7 @@ pub fn Gallery() -> impl IntoElement {
                 .min_h(px(0.0))
                 .children(
                     (current_scene == "board-transitions")
-                        .then(|| board_transitions_bar(ui, reduced_motion)),
+                        .then(|| board_transitions_bar(ui, reduced_motion, reject_drop)),
                 )
                 .child(canban_ui::frame::screen(ui))
                 .into_element()

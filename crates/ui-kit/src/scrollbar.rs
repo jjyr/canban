@@ -209,20 +209,18 @@ impl Ctl {
 
     fn fade_to(self, visible: bool, first: bool) {
         let target = if visible { 1.0 } else { 0.0 };
-        if first || motion::reduced() {
-            self.fade_target.replace(target);
-            self.opacity.set(target);
-            return;
-        }
-        if (self.fade_target.replace(target) - target).abs() < f32::EPSILON {
-            return;
-        }
-        let (ms, easing) = if visible {
+        let reduced = motion::reduced();
+        let changed = (self.fade_target.replace(target) - target).abs() >= f32::EPSILON;
+        let (ms, easing) = if first {
+            (0.0, Easing::Linear)
+        } else if visible {
             (ENTER_MS, Easing::EaseOut)
         } else {
             (EXIT_MS, Easing::Curve(Curve::Cubic, EaseMode::In))
         };
-        drop(self.opacity.timing(target, ms, easing));
+        if first || changed || reduced {
+            let _ = motion::timing(self.opacity, target, ms, easing);
+        }
     }
 
     fn hover_track(self, over: bool) {

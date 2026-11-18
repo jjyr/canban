@@ -48,15 +48,32 @@ static APP: std::sync::OnceLock<Arc<canban_app_server::AppClient>> = std::sync::
 pub(crate) static HOSTS: std::sync::OnceLock<Arc<canban_app_server::hosts::HostRegistry>> =
     std::sync::OnceLock::new();
 
+pub(crate) fn with_ui_projection(method: &str, mut params: serde_json::Value) -> serde_json::Value {
+    if params.get("fields").is_none()
+        && matches!(
+            method,
+            "card.create"
+                | "card.update"
+                | "card.move"
+                | "card.hold_auto_merge"
+                | "card.restore"
+                | "card.context.update"
+                | "comment.add"
+                | "comment.update"
+        )
+    {
+        params["view"] = serde_json::json!("full");
+    }
+    params
+}
+
 pub(crate) fn routed_call(
     method: &str,
-    mut params: serde_json::Value,
+    params: serde_json::Value,
     active_project_id: Option<&str>,
 ) -> Result<serde_json::Value> {
     // These writes hydrate the desktop's immediate, server-confirmed overlay.
-    if matches!(method, "card.create" | "comment.add") {
-        params["view"] = serde_json::json!("full");
-    }
+    let params = with_ui_projection(method, params);
     if let Some(hosts) = HOSTS.get() {
         return hosts.call_routed(method, params, active_project_id);
     }

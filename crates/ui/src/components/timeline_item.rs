@@ -740,7 +740,6 @@ fn render_narrative(
                             "comment.update",
                             json!({
                                 "card_id": save_card,
-                                "fields": ["body"],
                                 "comment_id": save_cid,
                                 "body": updated,
                                 "mentions": mentions,

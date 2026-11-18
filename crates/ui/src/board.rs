@@ -218,10 +218,10 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 return create.into_element();
             };
             untracked(|| {
-                let state = drag::BoardDrag::new(ui, project.clone());
                 let stages = project.workflow.stages.clone();
                 let width = signal(0f32);
                 let compact = compact_mode(ui, width, stages.len());
+                let state = drag::BoardDrag::new(ui, project.clone(), compact);
                 let focus = focus_stage(ui, &stages);
                 view()
                     .flex_1()

@@ -10,8 +10,6 @@ pub(super) const COMPACT_FADE_MS: f32 = 180.0;
 pub(super) const EXIT_FADE_MS: f32 = 190.0;
 pub(super) const EXIT_SCALE_TO: f32 = 0.94;
 pub(super) const FLIGHT_FADE_MS: f32 = 180.0;
-pub(super) const FLIGHT_TIMEOUT_MS: u64 = 450;
-pub(super) const EXIT_TIMEOUT_MS: u64 = 320;
 
 /// Critically damped spring for cross-column flights: fast and crisp without
 /// overshoot, softening slightly across longer horizontal spans.
@@ -45,6 +43,7 @@ pub(super) struct FlightSpec {
     pub to_opacity: f32,
     pub target_stage: String,
     pub exiting: bool,
+    pub initial_velocity: Option<(f32, f32)>,
     pub generation: u64,
 }
 
@@ -72,7 +71,6 @@ pub(super) struct TransitionPlan {
     pub flights: Vec<FlightSpec>,
     pub exits: Vec<ExitSpec>,
     pub entries: BTreeMap<String, EntryKind>,
-    pub flip_offsets: BTreeMap<String, f32>,
 }
 
 fn clamp_to_edge(raw_y: f32, view_top: f32, view_h: f32, card_h: f32) -> f32 {
@@ -103,6 +101,7 @@ pub(super) fn plan(
     columns: &BTreeMap<String, ColumnMetric>,
     root_w: f32,
     active_flights: &[FlightSpec],
+    exclude_flight_id: Option<&str>,
     next_gen: &mut u64,
 ) -> TransitionPlan {
     let mut result = TransitionPlan::default();
@@ -119,6 +118,9 @@ pub(super) fn plan(
     };
 
     for new_card in new_cards {
+        if exclude_flight_id == Some(new_card.id.as_str()) {
+            continue;
+        }
         let card_h = heights
             .get(&new_card.id)
             .copied()
@@ -165,6 +167,7 @@ pub(super) fn plan(
                             updated.to_opacity = to_opacity;
                             updated.target_stage = new_card.stage.clone();
                             updated.exiting = false;
+                            updated.initial_velocity = None;
                             updated.generation = take_gen();
                             result.flights.push(updated);
                         }
@@ -191,6 +194,7 @@ pub(super) fn plan(
                             to_opacity: if to_visible { 1.0 } else { 0.0 },
                             target_stage: new_card.stage.clone(),
                             exiting: false,
+                            initial_velocity: None,
                             generation: take_gen(),
                         });
                     }
@@ -246,6 +250,7 @@ pub(super) fn plan(
                         updated.target_y = target_y;
                         updated.width = nc.w;
                         updated.to_opacity = to_opacity;
+                        updated.initial_velocity = None;
                         updated.generation = take_gen();
                     }
                     result.flights.push(updated);
@@ -254,12 +259,6 @@ pub(super) fn plan(
                     updated.card = new_card.clone();
                     result.flights.push(updated);
                 }
-            } else if let (Some(&oy), Some(&ny)) = (
-                old_layout.resting.get(&new_card.id),
-                new_layout.resting.get(&new_card.id),
-            ) && (oy - ny).abs() > 0.5
-            {
-                result.flip_offsets.insert(new_card.id.clone(), oy - ny);
             }
         } else if has_geometry
             && let (Some(nc), Some(ny)) = (
@@ -379,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_column_move_creates_flight_and_flips_peers() {
+    fn cross_column_move_creates_flight() {
         let stages = vec!["backlog".into(), "develop".into(), "review".into()];
         let old_cards = vec![
             card("a", "backlog", 1),
@@ -396,7 +395,7 @@ mod tests {
         let new_layout = model::layout(&new_cards, &stages, &heights, "", None);
         let mut next_gen = 0;
 
-        let plan = plan(
+        let p = plan(
             &old_cards,
             &new_cards,
             &old_layout,
@@ -405,11 +404,12 @@ mod tests {
             &cols(),
             1000.0,
             &[],
+            None,
             &mut next_gen,
         );
 
-        assert_eq!(plan.flights.len(), 1);
-        let f = &plan.flights[0];
+        assert_eq!(p.flights.len(), 1);
+        let f = &p.flights[0];
         assert_eq!(f.id, "a");
         assert_eq!(f.origin_x, 0.0);
         assert_eq!(f.origin_y, 40.0);
@@ -417,11 +417,23 @@ mod tests {
         assert_eq!(f.target_y, 40.0);
         assert_eq!(f.from_opacity, 1.0);
         assert_eq!(f.to_opacity, 1.0);
-        // `b` moved up from 124 to 0 -> FLIP offset = +124; `c` moved down from 0 to 124 -> -124.
-        assert_eq!(plan.flip_offsets.get("b").copied(), Some(124.0));
-        assert_eq!(plan.flip_offsets.get("c").copied(), Some(-124.0));
-        assert!(plan.entries.is_empty());
-        assert!(plan.exits.is_empty());
+        assert_eq!(f.initial_velocity, None);
+        assert!(p.entries.is_empty());
+        assert!(p.exits.is_empty());
+
+        let excluded = plan(
+            &old_cards,
+            &new_cards,
+            &old_layout,
+            &new_layout,
+            &heights,
+            &cols(),
+            1000.0,
+            &[],
+            Some("a"),
+            &mut next_gen,
+        );
+        assert!(excluded.flights.is_empty());
     }
 
     #[test]
@@ -450,6 +462,7 @@ mod tests {
             &cols(),
             1000.0,
             &[],
+            None,
             &mut next_gen,
         );
         assert_eq!(one_side.flights.len(), 1);
@@ -469,6 +482,7 @@ mod tests {
             &scrolled_cols,
             1000.0,
             &[],
+            None,
             &mut next_gen,
         );
         assert!(both_offscreen.flights.is_empty());
@@ -495,6 +509,7 @@ mod tests {
             &cols(),
             1000.0,
             &[],
+            None,
             &mut next_gen,
         );
         assert_eq!(p1.flights[0].origin_x, 0.0);
@@ -510,6 +525,7 @@ mod tests {
             &cols(),
             1000.0,
             &p1.flights,
+            None,
             &mut next_gen,
         );
         assert_eq!(p2.flights.len(), 1);
@@ -547,6 +563,7 @@ mod tests {
             &compact_cols,
             360.0,
             &[],
+            None,
             &mut next_gen,
         );
         assert!(plan.flights.is_empty());
@@ -575,6 +592,7 @@ mod tests {
             &cols(),
             1000.0,
             &[],
+            None,
             &mut next_gen,
         );
         assert_eq!(plan.entries.get("born").copied(), Some(EntryKind::PopIn));
@@ -582,6 +600,5 @@ mod tests {
         assert_eq!(plan.exits[0].id, "gone");
         assert_eq!(plan.exits[0].x, 0.0);
         assert_eq!(plan.exits[0].y, 40.0);
-        assert_eq!(plan.flip_offsets.get("stay").copied(), Some(124.0));
     }
 }

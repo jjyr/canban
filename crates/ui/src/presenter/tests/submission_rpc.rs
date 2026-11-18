@@ -254,7 +254,7 @@ fn submissions_finish_before_refresh_and_refresh_failure_does_not_fail_the_write
             json!({"project_id":"p1","title":"First"}),
             move |result| {
                 assert!(result.is_ok());
-                assert!(!ui.pending.get_untracked());
+                assert!(!ui.is_method_pending("card.create"));
                 assert_eq!(ui.snapshot.with_untracked(|s| s.cards.len()), 1);
                 assert_eq!(ui.page.get_untracked(), "card");
                 assert_eq!(ui.card.get_untracked(), "c1");
@@ -275,7 +275,7 @@ fn submissions_finish_before_refresh_and_refresh_failure_does_not_fail_the_write
                     json!({"card_id":"c1","body":"Sent","mentions":[]}),
                     move |result| {
                         assert!(result.is_ok());
-                        assert!(!ui.pending.get_untracked());
+                        assert!(!ui.is_method_pending("comment.add"));
                         assert_eq!(ui.snapshot.with_untracked(|s| s.events.len()), 1);
                         // A late create receipt must not replace a different draft.
                         ui.page.set("new-card".into());
@@ -353,4 +353,155 @@ fn submissions_finish_before_refresh_and_refresh_failure_does_not_fail_the_write
     drop(core);
     drop(runtime);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn ui_projection_hydrates_real_app_server_card_and_comment_writes_for_overlay() {
+    struct TempDir(std::path::PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let dir = TempDir(std::env::temp_dir().join(format!("cb-ui-proj-{}", id())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let app = canban_app_server::AppServer::open(
+        dir.0.join("home"),
+        std::path::PathBuf::from("/bin/echo"),
+    )
+    .unwrap();
+    let project: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({
+                "name": "ProjectionTest",
+                "directory": dir.0.join("repo"),
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    // Explicit `fields` must not collide with `view = "full"`.
+    let explicit_fields =
+        crate::with_ui_projection("comment.update", json!({"fields": ["body"], "body": "x"}));
+    assert!(explicit_fields.get("view").is_none());
+
+    let mut writes = submission::CommittedWrites::default();
+    let call_projected = |method: &str, params: Value| -> Value {
+        app.call(method, crate::with_ui_projection(method, params))
+            .unwrap()
+    };
+
+    // 1. `card.create`
+    let created = call_projected(
+        "card.create",
+        json!({
+            "project_id": project.id,
+            "title": "Initial title",
+            "body": "Initial body",
+        }),
+    );
+    let card_id = created["id"].as_str().unwrap().to_owned();
+    let rev1 = created["revision"].as_u64().unwrap();
+    writes.record("card.create", &created, "local");
+
+    let mut stale = Snapshot::default();
+    writes.reconcile(&mut stale);
+    assert_eq!(stale.cards.len(), 1);
+    assert_eq!(stale.cards[0].id, card_id);
+    assert_eq!(stale.cards[0].stage, "backlog");
+    assert_eq!(stale.cards[0].title, "Initial title");
+    assert_eq!(stale.cards[0].body, "Initial body");
+
+    // Capture a stale snapshot at rev1 before subsequent mutations.
+    let stale_card_snap = Snapshot {
+        projects: vec![project.clone()],
+        cards: stale.cards.clone(),
+        ..Default::default()
+    };
+
+    // 2. `card.move`
+    let moved = call_projected(
+        "card.move",
+        json!({
+            "card_id": card_id,
+            "revision": rev1,
+            "stage": "develop",
+        }),
+    );
+    let rev2 = moved["revision"].as_u64().unwrap();
+    assert!(rev2 > rev1);
+    writes.record("card.move", &moved, "local");
+    let mut overlayed = stale_card_snap.clone();
+    writes.reconcile(&mut overlayed);
+    assert_eq!(overlayed.cards[0].stage, "develop");
+    assert_eq!(overlayed.cards[0].title, "Initial title");
+
+    // 3. `card.hold_auto_merge`
+    let held = call_projected(
+        "card.hold_auto_merge",
+        json!({
+            "card_id": card_id,
+            "revision": rev2,
+            "hold": true,
+        }),
+    );
+    let rev3 = held["revision"].as_u64().unwrap();
+    assert!(rev3 > rev2);
+    writes.record("card.hold_auto_merge", &held, "local");
+    let mut overlayed = stale_card_snap.clone();
+    writes.reconcile(&mut overlayed);
+    assert_eq!(overlayed.cards[0].stage, "develop");
+    assert!(overlayed.cards[0].hold_auto_merge);
+
+    // 4. `card.update` (returns `title` and `body` for `drafts::save`)
+    let updated_card = call_projected(
+        "card.update",
+        json!({
+            "card_id": card_id,
+            "revision": rev3,
+            "title": "Renamed title",
+            "body": "Edited markdown body",
+        }),
+    );
+    assert_eq!(updated_card["title"], json!("Renamed title"));
+    assert_eq!(updated_card["body"], json!("Edited markdown body"));
+
+    // 5. `comment.add`
+    let added_comment = call_projected(
+        "comment.add",
+        json!({
+            "card_id": card_id,
+            "body": "First comment",
+            "mentions": [],
+        }),
+    );
+    let comment_id = added_comment["id"].as_str().unwrap().to_owned();
+    writes.record("comment.add", &added_comment, "local");
+    let mut overlayed = stale_card_snap.clone();
+    writes.reconcile(&mut overlayed);
+    assert_eq!(overlayed.events.len(), 1);
+    assert_eq!(overlayed.events[0].id, comment_id);
+    assert_eq!(overlayed.events[0].message, "First comment");
+
+    // 6. `comment.update` (without `fields: ["body"]`, hydrates both `val["body"]` and `CommittedWrites`)
+    let stale_with_comment = overlayed.clone();
+    let updated_comment = call_projected(
+        "comment.update",
+        json!({
+            "card_id": card_id,
+            "comment_id": comment_id,
+            "body": "Updated comment body",
+            "mentions": [],
+        }),
+    );
+    assert_eq!(updated_comment["body"], json!("Updated comment body"));
+    writes.record("comment.update", &updated_comment, "local");
+    let mut overlayed = stale_with_comment;
+    writes.reconcile(&mut overlayed);
+    assert_eq!(overlayed.events.len(), 1);
+    assert_eq!(overlayed.events[0].message, "Updated comment body");
+    assert_eq!(overlayed.events[0].data["revision"], json!(2));
 }

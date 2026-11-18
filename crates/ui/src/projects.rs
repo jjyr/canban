@@ -646,7 +646,7 @@ pub fn new_project_form(
                 .child(
                     nsh_base::collapsible()
                         .open(workflow_expanded)
-                        .reveal(true)
+                        .reveal(move || !canban_ui_kit::motion::reduced())
                         .child(
                             action(
                                 move || {
@@ -694,7 +694,7 @@ pub fn new_project_form(
                 .child(
                     nsh_base::collapsible()
                         .open(agents_expanded)
-                        .reveal(true)
+                        .reveal(move || !canban_ui_kit::motion::reduced())
                         .child(
                             action(
                                 move || {

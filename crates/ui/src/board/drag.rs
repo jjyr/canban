@@ -2,17 +2,14 @@
 //! the display-frame loop only hit-tests, changes slots and scrolls at edges.
 use super::{
     Drop,
-    model::{self, Layout, Slot},
+    model::{self, Layout, PendingMove, Slot},
     transitions::{self, ColumnMetric, EntryKind, ExitSpec, FlightSpec},
 };
 use crate::{components::card_tile, presenter::*};
 use canban_types::{BoardFilter, Card, Project};
-use canban_ui_kit::{motion::ReducedMotion, tokens::*};
-use nsh_core::{element::AnimationEnd, keymap::When, prelude::*};
-use std::{
-    collections::BTreeMap,
-    time::{Duration, Instant},
-};
+use canban_ui_kit::{motion, tokens::*};
+use nsh_core::{keymap::When, prelude::*};
+use std::{collections::BTreeMap, time::Instant};
 #[derive(Clone, Copy, Default)]
 struct Rect {
     x: f32,
@@ -44,33 +41,38 @@ struct Session {
     card: Card,
     source: Rect,
     pointer: Point<Points>,
+    pan_x: f32,
+    pan_y: f32,
     target: Option<Slot>,
     original: Slot,
-    original_y: f32,
     end: Option<PanEvent>,
 }
-#[derive(Default)]
-struct FlipState {
-    seq: u64,
-    reset_seq: u64,
-    offsets: BTreeMap<String, f32>,
+#[derive(Clone)]
+struct ReleaseOrigin {
+    card_id: String,
+    origin_x: f32,
+    origin_y: f32,
+    vel_x: f32,
+    vel_y: f32,
 }
 #[derive(Clone, Copy)]
 pub(super) struct BoardDrag {
     owner: Owner,
     ui: Ui,
     trace: bool,
-    reduced_motion: Option<Signal<bool>>,
+    compact: Memo<bool>,
     initialized: Stored<bool>,
     last_filter: Stored<BoardFilter>,
+    pending_move: Stored<Option<PendingMove>>,
     pub cards: Signal<Vec<Card>>,
     pub layout: Signal<Layout>,
     viewports: Signal<BTreeMap<String, (f32, f32)>>,
     reflow_pending: Stored<bool>,
+    heights_settled: Stored<bool>,
     measure_pending: Stored<bool>,
     order: Stored<model::Order>,
     transition_gen: Stored<u64>,
-    flip: Stored<FlipState>,
+    pub motion_epoch: Signal<u64>,
     entries: Stored<(u64, BTreeMap<String, EntryKind>)>,
     pub flights: Signal<Vec<FlightSpec>>,
     pub exits: Signal<Vec<ExitSpec>>,
@@ -87,71 +89,25 @@ pub(super) struct BoardDrag {
     pointer: Stored<Point<Points>>,
     pub ghost: Signal<Option<(Card, f32, f32, f32)>>,
 }
-type MotionEnd = (Option<AnimationEnd>, Option<AnimationEnd>);
 #[derive(Default)]
 struct HitTest {
     target: Option<Slot>,
     scrolls: Vec<(String, ElementRef, f32)>,
     horizontal: Option<f32>,
 }
-pub(super) fn should_short_circuit_settle(current: Option<(f32, f32)>, to: f32) -> bool {
-    current.is_some_and(|(cur, vel)| (to - cur).abs() < 0.5 && vel.abs() < 10.)
-}
-pub(super) fn settle(value: AnimatedValue, to: f32) -> Option<AnimationEnd> {
-    settle_if_needed(value, None, to)
-}
-fn settle_if_needed(
-    value: AnimatedValue,
-    current: Option<(f32, f32)>,
-    to: f32,
-) -> Option<AnimationEnd> {
-    if canban_ui_kit::motion::reduced() || should_short_circuit_settle(current, to) {
-        value.set(to);
-        None
-    } else {
-        Some(value.spring(
-            to,
-            Spring {
-                stiffness: 1600.,
-                damping: 80.,
-                ..Default::default()
-            },
-        ))
-    }
-}
-async fn wait_motion_ends(ends: Vec<AnimationEnd>, timeout_ms: u64) {
-    if ends.is_empty() {
-        return;
-    }
-    let done = signal(false);
-    spawn(async move {
-        for end in ends {
-            end.await;
-        }
-        let _ = done.try_set(true);
-    });
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    while done.try_get() == Some(false) && Instant::now() < deadline {
-        timer(Duration::from_millis(16)).await;
-    }
-}
-async fn wait_motion((x, y): MotionEnd) {
-    let ends: Vec<_> = [x, y].into_iter().flatten().collect();
-    wait_motion_ends(ends, 450).await;
-}
 pub(super) fn can_start_drag(phase: u8, card_move_pending: bool) -> bool {
     phase == 0 && !card_move_pending
 }
 /// Whether NSH's pan gesture remains mounted on Board rows.
 /// Keep `PanEnd` mounted during active gesture phases (`1` and `2`) so mouse release
-/// delivers `on_pan_end`; disable during landing (`3`) or while `card.move` is in flight.
+/// delivers `on_pan_end`; disable while `card.move` is in flight.
 pub(super) fn is_row_pan_enabled(
     phase: u8,
     lifted_id: &str,
     row_id: &str,
     card_move_pending: bool,
 ) -> bool {
-    if card_move_pending || phase == 3 {
+    if card_move_pending || phase > 2 {
         return false;
     }
     phase == 0 || lifted_id == row_id
@@ -164,7 +120,7 @@ pub(super) fn should_abort_unmounted_row(
     lifted_id == Some(unmounted_id) && matches!(phase, Some(1 | 2))
 }
 impl BoardDrag {
-    pub fn new(ui: Ui, project: Project) -> Self {
+    pub fn new(ui: Ui, project: Project, compact: Memo<bool>) -> Self {
         let initial_filter = ui
             .github
             .filters
@@ -173,17 +129,19 @@ impl BoardDrag {
             owner: Owner::current(),
             ui,
             trace: std::env::var_os("CANBAN_BOARD_TRACE").is_some(),
-            reduced_motion: use_context::<ReducedMotion>().map(|p| p.0),
+            compact,
             initialized: stored(false),
             last_filter: stored(initial_filter),
+            pending_move: stored(None),
             cards: signal(Vec::new()),
             layout: signal(Layout::default()),
             viewports: signal(BTreeMap::new()),
             reflow_pending: stored(false),
+            heights_settled: stored(false),
             measure_pending: stored(false),
             order: stored(model::Order::new()),
             transition_gen: stored(0),
-            flip: stored(FlipState::default()),
+            motion_epoch: signal(0),
             entries: stored((0, BTreeMap::new())),
             flights: signal(Vec::new()),
             exits: signal(Vec::new()),
@@ -212,12 +170,25 @@ impl BoardDrag {
                 eprintln!("BOARD_DRAG_REFRESH_DEFERRED");
             }
         });
+        let prev_env = stored(None::<(bool, bool, bool)>);
         effect(move || {
-            let on_workspace = matches!(ui.page.get().as_str(), "board" | "card" | "new-card");
-            if !on_workspace && this.phase.get_untracked() != 0 {
-                this.end(PanEvent {
-                    cancelled: true,
-                    ..Default::default()
+            let reduced = motion::reduced();
+            let visible = this.board_visible_reactive();
+            let is_compact = compact.get();
+            let Some((was_reduced, was_visible, was_compact)) =
+                prev_env.replace(Some((reduced, visible, is_compact)))
+            else {
+                return;
+            };
+            let became_reduced = reduced && !was_reduced;
+            let became_hidden = !visible && was_visible;
+            let compact_changed = is_compact != was_compact;
+            if became_reduced || became_hidden || compact_changed {
+                batch(|| {
+                    if this.phase.get_untracked() != 0 {
+                        this.clear();
+                    }
+                    this.clear_transitions();
                 });
             }
         });
@@ -240,19 +211,16 @@ impl BoardDrag {
         });
         this
     }
-    fn is_reduced_motion(self) -> bool {
-        reduce_motion()
-            || self
-                .reduced_motion
-                .is_some_and(|s| s.try_get() == Some(true))
+    fn board_visible_reactive(self) -> bool {
+        let page = self.ui.page.get();
+        let on_board = matches!(page.as_str(), "board" | "card" | "new-card");
+        let full = self.ui.narrow.get()
+            || self.ui.card_standalone.get()
+            || (page == "card" && self.ui.card_terminal_open.get());
+        on_board && !full
     }
     fn board_visible(self) -> bool {
-        let page = self.ui.page.get_untracked();
-        let on_board = matches!(page.as_str(), "board" | "card" | "new-card");
-        let full = self.ui.narrow.get_untracked()
-            || self.ui.card_standalone.get_untracked()
-            || (page == "card" && self.ui.card_terminal_open.get_untracked());
-        on_board && !full
+        untracked(|| self.board_visible_reactive())
     }
     fn column_metrics(self) -> (f32, BTreeMap<String, ColumnMetric>) {
         self.metrics.with(|m| {
@@ -277,10 +245,7 @@ impl BoardDrag {
     }
     fn clear_transitions(self) {
         self.entries.with(|(_, map)| map.clear());
-        self.flip.with(|f| {
-            f.reset_seq = f.reset_seq.wrapping_add(1);
-            f.offsets.clear();
-        });
+        self.motion_epoch.update(|e| *e = e.wrapping_add(1));
         if !self.flights.with_untracked(Vec::is_empty) {
             self.flights.set(Vec::new());
         }
@@ -302,22 +267,6 @@ impl BoardDrag {
     pub fn take_entry(self, id: &str) -> Option<EntryKind> {
         self.entries.with(|(_, map)| map.remove(id))
     }
-    pub fn take_flip(
-        self,
-        id: &str,
-        seen_seq: u64,
-        seen_reset: u64,
-    ) -> (u64, u64, bool, Option<f32>) {
-        self.flip.with(|f| {
-            let reset_changed = f.reset_seq != seen_reset;
-            let offset = if f.seq != seen_seq {
-                f.offsets.get(id).copied()
-            } else {
-                None
-            };
-            (f.seq, f.reset_seq, reset_changed, offset)
-        })
-    }
     fn finish_flight(self, id: &str, generation: u64) {
         if self
             .flights
@@ -338,10 +287,60 @@ impl BoardDrag {
                 .update(|all| all.retain(|e| !(e.id == id && e.generation == generation)));
         }
     }
+    fn make_release_flight(
+        self,
+        release: &ReleaseOrigin,
+        new_cards: &[Card],
+        new_layout: &Layout,
+        cols: &BTreeMap<String, ColumnMetric>,
+    ) -> Option<FlightSpec> {
+        if untracked(motion::reduced) || !self.board_visible() || self.compact.get_untracked() {
+            return None;
+        }
+        let card = new_cards.iter().find(|c| c.id == release.card_id)?;
+        let nc = cols.get(&card.stage)?;
+        if nc.w <= 0.0 || nc.h <= 0.0 {
+            return None;
+        }
+        let ny = new_layout.resting.get(&card.id).copied()?;
+        let target_x = nc.x;
+        let target_y = nc.y + (ny - nc.offset);
+        if motion::should_short_circuit_settle(
+            Some((release.origin_x - target_x, release.vel_x)),
+            0.0,
+        ) && motion::should_short_circuit_settle(
+            Some((release.origin_y - target_y, release.vel_y)),
+            0.0,
+        ) {
+            return None;
+        }
+        let generation = self.transition_gen.with(|next_gen| {
+            *next_gen = next_gen.wrapping_add(1);
+            *next_gen
+        });
+        Some(FlightSpec {
+            id: card.id.clone(),
+            card: card.clone(),
+            origin_x: release.origin_x,
+            origin_y: release.origin_y,
+            target_x,
+            target_y,
+            width: nc.w,
+            from_opacity: 1.0,
+            to_opacity: 1.0,
+            target_stage: card.stage.clone(),
+            exiting: false,
+            initial_velocity: Some((release.vel_x, release.vel_y)),
+            generation,
+        })
+    }
     fn sync(self) {
         self.sync_with(true);
     }
     fn sync_with(self, animate: bool) {
+        self.sync_internal(animate, None);
+    }
+    fn sync_internal(self, animate: bool, release: Option<ReleaseOrigin>) {
         let project = self.project.with(|p| p.id.clone());
         let current_filter = self
             .ui
@@ -350,7 +349,16 @@ impl BoardDrag {
             .with_untracked(|m| m.get(&project).cloned().unwrap_or_default());
         let started = Instant::now();
         let changed = self.ui.snapshot.with_untracked(|s| {
-            let candidates: Vec<_> = s
+            if let Some(pending) = self.pending_move.get() {
+                let clear_pending = match s.cards.iter().find(|c| c.id == pending.card_id) {
+                    None => true,
+                    Some(c) => !c.active() || c.revision > pending.base_revision,
+                };
+                if clear_pending {
+                    self.pending_move.replace(None);
+                }
+            }
+            let mut new_cards: Vec<Card> = s
                 .cards
                 .iter()
                 .filter(|c| {
@@ -358,13 +366,15 @@ impl BoardDrag {
                         && c.active()
                         && crate::github::filters::matches(self.ui, c)
                 })
+                .cloned()
                 .collect();
+            if let Some(pending) = self.pending_move.get() {
+                model::apply_pending_move(&mut new_cards, &pending);
+            }
             let was_initialized = self.initialized.get();
-            if was_initialized
-                && self
-                    .cards
-                    .with_untracked(|old| old.iter().eq(candidates.iter().copied()))
-            {
+            let cards_unchanged =
+                was_initialized && self.cards.with_untracked(|old| old == &new_cards);
+            if cards_unchanged && release.is_none() {
                 return false;
             }
             self.initialized.replace(true);
@@ -373,8 +383,7 @@ impl BoardDrag {
                 && was_initialized
                 && !filter_changed
                 && self.board_visible()
-                && !self.is_reduced_motion();
-            let new_cards: Vec<_> = candidates.into_iter().cloned().collect();
+                && !untracked(motion::reduced);
             let new_order = model::order(&new_cards);
             let stages = self.project.with(|p| {
                 p.workflow
@@ -396,10 +405,37 @@ impl BoardDrag {
             });
 
             batch(|| {
+                if cards_unchanged {
+                    let (_, cols) = self.column_metrics();
+                    if let Some(rel) = release.as_ref() {
+                        if let Some(spec) =
+                            self.make_release_flight(rel, &new_cards, &new_layout, &cols)
+                        {
+                            self.flights.update(|all| {
+                                all.retain(|f| f.id != spec.id);
+                                all.push(spec);
+                            });
+                        } else if self
+                            .flights
+                            .with_untracked(|all| all.iter().any(|f| f.id == rel.card_id))
+                        {
+                            self.flights
+                                .update(|all| all.retain(|f| f.id != rel.card_id));
+                        }
+                    }
+                    self.order.replace(new_order);
+                    if self.layout.with_untracked(|old| old != &new_layout) {
+                        self.metrics.with(|m| m.layouts += 1);
+                        self.layout.set(new_layout);
+                    }
+                    return;
+                }
+
                 if can_animate {
                     let (root_w, cols) = self.column_metrics();
                     let active_flights = self.flights.get_untracked();
-                    let plan = self.cards.with_untracked(|old_cards| {
+                    let exclude_id = release.as_ref().map(|r| r.card_id.as_str());
+                    let mut plan = self.cards.with_untracked(|old_cards| {
                         self.layout.with_untracked(|old_layout| {
                             self.metrics.with(|m| {
                                 self.transition_gen.with(|next_gen| {
@@ -412,12 +448,20 @@ impl BoardDrag {
                                         &cols,
                                         root_w,
                                         &active_flights,
+                                        exclude_id,
                                         next_gen,
                                     )
                                 })
                             })
                         })
                     });
+                    if let Some(rel) = release.as_ref()
+                        && let Some(spec) =
+                            self.make_release_flight(rel, &new_cards, &new_layout, &cols)
+                    {
+                        plan.flights.retain(|f| f.id != spec.id);
+                        plan.flights.push(spec);
+                    }
                     if plan.flights != active_flights {
                         self.flights.set(plan.flights);
                     }
@@ -452,24 +496,6 @@ impl BoardDrag {
                             }
                         });
                     }
-                    let flip_seq = self.flip.with(|f| {
-                        f.seq = f.seq.wrapping_add(1);
-                        f.offsets = plan.flip_offsets;
-                        f.seq
-                    });
-                    if self.flip.with(|f| !f.offsets.is_empty()) {
-                        self.spawn_owned(async move {
-                            next_frame().await;
-                            next_frame().await;
-                            if self.phase.try_get().is_some() {
-                                self.flip.with(|f| {
-                                    if f.seq == flip_seq {
-                                        f.offsets.clear();
-                                    }
-                                });
-                            }
-                        });
-                    }
                 } else {
                     self.clear_transitions();
                 }
@@ -499,7 +525,12 @@ impl BoardDrag {
         self.spawn_owned(async move {
             next_frame().await;
             self.reflow_pending.replace(false);
-            self.reflow();
+            batch(|| {
+                if !self.heights_settled.replace(true) {
+                    self.motion_epoch.update(|e| *e = e.wrapping_add(1));
+                }
+                self.reflow();
+            });
         });
     }
     fn schedule_measure(self) {
@@ -741,7 +772,7 @@ impl BoardDrag {
             self.clear();
         }
     }
-    pub fn start(self, card: Card, reference: ElementRef) {
+    pub fn start(self, card: Card, reference: ElementRef, event: &PanEvent) {
         if !can_start_drag(
             self.phase.get_untracked(),
             self.ui
@@ -767,9 +798,8 @@ impl BoardDrag {
                 .position(|c| c.id == card.id)
                 .unwrap_or(0)
         });
-        let original_y = self
-            .layout
-            .with_untracked(|l| l.resting.get(&card.id).copied().unwrap_or(0.));
+        let pan_x = event.value_x.unwrap_or(event.translation.x.0);
+        let pan_y = event.value_y.unwrap_or(event.translation.y.0);
         self.session.replace(Some(Session {
             original: Slot {
                 stage: card.stage.clone(),
@@ -779,7 +809,8 @@ impl BoardDrag {
             card,
             source: Rect::default(),
             pointer: self.pointer.get(),
-            original_y,
+            pan_x,
+            pan_y,
             end: None,
         }));
         self.spawn_owned(async move {
@@ -905,6 +936,8 @@ impl BoardDrag {
         let Some(mut session) = self.session.get() else {
             return;
         };
+        session.pan_x = x;
+        session.pan_y = y;
         let hit = self.hit_test(&session, x, y, dt);
         for (stage, reference, next) in hit.scrolls {
             self.scrolled(&stage, next);
@@ -914,12 +947,15 @@ impl BoardDrag {
             self.horizontal_scroll(next);
             self.horizontal.scroll_to(point(px(next), px(0.)), false);
         }
-        if session.target != hit.target {
+        let target_changed = session.target != hit.target;
+        if target_changed {
             if self.trace {
                 eprintln!("BOARD_DRAG_SLOT {:?}", hit.target);
             }
             session.target = hit.target;
-            self.session.replace(Some(session));
+        }
+        self.session.replace(Some(session));
+        if target_changed {
             self.reflow();
         }
         self.metrics.with(|m| {
@@ -943,11 +979,12 @@ impl BoardDrag {
         if self.phase.get_untracked() != 2 {
             return;
         }
-        self.track(event.translation.x.0, event.translation.y.0, 0.);
+        if !event.cancelled {
+            self.track(event.translation.x.0, event.translation.y.0, 0.);
+        }
         let Some(session) = self.session.get() else {
             return;
         };
-        self.phase.set(3);
         if self.trace {
             self.metrics.with(|m| {
                 eprintln!(
@@ -956,14 +993,54 @@ impl BoardDrag {
                 )
             });
         }
+        let has_event_pos = event.value_x.is_some()
+            || event.value_y.is_some()
+            || event.translation.x.0 != 0.0
+            || event.translation.y.0 != 0.0;
+        let val_x = event.value_x.unwrap_or(if has_event_pos {
+            event.translation.x.0
+        } else {
+            session.pan_x
+        });
+        let val_y = event.value_y.unwrap_or(if has_event_pos {
+            event.translation.y.0
+        } else {
+            session.pan_y
+        });
+        let (origin_x, origin_y) = self.ghost.with_untracked(|g| {
+            g.as_ref()
+                .map(|(_, gx, gy, _)| (gx + val_x, gy + val_y))
+                .unwrap_or_else(|| {
+                    let root = self.metrics.with(|m| m.root);
+                    (
+                        session.source.x - root.x + val_x,
+                        session.source.y - root.y + val_y,
+                    )
+                })
+        });
+        let release = ReleaseOrigin {
+            card_id: session.card.id.clone(),
+            origin_x,
+            origin_y,
+            vel_x: event.velocity_x,
+            vel_y: event.velocity_y,
+        };
         let target = if event.cancelled {
             None
         } else {
             session.target.clone()
         };
-        let unchanged = target.as_ref() == Some(&session.original);
-        if target.is_none() || unchanged {
-            self.return_home_with(Some(&event));
+        let unchanged = target.is_none() || target.as_ref() == Some(&session.original);
+        if unchanged {
+            batch(|| {
+                self.session.replace(None);
+                self.ghost.set(None);
+                self.lifted.set(String::new());
+                self.x.set(0.);
+                self.y.set(0.);
+                self.phase.set(0);
+                self.sync_internal(true, Some(release));
+            });
             return;
         }
         let target = target.unwrap();
@@ -975,109 +1052,96 @@ impl BoardDrag {
         let intent = Drop {
             card_id: session.card.id.clone(),
             revision: session.card.revision,
-            stage: target.stage,
-            before_card_id: before,
+            stage: target.stage.clone(),
+            before_card_id: before.clone(),
         };
-        let motion = self.land_with(Some(&event));
-        let received = self.owner.run(|| signal(None::<bool>));
-        if let Some(handler) = self.ui.board_move.get() {
-            handler(intent);
-            received.set(Some(true));
-        } else {
-            dispatch_complete(
-                self.ui,
-                "card.move",
-                serde_json::json!({"card_id":intent.card_id,"revision":intent.revision,"stage":intent.stage,"before_card_id":intent.before_card_id}),
-                move |result| {
-                    received.try_set(Some(result.is_ok()));
-                },
-            );
-        }
-        self.spawn_owned(async move {
-            wait_motion(motion).await;
-            while received.try_get() == Some(None) {
-                timer(Duration::from_millis(16)).await;
-            }
-            if self.phase.try_get() != Some(3) {
+        let card_id = intent.card_id.clone();
+        let base_revision = intent.revision;
+        let on_complete = move |result: Result<serde_json::Value, String>| {
+            if self.phase.try_get().is_none() {
                 return;
             }
-            if received.try_get() == Some(Some(true)) {
-                self.clear();
-            } else {
-                self.return_home();
+            let matched = self.pending_move.with(|pm| {
+                if pm
+                    .as_ref()
+                    .is_some_and(|p| p.card_id == card_id && p.base_revision == base_revision)
+                {
+                    *pm = None;
+                    true
+                } else {
+                    false
+                }
+            });
+            if result.is_err() && matched {
+                self.sync_with(true);
             }
-        });
-    }
-    fn settle_to(
-        self,
-        event: Option<&PanEvent>,
-        stage: &str,
-        source_x: f32,
-        source_y: f32,
-        target_y: f32,
-    ) -> MotionEnd {
-        let Some(c) = self.metrics.with(|m| m.columns.get(stage).cloned()) else {
-            return (None, None);
         };
-        let horizontal = self.metrics.with(|m| m.horizontal);
-        let cur_x = event.and_then(|e| e.value_x.map(|v| (v, e.velocity_x)));
-        let cur_y = event.and_then(|e| e.value_y.map(|v| (v, e.velocity_y)));
-        (
-            settle_if_needed(self.x, cur_x, c.rect.x - horizontal - source_x),
-            settle_if_needed(self.y, cur_y, c.rect.y - c.offset + target_y - source_y),
-        )
-    }
-    fn land_with(self, event: Option<&PanEvent>) -> MotionEnd {
-        if let Some(s) = self.session.get()
-            && let Some((stage, y, _)) = self.layout.with_untracked(|l| l.gap.clone())
-        {
-            return self.settle_to(event, &stage, s.source.x, s.source.y, y);
-        }
-        (None, None)
-    }
-    fn return_home(self) {
-        self.return_home_with(None);
-    }
-    fn return_home_with(self, event: Option<&PanEvent>) {
-        self.session.with(|s| {
-            if let Some(s) = s {
-                s.target = Some(s.original.clone());
-            }
-        });
-        self.reflow();
-        let motion = if let Some(s) = self.session.get() {
-            self.settle_to(
-                event,
-                &s.original.stage,
-                s.source.x,
-                s.source.y,
-                s.original_y,
-            )
+        if let Some(handler) = self.ui.board_move.get() {
+            batch(|| {
+                self.session.replace(None);
+                self.ghost.set(None);
+                self.lifted.set(String::new());
+                self.x.set(0.);
+                self.y.set(0.);
+                self.phase.set(0);
+                handler(intent);
+                self.sync_internal(true, Some(release));
+            });
         } else {
-            (None, None)
-        };
-        if motion.0.is_none() && motion.1.is_none() {
-            self.clear();
+            self.pending_move.replace(Some(PendingMove {
+                card_id: intent.card_id.clone(),
+                base_revision: intent.revision,
+                target_stage: target.stage,
+                before_card_id: before,
+            }));
+            batch(|| {
+                self.session.replace(None);
+                self.ghost.set(None);
+                self.lifted.set(String::new());
+                self.x.set(0.);
+                self.y.set(0.);
+                self.phase.set(0);
+                self.sync_internal(true, Some(release));
+            });
+            self.dispatch_move(intent, on_complete);
+        }
+    }
+    fn dispatch_move(
+        self,
+        intent: Drop,
+        after: impl FnOnce(Result<serde_json::Value, String>) + 'static,
+    ) {
+        #[cfg(test)]
+        if let Some(mock) = TEST_MOVE_RPC.with(|m| m.borrow().clone()) {
+            mock(self.ui, intent, Box::new(after));
             return;
         }
-        self.spawn_owned(async move {
-            wait_motion(motion).await;
-            if self.phase.try_get().is_some() {
-                self.clear();
-            }
-        });
+        dispatch_complete(
+            self.ui,
+            "card.move",
+            serde_json::json!({
+                "card_id": intent.card_id,
+                "revision": intent.revision,
+                "stage": intent.stage,
+                "before_card_id": intent.before_card_id,
+            }),
+            after,
+        );
     }
     fn clear(self) {
         if self.phase.try_get().is_none() {
             return;
         }
+        let had_session = self.session.replace(None).is_some();
         self.phase.set(0);
-        self.session.replace(None);
         self.ghost.set(None);
         self.lifted.set(String::new());
         self.x.set(0.);
         self.y.set(0.);
         self.sync_with(false);
+        if had_session {
+            self.reflow();
+        }
     }
     pub fn overlay(self) -> impl IntoElement {
         view()
@@ -1102,35 +1166,54 @@ impl BoardDrag {
                     let prev_op = stored(initial.from_opacity);
                     effect(move || {
                         let spec = flight.get();
-                        if seen_gen.replace(spec.generation) == spec.generation {
+                        let prev_gen = seen_gen.replace(spec.generation);
+                        if prev_gen == spec.generation {
                             return;
                         }
+                        let first_run = prev_gen == 0;
                         let gen_id = spec.generation;
                         let dx = spec.target_x - origin_x;
                         let dy = spec.target_y - origin_y;
-                        let dist =
-                            ((dx - prev_dx.get()).powi(2) + (dy - prev_dy.get()).powi(2)).sqrt();
-                        let mut ends = Vec::new();
-                        if !spec.exiting {
+                        let dist = ((dx - prev_dx.replace(dx)).powi(2)
+                            + (dy - prev_dy.replace(dy)).powi(2))
+                        .sqrt();
+                        let (end_x, end_y) = if spec.exiting {
+                            (None, None)
+                        } else {
                             let spring = transitions::flight_spring(dist);
-                            if (dx - prev_dx.replace(dx)).abs() > 0.5 {
-                                ends.push(x.spring(dx, spring));
+                            if first_run {
+                                let init_vel = spec.initial_velocity;
+                                (
+                                    motion::settle_from(
+                                        x,
+                                        init_vel.map(|(vx, _)| (0., vx)),
+                                        dx,
+                                        spring,
+                                    ),
+                                    motion::settle_from(
+                                        y,
+                                        init_vel.map(|(_, vy)| (0., vy)),
+                                        dy,
+                                        spring,
+                                    ),
+                                )
+                            } else {
+                                (motion::spring(x, dx, spring), motion::spring(y, dy, spring))
                             }
-                            if (dy - prev_dy.replace(dy)).abs() > 0.5 {
-                                ends.push(y.spring(dy, spring));
-                            }
-                        }
+                        };
                         let op_ms = if spec.exiting {
                             transitions::EXIT_FADE_MS
                         } else {
                             transitions::FLIGHT_FADE_MS
                         };
-                        if (spec.to_opacity - prev_op.replace(spec.to_opacity)).abs() > 0.01 {
-                            ends.push(opacity.timing(spec.to_opacity, op_ms, Easing::EaseOut));
-                        }
+                        let old_op = prev_op.replace(spec.to_opacity);
+                        let end_op = if spec.exiting || (spec.to_opacity - old_op).abs() > 0.01 {
+                            motion::timing(opacity, spec.to_opacity, op_ms, Easing::EaseOut)
+                        } else {
+                            None
+                        };
                         let id = card_id.clone();
-                        spawn(async move {
-                            wait_motion_ends(ends, transitions::FLIGHT_TIMEOUT_MS).await;
+                        motion::when_done([end_x, end_y, end_op], move || {
                             self.finish_flight(&id, gen_id);
                         });
                     });
@@ -1155,18 +1238,17 @@ impl BoardDrag {
                     let initial = exit.get_untracked();
                     let opacity = animated_value(1.0);
                     let scale = animated_value(1.0);
-                    let ends = vec![
-                        opacity.timing(0.0, transitions::EXIT_FADE_MS, Easing::EaseOut),
-                        scale.timing(
-                            transitions::EXIT_SCALE_TO,
-                            transitions::EXIT_FADE_MS,
-                            Easing::EaseOut,
-                        ),
-                    ];
+                    let end_op =
+                        motion::timing(opacity, 0.0, transitions::EXIT_FADE_MS, Easing::EaseOut);
+                    let end_scale = motion::timing(
+                        scale,
+                        transitions::EXIT_SCALE_TO,
+                        transitions::EXIT_FADE_MS,
+                        Easing::EaseOut,
+                    );
                     let id = initial.id.clone();
                     let gen_id = initial.generation;
-                    spawn(async move {
-                        wait_motion_ends(ends, transitions::EXIT_TIMEOUT_MS).await;
+                    motion::when_done([end_op, end_scale], move || {
                         self.finish_exit(&id, gen_id);
                     });
                     view()
@@ -1200,16 +1282,26 @@ impl BoardDrag {
 }
 
 #[cfg(test)]
+type MoveRpcCallback = Box<dyn FnOnce(Result<serde_json::Value, String>)>;
+#[cfg(test)]
+type MoveRpcMock = std::rc::Rc<dyn Fn(Ui, Drop, MoveRpcCallback)>;
+#[cfg(test)]
+thread_local! {
+    static TEST_MOVE_RPC: std::cell::RefCell<Option<MoveRpcMock>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use canban_types::{Snapshot, Workflow};
+    use canban_ui_kit::motion::ReducedMotion;
     use nsh_core::{
         ApproxTextEngine, Core, MountBatch, MountItem, NodeId,
-        animation::{AnimationId, AnimationOp, Finished},
+        animation::{AnimValues, AnimationId, AnimationOp, Animator},
         element::JsEvent,
         geometry::size,
     };
-    use std::collections::HashMap;
+    use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
     #[component]
     fn DragBoardProbe() -> impl IntoElement {
@@ -1245,9 +1337,60 @@ mod tests {
         ui.project.set("proj-drag".into());
         ui.page.set("board".into());
         ui.onboarded.set(true);
+        let pending_rpc: Rc<RefCell<Option<(Drop, MoveRpcCallback)>>> = Rc::new(RefCell::new(None));
+        let capture = pending_rpc.clone();
+        TEST_MOVE_RPC.with(|m| {
+            *m.borrow_mut() = Some(Rc::new(move |ui_arg, intent, cb| {
+                ui_arg.pending_methods.update(|s| {
+                    s.insert("card.move");
+                });
+                *capture.borrow_mut() = Some((intent, cb));
+            }));
+        });
+        let ack_rpc = pending_rpc.clone();
+        let err_rpc = pending_rpc;
         view()
             .w(px(1200.))
             .h(px(760.))
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("Ack Pending Move".into()))
+                    .on_press(move |_: &()| {
+                        let (intent, cb) =
+                            ack_rpc.borrow_mut().take().expect("captured card.move RPC");
+                        ui.pending_methods.update(|s| {
+                            s.remove("card.move");
+                        });
+                        ui.snapshot.update(|s| {
+                            super::model::apply_pending_move(
+                                &mut s.cards,
+                                &super::model::PendingMove {
+                                    card_id: intent.card_id.clone(),
+                                    base_revision: intent.revision,
+                                    target_stage: intent.stage.clone(),
+                                    before_card_id: intent.before_card_id.clone(),
+                                },
+                            );
+                            if let Some(c) = s.cards.iter_mut().find(|c| c.id == intent.card_id) {
+                                c.revision = intent.revision + 1;
+                            }
+                        });
+                        cb(Ok(serde_json::json!({"accepted": true})));
+                    }),
+            )
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("Reject Pending Move".into()))
+                    .on_press(move |_: &()| {
+                        let (intent, cb) =
+                            err_rpc.borrow_mut().take().expect("captured card.move RPC");
+                        assert_eq!(intent.stage, "develop");
+                        ui.pending_methods.update(|s| {
+                            s.remove("card.move");
+                        });
+                        cb(Err("Human review must be approved".into()));
+                    }),
+            )
             .child(crate::board::screen(ui))
     }
 
@@ -1255,8 +1398,16 @@ mod tests {
         parents: HashMap<NodeId, NodeId>,
         labels: HashMap<String, NodeId>,
         texts: HashMap<NodeId, String>,
+        frames: HashMap<NodeId, Bounds<Points>>,
+        layout_listeners: std::collections::HashSet<NodeId>,
+        delivered_frames: HashMap<NodeId, Bounds<Points>>,
+        pending_layout_events: Vec<(NodeId, Bounds<Points>)>,
         opacities: HashMap<NodeId, f32>,
+        keymap: Option<std::sync::Arc<nsh_core::keymap::Keymap>>,
         started_animations: Vec<AnimationId>,
+        animator: Animator,
+        anim_values: HashMap<NodeId, AnimValues>,
+        clock: f64,
     }
 
     impl DragTree {
@@ -1265,13 +1416,22 @@ mod tests {
                 parents: HashMap::new(),
                 labels: HashMap::new(),
                 texts: HashMap::new(),
+                frames: HashMap::new(),
+                layout_listeners: std::collections::HashSet::new(),
+                delivered_frames: HashMap::new(),
+                pending_layout_events: Vec::new(),
                 opacities: HashMap::new(),
+                keymap: None,
                 started_animations: Vec::new(),
+                animator: Animator::default(),
+                anim_values: HashMap::new(),
+                clock: 0.0,
             }
         }
 
         fn apply(&mut self, batch: &MountBatch) {
             for item in &batch.items {
+                self.animator.apply(item);
                 match item {
                     MountItem::Insert { parent, child, .. } => {
                         self.parents.insert(*child, *parent);
@@ -1282,11 +1442,35 @@ mod tests {
                     MountItem::Delete { id } => {
                         self.parents.remove(id);
                         self.texts.remove(id);
+                        self.frames.remove(id);
+                        self.layout_listeners.remove(id);
+                        self.delivered_frames.remove(id);
                         self.opacities.remove(id);
+                        self.anim_values.remove(id);
                         self.labels.retain(|_, node| node != id);
                     }
                     MountItem::Text { id, text, .. } => {
                         self.texts.insert(*id, text.text.to_string());
+                    }
+                    MountItem::Frame { id, frame } => {
+                        self.frames.insert(*id, *frame);
+                        if self.layout_listeners.contains(id)
+                            && self.delivered_frames.get(id) != Some(frame)
+                        {
+                            self.pending_layout_events.push((*id, *frame));
+                        }
+                    }
+                    MountItem::Events { id, events } => {
+                        if events.contains(EventKind::Layout) {
+                            self.layout_listeners.insert(*id);
+                            if let Some(&frame) = self.frames.get(id)
+                                && self.delivered_frames.get(id) != Some(&frame)
+                            {
+                                self.pending_layout_events.push((*id, frame));
+                            }
+                        } else {
+                            self.layout_listeners.remove(id);
+                        }
                     }
                     MountItem::ViewProps { id, props } => {
                         if let Some(label) = &props.accessibility.label {
@@ -1296,12 +1480,23 @@ mod tests {
                     MountItem::ViewStyle { id, style } => {
                         self.opacities.insert(*id, style.opacity);
                     }
+                    MountItem::Keymap(keymap) => {
+                        self.keymap = Some(keymap.clone());
+                    }
                     MountItem::Animation(AnimationOp::Start { animation, .. }) => {
                         self.started_animations.push(*animation);
                     }
                     _ => {}
                 }
             }
+            self.sync_anim_values();
+        }
+
+        fn sync_anim_values(&mut self) {
+            let map = &mut self.anim_values;
+            self.animator.write(Some, |id, values, _| {
+                map.insert(id, values);
+            });
         }
 
         fn is_mounted(&self, mut id: NodeId) -> bool {
@@ -1328,17 +1523,56 @@ mod tests {
         }
 
         fn row_opacity(&self, row_id: NodeId) -> f32 {
-            self.opacities.get(&row_id).copied().unwrap_or(1.0)
+            self.anim_values
+                .get(&row_id)
+                .and_then(|v| v.opacity)
+                .unwrap_or_else(|| self.opacities.get(&row_id).copied().unwrap_or(1.0))
+        }
+
+        fn row_visual_y(&self, row_id: NodeId) -> f32 {
+            let top = self
+                .frames
+                .get(&row_id)
+                .map(|f| f.origin.y.0)
+                .unwrap_or(0.0);
+            let translate_y = self
+                .anim_values
+                .get(&row_id)
+                .and_then(|v| v.transform[0])
+                .unwrap_or(0.0);
+            top + translate_y
         }
     }
 
-    fn dispatch_core_events(core: &mut Core<ApproxTextEngine>) -> bool {
+    fn deliver_finished_animations(core: &mut Core<ApproxTextEngine>, tree: &mut DragTree) -> bool {
+        if tree.animator.finished.is_empty() {
+            return false;
+        }
+        core.animations_finished(&mut tree.animator.finished);
+        true
+    }
+
+    fn dispatch_core_events(core: &mut Core<ApproxTextEngine>, tree: &mut DragTree) -> bool {
+        let mut dispatched = false;
+        let pending_layouts = std::mem::take(&mut tree.pending_layout_events);
+        for (id, frame) in pending_layouts {
+            if tree.delivered_frames.get(&id) == Some(&frame) {
+                continue;
+            }
+            tree.delivered_frames.insert(id, frame);
+            core.component_event(id, EventKind::Layout, &EventPayload::Layout(frame));
+            dispatched = true;
+        }
         let mut events = Vec::new();
         core.take_events(&mut events);
-        let mut dispatched = false;
         for ev in events {
             match ev {
                 JsEvent::Event(id, kind, payload) => {
+                    if kind == EventKind::Layout
+                        && let EventPayload::Layout(frame) = &payload
+                    {
+                        tree.delivered_frames.insert(id, *frame);
+                    }
                     core.component_event(id, kind, &payload);
                     dispatched = true;
                 }
@@ -1348,6 +1582,7 @@ mod tests {
                     listener,
                     frame,
                 } => {
+                    tree.delivered_frames.insert(id, frame);
                     core.component_layout(host, id, &listener, frame);
                     dispatched = true;
                 }
@@ -1367,10 +1602,37 @@ mod tests {
             } else {
                 false
             };
-            let dispatched = dispatch_core_events(core);
-            if !had_batch && !dispatched && !core.wants_frame() {
+            let had_anim = deliver_finished_animations(core, tree);
+            let dispatched = dispatch_core_events(core, tree);
+            if !had_batch && !had_anim && !dispatched && !core.wants_frame() {
                 break;
             }
+        }
+    }
+
+    fn step_animator_ms(core: &mut Core<ApproxTextEngine>, tree: &mut DragTree, total_ms: u64) {
+        let frames = (total_ms / 16).max(1);
+        let dt = (total_ms as f64 / 1000.0) / (frames as f64);
+        for _ in 0..frames {
+            tree.clock += dt;
+            tree.animator.tick(tree.clock);
+            tree.sync_anim_values();
+            deliver_finished_animations(core, tree);
+            pump_board(core, tree);
+        }
+    }
+
+    fn finish_all_animations(
+        core: &mut Core<ApproxTextEngine>,
+        tree: &mut DragTree,
+        _runtime: &tokio::runtime::Runtime,
+        done: impl Fn(&DragTree) -> bool,
+    ) {
+        for _ in 0..120 {
+            if !tree.animator.finishing() && tree.animator.finished.is_empty() && done(tree) {
+                break;
+            }
+            step_animator_ms(core, tree, 16);
         }
     }
 
@@ -1383,6 +1645,11 @@ mod tests {
         core.mount_root(&nsh_core::element::Root::of::<DragBoardProbe>());
         let mut tree = DragTree::new();
         pump_board(&mut core, &mut tree);
+        // Settle the initial post-mount height reflow (`DEFAULT_HEIGHT` -> measured row height)
+        // before running drag assertions.
+        core.run_frame(nsh_core::time::now() + std::time::Duration::from_millis(20));
+        pump_board(&mut core, &mut tree);
+        tree.started_animations.clear();
         let row_id = *tree
             .labels
             .get("Card #1 Drag Card 1")
@@ -1423,11 +1690,11 @@ mod tests {
 
     #[test]
     fn settle_short_circuits_axis_already_at_rest() {
-        assert!(should_short_circuit_settle(Some((0.0, 0.0)), 0.0));
-        assert!(should_short_circuit_settle(Some((0.4, -5.0)), 0.0));
-        assert!(!should_short_circuit_settle(Some((12.0, 0.0)), 0.0));
-        assert!(!should_short_circuit_settle(Some((0.0, 25.0)), 0.0));
-        assert!(!should_short_circuit_settle(None, 0.0));
+        assert!(motion::should_short_circuit_settle(Some((0.0, 0.0)), 0.0));
+        assert!(motion::should_short_circuit_settle(Some((0.4, -5.0)), 0.0));
+        assert!(!motion::should_short_circuit_settle(Some((12.0, 0.0)), 0.0));
+        assert!(!motion::should_short_circuit_settle(Some((0.0, 25.0)), 0.0));
+        assert!(!motion::should_short_circuit_settle(None, 0.0));
     }
 
     #[test]
@@ -1477,7 +1744,7 @@ mod tests {
             if let Some(batch) = core.commit() {
                 tree.apply(&batch);
             }
-            dispatch_core_events(&mut core);
+            dispatch_core_events(&mut core, &mut tree);
             assert_eq!(
                 tree.row_opacity(row_id),
                 1.0,
@@ -1578,14 +1845,7 @@ mod tests {
         assert!(tree.has_mounted_ghost());
         assert_eq!(tree.row_opacity(row_id), 0.0);
 
-        let y_anim = tree.started_animations[0];
-        let mut finished = vec![Finished::new(y_anim, true)];
-        core.animations_finished(&mut finished);
-        let deadline = Instant::now() + Duration::from_millis(120);
-        while tree.has_mounted_ghost() && Instant::now() < deadline {
-            runtime.block_on(tokio::time::sleep(Duration::from_millis(5)));
-            pump_board(&mut core, &mut tree);
-        }
+        finish_all_animations(&mut core, &mut tree, &runtime, |t| !t.has_mounted_ghost());
 
         assert!(
             !tree.has_mounted_ghost(),
@@ -1699,6 +1959,28 @@ mod tests {
                     .accessibility_label(Some("Toggle Reduced Motion".into()))
                     .on_press(move |_: &()| reduced.set(!reduced.get_untracked())),
             )
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("Nudge Review Top".into()))
+                    .on_press(move |_: &()| {
+                        ui.snapshot.update(|s| {
+                            s.cards.push(
+                                serde_json::from_value(serde_json::json!({
+                                    "id": "c-review-top",
+                                    "project_id": "proj-trans",
+                                    "number": 50,
+                                    "title": "Review Top Card",
+                                    "body": "",
+                                    "stage": "review",
+                                    "board_order": -1024,
+                                    "revision": 1,
+                                    "created_at": 50
+                                }))
+                                .unwrap(),
+                            );
+                        });
+                    }),
+            )
             .child(crate::board::screen(ui))
     }
 
@@ -1711,33 +1993,15 @@ mod tests {
         core.mount_root(&nsh_core::element::Root::of::<TransitionBoardProbe>());
         let mut tree = DragTree::new();
         pump_board(&mut core, &mut tree);
+        core.run_frame(nsh_core::time::now() + std::time::Duration::from_millis(20));
+        pump_board(&mut core, &mut tree);
+        tree.started_animations.clear();
         (core, tree)
     }
 
     fn press_labeled(core: &mut Core<ApproxTextEngine>, tree: &DragTree, label: &str) {
         let id = *tree.labels.get(label).expect("probe button");
         assert!(core.component_event(id, EventKind::Press, &EventPayload::None));
-    }
-
-    fn finish_all_animations(
-        core: &mut Core<ApproxTextEngine>,
-        tree: &mut DragTree,
-        runtime: &tokio::runtime::Runtime,
-        done: impl Fn(&DragTree) -> bool,
-    ) {
-        let deadline = Instant::now() + Duration::from_millis(120);
-        while (!tree.started_animations.is_empty() || !done(tree)) && Instant::now() < deadline {
-            if !tree.started_animations.is_empty() {
-                let mut finished: Vec<_> = tree
-                    .started_animations
-                    .drain(..)
-                    .map(|id| Finished::new(id, true))
-                    .collect();
-                core.animations_finished(&mut finished);
-            }
-            runtime.block_on(tokio::time::sleep(Duration::from_millis(5)));
-            pump_board(core, tree);
-        }
     }
 
     fn mounted_text_count(tree: &DragTree, text: &str) -> usize {
@@ -1891,5 +2155,379 @@ mod tests {
             .get("Card #1 Drag Card 1")
             .expect("destination row mounted");
         assert_eq!(tree.row_opacity(row_id), 1.0);
+    }
+
+    #[test]
+    fn cross_column_drop_pending_move_and_async_snapshot_never_vanish_card_or_double_animate() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+
+        let (mut core, mut tree, row_id, press_pos) = setup_board(&runtime);
+        let peer_row_id = *tree
+            .labels
+            .get("Card #2 Drag Card 2")
+            .expect("second card row mounted");
+        let initial_peer_y = tree.row_visual_y(peer_row_id);
+        assert!(initial_peer_y > 40.0);
+
+        // Start dragging Card #1 from Backlog -> Develop (~392pt wide + 12pt gap -> dx = 420pt).
+        assert!(core.component_event(
+            row_id,
+            EventKind::PressDown,
+            &EventPayload::Press(PressEvent {
+                position: point(px(40.), px(10.)),
+                page_position: press_pos,
+                ..Default::default()
+            }),
+        ));
+        assert!(core.component_event(
+            row_id,
+            EventKind::PanStart,
+            &EventPayload::Pan {
+                translation: point(px(10.), px(0.)),
+                velocity_x: 120.,
+                velocity_y: 0.,
+                value_x: Some(px(10.)),
+                value_y: Some(px(0.)),
+            },
+        ));
+        pump_board(&mut core, &mut tree);
+
+        assert!(core.component_event(
+            row_id,
+            EventKind::PanEnd,
+            &EventPayload::Pan {
+                translation: point(px(420.), px(24.)),
+                velocity_x: 80.,
+                velocity_y: -20.,
+                value_x: Some(px(420.)),
+                value_y: Some(px(24.)),
+            },
+        ));
+        pump_board(&mut core, &mut tree);
+
+        // Optimistic PendingMove took effect immediately on drop:
+        // 1. Flight ghost is mounted while destination row in Develop has opacity 0.0.
+        assert!(
+            tree.has_mounted_ghost(),
+            "released card must hand off seamlessly to flight overlay"
+        );
+        let dest_row_id = *tree
+            .labels
+            .get("Card #1 Drag Card 1")
+            .expect("destination row mounted in develop");
+        assert_eq!(tree.row_opacity(dest_row_id), 0.0);
+
+        // Step animations to completion BEFORE the server RPC responds (simulating slow SSH RTT
+        // or stale snapshot prior to refresh).
+        finish_all_animations(&mut core, &mut tree, &runtime, |t| !t.has_mounted_ghost());
+        assert!(
+            !tree.has_mounted_ghost(),
+            "settle flight finishes cleanly without waiting on card.move RPC"
+        );
+        let settled_row_id = *tree
+            .labels
+            .get("Card #1 Drag Card 1")
+            .expect("settled card row mounted");
+        assert!(tree.is_mounted(settled_row_id));
+        assert_eq!(
+            tree.row_opacity(settled_row_id),
+            1.0,
+            "settled card must stay visible at opacity 1.0 while RPC is still in flight"
+        );
+        assert!(
+            tree.row_visual_y(peer_row_id).abs() < 1.0,
+            "source peer c-2 must stay shifted up at y=0 without snapping back to a hole; got {}",
+            tree.row_visual_y(peer_row_id)
+        );
+
+        // Now complete card.move RPC + authoritative Snapshot refresh: ZERO duplicate flights!
+        tree.started_animations.clear();
+        press_labeled(&mut core, &tree, "Ack Pending Move");
+        pump_board(&mut core, &mut tree);
+
+        assert!(
+            !tree.has_mounted_ghost(),
+            "authoritative snapshot arrival must NOT start a second cross-column flight"
+        );
+        assert!(
+            tree.started_animations.is_empty(),
+            "authoritative snapshot arrival matching PendingMove must start zero animations; got {:?}",
+            tree.started_animations
+        );
+        assert_eq!(tree.row_opacity(settled_row_id), 1.0);
+        assert!(tree.row_visual_y(peer_row_id).abs() < 1.0);
+
+        TEST_MOVE_RPC.with(|m| *m.borrow_mut() = None);
+    }
+
+    #[test]
+    fn failed_card_move_clears_pending_move_and_flies_card_back_to_source_column() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+
+        let (mut core, mut tree, row_id, press_pos) = setup_board(&runtime);
+        let peer_row_id = *tree
+            .labels
+            .get("Card #2 Drag Card 2")
+            .expect("second card row mounted");
+        let settled_peer_y = tree.row_visual_y(peer_row_id);
+        assert!(settled_peer_y > 40.0);
+
+        assert!(core.component_event(
+            row_id,
+            EventKind::PressDown,
+            &EventPayload::Press(PressEvent {
+                position: point(px(40.), px(10.)),
+                page_position: press_pos,
+                ..Default::default()
+            }),
+        ));
+        assert!(core.component_event(
+            row_id,
+            EventKind::PanStart,
+            &EventPayload::Pan {
+                translation: point(px(10.), px(0.)),
+                velocity_x: 0.,
+                velocity_y: 0.,
+                value_x: Some(px(10.)),
+                value_y: Some(px(0.)),
+            },
+        ));
+        pump_board(&mut core, &mut tree);
+
+        assert!(core.component_event(
+            row_id,
+            EventKind::PanEnd,
+            &EventPayload::Pan {
+                translation: point(px(420.), px(10.)),
+                velocity_x: 0.,
+                velocity_y: 0.,
+                value_x: Some(px(420.)),
+                value_y: Some(px(10.)),
+            },
+        ));
+        pump_board(&mut core, &mut tree);
+        finish_all_animations(&mut core, &mut tree, &runtime, |t| !t.has_mounted_ghost());
+        assert!(tree.row_visual_y(peer_row_id).abs() < 1.0);
+
+        // Reject the RPC: PendingMove clears and launches a rollback FlightSpec back to Backlog!
+        tree.started_animations.clear();
+        press_labeled(&mut core, &tree, "Reject Pending Move");
+        pump_board(&mut core, &mut tree);
+
+        assert!(
+            tree.has_mounted_ghost(),
+            "rejected card.move must launch a smooth rollback flight back to original column"
+        );
+        assert!(
+            !tree.started_animations.is_empty(),
+            "rollback must start flight and peer displacement springs"
+        );
+
+        finish_all_animations(&mut core, &mut tree, &runtime, |t| !t.has_mounted_ghost());
+        assert!(!tree.has_mounted_ghost());
+        let restored_row_id = *tree
+            .labels
+            .get("Card #1 Drag Card 1")
+            .expect("restored backlog row");
+        assert_eq!(tree.row_opacity(restored_row_id), 1.0);
+        assert!(
+            (tree.row_visual_y(peer_row_id) - settled_peer_y).abs() < 1.0,
+            "peer c-2 must return to {settled_peer_y} after rollback; got {}",
+            tree.row_visual_y(peer_row_id)
+        );
+
+        TEST_MOVE_RPC.with(|m| *m.borrow_mut() = None);
+    }
+
+    #[test]
+    fn mid_flight_vertical_retarget_keeps_flight_mounted_until_horizontal_axis_finishes() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (mut core, mut tree) = setup_transition_board(&runtime);
+
+        // Move c-1 far horizontally to Review (large dx ~780pt -> softer stiffness ~912).
+        press_labeled(&mut core, &tree, "Move c-1 to review");
+        pump_board(&mut core, &mut tree);
+        assert!(tree.has_mounted_ghost());
+
+        // Step 16ms so X is early in its long flight, then insert a card above c-1 in Review:
+        // ONLY target_y changes (+124pt, stiffer spring ~1322) while target_x is unchanged!
+        step_animator_ms(&mut core, &mut tree, 16);
+        assert!(tree.has_mounted_ghost());
+
+        press_labeled(&mut core, &tree, "Nudge Review Top");
+        pump_board(&mut core, &mut tree);
+        assert!(tree.has_mounted_ghost());
+
+        let review_row_id = *tree
+            .labels
+            .get("Card #1 Drag Card 1")
+            .expect("review row mounted");
+
+        // Step 176ms: the short 124pt Y retarget spring finishes first while the ~780pt X
+        // flight is still several points away from rest. Before unconditional dual-axis
+        // retargeting, Y finishing alone unmounted the flight ghost mid-air!
+        step_animator_ms(&mut core, &mut tree, 176);
+        assert!(
+            tree.has_mounted_ghost(),
+            "flight ghost must remain mounted while X is still mid-flight after Y finishes"
+        );
+        assert_eq!(
+            tree.row_opacity(review_row_id),
+            0.0,
+            "destination row must stay hidden until BOTH X and Y springs finish"
+        );
+
+        finish_all_animations(&mut core, &mut tree, &runtime, |t| !t.has_mounted_ghost());
+        assert!(!tree.has_mounted_ghost());
+        assert_eq!(tree.row_opacity(review_row_id), 1.0);
+    }
+
+    #[test]
+    fn same_column_at_rest_drop_unmasks_without_bogus_spring_and_escape_flies_home() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+
+        let (mut core, mut tree, row_id, press_pos) = setup_board(&runtime);
+        let row3_id = *tree
+            .labels
+            .get("Card #3 Drag Card 3")
+            .expect("third card row mounted");
+        let slot2_y = tree.row_visual_y(row3_id);
+        assert!(slot2_y > 80.0);
+
+        // 1. Drag Card #1 to exact resting slot 2 (`dy == slot2_y`, zero velocity) and drop:
+        // `make_release_flight` short-circuits, and Card #1 must unmask directly at `slot2_y`
+        // without springing from its old slot 0!
+        assert!(core.component_event(
+            row_id,
+            EventKind::PressDown,
+            &EventPayload::Press(PressEvent {
+                position: point(px(40.), px(10.)),
+                page_position: press_pos,
+                ..Default::default()
+            }),
+        ));
+        pump_board(&mut core, &mut tree);
+        tree.animator.pan_began(row_id);
+        tree.animator.pan_moved(row_id, point(px(0.), px(slot2_y)));
+        assert!(core.component_event(
+            row_id,
+            EventKind::PanStart,
+            &EventPayload::Pan {
+                translation: point(px(0.), px(slot2_y)),
+                velocity_x: 0.,
+                velocity_y: 0.,
+                value_x: Some(px(0.)),
+                value_y: Some(px(slot2_y)),
+            },
+        ));
+        pump_board(&mut core, &mut tree);
+        finish_all_animations(&mut core, &mut tree, &runtime, |_| true);
+        tree.started_animations.clear();
+
+        assert!(core.component_event(
+            row_id,
+            EventKind::PanEnd,
+            &EventPayload::Pan {
+                translation: point(px(0.), px(slot2_y)),
+                velocity_x: 0.,
+                velocity_y: 0.,
+                value_x: Some(px(0.)),
+                value_y: Some(px(slot2_y)),
+            },
+        ));
+        pump_board(&mut core, &mut tree);
+
+        assert!(
+            !tree.has_mounted_ghost(),
+            "at-rest drop right on target slot must short-circuit flight overlay"
+        );
+        assert_eq!(tree.row_opacity(row_id), 1.0);
+        assert!(
+            (tree.row_visual_y(row_id) - slot2_y).abs() < 1.0,
+            "unmasked card must sit directly at slot2_y={slot2_y}, got {}",
+            tree.row_visual_y(row_id)
+        );
+        press_labeled(&mut core, &tree, "Ack Pending Move");
+        pump_board(&mut core, &mut tree);
+        finish_all_animations(&mut core, &mut tree, &runtime, |_| true);
+
+        // 2. Drag Card #1 far right and cancel via Escape (`cancelled: true` with default PanEvent):
+        // must launch a return-home flight from the tracked pan coordinates!
+        let moved_bounds = core.measure(row_id).expect("moved row bounds");
+        let press_pos2 = point(
+            px(moved_bounds.page.x.0 + 40.),
+            px(moved_bounds.page.y.0 + 10.),
+        );
+        assert!(core.component_event(
+            row_id,
+            EventKind::PressDown,
+            &EventPayload::Press(PressEvent {
+                position: point(px(40.), px(10.)),
+                page_position: press_pos2,
+                ..Default::default()
+            }),
+        ));
+        pump_board(&mut core, &mut tree);
+        tree.animator.pan_began(row_id);
+        tree.animator.pan_moved(row_id, point(px(260.), px(-40.)));
+        assert!(core.component_event(
+            row_id,
+            EventKind::PanStart,
+            &EventPayload::Pan {
+                translation: point(px(260.), px(-40.)),
+                velocity_x: 0.,
+                velocity_y: 0.,
+                value_x: Some(px(260.)),
+                value_y: Some(px(-40.)),
+            },
+        ));
+        pump_board(&mut core, &mut tree);
+        assert!(tree.has_mounted_ghost());
+
+        let escape_id = tree
+            .keymap
+            .as_ref()
+            .and_then(|km| {
+                km.bindings()
+                    .iter()
+                    .rfind(|b| b.keystroke.key == nsh_core::keymap::Key::Escape)
+                    .map(|b| b.id)
+            })
+            .expect("escape keybinding mounted during phase 2");
+        tree.started_animations.clear();
+        assert!(core.component_event(
+            nsh_core::ROOT_ID,
+            EventKind::KeyCommand,
+            &EventPayload::Value(nsh_core::PayloadValue::Number(escape_id as f64)),
+        ));
+        pump_board(&mut core, &mut tree);
+        assert!(
+            tree.has_mounted_ghost(),
+            "Escape cancel from displaced drag must launch return-home flight"
+        );
+        assert!(!tree.started_animations.is_empty());
+
+        finish_all_animations(&mut core, &mut tree, &runtime, |t| !t.has_mounted_ghost());
+        assert!(!tree.has_mounted_ghost());
+        assert_eq!(tree.row_opacity(row_id), 1.0);
+        assert!((tree.row_visual_y(row_id) - slot2_y).abs() < 1.0);
+
+        TEST_MOVE_RPC.with(|m| *m.borrow_mut() = None);
     }
 }
