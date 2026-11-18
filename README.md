@@ -43,11 +43,11 @@
 
 - **Native agent CLIs** — Run Claude Code, Codex, Antigravity, Cursor CLI, and custom agents through Herdr, preserving their native TUIs, permissions, MCPs, and skills.
 
-- **Persistent agent sessions** — Keep agent sessions running across app restarts and upgrades without losing terminal state.
+- **Restart-safe execution** — Keep coding agents running even when Canban restarts or upgrades, without interrupting ongoing work.
 
-- **Local & remote execution** — Run agents locally or on remote machines through SSH/Tailscale, with headless Linux support for `canband` and `herdr-core`.
+- **Remote machine support** — Connect to remote Linux machines via SSH/Tailscale and run coding agents remotely.
 
-- **GitHub integration** — Sync GitHub Issues and PRs with Kanban cards, including approval gates for external pull requests.
+- **GitHub integration** — Turn GitHub Issues and PRs into Kanban cards and run workflows on them just like local cards.
 
 ---
 

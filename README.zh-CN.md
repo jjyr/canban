@@ -46,11 +46,11 @@
 
 - **原生 Agent CLI** — 通过 Herdr 运行 Claude Code、Codex、Antigravity、Cursor CLI 和自定义 Agent，保留各自的终端界面、权限机制、MCP 和技能。
 
-- **持久化 Agent 会话** — 应用重启或升级后，Agent 会话仍会继续运行，并保留终端状态。
+- **重启无中断执行** — 即使 Canban 重启或升级，编码 Agent 也能继续运行，不中断正在进行的工作。
 
-- **本地与远程执行** — 可在本机运行 Agent，也可通过 SSH/Tailscale 在远程机器上运行。`canband` 和 `herdr-core` 均支持在无图形界面的 Linux 上运行。
+- **远程机器支持** — 通过 SSH/Tailscale 连接远程 Linux 机器，并在远程执行编码 Agent。
 
-- **GitHub 集成** — 在 GitHub Issues、PR 与看板卡片之间同步信息，外部 PR 可经过人工审批。
+- **GitHub 集成** — 将 GitHub Issues 和 PR 转化为看板卡片，像本地卡片一样在其上运行工作流。
 
 ---
 
