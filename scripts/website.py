@@ -93,9 +93,9 @@ def inline_markdown(text, allow_relative=False):
             urlsplit(url).scheme in ("https", "http")
             or (allow_relative and (url.startswith("/") or url.startswith("#")))
         ):
-            output.append(f'<a href="{html.escape(url, quote=True)}">{html.escape(label)}</a>')
+            output.append(f'<a href="{html.escape(url, quote=True)}">{inline_markdown(label, allow_relative=allow_relative)}</a>')
         elif strong is not None:
-            output.append("<strong>" + html.escape(strong) + "</strong>")
+            output.append("<strong>" + inline_markdown(strong, allow_relative=allow_relative) + "</strong>")
         else:
             output.append(html.escape(match.group()))
         cursor = match.end()

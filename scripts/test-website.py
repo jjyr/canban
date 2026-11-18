@@ -26,8 +26,10 @@ class Page(HTMLParser):
         super().__init__()
         self.elements = []
         self.visible_text = []
+        self.prose_text = []
         self.scripts = []
         self.in_script = False
+        self._code_depth = 0
         self.ch1_links = []
         self._in_ch0 = False
         self._ch0_depth = 0
@@ -37,6 +39,8 @@ class Page(HTMLParser):
     def handle_starttag(self, tag, attrs):
         attr_map = dict(attrs)
         self.elements.append((tag, attr_map))
+        if tag in ("code", "pre"):
+            self._code_depth += 1
         if tag == "section" and attr_map.get("id") == "ch-0":
             self._in_ch0 = True
             self._ch0_depth = 1
@@ -51,6 +55,8 @@ class Page(HTMLParser):
             self.scripts.append((attr_map, ""))
 
     def handle_endtag(self, tag):
+        if tag in ("code", "pre") and self._code_depth > 0:
+            self._code_depth -= 1
         if tag == "script":
             self.in_script = False
         if self._in_ch1_nav and tag == "nav":
@@ -66,6 +72,8 @@ class Page(HTMLParser):
             self.scripts[-1] = (attrs, text + data)
         else:
             self.visible_text.append(data)
+            if self._code_depth == 0:
+                self.prose_text.append(data)
 
     def attrs(self, tag, **attributes):
         return [attrs for name, attrs in self.elements if name == tag and
@@ -151,6 +159,8 @@ class WebsiteTest(unittest.TestCase):
                             self.assertIn("copied_label", json.loads(script))
 
                     visible = " ".join(page.visible_text)
+                    prose = " ".join(page.prose_text)
+                    self.assertIsNone(re.search(r"`[^`]+`", prose), (lang, section))
                     if section == "install":
                         for question, answer in pages_json[lang]["faq_items"]:
                             self.assertIn(question, visible)
@@ -256,10 +266,11 @@ class WebsiteTest(unittest.TestCase):
 
     def test_doc_markdown_escapes_html_and_rejects_unsafe_links(self):
         rendered = website.doc_markdown(
-            '<script>alert(1)</script>\n\n[ok](/docs/)\n[bad](javascript:alert(1))\n\n```yaml\nschema: 10\n```',
+            '<script>alert(1)</script>\n\n**`source_trust == "external_pr"` gate**\n\n[ok](/docs/)\n[bad](javascript:alert(1))\n\n```yaml\nschema: 10\n```',
             website.load("pages.json")["en"],
         )
         self.assertNotIn("<script>", rendered)
+        self.assertIn("<strong><code>source_trust == &quot;external_pr&quot;</code> gate</strong>", rendered)
         self.assertIn('<a href="/docs/">ok</a>', rendered)
         self.assertNotIn('href="javascript:', rendered)
         self.assertIn('class="code-block"', rendered)
