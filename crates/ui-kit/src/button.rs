@@ -17,16 +17,31 @@ pub fn action(
         .child(action_label(label, variant))
         .on_press(on_press)
 }
+fn compact_base(variant: Variant) -> nsh_base::ButtonElement {
+    base(variant).min_h(px(26.0)).px_2().rounded(px(5.0))
+}
 /// Compact action for toolbars, inline status rows and secondary headers.
 pub fn compact_action(
     label: impl IntoReactive<SharedString>,
     variant: Variant,
     on_press: impl Fn(&()) + 'static,
 ) -> nsh_base::ButtonElement {
-    base(variant)
-        .min_h(px(26.0))
-        .px_2()
-        .rounded(px(5.0))
+    compact_base(variant)
+        .child(action_label(label, variant))
+        .on_press(on_press)
+}
+/// Compact action with a leading semantic icon for headers and toolbars.
+pub fn compact_action_with_icon(
+    kind: Icon,
+    label: impl IntoReactive<SharedString>,
+    variant: Variant,
+    on_press: impl Fn(&()) + 'static,
+) -> nsh_base::ButtonElement {
+    compact_base(variant)
+        .flex_row()
+        .items_center()
+        .gap_1p5()
+        .child(icon_tinted(kind, foreground(variant)).w(px(14.)).h(px(14.)))
         .child(action_label(label, variant))
         .on_press(on_press)
 }

@@ -2212,14 +2212,7 @@ fn config_panel(
         ("Weekdays 09:00", "0 9 * * 1-5"),
         ("Weekly Mon 09:00", "0 9 * * 1"),
     ];
-    let tz_presets: &[(&str, &str)] = &[
-        ("Local", ""),
-        ("UTC", "UTC"),
-        ("Asia/Shanghai", "Asia/Shanghai"),
-        ("America/New_York", "America/New_York"),
-        ("Europe/London", "Europe/London"),
-        ("Asia/Tokyo", "Asia/Tokyo"),
-    ];
+    let tz_presets: &[(&str, &str)] = &[("Local", ""), ("UTC", "UTC")];
 
     let first_stage = stages
         .first()
@@ -3340,5 +3333,113 @@ mod tests {
             texts.iter().any(|t| t.contains("Run #1 needs your input")),
             "expected mounted blocked banner, got {texts:?}"
         );
+    }
+
+    #[test]
+    fn create_modal_and_config_keep_only_local_utc_presets_and_header_agent_action() {
+        #[component]
+        fn ModalProbe() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = fixture_ui();
+            modal::open_create_modal(ui, Some(GLOBAL_PROJECT_ID.into()));
+            view()
+                .w(px(1200.))
+                .h(px(800.))
+                .child(modal::create_modal(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1200.), px(800.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<ModalProbe>());
+        let batch = core.commit().expect("create modal mounts cleanly");
+        let texts: Vec<String> = batch
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                MountItem::Text { text, .. } => Some(text.text.to_string()),
+                _ => None,
+            })
+            .collect();
+        let agent_idx = texts
+            .iter()
+            .position(|t| t == "Describe with agent…")
+            .expect("expected Describe with agent… action");
+        let template_idx = texts
+            .iter()
+            .position(|t| t == "Template: Worktree GC (7d)")
+            .expect("expected Template: Worktree GC (7d) action");
+        let scope_idx = texts
+            .iter()
+            .position(|t| t == "Scope")
+            .expect("expected Scope label");
+        assert!(
+            agent_idx < template_idx && template_idx < scope_idx,
+            "expected Describe with agent… before Template in header, got {texts:?}"
+        );
+        assert!(texts.iter().any(|t| t == "Local"), "expected Local preset");
+        assert!(texts.iter().any(|t| t == "UTC"), "expected UTC preset");
+        for country_tz in [
+            "Asia/Shanghai",
+            "America/New_York",
+            "Europe/London",
+            "Asia/Tokyo",
+        ] {
+            assert!(
+                !texts.iter().any(|t| t == country_tz),
+                "unexpected country timezone preset {country_tz} in {texts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn schedule_configuration_timezone_presets_keep_only_local_and_utc() {
+        #[component]
+        fn ConfigProbe() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = fixture_ui();
+            let pid = ui.project.get_untracked();
+            ensure_draft_initialized(ui, &pid);
+            ui.workflows.drafts.update(|d| {
+                let dr = d.entry(pid.clone()).or_default();
+                let doc = source::default_scheduled_document(
+                    format!("scheduled-1:{pid}"),
+                    "Project Nightly",
+                    Some("developer"),
+                );
+                dr.sources
+                    .insert("scheduled-1.yaml".into(), source::encode(&doc).unwrap());
+            });
+            offline_save_schedules(ui, &pid);
+            let all = collect_schedules(ui, "");
+            ui.schedules.selected.set(all[0].key.clone());
+            ui.schedules.config_expanded.set(true);
+            view().w(px(1200.)).h(px(800.)).child(screen(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1200.), px(800.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<ConfigProbe>());
+        let batch = core.commit().expect("schedules config mounts cleanly");
+        let texts: Vec<String> = batch
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                MountItem::Text { text, .. } => Some(text.text.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t == "Local"), "expected Local preset");
+        assert!(texts.iter().any(|t| t == "UTC"), "expected UTC preset");
+        for country_tz in [
+            "Asia/Shanghai",
+            "America/New_York",
+            "Europe/London",
+            "Asia/Tokyo",
+        ] {
+            assert!(
+                !texts.iter().any(|t| t == country_tz),
+                "unexpected country timezone preset {country_tz} in {texts:?}"
+            );
+        }
     }
 }

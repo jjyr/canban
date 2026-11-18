@@ -458,12 +458,7 @@ pub fn create_modal(ui: Ui) -> impl IntoElement {
         ("Weekdays 09:00", "0 9 * * 1-5"),
         ("Monday 09:00", "0 9 * * 1"),
     ];
-    let tz_presets = [
-        ("Local", "Local"),
-        ("UTC", "UTC"),
-        ("Asia/Shanghai", "Asia/Shanghai"),
-        ("America/New_York", "America/New_York"),
-    ];
+    let tz_presets = [("Local", "Local"), ("UTC", "UTC")];
     let cron_preview = computed(move || {
         let raw = m.cron.get();
         let tz = m.timezone.get();
@@ -501,14 +496,38 @@ pub fn create_modal(ui: Ui) -> impl IntoElement {
                             .child(icon_tinted(Icon::Clock, ACCENT))
                             .child(heading("New Scheduled Task")),
                     )
-                    .child(view().flex_row().items_center().gap_2().child(
-                        compact_action("Template: Worktree GC (7d)", Variant::Secondary, move |_| {
-                            m.apply_worktree_gc_preset(ui);
-                        }),
-                    )
-                    .child(chrome_button(Icon::Close, "Close modal", move |_| {
-                        ui.schedules.create_modal.set(false)
-                    }))),
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .child(compact_action_with_icon(
+                                Icon::Agent,
+                                "Describe with agent…",
+                                Variant::Secondary,
+                                move |_| {
+                                    let scope = m.scope.get_untracked();
+                                    let draft_desc = format!(
+                                        "Create or customize a scheduled task named \"{}\" (cron: `{}`, mode: `{}`). Ask clarifying questions if needed and apply YAML cleanly.",
+                                        m.name.get_untracked(),
+                                        m.cron.get_untracked(),
+                                        m.mode.get_untracked()
+                                    );
+                                    ui.schedules.create_modal.set(false);
+                                    describe_with_agent(ui, scope, Some(draft_desc));
+                                },
+                            ))
+                            .child(compact_action(
+                                "Template: Worktree GC (7d)",
+                                Variant::Secondary,
+                                move |_| {
+                                    m.apply_worktree_gc_preset(ui);
+                                },
+                            ))
+                            .child(chrome_button(Icon::Close, "Close modal", move |_| {
+                                ui.schedules.create_modal.set(false)
+                            })),
+                    ),
             )
             .child(
                 scroll().flex_1().min_h(px(0.)).child(
@@ -813,24 +832,8 @@ pub fn create_modal(ui: Ui) -> impl IntoElement {
                     .flex_row()
                     .flex_wrap()
                     .items_center()
+                    .justify_end()
                     .gap_2()
-                    .child(action_with_icon(
-                        Icon::Agent,
-                        "Describe with agent…",
-                        Variant::Secondary,
-                        move |_| {
-                            let scope = m.scope.get_untracked();
-                            let draft_desc = format!(
-                                "Create or customize a scheduled task named \"{}\" (cron: `{}`, mode: `{}`). Ask clarifying questions if needed and apply YAML cleanly.",
-                                m.name.get_untracked(),
-                                m.cron.get_untracked(),
-                                m.mode.get_untracked()
-                            );
-                            ui.schedules.create_modal.set(false);
-                            describe_with_agent(ui, scope, Some(draft_desc));
-                        },
-                    ))
-                    .child(view().flex_1())
                     .child(action("Cancel", Variant::Quiet, move |_| {
                         ui.schedules.create_modal.set(false);
                     }))
