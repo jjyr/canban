@@ -25,6 +25,8 @@ pub(crate) struct CardTileModel {
     pub running: Vec<(TerminalEntry, Option<u64>)>,
     pub ephemeral_agents: Vec<(crate::terminals::Entry, Option<u64>)>,
     pub replies: usize,
+    pub review_draft: Option<canban_types::ReviewDraft>,
+    pub review_running: bool,
 }
 
 impl CardTileModel {
@@ -139,6 +141,8 @@ impl CardTileModel {
             })
             .collect();
         let replies = idx.reply_count(&card.id);
+        let review_draft = idx.review_draft(&card.id).cloned();
+        let review_running = crate::review::active_review_run(snapshot, &card.id).is_some();
         Self {
             card,
             live_entries,
@@ -151,6 +155,8 @@ impl CardTileModel {
             running,
             ephemeral_agents,
             replies,
+            review_draft,
+            review_running,
         }
     }
 }
@@ -171,6 +177,8 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
         running,
         ephemeral_agents,
         replies,
+        review_draft,
+        review_running,
         ..
     } = model;
     let reminder_id = card.id.clone();
@@ -247,6 +255,29 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
                     .child(when(
                         move || active && merged,
                         move || archive_button(ui, archive_card.clone()),
+                    ))
+                    // Default-visible Review icon on PR Cards so users discover Agent PR Review without hovering.
+                    .child(when(
+                        {
+                            let is_pr = active && !merged && crate::review::card_has_pr(&card);
+                            move || is_pr
+                        },
+                        {
+                            let review_card_id = card.id.clone();
+                            let has_draft = review_draft.is_some();
+                            let draft_count =
+                                review_draft.as_ref().map(|d| d.comments.len()).unwrap_or(0);
+                            move || {
+                                review_button(
+                                    ui,
+                                    review_card_id.clone(),
+                                    card_number,
+                                    has_draft,
+                                    draft_count,
+                                    review_running,
+                                )
+                            }
+                        },
                     ))
                     // Space stays reserved so hovering never rewraps the title.
                     .child(when(
@@ -379,6 +410,7 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
         || !ephemeral_agents.is_empty()
         || branch.is_some()
         || replies > 0
+        || review_draft.is_some()
     {
         let mut left = view()
             .key("footer-left")
@@ -389,6 +421,9 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
             .gap_1p5()
             .min_w(px(0.))
             .children(chips);
+        if let Some(draft) = &review_draft {
+            left = left.child(review_draft_pill(ui, &card.id, draft));
+        }
         if let Some(branch) = branch {
             left = left.child(
                 view()
@@ -522,6 +557,110 @@ pub(crate) fn card_terminal_icon_tint(
     } else {
         MUTED
     }
+}
+
+/// Always-visible PR review entry on Board Card tiles: opens draft diff if ready,
+/// opens terminal if reviewing, or launches Agent PR Review immediately.
+fn review_button(
+    ui: Ui,
+    card_id: String,
+    number: u64,
+    has_draft: bool,
+    draft_count: usize,
+    review_running: bool,
+) -> View {
+    let default_prof = crate::sessions::default_review_profile(ui);
+    let hint = if review_running {
+        format!("Agent review running on Card #{number} — open Terminal")
+    } else if has_draft {
+        if draft_count > 0 {
+            format!("Open {draft_count} PR review draft(s) in Diff")
+        } else {
+            "Open PR review draft in Diff".to_owned()
+        }
+    } else {
+        format!("Run Agent PR Review (@{default_prof})")
+    };
+    let a11y = hint.clone();
+    let tint = if review_running || has_draft {
+        ACCENT
+    } else {
+        MUTED
+    };
+    let btn = press_target()
+        .w(px(22.))
+        .h(px(22.))
+        .items_center()
+        .justify_center()
+        .rounded(px(5.))
+        .bg(if has_draft { SELECTED } else { CLEAR })
+        .hover(|s| s.bg(INSET))
+        .focus(|s| s.border_1().border_color(ACCENT))
+        .accessibility_label(move || Some(a11y.clone().into()))
+        .child(icon_tinted(Icon::Eye, tint).w(px(14.)).h(px(14.)))
+        .on_press(move |_: &()| {
+            if review_running {
+                crate::terminals::open_card_quick(ui, &card_id);
+            } else if has_draft {
+                crate::review::open_card_pr(ui, &card_id);
+            } else {
+                crate::review::start_agent_review(ui, &card_id, None, None);
+            }
+        });
+    view()
+        .flex_shrink_0()
+        .w(px(22.))
+        .h(px(22.))
+        .window_drag(false)
+        .tooltip(hint_tooltip(hint).placement(Placement::Bottom))
+        .child(btn)
+}
+
+/// Clickable footer capsule when a local Agent PR review draft is ready for human review.
+fn review_draft_pill(ui: Ui, card_id: &str, draft: &canban_types::ReviewDraft) -> View {
+    let cid = card_id.to_owned();
+    let count = draft.comments.len();
+    let label_text = if count == 0 {
+        "Review ready ↗".to_owned()
+    } else if count == 1 {
+        "1 review draft ↗".to_owned()
+    } else {
+        format!("{count} review drafts ↗")
+    };
+    let author_hint = draft.author.as_deref().unwrap_or("Agent");
+    let hint = format!(
+        "Local PR review draft by {author_hint} ({count} inline comment{}) — click to review & publish",
+        if count == 1 { "" } else { "s" }
+    );
+    let a11y = hint.clone();
+    view()
+        .key("footer-review-draft")
+        .flex_shrink_0()
+        .window_drag(false)
+        .tooltip(hint_tooltip(hint))
+        .child(
+            press_target()
+                .h(px(20.))
+                .px_1p5()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .rounded(px(5.))
+                .bg(SELECTED)
+                .border_1()
+                .border_color(ACCENT)
+                .hover(|s| s.bg(CARD_HOVER))
+                .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
+                .accessibility_label(move || Some(a11y.clone().into()))
+                .child(icon_tinted(Icon::Eye, ACCENT).w(px(11.)).h(px(11.)))
+                .child(
+                    text(label_text)
+                        .text_size(px(11.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(ACCENT),
+                )
+                .on_press(move |_: &()| crate::review::open_card_pr(ui, &cid)),
+        )
 }
 
 /// Quick or live Terminal entry: open this Card's side-by-side terminal split directly.

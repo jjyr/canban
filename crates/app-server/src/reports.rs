@@ -198,11 +198,22 @@ impl AppServer {
                 }
                 None => None,
             };
+            let is_non_workflow_task = entry_opt
+                .as_ref()
+                .and_then(|t| t.agent.as_ref())
+                .is_some_and(|r| {
+                    r.workflow_run_id.is_none()
+                        && (r.trigger.is_comment()
+                            || r.trigger == ExecutionTrigger::Custom("diff_review".into()))
+                });
             let active_wf_id = entry_opt
                 .as_ref()
                 .and_then(|t| t.agent.as_ref())
                 .and_then(|r| r.workflow_run_id.clone())
                 .or_else(|| {
+                    if is_non_workflow_task {
+                        return None;
+                    }
                     db.list::<WorkflowRun>()
                         .ok()?
                         .into_iter()

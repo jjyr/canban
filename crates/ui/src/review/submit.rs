@@ -84,13 +84,24 @@ pub fn open_submit_panel(ui: Ui) {
     }
     let has_card = ui.current_card().is_some() && st.mode.get_untracked() != "git";
     let is_pr = st.mode.get_untracked() == "github_pr" || st.pr_target.get_untracked().is_some();
+    let has_agent_drafts = st
+        .pending_comments
+        .with_untracked(|list| list.iter().any(|c| c.author.is_some()))
+        || st.draft_anchor_sha.with_untracked(Option::is_some);
     let cur_action = st.submit_action.get_untracked();
-    if has_card {
+    if is_pr && has_agent_drafts && st.mode.get_untracked() == "github_pr" {
+        st.submit_action.set("github_review".into());
+    } else if has_card {
         if !matches!(
             cur_action.as_str(),
             "card_agent" | "card_comment" | "github_review" | "terminal"
         ) {
-            st.submit_action.set("card_agent".into());
+            st.submit_action
+                .set(if st.mode.get_untracked() == "github_pr" && is_pr {
+                    "github_review".into()
+                } else {
+                    "card_agent".into()
+                });
         }
     } else if is_pr {
         if !matches!(
@@ -131,25 +142,53 @@ pub fn render_bottom_bar(ui: Ui) -> impl IntoElement {
                         .items_center()
                         .gap_2()
                         .child(dynamic(move || {
-                            let n = st.pending_comments.with(Vec::len);
-                            if n == 0 {
+                            let (total, agent_count) = st.pending_comments.with(|list| {
+                                (
+                                    list.len(),
+                                    list.iter()
+                                        .filter(|c| c.author.is_some() && !c.edited_by_user)
+                                        .count(),
+                                )
+                            });
+                            if total == 0 {
                                 muted("No pending inline comments · click any diff line or send a summary review").into_element()
                             } else {
-                                view()
+                                let label_txt = if agent_count > 0 {
+                                    let user_count = total - agent_count;
+                                    if user_count > 0 {
+                                        format!("{total} draft comments ({agent_count} by Agent, {user_count} by you)")
+                                    } else {
+                                        format!("{total} Agent draft comment{}", if total == 1 { "" } else { "s" })
+                                    }
+                                } else {
+                                    format!(
+                                        "{total} pending inline comment{}",
+                                        if total == 1 { "" } else { "s" }
+                                    )
+                                };
+                                let mut row = view()
                                     .flex_row()
+                                    .flex_wrap()
                                     .items_center()
                                     .gap_2()
-                                    .child(status(
-                                        format!(
-                                            "{n} pending inline comment{}",
-                                            if n == 1 { "" } else { "s" }
-                                        ),
-                                        Tone::Info,
-                                    ))
-                                    .child(compact_action("Clear", Variant::Quiet, move |_| {
-                                        st.pending_comments.set(Vec::new());
-                                    }))
-                                    .into_element()
+                                    .child(status(label_txt, if agent_count > 0 { Tone::Highlight } else { Tone::Info }));
+                                if agent_count > 0 && agent_count < total {
+                                    row = row.child(compact_action(
+                                        "Discard Agent drafts",
+                                        Variant::Quiet,
+                                        move |_| {
+                                            st.pending_comments.update(|list| {
+                                                list.retain(|c| c.author.is_none() || c.edited_by_user);
+                                            });
+                                            super::sync_pending_draft_to_server(ui);
+                                        },
+                                    ));
+                                }
+                                row.child(compact_action("Clear", Variant::Quiet, move |_| {
+                                    st.pending_comments.set(Vec::new());
+                                    super::sync_pending_draft_to_server(ui);
+                                }))
+                                .into_element()
                             }
                         })),
                 )
@@ -169,8 +208,11 @@ pub fn render_bottom_bar(ui: Ui) -> impl IntoElement {
                         .child(compact_action(
                             move || {
                                 let n = st.pending_comments.with(Vec::len);
+                                let is_pr = st.mode.get() == "github_pr" || st.pr_target.with(Option::is_some);
                                 if st.submit_open.get() {
                                     "Hide Review Panel ▾".into()
+                                } else if n > 0 && is_pr {
+                                    format!("Review & Publish ({n}) ▴")
                                 } else if n > 0 {
                                     format!("Finish Review ({n}) ▴")
                                 } else {
@@ -586,23 +628,26 @@ fn submit_primary_button(ui: Ui, pr_info: Option<Value>) -> impl IntoElement {
                 sha: None,
                 url,
             };
-            dispatch_then(
-                ui,
-                "github.remote.review",
-                json!({
-                    "reference": r,
-                    "head": head,
-                    "body": summary,
-                    "comments": gh_comments,
-                    "event": st.submit_gh_event.get_untracked(),
-                }),
-                move |_| {
-                    st.pending_comments.set(Vec::new());
-                    st.submit_summary.set(String::new());
-                    st.submit_open.set(false);
-                    ui.notify("Review published to GitHub PR");
-                },
-            );
+            let cid = ui.card.get_untracked();
+            let mut gh_payload = json!({
+                "reference": r,
+                "head": head,
+                "body": summary,
+                "comments": gh_comments,
+                "event": st.submit_gh_event.get_untracked(),
+            });
+            if !cid.is_empty() {
+                gh_payload["card_id"] = json!(cid);
+            }
+            dispatch_then(ui, "github.remote.review", gh_payload, move |_| {
+                st.pending_comments.set(Vec::new());
+                st.submit_summary.set(String::new());
+                st.draft_anchor_sha.set(None);
+                st.draft_drift_dismissed.set(false);
+                st.loaded_draft_key.replace((String::new(), 0));
+                st.submit_open.set(false);
+                ui.notify("Review published to GitHub PR");
+            });
             return;
         }
 
@@ -692,7 +737,17 @@ fn submit_primary_button(ui: Ui, pr_info: Option<Value>) -> impl IntoElement {
         });
     })
     .disabled(move || {
-        ui.is_method_pending("review.send_agent")
+        let stale_draft = st.submit_action.get() == "github_review"
+            && !st.draft_drift_dismissed.get()
+            && st.pending_comments.with(|c| !c.is_empty())
+            && st.draft_anchor_sha.get().is_some_and(|anchor| {
+                let live = st.compare_data.with(|d| {
+                    d["compare_sha"].as_str().unwrap_or("").to_owned()
+                });
+                !anchor.is_empty() && !live.is_empty() && anchor != live
+            });
+        stale_draft
+            || ui.is_method_pending("review.send_agent")
             || ui.is_method_pending("github.remote.review")
             || (st.submit_action.get() != "github_review"
                 && st.submit_summary.with(|s| s.trim().is_empty())

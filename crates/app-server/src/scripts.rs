@@ -465,10 +465,20 @@ impl AppServer {
             };
             (path, Some(existing.clone()))
         } else {
+            let pr_tracking = self.prepare_pr_card_source(&prepared, &mut bound, &ops)?;
             let path = ops.prepare(&exec_home, &bound, &prepared)?;
             self.git_changed(&location.machine);
             prepared.worktree = Some(path.to_string_lossy().into_owned());
             let info = ops.info(&bound, &prepared).ok();
+            if let Some(target) = &pr_tracking
+                && path != Path::new(&location.directory)
+                && let Some(branch) = info
+                    .as_ref()
+                    .and_then(|i| i.branch.as_deref())
+                    .filter(|b| !b.is_empty())
+            {
+                ops.configure_pr_tracking(&path, branch, target)?;
+            }
             let binding = WorkspaceBinding {
                 location: location.clone(),
                 path: path.to_string_lossy().into_owned(),

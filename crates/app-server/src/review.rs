@@ -36,6 +36,70 @@ fn default_project_merge_strategy(db: Db<'_>, card: &Card) -> Result<MergeStrate
     }
     Ok(MergeStrategy::Rebase)
 }
+pub(super) fn resolve_review_profile(
+    config: &Config,
+    project: Option<&Project>,
+    explicit: Option<&str>,
+) -> Result<Profile> {
+    if let Some(id) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
+        return canban_scheduler::select_in_project(config, project, Some(id));
+    }
+    if config
+        .profiles
+        .iter()
+        .any(|p| p.id == "reviewer" && p.enabled)
+    {
+        return canban_scheduler::select_in_project(config, project, Some("reviewer"));
+    }
+    if config
+        .profiles
+        .iter()
+        .any(|p| p.id == config.default_agent && p.enabled)
+    {
+        return canban_scheduler::select_in_project(config, project, Some(&config.default_agent));
+    }
+    if let Some(first) = config.profiles.iter().find(|p| p.enabled) {
+        return canban_scheduler::select_in_project(config, project, Some(&first.id));
+    }
+    anyhow::bail!("No enabled Agent profile is available; enable one in Settings");
+}
+
+fn normalize_review_verdict(raw: Option<&str>) -> Result<String> {
+    let val = raw.unwrap_or("comment").trim().to_ascii_lowercase();
+    match val.as_str() {
+        "" | "comment" => Ok("comment".into()),
+        "approve" => Ok("approve".into()),
+        "request_changes" | "request-changes" => Ok("request_changes".into()),
+        _ => anyhow::bail!(
+            "Unsupported review verdict '{val}'; use comment, approve, or request_changes"
+        ),
+    }
+}
+
+fn validate_draft_comment_path(raw: &str) -> Result<String> {
+    let p = raw.trim();
+    ensure!(!p.is_empty(), "Draft comment path cannot be empty");
+    ensure!(
+        !p.starts_with('/') && !p.starts_with('-'),
+        "Invalid relative comment path: {p}"
+    );
+    ensure!(!p.contains('\0'), "Comment path contains NUL byte");
+    let rel = Path::new(p);
+    ensure!(!rel.is_absolute(), "Comment path must be relative: {p}");
+    for comp in rel.components() {
+        ensure!(
+            !matches!(
+                comp,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            ),
+            "Invalid path component in '{p}'"
+        );
+    }
+    Ok(p.to_owned())
+}
+
 impl AppServer {
     pub(super) fn review_preview(&self, p: Value) -> Result<Value> {
         let (card, project, warning) = {
@@ -1379,6 +1443,430 @@ impl AppServer {
                 .unwrap_or("Failed to launch Agent terminal")
         );
         Ok(outcome)
+    }
+
+    pub(super) fn review_draft_get(&self, p: Value) -> Result<Value> {
+        let card = {
+            let store = self.store.lock().unwrap();
+            super::resolve_card(store.db(), &p)?
+        };
+        let key = format!("review-draft:{}", card.id);
+        let raw: Option<String> = self
+            .store
+            .lock()
+            .unwrap()
+            .db()
+            .conn
+            .query_row(
+                "SELECT data FROM editor_drafts WHERE id=?1 AND data != 'null'",
+                [&key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match raw {
+            Some(data) => Ok(serde_json::from_str(&data)?),
+            None => Ok(Value::Null),
+        }
+    }
+
+    pub(super) fn review_draft_clear(&self, p: Value) -> Result<Value> {
+        let card = {
+            let store = self.store.lock().unwrap();
+            super::resolve_card(store.db(), &p)?
+        };
+        let key = format!("review-draft:{}", card.id);
+        self.store.lock().unwrap().write(|db| {
+            db.conn
+                .execute("DELETE FROM editor_drafts WHERE id=?1", [&key])?;
+            Ok(())
+        })?;
+        self.emit("review", Some(card.id.clone()));
+        Ok(json!({
+            "cleared": true,
+            "card_id": card.id,
+            "card": card.number,
+        }))
+    }
+
+    pub(crate) fn clear_review_draft_for_pr(
+        &self,
+        repository: &str,
+        number: u64,
+        card_id: Option<&str>,
+    ) -> Result<()> {
+        let mut target_cards = Vec::new();
+        {
+            let store = self.store.lock().unwrap();
+            let db = store.db();
+            if let Some(cid) = card_id.map(str::trim).filter(|s| !s.is_empty()) {
+                target_cards.push(cid.to_owned());
+            } else {
+                for c in db.list::<Card>()? {
+                    let matches_source = c.is_github_pr()
+                        && c.github_issue().is_some_and(|s| {
+                            s.repository.eq_ignore_ascii_case(repository) && s.number == number
+                        });
+                    let matches_delivery = c.pull_request.as_ref().is_some_and(|pr| {
+                        pr.repository.eq_ignore_ascii_case(repository) && pr.number == number
+                    });
+                    if matches_source || matches_delivery {
+                        target_cards.push(c.id);
+                    }
+                }
+            }
+        }
+        if target_cards.is_empty() {
+            return Ok(());
+        }
+        self.store.lock().unwrap().write(|db| {
+            for cid in &target_cards {
+                let key = format!("review-draft:{cid}");
+                db.conn
+                    .execute("DELETE FROM editor_drafts WHERE id=?1", [&key])?;
+            }
+            Ok(())
+        })?;
+        for cid in target_cards {
+            self.emit("review", Some(cid));
+        }
+        Ok(())
+    }
+
+    pub(super) fn review_draft_set(&self, p: Value) -> Result<Value> {
+        let (card, project) = {
+            let store = self.store.lock().unwrap();
+            let db = store.db();
+            let card = super::resolve_card(db, &p)?;
+            let proj: Project = db.get(&card.project_id)?;
+            let bound = self.bound_project(&proj, &card);
+            (card, bound)
+        };
+        let summary = p["summary"].as_str().unwrap_or("").trim().to_owned();
+        let verdict = normalize_review_verdict(p["verdict"].as_str())?;
+        let raw_comments = p["comments"].as_array().cloned().unwrap_or_default();
+        let profile_author = p["profile_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("@{}", s.trim_start_matches('@')));
+        let top_author = p["author"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("@{}", s.trim_start_matches('@')))
+            .or(profile_author);
+
+        let mut comments = Vec::with_capacity(raw_comments.len());
+        for item in &raw_comments {
+            let path = validate_draft_comment_path(
+                item["path"]
+                    .as_str()
+                    .context("Each draft comment requires a file 'path'")?,
+            )?;
+            let line = item["line"]
+                .as_u64()
+                .filter(|&n| n > 0)
+                .context("Each draft comment requires a positive 'line' number")?;
+            let side_raw = item["side"]
+                .as_str()
+                .unwrap_or("RIGHT")
+                .trim()
+                .to_ascii_uppercase();
+            let side = match side_raw.as_str() {
+                "" | "RIGHT" => "RIGHT".to_owned(),
+                "LEFT" => "LEFT".to_owned(),
+                other => anyhow::bail!("Invalid comment side '{other}'; expected LEFT or RIGHT"),
+            };
+            let body = item["body"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .context("Each draft comment requires a non-empty 'body'")?
+                .to_owned();
+            let edited_by_user = item["edited_by_user"].as_bool().unwrap_or(false);
+            let item_author = item["author"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| format!("@{}", s.trim_start_matches('@')))
+                .or_else(|| {
+                    if edited_by_user {
+                        None
+                    } else {
+                        top_author.clone()
+                    }
+                });
+            let cid = item["id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(id);
+            comments.push(ReviewDraftComment {
+                id: cid,
+                path,
+                section: item["section"].as_str().unwrap_or("").trim().to_owned(),
+                line,
+                side,
+                snippet: item["snippet"].as_str().unwrap_or("").trim().to_owned(),
+                body,
+                author: item_author,
+                edited_by_user,
+            });
+        }
+
+        let key = format!("review-draft:{}", card.id);
+        if summary.is_empty() && comments.is_empty() {
+            self.store.lock().unwrap().write(|db| {
+                db.conn
+                    .execute("DELETE FROM editor_drafts WHERE id=?1", [&key])?;
+                Ok(())
+            })?;
+            self.emit("review", Some(card.id.clone()));
+            return Ok(json!({
+                "saved": true,
+                "cleared": true,
+                "card_id": card.id,
+                "card": card.number,
+                "comment_count": 0,
+            }));
+        }
+
+        let repository = p["repository"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                if card.is_github_pr() {
+                    card.github_issue().map(|s| s.repository.clone())
+                } else {
+                    card.pull_request.as_ref().map(|pr| pr.repository.clone())
+                }
+            });
+        let pr_number = p["pr_number"].as_u64().filter(|&n| n > 0).or_else(|| {
+            if card.is_github_pr() {
+                card.github_issue().map(|s| s.number)
+            } else {
+                card.pull_request
+                    .as_ref()
+                    .filter(|pr| pr.number > 0)
+                    .map(|pr| pr.number)
+            }
+        });
+        let compare_sha = p["compare_sha"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                if let (Some(repo), Some(num)) = (&repository, pr_number) {
+                    self.github_cached_client()
+                        .ok()
+                        .and_then(|c| c.cached::<Value>(&format!("/repos/{repo}/pulls/{num}")))
+                        .and_then(|v| v["head"]["sha"].as_str().map(str::to_owned))
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                card.worktree.as_deref().and_then(|wt| {
+                    self.ops(&project.work_location().machine)
+                        .git_refs_in(&project, Some(wt))
+                        .ok()
+                        .and_then(|v| v["head_sha"].as_str().map(str::to_owned))
+                        .filter(|s| !s.is_empty())
+                })
+            });
+
+        let draft = ReviewDraft {
+            card_id: card.id.clone(),
+            repository,
+            pr_number,
+            compare_sha,
+            summary,
+            verdict: verdict.clone(),
+            comments,
+            author: top_author,
+            updated_at: now(),
+        };
+        let encoded = serde_json::to_string(&draft)?;
+        ensure!(
+            encoded.len() <= 4 * 1024 * 1024,
+            "Review draft exceeds 4 MiB"
+        );
+
+        self.store.lock().unwrap().write(|db| {
+            let prev_rev: Option<u64> = db
+                .conn
+                .query_row(
+                    "SELECT revision FROM editor_drafts WHERE id=?1",
+                    [&key],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let next = prev_rev.unwrap_or(0) + 1;
+            db.conn.execute(
+                "INSERT INTO editor_drafts(id,revision,updated_at,data) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at,data=excluded.data",
+                params![key, next, draft.updated_at, encoded],
+            )?;
+            Ok(())
+        })?;
+        self.emit("review", Some(card.id.clone()));
+        Ok(json!({
+            "saved": true,
+            "card_id": card.id,
+            "card": card.number,
+            "comment_count": draft.comments.len(),
+            "verdict": verdict,
+        }))
+    }
+
+    pub(super) fn review_run_agent(&self, p: Value) -> Result<Value> {
+        ensure!(
+            p["execution"].is_null(),
+            "Starting an Agent review requires an explicit user action"
+        );
+        let config = self.config();
+        let (card, profile) = {
+            let store = self.store.lock().unwrap();
+            let db = store.db();
+            let c = super::resolve_card(db, &p)?;
+            ensure!(
+                c.active(),
+                "Restore the Card before running an Agent review"
+            );
+            ensure!(!c.merged(), "Merged Cards do not need a new PR review");
+            let proj: Project = db.get(&c.project_id)?;
+            let bound = self.bound_project(&proj, &c);
+            let explicit_profile = p["profile_id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let profile = resolve_review_profile(&config, Some(&bound), explicit_profile)?;
+            let already_active = db.list::<TerminalEntry>()?.into_iter().any(|t| {
+                t.agent.as_ref().is_some_and(|a| {
+                    a.card_id == c.id
+                        && a.trigger == ExecutionTrigger::Custom("diff_review".into())
+                        && !a.finished()
+                        && !a.agent_stopped()
+                })
+            });
+            ensure!(
+                !already_active,
+                "An Agent review is already running for this Card"
+            );
+            (c, profile)
+        };
+
+        let (prepared_card, prepared_project) = {
+            let _gate = self.terminal_gate.lock().unwrap();
+            self.ensure_card_worktree(&card.id, None)?
+        };
+        let cwd = prepared_card
+            .worktree
+            .clone()
+            .unwrap_or_else(|| prepared_project.directory.clone());
+
+        let base_ref = prepared_card
+            .workspace
+            .as_ref()
+            .and_then(|w| w.target_branch.clone())
+            .or_else(|| prepared_project.target_branch.clone())
+            .unwrap_or_else(|| "main".into());
+        let compare_ref = prepared_card
+            .branch
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "HEAD".into());
+
+        let pr_info = if prepared_card.is_github_pr() {
+            prepared_card
+                .github_issue()
+                .map(|s| (s.repository.clone(), s.number))
+        } else {
+            prepared_card
+                .pull_request
+                .as_ref()
+                .filter(|pr| pr.number > 0)
+                .map(|pr| (pr.repository.clone(), pr.number))
+        };
+        let pr_head_sha = pr_info.as_ref().and_then(|(repo, num)| {
+            self.github_cached_client()
+                .ok()
+                .and_then(|c| c.cached::<Value>(&format!("/repos/{repo}/pulls/{num}")))
+                .and_then(|v| v["head"]["sha"].as_str().map(str::to_owned))
+        });
+        let compare_sha = pr_head_sha
+            .or_else(|| {
+                self.ops(&prepared_project.work_location().machine)
+                    .git_refs_in(&prepared_project, Some(&cwd))
+                    .ok()
+                    .and_then(|v| v["head_sha"].as_str().map(str::to_owned))
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or_else(|| "HEAD".into());
+
+        let context_label = if let Some((repo, num)) = &pr_info {
+            format!(
+                "PR {repo}#{num} (Card #{}: {})",
+                prepared_card.number, prepared_card.title
+            )
+        } else {
+            format!("Card #{}: {}", prepared_card.number, prepared_card.title)
+        };
+        let focus = p["focus"].as_str().unwrap_or("").trim();
+        let focus_section = if focus.is_empty() {
+            String::new()
+        } else {
+            format!("\nFocus areas requested by the user:\n{focus}\n")
+        };
+        let instruction = canban_context::render_template(
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../prompts/runtime/diff_review.txt"
+            ))
+            .trim_end(),
+            &[
+                ("context_label", &context_label),
+                ("base_ref", &base_ref),
+                ("compare_ref", &compare_ref),
+                ("compare_sha", &compare_sha),
+                ("cwd", &cwd),
+                ("focus_section", &focus_section),
+            ],
+        );
+
+        let profile_id = profile.id.clone();
+        self.mutate("review.run_agent", &p, |db| {
+            let mut current: Card = db.get(&prepared_card.id)?;
+            ensure!(
+                current.active(),
+                "Restore the Card before running an Agent review"
+            );
+            let proj: Project = db.get(&current.project_id)?;
+            let stage = canban_workflow_engine::stage(&proj.workflow, &current.stage)?;
+            let entry = enqueue(
+                db,
+                &config,
+                &mut current,
+                &proj,
+                stage,
+                ExecutionTrigger::Custom("diff_review".into()),
+                Some(&profile_id),
+                Some(instruction),
+            )?
+            .context("Agent review could not be queued")?;
+            current.revision += 1;
+            db.save(&current)?;
+            Ok(json!({
+                "state": "queued",
+                "card_id": current.id,
+                "card": current.number,
+                "profile_id": profile_id,
+                "terminal_id": entry.id,
+            }))
+        })
     }
 }
 

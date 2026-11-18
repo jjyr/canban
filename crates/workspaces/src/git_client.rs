@@ -660,6 +660,9 @@ impl Ops {
             let detail = if !stderr.is_empty() { stderr } else { stdout };
             bail!("Fast-forward pull from {remote_name}/{remote_branch} failed: {detail}");
         }
+        if remote_branch.starts_with("refs/pull/") {
+            let _ = self.git(dir, &["fetch", "--", &remote_name]);
+        }
         let new_head = self.checked(dir, &["rev-parse", "HEAD"])?;
 
         Ok(json!({
@@ -720,10 +723,15 @@ impl Ops {
             )
             && !merge_ref.trim().is_empty()
         {
-            merge_ref
-                .trim()
+            let trimmed = merge_ref.trim();
+            if trimmed.starts_with("refs/pull/") {
+                bail!(
+                    "Branch '{current_branch}' tracks a read-only GitHub PR ref ({trimmed}) from a fork and cannot be pushed directly to '{remote_name}'"
+                );
+            }
+            trimmed
                 .strip_prefix("refs/heads/")
-                .unwrap_or(merge_ref.trim())
+                .unwrap_or(trimmed)
                 .to_owned()
         } else {
             current_branch.clone()

@@ -101,6 +101,36 @@ In an interactive session on a Card not yet in `develop`, once the user authoriz
 "$CANBAN_CLI" card adopt --stage develop
 ```
 
+### Stage local diff review comments (`review draft`)
+
+When reviewing a Card or GitHub PR, write line-specific findings and an overall summary as a **local unpublished review draft** (never publish directly to GitHub) so a human can inspect, edit, or publish them from the local Diff UI:
+
+```sh
+"$CANBAN_CLI" review draft --file "$CANBAN_RUN_DIR/review_draft.json"
+```
+
+Expected JSON schema for `review_draft.json`:
+
+```json
+{
+  "summary": "Overall review summary...",
+  "verdict": "comment",
+  "comments": [
+    {
+      "path": "crates/scheduler/src/lib.rs",
+      "line": 86,
+      "side": "RIGHT",
+      "snippet": "let _ = self.reconcile_slots();",
+      "body": "Explain the issue and suggested fix..."
+    }
+  ]
+}
+```
+
+- `verdict`: `"comment"` (default), `"approve"`, or `"request_changes"`.
+- `side`: `"RIGHT"` (added or context line on the new file) or `"LEFT"` (deleted line on the old file).
+- Use `"$CANBAN_CLI" review clear` to discard the local review draft for the current Card if needed.
+
 ## Efficient RPC and CLI use
 
 - RPC and CLI default to compact Agent-facing summaries and mutation receipts.

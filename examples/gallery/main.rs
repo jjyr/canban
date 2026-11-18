@@ -1810,10 +1810,11 @@ pub fn Gallery() -> impl IntoElement {
     }
     if matches!(
         scene_env.as_str(),
-        "github-pr-review" | "github-pr-review-delete-confirm"
+        "github-pr-review" | "github-pr-review-delete-confirm" | "pr-agent-review-draft"
     ) {
         fixtures::github_browser(ui, true);
         let mut compare = fixtures::git_compare();
+        compare["compare_sha"] = json!("8f3a1c2");
         compare["threads"] = json!([
             {
                 "id": 801,
@@ -1845,6 +1846,37 @@ pub fn Gallery() -> impl IntoElement {
             "url": "https://github.com/fixture/repo/pull/2"
         })));
         ui.review_state.compare_data.set(compare);
+        if scene_env == "pr-agent-review-draft" {
+            ui.snapshot.update(|s| {
+                let cid = s.cards[0].id.clone();
+                s.review_drafts.push(canban_types::ReviewDraft {
+                    card_id: cid,
+                    repository: Some("fixture/repo".into()),
+                    pr_number: Some(2),
+                    compare_sha: Some("8f3a1c2".into()),
+                    summary: "Reviewed diff: ensure rail navigation clears stale selection.".into(),
+                    verdict: "request_changes".into(),
+                    comments: vec![canban_types::ReviewDraftComment {
+                        id: "agent-draft-1".into(),
+                        path: "crates/ui/src/rail.rs".into(),
+                        section: String::new(),
+                        line: 56,
+                        side: "RIGHT".into(),
+                        snippet: "move |_| crate::review::open_compare(ui)".into(),
+                        body: "Consider validating active project before opening Diff.".into(),
+                        author: Some("@reviewer".into()),
+                        edited_by_user: false,
+                    }],
+                    author: Some("@reviewer".into()),
+                    updated_at: 1_763_000_000_000,
+                });
+            });
+            let cid = ui.snapshot.with_untracked(|s| s.cards[0].id.clone());
+            ui.card.set(cid.clone());
+            canban_ui::review::hydrate_card_review_draft(ui, &cid, true);
+            ui.review_state.submit_open.set(true);
+            ui.review_state.submit_action.set("github_review".into());
+        }
         ui.page.set("review".into());
         if scene_env == "github-pr-review-delete-confirm" {
             ui.review_state.deleting_remote_comment.set(Some(802));

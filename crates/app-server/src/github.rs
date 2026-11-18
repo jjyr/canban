@@ -13,7 +13,7 @@ impl AppServer {
             canban_github::Client::from_cli(self.github_cli.clone(), true)
         }
     }
-    fn github_cached_client(&self) -> Result<canban_github::Client> {
+    pub(super) fn github_cached_client(&self) -> Result<canban_github::Client> {
         if self.github.status().state == "connected" {
             self.github.cached_client()
         } else {

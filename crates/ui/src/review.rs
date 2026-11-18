@@ -240,7 +240,7 @@ pub fn preview_to_compare_json(p: &ReviewPreview) -> Value {
     })
 }
 
-fn card_pr_info(c: &Card) -> Option<(String, u64, String)> {
+pub(crate) fn card_pr_info(c: &Card) -> Option<(String, u64, String)> {
     if c.is_github_pr()
         && let Some(src) = c.github_issue()
     {
@@ -248,7 +248,197 @@ fn card_pr_info(c: &Card) -> Option<(String, u64, String)> {
     }
     c.pull_request
         .as_ref()
+        .filter(|pr| pr.number > 0)
         .map(|pr| (pr.repository.clone(), pr.number, pr.url.clone()))
+}
+
+pub(crate) fn card_has_pr(c: &Card) -> bool {
+    card_pr_info(c).is_some()
+}
+
+pub(crate) fn active_review_run(
+    s: &canban_types::Snapshot,
+    card_id: &str,
+) -> Option<(String, Option<u64>)> {
+    s.terminals.iter().find_map(|t| {
+        let a = t.agent.as_ref()?;
+        if a.card_id == card_id
+            && a.trigger == canban_types::ExecutionTrigger::Custom("diff_review".into())
+            && !a.finished()
+            && !a.agent_stopped()
+        {
+            Some((
+                a.profile.id.clone(),
+                crate::components::activity::agent_started_at(s, t),
+            ))
+        } else {
+            None
+        }
+    })
+}
+
+pub fn start_agent_review(
+    ui: Ui,
+    card_id: &str,
+    profile_id: Option<String>,
+    focus: Option<String>,
+) {
+    let profile = profile_id
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| crate::sessions::default_review_profile(ui));
+    if crate::APP.get().is_none() {
+        ui.notify(format!(
+            "Gallery preview · started Agent review (@{profile})"
+        ));
+        return;
+    }
+    let mut payload = json!({
+        "card_id": card_id,
+        "profile_id": profile,
+        "request_key": canban_types::id(),
+    });
+    if let Some(f) = focus.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()) {
+        payload["focus"] = json!(f);
+    }
+    let notify_profile = profile;
+    dispatch_then(ui, "review.run_agent", payload, move |_| {
+        ui.notify(format!("Started Agent PR review (@{notify_profile})"));
+    });
+}
+
+pub fn discard_review_draft(ui: Ui, card_id: &str) {
+    if crate::APP.get().is_none() {
+        let cid = card_id.to_owned();
+        ui.snapshot.update(|s| {
+            s.review_drafts.retain(|d| d.card_id != cid);
+        });
+        let st = ui.review_state;
+        if ui.card.get_untracked() == card_id {
+            batch(|| {
+                st.pending_comments.set(Vec::new());
+                st.submit_summary.set(String::new());
+                st.draft_anchor_sha.set(None);
+                st.draft_drift_dismissed.set(false);
+            });
+        }
+        ui.notify("Gallery preview · discarded review draft");
+        return;
+    }
+    let cid = card_id.to_owned();
+    dispatch_then(
+        ui,
+        "review.draft.clear",
+        json!({"card_id": cid}),
+        move |_| {
+            let st = ui.review_state;
+            if ui.card.get_untracked() == cid {
+                batch(|| {
+                    st.pending_comments.set(Vec::new());
+                    st.submit_summary.set(String::new());
+                    st.draft_anchor_sha.set(None);
+                    st.draft_drift_dismissed.set(false);
+                    st.loaded_draft_key.replace((String::new(), 0));
+                });
+            }
+            ui.notify("Discarded local review draft");
+        },
+    );
+}
+
+pub fn sync_pending_draft_to_server(ui: Ui) {
+    if crate::APP.get().is_none() {
+        return;
+    }
+    let cid = ui.card.get_untracked();
+    let st = ui.review_state;
+    if cid.is_empty() || st.mode.get_untracked() == "git" {
+        return;
+    }
+    let pending = st.pending_comments.get_untracked();
+    let summary = st.submit_summary.get_untracked();
+    if pending.is_empty() && summary.trim().is_empty() {
+        dispatch_complete(ui, "review.draft.clear", json!({"card_id": cid}), |_| {});
+        return;
+    }
+    let verdict = match st.submit_gh_event.get_untracked().as_str() {
+        "APPROVE" => "approve",
+        "REQUEST_CHANGES" => "request_changes",
+        _ => "comment",
+    };
+    let comments: Vec<Value> = pending
+        .iter()
+        .map(|c| {
+            json!({
+                "id": c.id,
+                "path": c.path,
+                "section": c.section,
+                "line": c.line,
+                "side": c.side,
+                "snippet": c.snippet,
+                "body": c.body,
+                "author": c.author,
+                "edited_by_user": c.edited_by_user,
+            })
+        })
+        .collect();
+    let mut payload = json!({
+        "card_id": cid,
+        "summary": summary,
+        "verdict": verdict,
+        "comments": comments,
+    });
+    if let Some(sha) = st.draft_anchor_sha.get_untracked() {
+        payload["compare_sha"] = json!(sha);
+    }
+    dispatch_complete(ui, "review.draft.set", payload, |_| {});
+}
+
+pub fn hydrate_card_review_draft(ui: Ui, card_id: &str, force: bool) {
+    let st = ui.review_state;
+    let draft_opt = ui
+        .index
+        .with_untracked(|idx| idx.review_draft(card_id).cloned());
+    let Some(draft) = draft_opt else {
+        if force {
+            st.loaded_draft_key.replace((card_id.to_owned(), 0));
+            st.draft_anchor_sha.set(None);
+            st.draft_drift_dismissed.set(false);
+        }
+        return;
+    };
+    let key = (card_id.to_owned(), draft.updated_at);
+    if !force && st.loaded_draft_key.with(|prev| *prev == key) {
+        return;
+    }
+    st.loaded_draft_key.replace(key);
+    let pending: Vec<PendingInlineComment> = draft
+        .comments
+        .into_iter()
+        .map(|c| PendingInlineComment {
+            id: c.id,
+            path: c.path,
+            section: c.section,
+            line: c.line,
+            side: c.side,
+            snippet: c.snippet,
+            body: c.body,
+            author: c.author,
+            edited_by_user: c.edited_by_user,
+        })
+        .collect();
+    let gh_event = match draft.verdict.as_str() {
+        "approve" => "APPROVE",
+        "request_changes" => "REQUEST_CHANGES",
+        _ => "COMMENT",
+    };
+    batch(|| {
+        st.pending_comments.set(pending);
+        st.submit_summary.set(draft.summary);
+        st.submit_gh_event.set(gh_event.into());
+        st.draft_anchor_sha.set(draft.compare_sha);
+        st.draft_drift_dismissed.set(false);
+    });
 }
 
 /// Re-entering Git retains this Project's selected checkout and comparison.
@@ -318,6 +508,42 @@ pub(crate) fn card_compare_params(card: &Card, target: &str) -> Value {
     json!({"card_id":card.id, "cwd":card.worktree, "use_card_worktree":true, "target_branch":target, "three_dot":true})
 }
 
+pub fn open_card_pr(ui: Ui, card_id: &str) {
+    let Some(card) = ui
+        .snapshot
+        .with_untracked(|s| s.cards.iter().find(|c| c.id == card_id).cloned())
+    else {
+        open_compare(ui);
+        return;
+    };
+    if let Some((repository, number, url)) = card_pr_info(&card) {
+        crate::navigation::checkpoint(ui);
+        ui.project.set(card.project_id.clone());
+        let st = ui.review_state;
+        let cwd = card.worktree.clone().unwrap_or_default();
+        batch(|| {
+            ui.card.set(card.id.clone());
+            ui.review.set(None);
+            st.checkout_cwd.set(cwd);
+            st.mode.set("github_pr".into());
+            st.pr_target.set(Some(
+                json!({"repository":repository, "number":number, "url":url}),
+            ));
+            st.selected_file.set(String::new());
+            st.compare_open.set(false);
+            st.agent_review_open.set(false);
+        });
+        hydrate_card_review_draft(ui, &card.id, true);
+        prepare_context(ui);
+        load_refs(ui);
+        refresh_active_diff(ui, false);
+        ui.navigate("review");
+        crate::navigation::checkpoint(ui);
+    } else {
+        open_card(ui, card_id);
+    }
+}
+
 pub fn open_card(ui: Ui, card_id: &str) {
     let Some(card) = ui
         .snapshot
@@ -326,25 +552,21 @@ pub fn open_card(ui: Ui, card_id: &str) {
         open_compare(ui);
         return;
     };
+    if card.is_github_pr() || (card.worktree.is_none() && card_pr_info(&card).is_some()) {
+        open_card_pr(ui, card_id);
+        return;
+    }
     crate::navigation::checkpoint(ui);
     ui.project.set(card.project_id.clone());
     if let Some(path) = card.worktree.clone().filter(|p| !p.is_empty()) {
         git_ops::select_checkout(ui, path);
-    } else if let Some((repository, number, url)) = card_pr_info(&card) {
-        let st = ui.review_state;
-        batch(|| {
-            ui.card.set(card.id);
-            ui.review.set(None);
-            st.checkout_cwd.set(String::new());
-            st.mode.set("github_pr".into());
-            st.pr_target.set(Some(
+        if let Some((repository, number, url)) = card_pr_info(&card) {
+            ui.card.set(card.id.clone());
+            ui.review_state.pr_target.set(Some(
                 json!({"repository":repository, "number":number, "url":url}),
             ));
-            st.selected_file.set(String::new());
-            st.compare_open.set(false);
-        });
-        prepare_context(ui);
-        refresh_active_diff(ui, false);
+            hydrate_card_review_draft(ui, &card.id, true);
+        }
     } else {
         git_ops::select_checkout(ui, String::new());
     }
@@ -875,6 +1097,15 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         st.compare_data.set(preview_to_compare_json(&p));
     }
 
+    effect(move || {
+        let _ = ui.index.get();
+        let page = ui.page.get();
+        let cid = ui.card.get();
+        if page == "review" && !cid.is_empty() && st.mode.get_untracked() != "git" {
+            untracked(|| hydrate_card_review_draft(ui, &cid, false));
+        }
+    });
+
     view()
         .flex_1()
         .min_h(px(0.))
@@ -898,7 +1129,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         .min_w(px(0.))
                         .min_h(px(0.))
                         .child(when(
-                            move || st.mode.get() == "github_pr",
+                            move || st.mode.get() != "git",
                             move || dynamic(move || sidebar::render_card_delivery_banner(ui)),
                         ))
                         .child(dynamic(move || {

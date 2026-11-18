@@ -541,6 +541,17 @@ impl Db<'_> {
         let active = rows
             .map(|row| Ok(serde_json::from_str(&row?)?))
             .collect::<Result<Vec<WorkflowRevision>>>()?;
+        let review_drafts = {
+            let mut q = self.conn.prepare(
+                "SELECT data FROM editor_drafts WHERE id LIKE 'review-draft:%' AND data != 'null' ORDER BY updated_at DESC, id",
+            )?;
+            let rows = q.query_map([], |row| row.get::<_, String>(0))?;
+            rows.filter_map(|row| {
+                let raw = row.ok()?;
+                serde_json::from_str::<ReviewDraft>(&raw).ok()
+            })
+            .collect::<Vec<_>>()
+        };
         Ok(Snapshot {
             github_sync: Default::default(),
             workflow_runs: self.list()?,
@@ -573,6 +584,7 @@ impl Db<'_> {
             conversations: self.list()?,
             questions: self.list()?,
             note_events: self.list()?,
+            review_drafts,
             ..Default::default()
         })
     }

@@ -79,6 +79,8 @@ pub struct WorkspaceInfo {
     pub path: Option<String>,
     pub branch: Option<String>,
     pub target_branch: Option<String>,
+    #[serde(default)]
+    pub upstream: Option<String>,
     pub base_commit: Option<String>,
     pub state: String,
     pub dirty: bool,
@@ -1005,6 +1007,49 @@ pub struct Artifact {
     pub digest: String,
     pub bytes: u64,
 }
+fn default_review_side() -> String {
+    "RIGHT".into()
+}
+fn default_review_verdict() -> String {
+    "comment".into()
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewDraftComment {
+    pub id: String,
+    pub path: String,
+    #[serde(default)]
+    pub section: String,
+    pub line: u64,
+    #[serde(default = "default_review_side")]
+    pub side: String,
+    #[serde(default)]
+    pub snippet: String,
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub edited_by_user: bool,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewDraft {
+    pub card_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compare_sha: Option<String>,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default = "default_review_verdict")]
+    pub verdict: String,
+    #[serde(default)]
+    pub comments: Vec<ReviewDraftComment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default)]
+    pub updated_at: u64,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
 pub struct Snapshot {
     #[serde(default)]
@@ -1062,6 +1107,8 @@ pub struct Snapshot {
     pub questions: Vec<Question>,
     #[serde(default)]
     pub note_events: Vec<NoteEvent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_drafts: Vec<ReviewDraft>,
 }
 impl Snapshot {
     pub fn terminal_project_id<'a>(&'a self, t: &'a TerminalEntry) -> Option<&'a str> {

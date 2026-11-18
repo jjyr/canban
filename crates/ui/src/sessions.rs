@@ -34,6 +34,17 @@ pub fn open(ui: Ui, card: String, profile: String) {
     );
 }
 
+pub fn default_review_profile(ui: Ui) -> String {
+    ui.profiles
+        .with(|profiles| {
+            profiles
+                .iter()
+                .find(|p| p.id == "reviewer" && p.enabled)
+                .map(|p| p.id.clone())
+        })
+        .unwrap_or_else(|| default_profile(ui))
+}
+
 /// The configured default Agent, falling back to `developer` and then the first
 /// enabled profile. Shared by standalone worktree launches and review submission.
 pub fn default_profile(ui: Ui) -> String {

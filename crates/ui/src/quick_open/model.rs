@@ -20,6 +20,41 @@ pub struct Candidate {
     pub fields: Vec<String>,
     pub tags: Vec<String>,
 }
+pub(crate) fn github_search_fields(card: &Card) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut push_ref = |kind: &str, repository: &str, num: u64, include_gh: bool| {
+        if num == 0 {
+            return;
+        }
+        fields.push(format!("{kind} #{num}"));
+        fields.push(format!("{kind}#{num}"));
+        fields.push(format!("{kind}:{num}"));
+        if include_gh {
+            fields.push(format!("gh#{num}"));
+            fields.push(format!("gh:{num}"));
+        }
+        fields.push(format!("#{num}"));
+        fields.push(num.to_string());
+        if !repository.is_empty() {
+            fields.push(format!("{repository}#{num}"));
+        }
+    };
+    if let Some(src) = card.github_issue() {
+        let kind = if card.is_github_pr() { "pr" } else { "issue" };
+        push_ref(kind, &src.repository, src.number, true);
+    }
+    if let Some(pr) = card.pull_request.as_ref().filter(|p| p.number > 0) {
+        push_ref("pr", &pr.repository, pr.number, true);
+    }
+    for link in &card.github_links {
+        if let Some(num) = link.number.filter(|&n| n > 0) {
+            let kind = if link.kind == "pr" { "pr" } else { "issue" };
+            push_ref(kind, &link.repository, num, false);
+        }
+    }
+    fields
+}
+
 pub fn candidates(s: &Snapshot) -> Vec<Candidate> {
     candidates_with_tags(s, &BTreeSet::new())
 }
@@ -74,15 +109,27 @@ pub fn candidates_with_tags(s: &Snapshot, local_tags: &BTreeSet<String>) -> Vec<
             owner.clone(),
             c.branch.clone().unwrap_or_default(),
         ];
+        fields.extend(github_search_fields(c));
         for tag in &tags {
             fields.push(format!("#{tag}"));
             fields.push(tag.clone());
         }
+        let gh_detail = if let Some(src) = c.github_issue() {
+            format!(
+                " · {} #{}",
+                if c.is_github_pr() { "PR" } else { "Issue" },
+                src.number
+            )
+        } else if let Some(pr) = c.pull_request.as_ref().filter(|p| p.number > 0) {
+            format!(" · PR #{}", pr.number)
+        } else {
+            String::new()
+        };
         rows.push(Candidate {
             id: format!("card:{}", c.id),
             title,
             detail: format!(
-                "Card · {owner} · {}{}",
+                "Card · {owner} · {}{}{gh_detail}",
                 c.stage,
                 crate::tags::format_summary(&tags, crate::tags::MAX_BOARD_TILE_TAGS),
             ),

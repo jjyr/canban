@@ -753,7 +753,9 @@ pub fn render_top_bar(ui: Ui) -> impl IntoElement {
                         .items_center()
                         .gap_1p5()
                         .child(when(
-                            move || st.mode.get() != "github_pr",
+                            move || {
+                                st.mode.get() != "github_pr" || !st.checkout_cwd.get().is_empty()
+                            },
                             move || git_ops::render_sync_controls(ui),
                         ))
                         .child(render_refresh(ui))
@@ -1022,6 +1024,68 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
 
     let mut right_controls = view().flex_row().flex_wrap().items_center().gap_1p5();
 
+    if c.active() && !c.merged() {
+        let active_review = ui.snapshot.with(|s| super::active_review_run(s, &c.id));
+        if let Some((prof, started_at)) = active_review {
+            let cid = c.id.clone();
+            let now_ms = ui.runtime_clock.get();
+            let elapsed = started_at
+                .map(|t| {
+                    format!(
+                        " · {}",
+                        crate::components::activity::compact_duration(now_ms.saturating_sub(t))
+                    )
+                })
+                .unwrap_or_default();
+            right_controls = right_controls.child(
+                canban_ui_kit::press_target()
+                    .h(px(26.))
+                    .px_2()
+                    .rounded(px(13.))
+                    .flex_row()
+                    .items_center()
+                    .gap_1p5()
+                    .bg(SELECTED)
+                    .hover(|s| s.bg(CARD_HOVER))
+                    .on_press(move |_: &()| crate::terminals::open_card_quick(ui, &cid))
+                    .child(live_dot(ACCENT))
+                    .child(
+                        label(format!("@{prof} reviewing{elapsed}"))
+                            .text_size(px(11.5))
+                            .text_color(ACCENT),
+                    ),
+            );
+        } else {
+            let cid_quick = c.id.clone();
+            let default_prof = crate::sessions::default_review_profile(ui);
+            right_controls = right_controls.child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_0p5()
+                    .child(
+                        compact_action(
+                            format!("Ask @{default_prof}"),
+                            Variant::Secondary,
+                            move |_| super::start_agent_review(ui, &cid_quick, None, None),
+                        )
+                        .disabled(move || ui.is_method_pending("review.run_agent")),
+                    )
+                    .child(chrome_button(
+                        Icon::ChevronDown,
+                        "Configure Agent PR Review",
+                        move |_| {
+                            if st.agent_review_profile.get_untracked().is_empty() {
+                                st.agent_review_profile
+                                    .set(crate::sessions::default_review_profile(ui));
+                            }
+                            st.agent_review_open.update(|v| *v = !*v);
+                        },
+                    )),
+            );
+        }
+    }
+
     // Unified Local / PR #N switcher when both local branch/worktree and PR exist
     if let Some(prt) = &pr_target
         && has_local
@@ -1209,6 +1273,75 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
                 .child(left_info)
                 .child(right_controls),
         )
+        .child(when(
+            move || st.agent_review_open.get(),
+            move || {
+                let cid_start = c.id.clone();
+                view()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .pt_1()
+                    .child(muted("Agent:"))
+                    .child(dynamic(move || {
+                        let profiles = ui.profiles.get();
+                        let cur = st.agent_review_profile.get();
+                        let display = if cur.is_empty() {
+                            crate::sessions::default_review_profile(ui)
+                        } else {
+                            cur
+                        };
+                        action_with_icon(
+                            Icon::Agent,
+                            format!("@{display} ▾"),
+                            Variant::Secondary,
+                            move |_| {
+                                let list = profiles.clone();
+                                ui.spawn(async move {
+                                    let items: Vec<MenuItem> = list
+                                        .into_iter()
+                                        .map(|p| {
+                                            let pid = p.id.clone();
+                                            MenuItem::new(format!("@{}", p.id)).on_select(
+                                                move || {
+                                                    st.agent_review_profile.try_set(pid.clone());
+                                                },
+                                            )
+                                        })
+                                        .collect();
+                                    popup_menu(items).await;
+                                });
+                            },
+                        )
+                    }))
+                    .child(
+                        field(
+                            st.agent_review_focus,
+                            "Optional review focus (e.g. concurrency, error handling)…",
+                        )
+                        .flex_1()
+                        .min_w(px(220.)),
+                    )
+                    .child(compact_action("Cancel", Variant::Quiet, move |_| {
+                        st.agent_review_open.set(false);
+                    }))
+                    .child(
+                        compact_action("Start Diff Review", Variant::Primary, move |_| {
+                            let prof = st.agent_review_profile.get_untracked();
+                            let focus = st.agent_review_focus.get_untracked();
+                            st.agent_review_open.set(false);
+                            super::start_agent_review(
+                                ui,
+                                &cid_start,
+                                (!prof.is_empty()).then_some(prof),
+                                (!focus.trim().is_empty()).then_some(focus),
+                            );
+                        })
+                        .disabled(move || ui.is_method_pending("review.run_agent")),
+                    )
+            },
+        ))
         .child(when(
             move || st.delivery_customize.get(),
             move || {

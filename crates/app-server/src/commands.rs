@@ -1388,6 +1388,10 @@ impl AppServer {
             "review.merge" => self.review_merge(p),
             "review.github_pr" => self.review_github_pr(p),
             "review.send_agent" => self.review_send_agent(p),
+            "review.run_agent" => self.review_run_agent(p),
+            "review.draft.get" => self.review_draft_get(p),
+            "review.draft.set" => self.review_draft_set(p),
+            "review.draft.clear" => self.review_draft_clear(p),
             "agent.open" => self.open_agent(p),
             "agent.bind" => self.bind_session(p),
             // Old in-flight hook commands can finish, but never drive lifecycle.

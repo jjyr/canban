@@ -498,14 +498,147 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             row = row.child(view().flex_1().min_w(px(0.)));
             let in_review_stage =
                 c.stage == "review" || stage.is_some_and(|t| t.require_human_review);
+            let is_pr = crate::review::card_has_pr(&c);
             let can_review_diff = in_review_stage
                 || c.worktree.is_some()
                 || c.branch.as_ref().is_some_and(|b| !b.is_empty())
-                || c.is_github_pr()
-                || c.pull_request.is_some();
-            if !review_mode && can_review_diff && (in_review_stage || c.branch.as_ref().is_none_or(|b| b.is_empty())) {
+                || is_pr;
+            let (review_draft, active_review) = ui.snapshot.with(|s| {
+                let d = ui.index.with(|idx| idx.review_draft(&c.id).cloned());
+                let r = crate::review::active_review_run(s, &c.id);
+                (d, r)
+            });
+            if !review_mode && c.active() && !c.merged() && is_pr {
+                let st = ui.review_state;
+                if let Some((prof, started_at)) = active_review {
+                    let now_ms = ui.runtime_clock.get();
+                    let elapsed = started_at
+                        .map(|t| {
+                            format!(
+                                " · {}",
+                                crate::components::activity::compact_duration(
+                                    now_ms.saturating_sub(t)
+                                )
+                            )
+                        })
+                        .unwrap_or_default();
+                    let cid_term = c.id.clone();
+                    row = row.child(
+                        canban_ui_kit::press_target()
+                            .h(px(26.))
+                            .px_2()
+                            .rounded(px(13.))
+                            .flex_row()
+                            .items_center()
+                            .gap_1p5()
+                            .bg(SELECTED)
+                            .hover(|st| st.bg(CARD_HOVER))
+                            .on_press(move |_: &()| {
+                                if ui.page.get_untracked() == "card" {
+                                    crate::card::terminal::toggle(ui);
+                                } else {
+                                    crate::terminals::open_card_quick(ui, &cid_term);
+                                }
+                            })
+                            .child(live_dot(ACCENT))
+                            .child(
+                                label(format!("@{prof} reviewing{elapsed}"))
+                                    .text_size(px(11.5))
+                                    .text_color(ACCENT),
+                            ),
+                    );
+                } else if let Some(ref d) = review_draft {
+                    let count = d.comments.len();
+                    let cid_rerun = c.id.clone();
+                    let cid_open = c.id.clone();
+                    let btn_label = if count > 0 {
+                        format!("Review Drafts ({count}) →")
+                    } else {
+                        "Review Ready →".into()
+                    };
+                    row = row
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_0p5()
+                                .child(
+                                    compact_action("↻ Re-run", Variant::Quiet, move |_| {
+                                        crate::review::start_agent_review(
+                                            ui,
+                                            &cid_rerun,
+                                            None,
+                                            None,
+                                        );
+                                    })
+                                    .disabled(move || ui.is_method_pending("review.run_agent")),
+                                )
+                                .child(chrome_button(
+                                    Icon::ChevronDown,
+                                    "Configure Agent PR Review",
+                                    move |_| {
+                                        if st.agent_review_profile.get_untracked().is_empty() {
+                                            st.agent_review_profile.set(
+                                                crate::sessions::default_review_profile(ui),
+                                            );
+                                        }
+                                        st.agent_review_open.update(|v| *v = !*v);
+                                    },
+                                )),
+                        )
+                        .child(compact_action(
+                            btn_label,
+                            Variant::Primary,
+                            move |_| crate::review::open_card_pr(ui, &cid_open),
+                        ));
+                } else {
+                    let cid_run = c.id.clone();
+                    let default_prof = crate::sessions::default_review_profile(ui);
+                    row = row.child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_0p5()
+                            .child(
+                                compact_action(
+                                    format!("Agent Review (@{default_prof})"),
+                                    Variant::Secondary,
+                                    move |_| {
+                                        crate::review::start_agent_review(ui, &cid_run, None, None)
+                                    },
+                                )
+                                .disabled(move || ui.is_method_pending("review.run_agent")),
+                            )
+                            .child(chrome_button(
+                                Icon::ChevronDown,
+                                "Configure Agent PR Review",
+                                move |_| {
+                                    if st.agent_review_profile.get_untracked().is_empty() {
+                                        st.agent_review_profile
+                                            .set(crate::sessions::default_review_profile(ui));
+                                    }
+                                    st.agent_review_open.update(|v| *v = !*v);
+                                },
+                            )),
+                    );
+                }
+                if review_draft.is_none() {
+                    row = row.child(compact_action(
+                        "View PR diff",
+                        if in_review_stage {
+                            Variant::Primary
+                        } else {
+                            Variant::Secondary
+                        },
+                        move |_| changes::open(ui),
+                    ));
+                }
+            } else if !review_mode
+                && can_review_diff
+                && (in_review_stage || c.branch.as_ref().is_none_or(|b| b.is_empty()))
+            {
                 row = row.child(compact_action(
-                    if in_review_stage { "Review" } else if c.is_github_pr() || c.pull_request.is_some() { "View PR diff" } else { "Diff" },
+                    if in_review_stage { "Review" } else { "Diff" },
                     if c.stage == "review" {
                         Variant::Primary
                     } else {
@@ -574,5 +707,79 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             }
             row
         }))
+        .child(when(
+            move || !is_review.get() && ui.review_state.agent_review_open.get(),
+            move || {
+                let st = ui.review_state;
+                let Some(card) = ui.current_card() else {
+                    return view();
+                };
+                let cid = card.id;
+                view()
+                    .pt_1()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(muted("Agent:"))
+                    .child(dynamic(move || {
+                        let profiles = ui.profiles.get();
+                        let cur = st.agent_review_profile.get();
+                        let display = if cur.is_empty() {
+                            crate::sessions::default_review_profile(ui)
+                        } else {
+                            cur
+                        };
+                        action_with_icon(
+                            Icon::Agent,
+                            format!("@{display} ▾"),
+                            Variant::Secondary,
+                            move |_| {
+                                let list = profiles.clone();
+                                ui.spawn(async move {
+                                    let items: Vec<MenuItem> = list
+                                        .into_iter()
+                                        .map(|p| {
+                                            let pid = p.id.clone();
+                                            MenuItem::new(format!("@{}", p.id)).on_select(
+                                                move || {
+                                                    st.agent_review_profile
+                                                        .try_set(pid.clone());
+                                                },
+                                            )
+                                        })
+                                        .collect();
+                                    popup_menu(items).await;
+                                });
+                            },
+                        )
+                    }))
+                    .child(
+                        field(
+                            st.agent_review_focus,
+                            "Optional review focus (e.g. lock ordering, edge cases)…",
+                        )
+                        .flex_1()
+                        .min_w(px(200.)),
+                    )
+                    .child(compact_action("Cancel", Variant::Quiet, move |_| {
+                        st.agent_review_open.set(false);
+                    }))
+                    .child(
+                        compact_action("Start Agent Review", Variant::Primary, move |_| {
+                            let prof = st.agent_review_profile.get_untracked();
+                            let focus = st.agent_review_focus.get_untracked();
+                            st.agent_review_open.set(false);
+                            crate::review::start_agent_review(
+                                ui,
+                                &cid,
+                                (!prof.is_empty()).then_some(prof),
+                                (!focus.trim().is_empty()).then_some(focus),
+                            );
+                        })
+                        .disabled(move || ui.is_method_pending("review.run_agent")),
+                    )
+            },
+        ))
         .child(quick_merge::confirm_dialog(ui))
 }

@@ -188,6 +188,11 @@ enum Cmd {
         #[command(subcommand)]
         command: BatchCmd,
     },
+    /// Stage or clear local unpublished PR/diff review drafts for the current Card.
+    Review {
+        #[command(subcommand)]
+        command: ReviewCmd,
+    },
 }
 #[derive(Subcommand)]
 enum ServiceCmd {
@@ -372,6 +377,34 @@ enum BatchCmd {
         project: Option<String>,
         #[arg(long)]
         request_key: Option<String>,
+    },
+}
+#[derive(Subcommand)]
+enum ReviewCmd {
+    /// Save a local unpublished PR/diff review draft (summary, verdict, inline line comments).
+    Draft {
+        /// Path to JSON file (`-` for stdin) containing `{ summary, verdict, comments }`.
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Overall review summary (used when `--file` is omitted or to override `summary`).
+        #[arg(long)]
+        summary: Option<String>,
+        /// Suggested verdict: comment | approve | request_changes.
+        #[arg(long)]
+        verdict: Option<String>,
+        #[arg(long, env = "CANBAN_CARD")]
+        card: Option<u64>,
+        #[arg(long, env = "CANBAN_PROJECT")]
+        project: Option<String>,
+        #[arg(long)]
+        request_key: Option<String>,
+    },
+    /// Clear the local unpublished review draft for a Card.
+    Clear {
+        #[arg(long, env = "CANBAN_CARD")]
+        card: Option<u64>,
+        #[arg(long, env = "CANBAN_PROJECT")]
+        project: Option<String>,
     },
 }
 #[derive(Subcommand)]
@@ -783,6 +816,57 @@ fn run() -> Result<()> {
     );
     let (method, mut p) = match command {
         Cmd::Workflow { .. } => unreachable!(),
+        Cmd::Review { command } => match command {
+            ReviewCmd::Draft {
+                file,
+                summary,
+                verdict,
+                card,
+                project,
+                request_key,
+            } => {
+                let mut params = card_scope(card, project);
+                if let Some(path) = file {
+                    let raw = input_body(Some(path))?;
+                    let parsed: Value = serde_json::from_str(&raw)
+                        .context("Review draft file must contain valid JSON")?;
+                    let obj = parsed
+                        .as_object()
+                        .context("Review draft JSON must be an object")?;
+                    for (k, v) in obj {
+                        params[k] = v.clone();
+                    }
+                }
+                if let Some(s) = summary {
+                    params["summary"] = json!(s);
+                }
+                if let Some(v) = verdict {
+                    params["verdict"] = json!(v);
+                }
+                if let Some(key) = request_key {
+                    params["request_key"] = json!(key);
+                }
+                if params.get("card_id").is_none()
+                    && params.get("card").is_none()
+                    && let Ok(cid) = std::env::var("CARD_ID")
+                    && !cid.trim().is_empty()
+                {
+                    params["card_id"] = json!(cid);
+                }
+                ("review.draft.set".into(), params)
+            }
+            ReviewCmd::Clear { card, project } => {
+                let mut params = card_scope(card, project);
+                if params.get("card_id").is_none()
+                    && params.get("card").is_none()
+                    && let Ok(cid) = std::env::var("CARD_ID")
+                    && !cid.trim().is_empty()
+                {
+                    params["card_id"] = json!(cid);
+                }
+                ("review.draft.clear".into(), params)
+            }
+        },
         Cmd::Card { command } => match command {
             CardCmd::Show { card, project } => {
                 ("card.show".into(), card_scope(Some(card), project))

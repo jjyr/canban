@@ -1,7 +1,8 @@
 //! Shared derived `Snapshot` indexes so Board tiles, Card timelines, and Markdown readers
 //! borrow pre-indexed `O(log N)` maps instead of cloning or scanning the full `Snapshot`.
 use canban_types::{
-    Card, Event, GitHubIssueSnapshot, Project, Snapshot, TerminalEntry, WorkflowStep, normalize_tag,
+    Card, Event, GitHubIssueSnapshot, Project, ReviewDraft, Snapshot, TerminalEntry, WorkflowStep,
+    normalize_tag,
 };
 use canban_ui_kit::Tone;
 use std::{
@@ -36,6 +37,7 @@ pub struct SnapshotIndex {
     pub project_has_github_cards: BTreeSet<String>,
     pub explicit_body_tags: Vec<String>,
     pub card_status: BTreeMap<String, CardStatusDigest>,
+    pub review_drafts: BTreeMap<String, ReviewDraft>,
 }
 
 impl SnapshotIndex {
@@ -173,6 +175,11 @@ impl SnapshotIndex {
             );
         }
 
+        let mut review_drafts = BTreeMap::new();
+        for draft in &snapshot.review_drafts {
+            review_drafts.insert(draft.card_id.clone(), draft.clone());
+        }
+
         Self {
             generation: NEXT_INDEX_GENERATION.fetch_add(1, Ordering::Relaxed),
             projects,
@@ -187,7 +194,12 @@ impl SnapshotIndex {
             project_has_github_cards,
             explicit_body_tags,
             card_status,
+            review_drafts,
         }
+    }
+
+    pub fn review_draft(&self, card_id: &str) -> Option<&ReviewDraft> {
+        self.review_drafts.get(card_id)
     }
 
     pub fn reply_count(&self, card_id: &str) -> usize {

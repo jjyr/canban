@@ -3315,6 +3315,29 @@ pub fn board_filters() -> canban_types::Snapshot {
                     synced_at: 0,
                 });
             }
+            if i == 2 {
+                s.review_drafts.push(canban_types::ReviewDraft {
+                    card_id: c.id.clone(),
+                    repository: Some("fixture/repo".into()),
+                    pr_number: Some(2),
+                    compare_sha: Some("8f3a1c2".into()),
+                    summary: "Found one concurrency hazard and a missing boundary check.".into(),
+                    verdict: "request_changes".into(),
+                    comments: vec![canban_types::ReviewDraftComment {
+                        id: "draft-1".into(),
+                        path: "crates/ui/src/rail.rs".into(),
+                        section: String::new(),
+                        line: 56,
+                        side: "RIGHT".into(),
+                        snippet: "move |_| crate::review::open_compare(ui)".into(),
+                        body: "Guard against stale project selection before opening Diff.".into(),
+                        author: Some("@reviewer".into()),
+                        edited_by_user: false,
+                    }],
+                    author: Some("@reviewer".into()),
+                    updated_at: 1_763_000_000_000,
+                });
+            }
         }
     }
     s

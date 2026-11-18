@@ -270,6 +270,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                             reading.scroll.scroll_to_end(false);
                                         }
                                     })
+                                    .child(review_draft_banner(ui))
                                     .child(task::render(ui, draft, reading))
                                     .child(details::render(ui, draft))
                                     .child(when(
@@ -372,6 +373,109 @@ pub(crate) fn proxy(draft: Signal<Draft>, comment: bool) -> Signal<String> {
         }
     });
     text
+}
+
+/// Local unpublished PR review draft banner on the Card detail view.
+fn review_draft_banner(ui: Ui) -> impl IntoElement {
+    dynamic(move || {
+        let Some(card) = ui.current_card() else {
+            return view().into_element();
+        };
+        let Some(draft) = ui.index.with(|idx| idx.review_draft(&card.id).cloned()) else {
+            return view().into_element();
+        };
+        let author = draft.author.as_deref().unwrap_or("Agent");
+        let head_note = draft
+            .compare_sha
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(|s| format!(" · head {}", &s[..s.len().min(7)]))
+            .unwrap_or_default();
+        let count = draft.comments.len();
+        let mut files = Vec::<String>::new();
+        for c in &draft.comments {
+            let short = c.path.rsplit('/').next().unwrap_or(&c.path).to_owned();
+            if !files.contains(&short) {
+                files.push(short);
+            }
+        }
+        let files_summary = if count == 0 {
+            "Summary only (0 inline comments)".to_owned()
+        } else {
+            let shown: Vec<String> = files.iter().take(3).cloned().collect();
+            let more = if files.len() > 3 {
+                format!(" +{} more", files.len() - 3)
+            } else {
+                String::new()
+            };
+            format!(
+                "{count} inline comment{} across {}{more}",
+                if count == 1 { "" } else { "s" },
+                shown.join(", ")
+            )
+        };
+        let summary_preview = draft
+            .summary
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or("")
+            .to_owned();
+        let cid_discard = card.id.clone();
+        let cid_open = card.id;
+        let mut box_view = view()
+            .p_3()
+            .rounded(px(RADIUS))
+            .border_1()
+            .border_color(ACCENT)
+            .bg(SELECTED)
+            .gap_1p5()
+            .child(
+                view()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_1p5()
+                            .child(icon_tinted(Icon::Eye, ACCENT).w(px(14.)).h(px(14.)))
+                            .child(
+                                label(format!(
+                                    "{author} prepared a local PR review draft (unpublished{head_note})"
+                                ))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(12.5)),
+                            ),
+                    )
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_1p5()
+                            .child(
+                                compact_action("Discard", Variant::Quiet, move |_| {
+                                    crate::review::discard_review_draft(ui, &cid_discard);
+                                })
+                                .disabled(move || ui.is_method_pending("review.draft.clear")),
+                            )
+                            .child(compact_action(
+                                "Open in PR Diff & Publish →",
+                                Variant::Primary,
+                                move |_| crate::review::open_card_pr(ui, &cid_open),
+                            )),
+                    ),
+            );
+        if !summary_preview.is_empty() {
+            box_view = box_view.child(muted(summary_preview).truncate());
+        }
+        box_view
+            .child(muted(files_summary).text_size(px(11.5)))
+            .into_element()
+    })
 }
 
 /// Task previews, comments and references share one product reader.

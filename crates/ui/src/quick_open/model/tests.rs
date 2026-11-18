@@ -589,3 +589,97 @@ fn quick_open_indexes_global_and_project_schedules() {
     let global_hits = ranked(&rows, "global cron", &[], false);
     assert_eq!(global_hits[0].id, "schedule:sched-global-gc");
 }
+
+#[test]
+fn quick_open_searches_cards_by_github_issue_and_pr_numbers() {
+    let mut s = fixture();
+    // Card #42 (c1) is local #42; add Card #118 linked to PR #402 and Card #119 linked to Issue #399,
+    // plus Card #402 with local card number 402 to verify local number ranks above PR #402.
+    s.cards.push(
+        serde_json::from_value(json!({
+            "id": "c-pr",
+            "project_id": "p1",
+            "number": 118,
+            "title": "Fix scheduler lock",
+            "body": "",
+            "stage": "review",
+            "revision": 1,
+            "content": {
+                "kind": "github_pr",
+                "source": {
+                    "repository": "jjyr/canban",
+                    "repository_id": 1,
+                    "issue_id": 4020,
+                    "number": 402,
+                    "url": "https://github.com/jjyr/canban/pull/402"
+                }
+            },
+            "created_at": 1
+        }))
+        .unwrap(),
+    );
+    s.cards.push(
+        serde_json::from_value(json!({
+            "id": "c-issue",
+            "project_id": "p1",
+            "number": 119,
+            "title": "Improve cache invalidation",
+            "body": "",
+            "stage": "develop",
+            "revision": 1,
+            "content": {
+                "kind": "github_issue",
+                "source": {
+                    "repository": "jjyr/canban",
+                    "repository_id": 1,
+                    "issue_id": 3990,
+                    "number": 399,
+                    "url": "https://github.com/jjyr/canban/issues/399"
+                }
+            },
+            "created_at": 1
+        }))
+        .unwrap(),
+    );
+    s.cards.push(
+        serde_json::from_value(json!({
+            "id": "c-local-402",
+            "project_id": "p1",
+            "number": 402,
+            "title": "Local card 402",
+            "body": "",
+            "stage": "backlog",
+            "revision": 1,
+            "created_at": 1
+        }))
+        .unwrap(),
+    );
+
+    let rows = candidates(&s);
+    // Exact local card number ranks first when searching `#402`, while PR #402 also matches.
+    let by_hash = ranked(&rows, "#402", &[], false);
+    assert_eq!(by_hash[0].target, Target::Card("c-local-402".into()));
+    assert!(
+        by_hash
+            .iter()
+            .any(|r| r.target == Target::Card("c-pr".into()))
+    );
+
+    // Prefix queries `pr 402`, `pr#402`, `pr:402`, `jjyr/canban#402` narrow straight to the PR Card.
+    for q in ["pr 402", "pr#402", "pr:402", "jjyr/canban#402", "gh#402"] {
+        let hits = ranked(&rows, q, &[], false);
+        assert_eq!(hits.len(), 1, "expected 1 hit for query '{q}'");
+        assert_eq!(hits[0].target, Target::Card("c-pr".into()));
+        assert!(hits[0].detail.contains("PR #402"));
+    }
+
+    // Issue queries `issue:399` and `399` match the Issue Card.
+    assert_eq!(
+        ranked(&rows, "issue:399", &[], false)[0].target,
+        Target::Card("c-issue".into())
+    );
+    assert_eq!(
+        ranked(&rows, "399", &[], false)[0].target,
+        Target::Card("c-issue".into())
+    );
+}

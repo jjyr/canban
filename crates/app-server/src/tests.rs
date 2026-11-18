@@ -3910,3 +3910,203 @@ fn git_related_card_requires_a_unique_canonical_worktree_match() {
 mod memory;
 
 mod representations;
+
+#[test]
+fn pr_card_worktree_tracks_pr_branch_and_review_drafts_roundtrip_with_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = dir.path().join("origin.git");
+    let source = dir.path().join("source");
+    let peer = dir.path().join("peer");
+    std::fs::create_dir_all(&remote).unwrap();
+    std::fs::create_dir_all(&source).unwrap();
+    let git = |cwd: &Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&remote, &["init", "--bare", "-b", "main"]);
+    git(&source, &["init", "-b", "main"]);
+    for (k, v) in [
+        ("user.name", "Tester"),
+        ("user.email", "tester@example.invalid"),
+        ("core.hooksPath", "/dev/null"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&source, &["config", k, v]);
+    }
+    std::fs::write(source.join("README.md"), "base\n").unwrap();
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-m", "root"]);
+    git(
+        &source,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&source, &["push", "-u", "origin", "main"]);
+
+    git(
+        dir.path(),
+        &["clone", remote.to_str().unwrap(), peer.to_str().unwrap()],
+    );
+    for (k, v) in [
+        ("user.name", "Peer"),
+        ("user.email", "peer@example.invalid"),
+        ("core.hooksPath", "/dev/null"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&peer, &["config", k, v]);
+    }
+    git(&peer, &["switch", "-c", "feat/pr-work"]);
+    std::fs::write(peer.join("pr.rs"), "pub fn pr_code() {}\n").unwrap();
+    git(&peer, &["add", "."]);
+    git(&peer, &["commit", "-m", "feat: pr work"]);
+    git(&peer, &["push", "origin", "feat/pr-work"]);
+
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(home.join("credentials")).unwrap();
+    std::fs::write(
+        home.join("credentials/github.json"),
+        serde_json::to_vec(&json!({
+            "client_id": canban_github::auth::CLIENT_ID,
+            "login": "fixture",
+            "access_token": "fixture-not-a-real-token",
+            "refresh_token": null,
+            "expires_at": null
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let app = AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name":"PRProj","directory":source}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let c: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"view":"full","project_id":p.id,"title":"Review PR #256"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut card: Card = db.get(&c.id)?;
+            card.content = CardContent::GitHubPr {
+                source: GitHubIssueRef {
+                    repository: "example/repo".into(),
+                    repository_id: 1,
+                    issue_id: 2560,
+                    number: 256,
+                    url: "https://github.com/example/repo/pull/256".into(),
+                },
+            };
+            db.save(&card)
+        })
+        .unwrap();
+
+    // Seed PR cache so `prepare_pr_card_source` sees same-repo `feat/pr-work` -> `main`.
+    app.github.cached_client().unwrap().seed(
+        "/repos/example/repo/pulls/256",
+        json!({
+            "id": 2560,
+            "number": 256,
+            "state": "open",
+            "title": "Review PR #256",
+            "head": {
+                "ref": "feat/pr-work",
+                "sha": "deadbeef",
+                "repo": {"full_name": "example/repo"}
+            },
+            "base": {
+                "ref": "main",
+                "repo": {"full_name": "example/repo"}
+            },
+            "user": {"id": 1, "login": "alice"},
+            "updated_at": "2026-11-18T00:00:00Z"
+        }),
+    );
+
+    // Disable @reviewer to verify fallback to default_agent when running Agent Review.
+    let mut cfg = app.config();
+    for prof in &mut cfg.profiles {
+        if prof.id == "reviewer" {
+            prof.enabled = false;
+        }
+    }
+    *app.config.write().unwrap() = cfg;
+
+    let queued = app
+        .call(
+            "review.run_agent",
+            json!({"card_id": c.id, "focus": "Check lock ordering"}),
+        )
+        .unwrap();
+    assert_eq!(queued["state"], "queued");
+    assert_eq!(queued["profile_id"], "developer");
+
+    let snap = app.snapshot().unwrap();
+    let card_after = snap.cards.iter().find(|x| x.id == c.id).unwrap();
+    let wt_path = PathBuf::from(card_after.worktree.as_deref().unwrap());
+    assert!(wt_path.join("pr.rs").exists());
+    let ws_info: WorkspaceInfo = serde_json::from_value(
+        app.call("card.workspace", json!({"card_id": c.id}))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(ws_info.upstream.as_deref(), Some("origin/feat/pr-work"));
+    assert_eq!(ws_info.target_branch.as_deref(), Some("main"));
+
+    // Stage local diff review draft and verify Snapshot projection + draft.list isolation.
+    let draft_res = app
+        .call(
+            "review.draft.set",
+            json!({
+                "card_id": c.id,
+                "profile_id": "developer",
+                "summary": "Check edge case in pr_code.",
+                "verdict": "request_changes",
+                "comments": [
+                    {"path": "pr.rs", "line": 1, "side": "RIGHT", "body": "Add docstring."}
+                ]
+            }),
+        )
+        .unwrap();
+    assert_eq!(draft_res["saved"], true);
+    assert_eq!(draft_res["comment_count"], 1);
+    assert!(
+        app.call("draft.list", json!({}))
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let snap = app.snapshot().unwrap();
+    assert_eq!(snap.review_drafts.len(), 1);
+    assert_eq!(
+        snap.review_drafts[0].comments[0].author.as_deref(),
+        Some("@developer")
+    );
+
+    // Clearing draft on PR publish removes it from Snapshot.
+    app.clear_review_draft_for_pr("example/repo", 256, None)
+        .unwrap();
+    assert!(app.snapshot().unwrap().review_drafts.is_empty());
+}

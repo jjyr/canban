@@ -83,12 +83,46 @@ pub fn items(ui: Ui, card: Card) -> Vec<MenuItem> {
     ];
     let terminal_card = card.id.clone();
     let has_live_terminal = !crate::terminals::card_live_entries_for_ui(ui, &card.id).is_empty();
+    let mut insert_at = 0;
     items.insert(
-        0,
+        insert_at,
         MenuItem::new("Open Card Terminal")
             .disabled((inactive && !has_live_terminal) || ui.pending.get_untracked())
             .on_select(move || crate::terminals::open_card_quick(ui, &terminal_card)),
     );
+    insert_at += 1;
+    if !inactive
+        && !card.merged()
+        && (crate::review::card_has_pr(&card) || card.worktree.is_some() || card.branch.is_some())
+    {
+        let default_prof = crate::sessions::default_review_profile(ui);
+        let review_cid = card.id.clone();
+        items.insert(
+            insert_at,
+            MenuItem::new(format!("Agent Review PR (@{default_prof})"))
+                .disabled(ui.pending.get_untracked())
+                .on_select(move || crate::review::start_agent_review(ui, &review_cid, None, None)),
+        );
+        insert_at += 1;
+        let profiles = ui.profiles.get_untracked();
+        if !profiles.is_empty() {
+            let sub_items: Vec<MenuItem> = profiles
+                .into_iter()
+                .map(|p| {
+                    let cid = card.id.clone();
+                    let pid = p.id.clone();
+                    MenuItem::new(format!("@{}", p.id)).on_select(move || {
+                        crate::review::start_agent_review(ui, &cid, Some(pid.clone()), None);
+                    })
+                })
+                .collect();
+            items.insert(
+                insert_at,
+                MenuItem::submenu("Agent Review PR with…", sub_items)
+                    .disabled(ui.pending.get_untracked()),
+            );
+        }
+    }
     // GitHub removal excludes a source from intake; local Cards only archive.
     if card.removed_at.is_none() && card.github_issue().is_some() {
         items.push(

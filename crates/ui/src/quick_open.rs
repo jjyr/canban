@@ -2,6 +2,7 @@
 mod model;
 use crate::presenter::*;
 use canban_ui_kit::*;
+pub(crate) use model::github_search_fields;
 pub use model::{Candidate, Target, candidates, candidates_with_tags, ranked};
 use nsh_core::{keymap::When, prelude::*};
 

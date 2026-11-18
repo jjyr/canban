@@ -122,6 +122,85 @@ impl AppServer {
         let r = item.runtime.as_ref()?;
         Some((r.core_id.clone()?, r.terminal.clone()?))
     }
+    pub(super) fn prepare_pr_card_source(
+        &self,
+        card: &Card,
+        project: &mut Project,
+        ops: &canban_workspaces::Ops,
+    ) -> Result<Option<canban_workspaces::compare::PrTrackingTarget>> {
+        let pr_source = if card.is_github_pr() {
+            card.github_issue().map(|src| {
+                (
+                    src.repository.clone(),
+                    src.number,
+                    None::<String>,
+                    None::<String>,
+                )
+            })
+        } else {
+            card.pull_request
+                .as_ref()
+                .filter(|pr| pr.number > 0)
+                .map(|pr| {
+                    (
+                        pr.repository.clone(),
+                        pr.number,
+                        Some(pr.head_branch.clone()),
+                        Some(pr.base_branch.clone()),
+                    )
+                })
+        };
+        let Some((repo, pr_number, fallback_head, fallback_base)) = pr_source else {
+            return Ok(None);
+        };
+        let pr_json = self
+            .github_cached_client()
+            .ok()
+            .and_then(|c| c.cached::<Value>(&format!("/repos/{repo}/pulls/{pr_number}")))
+            .or_else(|| {
+                self.github_read(&format!("/repos/{repo}/pulls/{pr_number}"), false, false)
+                    .ok()
+                    .map(|r| r.data)
+            });
+        let head_ref = pr_json
+            .as_ref()
+            .and_then(|v| v["head"]["ref"].as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .or_else(|| fallback_head.filter(|s| !s.trim().is_empty()));
+        let base_ref = pr_json
+            .as_ref()
+            .and_then(|v| v["base"]["ref"].as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .or_else(|| fallback_base.filter(|s| !s.trim().is_empty()));
+        if let Some(base) = base_ref {
+            project.target_branch = Some(base.clone());
+            project.workflow.workspace.base_branch = Some(base);
+        }
+        let same_repo = if let Some(v) = &pr_json {
+            let head_repo = v["head"]["repo"]["full_name"].as_str();
+            let base_repo = v["base"]["repo"]["full_name"].as_str().unwrap_or(&repo);
+            head_repo.is_some_and(|hr| hr.eq_ignore_ascii_case(base_repo))
+        } else {
+            !card.is_github_pr()
+        };
+        if card.worktree.is_some() || card.branch.is_some() {
+            return Ok(None);
+        }
+        ops.seed_pr_for_card(
+            project,
+            &card.id,
+            &canban_workspaces::compare::PrCheckoutSpec {
+                pr_number,
+                head_ref,
+                same_repo,
+            },
+        )
+    }
+
     pub(super) fn ensure_card_worktree(
         &self,
         card_id: &str,
@@ -171,11 +250,18 @@ impl AppServer {
             project.workflow.workspace.sync_base = false;
         }
         let mut prepared = card.clone();
+        let pr_tracking = self.prepare_pr_card_source(&prepared, &mut project, &ops)?;
         let cwd = ops.prepare(&exec_home, &project, &prepared)?;
         let _ = source_dir;
         self.git_changed(&location.machine);
         prepared.worktree = Some(cwd.to_string_lossy().into_owned());
         let info = ops.info(&project, &prepared)?;
+        if let Some(target) = &pr_tracking
+            && cwd != Path::new(&location.directory)
+            && let Some(branch) = info.branch.as_deref().filter(|b| !b.is_empty())
+        {
+            ops.configure_pr_tracking(&cwd, branch, target)?;
+        }
         let workspace = WorkspaceBinding {
             location: location.clone(),
             path: cwd.to_string_lossy().into_owned(),

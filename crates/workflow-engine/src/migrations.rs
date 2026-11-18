@@ -7,7 +7,7 @@ use crate::source::Document;
 use anyhow::{Result, ensure};
 
 pub const BASELINE: u32 = 1;
-pub const CURRENT: u32 = 9;
+pub const CURRENT: u32 = 10;
 
 pub struct Migration {
     pub version: u32,
@@ -46,6 +46,10 @@ const STEPS: &[Migration] = &[
     Migration {
         version: 9,
         up: v9_global_scope,
+    },
+    Migration {
+        version: 10,
+        up: v10_diff_review_prompt,
     },
 ];
 
@@ -290,6 +294,27 @@ fn v9_global_scope(doc: &mut Document) -> Result<()> {
     Ok(())
 }
 
+/// Schema 10: Default review prompt guides `@reviewer` to stage local unpublished diff review
+/// drafts via `canban review draft`. Strip any verbatim v8 default review instruction so the
+/// updated built-in prompt takes effect automatically while preserving customized instructions.
+fn v10_diff_review_prompt(doc: &mut Document) -> Result<()> {
+    const V8_REVIEW_BUILTIN: &str = "Review the Card diff and earlier results without unrelated edits. Verify correctness, edge cases, and validation coverage, then report findings and remaining concerns with `--state completed` (or `--state blocked` if critical issues require human attention).";
+    for step in &mut doc.steps {
+        if step.uses != "agent" {
+            continue;
+        }
+        if step
+            .with
+            .get("instruction")
+            .and_then(|v| v.as_str())
+            .is_some_and(|instr| instr.trim() == V8_REVIEW_BUILTIN)
+        {
+            step.with.remove("instruction");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,5 +475,51 @@ steps:
             Some("cargo test")
         );
         assert!(upgrade_yaml(&upgraded).unwrap().is_none());
+    }
+
+    #[test]
+    fn v10_strips_legacy_review_builtin_and_preserves_custom_review_prompt() {
+        let v8 = r#"schema: 8
+id: delivery:demo
+name: Development
+on:
+  review:
+    event: card.column_entered
+    start_at: agent:review
+    match:
+      column: review
+steps:
+  - id: agent:review
+    uses: agent
+    with:
+      profile: reviewer
+      instruction: Review the Card diff and earlier results without unrelated edits. Verify correctness, edge cases, and validation coverage, then report findings and remaining concerns with `--state completed` (or `--state blocked` if critical issues require human attention).
+    next: agent:custom
+  - id: agent:custom
+    uses: agent
+    with:
+      profile: reviewer
+      instruction: Focus only on SQL migrations.
+    next: __end
+  - id: __end
+    uses: complete
+"#;
+        let v9 = v8.replacen("schema: 8", "schema: 9", 1);
+        for source in [v8, &v9] {
+            let upgraded = upgrade_yaml(source)
+                .unwrap()
+                .expect("legacy YAML should upgrade");
+            let doc = crate::source::parse(&upgraded).unwrap();
+            assert_eq!(doc.schema, CURRENT);
+            assert!(!doc.steps[0].with.contains_key("instruction"));
+            assert_eq!(
+                doc.steps[1]
+                    .with
+                    .get("instruction")
+                    .and_then(|v| v.as_str()),
+                Some("Focus only on SQL migrations.")
+            );
+            assert!(upgrade_yaml(&upgraded).unwrap().is_none());
+        }
     }
 }

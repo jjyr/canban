@@ -655,6 +655,10 @@ impl AppServer {
                     false,
                 );
             }
+            if r.kind == "pr" && method == "github.remote.review" {
+                let _ =
+                    self.clear_review_draft_for_pr(&r.repository, number, p["card_id"].as_str());
+            }
             self.github_sync_due.store(true, Ordering::SeqCst);
         }
         self.emit("github", None);

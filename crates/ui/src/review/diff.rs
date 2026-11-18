@@ -380,6 +380,60 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
         ));
     }
 
+    let live_sha = data["compare_sha"].as_str().unwrap_or("");
+    if let Some(anchor_sha) = st.draft_anchor_sha.get().filter(|s| !s.is_empty())
+        && !live_sha.is_empty()
+        && anchor_sha != live_sha
+        && !st.draft_drift_dismissed.get()
+        && !pending_all.is_empty()
+    {
+        let short_anchor = &anchor_sha[..anchor_sha.len().min(7)];
+        let short_live = &live_sha[..live_sha.len().min(7)];
+        let cid_for_rerun = ui.card.get();
+        diff_column = diff_column.child(
+            view()
+                .p_2p5()
+                .rounded(px(RADIUS))
+                .border_1()
+                .border_color(ATTENTION)
+                .bg(ATTENTION_SURFACE)
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .child(icon_tinted(Icon::TriangleAlert, ATTENTION).w(px(14.)).h(px(14.)))
+                        .child(
+                            label(format!(
+                                "Drafts anchored to earlier commit {short_anchor} (head is now {short_live})"
+                            ))
+                            .text_size(px(12.))
+                            .text_color(ATTENTION),
+                        ),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .children((!cid_for_rerun.is_empty()).then(move || {
+                            let cid = cid_for_rerun.clone();
+                            compact_action("Re-run Agent Review", Variant::Secondary, move |_| {
+                                super::start_agent_review(ui, &cid, None, None);
+                            })
+                        }))
+                        .child(compact_action("Dismiss", Variant::Quiet, move |_| {
+                            st.draft_drift_dismissed.set(true);
+                        })),
+                ),
+        );
+    }
+
     // Collapsible commit summary bar when comparing branches/ranges (clickable to inspect single commit!)
     if !commits.is_empty() && commit_detail.is_none() {
         let commit_len = commits.len();
@@ -574,6 +628,7 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
                     line: 1,
                     side: "RIGHT".into(),
                     snippet: String::new(),
+                    editing_author: None,
                 }));
                 st.line_draft.set(String::new());
             },
@@ -592,6 +647,7 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
             );
             continue;
         }
+        let mut rendered_comment_ids = std::collections::BTreeSet::<String>::new();
         let body = if patch.trim().is_empty() {
             view()
                 .p_3()
@@ -670,6 +726,7 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
                                 line: comment_line,
                                 side: side_owned.clone(),
                                 snippet: snippet_for_target.clone(),
+                                editing_author: None,
                             }));
                             st.line_draft.set(String::new());
                         })
@@ -851,74 +908,8 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
                         && c.line == comment_line
                         && c.side == comment_side
                 }) {
-                    let item_id = item.id.clone();
-                    let edit_item = item.clone();
-                    let body_txt = item.body.clone();
-                    rows = rows.child(
-                        view()
-                            .mx_4()
-                            .my_1p5()
-                            .p_2p5()
-                            .rounded(px(RADIUS))
-                            .border_1()
-                            .border_color(ACCENT)
-                            .bg(SURFACE)
-                            .gap_1p5()
-                            .child(
-                                view()
-                                    .flex_row()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_2()
-                                    .child(
-                                        view()
-                                            .flex_row()
-                                            .items_center()
-                                            .gap_1p5()
-                                            .child(status("Pending comment", Tone::Info))
-                                            .child(
-                                                muted(format!("{}:{}", item.path, item.line))
-                                                    .font_family(MONO_FONT)
-                                                    .text_size(px(11.)),
-                                            ),
-                                    )
-                                    .child(
-                                        view()
-                                            .flex_row()
-                                            .items_center()
-                                            .gap_1()
-                                            .child(compact_action(
-                                                "Edit",
-                                                Variant::Quiet,
-                                                move |_| {
-                                                    let cur = edit_item.clone();
-                                                    st.pending_comments.update(|list| {
-                                                        list.retain(|x| x.id != cur.id);
-                                                    });
-                                                    st.active_line.set(Some(LineTarget {
-                                                        path: cur.path,
-                                                        section: cur.section,
-                                                        line: cur.line,
-                                                        side: cur.side,
-                                                        snippet: cur.snippet,
-                                                    }));
-                                                    st.line_draft.set(cur.body);
-                                                },
-                                            ))
-                                            .child(compact_action(
-                                                "Remove",
-                                                Variant::Quiet,
-                                                move |_| {
-                                                    let rm_id = item_id.clone();
-                                                    st.pending_comments.update(|list| {
-                                                        list.retain(|x| x.id != rm_id);
-                                                    });
-                                                },
-                                            )),
-                                    ),
-                            )
-                            .child(label(body_txt).text_size(px(12.5))),
-                    );
+                    rendered_comment_ids.insert(item.id.clone());
+                    rows = rows.child(render_pending_comment_card(ui, item));
                 }
 
                 // Render active inline composer right beneath the clicked line
@@ -946,6 +937,14 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
             view().into_element()
         };
 
+        // Unanchored pending comments for this file (e.g. line outside hunk context or binary file)
+        let mut unanchored_for_file = view();
+        for item in pending_all.iter().filter(|c| {
+            c.path == path && c.section == section && !rendered_comment_ids.contains(&c.id)
+        }) {
+            unanchored_for_file = unanchored_for_file.child(render_pending_comment_card(ui, item));
+        }
+
         diff_column = diff_column.child(
             view()
                 .element_ref(&target)
@@ -956,8 +955,26 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
                 .overflow_hidden()
                 .child(header)
                 .child(extra_composer)
+                .child(unanchored_for_file)
                 .child(body),
         );
+    }
+
+    // Any remaining pending comments whose file is not in the visible diff list
+    let visible_paths: std::collections::BTreeSet<String> = st.compare_data.with_untracked(|v| {
+        v["files"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .take(limit)
+            .filter_map(|f| f["filename"].as_str().map(str::to_owned))
+            .collect()
+    });
+    for item in pending_all
+        .iter()
+        .filter(|c| !visible_paths.contains(&c.path))
+    {
+        diff_column = diff_column.child(render_pending_comment_card(ui, item));
     }
 
     if total_files > limit {
@@ -969,6 +986,81 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
     }
 
     diff_column.into_element()
+}
+
+fn render_pending_comment_card(ui: Ui, item: &PendingInlineComment) -> View {
+    let st = ui.review_state;
+    let item_id = item.id.clone();
+    let edit_item = item.clone();
+    let body_txt = item.body.clone();
+    let badge_label = match (&item.author, item.edited_by_user) {
+        (Some(author), true) => format!("{author} · Edited draft"),
+        (Some(author), false) => format!("{author} · Draft"),
+        (None, _) => "Pending comment".into(),
+    };
+    let tone = if item.author.is_some() && !item.edited_by_user {
+        Tone::Highlight
+    } else {
+        Tone::Info
+    };
+    let side_note = if item.side == "LEFT" { " (LEFT)" } else { "" };
+    view()
+        .mx_4()
+        .my_1p5()
+        .p_2p5()
+        .rounded(px(RADIUS))
+        .border_1()
+        .border_color(ACCENT)
+        .bg(SURFACE)
+        .gap_1p5()
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .child(status(badge_label, tone))
+                        .child(
+                            muted(format!("{}:{}{side_note}", item.path, item.line))
+                                .font_family(MONO_FONT)
+                                .text_size(px(11.)),
+                        ),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .child(compact_action("Edit", Variant::Quiet, move |_| {
+                            let cur = edit_item.clone();
+                            st.pending_comments.update(|list| {
+                                list.retain(|x| x.id != cur.id);
+                            });
+                            st.active_line.set(Some(LineTarget {
+                                path: cur.path,
+                                section: cur.section,
+                                line: cur.line,
+                                side: cur.side,
+                                snippet: cur.snippet,
+                                editing_author: cur.author,
+                            }));
+                            st.line_draft.set(cur.body);
+                        }))
+                        .child(compact_action("Discard ×", Variant::Quiet, move |_| {
+                            let rm_id = item_id.clone();
+                            st.pending_comments.update(|list| {
+                                list.retain(|x| x.id != rm_id);
+                            });
+                            super::sync_pending_draft_to_server(ui);
+                        })),
+                ),
+        )
+        .child(canban_ui_kit::markdown::reader(move || body_txt.clone()))
 }
 
 fn inline_composer_box(ui: Ui, target: LineTarget) -> View {
@@ -1043,10 +1135,13 @@ fn inline_composer_box(ui: Ui, target: LineTarget) -> View {
                                 side: target.side.clone(),
                                 snippet: target.snippet.clone(),
                                 body: body.trim().to_owned(),
+                                author: target.editing_author.clone(),
+                                edited_by_user: target.editing_author.is_some(),
                             });
                         });
                         st.active_line.set(None);
                         st.line_draft.set(String::new());
+                        super::sync_pending_draft_to_server(ui);
                     })
                     .disabled(move || st.line_draft.with(|s| s.trim().is_empty())),
                 ),

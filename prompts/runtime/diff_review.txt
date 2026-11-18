@@ -1,0 +1,6 @@
+Review the changes for {{context_label}} ({{base_ref}}...{{compare_ref}}, head {{compare_sha}}) in `{{cwd}}` without modifying repository files.
+{{focus_section}}
+Inspect the diff and surrounding context for bugs, regressions, security/concurrency issues, and missing tests.
+Record line-specific findings and an overall review summary as a local unpublished review draft (never publish directly to GitHub):
+  "$CANBAN_CLI" review draft --file "$CANBAN_RUN_DIR/review_draft.json"
+Then finish with `"$CANBAN_CLI" report --state completed --message '<concise summary>'`.

@@ -853,6 +853,30 @@ pub const CATALOG: &[Command] = &[
         keywords: "git review compare patch changes",
     },
     Command {
+        id: "open-pr-diff",
+        title: "Open Card PR Diff",
+        key: "",
+        display: "Card",
+        context: "Card",
+        keywords: "github pr diff review drafts publish",
+    },
+    Command {
+        id: "agent-review-pr",
+        title: "Run Agent PR Review",
+        key: "",
+        display: "Card",
+        context: "Card",
+        keywords: "agent reviewer pr diff draft comments",
+    },
+    Command {
+        id: "discard-review-draft",
+        title: "Discard Local PR Review Drafts",
+        key: "",
+        display: "Card",
+        context: "Card",
+        keywords: "discard clear review draft comments",
+    },
+    Command {
         id: "quick-merge-card",
         title: "Quick Merge Current Card",
         key: "",
@@ -1502,6 +1526,36 @@ pub fn execute(ui: Ui, id: &str) {
         "copy-card-branch" => crate::card::changes::copy_branch(ui),
         "refresh-card-diff" => crate::card::changes::refresh(ui),
         "open-card-diff" => crate::card::changes::open(ui),
+        "open-pr-diff" => {
+            if let Some(c) = ui.current_card() {
+                crate::review::open_card_pr(ui, &c.id);
+            } else {
+                ui.notify("Select a Card first");
+            }
+        }
+        "agent-review-pr" => {
+            if let Some(c) = ui.current_card() {
+                if c.active()
+                    && !c.merged()
+                    && (crate::review::card_has_pr(&c)
+                        || c.worktree.is_some()
+                        || c.branch.is_some())
+                {
+                    crate::review::start_agent_review(ui, &c.id, None, None);
+                } else {
+                    ui.notify("Current Card is not eligible for Agent PR review");
+                }
+            } else {
+                ui.notify("Select a Card first");
+            }
+        }
+        "discard-review-draft" => {
+            if let Some(c) = ui.current_card() {
+                crate::review::discard_review_draft(ui, &c.id);
+            } else {
+                ui.notify("Select a Card first");
+            }
+        }
         "quick-merge-card" => {
             if let Some(c) = ui.current_card() {
                 let project = ui.current_project();

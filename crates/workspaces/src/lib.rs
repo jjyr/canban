@@ -421,10 +421,13 @@ impl Ops {
         let mut value = WorkspaceInfo {
             path: card.worktree.clone(),
             branch: card.branch.clone(),
-            target_branch: project
-                .target_branch
-                .clone()
+            target_branch: card
+                .workspace
+                .as_ref()
+                .and_then(|w| w.target_branch.clone())
+                .or_else(|| project.target_branch.clone())
                 .or_else(|| project.workflow.workspace.base_branch.clone()),
+            upstream: None,
             base_commit: card.base_commit.clone(),
             state: "not_created".into(),
             dirty: false,
@@ -447,6 +450,20 @@ impl Ops {
                 value.branch = self
                     .current_branch(path)
                     .or_else(|| self.rebase_branch(cwd));
+                if value.branch.is_some() {
+                    value.upstream = self
+                        .checked(
+                            cwd,
+                            &[
+                                "rev-parse",
+                                "--abbrev-ref",
+                                "--symbolic-full-name",
+                                "@{upstream}",
+                            ],
+                        )
+                        .ok()
+                        .filter(|s| !s.is_empty());
+                }
                 value.base_commit = card
                     .base_commit
                     .clone()

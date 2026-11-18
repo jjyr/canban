@@ -75,6 +75,7 @@ pub fn panel(ui: Ui) -> impl IntoElement {
                 branch,
                 base_commit,
                 target_branch: untracked(|| ui.current_project().and_then(|p| p.target_branch)),
+                upstream: None,
                 dirty: false,
             }));
             untracked(|| load(ui, info, error, generation));
@@ -165,6 +166,9 @@ pub fn panel(ui: Ui) -> impl IntoElement {
                             move |_| copy_text(ui, copy.clone()),
                         )),
                 );
+            }
+            if let Some(upstream) = info.upstream.as_deref().filter(|s| !s.is_empty()) {
+                area = area.child(muted(format!("Upstream {upstream}")));
             }
             if let Some(commit) = info.base_commit {
                 area = area.child(muted(format!(

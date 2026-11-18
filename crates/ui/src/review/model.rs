@@ -11,6 +11,8 @@ pub struct PendingInlineComment {
     pub side: String, // "LEFT" | "RIGHT"
     pub snippet: String,
     pub body: String,
+    pub author: Option<String>,
+    pub edited_by_user: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20,6 +22,7 @@ pub struct LineTarget {
     pub line: u64,
     pub side: String,
     pub snippet: String,
+    pub editing_author: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -98,6 +101,12 @@ pub struct State {
     pub commit_description: Signal<String>,
     pub commit_amend: Signal<bool>,
     pub discard_confirm: Signal<Option<Vec<String>>>,
+    pub loaded_draft_key: Stored<(String, u64)>,
+    pub draft_anchor_sha: Signal<Option<String>>,
+    pub draft_drift_dismissed: Signal<bool>,
+    pub agent_review_open: Signal<bool>,
+    pub agent_review_profile: Signal<String>,
+    pub agent_review_focus: Signal<String>,
 }
 
 impl Default for State {
@@ -172,6 +181,12 @@ impl State {
             commit_description: signal(String::new()),
             commit_amend: signal(false),
             discard_confirm: signal(None),
+            loaded_draft_key: stored((String::new(), 0)),
+            draft_anchor_sha: signal(None),
+            draft_drift_dismissed: signal(false),
+            agent_review_open: signal(false),
+            agent_review_profile: signal(String::new()),
+            agent_review_focus: signal(String::new()),
         }
     }
 }

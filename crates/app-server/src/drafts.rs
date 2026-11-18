@@ -7,7 +7,7 @@ impl AppServer {
         if method == "draft.list" {
             let store = self.store.lock().unwrap();
             let mut q = store.db().conn.prepare(
-                "SELECT id,revision,updated_at,data FROM editor_drafts ORDER BY updated_at DESC,id",
+                "SELECT id,revision,updated_at,data FROM editor_drafts WHERE id NOT LIKE 'review-draft:%' ORDER BY updated_at DESC,id",
             )?;
             let rows = q
                 .query_map([], |r| {

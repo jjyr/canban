@@ -1132,14 +1132,22 @@ impl AppServer {
             prepared.branch = None;
             prepared.base_commit = None;
         }
+        let mut pr_tracking = None;
         let cwd = if resuming && !att.cwd.is_empty() {
             ops.resume(&home, &project, &prepared)?
         } else {
+            pr_tracking = self.prepare_pr_card_source(&prepared, &mut project, &ops)?;
             ops.prepare(&home, &project, &prepared)?
         };
         self.git_changed(&location.machine);
         prepared.worktree = Some(cwd.to_string_lossy().into_owned());
         let info = ops.info(&project, &prepared)?;
+        if let Some(target) = &pr_tracking
+            && cwd != Path::new(&location.directory)
+            && let Some(branch) = info.branch.as_deref().filter(|b| !b.is_empty())
+        {
+            ops.configure_pr_tracking(&cwd, branch, target)?;
+        }
         let workspace = WorkspaceBinding {
             location: location.clone(),
             path: cwd.to_string_lossy().into_owned(),

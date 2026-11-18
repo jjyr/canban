@@ -84,6 +84,7 @@ pub fn groups_with_tags(
             agents.join(" "),
             providers.into_iter().collect::<Vec<_>>().join(" "),
         ];
+        fields.extend(crate::quick_open::github_search_fields(&card));
         for tag in &tags {
             fields.push(format!("#{tag}"));
             fields.push(tag.clone());
@@ -246,5 +247,21 @@ mod tests {
         );
         assert_eq!(project_entries(&s, "b", "").len(), 1);
         assert!(project_entries(&s, "empty", "").is_empty());
+    }
+
+    #[test]
+    fn archive_search_matches_github_pr_and_issue_numbers() {
+        let mut s = fixture();
+        s.cards[0].content = canban_types::CardContent::GitHubPr {
+            source: canban_types::GitHubIssueRef {
+                repository: "jjyr/canban".into(),
+                repository_id: 1,
+                issue_id: 777,
+                number: 777,
+                url: "https://github.com/jjyr/canban/pull/777".into(),
+            },
+        };
+        assert_eq!(groups(&s, "pr 777")[0].entries[0].card.id, "one");
+        assert_eq!(groups(&s, "pr#777")[0].entries[0].card.id, "one");
     }
 }

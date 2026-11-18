@@ -175,6 +175,20 @@ fn zero_separated_names(bytes: &[u8]) -> Vec<String> {
         .collect()
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrCheckoutSpec {
+    pub pr_number: u64,
+    pub head_ref: Option<String>,
+    pub same_repo: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrTrackingTarget {
+    pub remote: String,
+    pub merge_ref: String,
+    pub fetch_refspec: Option<String>,
+}
+
 impl Ops {
     fn resolve_default_branch(&self, dir: &Path, project: &Project, current: &str) -> String {
         if let Some(t) = project
@@ -875,6 +889,120 @@ impl Ops {
             .collect()
     }
 
+    /// Seeds `refs/canban/cards/<card_id>` from either the PR's same-repo branch or
+    /// `refs/pull/<pr_number>/head` (for fork PRs / fallback) and returns the upstream
+    /// tracking target for the Card branch.
+    pub fn seed_pr_for_card(
+        &self,
+        project: &Project,
+        card_id: &str,
+        spec: &PrCheckoutSpec,
+    ) -> Result<Option<PrTrackingTarget>> {
+        ensure!(spec.pr_number > 0, "Invalid PR number");
+        validate_ref_arg(card_id)?;
+        let source = Path::new(&project.directory);
+        let remote = if project.workflow.workspace.remote.trim().is_empty() {
+            "origin"
+        } else {
+            project.workflow.workspace.remote.trim()
+        };
+        validate_ref_arg(remote)?;
+        if !self
+            .git(source, &["remote", "get-url", remote])?
+            .status
+            .success()
+        {
+            return Ok(None);
+        }
+        let keep = format!("refs/canban/cards/{card_id}");
+        if spec.same_repo
+            && let Some(head_ref) = spec
+                .head_ref
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            && self
+                .git(source, &["check-ref-format", "--branch", head_ref])?
+                .status
+                .success()
+        {
+            let remote_ref = format!("refs/remotes/{remote}/{head_ref}");
+            let fetch_spec = format!("+refs/heads/{head_ref}:{remote_ref}");
+            if self
+                .git(source, &["fetch", "--", remote, &fetch_spec])?
+                .status
+                .success()
+                && let Ok(sha) = self.checked(
+                    source,
+                    &["rev-parse", "--verify", &format!("{remote_ref}^{{commit}}")],
+                )
+            {
+                self.checked(source, &["update-ref", &keep, &sha])?;
+                return Ok(Some(PrTrackingTarget {
+                    remote: remote.to_owned(),
+                    merge_ref: format!("refs/heads/{head_ref}"),
+                    fetch_refspec: None,
+                }));
+            }
+        }
+        let pr_remote_ref = format!("refs/remotes/{remote}/pr/{}", spec.pr_number);
+        let fetch_spec = format!("+refs/pull/{}/head:{pr_remote_ref}", spec.pr_number);
+        self.checked(source, &["fetch", "--", remote, &fetch_spec])?;
+        let sha = self.checked(
+            source,
+            &[
+                "rev-parse",
+                "--verify",
+                &format!("{pr_remote_ref}^{{commit}}"),
+            ],
+        )?;
+        self.checked(source, &["update-ref", &keep, &sha])?;
+        Ok(Some(PrTrackingTarget {
+            remote: remote.to_owned(),
+            merge_ref: format!("refs/pull/{}/head", spec.pr_number),
+            fetch_refspec: Some(fetch_spec),
+        }))
+    }
+
+    /// Configures Git upstream tracking on a Card branch for its PR source when not already set.
+    pub fn configure_pr_tracking(
+        &self,
+        dir: &Path,
+        branch: &str,
+        target: &PrTrackingTarget,
+    ) -> Result<()> {
+        validate_ref_arg(branch)?;
+        validate_ref_arg(&target.remote)?;
+        validate_ref_arg(&target.merge_ref)?;
+        let remote_key = format!("branch.{branch}.remote");
+        if self
+            .git(dir, &["config", "--get", &remote_key])?
+            .status
+            .success()
+        {
+            return Ok(());
+        }
+        if let Some(refspec) = &target.fetch_refspec {
+            let fetch_key = format!("remote.{}.fetch", target.remote);
+            let existing = self
+                .checked(dir, &["config", "--get-all", &fetch_key])
+                .unwrap_or_default();
+            if !existing.lines().any(|l| l.trim() == refspec) {
+                self.checked(dir, &["config", "--add", &fetch_key, refspec])?;
+            }
+        }
+        self.checked(dir, &["config", &remote_key, &target.remote])?;
+        self.checked(
+            dir,
+            &[
+                "config",
+                &format!("branch.{branch}.merge"),
+                &target.merge_ref,
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Seeds `refs/canban/cards/<card_id>` from `refs/pull/<pr_number>/head` on the configured remote
     /// so `Ops::prepare` checks out the exact PR branch head when creating a local Card worktree.
     pub fn fetch_pr_for_card(
@@ -1126,5 +1254,177 @@ mod tests {
             .prepare_review_worktree(&home, &project, "feat/review-ui", "r1")
             .unwrap();
         assert!(wt.join("src_view.rs").exists());
+    }
+
+    #[test]
+    fn seed_pr_and_configure_tracking_handle_same_repo_and_fork_prs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let remote = tmp.path().join("origin.git");
+        let source = tmp.path().join("source");
+        let peer = tmp.path().join("peer");
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&remote).unwrap();
+        fs::create_dir_all(&source).unwrap();
+        git(&remote, &["init", "--bare", "-b", "main"]);
+        git(&source, &["init", "-b", "main"]);
+        for (k, v) in [
+            ("user.name", "Tester"),
+            ("user.email", "tester@example.invalid"),
+            ("core.hooksPath", "/dev/null"),
+            ("commit.gpgsign", "false"),
+        ] {
+            git(&source, &["config", k, v]);
+        }
+        fs::write(source.join("README.md"), "root\n").unwrap();
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "-m", "root"]);
+        git(
+            &source,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&source, &["push", "-u", "origin", "main"]);
+
+        // Peer creates a same-repo PR branch `feat/pr-branch` and a fork PR ref `refs/pull/42/head`.
+        git(
+            tmp.path(),
+            &["clone", remote.to_str().unwrap(), peer.to_str().unwrap()],
+        );
+        for (k, v) in [
+            ("user.name", "Peer"),
+            ("user.email", "peer@example.invalid"),
+            ("core.hooksPath", "/dev/null"),
+            ("commit.gpgsign", "false"),
+        ] {
+            git(&peer, &["config", k, v]);
+        }
+        git(&peer, &["switch", "-c", "feat/pr-branch"]);
+        fs::write(peer.join("pr_file.txt"), "from same-repo pr\n").unwrap();
+        git(&peer, &["add", "."]);
+        git(&peer, &["commit", "-m", "feat: pr commit"]);
+        git(&peer, &["push", "origin", "feat/pr-branch"]);
+
+        // Also publish a fork PR commit directly to refs/pull/42/head on the bare remote.
+        git(&peer, &["switch", "main"]);
+        git(&peer, &["switch", "-c", "fork/patch"]);
+        fs::write(peer.join("fork_file.txt"), "from fork\n").unwrap();
+        git(&peer, &["add", "."]);
+        git(&peer, &["commit", "-m", "feat: fork pr"]);
+        git(&peer, &["push", "origin", "HEAD:refs/pull/42/head"]);
+
+        let mut workflow = canban_types::Workflow::default();
+        workflow.workspace.sync_base = false;
+        let project = Project {
+            github: None,
+            detected_github: None,
+            github_disconnected: false,
+            delivery_mode: Default::default(),
+            agent_overrides: Default::default(),
+            tags: Default::default(),
+            id: "projpr123".into(),
+            name: "PR Demo".into(),
+            location: None,
+            directory: source.to_string_lossy().into_owned(),
+            workflow,
+            target_branch: Some("main".into()),
+            created_at: 0,
+        };
+        let mut card_same = canban_types::Card {
+            schedule_source: None,
+            source_trust: None,
+            hold_auto_merge: false,
+            github_links: Vec::new(),
+            created_by: String::new(),
+            content: Default::default(),
+            removed_at: None,
+            pull_request: None,
+            pull_request_history: Vec::new(),
+            delivery_mode: None,
+            workspace: None,
+            workspace_history: Vec::new(),
+            id: "card-same".into(),
+            project_id: project.id.clone(),
+            number: 10,
+            board_order: None,
+            title: "Same repo PR".into(),
+            body: String::new(),
+            context_notes: None,
+            stage: "develop".into(),
+            revision: 1,
+            attention: None,
+            archived_at: None,
+            archive: None,
+            archive_error: None,
+            worktree: None,
+            branch: None,
+            base_commit: None,
+            human_gate: None,
+            delivery: None,
+            created_at: 0,
+        };
+        let ops = Ops::local();
+        let target_same = ops
+            .seed_pr_for_card(
+                &project,
+                &card_same.id,
+                &PrCheckoutSpec {
+                    pr_number: 11,
+                    head_ref: Some("feat/pr-branch".into()),
+                    same_repo: true,
+                },
+            )
+            .unwrap()
+            .expect("same-repo tracking target");
+        let wt_same = ops.prepare(&home, &project, &card_same).unwrap();
+        assert!(wt_same.join("pr_file.txt").exists());
+        card_same.worktree = Some(wt_same.to_string_lossy().into_owned());
+        let info_same = ops.info(&project, &card_same).unwrap();
+        let br_same = info_same.branch.clone().unwrap();
+        ops.configure_pr_tracking(&wt_same, &br_same, &target_same)
+            .unwrap();
+        let info_same = ops.info(&project, &card_same).unwrap();
+        assert_eq!(info_same.upstream.as_deref(), Some("origin/feat/pr-branch"));
+
+        // Peer pushes a second commit to feat/pr-branch -> git_pull fast-forwards Card worktree.
+        git(&peer, &["switch", "feat/pr-branch"]);
+        fs::write(peer.join("pr_file.txt"), "from same-repo pr v2\n").unwrap();
+        git(&peer, &["add", "."]);
+        git(&peer, &["commit", "-m", "feat: pr commit 2"]);
+        git(&peer, &["push", "origin", "feat/pr-branch"]);
+        let pull_res = ops.git_pull(&project, &wt_same, None, None).unwrap();
+        assert_eq!(pull_res["fast_forwarded"], true);
+        assert_eq!(
+            fs::read_to_string(wt_same.join("pr_file.txt")).unwrap(),
+            "from same-repo pr v2\n"
+        );
+
+        // Cross-repo fork PR: tracks refs/pull/42/head and rejects direct push.
+        let mut card_fork = card_same.clone();
+        card_fork.id = "card-fork".into();
+        card_fork.number = 11;
+        card_fork.worktree = None;
+        card_fork.branch = None;
+        let target_fork = ops
+            .seed_pr_for_card(
+                &project,
+                &card_fork.id,
+                &PrCheckoutSpec {
+                    pr_number: 42,
+                    head_ref: Some("fork/patch".into()),
+                    same_repo: false,
+                },
+            )
+            .unwrap()
+            .expect("fork tracking target");
+        let wt_fork = ops.prepare(&home, &project, &card_fork).unwrap();
+        assert!(wt_fork.join("fork_file.txt").exists());
+        card_fork.worktree = Some(wt_fork.to_string_lossy().into_owned());
+        let info_fork = ops.info(&project, &card_fork).unwrap();
+        let br_fork = info_fork.branch.clone().unwrap();
+        ops.configure_pr_tracking(&wt_fork, &br_fork, &target_fork)
+            .unwrap();
+        let info_fork = ops.info(&project, &card_fork).unwrap();
+        assert_eq!(info_fork.upstream.as_deref(), Some("origin/pr/42"));
+        let push_err = ops.git_push(&project, &wt_fork, None, false).unwrap_err();
+        assert!(push_err.to_string().contains("read-only GitHub PR ref"));
     }
 }
