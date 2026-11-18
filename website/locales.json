@@ -65,6 +65,11 @@
     "s_ghostty": "Terminal Rendering Engine",
     "closing_seo_note": "Canban = Kanban + Workflow + Herdr — Maintain Human Context with Kanban, schedule with custom Workflows, and power native Agent CLIs with Herdr.",
     "footer_meta": "Apache-2.0 · © 2026 JJy",
+    "nav_install": "Install",
+    "nav_docs": "Docs",
+    "nav_workflows": "Workflows",
+    "nav_compare": "Compare",
+    "nav_changelog": "Changelog",
     "install_guide": "Installation guide",
     "changelog": "Changelog"
   },
@@ -134,6 +139,11 @@
     "s_ghostty": "终端渲染引擎",
     "closing_seo_note": "Canban = Kanban + Workflow + Herdr — 用 Kanban 维护 Human Context，自定义 Workflow 调度，Herdr 提供原生的 Agent CLI 支持。",
     "footer_meta": "Apache-2.0 · © 2026 JJy",
+    "nav_install": "安装",
+    "nav_docs": "文档",
+    "nav_workflows": "工作流",
+    "nav_compare": "对比",
+    "nav_changelog": "版本更新",
     "install_guide": "完整安装说明",
     "changelog": "版本更新"
   }

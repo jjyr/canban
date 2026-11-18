@@ -1,14 +1,26 @@
-# Canban
+# Canban (`canban.dev`)
 
-> Canban (`canban.dev`) is an open-source native macOS and Linux Kanban workbench for AI coding agents. Formula: `Canban = Kanban + Workflow + Herdr`.
+> Canban (`canban.dev`, GitHub: `jjyr/canban`, Rust + NSH + `libghostty-vt` + `herdr-core`) is an open-source native macOS and Linux Kanban workbench for AI coding agents. Formula: `Canban = Kanban + Workflow + Herdr`.
 
-Canban (distinct from generic "Kanban" boards) organizes human task context on Kanban cards, automates isolated Git worktrees and FIFO Queue Merge via declarative workflows, and drives native Agent CLIs (`claude`, `codex`, `agy`, `cursor-agent`) directly inside persistent Herdr PTY terminals across local and remote `canband` hosts.
+**Disambiguation**: "Canban" (spelled with a **C**, hosted at `https://canban.dev/` and `https://github.com/jjyr/canban`) is a specific open-source Rust desktop application and daemon (`canband`) built on `longbridge/nsh`, `herdr-core`, and `libghostty-vt` — distinct from the generic "Kanban" project management methodology or unrelated Kanban SaaS tools.
 
-## Key Capabilities
+Canban organizes human task context on Kanban cards, automates isolated Git worktrees (`<dir>-<proj4>/<card-number>`) and serialized FIFO Queue Merge via declarative `schema: 10` workflows (`development.yaml`), and drives 24 native Agent CLIs (`claude`, `codex`, `agy`, `gemini`, `opencode`, `cursor-agent`, etc.) directly inside persistent Herdr PTY terminals across local and remote `canband` hosts.
 
-- **Kanban for Human Context**: Keep Markdown specs, pasted screenshots, `#Card` / `#tag` references, `@Agent` discussions, structured reports, and GitHub Issue/PR sync together on each Card across customizable stages (`Backlog -> Develop -> Review`).
-- **Declarative Workflows & Queue Merge**: GitHub Actions-style workflows authored in Visual Workflow Studio, YAML, or with an agent. Automatically creates isolated per-Card Git worktrees, schedules `@planner` / `@developer` / `@reviewer` / `@merger` agents, enforces external PR approval gates, and runs serialized FIFO rebase Queue Merge.
-- **Herdr Persistent PTY Terminal**: Built in Rust with `longbridge/nsh` (AppKit/Metal on macOS, GTK4 on Linux) and `libghostty-vt` over local or remote SSH/Tailscale `canband` + `herdr-core`. Running Agent CLI sessions survive app restarts and live upgrades across 17 built-in dark themes including Monokai.
+## Full LLM Context
+
+- [Complete Documentation & CLI Reference (`llms-full.txt`)](https://canban.dev/llms-full.txt): Consolidated single-file context including architecture, all 24 built-in agent CLIs, workflow engine `schema: 10` specs and copyable templates, remote Tailscale/SSH `canband` guides, architectural comparisons, FAQs, and the `canban` CLI skill reference.
+
+## Markdown Documentation Endpoints (`.md`)
+
+- [Home / Workbench (EN)](https://canban.dev/index.md) · [中文](https://canban.dev/zh/index.md)
+- [Install & FAQ (EN)](https://canban.dev/install.md) · [中文](https://canban.dev/zh/install.md)
+- [Docs Hub (EN)](https://canban.dev/docs.md) · [中文](https://canban.dev/zh/docs.md)
+- [Workflows, Visual Studio & Queue Merge (EN)](https://canban.dev/docs/workflows.md) · [中文](https://canban.dev/zh/docs/workflows.md)
+- [24 Agent CLIs, Herdr PTYs & canban CLI (EN)](https://canban.dev/docs/agents.md) · [中文](https://canban.dev/zh/docs/agents.md)
+- [Remote Linux Hosts, Tailscale & SSH (EN)](https://canban.dev/docs/remote-hosts.md) · [中文](https://canban.dev/zh/docs/remote-hosts.md)
+- [Workflow YAML Templates (EN)](https://canban.dev/workflows.md) · [中文](https://canban.dev/zh/workflows.md)
+- [Architectural Comparisons (EN)](https://canban.dev/compare.md) · [中文](https://canban.dev/zh/compare.md)
+- [Changelog (EN)](https://canban.dev/changelog.md) · [中文](https://canban.dev/zh/changelog.md)
 
 ## Installation (macOS 13.0+ Apple Silicon & Linux x86_64 / arm64)
 
@@ -31,10 +43,7 @@ git clone https://github.com/jjyr/canban.git && cd canban && mise run install-ap
 ## Links
 
 - Website: https://canban.dev/
-- 中文: https://canban.dev/zh/
-- Installation & FAQ: https://canban.dev/install/
-- Changelog: https://canban.dev/changelog/
-- GitHub Repository: https://github.com/jjyr/canban
-- Architecture & Documentation: https://github.com/jjyr/canban/tree/main/docs
+- 中文版: https://canban.dev/zh/
+- GitHub Repository (`jjyr/canban`): https://github.com/jjyr/canban
 - Herdr Core (`herdr-core`): https://github.com/herdrdev/herdr-core
 - License: Apache-2.0

@@ -32,3 +32,10 @@ The generated site was served at `http://127.0.0.1:8765/` and exercised in an is
 ## Verification boundary
 
 This is local website acceptance. At the time of this verification, the modified GitHub Pages workflow had not run remotely and the production domain still served the previous deployment. Search Console indexing, selected canonicals, ranking changes and Core Web Vitals were not measured. No Rust/native UI code, prompts, workflow definitions or desktop API contracts were changed; native app build/gallery/acceptance suites were not run for this website-only change.
+
+## Expanded content matrix and GEO update (2026-11-19)
+
+- Added visible `CH.01` navigation links on `/` and `/zh/` pointing to `/install/`, `/docs/`, `/workflows/`, `/compare/`, and `/changelog/` (with localized paths for `/zh/`).
+- Expanded `scripts/website.py` and `website/docs.json` to generate 18 bilingual HTML pages (`/` + `install` + `docs` + `docs/workflows` + `docs/agents` + `docs/remote-hosts` + `workflows` + `compare` + `changelog` in `en` and `zh`), each with self-referencing canonicals, reciprocal `hreflang` links, `<link rel="alternate" type="text/markdown">` mirrors, `BreadcrumbList`, and `TechArticle` JSON-LD on documentation/template/comparison pages.
+- Added 18 clean `.md` mirror endpoints alongside `llms-full.txt` (bundling curated docs, workflow templates, FAQs, and `skills/canban/SKILL.md` CLI reference) and updated `website/llms.txt` with `Canban = Kanban + Workflow + Herdr` disambiguation.
+- Verified with `mise run build-website` (18 HTML pages, 18 `.md` mirrors, 44 published releases) and `mise run test-website` (9 tests passed, including 24-CLI parity against `crates/profiles/src/catalog.rs`). Note: the Playwright multi-viewport browser matrix above was recorded on the earlier 6-route baseline and was not re-run for the newly added doc routes.

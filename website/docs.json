@@ -1,0 +1,450 @@
+{
+  "en": {
+    "docs": {
+      "eyebrow": "CANBAN // DOCS",
+      "title": "Canban Documentation",
+      "meta_title": "Canban Documentation — Workflows, Agents & Remote Hosts",
+      "description": "Architecture and user guides for Canban: visual and YAML workflows, 24 built-in agent CLIs via Herdr, FIFO Queue Merge, and remote Linux canband hosts.",
+      "intro": "Canban (canban.dev) unifies Kanban cards for Human Context, declarative GitHub Actions-style Workflows, and Herdr persistent PTY terminals for native AI coding agent CLIs.",
+      "breadcrumbs": [["Docs", "docs"]],
+      "cards": [
+        {
+          "title": "Workflows & Queue Merge",
+          "summary": "Visual Studio, schema 10 development.yaml, admit/script/deliver steps, FIFO batch merging, and the external_pr approval gate.",
+          "href": "/docs/workflows/"
+        },
+        {
+          "title": "24 Agent CLIs & Herdr PTYs",
+          "summary": "All 24 built-in CLI agents, libghostty-vt terminal preservation, canban card adopt, and the injected canban CLI reference.",
+          "href": "/docs/agents/"
+        },
+        {
+          "title": "Remote Linux Hosts (canband)",
+          "summary": "Headless Linux canband daemons, Tailscale direct TCP with bearer auth, SSH bootstrap/fallback, offline cache, and Diagnostics.",
+          "href": "/docs/remote-hosts/"
+        },
+        {
+          "title": "Workflow YAML Templates",
+          "summary": "Four copyable schema 10 templates: default delivery, capacity-gated batch testing, @reviewer gate, and scheduled QA.",
+          "href": "/workflows/"
+        },
+        {
+          "title": "Architecture Comparisons",
+          "summary": "Factual trade-offs comparing Canban with Vibe Kanban, Linear, cloud coding agents, and plain terminal tabs.",
+          "href": "/compare/"
+        },
+        {
+          "title": "Install & FAQ",
+          "summary": "Desktop macOS/Linux and headless server installation, Linux GTK4/GStreamer dependencies, and answers to common questions.",
+          "href": "/install/"
+        }
+      ],
+      "sections": [
+        {
+          "id": "architecture",
+          "heading": "System architecture",
+          "markdown": "Canban is built in Rust with native UI (`longbridge/nsh` — AppKit/Metal on macOS 13.0+ Apple Silicon, GTK4 on Linux `x86_64` / `arm64`) and `libghostty-vt` for terminal emulation.\n\n- **Canban UI (`canban-ui`)**: Connects over Unix socket (`~/.canban/app.sock`) to local `AppServer`, and simultaneously over Tailscale TCP or SSH tunnels to remote `canband` hosts.\n- **AppServer (`canban serve` / `canband`)**: Owns SQLite WAL storage, Cards, the Workflow Engine, Scheduler, Git worktree management, and Merge Queue coordination. Closing the desktop window leaves background scheduling active.\n- **Herdr Core (`hc`)**: Persistent PTY session supervisor running native Agent CLIs (`claude`, `codex`, `agy`, `gemini`, `opencode`, `cursor-agent`, etc.) so running agent sessions survive UI restarts and upgrades."
+        },
+        {
+          "id": "formula",
+          "heading": "Why Canban = Kanban + Workflow + Herdr",
+          "markdown": "1. **Kanban maintains Human Context**: Feature specs, pasted screenshots, `#Card` and GitHub Issue/PR references, `@Agent` discussions, structured reports, and diffs stay together on each Card.\n2. **Workflow automates worktrees and delivery**: Dragging a Card into `Develop` allocates an isolated Git worktree (`<dir>-<proj4>/<card-number>`) and runs your workflow graph; `Review` integrates changes through a serialized FIFO Queue Merge.\n3. **Herdr runs native Agent CLIs without interference**: Keep your CLI's native TUI, MCP servers, skills, permissions, and exact-ID session resume intact."
+        },
+        {
+          "id": "cli-quickstart",
+          "heading": "Core CLI quickstart",
+          "markdown": "Inside any Canban-launched terminal or scheduled agent session, Canban injects `CANBAN_CLI`, `CANBAN_ENDPOINT`, `CANBAN_CARD`, `CANBAN_PROJECT`, and `CANBAN_RUN_DIR`.\n\n```sh\n\"$CANBAN_CLI\" card show --fields number,title,body,stage,revision\n\"$CANBAN_CLI\" card adopt --stage develop\n\"$CANBAN_CLI\" report --state completed --message 'Implemented and verified tests' --file \"$CANBAN_RUN_DIR/report.md\"\n```"
+        }
+      ]
+    },
+    "docs/workflows": {
+      "eyebrow": "CANBAN // DOCS // WORKFLOWS",
+      "title": "Workflows, Visual Studio & Queue Merge",
+      "meta_title": "Canban Workflows — Visual Studio, development.yaml & FIFO Queue Merge",
+      "description": "How Canban's declarative schema 10 workflow engine works: Visual Studio, admit/script/deliver steps, FIFO batch Queue Merge, and the external_pr security gate.",
+      "intro": "Canban workflows are declarative YAML graphs stored in SQLite (`workflow_sources` and immutable `workflow_revisions`). Visual Studio, manual YAML edits, and Edit with agent all publish through the same schema validation.",
+      "breadcrumbs": [["Docs", "docs"], ["Workflows", "docs/workflows"]],
+      "sections": [
+        {
+          "id": "visual-studio",
+          "heading": "Visual Studio & SQLite single source of truth",
+          "markdown": "Open **Workflows** in any Project header to switch between **Visual Studio**, **YAML Source**, **History**, and **Edit with agent**:\n\n- **Stage Execution Graph**: Renders one swimlane per Board column (`Backlog`, `Develop`, `Review`, or custom `columns`) directly from the YAML graph (`schema: 10` is `CURRENT`, with linear migrations from `1..=10`).\n- **Inline Automation & Step Inspector**: Toggle Backlog auto-analyze or auto-start, Review Queue Merge vs. Manual Approval, and Upstream Sync (`sync_upstream`) directly on stage lanes, or inspect individual step prompts, scripts, timeouts, and environment variables.\n- **SQLite Storage**: Sources and immutable revisions live inside `canban.sqlite` rather than generating hidden YAML files in `~/.canban`. Use `canban workflow export` and `canban workflow submit` when editing external files.\n- **Frozen Run Revisions**: Each `WorkflowRun` captures the active revision at creation, so publishing new YAML never mutates in-flight runs."
+        },
+        {
+          "id": "step-types",
+          "heading": "Supported workflow step types (schema 10)",
+          "markdown": "| `uses` | Purpose and behavior |\n| --- | --- |\n| `agent` | Dispatches an Agent Profile (`developer`, `reviewer`, or custom CLI) in the Card's isolated Git worktree. Resolves built-in prompts when `instruction` is omitted. Advances only on explicit `canban report --state completed`. |\n| `script` (or `run:`) | Executes shell/interpreter commands (`bash -eo pipefail` default, `zsh`, `python3`) via Herdr Core without consuming `scheduler.max_agents` slots. Reads `$CANBAN_ENV` and `$CANBAN_OUTPUT` and supports 1 automatic `on_failure` fallback before pausing in `waiting_approval`. |\n| `admit` | Capacity gate (`agent_slot: true` waits for a free global automatic Agent slot; `max_ready: K` caps ready Cards). Releases waiting Cards in Board order. |\n| `card.move` | Moves the Card to `column` (supports `$next` and `next: $entry`) with causal workflow ancestry so stage triggers do not double-fire. |\n| `condition` | Branches (`then` / `otherwise`) using a JSON pointer over `{inputs, outputs, card}`, such as `/card/source_trust` or `/outputs/script:check/gate`. |\n| `approval` | Pauses the run in `waiting_approval` (`Card.human_gate`) until a human approves or requests rework (`on_changes_requested`). |\n| `deliver` | Enters the Project's serialized FIFO Batch Merge Queue. |\n| `notify` / `complete` | Appends a `workflow.notification` timeline event or marks the `WorkflowRun` completed. |"
+        },
+        {
+          "id": "queue-merge",
+          "heading": "FIFO Batch Queue Merge (deliver)",
+          "markdown": "When a Card enters `deliver` (typically in `Review`), Canban serializes delivery so parallel worktrees never race against the target branch:\n\n1. **FIFO Batching**: Drains `waiting_delivery` runs in strict `inputs.queued_at` order, grouping up to `batch_size` (`1..=50`, default `5`) compatible Cards into `<home>/worktrees/<project-ns>/_merge_queue`.\n2. **Wait-Free Settle**: If an Agent called `canban report --state completed` mid-turn while still finishing cleanup, Canban waits for the turn to settle (bounded by a 3-minute grace window) before integrating its worktree.\n3. **Integrate & Verify**: Applies `strategy` (`rebase` default, `squash`, or `--first-parent` `merge`), then runs `test_command` once against the integrated batch if configured (skipping tests when omitted).\n4. **Fast-Forward & Sync**: Clean batches fast-forward the target branch once, push once when `sync_upstream: true` (default), and auto-archive merged Cards after saving `refs/canban/cards/<card-id>`.\n5. **Conflict Resolution (`@merger`)**: On merge conflict or batch test failure, Canban records `refs/canban/batch/<short_id>/{target,card-<N>}` and launches a single Project-scoped `@merger` session in `_merge_queue`. `@merger` can resolve conflicts in place or evict an incompatible Card via `canban batch report --state completed --evict <CARD_NUMBER>`."
+        },
+        {
+          "id": "external-pr-gate",
+          "heading": "External PR security gate & human overrides",
+          "markdown": "Automated merging must never blindly accept untrusted external contributions. Canban enforces three layers of human control:\n\n- **`source_trust == \"external_pr\"` gate**: In the default `development.yaml`, entering `Review` runs `condition:external_pr` on `/card/source_trust`. Untrusted external PRs route automatically to `approval:review` (`uses: approval`) instead of `deliver:review`.\n- **Per-Card Hold auto-merge**: Toggle **Hold auto-merge** (`card.hold_auto_merge`) on any Card at any time to pause automatic delivery without cancelling ongoing work.\n- **Explicit Completion & Human Gates**: Terminal process exit or idle detection never advances a `WorkflowRun` step; only an explicit CLI `canban report --state completed` advances an Agent step, and `approval` / `waiting_approval` gates require human action."
+        },
+        {
+          "id": "cli-workflows",
+          "heading": "Managing workflows via CLI",
+          "markdown": "Inspect, validate, and publish a Project's `development.yaml` or set a default template for new Projects:\n\n```sh\ncanban workflow sources --project-id <PROJECT_ID>\ncanban workflow export --project-id <PROJECT_ID> --name development.yaml --output development.yaml\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml --check\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml\ncanban workflow set-default --project-id <PROJECT_ID>\n```\n\nSee ready-to-copy templates on the [Workflow Templates](/workflows/) page."
+        }
+      ]
+    },
+    "docs/agents": {
+      "eyebrow": "CANBAN // DOCS // AGENTS",
+      "title": "24 Built-in Agent CLIs, Herdr PTYs & CLI",
+      "meta_title": "Canban Agents — 24 Built-in CLIs, Herdr PTYs & canban CLI",
+      "description": "All 24 built-in CLI coding agents in Canban, how Herdr Core and libghostty-vt preserve native TUIs/MCPs/skills, canban card adopt, and CLI reference.",
+      "intro": "Canban runs native coding agent CLIs inside persistent Herdr PTY terminals (`herdr-core`) rendered with `libghostty-vt`, preserving every tool's native TUI, MCP servers, skills, permissions, and conversation resume.",
+      "breadcrumbs": [["Docs", "docs"], ["Agents", "docs/agents"]],
+      "sections": [
+        {
+          "id": "herdr-preservation",
+          "heading": "Zero-interference native TUI, MCP & skill preservation",
+          "markdown": "Rather than reimplementing provider chat wrappers or injecting fragile `Stop` hooks, Canban launches your chosen CLI inside a `herdr-core` (`hc`) supervised PTY:\n\n- **Native TUIs & Controls**: Interact directly with the agent's own terminal UI via `libghostty-vt` (rendered in native AppKit/CoreText on macOS and GTK4 on Linux, with SGR/pixel mouse reporting, OSC 8 hyperlinks, and 17 dark themes including Monokai).\n- **MCPs, Skills & Permissions Intact**: Because the real CLI binary executes in the Card worktree with your home configuration, existing MCP servers, custom skills, sandbox flags, and auth logins work unchanged.\n- **Restart-Safe PTYs & Exact Resume**: Closing Canban, restarting `canband`, or live-upgrading the app leaves running `herdr-core` sessions alive. Finished sessions can resume exact provider conversation IDs (`--resume`, `--session`, or `--conversation`) when supported.\n- **Global Scheduler Budget**: Automatic workflow steps share a configurable concurrency limit (`scheduler.max_agents`, default `8`), while manual shells and `script` steps run outside the agent budget."
+        },
+        {
+          "id": "catalog-24",
+          "heading": "All 24 built-in CLI agents",
+          "markdown": "Canban's catalog (`crates/profiles/src/catalog.rs`) includes 24 official interactive CLI presets matching Herdr's terminal detector and resume planner, plus custom profiles in `config/agents.json` and dynamic `herdr:<template>` profiles:\n\n| ID | Agent | Binary | Exact Resume | Model / Effort Args |\n| --- | --- | --- | --- | --- |\n| `codex` | Codex | `codex` | Yes (`resume`) | `-m`, reasoning effort |\n| `claude` | Claude Code | `claude` | Yes (`--resume`) | `--model`, `--effort` |\n| `agy` | Antigravity | `agy` | Yes (`--conversation`) | `--model`, `--effort` |\n| `gemini` | Gemini CLI | `gemini` | Yes (`--resume`) | `-m` |\n| `opencode` | OpenCode | `opencode` | Yes (`--session`) | `-m`, `--variant` |\n| `cursor` | Cursor Agent | `cursor-agent` | Yes (`--resume`) | `--model` |\n| `pi` | Pi | `pi` | Yes (`--session`) | `--model`, `--thinking` |\n| `omp` | Omp | `omp` | Yes (`--resume=`) | `--model` |\n| `copilot` | GitHub Copilot | `copilot` | Yes (`--resume=`) | `--model` |\n| `droid` | Droid | `droid` | Yes (`--resume`) | `-m` |\n| `amp` | Amp | `amp` | Fresh launch | — |\n| `kimi` | Kimi | `kimi` | Yes (`--session`) | `--model` |\n| `kiro` | Kiro | `kiro-cli` | Fresh launch | `--model` |\n| `qwen` | Qwen Code | `qwen` | Yes (`--resume`) | `-m` |\n| `devin` | Devin | `devin` | Yes (`--resume`) | — |\n| `cline` | Cline | `cline` | Fresh launch | — |\n| `grok` | Grok | `grok` | Yes (`--resume`) | `-m` |\n| `hermes` | Hermes | `hermes` | Yes (`--resume`) | `-m` |\n| `kilo` | Kilo | `kilo` | Yes (`--session`) | `-m` |\n| `qodercli` | Qoder | `qodercli` | Yes (`--resume`) | `--model` |\n| `letta` | Letta | `letta` | Yes (`--conversation`) | `-m` |\n| `mastracode` | Mastra Code | `mastracode` | Yes (`--thread`) | `--model` |\n| `maki` | Maki | `maki` | Fresh launch | — |\n| `muse` | Muse | `muse` | Fresh launch | — |"
+        },
+        {
+          "id": "card-adopt",
+          "heading": "Interactive takeover with canban card adopt",
+          "markdown": "When you start exploring a `Backlog` Card in an interactive terminal or `@mention` session and decide to move ahead with implementation in that same conversation, the agent does not need to lose its context or spawn a duplicate session:\n\n```sh\n\"$CANBAN_CLI\" card update --file \"$CANBAN_RUN_DIR/card.md\"\n\"$CANBAN_CLI\" card adopt --stage develop\n```\n\n- `card adopt` automatically passes inherited `HC_TERMINAL_ID` and `HC_SESSION` context to `AppServer`.\n- `AppServer` verifies the Core, machine, live PTY, Profile, and Card workspace, transitions the Card to `develop` (`reason: \"agent_adopted_stage\"`) without launching a second Agent, and binds the existing live PTY directly to the `WorkflowRun` step.\n- When the agent later runs `canban report --state completed`, the workflow proceeds seamlessly to `Review` and `Queue Merge`."
+        },
+        {
+          "id": "canban-cli",
+          "heading": "Injected canban CLI reference",
+          "markdown": "Canban injects `CANBAN_CLI`, `CANBAN_ENDPOINT`, `CANBAN_HOME`, `CANBAN_CARD`, `CARD_ID`, `CANBAN_PROJECT`, `CANBAN_PROFILE_ID`, and `CANBAN_RUN_DIR` into every launched session:\n\n```sh\n# Inspect or update the current Card\n\"$CANBAN_CLI\" card show --fields number,title,body,stage,revision\n\"$CANBAN_CLI\" card update [--title 'Updated title'] --file \"$CANBAN_RUN_DIR/card.md\"\n\n# Report execution outcome (completed | backlog | blocked | failed | working)\n\"$CANBAN_CLI\" report --state completed --message 'Summary' --file \"$CANBAN_RUN_DIR/report.md\"\n\n# Reply to a follow-up question without ending the active task\n\"$CANBAN_CLI\" reply --to <QUESTION_ID> --file \"$CANBAN_RUN_DIR/reply.md\"\n\n# Stage local diff review comments without publishing directly to GitHub\n\"$CANBAN_CLI\" review draft --file \"$CANBAN_RUN_DIR/review_draft.json\"\n\n# Call any AppServer JSON-RPC method\n\"$CANBAN_CLI\" call card.list '{\"project_id\":\"<PROJECT_ID>\",\"stage\":\"develop\",\"limit\":50}'\n```"
+        }
+      ]
+    },
+    "docs/remote-hosts": {
+      "eyebrow": "CANBAN // DOCS // REMOTE HOSTS",
+      "title": "Remote Linux Hosts, Tailscale & SSH",
+      "meta_title": "Canban Remote Hosts — Headless Linux canband, Tailscale TCP & SSH",
+      "description": "Run headless Linux canband servers 24/7 and connect simultaneously from Canban.app over direct Tailscale TCP or managed SSH tunnels.",
+      "intro": "A single Canban.app desktop client connects simultaneously to your local Mac (`This Mac`) and one or more remote Linux or macOS `canband` hosts over Tailscale TCP or SSH.",
+      "breadcrumbs": [["Docs", "docs"], ["Remote Hosts", "docs/remote-hosts"]],
+      "sections": [
+        {
+          "id": "multi-host-model",
+          "heading": "Simultaneous multi-host & offline-resilient execution",
+          "markdown": "Each host runs a self-contained `canband` + local `herdr-core` (`hc`) pair owning its own SQLite WAL database, Projects, Cards, Workflows, Scheduler, and Git worktrees:\n\n- **24/7 Autonomous Progression**: When your laptop sleeps or goes offline, remote `canband` hosts keep running agents, collecting reports, executing FIFO Queue Merge, and polling linked GitHub repositories.\n- **Unified Board & Notifications**: `Canban.app` merges local and remote Projects into one `HostRegistry`, routing operations by owning `host_id` and surfacing remote `Needs you` / `Updates` items in `⌘I`.\n- **Offline Snapshot Cache**: Successful remote snapshots are cached under `<local-home>/cache/hosts/<host_id>.json`. If Tailscale disconnects, remote boards remain inspectable in `Offline · Cached` read-only mode."
+        },
+        {
+          "id": "headless-install",
+          "heading": "Installing headless Linux canband",
+          "markdown": "On headless Linux (`x86_64` or `aarch64`) servers without a desktop session, install standalone `canban` (no GTK4 or GStreamer required) and register a persistent `systemd --user` service:\n\n```sh\ncurl -fsSL https://canban.dev/install.sh | bash -s -- --headless\ncanban service install --tailscale --port 7680\ncanban service status\n```\n\n`canban service install` enables `loginctl enable-linger` when available so user services and active `herdr-core` PTYs persist across logouts."
+        },
+        {
+          "id": "tailscale-ssh-pairing",
+          "heading": "Tailscale direct TCP vs. SSH pairing",
+          "markdown": "Canban uses a Tailscale-first direct data plane with SSH bootstrap and fallback:\n\n- **Tailscale Direct TCP (Recommended)**: `canban serve --tailscale` binds the host's Tailscale IPv4 (`100.64.0.0/10`, default port `7680`) and persists settings in `<home>/config/server.json`. A 256-bit Bearer secret is stored in `<home>/server.token` (`0600`). Pre-auth `host.probe` exposes only non-sensitive identity (`server_id`, `hostname`, `platform`, `version`, `api_version`), while all RPCs and `herdr.connect` PTY streams authenticate against `server.token`.\n- **Pairing URI**: Run `canban pair [--port 7680]` on the remote host to print a copyable `canban://<addr>:<port>#<token>` URI, or use the desktop **Connect a Machine** wizard to discover Tailscale peers (`tailscale status --json`) and auto-pair or bootstrap over SSH.\n- **Managed SSH Tunnel Fallback**: For pure-SSH hosts without Tailscale, `Canban.app` manages a background `ssh -L` Unix-socket forwarder into a mode-`0600` local socket directory."
+        },
+        {
+          "id": "diagnostics",
+          "heading": "Built-in Diagnostics & remote daemon upgrades",
+          "markdown": "Open **Settings → Diagnostics** to verify and repair local or remote hosts end to end:\n\n- **Transport & Latency**: Socket, Tailscale TCP, or SSH tunnel state, RTT (`ms`), and reconnect history.\n- **Canban Service & Storage**: Daemon PID, platform, version, `DESKTOP_API` compatibility, `systemd --user` / `launchd` state, and SQLite DB/WAL sizes.\n- **Herdr & Toolchain**: Resolved `hc` binary, Core ID, active PTY count, `git`, `python3`, `tailscale`, and resolved paths for enabled Agent profiles.\n- **Live Logs & Updates**: Stream `server.log` and `updater.log`, or trigger a remote `update.daemon` directly from the UI when `ApiMismatch` is detected."
+        }
+      ]
+    },
+    "workflows": {
+      "eyebrow": "CANBAN // WORKFLOWS",
+      "title": "Curated Workflow Templates (schema 10)",
+      "meta_title": "Canban Workflow Templates — Copyable development.yaml Examples",
+      "description": "Copyable schema 10 development.yaml templates for Canban: default delivery, capacity-gated batch testing, @reviewer approval gates, and scheduled QA.",
+      "intro": "Every Canban workflow is compiled from declarative YAML (`schema: 10`, `CURRENT` in `crates/workflow-engine`). Paste these templates into Project Workflows → YAML Source, customize them in Visual Studio, or submit them with `canban workflow submit`.",
+      "breadcrumbs": [["Workflows", "workflows"]],
+      "sections": [
+        {
+          "id": "how-to-apply",
+          "heading": "Apply a template via Studio or CLI",
+          "markdown": "1. Open **Workflows → YAML Source** in your Project (or click **Set as default** to apply to future Projects), or\n2. Validate and submit from the CLI:\n\n```sh\ncanban workflow sources --project-id <PROJECT_ID>\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml --check\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml\n```"
+        },
+        {
+          "id": "template-default",
+          "heading": "1. Default delivery pipeline (development.yaml)",
+          "markdown": "Matches Canban's built-in `default_document`: quiet `Backlog` intake, automatic `@developer` implementation in `Develop`, `external_pr` trust check, and FIFO Queue Merge (`deliver:review`) with `sync_upstream: true` in `Review`.\n\n```yaml\nschema: 10\nid: delivery:default\nname: Development\nscope: project\nenabled: true\ncolumns:\n  - id: backlog\n    name: Backlog\n  - id: develop\n    name: Develop\n  - id: review\n    name: Review\non:\n  develop:\n    event: card.column_entered\n    start_at: agent:develop\n    match:\n      column: develop\n  review:\n    event: card.column_entered\n    start_at: condition:external_pr\n    match:\n      column: review\nsteps:\n  - id: agent:develop\n    name: Implement\n    uses: agent\n    with:\n      profile: developer\n    next: move:develop\n  - id: move:develop\n    name: Move to Review\n    uses: card.move\n    with:\n      column: review\n    next: condition:external_pr\n  - id: condition:external_pr\n    name: External PR check\n    uses: condition\n    with:\n      pointer: /card/source_trust\n      equals: external_pr\n      then: approval:review\n      otherwise: deliver:review\n  - id: deliver:review\n    name: Queue merge\n    uses: deliver\n    with:\n      sync_upstream: true\n    next: __end\n    on_changes_requested: agent:develop\n  - id: approval:review\n    name: Human approval\n    uses: approval\n    with:\n      title: External PR; human approval is required before merging\n    next: __end\n    on_changes_requested: agent:develop\n  - id: __end\n    uses: complete\nworkspace:\n  create_worktree: true\n  sync_base: true\n  remote: origin\n```"
+        },
+        {
+          "id": "template-admit-batch",
+          "heading": "2. Capacity-gated plan + tested batch merge queue",
+          "markdown": "Automatically plans new `Backlog` cards with `@planner`, caps ready backlog cards at `max_ready: 2`, admits cards into `Develop` only when a global Agent slot is free (`agent_slot: true`), and runs `cargo test --workspace` once per integrated FIFO batch before fast-forwarding `main`.\n\n```yaml\nschema: 10\nid: delivery:gated-batch\nname: Planned & Tested Delivery\nscope: project\nenabled: true\ncolumns:\n  - id: backlog\n    name: Backlog\n  - id: develop\n    name: Develop\n  - id: review\n    name: Review\non:\n  backlog:\n    event: card.column_entered\n    start_at: admit:plan\n    match:\n      column: backlog\n  develop:\n    event: card.column_entered\n    start_at: agent:develop\n    match:\n      column: develop\n  review:\n    event: card.column_entered\n    start_at: condition:external_pr\n    match:\n      column: review\nsteps:\n  - id: admit:plan\n    name: Backlog ready cap\n    uses: admit\n    with:\n      agent_slot: false\n      max_ready: 2\n    next: agent:plan\n  - id: agent:plan\n    name: Plan task\n    uses: agent\n    with:\n      profile: planner\n    next: admit:develop\n  - id: admit:develop\n    name: Wait for free agent\n    uses: admit\n    with:\n      agent_slot: true\n    next: move:backlog\n  - id: move:backlog\n    name: Start Develop\n    uses: card.move\n    with:\n      column: develop\n    next: agent:develop\n  - id: agent:develop\n    name: Implement\n    uses: agent\n    with:\n      profile: developer\n    next: move:develop\n  - id: move:develop\n    name: Move to Review\n    uses: card.move\n    with:\n      column: review\n    next: condition:external_pr\n  - id: condition:external_pr\n    name: External PR check\n    uses: condition\n    with:\n      pointer: /card/source_trust\n      equals: external_pr\n      then: approval:review\n      otherwise: deliver:review\n  - id: deliver:review\n    name: Batch queue merge\n    uses: deliver\n    with:\n      strategy: rebase\n      batch_size: 5\n      test_command: cargo test --workspace\n      sync_upstream: true\n    next: __end\n    on_changes_requested: agent:develop\n  - id: approval:review\n    name: Human approval\n    uses: approval\n    with:\n      title: External PR; human approval is required before merging\n    next: __end\n    on_changes_requested: agent:develop\n  - id: __end\n    uses: complete\nworkspace:\n  create_worktree: true\n  sync_base: true\n  remote: origin\n```"
+        },
+        {
+          "id": "template-reviewer-gate",
+          "heading": "3. Script check + @reviewer diff review + human approval",
+          "markdown": "Runs a zero-slot `script:check` step, dispatches `@reviewer` to inspect the diff and stage line-level feedback (`canban review draft`), pauses for human approval (`approval:review`), and supports rework loops back to `@developer`.\n\n```yaml\nschema: 10\nid: delivery:reviewed\nname: Reviewed Delivery\nscope: project\nenabled: true\ncolumns:\n  - id: backlog\n    name: Backlog\n  - id: develop\n    name: Develop\n  - id: review\n    name: Review\non:\n  develop:\n    event: card.column_entered\n    start_at: agent:develop\n    match:\n      column: develop\n  review:\n    event: card.column_entered\n    start_at: script:check\n    match:\n      column: review\nsteps:\n  - id: agent:develop\n    name: Implement\n    uses: agent\n    with:\n      profile: developer\n    next: move:develop\n  - id: move:develop\n    name: Move to Review\n    uses: card.move\n    with:\n      column: review\n    next: script:check\n  - id: script:check\n    name: Run checks\n    run: |\n      git status --short\n      echo \"gate=ok\" >> \"$CANBAN_OUTPUT\"\n    on_failure: agent:develop\n    next: agent:review\n  - id: agent:review\n    name: Diff review\n    uses: agent\n    with:\n      profile: reviewer\n    next: approval:review\n  - id: approval:review\n    name: Human approval\n    uses: approval\n    with:\n      title: Review @reviewer findings and approve delivery\n    next: deliver:review\n    on_changes_requested: agent:develop\n  - id: deliver:review\n    name: Queue merge\n    uses: deliver\n    with:\n      sync_upstream: true\n    next: __end\n    on_changes_requested: agent:develop\n  - id: __end\n    uses: complete\nworkspace:\n  create_worktree: true\n  sync_base: true\n  remote: origin\n```"
+        },
+        {
+          "id": "template-scheduled-qa",
+          "heading": "4. Scheduled nightly QA (Card-creating cron)",
+          "markdown": "Creates a tracked `Develop` Card on weekday nights (`cron: \"30 3 * * 1-5\"`) so reports, diffs, and logs attach to the Board. For host-level maintenance without Cards, set `scope: global` and start with a `run:` script + `on_failure` escalation.\n\n```yaml\nschema: 10\nid: nightly_qa:project\nname: Nightly QA\nscope: project\nenabled: true\non:\n  nightly:\n    cron: \"30 3 * * 1-5\"\n    timezone: UTC\n    overlap: skip\n    start_at: run_qa\n    card:\n      column: develop\n      title: \"Nightly QA ({{date}} #{{run_number}})\"\n      body: \"Automated scheduled check for {{workflow}} ({{datetime}}).\"\nsteps:\n  - id: run_qa\n    uses: agent\n    with:\n      profile: developer\n      instruction: Run the test suite, verify regressions, and report findings via $CANBAN_CLI.\n    next: finish\n  - id: finish\n    uses: complete\n```"
+        }
+      ]
+    },
+    "compare": {
+      "eyebrow": "CANBAN // COMPARE",
+      "title": "Architectural Trade-Offs",
+      "meta_title": "Canban vs Vibe Kanban, Linear, Cloud Agents & Terminal Tabs",
+      "description": "Honest architectural comparison of Canban against Vibe Kanban, Linear, cloud coding agents, and plain terminal tabs or tmux.",
+      "intro": "Different developer workflows optimize for different constraints. This guide outlines documented architectural differences and honest trade-offs grounded in Canban's design and product research.",
+      "breadcrumbs": [["Compare", "compare"]],
+      "sections": [
+        {
+          "id": "overview-matrix",
+          "heading": "At-a-glance architecture comparison",
+          "markdown": "| Dimension | Canban (`canban.dev`) | Vibe Kanban | Linear / Issue Trackers | Cloud Coding Agents | Terminal Tabs / `tmux` |\n| --- | --- | --- | --- | --- | --- |\n| **Runtime** | Native Rust (`AppKit/Metal`, `GTK4`) + local/remote `canband` | Local server + web UI | Cloud SaaS | Cloud ephemeral VMs/containers | Local or SSH shell |\n| **Agent Execution** | 24 native CLIs in `herdr-core` PTYs (`libghostty-vt`) | Agent workspaces linked to issues | Assigned/delegated external agents | Hosted remote agent loop | Direct CLI in shell |\n| **Task Context** | SQLite Card timeline + specs + images + diffs | Issue + workspace records | Cloud issues, documents & activity | Issue/PR thread | Scattered across tabs/notes |\n| **Delivery & Git** | Per-Card worktrees + FIFO Queue Merge (`deliver`) | Workspace Git actions | External PRs in Git host | Opens remote PR for review | Manual `git worktree` / `rebase` |\n| **Offline / Local-first** | Yes (local SQLite + cached remote snapshots) | Local server | Cloud-dependent | Cloud-dependent | Yes |"
+        },
+        {
+          "id": "vs-vibe-kanban",
+          "heading": "Canban vs. Vibe Kanban",
+          "markdown": "Both tools organize AI coding work around Kanban issues and isolated agent workspaces.\n\n- **How Canban differs**: Canban is a native Rust desktop workbench (`NSH` + `libghostty-vt`) backed by `herdr-core` persistent PTYs, a declarative `schema: 10` YAML/Visual Studio workflow engine (`admit`, `script`, `condition`, `approval`, `deliver`), and a serialized FIFO Batch Merge Queue (`_merge_queue`) with `@merger` conflict resolution. Operation direction is explicit: `deliver` integrates Card worktrees into the target branch and can sync upstream.\n- **Trade-offs**: Vibe Kanban provides a browser-first interface accessible from any browser; Canban targets native macOS (`13.0+` Apple Silicon) and Linux (`x86_64` / `arm64`) desktop clients paired with local or headless Linux `canband` servers."
+        },
+        {
+          "id": "vs-linear",
+          "heading": "Canban vs. Linear & Cloud Issue Trackers",
+          "markdown": "Linear excels at cross-team product planning, roadmaps, cycles, and multi-user collaboration.\n\n- **How Canban differs**: Canban focuses on **execution-level Human Context** on your own machines—binding each Card directly to a Git worktree, live `herdr-core` agent PTYs, scripted checks, diff review, and merge delivery, while syncing with GitHub Issues and PRs.\n- **Trade-offs**: If you need organization-wide multi-tenant SaaS permissions, sprint reporting, and non-engineering stakeholder triage, Linear is a better primary system of record. Canban is built for single-developer / local-authority execution across your Mac and remote Linux servers."
+        },
+        {
+          "id": "vs-cloud-agents",
+          "heading": "Canban vs. Cloud Coding Agents",
+          "markdown": "Cloud agents (such as GitHub Copilot coding agent) start from an issue in the cloud, spin up an ephemeral container, and open a pull request.\n\n- **How Canban differs**: Canban runs your own installed CLIs (`claude`, `codex`, `agy`, `gemini`, `opencode`, `cursor-agent`, etc.) directly on your Mac or always-on Linux host over Tailscale/SSH. Your local toolchains, private repos, MCP servers, skills, and interactive TUI takeover (`canban card adopt`) work without waiting for remote container spins or opening a PR for every local experiment.\n- **Trade-offs**: Cloud agents require zero local machine management or CLI installation; Canban assumes you maintain `git`, `herdr-core`, and your chosen agent CLI credentials on the execution host."
+        },
+        {
+          "id": "vs-terminal-tabs",
+          "heading": "Canban vs. Plain Terminal Tabs / tmux + Git Worktrees",
+          "markdown": "Running `claude` or `codex` inside `tmux` and manual `git worktree` checkouts gives maximum flexibility with zero onboarding.\n\n- **How Canban differs**: Canban preserves the exact same native CLI TUI inside `libghostty-vt` / `herdr-core` while eliminating manual context juggling—every worktree, spec, screenshot, comment, script log, and merge queue slot stays attached to a numbered Card, and finished worktrees integrate in FIFO order without branch collisions.\n- **Trade-offs**: For a quick one-off shell command or single-file tweak, opening a terminal tab is faster than creating a Card. Canban pays off as soon as you run multiple parallel tasks, switch branches, or step away while remote agents work."
+        }
+      ]
+    }
+  },
+  "zh": {
+    "docs": {
+      "eyebrow": "CANBAN // 文档",
+      "title": "Canban 文档中心",
+      "meta_title": "Canban 文档 — 工作流引擎、24 种 Agent CLI 与远程 Linux 主机",
+      "description": "Canban 架构与使用文档：可视化与 YAML 工作流引擎、基于 Herdr 的 24 种内置 Agent CLI、FIFO Queue Merge 以及远程 Linux canband 主机。",
+      "intro": "Canban（canban.dev）将用于维护 Human Context 的 Kanban 卡片、GitHub Actions 风格的声明式 Workflow 调度，以及基于 Herdr 的持久 PTY 原生 Agent CLI 终端整合在同一个原生工作台中。",
+      "breadcrumbs": [["文档", "docs"]],
+      "cards": [
+        {
+          "title": "工作流与 Queue Merge",
+          "summary": "Visual Studio、schema 10 development.yaml、admit/script/deliver 步骤、FIFO 批量合入以及 external_pr 安全门禁。",
+          "href": "/zh/docs/workflows/"
+        },
+        {
+          "title": "24 种 Agent CLI 与 Herdr PTY",
+          "summary": "全部 24 个内置 CLI Agent、libghostty-vt 终端保活、canban card adopt 接管以及注入的 canban CLI 参考。",
+          "href": "/zh/docs/agents/"
+        },
+        {
+          "title": "远程 Linux 主机 (canband)",
+          "summary": "Headless Linux canband 守护进程、Tailscale TCP 直连与 Bearer 鉴权、SSH 引导/回退、离线快照缓存与诊断中心。",
+          "href": "/zh/docs/remote-hosts/"
+        },
+        {
+          "title": "工作流 YAML 模板库",
+          "summary": "4 套可直接复制使用的 schema 10 模板：默认交付、并发准入与批量测试、@reviewer 审查门禁以及定时 QA。",
+          "href": "/zh/workflows/"
+        },
+        {
+          "title": "架构对比与取舍",
+          "summary": "基于实事的架构对比：Canban 与 Vibe Kanban、Linear、云端 Coding Agent 及原生终端标签页的取舍。",
+          "href": "/zh/compare/"
+        },
+        {
+          "title": "安装与常见问题",
+          "summary": "macOS / Linux 桌面版与 Headless 服务器安装命令、GTK4/GStreamer 运行库依赖及常见问题解答。",
+          "href": "/zh/install/"
+        }
+      ],
+      "sections": [
+        {
+          "id": "architecture",
+          "heading": "系统架构",
+          "markdown": "Canban 使用 Rust 构建，采用原生界面框架（`longbridge/nsh` — macOS 13.0+ Apple Silicon 使用 AppKit/Metal，Linux `x86_64` / `arm64` 使用 GTK4）以及 `libghostty-vt` 终端渲染引擎。\n\n- **Canban 桌面客户端 (`canban-ui`)**：通过本地 Unix Socket（`~/.canban/app.sock`）连接本机 `AppServer`，同时通过 Tailscale TCP 或 SSH 隧道直连多台远程 `canband` 主机。\n- **AppServer (`canban serve` / `canband`)**：负责 SQLite WAL 存储、卡片、工作流引擎、调度器、Git Worktree 隔离与合并队列。关闭桌面窗口不会中断后台调度。\n- **Herdr Core (`hc`)**：持久化 PTY 会话守护进程，直接运行原生 Agent CLI（`claude`、`codex`、`agy`、`gemini`、`opencode`、`cursor-agent` 等），在应用重启或升级时保持 Agent 进程不中断。"
+        },
+        {
+          "id": "formula",
+          "heading": "为什么是 Canban = Kanban + Workflow + Herdr",
+          "markdown": "1. **Kanban 维护 Human Context**：需求说明、粘贴的截图、`#Card` 与 GitHub Issue/PR 引用、`@Agent` 讨论、结构化报告和代码 Diff 都保存在同一张卡片上。\n2. **Workflow 自动调度 Worktree 与交付**：将卡片拖入 `Develop` 自动创建独立 Git Worktree（`<dir>-<proj4>/<card-number>`）并推进工作流图；进入 `Review` 后通过串行 FIFO Queue Merge 完成变基合并。\n3. **Herdr 无干扰运行原生 Agent CLI**：完整保留原生 CLI 的 TUI 交互、MCP Server、Skills、权限确认与精确会话恢复能力。"
+        },
+        {
+          "id": "cli-quickstart",
+          "heading": "核心 CLI 速览",
+          "markdown": "在 Canban 启动的终端或定时 Agent 会话中，进程会自动注入 `CANBAN_CLI`、`CANBAN_ENDPOINT`、`CANBAN_CARD`、`CANBAN_PROJECT` 与 `CANBAN_RUN_DIR`：\n\n```sh\n\"$CANBAN_CLI\" card show --fields number,title,body,stage,revision\n\"$CANBAN_CLI\" card adopt --stage develop\n\"$CANBAN_CLI\" report --state completed --message '已完成实现并验证测试' --file \"$CANBAN_RUN_DIR/report.md\"\n```"
+        }
+      ]
+    },
+    "docs/workflows": {
+      "eyebrow": "CANBAN // 文档 // 工作流",
+      "title": "工作流引擎、Visual Studio 与 Queue Merge",
+      "meta_title": "Canban 工作流 — Visual Studio、development.yaml 与 FIFO Queue Merge",
+      "description": "Canban 声明式 schema 10 工作流引擎详解：Visual Studio、admit/script/deliver 步骤、FIFO 批量合并队列与 external_pr 安全门禁。",
+      "intro": "Canban 工作流是以 SQLite 为唯一数据源（`workflow_sources` 与不可变 `workflow_revisions`）的声明式 YAML 图。Visual Studio 图形编辑、YAML 手写与 Edit with agent 全部经过同一套校验与发布链路。",
+      "breadcrumbs": [["文档", "docs"], ["工作流", "docs/workflows"]],
+      "sections": [
+        {
+          "id": "visual-studio",
+          "heading": "Visual Studio 与 SQLite 单一数据源",
+          "markdown": "在任意项目顶栏打开 **Workflows**，即可在 **Visual Studio**、**YAML Source**、**History** 与 **Edit with agent** 之间无缝切换：\n\n- **Stage 执行图**：直接根据 YAML 图（当前最新为 `schema: 10`，`crates/workflow-engine/src/migrations.rs` 支持 `1..=10` 线性迁移）为每个看板列（`Backlog`、`Develop`、`Review` 或自定义 `columns`）渲染泳道。\n- **内联自动化开关与节点检查器**：在列内直接切换 Backlog 自动规划/自动准入、Review 队列合并 vs 人工审批、是否同步远端（`sync_upstream`），或选中节点编辑 Prompt、脚本、超时时间与环境变量。\n- **SQLite 存储**：所有工作流源码与版本记录保存在 `canban.sqlite` 中，不会在 `~/.canban` 生成冗余 YAML 镜像；需要导出或提交外部文件时可使用 `canban workflow export` / `submit`。\n- **运行版本冻结**：每个 `WorkflowRun` 在创建时绑定当前修订版本，发布新 YAML 不会篡改正在运行的任务。"
+        },
+        {
+          "id": "step-types",
+          "heading": "支持的步骤类型（schema 10）",
+          "markdown": "| `uses` | 用途与执行语义 |\n| --- | --- |\n| `agent` | 在卡片隔离的 Git Worktree 中调度指定 Profile（`developer`、`reviewer` 或自定义 CLI）。省略 `instruction` 时自动使用内置默认提示词；仅在显式调用 `canban report --state completed` 后推进下一步。 |\n| `script`（或 `run:`） | 通过 Herdr Core 执行 Shell/解释器脚本（默认 `bash -eo pipefail`，支持 `zsh`、`python3`），**不占用 `scheduler.max_agents` 并发槽位**。支持 `$CANBAN_ENV`、`$CANBAN_OUTPUT` 以及最多 1 次 `on_failure` 自动回退。 |\n| `admit` | 并发与准入闸门（`agent_slot: true` 等待全局空闲 Agent 槽位；`max_ready: K` 限制就绪卡片数），严格按看板顺序放行。 |\n| `card.move` | 将卡片移动至目标列（支持 `$next` 与 `next: $entry`），并携带工作流因果标识，避免重复触发入列规则。 |\n| `condition` | 基于 `{inputs, outputs, card}` 的 JSON Pointer 条件分支（如 `/card/source_trust` 或 `/outputs/script:check/gate`）。 |\n| `approval` | 将流程暂停在 `waiting_approval`（`Card.human_gate`），等待人工批准或打回返工（`on_changes_requested`）。 |\n| `deliver` | 进入项目的串行 **FIFO 批量合并队列（Queue Merge）**。 |\n| `notify` / `complete` | 追加 `workflow.notification` 时间线事件或结束 `WorkflowRun`。 |"
+        },
+        {
+          "id": "queue-merge",
+          "heading": "FIFO 批量合并队列（deliver）",
+          "markdown": "进入 `deliver` 步骤后，Canban 会按严格顺序串行集成多个并行分支，避免本地并发冲突：\n\n1. **FIFO 批量分组**：按 `inputs.queued_at` 顺序从队头提取最多 `batch_size`（`1..=50`，默认 `5`）张兼容卡片，合入项目专属的批量工作树 `<home>/worktrees/<project-ns>/_merge_queue`。\n2. **等待 Turn 收尾**：若 Agent 在 Turn 尚未结束时提前上报 `completed`，Canban 会等待其 Turn 稳定结束（最多 3 分钟宽限窗口）后再执行 Git 集成。\n3. **集成与单次验证**：按 `strategy`（默认 `rebase`，可选 `squash` 或 `--first-parent` `merge`）逐一集成；若配置了 `test_command`，则对集成后的批量结果运行一次测试（未配置则跳过）。\n4. **快进与远端同步**：测试通过后一次性快进目标分支，并在 `sync_upstream: true`（默认）时自动推送远端；合入后的干净卡片会在保留 `refs/canban/cards/<card-id>` 后自动归档。\n5. **冲突自愈（`@merger`）**：若发生合并冲突或批量测试失败，Canban 会持久化 `MergeBatch` 与安全引用 `refs/canban/batch/<short_id>/{target,card-<N>}`，并仅唤醒一个项目级 `@merger` 会话在 `_merge_queue` 中修复冲突，或通过 `canban batch report --state completed --evict <CARD_NUMBER>` 剔除异常卡片。"
+        },
+        {
+          "id": "external-pr-gate",
+          "heading": "外部 PR 安全门禁与人工接管",
+          "markdown": "自动合入绝不应当在未经确认的情况下放行外部不可信代码：\n\n- **`source_trust == \"external_pr\"` 分流门禁**：默认的 `development.yaml` 在进入 `Review` 时先执行 `condition:external_pr` 检查 `/card/source_trust`。外部 PR 会自动路由至 `approval:review` 等待人工审批，而不会直接进入 `deliver:review`。\n- **单卡暂停自动合入（Hold auto-merge）**：可随时在任意卡片上开启 `card.hold_auto_merge`，温和暂停队列交付而不中断当前 Agent。\n- **显式完成契约**：终端进程退出或空闲检测绝不会推进工作流步骤；只有显式执行 `canban report --state completed` 才会推进 Agent 步骤。"
+        },
+        {
+          "id": "cli-workflows",
+          "heading": "通过 CLI 管理工作流",
+          "markdown": "在命令行中查看、校验与提交 `development.yaml`，或将当前项目配置设为全局默认模板：\n\n```sh\ncanban workflow sources --project-id <PROJECT_ID>\ncanban workflow export --project-id <PROJECT_ID> --name development.yaml --output development.yaml\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml --check\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml\ncanban workflow set-default --project-id <PROJECT_ID>\n```\n\n可直接复制的模板示例见 [工作流模板库](/zh/workflows/)。"
+        }
+      ]
+    },
+    "docs/agents": {
+      "eyebrow": "CANBAN // 文档 // AGENT",
+      "title": "24 种内置 Agent CLI、Herdr PTY 与 CLI 参考",
+      "meta_title": "Canban Agents — 24 种内置 CLI、Herdr 持久 PTY 与 CLI 参考",
+      "description": "Canban 内置支持的 24 种编程 Agent CLI 完整清单，Herdr Core 与 libghostty-vt 如何保留原生 TUI/MCP/Skill，canban card adopt 接管以及 CLI 参考。",
+      "intro": "Canban 通过 `herdr-core` 持久 PTY 与 `libghostty-vt` 直接运行原生编程 Agent CLI，完整保留各工具原有的交互式 TUI、MCP、Skills、权限提示与会话恢复能力。",
+      "breadcrumbs": [["文档", "docs"], ["Agent 与 CLI", "docs/agents"]],
+      "sections": [
+        {
+          "id": "herdr-preservation",
+          "heading": "无干扰保留原生 TUI、MCP 与 Skills",
+          "markdown": "Canban 不会用简陋聊天框替换你的编程工具，也不依赖脆弱的 `Stop` Hook，而是通过 `herdr-core`（`hc`）托管真实 PTY：\n\n- **原生 TUI 与终端渲染**：由 `libghostty-vt` 负责 VT 解析与增量状态同步，macOS 通过 AppKit/CoreText 原生绘制，Linux 通过 GTK4 绘制，支持 SGR/像素鼠标上报、OSC 8 超链接与 Monokai 等 17 套深色配色。\n- **完整保留 MCP、Skills 与权限控制**：CLI 进程直接在卡片对应 Worktree 中以你的本机环境启动，既有的 MCP Server、自定义 Skill、沙箱规则与登录态无需重新配置。\n- **重启不丢会话与精确恢复**：关闭 Canban 窗口、重启 `canband` 或应用在线升级时，`herdr-core` 中的 Agent 进程依然保持运行；已结束的会话也支持按精确会话 ID（`--resume` / `--session` / `--conversation`）恢复上下文。\n- **全局并发预算**：自动工作流步骤共享全局并发上限（`scheduler.max_agents`，默认 `8`），手动 Shell 与 `script` 步骤不占用 Agent 槽位。"
+        },
+        {
+          "id": "catalog-24",
+          "heading": "全部 24 种内置 CLI Agent",
+          "markdown": "`crates/profiles/src/catalog.rs` 内置了与 Herdr 终端识别及恢复引擎对齐的 24 种官方交互式 CLI，同时支持在 `config/agents.json` 自定义命令或使用动态 `herdr:<template>` 模板：\n\n| ID | Agent | 可执行文件 | 精确会话恢复 | 模型 / 推理强度参数 |\n| --- | --- | --- | --- | --- |\n| `codex` | Codex | `codex` | 支持 (`resume`) | `-m`, 推理强度 |\n| `claude` | Claude Code | `claude` | 支持 (`--resume`) | `--model`, `--effort` |\n| `agy` | Antigravity | `agy` | 支持 (`--conversation`) | `--model`, `--effort` |\n| `gemini` | Gemini CLI | `gemini` | 支持 (`--resume`) | `-m` |\n| `opencode` | OpenCode | `opencode` | 支持 (`--session`) | `-m`, `--variant` |\n| `cursor` | Cursor Agent | `cursor-agent` | 支持 (`--resume`) | `--model` |\n| `pi` | Pi | `pi` | 支持 (`--session`) | `--model`, `--thinking` |\n| `omp` | Omp | `omp` | 支持 (`--resume=`) | `--model` |\n| `copilot` | GitHub Copilot | `copilot` | 支持 (`--resume=`) | `--model` |\n| `droid` | Droid | `droid` | 支持 (`--resume`) | `-m` |\n| `amp` | Amp | `amp` | 新建会话 | — |\n| `kimi` | Kimi | `kimi` | 支持 (`--session`) | `--model` |\n| `kiro` | Kiro | `kiro-cli` | 新建会话 | `--model` |\n| `qwen` | Qwen Code | `qwen` | 支持 (`--resume`) | `-m` |\n| `devin` | Devin | `devin` | 支持 (`--resume`) | — |\n| `cline` | Cline | `cline` | 新建会话 | — |\n| `grok` | Grok | `grok` | 支持 (`--resume`) | `-m` |\n| `hermes` | Hermes | `hermes` | 支持 (`--resume`) | `-m` |\n| `kilo` | Kilo | `kilo` | 支持 (`--session`) | `-m` |\n| `qodercli` | Qoder | `qodercli` | 支持 (`--resume`) | `--model` |\n| `letta` | Letta | `letta` | 支持 (`--conversation`) | `-m` |\n| `mastracode` | Mastra Code | `mastracode` | 支持 (`--thread`) | `--model` |\n| `maki` | Maki | `maki` | 新建会话 | — |\n| `muse` | Muse | `muse` | 新建会话 | — |"
+        },
+        {
+          "id": "card-adopt",
+          "heading": "使用 canban card adopt 无缝接管工作流阶段",
+          "markdown": "当你在 `Backlog` 卡片的交互式终端中与 Agent 讨论需求，确认方案后希望直接在该会话中开始编码时，无需重新启动新 Agent：\n\n```sh\n\"$CANBAN_CLI\" card update --file \"$CANBAN_RUN_DIR/card.md\"\n\"$CANBAN_CLI\" card adopt --stage develop\n```\n\n- `card adopt` 会自动携带继承的 `HC_TERMINAL_ID` 与 `HC_SESSION` 运行时上下文。\n- `AppServer` 校验所属 Core、主机、活跃 PTY、Profile 与工作区后，将卡片移入 `develop`（`reason: \"agent_adopted_stage\"`）且不触发重复调度，并把当前活终端直接绑定到 `WorkflowRun`。\n- 后续 Agent 调用 `canban report --state completed` 时，卡片会自动顺滑推进至 `Review` 与 `Queue Merge`。"
+        },
+        {
+          "id": "canban-cli",
+          "heading": "注入的 canban CLI 常用命令",
+          "markdown": "Canban 会为每个启动的 Agent 与卡片终端自动注入 `CANBAN_CLI`、`CANBAN_ENDPOINT`、`CANBAN_HOME`、`CANBAN_CARD`、`CARD_ID`、`CANBAN_PROJECT`、`CANBAN_PROFILE_ID` 和 `CANBAN_RUN_DIR`：\n\n```sh\n# 查看或更新当前卡片\n\"$CANBAN_CLI\" card show --fields number,title,body,stage,revision\n\"$CANBAN_CLI\" card update [--title '新标题'] --file \"$CANBAN_RUN_DIR/card.md\"\n\n# 上报执行结果（completed | backlog | blocked | failed | working）\n\"$CANBAN_CLI\" report --state completed --message '摘要' --file \"$CANBAN_RUN_DIR/report.md\"\n\n# 回复运行中的追问，而不结束当前主任务\n\"$CANBAN_CLI\" reply --to <QUESTION_ID> --file \"$CANBAN_RUN_DIR/reply.md\"\n\n# 暂存本地 Diff 审查草稿（不直接发往 GitHub）\n\"$CANBAN_CLI\" review draft --file \"$CANBAN_RUN_DIR/review_draft.json\"\n\n# 调用任意 AppServer JSON-RPC 方法\n\"$CANBAN_CLI\" call card.list '{\"project_id\":\"<PROJECT_ID>\",\"stage\":\"develop\",\"limit\":50}'\n```"
+        }
+      ]
+    },
+    "docs/remote-hosts": {
+      "eyebrow": "CANBAN // 文档 // 远程主机",
+      "title": "远程 Linux 主机、Tailscale 与 SSH",
+      "meta_title": "Canban 远程主机 — Headless Linux canband、Tailscale TCP 与 SSH",
+      "description": "在无桌面 Linux 服务器部署 24/7 运行的 canband 守护进程，并通过 Tailscale 直连 TCP 或 SSH 从 Canban.app 同时管理多台主机。",
+      "intro": "单个 Canban.app 桌面端可以同时连接本机（`This Mac`）和一台或多台远程 Linux / macOS `canband` 主机，在 Tailscale 直连或 SSH 隧道下无缝工作。",
+      "breadcrumbs": [["文档", "docs"], ["远程主机", "docs/remote-hosts"]],
+      "sections": [
+        {
+          "id": "multi-host-model",
+          "heading": "多主机同时在线与离线容灾",
+          "markdown": "每台主机运行独立的 `canband` 与本地 `herdr-core`（`hc`），各自持有 SQLite WAL 数据库、项目、卡片、工作流引擎、调度器与 Git Worktree：\n\n- **7×24 小时自主推进**：即使你的 MacBook 休眠或断网，远程 `canband` 仍会继续推进卡片、收集 Agent 报告、执行 FIFO Queue Merge 并轮询关联的 GitHub 仓库。\n- **统一看板与通知聚合**：桌面客户端通过 `HostRegistry` 聚合所有主机的项目与终端，按 `host_id` 自动路由操作，并在全局 `⌘I` 面板统一展示跨主机的 `Needs you` 与进度更新。\n- **离线快照缓存**：每次成功拉取的远程快照都会原子缓存到 `<local-home>/cache/hosts/<host_id>.json`。断网时仍可在 `Offline · Cached` 只读模式下浏览远程看板与报告。"
+        },
+        {
+          "id": "headless-install",
+          "heading": "部署 Headless Linux canband",
+          "markdown": "在没有桌面环境的 Linux（`x86_64` / `aarch64`）服务器上安装无 GTK4 依赖的独立 `canban`，并注册 `systemd --user` 常驻服务：\n\n```sh\ncurl -fsSL https://canban.dev/install.sh | bash -s -- --headless\ncanban service install --tailscale --port 7680\ncanban service status\n```\n\n`canban service install` 会尝试开启 `loginctl enable-linger`，保证退出 SSH 后后台服务与 `herdr-core` 会话持续存活。"
+        },
+        {
+          "id": "tailscale-ssh-pairing",
+          "heading": "Tailscale 直连 TCP 与 SSH 配对",
+          "markdown": "Canban 采用 Tailscale 优先的数据面，并结合 SSH 完成一键初始化与兜底转发：\n\n- **Tailscale 直连 TCP（推荐）**：`canban serve --tailscale` 自动绑定主机 Tailscale IPv4（`100.64.0.0/10`，默认端口 `7680`），配置持久化在 `<home>/config/server.json`，首次开启时在 `<home>/server.token`（`0600`）生成 256 位随机 Bearer Token。未鉴权的 `host.probe` 仅返回非敏感身份信息（`server_id`、`hostname`、`platform`、`version`、`api_version`），其余所有 RPC 与 `herdr.connect` 终端字节流均需常量时间校验 Token。\n- **配对 URI 与引导**：在服务器执行 `canban pair [--port 7680]` 可生成 `canban://<addr>:<port>#<token>` 配对链接；或在桌面端 **Connect a Machine** 向导中直接从 `tailscale status --json` / `~/.ssh/config` 发现主机，自动完成 SSH 远程安装与 Token 配对。\n- **SSH 隧道兜底**：对于未安装 Tailscale 的纯 SSH 主机，`Canban.app` 会在本地托管后台 `ssh -L` Unix Socket 转发。"
+        },
+        {
+          "id": "diagnostics",
+          "heading": "内置诊断中心与远程守护进程升级",
+          "markdown": "在桌面端 **Settings → Diagnostics** 中可一键端到端排查本地与远程主机：\n\n- **传输与延迟**：检查 Socket / Tailscale TCP / SSH 隧道状态、RTT（`ms`）与重连记录。\n- **Canban 服务与存储**：查看守护进程 PID、平台、`DESKTOP_API` 匹配度、`systemd --user` / `launchd` 状态与 SQLite WAL 体积。\n- **Herdr 与执行工具链**：检测 `hc` 路径、Core ID、活跃 PTY 数量以及 `git`、`python3`、`tailscale` 和各 Agent 可执行文件状态。\n- **实时日志与更新**：在线查阅 `server.log` / `updater.log`，并在检测到 `ApiMismatch` 时直接触发 `update.daemon`。"
+        }
+      ]
+    },
+    "workflows": {
+      "eyebrow": "CANBAN // 工作流模板",
+      "title": "精选工作流模板（schema 10）",
+      "meta_title": "Canban 工作流模板 — 可直接复制的 development.yaml 示例",
+      "description": "适用于 Canban 的 schema 10 精选 development.yaml 模板：默认交付流水线、并发闸门与批量测试合并队列、@reviewer 门禁及定时 QA。",
+      "intro": "Canban 的每条工作流都由声明式 YAML（`crates/workflow-engine` 当前 `CURRENT = 10`）编译执行。你可以直接复制以下模板到 **Workflows → YAML Source**，在 Visual Studio 中微调，或通过 `canban workflow submit` 提交。",
+      "breadcrumbs": [["工作流模板", "workflows"]],
+      "sections": [
+        {
+          "id": "how-to-apply",
+          "heading": "如何应用模板",
+          "markdown": "1. 在项目 **Workflows → YAML Source** 粘贴并保存（如需作为新项目默认工作流，点击 **Set as default**），或\n2. 使用 CLI 校验并发布：\n\n```sh\ncanban workflow sources --project-id <PROJECT_ID>\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml --check\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml\n```"
+        },
+        {
+          "id": "template-default",
+          "heading": "1. 默认交付流水线（development.yaml）",
+          "markdown": "与 `crates/workflow-engine/src/source.rs` 中的 `default_document` 完全一致：`Backlog` 安静接收需求，进入 `Develop` 自动调度 `@developer`，进入 `Review` 先校验 `external_pr` 安全门禁，受信任分支自动进入 FIFO Queue Merge 并同步远端（`sync_upstream: true`）。\n\n```yaml\nschema: 10\nid: delivery:default\nname: Development\nscope: project\nenabled: true\ncolumns:\n  - id: backlog\n    name: Backlog\n  - id: develop\n    name: Develop\n  - id: review\n    name: Review\non:\n  develop:\n    event: card.column_entered\n    start_at: agent:develop\n    match:\n      column: develop\n  review:\n    event: card.column_entered\n    start_at: condition:external_pr\n    match:\n      column: review\nsteps:\n  - id: agent:develop\n    name: Implement\n    uses: agent\n    with:\n      profile: developer\n    next: move:develop\n  - id: move:develop\n    name: Move to Review\n    uses: card.move\n    with:\n      column: review\n    next: condition:external_pr\n  - id: condition:external_pr\n    name: External PR check\n    uses: condition\n    with:\n      pointer: /card/source_trust\n      equals: external_pr\n      then: approval:review\n      otherwise: deliver:review\n  - id: deliver:review\n    name: Queue merge\n    uses: deliver\n    with:\n      sync_upstream: true\n    next: __end\n    on_changes_requested: agent:develop\n  - id: approval:review\n    name: Human approval\n    uses: approval\n    with:\n      title: External PR; human approval is required before merging\n    next: __end\n    on_changes_requested: agent:develop\n  - id: __end\n    uses: complete\nworkspace:\n  create_worktree: true\n  sync_base: true\n  remote: origin\n```"
+        },
+        {
+          "id": "template-admit-batch",
+          "heading": "2. 并发准入规划 + 批量测试合并队列",
+          "markdown": "新卡片进入 `Backlog` 后自动由 `@planner` 规划（同时通过 `max_ready: 2` 限制就绪队列深度），等待全局有空闲并发槽位（`agent_slot: true`）后自动移入 `Develop` 实现，并在 `Review` 阶段以 `batch_size: 5` 批量集成并运行一次 `cargo test --workspace`。\n\n```yaml\nschema: 10\nid: delivery:gated-batch\nname: Planned & Tested Delivery\nscope: project\nenabled: true\ncolumns:\n  - id: backlog\n    name: Backlog\n  - id: develop\n    name: Develop\n  - id: review\n    name: Review\non:\n  backlog:\n    event: card.column_entered\n    start_at: admit:plan\n    match:\n      column: backlog\n  develop:\n    event: card.column_entered\n    start_at: agent:develop\n    match:\n      column: develop\n  review:\n    event: card.column_entered\n    start_at: condition:external_pr\n    match:\n      column: review\nsteps:\n  - id: admit:plan\n    name: Backlog ready cap\n    uses: admit\n    with:\n      agent_slot: false\n      max_ready: 2\n    next: agent:plan\n  - id: agent:plan\n    name: Plan task\n    uses: agent\n    with:\n      profile: planner\n    next: admit:develop\n  - id: admit:develop\n    name: Wait for free agent\n    uses: admit\n    with:\n      agent_slot: true\n    next: move:backlog\n  - id: move:backlog\n    name: Start Develop\n    uses: card.move\n    with:\n      column: develop\n    next: agent:develop\n  - id: agent:develop\n    name: Implement\n    uses: agent\n    with:\n      profile: developer\n    next: move:develop\n  - id: move:develop\n    name: Move to Review\n    uses: card.move\n    with:\n      column: review\n    next: condition:external_pr\n  - id: condition:external_pr\n    name: External PR check\n    uses: condition\n    with:\n      pointer: /card/source_trust\n      equals: external_pr\n      then: approval:review\n      otherwise: deliver:review\n  - id: deliver:review\n    name: Batch queue merge\n    uses: deliver\n    with:\n      strategy: rebase\n      batch_size: 5\n      test_command: cargo test --workspace\n      sync_upstream: true\n    next: __end\n    on_changes_requested: agent:develop\n  - id: approval:review\n    name: Human approval\n    uses: approval\n    with:\n      title: External PR; human approval is required before merging\n    next: __end\n    on_changes_requested: agent:develop\n  - id: __end\n    uses: complete\nworkspace:\n  create_worktree: true\n  sync_base: true\n  remote: origin\n```"
+        },
+        {
+          "id": "template-reviewer-gate",
+          "heading": "3. 脚本检查 + @reviewer Diff 审查 + 人工审批",
+          "markdown": "先运行不占 Agent 槽位的 `script:check`（通过 `$CANBAN_OUTPUT` 输出门禁结果），再由 `@reviewer` 审查 Diff 并通过 `canban review draft` 暂存行级批注，最终经人工 `approval:review` 确认或打回 `@developer` 返工。\n\n```yaml\nschema: 10\nid: delivery:reviewed\nname: Reviewed Delivery\nscope: project\nenabled: true\ncolumns:\n  - id: backlog\n    name: Backlog\n  - id: develop\n    name: Develop\n  - id: review\n    name: Review\non:\n  develop:\n    event: card.column_entered\n    start_at: agent:develop\n    match:\n      column: develop\n  review:\n    event: card.column_entered\n    start_at: script:check\n    match:\n      column: review\nsteps:\n  - id: agent:develop\n    name: Implement\n    uses: agent\n    with:\n      profile: developer\n    next: move:develop\n  - id: move:develop\n    name: Move to Review\n    uses: card.move\n    with:\n      column: review\n    next: script:check\n  - id: script:check\n    name: Run checks\n    run: |\n      git status --short\n      echo \"gate=ok\" >> \"$CANBAN_OUTPUT\"\n    on_failure: agent:develop\n    next: agent:review\n  - id: agent:review\n    name: Diff review\n    uses: agent\n    with:\n      profile: reviewer\n    next: approval:review\n  - id: approval:review\n    name: Human approval\n    uses: approval\n    with:\n      title: Review @reviewer findings and approve delivery\n    next: deliver:review\n    on_changes_requested: agent:develop\n  - id: deliver:review\n    name: Queue merge\n    uses: deliver\n    with:\n      sync_upstream: true\n    next: __end\n    on_changes_requested: agent:develop\n  - id: __end\n    uses: complete\nworkspace:\n  create_worktree: true\n  sync_base: true\n  remote: origin\n```"
+        },
+        {
+          "id": "template-scheduled-qa",
+          "heading": "4. 定时夜间 QA 巡检（自动建卡 Cron）",
+          "markdown": "在工作日晚间自动触发（`cron: \"30 3 * * 1-5\"`），创建带 `{{date}}` 与 `{{run_number}}` 的 `Develop` 卡片，将执行日志、报告与 Diff 留在时间线中。如需无卡片的全局主机巡检，可使用 `scope: global` 配合 `run:` 脚本与 `on_failure` 升级到 Agent。\n\n```yaml\nschema: 10\nid: nightly_qa:project\nname: Nightly QA\nscope: project\nenabled: true\non:\n  nightly:\n    cron: \"30 3 * * 1-5\"\n    timezone: UTC\n    overlap: skip\n    start_at: run_qa\n    card:\n      column: develop\n      title: \"Nightly QA ({{date}} #{{run_number}})\"\n      body: \"Automated scheduled check for {{workflow}} ({{datetime}}).\"\nsteps:\n  - id: run_qa\n    uses: agent\n    with:\n      profile: developer\n      instruction: Run the test suite, verify regressions, and report findings via $CANBAN_CLI.\n    next: finish\n  - id: finish\n    uses: complete\n```"
+        }
+      ]
+    },
+    "compare": {
+      "eyebrow": "CANBAN // 对比",
+      "title": "架构对比与取舍指南",
+      "meta_title": "Canban 对比 Vibe Kanban、Linear、云端 Agent 与原生终端标签页",
+      "description": "客观剖析 Canban 与 Vibe Kanban、Linear、云端编程 Agent 以及普通终端标签页 / tmux 在架构与适用场景上的差异。",
+      "intro": "不同研发工具针对的约束各不相同。本页基于项目公开文档与调研记录，客观对比各自在运行环境、Agent 托管方式、任务上下文与交付链路上的架构取舍。",
+      "breadcrumbs": [["对比", "compare"]],
+      "sections": [
+        {
+          "id": "overview-matrix",
+          "heading": "核心架构一览",
+          "markdown": "| 维度 | Canban (`canban.dev`) | Vibe Kanban | Linear / 问题跟踪器 | 云端编程 Agent | 原生终端标签 / `tmux` |\n| --- | --- | --- | --- | --- | --- |\n| **运行形态** | Rust 原生客户端（`AppKit/Metal`、`GTK4`）+ 本地/远程 `canband` | 本地服务 + Web 界面 | 云端 SaaS | 云端临时容器/虚拟机 | 本机或 SSH Shell |\n| **Agent 运行方式** | 24 种原生 CLI 运行于 `herdr-core` PTY（`libghostty-vt`） | 关联到 Issue 的独立 Workspace | 外部委派/指派集成 | 云端托管循环 | 直接在 Shell 中启动 CLI |\n| **任务上下文** | SQLite 卡片时间线 + 规格 + 图片 + Diff | Issue 与 Workspace 记录 | 云端 Issue、文档与动态 | Issue / PR 讨论串 | 散落在多个终端和笔记中 |\n| **Git 与交付** | 每卡独立 Worktree + FIFO Queue Merge（`deliver`） | Workspace Git 操作 | 依赖外部 Git 托管平台 PR | 远端创建 PR 供审阅 | 手动执行 `git worktree` 与 `rebase` |\n| **离线 / 本地优先** | 是（本地 SQLite + 远程主机离线快照缓存） | 本地服务 | 强依赖云端 | 强依赖云端 | 是 |"
+        },
+        {
+          "id": "vs-vibe-kanban",
+          "heading": "Canban vs. Vibe Kanban",
+          "markdown": "两者都将 Kanban 任务卡片与隔离的 Agent 工作区结合在一起：\n\n- **架构差异**：Canban 采用 Rust 原生桌面客户端（`NSH` + `libghostty-vt`），由 `herdr-core` 托管持久 PTY，内置 `schema: 10` Visual Studio / YAML 工作流引擎（`admit`、`script`、`condition`、`approval`、`deliver`）以及带有 `@merger` 冲突自愈的串行 FIFO 批量合并队列。操作方向语义清晰：`deliver` 明确将卡片工作树集成到目标分支并可选同步远端。\n- **取舍**：Vibe Kanban 的 Web 界面可以在任意浏览器访问；Canban 面向 macOS（`13.0+` Apple Silicon）与 Linux（`x86_64` / `arm64`）原生桌面端，并可直连 Headless Linux `canband` 服务器。"
+        },
+        {
+          "id": "vs-linear",
+          "heading": "Canban vs. Linear 与云端协作看板",
+          "markdown": "Linear 擅长跨团队产品规划、路线图、迭代周期以及多人在线协作。\n\n- **架构差异**：Canban 聚焦于**个人或本机/自有服务器上的执行级 Human Context**，将每张卡片直接绑定到 Git Worktree、活跃的 `herdr-core` Agent 终端、检查脚本、Diff 审查与合并队列，同时支持同步 GitHub Issues 与 PR。\n- **取舍**：如果你需要组织级多租户权限体系、跨团队排期统计与非研发角色协同，Linear 更适合作为主数据源；Canban 更适合将任务真正落地到代码分支与本地/远程执行机。"
+        },
+        {
+          "id": "vs-cloud-agents",
+          "heading": "Canban vs. 云端编程 Agent",
+          "markdown": "云端编程 Agent（如 GitHub Copilot coding agent）通常从云端 Issue 启动临时容器并最终发起 PR。\n\n- **架构差异**：Canban 直接在你的 Mac 或通过 Tailscale/SSH 连接的常驻 Linux 服务器上运行已安装的原生 CLI（`claude`、`codex`、`agy`、`gemini`、`opencode`、`cursor-agent` 等），无需等待云端容器冷启动，也保留你的本地工具链、私有依赖、MCP、Skills 与 `canban card adopt` 实时终端接管能力。\n- **取舍**：云端 Agent 无需在本地维护环境；Canban 需要你在执行主机上自行安装 `git`、`herdr-core` 及对应 Agent CLI 的登录凭据。"
+        },
+        {
+          "id": "vs-terminal-tabs",
+          "heading": "Canban vs. 原生终端标签 / tmux + Worktree",
+          "markdown": "直接在 `tmux` 与手动 `git worktree` 中运行 `claude` 或 `codex` 几乎没有前置学习成本。\n\n- **架构差异**：Canban 借助 `libghostty-vt` 与 `herdr-core` 保留同样完整的原生 CLI TUI 体验，同时把原本靠人脑记忆的 Worktree 路径、需求说明、截图、脚本日志、未读提醒与顺序合并收拢到每张卡片中，避免分支错位或重复粘贴上下文。\n- **取舍**：一次性执行简单命令或单文件小改时，直接开一个终端更快；一旦同时推进多张任务卡片、需要跨机器运行或频繁切换分支时，Canban 的结构化卡片与自动合入队列会明显降低心智负担。"
+        }
+      ]
+    }
+  }
+}

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Check the generated website's crawlable content and release trust boundary."""
+"""Check the generated website's crawlable content, GEO mirrors, and release trust boundary."""
 # Copyright 2026 JJy <jjyruby@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import re
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -13,6 +14,12 @@ from urllib.parse import unquote, urlsplit
 
 import website
 
+BUILTIN_24_CLI_IDS = (
+    "codex", "claude", "agy", "gemini", "opencode", "cursor", "pi", "omp",
+    "copilot", "droid", "amp", "kimi", "kiro", "qwen", "devin", "cline",
+    "grok", "hermes", "kilo", "qodercli", "letta", "mastracode", "maki", "muse",
+)
+
 
 class Page(HTMLParser):
     def __init__(self, text):
@@ -21,17 +28,37 @@ class Page(HTMLParser):
         self.visible_text = []
         self.scripts = []
         self.in_script = False
+        self.ch1_links = []
+        self._in_ch0 = False
+        self._ch0_depth = 0
+        self._in_ch1_nav = False
         self.feed(text)
 
     def handle_starttag(self, tag, attrs):
-        self.elements.append((tag, dict(attrs)))
+        attr_map = dict(attrs)
+        self.elements.append((tag, attr_map))
+        if tag == "section" and attr_map.get("id") == "ch-0":
+            self._in_ch0 = True
+            self._ch0_depth = 1
+        elif self._in_ch0:
+            self._ch0_depth += 1
+        if self._in_ch0 and tag == "nav" and "ch1-links" in attr_map.get("class", "").split():
+            self._in_ch1_nav = True
+        if self._in_ch1_nav and tag == "a" and attr_map.get("href"):
+            self.ch1_links.append(attr_map["href"])
         if tag == "script":
             self.in_script = True
-            self.scripts.append((dict(attrs), ""))
+            self.scripts.append((attr_map, ""))
 
     def handle_endtag(self, tag):
         if tag == "script":
             self.in_script = False
+        if self._in_ch1_nav and tag == "nav":
+            self._in_ch1_nav = False
+        if self._in_ch0:
+            self._ch0_depth -= 1
+            if self._ch0_depth <= 0:
+                self._in_ch0 = False
 
     def handle_data(self, data):
         if self.in_script:
@@ -58,8 +85,10 @@ class WebsiteTest(unittest.TestCase):
         cls.temp.cleanup()
 
     def test_localized_content_metadata_and_language_pairs_without_javascript(self):
+        pages_json = website.load("pages.json")
+        locales_json = website.load("locales.json")
         for lang in ("en", "zh"):
-            for section in ("", "install", "changelog"):
+            for section in website.PAGES:
                 with self.subTest(lang=lang, section=section):
                     route = website.route(lang, section)
                     text = (self.output / route.lstrip("/") / "index.html").read_text()
@@ -69,10 +98,16 @@ class WebsiteTest(unittest.TestCase):
                     self.assertEqual(page.attrs("link", rel="canonical"), [{"rel": "canonical", "href": website.ORIGIN + route}])
                     for code, target in (("en", "en"), ("zh-CN", "zh"), ("x-default", "en")):
                         self.assertEqual(page.attrs("link", rel="alternate", hreflang=code)[0]["href"], website.ORIGIN + website.route(target, section))
+                    md_alts = page.attrs("link", rel="alternate", type="text/markdown")
+                    self.assertEqual(len(md_alts), 1)
+                    self.assertEqual(md_alts[0]["href"], website.ORIGIN + website.md_route(lang, section))
                     self.assertEqual(page.attrs("meta", property="og:url")[0]["content"], website.ORIGIN + route)
                     self.assertEqual(page.attrs("meta", property="og:locale")[0]["content"], "zh_CN" if lang == "zh" else "en_US")
-                    self.assertNotIn("{{", text)
+                    self.assertIsNone(re.search(r"\{\{(?:en|zh|install|docs|workflows|compare|changelog)_url\}\}", text))
+                    if section != "workflows":
+                        self.assertNotIn("{{", text)
                     self.assertNotIn("localStorage", text)
+
                     for attrs, script in page.scripts:
                         if attrs.get("type") == "application/ld+json":
                             graph = json.loads(script)["@graph"]
@@ -81,39 +116,102 @@ class WebsiteTest(unittest.TestCase):
                             self.assertEqual(software["softwareVersion"], self.releases[0]["tag_name"])
                             self.assertEqual(software["dateModified"], self.releases[0]["published_at"])
                             self.assertEqual(software["releaseNotes"], website.ORIGIN + website.route(lang, "changelog"))
-                            webpage = by_type["CollectionPage" if section == "changelog" else "WebPage"]
-                            self.assertEqual(webpage["url"], website.ORIGIN + route)
-                            if not section:
-                                self.assertIn("featureList", software)
-                                self.assertNotIn("FAQPage", by_type)
-                                self.assertNotIn("BreadcrumbList", by_type)
-                            else:
+
+                            if section in website.DOC_PAGES:
+                                article = by_type["TechArticle"]
+                                self.assertEqual(article["url"], website.ORIGIN + route)
+                                self.assertEqual(article["inLanguage"], "zh-CN" if lang == "zh" else "en")
+                                self.assertEqual(article["dateModified"], self.releases[0]["published_at"])
                                 self.assertIn("BreadcrumbList", by_type)
-                            if section == "install":
-                                faq = by_type["FAQPage"]
-                                expected_faqs = [
-                                    (q, a) for q, a in website.load("pages.json")[lang]["faq_items"]
-                                ]
-                                actual_faqs = [
-                                    (item["name"], item["acceptedAnswer"]["text"])
-                                    for item in faq["mainEntity"]
-                                ]
-                                self.assertEqual(actual_faqs, expected_faqs)
-                            elif section == "changelog":
+                                expected_crumbs = 3 if section.startswith("docs/") else 2
+                                self.assertEqual(len(by_type["BreadcrumbList"]["itemListElement"]), expected_crumbs)
                                 self.assertNotIn("FAQPage", by_type)
+                            else:
+                                webpage = by_type["CollectionPage" if section == "changelog" else "WebPage"]
+                                self.assertEqual(webpage["url"], website.ORIGIN + route)
+                                if not section:
+                                    self.assertIn("featureList", software)
+                                    self.assertNotIn("FAQPage", by_type)
+                                    self.assertNotIn("BreadcrumbList", by_type)
+                                else:
+                                    self.assertIn("BreadcrumbList", by_type)
+                                if section == "install":
+                                    faq = by_type["FAQPage"]
+                                    expected_faqs = [
+                                        (q, a) for q, a in pages_json[lang]["faq_items"]
+                                    ]
+                                    actual_faqs = [
+                                        (item["name"], item["acceptedAnswer"]["text"])
+                                        for item in faq["mainEntity"]
+                                    ]
+                                    self.assertEqual(actual_faqs, expected_faqs)
+                                elif section == "changelog":
+                                    self.assertNotIn("FAQPage", by_type)
                         if attrs.get("type") == "application/json":
                             self.assertIn("copied_label", json.loads(script))
+
+                    visible = " ".join(page.visible_text)
                     if section == "install":
-                        visible = " ".join(page.visible_text)
-                        for question, answer in website.load("pages.json")[lang]["faq_items"]:
+                        for question, answer in pages_json[lang]["faq_items"]:
                             self.assertIn(question, visible)
                             self.assertIn(answer, visible)
                         self.assertIn("Herdr", visible)
                         self.assertIn(website.HEADLESS, visible)
                     if not section:
-                        self.assertIn(website.load("locales.json")[lang]["hero_subtitle"], " ".join(page.visible_text))
+                        self.assertIn(locales_json[lang]["hero_subtitle"], visible)
                         self.assertEqual(len(page.attrs("title")), 1)
                         self.assertIn("Kanban + Workflow + Herdr", text)
+                        expected_ch1 = {
+                            website.route(lang, hub)
+                            for hub in ("install", "docs", "workflows", "compare", "changelog")
+                        }
+                        self.assertEqual(set(page.ch1_links), expected_ch1)
+
+    def test_markdown_mirrors_and_geo_files(self):
+        for lang in ("en", "zh"):
+            for section in website.PAGES:
+                with self.subTest(lang=lang, section=section):
+                    md_path = self.output / website.md_route(lang, section).lstrip("/")
+                    self.assertTrue(md_path.is_file(), md_path)
+                    content = md_path.read_text()
+                    self.assertTrue(content.startswith("# "), md_path)
+                    self.assertNotIn("<script", content)
+
+        agents_md = (self.output / "docs/agents.md").read_text()
+        for cli_id in BUILTIN_24_CLI_IDS:
+            self.assertIn(f"`{cli_id}`", agents_md)
+        self.assertIn("canban card adopt", agents_md)
+        self.assertIn("libghostty-vt", agents_md)
+
+        workflows_doc_md = (self.output / "docs/workflows.md").read_text()
+        for term in ("development.yaml", "admit", "script", "deliver", "external_pr", "schema: 10"):
+            self.assertIn(term, workflows_doc_md)
+
+        remote_md = (self.output / "docs/remote-hosts.md").read_text()
+        for term in ("canband", "Tailscale", "SSH", "--headless"):
+            self.assertIn(term, remote_md)
+
+        workflows_md = (self.output / "workflows.md").read_text()
+        self.assertGreaterEqual(workflows_md.count("schema: 10"), 4)
+
+        compare_md = (self.output / "compare.md").read_text()
+        for competitor in ("Vibe Kanban", "Linear", "Cloud Coding Agents", "Terminal Tabs"):
+            self.assertIn(competitor, compare_md)
+
+        llms_txt = (self.output / "llms.txt").read_text()
+        self.assertIn("https://canban.dev/llms-full.txt", llms_txt)
+        self.assertIn("Canban = Kanban + Workflow + Herdr", llms_txt)
+        for slug in ("install", "docs", "docs/workflows", "docs/agents", "docs/remote-hosts", "workflows", "compare", "changelog"):
+            self.assertIn(f"https://canban.dev/{slug}.md", llms_txt)
+
+        llms_full = (self.output / "llms-full.txt").read_text()
+        self.assertIn("Canban = Kanban + Workflow + Herdr", llms_full)
+        self.assertIn("canban card adopt", llms_full)
+        self.assertIn("batch report", llms_full)
+        self.assertIn("review draft", llms_full)
+        self.assertIn("worktree gc", llms_full)
+        for cli_id in BUILTIN_24_CLI_IDS:
+            self.assertIn(f"`{cli_id}`", llms_full)
 
     def test_links_assets_and_fragments_resolve(self):
         for source in self.output.rglob("*.html"):
@@ -137,7 +235,7 @@ class WebsiteTest(unittest.TestCase):
         ns = {"s": "http://www.sitemaps.org/schemas/sitemap/0.9", "x": "http://www.w3.org/1999/xhtml"}
         tree = ET.parse(self.output / "sitemap.xml")
         entries = tree.findall("s:url", ns)
-        expected = {website.ORIGIN + website.route(lang, page) for lang in ("en", "zh") for page in ("", "install", "changelog")}
+        expected = {website.ORIGIN + website.route(lang, page) for lang in ("en", "zh") for page in website.PAGES}
         self.assertEqual({entry.find("s:loc", ns).text for entry in entries}, expected)
         for entry in entries:
             self.assertEqual(entry.find("s:lastmod", ns).text, self.releases[0]["published_at"][:10])
@@ -156,6 +254,17 @@ class WebsiteTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             website.published_releases([dict(release, html_url="https://example.com/")])
 
+    def test_doc_markdown_escapes_html_and_rejects_unsafe_links(self):
+        rendered = website.doc_markdown(
+            '<script>alert(1)</script>\n\n[ok](/docs/)\n[bad](javascript:alert(1))\n\n```yaml\nschema: 10\n```',
+            website.load("pages.json")["en"],
+        )
+        self.assertNotIn("<script>", rendered)
+        self.assertIn('<a href="/docs/">ok</a>', rendered)
+        self.assertNotIn('href="javascript:', rendered)
+        self.assertIn('class="code-block"', rendered)
+        self.assertIn('data-copy-value="schema: 10"', rendered)
+
     def test_installer_is_canonical_and_history_is_rendered(self):
         self.assertEqual((self.output / "install.sh").read_bytes(), (website.ROOT / "scripts/install.sh").read_bytes())
         for lang in ("en", "zh"):
@@ -169,6 +278,12 @@ class WebsiteTest(unittest.TestCase):
                   dict(base, tag_name="20261118-10"), dict(base, tag_name="20261117-99")]
         self.assertEqual([item["tag_name"] for item in website.published_releases(values)],
                          ["20261118-10", "20261118-2", "20261117-99"])
+
+
+    def test_catalog_24_matches_rust_source(self):
+        catalog_src = (website.ROOT / "crates/profiles/src/catalog.rs").read_text()
+        found = re.findall(r'CatalogEntry\s*\{\s*id:\s*"([^"]+)"', catalog_src)
+        self.assertEqual(tuple(found), BUILTIN_24_CLI_IDS)
 
 
 if __name__ == "__main__":
