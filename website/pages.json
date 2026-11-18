@@ -11,6 +11,14 @@
     "install_title": "Install Canban",
     "install_desc": "Install or update Canban on macOS and Linux, set up a headless server, and find answers to common questions.",
     "install_intro": "A native workbench on your desktop. Persistent agents on your server.",
+    "install_screenshot": {
+      "src": "/screenshots/board-terminal.png",
+      "alt": "Canban macOS desktop app showing Card #2 in Develop with an isolated Git worktree, activity comments, workflow pipeline status, and a live Herdr @developer terminal running cargo test.",
+      "caption": "Canban desktop workbench: Card #2 specification, workflow progress bar, and live @developer Herdr PTY terminal side by side.",
+      "width": 2880,
+      "height": 1800,
+      "lazy": false
+    },
     "requirements": "Before you begin",
     "requirements_text": "Install Git and your chosen agent CLI, and complete the agent’s authentication. Canban uses Herdr Core (hc) to run persistent terminal sessions and guides you through setup on first launch if it is missing.",
     "desktop": "Desktop",
@@ -75,6 +83,14 @@
     "install_title": "安装 Canban",
     "install_desc": "在 macOS 和 Linux 上安装或更新 Canban，配置无桌面的远程服务器，并查看常见问题解答。",
     "install_intro": "桌面上的原生工作台，服务器上持续运行的 Agent。",
+    "install_screenshot": {
+      "src": "/screenshots/board-terminal.png",
+      "alt": "Canban macOS 桌面应用界面：Develop 列中的 Card #2 展示独立 Git Worktree、活动时间线、工作流进度条，以及右侧运行 cargo test 的实时 Herdr @developer 终端。",
+      "caption": "Canban 桌面工作台：左侧集中呈现卡片规格、工作流状态与讨论，右侧实时运行 @developer Herdr PTY 终端。",
+      "width": 2880,
+      "height": 1800,
+      "lazy": false
+    },
     "requirements": "开始之前",
     "requirements_text": "安装 Git 和你选择的 Agent CLI，并完成 Agent 自身的登录或 API 配置。Canban 使用 Herdr Core（hc）运行持久终端会话；首次启动时会引导安装缺失的 Herdr Core。",
     "desktop": "桌面版",

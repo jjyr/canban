@@ -30,7 +30,11 @@
         "https://github.com/jjyr/canban"
       ],
       "image": "https://canban.dev/og-image.png",
-      "screenshot": "https://canban.dev/og-image.png",
+      "screenshot": [
+        "https://canban.dev/screenshots/board-terminal.png",
+        "https://canban.dev/screenshots/workflow-studio.png",
+        "https://canban.dev/screenshots/review-diff.png"
+      ],
       "applicationCategory": "DeveloperApplication",
       "applicationSubCategory": "AI Coding Agent Workbench & Kanban Board",
       "operatingSystem": "macOS 13.0+, Linux (x86_64, arm64)",

@@ -22,7 +22,7 @@ Static product site for [https://canban.dev/](https://canban.dev/), deployed via
 - `releases.json` — checked-in published-release snapshot for deterministic offline builds. Refresh it intentionally when updating the snapshot; deployments fetch current releases independently.
 - `../scripts/website.py` — generator, release fetching/filtering, conservative escaped Markdown rendering (including tables and copyable code blocks for trusted docs), `.md` mirror emitter, and `llms-full.txt` bundler.
 - `install.sh` — source compatibility symlink. The generator copies the canonical `../scripts/install.sh` into the output.
-- `CNAME`, icons, `og-image.png`, `site.webmanifest`, `robots.txt`, `llms.txt` — public assets. Templates and content JSON are not deployed.
+- `CNAME`, icons, `og-image.png`, `screenshots/`, `site.webmanifest`, `robots.txt`, `llms.txt` — public assets. Templates and content JSON are not deployed.
 
 ## Build and preview
 

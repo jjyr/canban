@@ -124,6 +124,13 @@ class WebsiteTest(unittest.TestCase):
                             self.assertEqual(software["softwareVersion"], self.releases[0]["tag_name"])
                             self.assertEqual(software["dateModified"], self.releases[0]["published_at"])
                             self.assertEqual(software["releaseNotes"], website.ORIGIN + website.route(lang, "changelog"))
+                            screenshots = software["screenshot"]
+                            self.assertIsInstance(screenshots, list)
+                            self.assertEqual(len(screenshots), 3)
+                            for shot_url in screenshots:
+                                self.assertTrue(shot_url.startswith(website.ORIGIN + "/screenshots/"), shot_url)
+                                shot_path = self.output / urlsplit(shot_url).path.lstrip("/")
+                                self.assertTrue(shot_path.is_file(), shot_path)
 
                             if section in website.DOC_PAGES:
                                 article = by_type["TechArticle"]
@@ -176,6 +183,26 @@ class WebsiteTest(unittest.TestCase):
                             for hub in ("install", "docs", "workflows", "compare", "changelog")
                         }
                         self.assertEqual(set(page.ch1_links), expected_ch1)
+                        self.assertFalse([img for img in page.attrs("img") if img.get("src", "").startswith("/screenshots/")])
+
+                    expected_screenshots = {
+                        "install": ("/screenshots/board-terminal.png", False),
+                        "docs": ("/screenshots/review-diff.png", True),
+                        "docs/workflows": ("/screenshots/workflow-studio.png", True),
+                        "docs/agents": ("/screenshots/board-terminal.png", True),
+                        "workflows": ("/screenshots/workflow-studio.png", True),
+                    }
+                    if section in expected_screenshots:
+                        expected_src, expect_lazy = expected_screenshots[section]
+                        shot_imgs = [img for img in page.attrs("img") if img.get("src") == expected_src]
+                        self.assertEqual(len(shot_imgs), 1, (lang, section))
+                        self.assertEqual(shot_imgs[0].get("width"), "2880")
+                        self.assertEqual(shot_imgs[0].get("height"), "1800")
+                        self.assertTrue(shot_imgs[0].get("alt"), (lang, section))
+                        if expect_lazy:
+                            self.assertEqual(shot_imgs[0].get("loading"), "lazy", (lang, section))
+                        else:
+                            self.assertNotIn("loading", shot_imgs[0], (lang, section))
 
     def test_markdown_mirrors_and_geo_files(self):
         for lang in ("en", "zh"):
@@ -224,6 +251,19 @@ class WebsiteTest(unittest.TestCase):
             self.assertIn(f"`{cli_id}`", llms_full)
 
     def test_links_assets_and_fragments_resolve(self):
+        expected_screenshots = {
+            "board-terminal.png",
+            "workflow-studio.png",
+            "review-diff.png",
+        }
+        source_shots = {path.name for path in (website.SOURCE / "screenshots").glob("*.png")}
+        self.assertEqual(source_shots, expected_screenshots)
+        for name in expected_screenshots:
+            built_shot = self.output / "screenshots" / name
+            self.assertTrue(built_shot.is_file(), built_shot)
+            self.assertEqual(built_shot.read_bytes(), (website.SOURCE / "screenshots" / name).read_bytes())
+
+        referenced_screenshots = set()
         for source in self.output.rglob("*.html"):
             page = Page(source.read_text())
             base = "/" + str(source.parent.relative_to(self.output))
@@ -231,6 +271,8 @@ class WebsiteTest(unittest.TestCase):
                 url = attrs.get("href") or attrs.get("src")
                 if not url or urlsplit(url).scheme or url.startswith("//"):
                     continue
+                if tag == "img" and url.startswith("/screenshots/"):
+                    referenced_screenshots.add(url)
                 parts = urlsplit(url)
                 path = unquote(parts.path)
                 destination = self.output / path.lstrip("/") if path.startswith("/") else self.output / base.lstrip("/") / path
@@ -240,6 +282,7 @@ class WebsiteTest(unittest.TestCase):
                 if parts.fragment and destination.suffix == ".html":
                     ids = [attrs.get("id") for _, attrs in Page(destination.read_text()).elements]
                     self.assertIn(parts.fragment, ids, (source, url))
+        self.assertEqual(referenced_screenshots, {f"/screenshots/{name}" for name in expected_screenshots})
 
     def test_sitemap_has_all_canonical_pages_and_reciprocal_alternates(self):
         ns = {"s": "http://www.sitemaps.org/schemas/sitemap/0.9", "x": "http://www.w3.org/1999/xhtml"}

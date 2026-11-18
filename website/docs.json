@@ -48,7 +48,15 @@
         {
           "id": "formula",
           "heading": "Why Canban = Kanban + Workflow + Herdr",
-          "markdown": "1. **Kanban maintains Human Context**: Feature specs, pasted screenshots, `#Card` and GitHub Issue/PR references, `@Agent` discussions, structured reports, and diffs stay together on each Card.\n2. **Workflow automates worktrees and delivery**: Dragging a Card into `Develop` allocates an isolated Git worktree (`<dir>-<proj4>/<card-number>`) and runs your workflow graph; `Review` integrates changes through a serialized FIFO Queue Merge.\n3. **Herdr runs native Agent CLIs without interference**: Keep your CLI's native TUI, MCP servers, skills, permissions, and exact-ID session resume intact."
+          "markdown": "1. **Kanban maintains Human Context**: Feature specs, pasted screenshots, `#Card` and GitHub Issue/PR references, `@Agent` discussions, structured reports, and diffs stay together on each Card.\n2. **Workflow automates worktrees and delivery**: Dragging a Card into `Develop` allocates an isolated Git worktree (`<dir>-<proj4>/<card-number>`) and runs your workflow graph; `Review` integrates changes through a serialized FIFO Queue Merge.\n3. **Herdr runs native Agent CLIs without interference**: Keep your CLI's native TUI, MCP servers, skills, permissions, and exact-ID session resume intact.",
+          "screenshot": {
+            "src": "/screenshots/review-diff.png",
+            "alt": "Canban Git diff inspector for Card #1 worktree showing commit history, changed Rust files, inline diff lines, Copy Markdown, and the Review & Send to @Agent button.",
+            "caption": "Built-in worktree diff review in Canban: inspect commits and inline hunks, add line comments, and hand off findings directly with Review & Send to @Agent.",
+            "width": 2880,
+            "height": 1800,
+            "lazy": true
+          }
         },
         {
           "id": "cli-quickstart",
@@ -68,7 +76,15 @@
         {
           "id": "visual-studio",
           "heading": "Visual Studio & SQLite single source of truth",
-          "markdown": "Open **Workflows** in any Project header to switch between **Visual Studio**, **YAML Source**, **History**, and **Edit with agent**:\n\n- **Stage Execution Graph**: Renders one swimlane per Board column (`Backlog`, `Develop`, `Review`, or custom `columns`) directly from the YAML graph (`schema: 10` is `CURRENT`, with linear migrations from `1..=10`).\n- **Inline Automation & Step Inspector**: Toggle Backlog auto-analyze or auto-start, Review Queue Merge vs. Manual Approval, and Upstream Sync (`sync_upstream`) directly on stage lanes, or inspect individual step prompts, scripts, timeouts, and environment variables.\n- **SQLite Storage**: Sources and immutable revisions live inside `canban.sqlite` rather than generating hidden YAML files in `~/.canban`. Use `canban workflow export` and `canban workflow submit` when editing external files.\n- **Frozen Run Revisions**: Each `WorkflowRun` captures the active revision at creation, so publishing new YAML never mutates in-flight runs."
+          "markdown": "Open **Workflows** in any Project header to switch between **Visual Studio**, **YAML Source**, **History**, and **Edit with agent**:\n\n- **Stage Execution Graph**: Renders one swimlane per Board column (`Backlog`, `Develop`, `Review`, or custom `columns`) directly from the YAML graph (`schema: 10` is `CURRENT`, with linear migrations from `1..=10`).\n- **Inline Automation & Step Inspector**: Toggle Backlog auto-analyze or auto-start, Review Queue Merge vs. Manual Approval, and Upstream Sync (`sync_upstream`) directly on stage lanes, or inspect individual step prompts, scripts, timeouts, and environment variables.\n- **SQLite Storage**: Sources and immutable revisions live inside `canban.sqlite` rather than generating hidden YAML files in `~/.canban`. Use `canban workflow export` and `canban workflow submit` when editing external files.\n- **Frozen Run Revisions**: Each `WorkflowRun` captures the active revision at creation, so publishing new YAML never mutates in-flight runs.",
+          "screenshot": {
+            "src": "/screenshots/workflow-studio.png",
+            "alt": "Canban Workflows Visual Studio showing development.yaml with Backlog, Develop (@developer Implement), and Review (External PR check condition, Human approval, and Queue merge) lanes.",
+            "caption": "Visual Studio for development.yaml: Backlog, Develop (@developer), and Review stages with the /card/source_trust == external_pr branch, Human approval gate, and Rebase · Sync Queue merge.",
+            "width": 2880,
+            "height": 1800,
+            "lazy": true
+          }
         },
         {
           "id": "step-types",
@@ -103,7 +119,15 @@
         {
           "id": "herdr-preservation",
           "heading": "Zero-interference native TUI, MCP & skill preservation",
-          "markdown": "Rather than reimplementing provider chat wrappers or injecting fragile `Stop` hooks, Canban launches your chosen CLI inside a `herdr-core` (`hc`) supervised PTY:\n\n- **Native TUIs & Controls**: Interact directly with the agent's own terminal UI via `libghostty-vt` (rendered in native AppKit/CoreText on macOS and GTK4 on Linux, with SGR/pixel mouse reporting, OSC 8 hyperlinks, and 17 dark themes including Monokai).\n- **MCPs, Skills & Permissions Intact**: Because the real CLI binary executes in the Card worktree with your home configuration, existing MCP servers, custom skills, sandbox flags, and auth logins work unchanged.\n- **Restart-Safe PTYs & Exact Resume**: Closing Canban, restarting `canband`, or live-upgrading the app leaves running `herdr-core` sessions alive. Finished sessions can resume exact provider conversation IDs (`--resume`, `--session`, or `--conversation`) when supported.\n- **Global Scheduler Budget**: Automatic workflow steps share a configurable concurrency limit (`scheduler.max_agents`, default `8`), while manual shells and `script` steps run outside the agent budget."
+          "markdown": "Rather than reimplementing provider chat wrappers or injecting fragile `Stop` hooks, Canban launches your chosen CLI inside a `herdr-core` (`hc`) supervised PTY:\n\n- **Native TUIs & Controls**: Interact directly with the agent's own terminal UI via `libghostty-vt` (rendered in native AppKit/CoreText on macOS and GTK4 on Linux, with SGR/pixel mouse reporting, OSC 8 hyperlinks, and 17 dark themes including Monokai).\n- **MCPs, Skills & Permissions Intact**: Because the real CLI binary executes in the Card worktree with your home configuration, existing MCP servers, custom skills, sandbox flags, and auth logins work unchanged.\n- **Restart-Safe PTYs & Exact Resume**: Closing Canban, restarting `canband`, or live-upgrading the app leaves running `herdr-core` sessions alive. Finished sessions can resume exact provider conversation IDs (`--resume`, `--session`, or `--conversation`) when supported.\n- **Global Scheduler Budget**: Automatic workflow steps share a configurable concurrency limit (`scheduler.max_agents`, default `8`), while manual shells and `script` steps run outside the agent budget.",
+          "screenshot": {
+            "src": "/screenshots/board-terminal.png",
+            "alt": "Canban Card #2 running a native @developer CLI session inside a persistent Herdr PTY terminal alongside card activity, Hold auto-merge, and workflow progress.",
+            "caption": "Live @developer Herdr PTY running cargo test inside Card #2's isolated Git worktree (acme-api-f4c9/2), waiting for explicit canban report completion.",
+            "width": 2880,
+            "height": 1800,
+            "lazy": true
+          }
         },
         {
           "id": "catalog-24",
@@ -163,7 +187,15 @@
         {
           "id": "how-to-apply",
           "heading": "Apply a template via Studio or CLI",
-          "markdown": "1. Open **Workflows → YAML Source** in your Project (or click **Set as default** to apply to future Projects), or\n2. Validate and submit from the CLI:\n\n```sh\ncanban workflow sources --project-id <PROJECT_ID>\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml --check\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml\n```"
+          "markdown": "1. Open **Workflows → YAML Source** in your Project (or click **Set as default** to apply to future Projects), or\n2. Validate and submit from the CLI:\n\n```sh\ncanban workflow sources --project-id <PROJECT_ID>\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml --check\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml\n```",
+          "screenshot": {
+            "src": "/screenshots/workflow-studio.png",
+            "alt": "Canban Visual Studio and YAML Source controls for development.yaml with Edit with agent, Set as default, and stage lanes for Backlog, Develop, and Review.",
+            "caption": "Switch between Visual Studio, YAML Source, History, and Edit with agent, or click Set as default to apply a workflow template to new Projects.",
+            "width": 2880,
+            "height": 1800,
+            "lazy": true
+          }
         },
         {
           "id": "template-default",
@@ -272,7 +304,15 @@
         {
           "id": "formula",
           "heading": "为什么是 Canban = Kanban + Workflow + Herdr",
-          "markdown": "1. **Kanban 维护 Human Context**：需求说明、粘贴的截图、`#Card` 与 GitHub Issue/PR 引用、`@Agent` 讨论、结构化报告和代码 Diff 都保存在同一张卡片上。\n2. **Workflow 自动调度 Worktree 与交付**：将卡片拖入 `Develop` 自动创建独立 Git Worktree（`<dir>-<proj4>/<card-number>`）并推进工作流图；进入 `Review` 后通过串行 FIFO Queue Merge 完成变基合并。\n3. **Herdr 无干扰运行原生 Agent CLI**：完整保留原生 CLI 的 TUI 交互、MCP Server、Skills、权限确认与精确会话恢复能力。"
+          "markdown": "1. **Kanban 维护 Human Context**：需求说明、粘贴的截图、`#Card` 与 GitHub Issue/PR 引用、`@Agent` 讨论、结构化报告和代码 Diff 都保存在同一张卡片上。\n2. **Workflow 自动调度 Worktree 与交付**：将卡片拖入 `Develop` 自动创建独立 Git Worktree（`<dir>-<proj4>/<card-number>`）并推进工作流图；进入 `Review` 后通过串行 FIFO Queue Merge 完成变基合并。\n3. **Herdr 无干扰运行原生 Agent CLI**：完整保留原生 CLI 的 TUI 交互、MCP Server、Skills、权限确认与精确会话恢复能力。",
+          "screenshot": {
+            "src": "/screenshots/review-diff.png",
+            "alt": "Canban Card #1 工作树 Git Diff 审查视图，展示提交列表、变更 Rust 文件、行内 Diff、Copy Markdown 以及 Review & Send to @Agent 按钮。",
+            "caption": "Canban 内置 Worktree Diff 审查：查看提交与行内代码变更、添加行级批注，并通过 Review & Send to @Agent 直接交给 Agent 处理。",
+            "width": 2880,
+            "height": 1800,
+            "lazy": true
+          }
         },
         {
           "id": "cli-quickstart",
@@ -292,7 +332,15 @@
         {
           "id": "visual-studio",
           "heading": "Visual Studio 与 SQLite 单一数据源",
-          "markdown": "在任意项目顶栏打开 **Workflows**，即可在 **Visual Studio**、**YAML Source**、**History** 与 **Edit with agent** 之间无缝切换：\n\n- **Stage 执行图**：直接根据 YAML 图（当前最新为 `schema: 10`，`crates/workflow-engine/src/migrations.rs` 支持 `1..=10` 线性迁移）为每个看板列（`Backlog`、`Develop`、`Review` 或自定义 `columns`）渲染泳道。\n- **内联自动化开关与节点检查器**：在列内直接切换 Backlog 自动规划/自动准入、Review 队列合并 vs 人工审批、是否同步远端（`sync_upstream`），或选中节点编辑 Prompt、脚本、超时时间与环境变量。\n- **SQLite 存储**：所有工作流源码与版本记录保存在 `canban.sqlite` 中，不会在 `~/.canban` 生成冗余 YAML 镜像；需要导出或提交外部文件时可使用 `canban workflow export` / `submit`。\n- **运行版本冻结**：每个 `WorkflowRun` 在创建时绑定当前修订版本，发布新 YAML 不会篡改正在运行的任务。"
+          "markdown": "在任意项目顶栏打开 **Workflows**，即可在 **Visual Studio**、**YAML Source**、**History** 与 **Edit with agent** 之间无缝切换：\n\n- **Stage 执行图**：直接根据 YAML 图（当前最新为 `schema: 10`，`crates/workflow-engine/src/migrations.rs` 支持 `1..=10` 线性迁移）为每个看板列（`Backlog`、`Develop`、`Review` 或自定义 `columns`）渲染泳道。\n- **内联自动化开关与节点检查器**：在列内直接切换 Backlog 自动规划/自动准入、Review 队列合并 vs 人工审批、是否同步远端（`sync_upstream`），或选中节点编辑 Prompt、脚本、超时时间与环境变量。\n- **SQLite 存储**：所有工作流源码与版本记录保存在 `canban.sqlite` 中，不会在 `~/.canban` 生成冗余 YAML 镜像；需要导出或提交外部文件时可使用 `canban workflow export` / `submit`。\n- **运行版本冻结**：每个 `WorkflowRun` 在创建时绑定当前修订版本，发布新 YAML 不会篡改正在运行的任务。",
+          "screenshot": {
+            "src": "/screenshots/workflow-studio.png",
+            "alt": "Canban Workflows Visual Studio 界面，展示 development.yaml 中的 Backlog、Develop（@developer Implement）与 Review（External PR check 条件分支、Human approval 与 Queue merge）泳道。",
+            "caption": "development.yaml 的 Visual Studio 视图：清晰展示 Backlog、Develop 与 Review 泳道，包含 external_pr 条件分支、人工审批门禁与 Rebase · Sync 队列合入。",
+            "width": 2880,
+            "height": 1800,
+            "lazy": true
+          }
         },
         {
           "id": "step-types",
@@ -327,7 +375,15 @@
         {
           "id": "herdr-preservation",
           "heading": "无干扰保留原生 TUI、MCP 与 Skills",
-          "markdown": "Canban 不会用简陋聊天框替换你的编程工具，也不依赖脆弱的 `Stop` Hook，而是通过 `herdr-core`（`hc`）托管真实 PTY：\n\n- **原生 TUI 与终端渲染**：由 `libghostty-vt` 负责 VT 解析与增量状态同步，macOS 通过 AppKit/CoreText 原生绘制，Linux 通过 GTK4 绘制，支持 SGR/像素鼠标上报、OSC 8 超链接与 Monokai 等 17 套深色配色。\n- **完整保留 MCP、Skills 与权限控制**：CLI 进程直接在卡片对应 Worktree 中以你的本机环境启动，既有的 MCP Server、自定义 Skill、沙箱规则与登录态无需重新配置。\n- **重启不丢会话与精确恢复**：关闭 Canban 窗口、重启 `canband` 或应用在线升级时，`herdr-core` 中的 Agent 进程依然保持运行；已结束的会话也支持按精确会话 ID（`--resume` / `--session` / `--conversation`）恢复上下文。\n- **全局并发预算**：自动工作流步骤共享全局并发上限（`scheduler.max_agents`，默认 `8`），手动 Shell 与 `script` 步骤不占用 Agent 槽位。"
+          "markdown": "Canban 不会用简陋聊天框替换你的编程工具，也不依赖脆弱的 `Stop` Hook，而是通过 `herdr-core`（`hc`）托管真实 PTY：\n\n- **原生 TUI 与终端渲染**：由 `libghostty-vt` 负责 VT 解析与增量状态同步，macOS 通过 AppKit/CoreText 原生绘制，Linux 通过 GTK4 绘制，支持 SGR/像素鼠标上报、OSC 8 超链接与 Monokai 等 17 套深色配色。\n- **完整保留 MCP、Skills 与权限控制**：CLI 进程直接在卡片对应 Worktree 中以你的本机环境启动，既有的 MCP Server、自定义 Skill、沙箱规则与登录态无需重新配置。\n- **重启不丢会话与精确恢复**：关闭 Canban 窗口、重启 `canband` 或应用在线升级时，`herdr-core` 中的 Agent 进程依然保持运行；已结束的会话也支持按精确会话 ID（`--resume` / `--session` / `--conversation`）恢复上下文。\n- **全局并发预算**：自动工作流步骤共享全局并发上限（`scheduler.max_agents`，默认 `8`），手动 Shell 与 `script` 步骤不占用 Agent 槽位。",
+          "screenshot": {
+            "src": "/screenshots/board-terminal.png",
+            "alt": "Canban Card #2 在持久 Herdr PTY 终端中运行原生 @developer CLI 会话，并与卡片讨论、Hold auto-merge 和工作流进度条并排显示。",
+            "caption": "@developer 在 Card #2 的独立 Worktree（acme-api-f4c9/2）中通过 Herdr PTY 运行 cargo test，并等待显式调用 canban report 推进流程。",
+            "width": 2880,
+            "height": 1800,
+            "lazy": true
+          }
         },
         {
           "id": "catalog-24",
@@ -387,7 +443,15 @@
         {
           "id": "how-to-apply",
           "heading": "如何应用模板",
-          "markdown": "1. 在项目 **Workflows → YAML Source** 粘贴并保存（如需作为新项目默认工作流，点击 **Set as default**），或\n2. 使用 CLI 校验并发布：\n\n```sh\ncanban workflow sources --project-id <PROJECT_ID>\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml --check\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml\n```"
+          "markdown": "1. 在项目 **Workflows → YAML Source** 粘贴并保存（如需作为新项目默认工作流，点击 **Set as default**），或\n2. 使用 CLI 校验并发布：\n\n```sh\ncanban workflow sources --project-id <PROJECT_ID>\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml --check\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml\n```",
+          "screenshot": {
+            "src": "/screenshots/workflow-studio.png",
+            "alt": "Canban Visual Studio 与 YAML Source 切换栏，包含 Edit with agent、Set as default 按钮以及 Backlog、Develop 和 Review 阶段泳道。",
+            "caption": "可在 Visual Studio、YAML Source、History 与 Edit with agent 之间切换，或点击 Set as default 将当前模板设为新建项目的默认工作流。",
+            "width": 2880,
+            "height": 1800,
+            "lazy": true
+          }
         },
         {
           "id": "template-default",

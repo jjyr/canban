@@ -326,6 +326,23 @@ def command(text, labels):
       <span class="copy-text">{labels['copy']}</span></button></div>'''
 
 
+def render_screenshot(shot):
+    if not shot:
+        return ""
+    src = html.escape(shot["src"], quote=True)
+    alt = html.escape(shot["alt"], quote=True)
+    caption = html.escape(shot["caption"])
+    width = int(shot.get("width", 2880))
+    height = int(shot.get("height", 1800))
+    loading = ' loading="lazy"' if shot.get("lazy", True) else ""
+    return (
+        f'<figure class="doc-screenshot">'
+        f'<img src="{src}" alt="{alt}" width="{width}" height="{height}" decoding="async"{loading}>'
+        f'<figcaption>{caption}</figcaption>'
+        f'</figure>'
+    )
+
+
 def footer(lang, page, labels):
     return f'''<footer class="doc-footer"><span>Apache-2.0 · © 2026 JJy</span><nav class="page-links">
       <a href="{route(lang, 'install')}">{html.escape(labels['install'])}</a>
@@ -347,9 +364,10 @@ def install_body(lang, labels):
         ("Arch Linux", "sudo pacman -S gtk4 gstreamer gst-plugins-base"),
         ("Fedora", "sudo dnf install gtk4 gstreamer1 gstreamer1-plugins-base"),
     ))
+    intro_shot = render_screenshot(labels.get("install_screenshot"))
     return f'''<div class="doc-shell">{header(lang, 'install', labels)}
     <main id="main" class="doc-main"><div class="doc-intro"><p class="eyebrow">CANBAN // INSTALL</p>
-      <h1>{t('install_title')}</h1><p>{t('install_intro')}</p></div>
+      <h1>{t('install_title')}</h1><p>{t('install_intro')}</p>{intro_shot}</div>
     <section><h2>{t('requirements')}</h2><p>{t('requirements_text')}</p></section>
     <section id="desktop"><h2>{t('desktop')}</h2><p>{t('desktop_text')}</p>{command(DESKTOP, labels)}
       <div class="platform-grid"><article><h3>{t('macos')}</h3><p>{t('macos_text')}</p></article>
@@ -402,14 +420,15 @@ def doc_body(lang, page, spec, labels):
         )
         cards_html = f'<section aria-label="{html.escape(spec["title"])}"><div class="doc-card-grid">{cards}</div></section>'
 
+    intro_shot = render_screenshot(spec.get("screenshot"))
     sections_html = "".join(
         f'<section id="{html.escape(sec["id"], quote=True)}"><h2>{html.escape(sec["heading"])}</h2>'
-        f'{doc_markdown(sec["markdown"], labels)}</section>'
+        f'{doc_markdown(sec["markdown"], labels)}{render_screenshot(sec.get("screenshot"))}</section>'
         for sec in spec["sections"]
     )
     return f'''<div class="doc-shell">{header(lang, page, labels)}
       <main id="main" class="doc-main"><div class="doc-intro">{breadcrumb_nav}<p class="eyebrow">{html.escape(spec['eyebrow'])}</p>
-      <h1>{html.escape(spec['title'])}</h1><p>{inline_markdown(spec['intro'], allow_relative=True)}</p></div>
+      <h1>{html.escape(spec['title'])}</h1><p>{inline_markdown(spec['intro'], allow_relative=True)}</p>{intro_shot}</div>
       {cards_html}{sections_html}</main>{footer(lang, page, labels)}</div>'''
 
 
@@ -597,12 +616,19 @@ def render_home_markdown(lang, strings):
     return "\n".join(lines) + "\n"
 
 
+def screenshot_markdown(shot):
+    if not shot:
+        return []
+    return [f"![{shot['alt']}]({ORIGIN + shot['src']})", "", f"*{shot['caption']}*", ""]
+
+
 def render_install_markdown(lang, labels):
     lines = [
         f"# {labels['install_title']}",
         "",
         f"> {labels['install_intro']}",
         "",
+        *screenshot_markdown(labels.get("install_screenshot")),
         f"## {labels['requirements']}",
         "",
         labels["requirements_text"],
@@ -676,12 +702,14 @@ def render_changelog_markdown(lang, labels, releases):
 
 def render_doc_markdown_mirror(lang, spec):
     lines = [f"# {spec['title']}", "", f"> {spec['intro']}", ""]
+    lines.extend(screenshot_markdown(spec.get("screenshot")))
     if spec.get("cards"):
         for card in spec["cards"]:
             lines.append(f"- [{card['title']}]({ORIGIN + card['href']}): {card['summary']}")
         lines.append("")
     for sec in spec["sections"]:
         lines.extend([f"## {sec['heading']}", "", sec["markdown"].strip(), ""])
+        lines.extend(screenshot_markdown(sec.get("screenshot")))
     return "\n".join(lines)
 
 
@@ -729,6 +757,12 @@ def build(output, releases):
     for source in SOURCE.iterdir():
         if source.suffix in (".css", ".js", ".png", ".svg", ".webmanifest") or source.name in ("CNAME", "robots.txt", "llms.txt"):
             shutil.copyfile(source, output / source.name)
+    screenshots_src = SOURCE / "screenshots"
+    if screenshots_src.is_dir():
+        screenshots_dst = output / "screenshots"
+        screenshots_dst.mkdir(parents=True, exist_ok=True)
+        for shot in sorted(screenshots_src.glob("*.png")):
+            shutil.copyfile(shot, screenshots_dst / shot.name)
     shutil.copyfile(ROOT / "scripts/install.sh", output / "install.sh")
     locales, pages, docs = load("locales.json"), load("pages.json"), load("docs.json")
     latest_release = releases[0] if releases else None
