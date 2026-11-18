@@ -41,6 +41,7 @@ pub enum AnchorEdge {
 pub struct DiffViewport {
     pub scroll: ElementRef,
     pub content: ElementRef,
+    pub bottom_space: Signal<f32>,
 }
 
 #[derive(Clone, Copy)]

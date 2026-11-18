@@ -365,21 +365,16 @@ pub fn expand_context_gap(
         if st.compare_ticket.try_get() != Some(ticket) || st.read_context.with(|v| *v != context) {
             return;
         }
-        st.file_lines_loading.update(|s| {
-            s.remove(&file_key);
-        });
-
-        let payload = match res {
-            Ok(Ok(val)) => val,
-            Ok(Err(err)) => {
-                st.file_lines_errors.update(|m| {
-                    m.insert(file_key.clone(), err);
-                });
-                return;
-            }
+        let payload = match res.map_err(|err| err.to_string()).and_then(|result| result) {
+            Ok(val) => val,
             Err(err) => {
-                st.file_lines_errors.update(|m| {
-                    m.insert(file_key.clone(), err.to_string());
+                batch(|| {
+                    st.file_lines_loading.update(|s| {
+                        s.remove(&file_key);
+                    });
+                    st.file_lines_errors.update(|m| {
+                        m.insert(file_key, err);
+                    });
                 });
                 return;
             }
@@ -403,16 +398,36 @@ pub fn expand_context_gap(
     });
 }
 
+struct ViewportAnchor {
+    scroll_y: f32,
+    line_y: f32,
+    content_overflow: f32,
+}
+
+impl ViewportAnchor {
+    fn new(
+        scroll: nsh_core::Measurement,
+        content: nsh_core::Measurement,
+        anchor: nsh_core::Measurement,
+    ) -> Self {
+        Self {
+            scroll_y: scroll.page.y.0 - content.page.y.0,
+            line_y: anchor.page.y.0 - content.page.y.0,
+            content_overflow: content.frame.size.height.0 - scroll.frame.size.height.0,
+        }
+    }
+}
+
 async fn measure_viewport_anchor(
     vp: super::model::DiffViewport,
     anchor: &ElementRef,
-) -> Option<(f32, f32)> {
+) -> Option<ViewportAnchor> {
     // Queue all three measurements before awaiting so Core answers them in one commit.
     let s = vp.scroll.measure();
     let c = vp.content.measure();
     let a = anchor.measure();
     let (sb, cb, ab) = (s.await?, c.await?, a.await?);
-    Some((sb.page.y.0 - cb.page.y.0, ab.page.y.0 - cb.page.y.0))
+    Some(ViewportAnchor::new(sb, cb, ab))
 }
 
 async fn apply_expanded_with_scroll_anchor(
@@ -447,11 +462,8 @@ async fn apply_expanded_with_scroll_anchor(
                         {
                             let use_below = ab.page.y.0 < sb.page.y.0;
                             let chosen_key = if use_below { below_key } else { above_key };
-                            let chosen_y = if use_below { bb.page.y.0 } else { ab.page.y.0 };
-                            (
-                                Some(chosen_key),
-                                Some((sb.page.y.0 - cb.page.y.0, chosen_y - cb.page.y.0)),
-                            )
+                            let chosen = if use_below { bb } else { ab };
+                            (Some(chosen_key), Some(ViewportAnchor::new(sb, cb, chosen)))
                         } else {
                             (Some(above_key), None)
                         }
@@ -521,6 +533,11 @@ async fn apply_expanded_with_scroll_anchor(
         .with(|c| c.get(&ctx.cache_key()).map(|e| e.total_lines as u64));
 
     batch(|| {
+        // Clearing the loading state rebuilds the rows, so measure the original
+        // anchor first and clear it in the same update that expands the gap.
+        st.file_lines_loading.update(|files| {
+            files.remove(&ctx.key);
+        });
         st.file_lines_revision.update(|n| *n += 1);
         st.expanded_gaps.update(|map| {
             let entry = map.entry((ctx.key.clone(), gap_idx)).or_default();
@@ -567,18 +584,21 @@ async fn apply_expanded_with_scroll_anchor(
         });
     });
 
-    if let (Some(vp), Some(akey), Some((scroll_y_before, anchor_in_content_before))) =
-        (viewport, anchor_key, pre_anchor)
-    {
+    if let (Some(vp), Some(akey), Some(before)) = (viewport, anchor_key, pre_anchor) {
         next_frame().await;
         next_frame().await;
         if let Some(aref) = st.anchor_targets.with(|m| m.get(&akey).copied())
-            && let Some((scroll_y_after, anchor_in_content_after)) =
-                measure_viewport_anchor(vp, &aref).await
+            && let Some(after) = measure_viewport_anchor(vp, &aref).await
         {
-            let target_scroll_y =
-                (scroll_y_before + (anchor_in_content_after - anchor_in_content_before)).max(0.0);
-            if (target_scroll_y - scroll_y_after).abs() > 0.5 {
+            let target_scroll_y = (before.scroll_y + after.line_y - before.line_y).max(0.);
+            if (target_scroll_y - after.scroll_y).abs() > 0.5 {
+                // Short diffs need space after the last file for the native scroll view
+                // to reach the offset that keeps the original hunk in place.
+                let extra = target_scroll_y - after.content_overflow;
+                if extra > 0. {
+                    vp.bottom_space.update(|height| *height += extra);
+                    next_frame().await;
+                }
                 vp.scroll
                     .scroll_to(Point::new(px(0.), px(target_scroll_y)), false);
             }

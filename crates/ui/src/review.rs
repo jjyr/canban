@@ -697,6 +697,9 @@ fn clear_context_expansion(st: State) {
     if st.expanded_gaps.with_untracked(|m| !m.is_empty()) {
         st.expanded_gaps.set(Default::default());
     }
+    if let Some(viewport) = st.viewport.with(|v| *v) {
+        viewport.bottom_space.try_set(0.);
+    }
     if st.file_lines_loading.with_untracked(|s| !s.is_empty()) {
         st.file_lines_loading.set(Default::default());
     }

@@ -65,6 +65,7 @@ pub fn workbench(ui: Ui) -> impl IntoElement {
     let viewport = super::model::DiffViewport {
         scroll: element_ref(),
         content: element_ref(),
+        bottom_space: signal(0.),
     };
     st.viewport.replace(Some(viewport));
     let data = computed(move || {
@@ -142,7 +143,14 @@ pub fn workbench(ui: Ui) -> impl IntoElement {
                                 .flex_1()
                                 .min_h(px(0.))
                                 .min_w(px(0.))
-                                .child(dynamic(move || code_content(ui, &data.get(), login))),
+                                .child(
+                                    view()
+                                        .element_ref(&viewport.content)
+                                        .child(dynamic(move || {
+                                            code_content(ui, &data.get(), login)
+                                        }))
+                                        .child(view().h(move || px(viewport.bottom_space.get()))),
+                                ),
                         ),
                 )
         }),
@@ -371,10 +379,7 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
     };
 
     // Right main diff viewer
-    let content = st
-        .viewport
-        .with(|v| v.expect("diff viewport is mounted").content);
-    let mut diff_column = view().element_ref(&content).gap_3().p_3();
+    let mut diff_column = view().gap_3().p_3();
     st.file_targets.replace(Default::default());
     let collapsed_files = st.collapsed_files.get();
 
@@ -1828,7 +1833,7 @@ mod tests {
         ui.review_state.mode.set("git".into());
         ui.review_state.compare_ref.set("feat/expand".into());
         ui.review_state.compare_data.set(data);
-        view().w(px(1000.)).h(px(420.)).child(workbench(ui))
+        view().w(px(1000.)).h(px(900.)).child(workbench(ui))
     }
 
     struct ProbeTree {
@@ -1836,6 +1841,7 @@ mod tests {
         texts: HashMap<NodeId, String>,
         parents: HashMap<NodeId, NodeId>,
         scroll_nodes: std::collections::HashSet<NodeId>,
+        scroll_content_heights: HashMap<NodeId, f32>,
         scroll_commands: Vec<(NodeId, Point<Points>)>,
     }
 
@@ -1846,6 +1852,7 @@ mod tests {
                 texts: HashMap::new(),
                 parents: HashMap::new(),
                 scroll_nodes: std::collections::HashSet::new(),
+                scroll_content_heights: HashMap::new(),
                 scroll_commands: Vec::new(),
             }
         }
@@ -1869,6 +1876,7 @@ mod tests {
                         self.texts.remove(id);
                         self.parents.remove(id);
                         self.scroll_nodes.remove(id);
+                        self.scroll_content_heights.remove(id);
                         self.labels.retain(|_, node| node != id);
                     }
                     MountItem::Text { id, text, .. } => {
@@ -1885,6 +1893,9 @@ mod tests {
                     } => {
                         self.scroll_commands.push((*id, point(*x, *y)));
                     }
+                    MountItem::ScrollContent { id, size } => {
+                        self.scroll_content_heights.insert(*id, size.height.0);
+                    }
                     _ => {}
                 }
             }
@@ -1898,7 +1909,14 @@ mod tests {
             core.run_component_tasks();
             let had_batch = if let Some(batch) = core.commit() {
                 tree.apply(&batch);
-                for (id, offset) in std::mem::take(&mut tree.scroll_commands) {
+                for (id, mut offset) in std::mem::take(&mut tree.scroll_commands) {
+                    // Match the native scroll view's clamp when the diff is shorter than the viewport.
+                    let viewport_height = core.measure(id).unwrap().frame.size.height.0;
+                    let content_height = tree.scroll_content_heights[&id];
+                    offset.y = px(offset
+                        .y
+                        .0
+                        .clamp(0., (content_height - viewport_height).max(0.)));
                     core.set_scroll_offset(id, offset, u32::MAX);
                 }
                 true
@@ -1941,7 +1959,7 @@ mod tests {
             .build()
             .unwrap();
         let _guard = runtime.enter();
-        let mut core = Core::new(ApproxTextEngine, size(px(1000.), px(420.)));
+        let mut core = Core::new(ApproxTextEngine, size(px(1000.), px(900.)));
         core.set_components(nsh_base::registry());
         core.set_task_runtime(runtime.handle().clone());
         core.mount_root(&nsh_core::element::Root::of::<DiffExpandProbe>());
