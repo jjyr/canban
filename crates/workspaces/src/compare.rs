@@ -1065,6 +1065,180 @@ impl Ops {
         )?;
         Ok(dest)
     }
+
+    /// Reads text lines from a file in the checkout (`workdir`, `index`, or `rev`) for diff context expansion.
+    pub fn git_file_lines(&self, req: FileLinesRequest<'_>) -> Result<Value> {
+        let FileLinesRequest {
+            project,
+            cwd_override,
+            path,
+            source,
+            rev,
+            start_line,
+            end_line,
+        } = req;
+        let rel = path.trim();
+        ensure!(!rel.is_empty(), "File path cannot be empty");
+        ensure!(
+            !rel.starts_with('/') && !rel.starts_with('-') && !rel.contains('\0'),
+            "Invalid relative file path: {rel}"
+        );
+        let rel_path = Path::new(rel);
+        ensure!(!rel_path.is_absolute(), "File path must be relative");
+        for comp in rel_path.components() {
+            ensure!(
+                !matches!(
+                    comp,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                ),
+                "Invalid path component in '{rel}'"
+            );
+        }
+
+        let dir = Path::new(cwd_override.unwrap_or(&project.directory));
+        ensure!(
+            self.host.is_dir(dir),
+            "Comparison directory does not exist: {}",
+            dir.display()
+        );
+
+        const MAX_CONTEXT_FILE_BYTES: usize = 4 * 1024 * 1024;
+
+        let bytes = match source {
+            "workdir" => {
+                let target = dir.join(rel_path);
+                if !self.host.remote() {
+                    let canon_dir = dir
+                        .canonicalize()
+                        .with_context(|| format!("Invalid directory {}", dir.display()))?;
+                    let canon_file = target
+                        .canonicalize()
+                        .with_context(|| format!("File not found: {rel}"))?;
+                    ensure!(
+                        canon_file.starts_with(&canon_dir),
+                        "File path escapes checkout directory"
+                    );
+                    let meta = std::fs::metadata(&canon_file)?;
+                    ensure!(
+                        meta.len() <= MAX_CONTEXT_FILE_BYTES as u64,
+                        "File exceeds 4 MiB context limit"
+                    );
+                    std::fs::read(&canon_file)?
+                } else {
+                    let value = self.host.python(
+                        concat!(
+                            "import base64,json,os,sys;",
+                            "d=os.path.realpath(sys.argv[1]);",
+                            "f=os.path.realpath(os.path.join(d,sys.argv[2]));",
+                            "assert f==d or f.startswith(d+os.sep), 'File path escapes checkout directory';",
+                            "assert os.path.isfile(f), 'File not found';",
+                            "sz=os.path.getsize(f);",
+                            "assert sz<=4*1024*1024, 'File exceeds 4 MiB context limit';",
+                            "data=open(f,'rb').read();",
+                            "print(json.dumps(base64.b64encode(data).decode('ascii')))"
+                        ),
+                        &[&dir.to_string_lossy(), rel],
+                    )?;
+                    use base64::{Engine, engine::general_purpose::STANDARD};
+                    STANDARD.decode(value.as_str().unwrap_or_default())?
+                }
+            }
+            "index" => {
+                let spec = format!(":{rel}");
+                let out = self.git(dir, &["show", &spec])?;
+                ensure!(
+                    out.status.success(),
+                    "git show failed for index file '{rel}': {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+                ensure!(
+                    out.stdout.len() <= MAX_CONTEXT_FILE_BYTES,
+                    "File exceeds 4 MiB context limit"
+                );
+                out.stdout
+            }
+            "rev" => {
+                let r = rev
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .context("Missing Git revision")?;
+                validate_ref_arg(r)?;
+                let spec = format!("{r}:{rel}");
+                let out = self.git(dir, &["show", &spec])?;
+                ensure!(
+                    out.status.success(),
+                    "git show failed for '{spec}': {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+                ensure!(
+                    out.stdout.len() <= MAX_CONTEXT_FILE_BYTES,
+                    "File exceeds 4 MiB context limit"
+                );
+                out.stdout
+            }
+            other => anyhow::bail!("Unsupported file source: {other}"),
+        };
+
+        slice_context_file_bytes(rel, &bytes, start_line, end_line)
+    }
+}
+
+/// Request parameters for [`Ops::git_file_lines`].
+pub struct FileLinesRequest<'a> {
+    pub project: &'a Project,
+    pub cwd_override: Option<&'a str>,
+    pub path: &'a str,
+    pub source: &'a str,
+    pub rev: Option<&'a str>,
+    pub start_line: Option<usize>,
+    pub end_line: Option<usize>,
+}
+
+/// Validates size/binary safety on raw file bytes and returns 1-based line slices for diff context expansion.
+pub fn slice_context_file_bytes(
+    path: &str,
+    bytes: &[u8],
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+) -> Result<Value> {
+    const MAX_CONTEXT_FILE_BYTES: usize = 4 * 1024 * 1024;
+    const BINARY_SNIFF_LEN: usize = 8192;
+    ensure!(
+        bytes.len() <= MAX_CONTEXT_FILE_BYTES,
+        "File exceeds 4 MiB context limit"
+    );
+    let sniff = bytes.len().min(BINARY_SNIFF_LEN);
+    ensure!(
+        !bytes[..sniff].contains(&0),
+        "Binary file cannot be expanded"
+    );
+
+    let text = String::from_utf8_lossy(bytes);
+    let all_lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    let total_lines = all_lines.len();
+
+    let (actual_start, lines) = match (start_line, end_line) {
+        (Some(s), Some(e)) if s >= 1 && e >= s => {
+            let lo = s.saturating_sub(1).min(total_lines);
+            let hi = e.min(total_lines);
+            (lo + 1, all_lines[lo..hi].to_vec())
+        }
+        (Some(s), None) if s >= 1 => {
+            let lo = s.saturating_sub(1).min(total_lines);
+            (lo + 1, all_lines[lo..].to_vec())
+        }
+        _ => (1, all_lines),
+    };
+
+    Ok(json!({
+        "path": path,
+        "total_lines": total_lines,
+        "start_line": actual_start,
+        "lines": lines,
+        "truncated": false,
+    }))
 }
 
 #[cfg(test)]
@@ -1426,5 +1600,91 @@ mod tests {
         assert_eq!(info_fork.upstream.as_deref(), Some("origin/pr/42"));
         let push_err = ops.git_push(&project, &wt_fork, None, false).unwrap_err();
         assert!(push_err.to_string().contains("read-only GitHub PR ref"));
+    }
+
+    #[test]
+    fn git_file_lines_reads_workdir_index_and_rev_and_rejects_traversal_and_binary() {
+        let (_tmp, project) = make_repo();
+        let repo = Path::new(&project.directory);
+        let ops = Ops::local();
+
+        fs::write(repo.join("notes.txt"), "l1\nl2\nl3\nl4\n").unwrap();
+        git(repo, &["add", "notes.txt"]);
+        git(repo, &["commit", "-m", "add notes"]);
+        let head_sha = ops.checked(repo, &["rev-parse", "HEAD"]).unwrap();
+
+        fs::write(repo.join("notes.txt"), "l1\nl2-index\nl3\nl4\n").unwrap();
+        git(repo, &["add", "notes.txt"]);
+        fs::write(repo.join("notes.txt"), "l1\nl2-workdir\nl3\nl4\nl5\n").unwrap();
+
+        let from_rev = ops
+            .git_file_lines(FileLinesRequest {
+                project: &project,
+                cwd_override: None,
+                path: "notes.txt",
+                source: "rev",
+                rev: Some(&head_sha),
+                start_line: None,
+                end_line: None,
+            })
+            .unwrap();
+        assert_eq!(from_rev["total_lines"], 4);
+        assert_eq!(from_rev["lines"][1], "l2");
+
+        let from_index = ops
+            .git_file_lines(FileLinesRequest {
+                project: &project,
+                cwd_override: None,
+                path: "notes.txt",
+                source: "index",
+                rev: None,
+                start_line: Some(2),
+                end_line: Some(3),
+            })
+            .unwrap();
+        assert_eq!(from_index["total_lines"], 4);
+        assert_eq!(from_index["start_line"], 2);
+        assert_eq!(from_index["lines"], json!(["l2-index", "l3"]));
+
+        let from_workdir = ops
+            .git_file_lines(FileLinesRequest {
+                project: &project,
+                cwd_override: None,
+                path: "notes.txt",
+                source: "workdir",
+                rev: None,
+                start_line: None,
+                end_line: None,
+            })
+            .unwrap();
+        assert_eq!(from_workdir["total_lines"], 5);
+        assert_eq!(from_workdir["lines"][1], "l2-workdir");
+        assert_eq!(from_workdir["lines"][4], "l5");
+
+        assert!(
+            ops.git_file_lines(FileLinesRequest {
+                project: &project,
+                cwd_override: None,
+                path: "../etc/passwd",
+                source: "workdir",
+                rev: None,
+                start_line: None,
+                end_line: None,
+            })
+            .is_err()
+        );
+        fs::write(repo.join("bin.dat"), [0u8, 1, 2, 3]).unwrap();
+        assert!(
+            ops.git_file_lines(FileLinesRequest {
+                project: &project,
+                cwd_override: None,
+                path: "bin.dat",
+                source: "workdir",
+                rev: None,
+                start_line: None,
+                end_line: None,
+            })
+            .is_err()
+        );
     }
 }

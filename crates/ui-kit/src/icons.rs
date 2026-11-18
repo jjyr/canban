@@ -77,6 +77,9 @@ pub enum Icon {
     Server,
     Diagnostics,
     Insights,
+    ArrowUp,
+    ArrowDown,
+    ChevronsUpDown,
 }
 impl Icon {
     fn source(self) -> &'static str {
@@ -154,6 +157,9 @@ impl Icon {
             Self::Server => include_str!("../assets/lucide/server.svg"),
             Self::Diagnostics => include_str!("../assets/lucide/activity.svg"),
             Self::Insights => include_str!("../assets/lucide/chart-column.svg"),
+            Self::ArrowUp => include_str!("../assets/lucide/arrow-up.svg"),
+            Self::ArrowDown => include_str!("../assets/lucide/arrow-down.svg"),
+            Self::ChevronsUpDown => include_str!("../assets/lucide/chevrons-up-down.svg"),
         }
     }
 
@@ -400,10 +406,17 @@ mod tests {
 
     #[test]
     fn insights_icon_vector_rasterizes_cleanly() {
-        let markup = Icon::Insights.source();
-        let drawing = nsh_core::svg::drawing(markup).expect("Insights SVG drawing()");
-        assert!(!drawing.ops.is_empty());
-        let raster = nsh_core::svg::rasterize(markup.as_bytes(), 32).expect("Insights rasterize()");
-        assert!(raster.pixels.as_chunks::<4>().0.iter().any(|px| px[3] > 0));
+        for kind in [
+            Icon::Insights,
+            Icon::ArrowUp,
+            Icon::ArrowDown,
+            Icon::ChevronsUpDown,
+        ] {
+            let markup = kind.source();
+            let drawing = nsh_core::svg::drawing(markup).expect("SVG drawing()");
+            assert!(!drawing.ops.is_empty());
+            let raster = nsh_core::svg::rasterize(markup.as_bytes(), 32).expect("rasterize()");
+            assert!(raster.pixels.as_chunks::<4>().0.iter().any(|px| px[3] > 0));
+        }
     }
 }

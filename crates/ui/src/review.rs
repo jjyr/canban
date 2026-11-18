@@ -3,6 +3,7 @@
 //! - Opens directly from Local Cards (worktree/branch) and GitHub PR Cards (zero-clone remote PR diff).
 //! - Supports inline line-by-line review comments + batch dispatch to @Agent (Terminals or Card) or GitHub PR.
 pub mod cache;
+pub mod context;
 pub mod diff;
 pub mod git_ops;
 pub mod model;
@@ -480,6 +481,8 @@ fn reset_git_selection(st: State) {
     st.prepared_lines.set(Default::default());
     st.log_commits.set(Vec::new());
     st.log_has_more.set(false);
+    clear_context_expansion(st);
+    st.anchor_targets.with(std::collections::BTreeMap::clear);
 }
 
 /// A history destination keeps its Project; only foreign Git selections expire.
@@ -682,7 +685,27 @@ pub fn invalidate_reads(ui: Ui) {
         )
     });
     st.summary_revision.update(|n| *n += 1);
+    clear_context_expansion(st);
     cancel_reads(st);
+}
+
+fn clear_context_expansion(st: State) {
+    if st.file_lines_cache.with(|c| !c.is_empty()) {
+        st.file_lines_cache.with(cache::FileLinesCache::clear);
+        st.file_lines_revision.update(|n| *n += 1);
+    }
+    if st.expanded_gaps.with_untracked(|m| !m.is_empty()) {
+        st.expanded_gaps.set(Default::default());
+    }
+    if st.file_lines_loading.with_untracked(|s| !s.is_empty()) {
+        st.file_lines_loading.set(Default::default());
+    }
+    if st.file_lines_errors.with_untracked(|m| !m.is_empty()) {
+        st.file_lines_errors.set(Default::default());
+    }
+    if st.expanded_line_caps.with_untracked(|s| !s.is_empty()) {
+        st.expanded_line_caps.set(Default::default());
+    }
 }
 
 fn cancel_reads(st: State) {
@@ -722,6 +745,8 @@ fn prepare_context(ui: Ui) {
         st.prepared_lines.set(Default::default());
         st.visible_file_limit.set(4);
         st.collapsed_files.set(Default::default());
+        clear_context_expansion(st);
+        st.anchor_targets.with(std::collections::BTreeMap::clear);
     });
 }
 
@@ -1008,6 +1033,8 @@ fn load_active_diff(ui: Ui, force_remote_refresh: bool) {
             st.selected_file.set(String::new());
             st.visible_file_limit.set(4);
             st.collapsed_files.set(Default::default());
+            clear_context_expansion(st);
+            st.anchor_targets.with(std::collections::BTreeMap::clear);
         });
     }
     let ticket = st.compare_ticket.get_untracked() + 1;

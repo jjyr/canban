@@ -45,6 +45,12 @@ impl<K: Ord + Clone, V> LruCache<K, V> {
         self.order.clear();
     }
 
+    pub fn pop_oldest(&mut self) -> Option<(K, V)> {
+        let (_, oldest_key) = self.order.pop_first()?;
+        let (_, value) = self.entries.remove(&oldest_key)?;
+        Some((oldest_key, value))
+    }
+
     pub fn retain(&mut self, mut keep: impl FnMut(&K, &V) -> bool) {
         self.entries.retain(|key, (_, value)| keep(key, value));
         self.order.retain(|_, key| self.entries.contains_key(key));

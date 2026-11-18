@@ -2097,6 +2097,7 @@ pub fn Gallery() -> impl IntoElement {
             | "review-uncommitted"
             | "review-async"
             | "review-large-diff"
+            | "review-context-expand"
             | "review-refresh")
     ) {
         canban_ui::frame::configure_window_chrome();
@@ -2186,6 +2187,16 @@ pub fn Gallery() -> impl IntoElement {
             ui.review_state
                 .compare_ref
                 .set("feat/diff-workbench".into());
+        }
+        if scene == "review-context-expand" {
+            let data = fixtures::git_context_expand_compare();
+            let prepared = review::cache::ReadValue::new(data.clone());
+            ui.review_state.prepared_lines.set(prepared.lines);
+            ui.review_state.compare_data.set(data);
+            ui.review_state.base_ref.set("main".into());
+            ui.review_state
+                .compare_ref
+                .set("feat/diff-context-expand".into());
         }
         ui.page.set("review".into());
         return canban_ui::frame::screen(ui).into_element();
@@ -2347,6 +2358,27 @@ pub fn Gallery() -> impl IntoElement {
                     ui.review_state.compare_data.set(fixtures::git_compare());
                     ui.review_state.base_ref.set("main".into());
                     ui.review_state.compare_ref.set("feat/diff-workbench".into());
+                    ui.page.set("review".into());
+                }))
+                .child(action("Diff Context Expand", Variant::Secondary, move |_| {
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::workspace());
+                    ui.select_project("gallery-project".into());
+                    ui.card.set(String::new());
+                    ui.review.set(None);
+                    let refs = fixtures::git_refs();
+                    let data = fixtures::git_context_expand_compare();
+                    let prepared = review::cache::ReadValue::new(data.clone());
+                    ui.review_state.mode.set("git".into());
+                    ui.review_state.refs_data.set(refs.clone());
+                    ui.review_state.log_branch.set("feat/diff-workbench".into());
+                    ui.review_state.log_commits.set(
+                        refs["commits"].as_array().cloned().unwrap_or_default(),
+                    );
+                    ui.review_state.prepared_lines.set(prepared.lines);
+                    ui.review_state.compare_data.set(data);
+                    ui.review_state.base_ref.set("main".into());
+                    ui.review_state.compare_ref.set("feat/diff-context-expand".into());
                     ui.page.set("review".into());
                 }))
                 .child(action("Git Commit Detail", Variant::Secondary, move |_| {

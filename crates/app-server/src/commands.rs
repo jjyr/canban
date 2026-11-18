@@ -1397,6 +1397,7 @@ impl AppServer {
             "review.preview" => self.review_preview(p),
             "review.merge" => self.review_merge(p),
             "review.github_pr" => self.review_github_pr(p),
+            "review.github_pr_file" => self.review_github_pr_file(p),
             "review.send_agent" => self.review_send_agent(p),
             "review.run_agent" => self.review_run_agent(p),
             "review.draft.get" => self.review_draft_get(p),

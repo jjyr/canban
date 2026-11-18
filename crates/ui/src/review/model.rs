@@ -25,6 +25,18 @@ pub struct LineTarget {
     pub editing_author: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GapExpansion {
+    pub from_top: u64,
+    pub from_bottom: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AnchorEdge {
+    HunkStart,
+    HunkEnd,
+}
+
 #[derive(Clone, Copy)]
 pub struct DiffViewport {
     pub scroll: ElementRef,
@@ -107,6 +119,13 @@ pub struct State {
     pub agent_review_open: Signal<bool>,
     pub agent_review_profile: Signal<String>,
     pub agent_review_focus: Signal<String>,
+    pub expanded_gaps: Signal<std::collections::BTreeMap<(String, usize), GapExpansion>>,
+    pub file_lines_cache: Stored<super::cache::FileLinesCache>,
+    pub file_lines_loading: Signal<std::collections::BTreeSet<String>>,
+    pub file_lines_errors: Signal<std::collections::BTreeMap<String, String>>,
+    pub file_lines_revision: Signal<u64>,
+    pub expanded_line_caps: Signal<std::collections::BTreeSet<String>>,
+    pub anchor_targets: Stored<std::collections::BTreeMap<(String, usize, AnchorEdge), ElementRef>>,
 }
 
 impl Default for State {
@@ -187,6 +206,13 @@ impl State {
             agent_review_open: signal(false),
             agent_review_profile: signal(String::new()),
             agent_review_focus: signal(String::new()),
+            expanded_gaps: signal(Default::default()),
+            file_lines_cache: stored(super::cache::FileLinesCache::default()),
+            file_lines_loading: signal(Default::default()),
+            file_lines_errors: signal(Default::default()),
+            file_lines_revision: signal(0),
+            expanded_line_caps: signal(Default::default()),
+            anchor_targets: stored(Default::default()),
         }
     }
 }
@@ -199,55 +225,158 @@ pub struct DiffLine {
     pub text: String,
 }
 
-pub fn parse_unified_hunk_lines(patch: &str) -> Vec<DiffLine> {
-    let mut out = Vec::new();
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiffHunk {
+    pub header: String,
+    pub old_start: u64,
+    pub old_count: u64,
+    pub new_start: u64,
+    pub new_count: u64,
+    pub context: String,
+    pub lines: Vec<DiffLine>,
+}
+
+impl DiffHunk {
+    pub fn entry_old(&self) -> u64 {
+        if self.old_count > 0 {
+            self.old_start
+        } else {
+            self.old_start + 1
+        }
+    }
+
+    pub fn entry_new(&self) -> u64 {
+        if self.new_count > 0 {
+            self.new_start
+        } else {
+            self.new_start + 1
+        }
+    }
+
+    pub fn exit_old(&self) -> u64 {
+        if self.old_count > 0 {
+            self.old_start + self.old_count
+        } else {
+            self.old_start + 1
+        }
+    }
+
+    pub fn exit_new(&self) -> u64 {
+        if self.new_count > 0 {
+            self.new_start + self.new_count
+        } else {
+            self.new_start + 1
+        }
+    }
+
+    pub fn ends_with_no_newline(&self) -> bool {
+        self.lines.last().is_some_and(|l| l.kind == '\\')
+    }
+
+    pub fn formatted_header(&self, expanded_above: u64) -> String {
+        if expanded_above == 0 {
+            return self.header.clone();
+        }
+        let adj_old_start = self.entry_old().saturating_sub(expanded_above);
+        let adj_old_count = self.old_count + expanded_above;
+        let adj_new_start = self.entry_new().saturating_sub(expanded_above);
+        let adj_new_count = self.new_count + expanded_above;
+        if self.context.is_empty() {
+            format!("@@ -{adj_old_start},{adj_old_count} +{adj_new_start},{adj_new_count} @@")
+        } else {
+            format!(
+                "@@ -{adj_old_start},{adj_old_count} +{adj_new_start},{adj_new_count} @@ {}",
+                self.context
+            )
+        }
+    }
+}
+
+fn parse_hunk_range(spec: &str) -> (u64, u64) {
+    if let Some((start, count)) = spec.split_once(',') {
+        (start.parse().unwrap_or(1), count.parse().unwrap_or(1))
+    } else {
+        (spec.parse().unwrap_or(1), 1)
+    }
+}
+
+fn parse_hunk_header(raw: &str) -> Option<(u64, u64, u64, u64, String)> {
+    let after = raw.strip_prefix("@@")?;
+    let (header, context) = after.split_once("@@")?;
+    let mut old_start = 1u64;
+    let mut old_count = 1u64;
+    let mut new_start = 1u64;
+    let mut new_count = 1u64;
+    for part in header.split_whitespace() {
+        if let Some(old_spec) = part.strip_prefix('-') {
+            (old_start, old_count) = parse_hunk_range(old_spec);
+        } else if let Some(new_spec) = part.strip_prefix('+') {
+            (new_start, new_count) = parse_hunk_range(new_spec);
+        }
+    }
+    Some((
+        old_start,
+        old_count,
+        new_start,
+        new_count,
+        context.trim().to_owned(),
+    ))
+}
+
+fn is_diff_metadata_line(raw: &str) -> bool {
+    raw.starts_with("diff --git ")
+        || raw.starts_with("index ")
+        || raw.starts_with("--- ")
+        || raw.starts_with("+++ ")
+        || raw.starts_with("new file mode ")
+        || raw.starts_with("deleted file mode ")
+        || raw.starts_with("similarity index ")
+        || raw.starts_with("rename from ")
+        || raw.starts_with("rename to ")
+        || raw.starts_with("old mode ")
+        || raw.starts_with("new mode ")
+}
+
+pub fn parse_unified_hunks(patch: &str) -> Vec<DiffHunk> {
+    let mut hunks = Vec::new();
+    let mut current: Option<DiffHunk> = None;
     let mut old_ln = 0u64;
     let mut new_ln = 0u64;
+
     for raw in patch.lines() {
-        if raw.starts_with("diff --git ")
-            || raw.starts_with("index ")
-            || raw.starts_with("--- ")
-            || raw.starts_with("+++ ")
-            || raw.starts_with("new file mode ")
-            || raw.starts_with("deleted file mode ")
-            || raw.starts_with("similarity index ")
-            || raw.starts_with("rename from ")
-            || raw.starts_with("rename to ")
-        {
+        if is_diff_metadata_line(raw) {
             continue;
         }
-        if let Some(after) = raw.strip_prefix("@@") {
-            if let Some((header, _)) = after.split_once("@@") {
-                for part in header.split_whitespace() {
-                    if let Some(old_spec) = part.strip_prefix('-') {
-                        let start = old_spec.split(',').next().unwrap_or("1");
-                        old_ln = start.parse::<u64>().unwrap_or(1);
-                    } else if let Some(new_spec) = part.strip_prefix('+') {
-                        let start = new_spec.split(',').next().unwrap_or("1");
-                        new_ln = start.parse::<u64>().unwrap_or(1);
-                    }
-                }
+        if let Some((os, oc, ns, nc, ctx)) = parse_hunk_header(raw) {
+            if let Some(prev) = current.take() {
+                hunks.push(prev);
             }
-            out.push(DiffLine {
-                kind: '@',
-                old_line: None,
-                new_line: None,
-                text: raw.to_owned(),
+            old_ln = os;
+            new_ln = ns;
+            current = Some(DiffHunk {
+                header: raw.to_owned(),
+                old_start: os,
+                old_count: oc,
+                new_start: ns,
+                new_count: nc,
+                context: ctx,
+                lines: Vec::new(),
             });
             continue;
         }
+        let Some(hunk) = current.as_mut() else {
+            continue;
+        };
         if raw.starts_with('\\') {
-            out.push(DiffLine {
+            hunk.lines.push(DiffLine {
                 kind: '\\',
                 old_line: None,
                 new_line: None,
                 text: raw.to_owned(),
             });
-            continue;
-        }
-        if let Some(added) = raw.strip_prefix('+') {
+        } else if let Some(added) = raw.strip_prefix('+') {
             let ln = new_ln.max(1);
-            out.push(DiffLine {
+            hunk.lines.push(DiffLine {
                 kind: '+',
                 old_line: None,
                 new_line: Some(ln),
@@ -256,7 +385,7 @@ pub fn parse_unified_hunk_lines(patch: &str) -> Vec<DiffLine> {
             new_ln = ln + 1;
         } else if let Some(removed) = raw.strip_prefix('-') {
             let ln = old_ln.max(1);
-            out.push(DiffLine {
+            hunk.lines.push(DiffLine {
                 kind: '-',
                 old_line: Some(ln),
                 new_line: None,
@@ -267,7 +396,7 @@ pub fn parse_unified_hunk_lines(patch: &str) -> Vec<DiffLine> {
             let content = raw.strip_prefix(' ').unwrap_or(raw);
             let o = old_ln.max(1);
             let n = new_ln.max(1);
-            out.push(DiffLine {
+            hunk.lines.push(DiffLine {
                 kind: ' ',
                 old_line: Some(o),
                 new_line: Some(n),
@@ -276,6 +405,23 @@ pub fn parse_unified_hunk_lines(patch: &str) -> Vec<DiffLine> {
             old_ln = o + 1;
             new_ln = n + 1;
         }
+    }
+    if let Some(prev) = current.take() {
+        hunks.push(prev);
+    }
+    hunks
+}
+
+pub fn parse_unified_hunk_lines(patch: &str) -> Vec<DiffLine> {
+    let mut out = Vec::new();
+    for hunk in parse_unified_hunks(patch) {
+        out.push(DiffLine {
+            kind: '@',
+            old_line: None,
+            new_line: None,
+            text: hunk.header,
+        });
+        out.extend(hunk.lines);
     }
     out
 }
@@ -331,5 +477,54 @@ pub fn diff_key(section: &str, path: &str) -> String {
         path.to_owned()
     } else {
         format!("{section}\0{path}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_unified_hunks_handles_multiple_hunks_and_dynamic_headers() {
+        let patch = concat!(
+            "@@ -10,3 +10,4 @@ fn top_fn() {\n",
+            " ctx1\n",
+            "+added\n",
+            " ctx2\n",
+            " ctx3\n",
+            "@@ -50,2 +51,2 @@ fn second_fn() {\n",
+            "-old\n",
+            "+new\n",
+            " tail\n",
+        );
+        let hunks = parse_unified_hunks(patch);
+        assert_eq!(hunks.len(), 2);
+        assert_eq!(hunks[0].entry_old(), 10);
+        assert_eq!(hunks[0].entry_new(), 10);
+        assert_eq!(hunks[0].exit_old(), 13);
+        assert_eq!(hunks[0].exit_new(), 14);
+        assert_eq!(hunks[1].entry_old(), 50);
+        assert_eq!(hunks[1].entry_new(), 51);
+        assert_eq!(
+            hunks[1].formatted_header(20),
+            "@@ -30,22 +31,22 @@ fn second_fn() {"
+        );
+        // Gap between hunk 0 and hunk 1 has identical old/new length (37 lines).
+        assert_eq!(
+            hunks[1].entry_old() - hunks[0].exit_old(),
+            hunks[1].entry_new() - hunks[0].exit_new()
+        );
+
+        let pure_insert = parse_unified_hunks("@@ -10,0 +11,2 @@\n+a\n+b");
+        assert_eq!(pure_insert[0].entry_old(), 11);
+        assert_eq!(pure_insert[0].entry_new(), 11);
+        assert_eq!(pure_insert[0].exit_old(), 11);
+        assert_eq!(pure_insert[0].exit_new(), 13);
+
+        let single_line = parse_unified_hunks("@@ -1 +1 @@\n-a\n+b");
+        assert_eq!(single_line[0].old_count, 1);
+        assert_eq!(single_line[0].new_count, 1);
+        assert_eq!(single_line[0].exit_old(), 2);
+        assert_eq!(single_line[0].exit_new(), 2);
     }
 }

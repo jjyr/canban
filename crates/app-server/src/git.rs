@@ -17,6 +17,7 @@ impl AppServer {
         match method {
             "git.refs" => self.git_refs_rpc(p),
             "git.compare" => self.git_compare(p),
+            "git.file_lines" => self.git_file_lines_rpc(p),
             "git.log" => self.git_log_rpc(p),
             "git.commit_detail" => self.git_commit_detail_rpc(p),
             "git.stage" => self.git_stage_rpc(p),
@@ -282,6 +283,27 @@ impl AppServer {
         let parent_index = p["parent_index"].as_u64().unwrap_or(0) as usize;
         self.ops(&machine)
             .git_commit_detail(&ctx.project, Some(&ctx.cwd), sha, parent_index)
+    }
+
+    fn git_file_lines_rpc(&self, p: Value) -> Result<Value> {
+        let ctx = self.resolve_project_checkout(&p)?;
+        let machine = ctx.project.work_location().machine;
+        let _permit = self.check(&machine);
+        let path = strp(&p, "path")?;
+        let source = p["source"].as_str().unwrap_or("workdir");
+        let rev = p["rev"].as_str();
+        let start_line = p["start_line"].as_u64().map(|n| n as usize);
+        let end_line = p["end_line"].as_u64().map(|n| n as usize);
+        self.ops(&machine)
+            .git_file_lines(canban_workspaces::compare::FileLinesRequest {
+                project: &ctx.project,
+                cwd_override: Some(&ctx.cwd),
+                path,
+                source,
+                rev,
+                start_line,
+                end_line,
+            })
     }
 
     fn git_stage_rpc(&self, p: Value) -> Result<Value> {

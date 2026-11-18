@@ -440,3 +440,88 @@ fn github_issue_upsert_triggers_only_from_local_instructions_not_remote_issue_bo
     assert_eq!(runs[0].profile.id, "developer");
     assert_eq!(runs[0].trigger, ExecutionTrigger::Interactive);
 }
+
+#[test]
+fn review_github_pr_file_decodes_contents_and_blob_fallback() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let (_dir, app, _p) = github_setup();
+    let client = app.github.cached_client().unwrap();
+
+    let encoded_small = STANDARD.encode("alpha\nbeta\ngamma\n");
+    client.seed_response(
+        "/repos/owner/repo/contents/src/main.rs?ref=1234567890abcdef1234567890abcdef12345678",
+        &canban_github::cache::Response {
+            data: json!({
+                "encoding": "base64",
+                "content": format!("{encoded_small}\n"),
+            }),
+            link: None,
+            etag: None,
+            modified: None,
+            poll_interval: None,
+            validated_at: 1,
+            fetched_at: 0,
+            cached: false,
+        },
+    );
+    let resp = app
+        .call(
+            "review.github_pr_file",
+            json!({
+                "repository": "owner/repo",
+                "sha": "1234567890abcdef1234567890abcdef12345678",
+                "path": "src/main.rs",
+            }),
+        )
+        .unwrap();
+    assert_eq!(resp["total_lines"], 3);
+    assert_eq!(resp["lines"], json!(["alpha", "beta", "gamma"]));
+
+    // When /contents omits base64 content (large file), fall back to /git/blobs/<sha>.
+    let blob_sha = "abcdef1234567890abcdef1234567890abcdef12";
+    client.seed_response(
+        "/repos/owner/repo/contents/src/big.rs?ref=1234567890abcdef1234567890abcdef12345678",
+        &canban_github::cache::Response {
+            data: json!({
+                "encoding": "none",
+                "sha": blob_sha,
+            }),
+            link: None,
+            etag: None,
+            modified: None,
+            poll_interval: None,
+            validated_at: 1,
+            fetched_at: 0,
+            cached: false,
+        },
+    );
+    let encoded_big = STANDARD.encode("row1\nrow2\n");
+    client.seed_response(
+        &format!("/repos/owner/repo/git/blobs/{blob_sha}"),
+        &canban_github::cache::Response {
+            data: json!({
+                "encoding": "base64",
+                "content": encoded_big,
+            }),
+            link: None,
+            etag: None,
+            modified: None,
+            poll_interval: None,
+            validated_at: 1,
+            fetched_at: 0,
+            cached: false,
+        },
+    );
+    let blob_resp = app
+        .call(
+            "review.github_pr_file",
+            json!({
+                "repository": "owner/repo",
+                "sha": "1234567890abcdef1234567890abcdef12345678",
+                "path": "src/big.rs",
+            }),
+        )
+        .unwrap();
+    assert_eq!(blob_resp["total_lines"], 2);
+    assert_eq!(blob_resp["lines"], json!(["row1", "row2"]));
+}

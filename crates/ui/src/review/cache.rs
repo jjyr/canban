@@ -1,7 +1,7 @@
 //! Window-owned Git read cache. RPC and patch preparation run on the blocking
 //! pool; identical concurrent reads share a result. Scoped events/manual refresh detach
 //! matching flights so older requests cannot repopulate invalidated entries.
-use super::model::{DiffLine, parse_unified_hunk_lines};
+use super::model::{DiffHunk, DiffLine, parse_unified_hunk_lines, parse_unified_hunks};
 use crate::cache::LruCache;
 use serde_json::Value;
 use std::{
@@ -11,29 +11,116 @@ use std::{
 };
 
 pub type PreparedLines = BTreeMap<String, Arc<Vec<DiffLine>>>;
+pub type PreparedHunks = BTreeMap<String, Arc<Vec<DiffHunk>>>;
+
+#[derive(Clone, Debug)]
+pub struct CachedFileLines {
+    pub lines: Arc<Vec<String>>,
+    pub total_lines: usize,
+    pub byte_len: usize,
+}
+
+/// Bounded in-memory cache of expanded file text for the active diff comparison.
+/// Enforces both entry count and total byte budgets.
+pub struct FileLinesCache {
+    max_entries: usize,
+    max_bytes: usize,
+    total_bytes: usize,
+    entries: LruCache<String, CachedFileLines>,
+}
+
+impl Default for FileLinesCache {
+    fn default() -> Self {
+        Self::new(32, 16 * 1024 * 1024)
+    }
+}
+
+impl FileLinesCache {
+    pub fn new(max_entries: usize, max_bytes: usize) -> Self {
+        Self {
+            max_entries,
+            max_bytes,
+            total_bytes: 0,
+            entries: LruCache::new(max_entries),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.total_bytes = 0;
+    }
+
+    pub fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn get(&mut self, key: &str) -> Option<CachedFileLines> {
+        self.entries.get(key).cloned()
+    }
+
+    pub fn insert(
+        &mut self,
+        key: String,
+        lines: Vec<String>,
+        total_lines: usize,
+    ) -> CachedFileLines {
+        let byte_len: usize = lines.iter().map(String::len).sum();
+        let entry = CachedFileLines {
+            lines: Arc::new(lines),
+            total_lines,
+            byte_len,
+        };
+        if !self.entries.contains_key(&key) {
+            while self.entries.len() >= self.max_entries {
+                let Some((_, evicted)) = self.entries.pop_oldest() else {
+                    break;
+                };
+                self.total_bytes = self.total_bytes.saturating_sub(evicted.byte_len);
+            }
+        }
+        if let Some(prev) = self.entries.insert(key, entry.clone()) {
+            self.total_bytes = self.total_bytes.saturating_sub(prev.byte_len);
+        }
+        self.total_bytes = self.total_bytes.saturating_add(byte_len);
+        while self.total_bytes > self.max_bytes && self.entries.len() > 1 {
+            let Some((_, evicted)) = self.entries.pop_oldest() else {
+                break;
+            };
+            self.total_bytes = self.total_bytes.saturating_sub(evicted.byte_len);
+        }
+        entry
+    }
+}
 
 #[derive(Clone)]
 pub struct ReadValue {
     pub data: Value,
     pub lines: Arc<PreparedLines>,
+    pub hunks: Arc<PreparedHunks>,
 }
 
 impl ReadValue {
     pub fn new(data: Value) -> Self {
-        let lines = data["files"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|f| {
-                (
-                    super::model::file_key(f),
-                    Arc::new(parse_unified_hunk_lines(f["patch"].as_str().unwrap_or(""))),
-                )
-            })
-            .collect();
+        let mut lines = PreparedLines::new();
+        let mut hunks = PreparedHunks::new();
+        for f in data["files"].as_array().into_iter().flatten() {
+            let key = super::model::file_key(f);
+            let patch = f["patch"].as_str().unwrap_or("");
+            lines.insert(key.clone(), Arc::new(parse_unified_hunk_lines(patch)));
+            hunks.insert(key, Arc::new(parse_unified_hunks(patch)));
+        }
         Self {
             data,
             lines: Arc::new(lines),
+            hunks: Arc::new(hunks),
         }
     }
 }
@@ -355,5 +442,21 @@ mod section_tests {
         assert_eq!(value.lines.len(), 2);
         assert_eq!(value.lines["staged\0a.rs"][2].text, "index");
         assert_eq!(value.lines["unstaged\0a.rs"][2].text, "disk");
+    }
+
+    #[test]
+    fn file_lines_cache_enforces_byte_budget() {
+        let mut cache = FileLinesCache::new(10, 20);
+        cache.insert("a".into(), vec!["1234567890".into()], 1);
+        cache.insert("b".into(), vec!["1234567890".into()], 1);
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.total_bytes(), 20);
+        // Touch "a" so "b" is evicted when "c" pushes total_bytes past 20.
+        assert!(cache.get("a").is_some());
+        cache.insert("c".into(), vec!["12345".into()], 1);
+        assert!(cache.total_bytes() <= 20);
+        assert!(cache.get("a").is_some());
+        assert!(cache.get("c").is_some());
+        assert!(cache.get("b").is_none());
     }
 }

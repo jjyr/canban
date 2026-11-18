@@ -424,6 +424,62 @@ pub fn git_compare() -> serde_json::Value {
     })
 }
 
+pub fn git_context_expand_compare() -> serde_json::Value {
+    let mut lines: Vec<String> = (1..=140)
+        .map(|n| format!("    // Context line {n:03}: preserves exact scroll anchor on expand"))
+        .collect();
+    lines[29] = "    let mode = ui.review_state.mode.get();".into();
+    lines[30] = "    let enabled = mode == \"git\" && !ui.narrow.get();".into();
+    lines[31] = "    let theme = ui.theme.get();".into();
+    lines[41] = "    let summary = ui.review_state.submit_summary.get();".into();
+    lines[42] = "    let ready = enabled && !summary.is_empty();".into();
+    lines[43] = "    if ready { dispatch_review(ui); }".into();
+    lines[104] = "    let viewport = DiffViewport { scroll, content };".into();
+    lines[105] = "    st.viewport.replace(Some(viewport));".into();
+    lines[106] = "    render_workbench_body(ui, viewport)".into();
+
+    let patch = concat!(
+        "@@ -30,3 +30,3 @@ fn top_section(ui: Ui) {\n",
+        "     let mode = ui.review_state.mode.get();\n",
+        "-    let enabled = mode == \"git\";\n",
+        "+    let enabled = mode == \"git\" && !ui.narrow.get();\n",
+        "     let theme = ui.theme.get();\n",
+        "@@ -42,3 +42,3 @@ fn small_gap_section(ui: Ui) {\n",
+        "     let summary = ui.review_state.submit_summary.get();\n",
+        "-    let ready = enabled;\n",
+        "+    let ready = enabled && !summary.is_empty();\n",
+        "     if ready { dispatch_review(ui); }\n",
+        "@@ -105,3 +105,3 @@ pub fn workbench(ui: Ui) {\n",
+        "     let viewport = DiffViewport { scroll, content };\n",
+        "-    st.viewport.replace(None);\n",
+        "+    st.viewport.replace(Some(viewport));\n",
+        "     render_workbench_body(ui, viewport)",
+    );
+
+    json!({
+        "base_ref": "main",
+        "compare_ref": "feat/diff-context-expand",
+        "base_sha": "1cfcce8111222333444555666777888999000aaa",
+        "compare_sha": "d409f12a91fe001234567890abcdef0123456789",
+        "three_dot": true,
+        "total_additions": 3,
+        "total_deletions": 3,
+        "truncated": false,
+        "cwd": "/example/project",
+        "commits": [],
+        "files": [
+            {
+                "filename": "crates/ui/src/review/diff.rs",
+                "status": "modified",
+                "additions": 3,
+                "deletions": 3,
+                "patch": patch,
+                "preview_lines": lines,
+            }
+        ]
+    })
+}
+
 pub const TERMINAL: &str = concat!(
     "\x1b[1;38;2;110;210;255m╭─ Canban Native Terminal · libghostty-vt ──────────────────────╮\x1b[0m\r\n",
     "\x1b[1;38;2;110;210;255m│\x1b[0m Styles : \x1b[1mBold\x1b[0m · \x1b[3mItalic\x1b[0m · \x1b[2mFaint\x1b[0m · \x1b[9mStrike\x1b[0m · \x1b[4:3;58;2;255;105;97mCurly diagnostic\x1b[0m     \x1b[1;38;2;110;210;255m│\x1b[0m\r\n",

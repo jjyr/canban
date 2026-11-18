@@ -1351,7 +1351,11 @@ impl HostRegistry {
             || method.starts_with("github.auth.")
             || matches!(
                 method,
-                "github.status" | "github.search" | "github.item" | "review.github_pr"
+                "github.status"
+                    | "github.search"
+                    | "github.item"
+                    | "review.github_pr"
+                    | "review.github_pr_file"
             )
         {
             return "local".into();
@@ -1468,6 +1472,7 @@ impl HostRegistry {
                     | "diagnostics.logs"
                     | "directory.list"
                     | "project.detect_github"
+                    | "git.file_lines"
                     | "review.preview"
                     | "execution.output"
                     | "resource.read"

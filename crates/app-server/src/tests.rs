@@ -2149,6 +2149,19 @@ fn git_refs_compare_and_review_send_agent_work_with_and_without_cards() {
     assert_eq!(cmp["files"].as_array().unwrap().len(), 1);
     assert_eq!(cmp["files"][0]["filename"], "lib.rs");
 
+    let ctx_lines = app
+        .call(
+            "git.file_lines",
+            json!({
+                "project_id": p.id,
+                "path": "lib.rs",
+                "source": "rev",
+                "rev": cmp["compare_sha"],
+            }),
+        )
+        .unwrap();
+    assert!(ctx_lines["total_lines"].as_u64().unwrap() >= 1);
+
     // Dispatch structured inline comments to an existing Card's @developer locally
     let sent = app
         .call(

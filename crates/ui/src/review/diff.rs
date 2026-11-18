@@ -1,10 +1,15 @@
+use super::context::{
+    CONTEXT_STEP, ExpandKind, FileRenderContext, anchor_ref_for, expanded_context_line,
+    render_expander_bar, render_static_hunk_bar,
+};
 use super::git_ops;
-use super::model::{LineTarget, PendingInlineComment, parse_unified_hunk_lines};
+use super::model::{AnchorEdge, DiffLine, LineTarget, PendingInlineComment, parse_unified_hunks};
 use crate::presenter::*;
 use canban_ui_kit::tokens::*;
 use canban_ui_kit::*;
 use nsh_core::prelude::*;
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 fn multiline_comment_input(
     value: Signal<String>,
@@ -329,11 +334,6 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
             .into_element();
     }
 
-    let active_line = st.active_line.get();
-    let pending_all = st.pending_comments.get();
-    let editing_remote = st.editing_remote_comment.get();
-    let deleting_remote = st.deleting_remote_comment.get();
-    let my_login = login.get();
     let pr_target = st.pr_target.get();
     let pr_base_url = pr_target.as_ref().and_then(|pr| {
         pr["url"]
@@ -347,6 +347,18 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
                     .then(|| format!("https://github.com/{repo}/pull/{num}"))
             })
     });
+    let remote_threads = Arc::new(remote_threads);
+    let mode = st.mode.get();
+    let compare_ref = st.compare_ref.get();
+    let live_sha = data["compare_sha"].as_str().unwrap_or("").to_owned();
+    let compare_cwd = data["cwd"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            let c = st.checkout_cwd.get_untracked();
+            (!c.is_empty()).then_some(c)
+        });
 
     let status_files_for_actions: Vec<Value> = if is_workdir_mode {
         data["status_files"]
@@ -380,17 +392,18 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
         ));
     }
 
-    let live_sha = data["compare_sha"].as_str().unwrap_or("");
-    if let Some(anchor_sha) = st.draft_anchor_sha.get().filter(|s| !s.is_empty())
-        && !live_sha.is_empty()
-        && anchor_sha != live_sha
-        && !st.draft_drift_dismissed.get()
-        && !pending_all.is_empty()
-    {
-        let short_anchor = &anchor_sha[..anchor_sha.len().min(7)];
-        let short_live = &live_sha[..live_sha.len().min(7)];
-        let cid_for_rerun = ui.card.get();
-        diff_column = diff_column.child(
+    let drift_sha = live_sha.clone();
+    diff_column = diff_column.child(dynamic(move || {
+        let has_pending = st.pending_comments.with(|list| !list.is_empty());
+        if let Some(anchor_sha) = st.draft_anchor_sha.get().filter(|s| !s.is_empty())
+            && !drift_sha.is_empty()
+            && anchor_sha != drift_sha
+            && !st.draft_drift_dismissed.get()
+            && has_pending
+        {
+            let short_anchor = &anchor_sha[..anchor_sha.len().min(7)];
+            let short_live = &drift_sha[..drift_sha.len().min(7)];
+            let cid_for_rerun = ui.card.get();
             view()
                 .p_2p5()
                 .rounded(px(RADIUS))
@@ -430,9 +443,12 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
                         .child(compact_action("Dismiss", Variant::Quiet, move |_| {
                             st.draft_drift_dismissed.set(true);
                         })),
-                ),
-        );
-    }
+                )
+                .into_element()
+        } else {
+            view().into_element()
+        }
+    }));
 
     // Collapsible commit summary bar when comparing branches/ranges (clickable to inspect single commit!)
     if !commits.is_empty() && commit_detail.is_none() {
@@ -584,7 +600,7 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
                     .text_size(px(12.))
                     .font_weight(FontWeight::SEMIBOLD),
             )
-            .child(badge(f_status))
+            .child(badge(f_status.clone()))
             .child(
                 label(format!("+{additions}"))
                     .text_size(px(11.5))
@@ -647,303 +663,22 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
             );
             continue;
         }
-        let mut rendered_comment_ids = std::collections::BTreeSet::<String>::new();
-        let body = if patch.trim().is_empty() {
-            view()
-                .p_3()
-                .child(muted(
-                    "Binary file, rename without content changes, or empty patch.",
-                ))
-                .into_element()
-        } else {
-            let parsed_lines = st
-                .prepared_lines
-                .with(|all| all.get(&key).cloned())
-                .unwrap_or_else(|| std::sync::Arc::new(parse_unified_hunk_lines(&patch)));
-            let mut rows = view();
-
-            // Show file-level comment composer if line == 1 and no specific hunk line matched or at top
-            for dl in parsed_lines.iter().take(500).cloned() {
-                if dl.kind == '@' || dl.kind == '\\' {
-                    rows = rows.child(
-                        view().px_3().py_1().bg(INSET).child(
-                            label(dl.text)
-                                .font_family(MONO_FONT)
-                                .text_size(px(11.5))
-                                .text_color(MUTED),
-                        ),
-                    );
-                    continue;
-                }
-
-                let (comment_line, comment_side) = if dl.kind == '-' {
-                    (dl.old_line.unwrap_or(1), "LEFT")
-                } else {
-                    (dl.new_line.or(dl.old_line).unwrap_or(1), "RIGHT")
-                };
-                let old_str = dl
-                    .old_line
-                    .map(|n| format!("{n:>4}"))
-                    .unwrap_or_else(|| "    ".into());
-                let new_str = dl
-                    .new_line
-                    .map(|n| format!("{n:>4}"))
-                    .unwrap_or_else(|| "    ".into());
-                let prefix = dl.kind;
-                let snippet_for_target = dl.text.clone();
-                let line_path = path.clone();
-                let side_owned = comment_side.to_owned();
-
-                let text_col = match dl.kind {
-                    '+' => SUCCESS,
-                    '-' => DANGER,
-                    _ => TEXT,
-                };
-                let mut line_btn = canban_ui_kit::press_target()
-                    .w_full()
-                    .px_2()
-                    .py_0p5()
-                    .flex_row()
-                    .items_start()
-                    .gap_2();
-                line_btn = match dl.kind {
-                    '+' => line_btn.bg(SUCCESS_SURFACE),
-                    '-' => line_btn.bg(DANGER_SURFACE),
-                    _ => line_btn.bg(CLEAR),
-                };
-
-                let line_section = section.clone();
-                rows = rows.child(
-                    line_btn
-                        .hover(|s| s.bg(SELECTED))
-                        .accessibility_label(format!(
-                            "Add review comment on {path} line {comment_line}"
-                        ))
-                        .on_press(move |_: &()| {
-                            st.active_line.set(Some(LineTarget {
-                                path: line_path.clone(),
-                                section: line_section.clone(),
-                                line: comment_line,
-                                side: side_owned.clone(),
-                                snippet: snippet_for_target.clone(),
-                                editing_author: None,
-                            }));
-                            st.line_draft.set(String::new());
-                        })
-                        .child(
-                            label(format!("{old_str} {new_str}"))
-                                .w(px(74.))
-                                .flex_shrink_0()
-                                .font_family(MONO_FONT)
-                                .text_size(px(11.))
-                                .text_color(MUTED),
-                        )
-                        .child(
-                            label(format!("{prefix} {}", dl.text))
-                                .flex_1()
-                                .min_w(px(0.))
-                                .font_family(MONO_FONT)
-                                .text_size(px(12.))
-                                .text_color(text_col),
-                        ),
-                );
-
-                // Render existing remote GitHub PR review comments on this exact line
-                for rt in remote_threads.iter().filter(|t| {
-                    t["path"].as_str() == Some(path.as_str())
-                        && t["line"].as_u64().or_else(|| t["original_line"].as_u64())
-                            == Some(comment_line)
-                        && t["side"].as_str().unwrap_or("RIGHT") == comment_side
-                }) {
-                    let author = rt["user"]["login"]
-                        .as_str()
-                        .unwrap_or("reviewer")
-                        .to_owned();
-                    let cid = rt["id"].as_u64().unwrap_or(0);
-                    let web_url =
-                        crate::github::comment_web_url(rt, pr_base_url.as_deref(), "threads");
-                    let is_own = cid > 0
-                        && pr_target.is_some()
-                        && my_login
-                            .as_deref()
-                            .is_some_and(|me| author.eq_ignore_ascii_case(me));
-                    let is_editing = cid > 0 && editing_remote == Some(cid);
-                    let is_deleting = cid > 0 && deleting_remote == Some(cid);
-                    let was_edited = match (rt["created_at"].as_str(), rt["updated_at"].as_str()) {
-                        (Some(c), Some(u)) if !c.is_empty() && !u.is_empty() => c != u,
-                        _ => false,
-                    };
-                    let body_txt = rt["body"].as_str().unwrap_or("").to_owned();
-                    let mut header_row = view()
-                        .flex_row()
-                        .flex_wrap()
-                        .items_center()
-                        .gap_2()
-                        .child(icon(Icon::GitHub).w(px(12.)).h(px(12.)))
-                        .child(
-                            label(format!("@{author}"))
-                                .text_size(px(11.5))
-                                .font_weight(FontWeight::SEMIBOLD),
-                        )
-                        .child(badge("GitHub PR comment"));
-                    if was_edited {
-                        header_row = header_row.child(muted("· edited").text_size(px(11.)));
-                    }
-                    let mut trailing = view().flex_row().items_center().gap_1();
-                    let mut has_trailing = false;
-                    if let Some(jump_url) = web_url {
-                        has_trailing = true;
-                        trailing = trailing.child(
-                            view()
-                                .tooltip(hint_tooltip("Open comment in GitHub"))
-                                .child(
-                                    compact_action("GitHub ↗", Variant::Quiet, move |_| {
-                                        crate::github::open_url(ui, jump_url.clone())
-                                    })
-                                    .accessibility_label(|| Some("Open comment in GitHub".into())),
-                                ),
-                        );
-                    }
-                    if is_own && !is_editing && !is_deleting {
-                        has_trailing = true;
-                        let initial_body = body_txt.clone();
-                        let anchor = element_ref();
-                        trailing = trailing.child(
-                            canban_ui_kit::press_target()
-                                .element_ref(&anchor)
-                                .w(px(26.))
-                                .h(px(26.))
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(5.))
-                                .bg(CLEAR)
-                                .hover(|s| s.bg(INSET))
-                                .focus(|s| s.border_1().border_color(ACCENT))
-                                .accessibility_label(|| Some("PR comment actions".into()))
-                                .child(icon_tinted(Icon::More, MUTED).w(px(15.)).h(px(15.)))
-                                .on_press(move |_: &()| {
-                                    use nsh_core::element::desktop::{MenuItem, popup_menu_at};
-                                    let body_val = initial_body.clone();
-                                    ui.spawn(async move {
-                                        let Some(bounds) = anchor.measure().await else {
-                                            return;
-                                        };
-                                        popup_menu_at(
-                                            vec![
-                                                MenuItem::new("Edit comment").on_select(
-                                                    move || {
-                                                        let b = body_val.clone();
-                                                        batch(move || {
-                                                            st.remote_edit_error.set(String::new());
-                                                            st.remote_delete_error
-                                                                .set(String::new());
-                                                            st.deleting_remote_comment.set(None);
-                                                            st.remote_edit_draft.set(b);
-                                                            st.editing_remote_comment
-                                                                .set(Some(cid));
-                                                        });
-                                                    },
-                                                ),
-                                                MenuItem::new("Delete comment…").on_select(
-                                                    move || {
-                                                        batch(move || {
-                                                            st.remote_delete_error
-                                                                .set(String::new());
-                                                            st.remote_edit_error.set(String::new());
-                                                            st.editing_remote_comment.set(None);
-                                                            st.deleting_remote_comment
-                                                                .set(Some(cid));
-                                                        });
-                                                    },
-                                                ),
-                                            ],
-                                            point(
-                                                bounds.page.x,
-                                                bounds.page.y + bounds.frame.size.height,
-                                            ),
-                                        )
-                                        .await;
-                                    });
-                                }),
-                        );
-                    }
-                    if has_trailing {
-                        header_row = header_row.child(view().flex_1()).child(trailing);
-                    }
-                    let mut comment_card = view()
-                        .mx_4()
-                        .my_1()
-                        .p_2p5()
-                        .rounded(px(RADIUS))
-                        .border_1()
-                        .border_color(if is_deleting {
-                            DANGER
-                        } else if is_editing {
-                            ACCENT
-                        } else {
-                            BORDER
-                        })
-                        .bg(SURFACE)
-                        .gap_1p5()
-                        .child(header_row);
-                    if is_deleting {
-                        comment_card = comment_card.child(remote_pr_comment_delete_confirm(
-                            ui,
-                            cid,
-                            pr_target.clone(),
-                        ));
-                    }
-                    let content = if is_editing {
-                        remote_pr_comment_editor(ui, cid, pr_target.clone()).into_element()
-                    } else {
-                        canban_ui_kit::markdown::reader(move || body_txt.clone()).into_element()
-                    };
-                    rows = rows.child(comment_card.child(content));
-                }
-
-                // Render any pending inline comments saved for this file + line + side
-                for item in pending_all.iter().filter(|c| {
-                    c.path == path
-                        && c.section == section
-                        && c.line == comment_line
-                        && c.side == comment_side
-                }) {
-                    rendered_comment_ids.insert(item.id.clone());
-                    rows = rows.child(render_pending_comment_card(ui, item));
-                }
-
-                // Render active inline composer right beneath the clicked line
-                if let Some(ref target) = active_line
-                    && target.path == path
-                    && target.section == section
-                    && target.line == comment_line
-                    && target.side == comment_side
-                {
-                    let save_target = target.clone();
-                    rows = rows.child(inline_composer_box(ui, save_target));
-                }
-            }
-            rows.into_element()
+        let file_ctx = FileRenderContext {
+            file: file.clone(),
+            key: key.clone(),
+            path,
+            section,
+            status: f_status,
+            patch,
+            mode: mode.clone(),
+            compare_ref: compare_ref.clone(),
+            compare_sha: live_sha.clone(),
+            cwd: compare_cwd.clone(),
+            pr_target: pr_target.clone(),
+            pr_base_url: pr_base_url.clone(),
+            remote_threads: remote_threads.clone(),
+            login,
         };
-
-        // Fallback composer when "+ File comment" was clicked on an empty/binary patch
-        let extra_composer = if let Some(ref target) = active_line
-            && target.path == path
-            && target.section == section
-            && patch.trim().is_empty()
-        {
-            inline_composer_box(ui, target.clone()).into_element()
-        } else {
-            view().into_element()
-        };
-
-        // Unanchored pending comments for this file (e.g. line outside hunk context or binary file)
-        let mut unanchored_for_file = view();
-        for item in pending_all.iter().filter(|c| {
-            c.path == path && c.section == section && !rendered_comment_ids.contains(&c.id)
-        }) {
-            unanchored_for_file = unanchored_for_file.child(render_pending_comment_card(ui, item));
-        }
 
         diff_column = diff_column.child(
             view()
@@ -954,9 +689,7 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
                 .bg(SURFACE)
                 .overflow_hidden()
                 .child(header)
-                .child(extra_composer)
-                .child(unanchored_for_file)
-                .child(body),
+                .child(dynamic(move || render_file_body(ui, &file_ctx))),
         );
     }
 
@@ -970,12 +703,17 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
             .filter_map(|f| f["filename"].as_str().map(str::to_owned))
             .collect()
     });
-    for item in pending_all
-        .iter()
-        .filter(|c| !visible_paths.contains(&c.path))
-    {
-        diff_column = diff_column.child(render_pending_comment_card(ui, item));
-    }
+    diff_column = diff_column.child(dynamic(move || {
+        let pending_all = st.pending_comments.get();
+        let mut extra = view();
+        for item in pending_all
+            .iter()
+            .filter(|c| !visible_paths.contains(&c.path))
+        {
+            extra = extra.child(render_pending_comment_card(ui, item));
+        }
+        extra
+    }));
 
     if total_files > limit {
         diff_column = diff_column.child(compact_action(
@@ -986,6 +724,640 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
     }
 
     diff_column.into_element()
+}
+
+const RAW_DIFF_LINE_CAP: usize = 800;
+
+fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
+    let st = ui.review_state;
+    let active_line = st.active_line.get();
+    let pending_all = st.pending_comments.get();
+    let editing_remote = st.editing_remote_comment.get();
+    let deleting_remote = st.deleting_remote_comment.get();
+    let my_login = ctx.login.get();
+    let expanded_gaps = st.expanded_gaps.get();
+    let is_loading = st.file_lines_loading.with(|s| s.contains(&ctx.key));
+    let load_err = st.file_lines_errors.with(|m| m.get(&ctx.key).cloned());
+    let _rev = st.file_lines_revision.get();
+    let cache_key = ctx.cache_key();
+    let cached_file = st.file_lines_cache.with(|c| c.get(&cache_key));
+    let cap_expanded = st.expanded_line_caps.with(|s| s.contains(&ctx.key));
+
+    let mut rendered_comment_ids = std::collections::BTreeSet::<String>::new();
+
+    let body = if ctx.patch.trim().is_empty() {
+        view()
+            .p_3()
+            .child(muted(
+                "Binary file, rename without content changes, or empty patch.",
+            ))
+            .into_element()
+    } else {
+        let hunks = parse_unified_hunks(&ctx.patch);
+        if hunks.is_empty() {
+            view()
+                .p_3()
+                .child(muted(
+                    "Binary file, rename without content changes, or empty patch.",
+                ))
+                .into_element()
+        } else {
+            let mut rows = view();
+            let hunk_count = hunks.len();
+            let is_added_or_removed = ctx.status == "added" || ctx.status == "removed";
+            let has_file_expansion = expanded_gaps
+                .iter()
+                .any(|((k, _), exp)| k == &ctx.key && (exp.from_top > 0 || exp.from_bottom > 0));
+            let total_raw_lines: usize = hunks.iter().map(|h| h.lines.len() + 1).sum();
+            let apply_cap =
+                !cap_expanded && !has_file_expansion && total_raw_lines > RAW_DIFF_LINE_CAP;
+            let mut rendered_raw = 0usize;
+            let mut truncated_file = false;
+
+            // Gap 0: before Hunk 0
+            let first_entry_new = hunks[0].entry_new();
+            let top_gap_len = first_entry_new.saturating_sub(1);
+            let top_exp = expanded_gaps
+                .get(&(ctx.key.clone(), 0))
+                .copied()
+                .unwrap_or_default();
+            let top_shown = if cached_file.is_some() {
+                top_exp.from_bottom.min(top_gap_len)
+            } else {
+                0
+            };
+            let top_remaining = top_gap_len.saturating_sub(top_shown);
+
+            if !is_added_or_removed && top_remaining > 0 {
+                let header_txt = hunks[0].formatted_header(top_shown);
+                let label_txt =
+                    format_gap_label(&header_txt, top_remaining, is_loading, load_err.as_deref());
+                rows = rows.child(render_expander_bar(
+                    ui,
+                    ctx,
+                    0,
+                    None,
+                    Some(0),
+                    Some(top_remaining),
+                    ExpandKind::TopOnly,
+                    label_txt,
+                    is_loading,
+                    load_err.is_some(),
+                ));
+            } else if top_gap_len == 0 {
+                rows = rows.child(render_static_hunk_bar(&hunks[0].header));
+            }
+
+            if let Some(ref cached) = cached_file
+                && top_shown > 0
+            {
+                let start_ln = first_entry_new - top_shown;
+                for ln in start_ln..first_entry_new {
+                    let dl = expanded_context_line(cached, ln, ln);
+                    rows = render_diff_line_row(
+                        ui,
+                        ctx,
+                        &dl,
+                        None,
+                        active_line.as_ref(),
+                        &pending_all,
+                        editing_remote,
+                        deleting_remote,
+                        my_login.as_deref(),
+                        &mut rendered_comment_ids,
+                        rows,
+                    );
+                }
+            }
+
+            for (i, hunk) in hunks.iter().enumerate() {
+                if apply_cap && rendered_raw >= RAW_DIFF_LINE_CAP {
+                    truncated_file = true;
+                    break;
+                }
+                let start_ref = anchor_ref_for(st, &ctx.key, i, AnchorEdge::HunkStart);
+                let end_ref = anchor_ref_for(st, &ctx.key, i, AnchorEdge::HunkEnd);
+                let mut lines_len = hunk.lines.len();
+                if apply_cap && rendered_raw + lines_len > RAW_DIFF_LINE_CAP {
+                    lines_len = RAW_DIFF_LINE_CAP - rendered_raw;
+                    truncated_file = true;
+                }
+                for (li, dl) in hunk.lines.iter().take(lines_len).enumerate() {
+                    if dl.kind == '\\' {
+                        rows = rows.child(render_static_hunk_bar(&dl.text));
+                        continue;
+                    }
+                    let line_ref = if li == 0 {
+                        Some(start_ref)
+                    } else if li + 1 == hunk.lines.len() {
+                        Some(end_ref)
+                    } else {
+                        None
+                    };
+                    if li == 0 && hunk.lines.len() == 1 {
+                        st.anchor_targets.with(|m| {
+                            m.insert((ctx.key.clone(), i, AnchorEdge::HunkEnd), start_ref);
+                        });
+                    }
+                    rows = render_diff_line_row(
+                        ui,
+                        ctx,
+                        dl,
+                        line_ref,
+                        active_line.as_ref(),
+                        &pending_all,
+                        editing_remote,
+                        deleting_remote,
+                        my_login.as_deref(),
+                        &mut rendered_comment_ids,
+                        rows,
+                    );
+                }
+                rendered_raw += lines_len + 1;
+                if truncated_file {
+                    break;
+                }
+
+                // Gap i + 1: between Hunk i and Hunk i + 1
+                if i + 1 < hunk_count {
+                    let next_hunk = &hunks[i + 1];
+                    let gap_start_old = hunk.exit_old();
+                    let gap_start_new = hunk.exit_new();
+                    let gap_end_new = next_hunk.entry_new();
+                    let gap_len = gap_end_new.saturating_sub(gap_start_new);
+                    let gap_exp = expanded_gaps
+                        .get(&(ctx.key.clone(), i + 1))
+                        .copied()
+                        .unwrap_or_default();
+                    let shown_top = if cached_file.is_some() {
+                        gap_exp.from_top.min(gap_len)
+                    } else {
+                        0
+                    };
+                    let shown_bottom = if cached_file.is_some() {
+                        gap_exp.from_bottom.min(gap_len.saturating_sub(shown_top))
+                    } else {
+                        0
+                    };
+                    let remaining = gap_len.saturating_sub(shown_top + shown_bottom);
+
+                    if let Some(ref cached) = cached_file {
+                        for off in 0..shown_top {
+                            let dl = expanded_context_line(
+                                cached,
+                                gap_start_old + off,
+                                gap_start_new + off,
+                            );
+                            rows = render_diff_line_row(
+                                ui,
+                                ctx,
+                                &dl,
+                                None,
+                                active_line.as_ref(),
+                                &pending_all,
+                                editing_remote,
+                                deleting_remote,
+                                my_login.as_deref(),
+                                &mut rendered_comment_ids,
+                                rows,
+                            );
+                        }
+                    }
+
+                    if remaining > 0 {
+                        let header_txt = next_hunk.formatted_header(shown_bottom);
+                        let label_txt = format_gap_label(
+                            &header_txt,
+                            remaining,
+                            is_loading,
+                            load_err.as_deref(),
+                        );
+                        let kind = if remaining <= CONTEXT_STEP {
+                            ExpandKind::MergeAll
+                        } else {
+                            ExpandKind::SplitUpDown
+                        };
+                        rows = rows.child(render_expander_bar(
+                            ui,
+                            ctx,
+                            i + 1,
+                            Some(i),
+                            Some(i + 1),
+                            Some(remaining),
+                            kind,
+                            label_txt,
+                            is_loading,
+                            load_err.is_some(),
+                        ));
+                    }
+
+                    if let Some(ref cached) = cached_file
+                        && shown_bottom > 0
+                    {
+                        let gap_end_old = next_hunk.entry_old();
+                        let start_new = gap_end_new - shown_bottom;
+                        let start_old = gap_end_old.saturating_sub(shown_bottom);
+                        for off in 0..shown_bottom {
+                            let dl =
+                                expanded_context_line(cached, start_old + off, start_new + off);
+                            rows = render_diff_line_row(
+                                ui,
+                                ctx,
+                                &dl,
+                                None,
+                                active_line.as_ref(),
+                                &pending_all,
+                                editing_remote,
+                                deleting_remote,
+                                my_login.as_deref(),
+                                &mut rendered_comment_ids,
+                                rows,
+                            );
+                        }
+                    }
+                }
+            }
+
+            if truncated_file {
+                let key_cap = ctx.key.clone();
+                rows = rows.child(view().px_3().py_2().bg(INSET).child(compact_action(
+                    format!("Show all remaining diff lines ({total_raw_lines} total)"),
+                    Variant::Quiet,
+                    move |_| {
+                        st.expanded_line_caps.update(|s| {
+                            s.insert(key_cap.clone());
+                        });
+                    },
+                )));
+            } else if !is_added_or_removed
+                && let Some(last_hunk) = hunks.last()
+                && !last_hunk.ends_with_no_newline()
+            {
+                let gap_idx = hunk_count;
+                let gap_start_old = last_hunk.exit_old();
+                let gap_start_new = last_hunk.exit_new();
+                let bot_exp = expanded_gaps
+                    .get(&(ctx.key.clone(), gap_idx))
+                    .copied()
+                    .unwrap_or_default();
+                let (shown_top, remaining_opt) = if let Some(ref cached) = cached_file {
+                    let gap_end_new = (cached.total_lines as u64 + 1).max(gap_start_new);
+                    let gap_len = gap_end_new.saturating_sub(gap_start_new);
+                    let shown = bot_exp.from_top.min(gap_len);
+                    (shown, Some(gap_len.saturating_sub(shown)))
+                } else {
+                    (0, None)
+                };
+
+                if let Some(ref cached) = cached_file {
+                    for off in 0..shown_top {
+                        let dl =
+                            expanded_context_line(cached, gap_start_old + off, gap_start_new + off);
+                        rows = render_diff_line_row(
+                            ui,
+                            ctx,
+                            &dl,
+                            None,
+                            active_line.as_ref(),
+                            &pending_all,
+                            editing_remote,
+                            deleting_remote,
+                            my_login.as_deref(),
+                            &mut rendered_comment_ids,
+                            rows,
+                        );
+                    }
+                }
+
+                if remaining_opt.is_none_or(|r| r > 0) {
+                    let label_txt = if is_loading {
+                        "Loading context…".into()
+                    } else if let Some(ref err) = load_err {
+                        err.clone()
+                    } else if let Some(rem) = remaining_opt {
+                        if rem <= CONTEXT_STEP {
+                            format!(
+                                "··· Expand remaining {rem} line{} below ···",
+                                if rem == 1 { "" } else { "s" }
+                            )
+                        } else {
+                            format!("··· Expand {CONTEXT_STEP} lines below ({rem} remaining) ···")
+                        }
+                    } else {
+                        format!("··· Expand {CONTEXT_STEP} lines below ···")
+                    };
+                    rows = rows.child(render_expander_bar(
+                        ui,
+                        ctx,
+                        gap_idx,
+                        Some(hunk_count - 1),
+                        None,
+                        remaining_opt,
+                        ExpandKind::BottomOnly,
+                        label_txt,
+                        is_loading,
+                        load_err.is_some(),
+                    ));
+                }
+            }
+
+            rows.into_element()
+        }
+    };
+
+    let extra_composer = if let Some(ref target) = active_line
+        && target.path == ctx.path
+        && target.section == ctx.section
+        && ctx.patch.trim().is_empty()
+    {
+        inline_composer_box(ui, target.clone()).into_element()
+    } else {
+        view().into_element()
+    };
+
+    let mut unanchored_for_file = view();
+    for item in pending_all.iter().filter(|c| {
+        c.path == ctx.path && c.section == ctx.section && !rendered_comment_ids.contains(&c.id)
+    }) {
+        unanchored_for_file = unanchored_for_file.child(render_pending_comment_card(ui, item));
+    }
+
+    view()
+        .child(extra_composer)
+        .child(unanchored_for_file)
+        .child(body)
+        .into_element()
+}
+
+fn format_gap_label(
+    header_txt: &str,
+    remaining: u64,
+    is_loading: bool,
+    load_err: Option<&str>,
+) -> String {
+    if is_loading {
+        format!("{header_txt} · Loading context…")
+    } else if let Some(err) = load_err {
+        format!("{header_txt} · {err}")
+    } else {
+        format!(
+            "{header_txt} · {remaining} hidden line{}",
+            if remaining == 1 { "" } else { "s" }
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_diff_line_row(
+    ui: Ui,
+    ctx: &FileRenderContext,
+    dl: &DiffLine,
+    row_ref: Option<ElementRef>,
+    active_line: Option<&LineTarget>,
+    pending_all: &[PendingInlineComment],
+    editing_remote: Option<u64>,
+    deleting_remote: Option<u64>,
+    my_login: Option<&str>,
+    rendered_comment_ids: &mut std::collections::BTreeSet<String>,
+    mut rows: View,
+) -> View {
+    let st = ui.review_state;
+    let (comment_line, comment_side) = if dl.kind == '-' {
+        (dl.old_line.unwrap_or(1), "LEFT")
+    } else {
+        (dl.new_line.or(dl.old_line).unwrap_or(1), "RIGHT")
+    };
+    let old_str = dl
+        .old_line
+        .map(|n| format!("{n:>4}"))
+        .unwrap_or_else(|| "    ".into());
+    let new_str = dl
+        .new_line
+        .map(|n| format!("{n:>4}"))
+        .unwrap_or_else(|| "    ".into());
+    let prefix = dl.kind;
+    let snippet_for_target = dl.text.clone();
+    let line_path = ctx.path.clone();
+    let side_owned = comment_side.to_owned();
+
+    let text_col = match dl.kind {
+        '+' => SUCCESS,
+        '-' => DANGER,
+        _ => TEXT,
+    };
+    let mut line_btn = canban_ui_kit::press_target()
+        .w_full()
+        .px_2()
+        .py_0p5()
+        .flex_row()
+        .items_start()
+        .gap_2();
+    if let Some(ref r) = row_ref {
+        line_btn = line_btn.element_ref(r);
+    }
+    line_btn = match dl.kind {
+        '+' => line_btn.bg(SUCCESS_SURFACE),
+        '-' => line_btn.bg(DANGER_SURFACE),
+        _ => line_btn.bg(CLEAR),
+    };
+
+    let line_section = ctx.section.clone();
+    rows = rows.child(
+        line_btn
+            .hover(|s| s.bg(SELECTED))
+            .accessibility_label(format!(
+                "Add review comment on {} line {comment_line}",
+                ctx.path
+            ))
+            .on_press(move |_: &()| {
+                st.active_line.set(Some(LineTarget {
+                    path: line_path.clone(),
+                    section: line_section.clone(),
+                    line: comment_line,
+                    side: side_owned.clone(),
+                    snippet: snippet_for_target.clone(),
+                    editing_author: None,
+                }));
+                st.line_draft.set(String::new());
+            })
+            .child(
+                label(format!("{old_str} {new_str}"))
+                    .w(px(74.))
+                    .flex_shrink_0()
+                    .font_family(MONO_FONT)
+                    .text_size(px(11.))
+                    .text_color(MUTED),
+            )
+            .child(
+                label(format!("{prefix} {}", dl.text))
+                    .flex_1()
+                    .min_w(px(0.))
+                    .font_family(MONO_FONT)
+                    .text_size(px(12.))
+                    .text_color(text_col),
+            ),
+    );
+
+    // Render existing remote GitHub PR review comments on this exact line
+    for rt in ctx.remote_threads.iter().filter(|t| {
+        t["path"].as_str() == Some(ctx.path.as_str())
+            && t["line"].as_u64().or_else(|| t["original_line"].as_u64()) == Some(comment_line)
+            && t["side"].as_str().unwrap_or("RIGHT") == comment_side
+    }) {
+        let author = rt["user"]["login"]
+            .as_str()
+            .unwrap_or("reviewer")
+            .to_owned();
+        let cid = rt["id"].as_u64().unwrap_or(0);
+        let web_url = crate::github::comment_web_url(rt, ctx.pr_base_url.as_deref(), "threads");
+        let is_own = cid > 0
+            && ctx.pr_target.is_some()
+            && my_login.is_some_and(|me| author.eq_ignore_ascii_case(me));
+        let is_editing = cid > 0 && editing_remote == Some(cid);
+        let is_deleting = cid > 0 && deleting_remote == Some(cid);
+        let was_edited = match (rt["created_at"].as_str(), rt["updated_at"].as_str()) {
+            (Some(c), Some(u)) if !c.is_empty() && !u.is_empty() => c != u,
+            _ => false,
+        };
+        let body_txt = rt["body"].as_str().unwrap_or("").to_owned();
+        let mut header_row = view()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(icon(Icon::GitHub).w(px(12.)).h(px(12.)))
+            .child(
+                label(format!("@{author}"))
+                    .text_size(px(11.5))
+                    .font_weight(FontWeight::SEMIBOLD),
+            )
+            .child(badge("GitHub PR comment"));
+        if was_edited {
+            header_row = header_row.child(muted("· edited").text_size(px(11.)));
+        }
+        let mut trailing = view().flex_row().items_center().gap_1();
+        let mut has_trailing = false;
+        if let Some(jump_url) = web_url {
+            has_trailing = true;
+            trailing = trailing.child(
+                view()
+                    .tooltip(hint_tooltip("Open comment in GitHub"))
+                    .child(
+                        compact_action("GitHub ↗", Variant::Quiet, move |_| {
+                            crate::github::open_url(ui, jump_url.clone())
+                        })
+                        .accessibility_label(|| Some("Open comment in GitHub".into())),
+                    ),
+            );
+        }
+        if is_own && !is_editing && !is_deleting {
+            has_trailing = true;
+            let initial_body = body_txt.clone();
+            let anchor = element_ref();
+            trailing = trailing.child(
+                canban_ui_kit::press_target()
+                    .element_ref(&anchor)
+                    .w(px(26.))
+                    .h(px(26.))
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(5.))
+                    .bg(CLEAR)
+                    .hover(|s| s.bg(INSET))
+                    .focus(|s| s.border_1().border_color(ACCENT))
+                    .accessibility_label(|| Some("PR comment actions".into()))
+                    .child(icon_tinted(Icon::More, MUTED).w(px(15.)).h(px(15.)))
+                    .on_press(move |_: &()| {
+                        use nsh_core::element::desktop::{MenuItem, popup_menu_at};
+                        let body_val = initial_body.clone();
+                        ui.spawn(async move {
+                            let Some(bounds) = anchor.measure().await else {
+                                return;
+                            };
+                            popup_menu_at(
+                                vec![
+                                    MenuItem::new("Edit comment").on_select(move || {
+                                        let b = body_val.clone();
+                                        batch(move || {
+                                            st.remote_edit_error.set(String::new());
+                                            st.remote_delete_error.set(String::new());
+                                            st.deleting_remote_comment.set(None);
+                                            st.remote_edit_draft.set(b);
+                                            st.editing_remote_comment.set(Some(cid));
+                                        });
+                                    }),
+                                    MenuItem::new("Delete comment…").on_select(move || {
+                                        batch(move || {
+                                            st.remote_delete_error.set(String::new());
+                                            st.remote_edit_error.set(String::new());
+                                            st.editing_remote_comment.set(None);
+                                            st.deleting_remote_comment.set(Some(cid));
+                                        });
+                                    }),
+                                ],
+                                point(bounds.page.x, bounds.page.y + bounds.frame.size.height),
+                            )
+                            .await;
+                        });
+                    }),
+            );
+        }
+        if has_trailing {
+            header_row = header_row.child(view().flex_1()).child(trailing);
+        }
+        let mut comment_card = view()
+            .mx_4()
+            .my_1()
+            .p_2p5()
+            .rounded(px(RADIUS))
+            .border_1()
+            .border_color(if is_deleting {
+                DANGER
+            } else if is_editing {
+                ACCENT
+            } else {
+                BORDER
+            })
+            .bg(SURFACE)
+            .gap_1p5()
+            .child(header_row);
+        if is_deleting {
+            comment_card = comment_card.child(remote_pr_comment_delete_confirm(
+                ui,
+                cid,
+                ctx.pr_target.clone(),
+            ));
+        }
+        let content = if is_editing {
+            remote_pr_comment_editor(ui, cid, ctx.pr_target.clone()).into_element()
+        } else {
+            canban_ui_kit::markdown::reader(move || body_txt.clone()).into_element()
+        };
+        rows = rows.child(comment_card.child(content));
+    }
+
+    // Render any pending inline comments saved for this file + line + side
+    for item in pending_all.iter().filter(|c| {
+        c.path == ctx.path
+            && c.section == ctx.section
+            && c.line == comment_line
+            && c.side == comment_side
+    }) {
+        rendered_comment_ids.insert(item.id.clone());
+        rows = rows.child(render_pending_comment_card(ui, item));
+    }
+
+    // Render active inline composer right beneath the clicked line
+    if let Some(target) = active_line
+        && target.path == ctx.path
+        && target.section == ctx.section
+        && target.line == comment_line
+        && target.side == comment_side
+    {
+        rows = rows.child(inline_composer_box(ui, target.clone()));
+    }
+
+    rows
 }
 
 fn render_pending_comment_card(ui: Ui, item: &PendingInlineComment) -> View {
@@ -1405,4 +1777,312 @@ pub fn fold_button(ui: Ui, key: String, title: String) -> impl IntoElement {
         label,
         move |_| super::toggle_file(ui, key.clone()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nsh_core::{
+        ApproxTextEngine, Core, EventKind, EventPayload, MountBatch, MountItem, NodeId,
+        element::JsEvent, geometry::size,
+    };
+    use std::collections::HashMap;
+
+    #[component]
+    fn DiffExpandProbe() -> impl IntoElement {
+        canban_ui_kit::tokens::install_theme();
+        let ui = Ui::new();
+        let lines: Vec<String> = (1..=140)
+            .map(|n| format!("line-{n:03} context body"))
+            .collect();
+        let patch = concat!(
+            "@@ -30,3 +30,3 @@ fn top_section() {\n",
+            " line-030 context body\n",
+            "-line-031 old\n",
+            "+line-031 new\n",
+            " line-032 context body\n",
+            "@@ -42,3 +42,3 @@ fn small_gap_section() {\n",
+            " line-042 context body\n",
+            "-line-043 old\n",
+            "+line-043 new\n",
+            " line-044 context body\n",
+            "@@ -105,3 +105,3 @@ fn bottom_section() {\n",
+            " line-105 context body\n",
+            "-line-106 old\n",
+            "+line-106 new\n",
+            " line-107 context body",
+        );
+        let data = json!({
+            "base_ref": "main",
+            "compare_ref": "feat/expand",
+            "compare_sha": "abc1234",
+            "files": [{
+                "filename": "src/demo.rs",
+                "status": "modified",
+                "additions": 3,
+                "deletions": 3,
+                "patch": patch,
+                "preview_lines": lines,
+            }]
+        });
+        ui.review_state.mode.set("git".into());
+        ui.review_state.compare_ref.set("feat/expand".into());
+        ui.review_state.compare_data.set(data);
+        view().w(px(1000.)).h(px(420.)).child(workbench(ui))
+    }
+
+    struct ProbeTree {
+        labels: HashMap<String, NodeId>,
+        texts: HashMap<NodeId, String>,
+        parents: HashMap<NodeId, NodeId>,
+        scroll_nodes: std::collections::HashSet<NodeId>,
+        scroll_commands: Vec<(NodeId, Point<Points>)>,
+    }
+
+    impl ProbeTree {
+        fn new() -> Self {
+            Self {
+                labels: HashMap::new(),
+                texts: HashMap::new(),
+                parents: HashMap::new(),
+                scroll_nodes: std::collections::HashSet::new(),
+                scroll_commands: Vec::new(),
+            }
+        }
+
+        fn apply(&mut self, batch: &MountBatch) {
+            for item in &batch.items {
+                match item {
+                    MountItem::Create {
+                        id,
+                        kind: nsh_core::ViewKind::Scroll,
+                    } => {
+                        self.scroll_nodes.insert(*id);
+                    }
+                    MountItem::Insert { parent, child, .. } => {
+                        self.parents.insert(*child, *parent);
+                    }
+                    MountItem::Remove { id } => {
+                        self.parents.remove(id);
+                    }
+                    MountItem::Delete { id } => {
+                        self.texts.remove(id);
+                        self.parents.remove(id);
+                        self.scroll_nodes.remove(id);
+                        self.labels.retain(|_, node| node != id);
+                    }
+                    MountItem::Text { id, text, .. } => {
+                        self.texts.insert(*id, text.text.to_string());
+                    }
+                    MountItem::ViewProps { id, props } => {
+                        if let Some(label) = &props.accessibility.label {
+                            self.labels.insert(label.to_string(), *id);
+                        }
+                    }
+                    MountItem::Command {
+                        id,
+                        command: nsh_core::Command::ScrollTo { x, y, .. },
+                    } => {
+                        self.scroll_commands.push((*id, point(*x, *y)));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn pump(core: &mut Core<ApproxTextEngine>, tree: &mut ProbeTree) {
+        let mut idle = 0u8;
+        for _ in 0..32 {
+            core.run_frame(nsh_core::time::now());
+            core.run_component_tasks();
+            let had_batch = if let Some(batch) = core.commit() {
+                tree.apply(&batch);
+                for (id, offset) in std::mem::take(&mut tree.scroll_commands) {
+                    core.set_scroll_offset(id, offset, u32::MAX);
+                }
+                true
+            } else {
+                false
+            };
+            let mut events = Vec::new();
+            core.take_events(&mut events);
+            let mut dispatched = false;
+            for ev in events {
+                if let JsEvent::Event(id, kind, payload) = ev {
+                    core.component_event(id, kind, &payload);
+                    dispatched = true;
+                } else if let JsEvent::LayoutListener {
+                    host,
+                    id,
+                    listener,
+                    frame,
+                } = ev
+                {
+                    core.component_layout(host, id, &listener, frame);
+                    dispatched = true;
+                }
+            }
+            if !had_batch && !dispatched && !core.wants_frame() {
+                idle += 1;
+                if idle >= 3 {
+                    break;
+                }
+            } else {
+                idle = 0;
+            }
+        }
+    }
+
+    #[test]
+    fn context_expansion_preserves_visible_diff_scroll_position_and_allows_inline_comments() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let mut core = Core::new(ApproxTextEngine, size(px(1000.), px(420.)));
+        core.set_components(nsh_base::registry());
+        core.set_task_runtime(runtime.handle().clone());
+        core.mount_root(&nsh_core::element::Root::of::<DiffExpandProbe>());
+        let mut tree = ProbeTree::new();
+        pump(&mut core, &mut tree);
+
+        // Before expanding above hunk 0 (line 30), record line 30's viewport page.y.
+        let line30_id = tree.labels["Add review comment on src/demo.rs line 30"];
+        let before_y = core.measure(line30_id).unwrap().page.y.0;
+
+        let expand_top = tree.labels["Expand 20 lines above"];
+        assert!(core.component_event(expand_top, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+
+        // Expanded lines 10..=29 are now rendered and clickable for inline comments.
+        assert!(
+            tree.labels
+                .contains_key("Add review comment on src/demo.rs line 10")
+        );
+        let line30_after_id = tree.labels["Add review comment on src/demo.rs line 30"];
+        let after_y = core.measure(line30_after_id).unwrap().page.y.0;
+        assert!(
+            (after_y - before_y).abs() < 1.0,
+            "expanding top context must keep line 30 pinned at the same screen Y (before={before_y}, after={after_y})"
+        );
+
+        // Expand small gap (9 lines between hunk 0 and hunk 1) via [↕]: hunk 0's end stays pinned.
+        let line32_id = tree.labels["Add review comment on src/demo.rs line 32"];
+        let line32_before_y = core.measure(line32_id).unwrap().page.y.0;
+        let expand_small = tree.labels["Expand all 9 hidden lines"];
+        assert!(core.component_event(expand_small, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert!(
+            tree.labels
+                .contains_key("Add review comment on src/demo.rs line 35")
+        );
+        let line32_after_y = core
+            .measure(tree.labels["Add review comment on src/demo.rs line 32"])
+            .unwrap()
+            .page
+            .y
+            .0;
+        assert!(
+            (line32_after_y - line32_before_y).abs() < 1.0,
+            "expanding small gap must keep hunk 0 pinned (before={line32_before_y}, after={line32_after_y})"
+        );
+
+        // Expand upward from hunk 2 (line 105): hunk 2's first line must keep its screen Y!
+        let line105_before_y = core
+            .measure(tree.labels["Add review comment on src/demo.rs line 105"])
+            .unwrap()
+            .page
+            .y
+            .0;
+        let expand_up = tree.labels["Expand 20 lines up"];
+        assert!(core.component_event(expand_up, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert!(
+            tree.labels
+                .contains_key("Add review comment on src/demo.rs line 85")
+        );
+        let line105_after_y = core
+            .measure(tree.labels["Add review comment on src/demo.rs line 105"])
+            .unwrap()
+            .page
+            .y
+            .0;
+        assert!(
+            (line105_after_y - line105_before_y).abs() < 1.0,
+            "expanding up from hunk 2 must keep line 105 pinned (before={line105_before_y}, after={line105_after_y})"
+        );
+
+        // Expand downward from hunk 1 (line 44) in the large gap: line 44 stays pinned.
+        let line44_before_y = core
+            .measure(tree.labels["Add review comment on src/demo.rs line 44"])
+            .unwrap()
+            .page
+            .y
+            .0;
+        let expand_down = tree.labels["Expand 20 lines down"];
+        assert!(core.component_event(expand_down, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert!(
+            tree.labels
+                .contains_key("Add review comment on src/demo.rs line 45")
+        );
+        let line44_after_y = core
+            .measure(tree.labels["Add review comment on src/demo.rs line 44"])
+            .unwrap()
+            .page
+            .y
+            .0;
+        assert!(
+            (line44_after_y - line44_before_y).abs() < 1.0,
+            "expanding down from hunk 1 must keep line 44 pinned (before={line44_before_y}, after={line44_after_y})"
+        );
+
+        // Clicking an expanded context line opens the inline comment composer!
+        let expanded_line_btn = tree.labels["Add review comment on src/demo.rs line 85"];
+        assert!(core.component_event(expanded_line_btn, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert!(
+            tree.texts
+                .values()
+                .any(|t| t.contains("Comment on src/demo.rs:85 (new side)")),
+            "clicking an expanded context line must open the inline comment composer"
+        );
+
+        // Scroll down to bring hunk 2's bottom EOF gap into the 420px viewport (un-culling it),
+        // then expand bottom EOF gap and verify line 107 stays pinned.
+        let diff_code_node = tree.labels["Git diff code"];
+        let diff_scroll_id = *tree
+            .scroll_nodes
+            .iter()
+            .find(|id| tree.parents.get(id) == Some(&diff_code_node))
+            .expect("diff scroll view mounted under Git diff code");
+        core.set_scroll_offset(diff_scroll_id, point(px(0.), px(1250.)), u32::MAX);
+        pump(&mut core, &mut tree);
+
+        let line107_before_y = core
+            .measure(tree.labels["Add review comment on src/demo.rs line 107"])
+            .unwrap()
+            .page
+            .y
+            .0;
+        let expand_bottom = tree.labels["Expand 20 lines below"];
+        assert!(core.component_event(expand_bottom, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert!(
+            tree.labels
+                .contains_key("Add review comment on src/demo.rs line 108")
+        );
+        let line107_after_y = core
+            .measure(tree.labels["Add review comment on src/demo.rs line 107"])
+            .unwrap()
+            .page
+            .y
+            .0;
+        assert!(
+            (line107_after_y - line107_before_y).abs() < 1.0,
+            "expanding bottom EOF gap must keep line 107 pinned (before={line107_before_y}, after={line107_after_y})"
+        );
+    }
 }

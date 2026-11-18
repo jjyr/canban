@@ -1033,6 +1033,7 @@ impl AppServer {
                 json!({
                     "filename": f["filename"].as_str().unwrap_or(""),
                     "status": f["status"].as_str().unwrap_or("modified"),
+                    "sha": f["sha"].as_str().unwrap_or(""),
                     "additions": add,
                     "deletions": del,
                     "patch": f["patch"].as_str().unwrap_or(""),
@@ -1067,6 +1068,76 @@ impl AppServer {
             "truncated": files.len() >= 100,
             "cached": overview.cached && files_resp.cached,
         }))
+    }
+
+    pub(super) fn review_github_pr_file(&self, p: Value) -> Result<Value> {
+        let repo = canban_github::repository(strp(&p, "repository")?)?;
+        let path = validate_draft_comment_path(strp(&p, "path")?)?;
+        ensure!(!path.contains('\\'), "Invalid file path");
+        let sha = p["sha"].as_str().map(str::trim).unwrap_or("");
+        let blob_sha = p["blob_sha"].as_str().map(str::trim).unwrap_or("");
+        let valid_sha =
+            |s: &str| (7..=40).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit());
+        ensure!(
+            valid_sha(sha) || valid_sha(blob_sha),
+            "Missing valid GitHub commit or blob SHA"
+        );
+        let refresh = p["refresh"].as_bool().unwrap_or(false);
+
+        let decode_base64_content = |data: &Value| -> Option<Result<Vec<u8>>> {
+            let enc = data["encoding"].as_str().unwrap_or("");
+            let content = data["content"].as_str().filter(|s| !s.is_empty())?;
+            if enc != "base64" {
+                return None;
+            }
+            let cleaned: String = content
+                .chars()
+                .filter(|c| !c.is_ascii_whitespace())
+                .collect();
+            use base64::{Engine, engine::general_purpose::STANDARD};
+            Some(STANDARD.decode(cleaned.as_bytes()).map_err(Into::into))
+        };
+
+        let mut bytes_opt: Option<Vec<u8>> = None;
+        let mut fallback_blob = valid_sha(blob_sha).then(|| blob_sha.to_owned());
+
+        if valid_sha(sha) {
+            let encoded_path: String = path
+                .split('/')
+                .map(canban_github::segment)
+                .collect::<Vec<_>>()
+                .join("/");
+            let contents_path = format!("/repos/{repo}/contents/{encoded_path}?ref={sha}");
+            match self.github_read(&contents_path, refresh, false) {
+                Ok(resp) => {
+                    if let Some(decoded) = decode_base64_content(&resp.data) {
+                        bytes_opt = Some(decoded?);
+                    } else if let Some(s) = resp.data["sha"].as_str().filter(|s| valid_sha(s)) {
+                        fallback_blob = Some(s.to_owned());
+                    }
+                }
+                Err(err) => {
+                    if fallback_blob.is_none() {
+                        return Err(err);
+                    }
+                }
+            }
+        }
+
+        if bytes_opt.is_none()
+            && let Some(bsha) = fallback_blob
+        {
+            let blob_path = format!("/repos/{repo}/git/blobs/{bsha}");
+            let resp = self.github_read(&blob_path, refresh, false)?;
+            let decoded = decode_base64_content(&resp.data)
+                .context("GitHub blob did not return base64 file content")??;
+            bytes_opt = Some(decoded);
+        }
+
+        let bytes = bytes_opt.context("File content is unavailable from GitHub")?;
+        let start_line = p["start_line"].as_u64().map(|n| n as usize);
+        let end_line = p["end_line"].as_u64().map(|n| n as usize);
+        canban_workspaces::compare::slice_context_file_bytes(&path, &bytes, start_line, end_line)
     }
 
     pub(super) fn review_send_agent(&self, p: Value) -> Result<Value> {

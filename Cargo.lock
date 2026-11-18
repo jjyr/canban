@@ -507,6 +507,7 @@ name = "canban-app-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "canban-context",
  "canban-github",
  "canban-herdr",
@@ -780,6 +781,7 @@ name = "canban-workspaces"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "canban-herdr",
  "canban-types",
  "serde",
