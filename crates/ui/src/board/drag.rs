@@ -3,10 +3,11 @@
 use super::{
     Drop,
     model::{self, Layout, Slot},
+    transitions::{self, ColumnMetric, EntryKind, ExitSpec, FlightSpec},
 };
 use crate::{components::card_tile, presenter::*};
-use canban_types::{Card, Project};
-use canban_ui_kit::tokens::*;
+use canban_types::{BoardFilter, Card, Project};
+use canban_ui_kit::{motion::ReducedMotion, tokens::*};
 use nsh_core::{element::AnimationEnd, keymap::When, prelude::*};
 use std::{
     collections::BTreeMap,
@@ -48,16 +49,31 @@ struct Session {
     original_y: f32,
     end: Option<PanEvent>,
 }
+#[derive(Default)]
+struct FlipState {
+    seq: u64,
+    reset_seq: u64,
+    offsets: BTreeMap<String, f32>,
+}
 #[derive(Clone, Copy)]
 pub(super) struct BoardDrag {
     owner: Owner,
     ui: Ui,
     trace: bool,
+    reduced_motion: Option<Signal<bool>>,
+    initialized: Stored<bool>,
+    last_filter: Stored<BoardFilter>,
     pub cards: Signal<Vec<Card>>,
     pub layout: Signal<Layout>,
     viewports: Signal<BTreeMap<String, (f32, f32)>>,
     reflow_pending: Stored<bool>,
+    measure_pending: Stored<bool>,
     order: Stored<model::Order>,
+    transition_gen: Stored<u64>,
+    flip: Stored<FlipState>,
+    entries: Stored<(u64, BTreeMap<String, EntryKind>)>,
+    pub flights: Signal<Vec<FlightSpec>>,
+    pub exits: Signal<Vec<ExitSpec>>,
     pub focused: Signal<String>,
     pub phase: Signal<u8>,
     pub lifted: Signal<String>,
@@ -89,7 +105,7 @@ fn settle_if_needed(
     current: Option<(f32, f32)>,
     to: f32,
 ) -> Option<AnimationEnd> {
-    if reduce_motion() || should_short_circuit_settle(current, to) {
+    if canban_ui_kit::motion::reduced() || should_short_circuit_settle(current, to) {
         value.set(to);
         None
     } else {
@@ -103,24 +119,25 @@ fn settle_if_needed(
         ))
     }
 }
-async fn wait_motion((x, y): MotionEnd) {
-    if x.is_none() && y.is_none() {
+async fn wait_motion_ends(ends: Vec<AnimationEnd>, timeout_ms: u64) {
+    if ends.is_empty() {
         return;
     }
     let done = signal(false);
     spawn(async move {
-        if let Some(end) = x {
-            end.await;
-        }
-        if let Some(end) = y {
+        for end in ends {
             end.await;
         }
         let _ = done.try_set(true);
     });
-    let deadline = Instant::now() + Duration::from_millis(450);
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     while done.try_get() == Some(false) && Instant::now() < deadline {
         timer(Duration::from_millis(16)).await;
     }
+}
+async fn wait_motion((x, y): MotionEnd) {
+    let ends: Vec<_> = [x, y].into_iter().flatten().collect();
+    wait_motion_ends(ends, 450).await;
 }
 pub(super) fn can_start_drag(phase: u8, card_move_pending: bool) -> bool {
     phase == 0 && !card_move_pending
@@ -148,15 +165,28 @@ pub(super) fn should_abort_unmounted_row(
 }
 impl BoardDrag {
     pub fn new(ui: Ui, project: Project) -> Self {
+        let initial_filter = ui
+            .github
+            .filters
+            .with_untracked(|m| m.get(&project.id).cloned().unwrap_or_default());
         let this = Self {
             owner: Owner::current(),
             ui,
             trace: std::env::var_os("CANBAN_BOARD_TRACE").is_some(),
+            reduced_motion: use_context::<ReducedMotion>().map(|p| p.0),
+            initialized: stored(false),
+            last_filter: stored(initial_filter),
             cards: signal(Vec::new()),
             layout: signal(Layout::default()),
             viewports: signal(BTreeMap::new()),
             reflow_pending: stored(false),
+            measure_pending: stored(false),
             order: stored(model::Order::new()),
+            transition_gen: stored(0),
+            flip: stored(FlipState::default()),
+            entries: stored((0, BTreeMap::new())),
+            flights: signal(Vec::new()),
+            exits: signal(Vec::new()),
             focused: signal(String::new()),
             phase: signal(0),
             lifted: signal(String::new()),
@@ -210,8 +240,114 @@ impl BoardDrag {
         });
         this
     }
+    fn is_reduced_motion(self) -> bool {
+        reduce_motion()
+            || self
+                .reduced_motion
+                .is_some_and(|s| s.try_get() == Some(true))
+    }
+    fn board_visible(self) -> bool {
+        let page = self.ui.page.get_untracked();
+        let on_board = matches!(page.as_str(), "board" | "card" | "new-card");
+        let full = self.ui.narrow.get_untracked()
+            || self.ui.card_standalone.get_untracked()
+            || (page == "card" && self.ui.card_terminal_open.get_untracked());
+        on_board && !full
+    }
+    fn column_metrics(self) -> (f32, BTreeMap<String, ColumnMetric>) {
+        self.metrics.with(|m| {
+            let cols = m
+                .columns
+                .iter()
+                .map(|(stage, c)| {
+                    (
+                        stage.clone(),
+                        ColumnMetric {
+                            x: c.rect.x - m.horizontal - m.root.x,
+                            y: c.rect.y - m.root.y,
+                            w: c.rect.w,
+                            h: c.rect.h,
+                            offset: c.offset,
+                        },
+                    )
+                })
+                .collect();
+            (m.root.w, cols)
+        })
+    }
+    fn clear_transitions(self) {
+        self.entries.with(|(_, map)| map.clear());
+        self.flip.with(|f| {
+            f.reset_seq = f.reset_seq.wrapping_add(1);
+            f.offsets.clear();
+        });
+        if !self.flights.with_untracked(Vec::is_empty) {
+            self.flights.set(Vec::new());
+        }
+        if !self.exits.with_untracked(Vec::is_empty) {
+            self.exits.set(Vec::new());
+        }
+    }
+    pub fn cancel_transitions(self, id: &str) {
+        self.entries.with(|(_, map)| {
+            map.remove(id);
+        });
+        if self
+            .flights
+            .with_untracked(|all| all.iter().any(|f| f.id == id))
+        {
+            self.flights.update(|all| all.retain(|f| f.id != id));
+        }
+    }
+    pub fn take_entry(self, id: &str) -> Option<EntryKind> {
+        self.entries.with(|(_, map)| map.remove(id))
+    }
+    pub fn take_flip(
+        self,
+        id: &str,
+        seen_seq: u64,
+        seen_reset: u64,
+    ) -> (u64, u64, bool, Option<f32>) {
+        self.flip.with(|f| {
+            let reset_changed = f.reset_seq != seen_reset;
+            let offset = if f.seq != seen_seq {
+                f.offsets.get(id).copied()
+            } else {
+                None
+            };
+            (f.seq, f.reset_seq, reset_changed, offset)
+        })
+    }
+    fn finish_flight(self, id: &str, generation: u64) {
+        if self
+            .flights
+            .try_get()
+            .is_some_and(|all| all.iter().any(|f| f.id == id && f.generation == generation))
+        {
+            self.flights
+                .update(|all| all.retain(|f| !(f.id == id && f.generation == generation)));
+        }
+    }
+    fn finish_exit(self, id: &str, generation: u64) {
+        if self
+            .exits
+            .try_get()
+            .is_some_and(|all| all.iter().any(|e| e.id == id && e.generation == generation))
+        {
+            self.exits
+                .update(|all| all.retain(|e| !(e.id == id && e.generation == generation)));
+        }
+    }
     fn sync(self) {
+        self.sync_with(true);
+    }
+    fn sync_with(self, animate: bool) {
         let project = self.project.with(|p| p.id.clone());
+        let current_filter = self
+            .ui
+            .github
+            .filters
+            .with_untracked(|m| m.get(&project).cloned().unwrap_or_default());
         let started = Instant::now();
         let changed = self.ui.snapshot.with_untracked(|s| {
             let candidates: Vec<_> = s
@@ -223,17 +359,127 @@ impl BoardDrag {
                         && crate::github::filters::matches(self.ui, c)
                 })
                 .collect();
-            if self
-                .cards
-                .with_untracked(|old| old.iter().eq(candidates.iter().copied()))
+            let was_initialized = self.initialized.get();
+            if was_initialized
+                && self
+                    .cards
+                    .with_untracked(|old| old.iter().eq(candidates.iter().copied()))
             {
                 return false;
             }
+            self.initialized.replace(true);
+            let filter_changed = self.last_filter.replace(current_filter.clone()) != current_filter;
+            let can_animate = animate
+                && was_initialized
+                && !filter_changed
+                && self.board_visible()
+                && !self.is_reduced_motion();
+            let new_cards: Vec<_> = candidates.into_iter().cloned().collect();
+            let new_order = model::order(&new_cards);
+            let stages = self.project.with(|p| {
+                p.workflow
+                    .stages
+                    .iter()
+                    .map(|s| s.id.clone())
+                    .collect::<Vec<_>>()
+            });
+            let session = self.session.get();
+            let new_layout = self.metrics.with(|m| {
+                model::layout_ordered(
+                    &new_cards,
+                    &stages,
+                    &new_order,
+                    &m.heights,
+                    session.as_ref().map(|s| s.card.id.as_str()).unwrap_or(""),
+                    session.as_ref().and_then(|s| s.target.as_ref()),
+                )
+            });
+
             batch(|| {
-                let cards: Vec<_> = candidates.into_iter().cloned().collect();
-                self.order.replace(model::order(&cards));
-                self.cards.set(cards);
-                self.reflow();
+                if can_animate {
+                    let (root_w, cols) = self.column_metrics();
+                    let active_flights = self.flights.get_untracked();
+                    let plan = self.cards.with_untracked(|old_cards| {
+                        self.layout.with_untracked(|old_layout| {
+                            self.metrics.with(|m| {
+                                self.transition_gen.with(|next_gen| {
+                                    transitions::plan(
+                                        old_cards,
+                                        &new_cards,
+                                        old_layout,
+                                        &new_layout,
+                                        &m.heights,
+                                        &cols,
+                                        root_w,
+                                        &active_flights,
+                                        next_gen,
+                                    )
+                                })
+                            })
+                        })
+                    });
+                    if plan.flights != active_flights {
+                        self.flights.set(plan.flights);
+                    }
+                    if !plan.exits.is_empty()
+                        || self.exits.with_untracked(|exits| {
+                            exits.iter().any(|e| new_cards.iter().any(|c| c.id == e.id))
+                        })
+                    {
+                        self.exits.update(|exits| {
+                            exits.retain(|e| {
+                                !new_cards.iter().any(|c| c.id == e.id)
+                                    && !plan.exits.iter().any(|n| n.id == e.id)
+                            });
+                            exits.extend(plan.exits);
+                        });
+                    }
+                    let entry_seq = self.entries.with(|(seq, map)| {
+                        *seq = seq.wrapping_add(1);
+                        *map = plan.entries;
+                        *seq
+                    });
+                    if self.entries.with(|(_, map)| !map.is_empty()) {
+                        self.spawn_owned(async move {
+                            next_frame().await;
+                            next_frame().await;
+                            if self.phase.try_get().is_some() {
+                                self.entries.with(|(seq, map)| {
+                                    if *seq == entry_seq {
+                                        map.clear();
+                                    }
+                                });
+                            }
+                        });
+                    }
+                    let flip_seq = self.flip.with(|f| {
+                        f.seq = f.seq.wrapping_add(1);
+                        f.offsets = plan.flip_offsets;
+                        f.seq
+                    });
+                    if self.flip.with(|f| !f.offsets.is_empty()) {
+                        self.spawn_owned(async move {
+                            next_frame().await;
+                            next_frame().await;
+                            if self.phase.try_get().is_some() {
+                                self.flip.with(|f| {
+                                    if f.seq == flip_seq {
+                                        f.offsets.clear();
+                                    }
+                                });
+                            }
+                        });
+                    }
+                } else {
+                    self.clear_transitions();
+                }
+
+                self.order.replace(new_order);
+                self.cards.set(new_cards);
+                if self.layout.with_untracked(|old| old != &new_layout) {
+                    self.metrics.with(|m| m.layouts += 1);
+                    self.layout.set(new_layout);
+                }
             });
             true
         });
@@ -256,9 +502,24 @@ impl BoardDrag {
             self.reflow();
         });
     }
+    fn schedule_measure(self) {
+        if self.measure_pending.replace(true) {
+            return;
+        }
+        self.spawn_owned(async move {
+            next_frame().await;
+            self.measure_pending.replace(false);
+            if self.phase.try_get() == Some(0) && self.metrics.with(|m| m.dirty) {
+                self.measure().await;
+            }
+        });
+    }
     pub fn is_ghost_active(self, id: &str) -> bool {
         self.ghost
             .with(|g| g.as_ref().is_some_and(|(c, ..)| c.id == id))
+            || self
+                .flights
+                .with(|all| all.iter().any(|f| !f.exiting && f.id == id))
     }
     pub fn visible(self, stage: &str) -> Vec<Card> {
         let (offset, height) = self
@@ -340,19 +601,22 @@ impl BoardDrag {
                     offset: position.y.0,
                 },
             );
-            m.dirty = true;
         });
+        self.dirty();
     }
     /// Forget unmounted columns (single-stage compact Board) so drag hit
     /// testing only targets visible stages.
     pub fn retain(self, stages: &[String]) {
         self.metrics.with(|m| {
             m.columns.retain(|stage, _| stages.contains(stage));
-            m.dirty = true;
         });
+        self.dirty();
     }
     pub fn dirty(self) {
         self.metrics.with(|m| m.dirty = true);
+        if self.phase.try_get() == Some(0) {
+            self.schedule_measure();
+        }
     }
     pub fn scrolled(self, stage: &str, offset: f32) {
         if self
@@ -376,8 +640,8 @@ impl BoardDrag {
     pub fn content_width(self, width: f32) {
         self.metrics.with(|m| {
             m.width = width;
-            m.dirty = true;
         });
+        self.dirty();
     }
     fn reflow(self) {
         let started = Instant::now();
@@ -486,6 +750,7 @@ impl BoardDrag {
         ) {
             return;
         }
+        self.cancel_transitions(&card.id);
         self.phase.set(1);
         self.metrics.with(|m| {
             m.frames = 0;
@@ -812,25 +1077,125 @@ impl BoardDrag {
         self.lifted.set(String::new());
         self.x.set(0.);
         self.y.set(0.);
-        self.sync();
+        self.sync_with(false);
     }
     pub fn overlay(self) -> impl IntoElement {
-        dynamic(move || match self.ghost.get() {
-            None => view().into_element(),
-            Some((card, x, y, width)) => view()
-                .absolute()
-                .left(px(x))
-                .top(px(y))
-                .w(px(width))
-                .z_index(100)
-                .pointer_events(PointerEvents::None)
-                .shadow_lg()
-                .rounded(px(RADIUS))
-                .bind_translate_x(&self.x)
-                .bind_translate_y(&self.y)
-                .child(card_tile(self.ui, card))
-                .into_element(),
-        })
+        view()
+            .absolute()
+            .inset_0()
+            .z_index(100)
+            .pointer_events(PointerEvents::None)
+            .child(each(
+                move || self.flights.get(),
+                |f| f.id.clone(),
+                move |flight, _| {
+                    let initial = flight.get_untracked();
+                    let x = animated_value(0.);
+                    let y = animated_value(0.);
+                    let opacity = animated_value(initial.from_opacity);
+                    let origin_x = initial.origin_x;
+                    let origin_y = initial.origin_y;
+                    let card_id = initial.id.clone();
+                    let seen_gen = stored(0u64);
+                    let prev_dx = stored(0f32);
+                    let prev_dy = stored(0f32);
+                    let prev_op = stored(initial.from_opacity);
+                    effect(move || {
+                        let spec = flight.get();
+                        if seen_gen.replace(spec.generation) == spec.generation {
+                            return;
+                        }
+                        let gen_id = spec.generation;
+                        let dx = spec.target_x - origin_x;
+                        let dy = spec.target_y - origin_y;
+                        let dist =
+                            ((dx - prev_dx.get()).powi(2) + (dy - prev_dy.get()).powi(2)).sqrt();
+                        let mut ends = Vec::new();
+                        if !spec.exiting {
+                            let spring = transitions::flight_spring(dist);
+                            if (dx - prev_dx.replace(dx)).abs() > 0.5 {
+                                ends.push(x.spring(dx, spring));
+                            }
+                            if (dy - prev_dy.replace(dy)).abs() > 0.5 {
+                                ends.push(y.spring(dy, spring));
+                            }
+                        }
+                        let op_ms = if spec.exiting {
+                            transitions::EXIT_FADE_MS
+                        } else {
+                            transitions::FLIGHT_FADE_MS
+                        };
+                        if (spec.to_opacity - prev_op.replace(spec.to_opacity)).abs() > 0.01 {
+                            ends.push(opacity.timing(spec.to_opacity, op_ms, Easing::EaseOut));
+                        }
+                        let id = card_id.clone();
+                        spawn(async move {
+                            wait_motion_ends(ends, transitions::FLIGHT_TIMEOUT_MS).await;
+                            self.finish_flight(&id, gen_id);
+                        });
+                    });
+                    view()
+                        .absolute()
+                        .left(px(origin_x))
+                        .top(px(origin_y))
+                        .w(move || px(flight.get().width))
+                        .pointer_events(PointerEvents::None)
+                        .shadow_lg()
+                        .rounded(px(RADIUS))
+                        .bind_translate_x(&x)
+                        .bind_translate_y(&y)
+                        .bind_opacity(&opacity)
+                        .child(dynamic(move || card_tile(self.ui, flight.get().card)))
+                },
+            ))
+            .child(each(
+                move || self.exits.get(),
+                |e| e.id.clone(),
+                move |exit, _| {
+                    let initial = exit.get_untracked();
+                    let opacity = animated_value(1.0);
+                    let scale = animated_value(1.0);
+                    let ends = vec![
+                        opacity.timing(0.0, transitions::EXIT_FADE_MS, Easing::EaseOut),
+                        scale.timing(
+                            transitions::EXIT_SCALE_TO,
+                            transitions::EXIT_FADE_MS,
+                            Easing::EaseOut,
+                        ),
+                    ];
+                    let id = initial.id.clone();
+                    let gen_id = initial.generation;
+                    spawn(async move {
+                        wait_motion_ends(ends, transitions::EXIT_TIMEOUT_MS).await;
+                        self.finish_exit(&id, gen_id);
+                    });
+                    view()
+                        .absolute()
+                        .left(px(initial.x))
+                        .top(px(initial.y))
+                        .w(px(initial.width))
+                        .pointer_events(PointerEvents::None)
+                        .rounded(px(RADIUS))
+                        .bind_opacity(&opacity)
+                        .bind_scale(&scale)
+                        .child(card_tile(self.ui, initial.card))
+                },
+            ))
+            .child(dynamic(move || match self.ghost.get() {
+                None => view().into_element(),
+                Some((card, x, y, width)) => view()
+                    .absolute()
+                    .left(px(x))
+                    .top(px(y))
+                    .w(px(width))
+                    .pointer_events(PointerEvents::None)
+                    .shadow_lg()
+                    .rounded(px(RADIUS))
+                    .bind_translate_x(&self.x)
+                    .bind_translate_y(&self.y)
+                    .child(card_tile(self.ui, card))
+                    .into_element(),
+            }))
     }
 }
 
@@ -1231,5 +1596,300 @@ mod tests {
             1.0,
             "original row must return to opacity 1.0 in the same clear batch"
         );
+    }
+
+    #[component]
+    fn TransitionBoardProbe() -> impl IntoElement {
+        canban_ui_kit::tokens::install_theme();
+        let reduced = signal(false);
+        provide_context(ReducedMotion(reduced));
+        let ui = Ui::new();
+        let mut snapshot = Snapshot::default();
+        snapshot.projects.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "proj-trans",
+                "name": "Transition Probe",
+                "directory": "/tmp/trans-probe",
+                "workflow": Workflow::default(),
+                "created_at": 1
+            }))
+            .unwrap(),
+        );
+        for n in 1u64..=3 {
+            snapshot.cards.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": format!("c-{n}"),
+                    "project_id": "proj-trans",
+                    "number": n,
+                    "title": format!("Drag Card {n}"),
+                    "body": "",
+                    "stage": "backlog",
+                    "revision": 1,
+                    "created_at": n
+                }))
+                .unwrap(),
+            );
+        }
+        ui.snapshot.set(snapshot);
+        ui.project.set("proj-trans".into());
+        ui.page.set("board".into());
+        ui.onboarded.set(true);
+        view()
+            .w(px(1200.))
+            .h(px(760.))
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("Move c-1 to develop".into()))
+                    .on_press(move |_: &()| {
+                        ui.snapshot.update(|s| {
+                            if let Some(c) = s.cards.iter_mut().find(|c| c.id == "c-1") {
+                                c.stage = "develop".into();
+                                c.revision += 1;
+                            }
+                        });
+                    }),
+            )
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("Move c-1 to review".into()))
+                    .on_press(move |_: &()| {
+                        ui.snapshot.update(|s| {
+                            if let Some(c) = s.cards.iter_mut().find(|c| c.id == "c-1") {
+                                c.stage = "review".into();
+                                c.revision += 1;
+                            }
+                        });
+                    }),
+            )
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("Create Born Card".into()))
+                    .on_press(move |_: &()| {
+                        ui.snapshot.update(|s| {
+                            s.cards.push(
+                                serde_json::from_value(serde_json::json!({
+                                    "id": "c-born",
+                                    "project_id": "proj-trans",
+                                    "number": 99,
+                                    "title": "Born Card",
+                                    "body": "",
+                                    "stage": "develop",
+                                    "revision": 1,
+                                    "created_at": 99
+                                }))
+                                .unwrap(),
+                            );
+                        });
+                    }),
+            )
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("Archive Born Card".into()))
+                    .on_press(move |_: &()| {
+                        ui.snapshot.update(|s| {
+                            if let Some(c) = s.cards.iter_mut().find(|c| c.id == "c-born") {
+                                c.archived_at = Some(1000);
+                                c.revision += 1;
+                            }
+                        });
+                    }),
+            )
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("Toggle Reduced Motion".into()))
+                    .on_press(move |_: &()| reduced.set(!reduced.get_untracked())),
+            )
+            .child(crate::board::screen(ui))
+    }
+
+    fn setup_transition_board(
+        runtime: &tokio::runtime::Runtime,
+    ) -> (Core<ApproxTextEngine>, DragTree) {
+        let mut core = Core::new(ApproxTextEngine, size(px(1200.), px(760.)));
+        core.set_components(nsh_base::registry());
+        core.set_task_runtime(runtime.handle().clone());
+        core.mount_root(&nsh_core::element::Root::of::<TransitionBoardProbe>());
+        let mut tree = DragTree::new();
+        pump_board(&mut core, &mut tree);
+        (core, tree)
+    }
+
+    fn press_labeled(core: &mut Core<ApproxTextEngine>, tree: &DragTree, label: &str) {
+        let id = *tree.labels.get(label).expect("probe button");
+        assert!(core.component_event(id, EventKind::Press, &EventPayload::None));
+    }
+
+    fn finish_all_animations(
+        core: &mut Core<ApproxTextEngine>,
+        tree: &mut DragTree,
+        runtime: &tokio::runtime::Runtime,
+        done: impl Fn(&DragTree) -> bool,
+    ) {
+        let deadline = Instant::now() + Duration::from_millis(120);
+        while (!tree.started_animations.is_empty() || !done(tree)) && Instant::now() < deadline {
+            if !tree.started_animations.is_empty() {
+                let mut finished: Vec<_> = tree
+                    .started_animations
+                    .drain(..)
+                    .map(|id| Finished::new(id, true))
+                    .collect();
+                core.animations_finished(&mut finished);
+            }
+            runtime.block_on(tokio::time::sleep(Duration::from_millis(5)));
+            pump_board(core, tree);
+        }
+    }
+
+    fn mounted_text_count(tree: &DragTree, text: &str) -> usize {
+        tree.texts
+            .iter()
+            .filter(|(id, t)| t.as_str() == text && tree.is_mounted(**id))
+            .count()
+    }
+
+    #[test]
+    fn stage_update_launches_flight_ghost_hides_target_and_restores_on_finish() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (mut core, mut tree) = setup_transition_board(&runtime);
+        tree.started_animations.clear();
+
+        press_labeled(&mut core, &tree, "Move c-1 to develop");
+        pump_board(&mut core, &mut tree);
+
+        assert!(
+            tree.has_mounted_ghost(),
+            "cross-column stage update must mount flight ghost alongside destination row"
+        );
+        let new_row_id = *tree
+            .labels
+            .get("Card #1 Drag Card 1")
+            .expect("destination row mounted");
+        assert_eq!(
+            tree.row_opacity(new_row_id),
+            0.0,
+            "destination row stays hidden while flight ghost travels"
+        );
+        assert!(
+            !tree.started_animations.is_empty(),
+            "cross-column move should start flight and peer FLIP animations"
+        );
+
+        finish_all_animations(&mut core, &mut tree, &runtime, |t| !t.has_mounted_ghost());
+        assert!(
+            !tree.has_mounted_ghost(),
+            "flight ghost must unmount after animation finishes"
+        );
+        assert_eq!(
+            tree.row_opacity(new_row_id),
+            1.0,
+            "destination row must return to opacity 1.0 when flight completes"
+        );
+    }
+
+    #[test]
+    fn rapid_stage_updates_retarget_flight_without_leaving_hidden_row() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (mut core, mut tree) = setup_transition_board(&runtime);
+        tree.started_animations.clear();
+
+        press_labeled(&mut core, &tree, "Move c-1 to develop");
+        pump_board(&mut core, &mut tree);
+        assert!(tree.has_mounted_ghost());
+
+        press_labeled(&mut core, &tree, "Move c-1 to review");
+        pump_board(&mut core, &mut tree);
+        assert!(tree.has_mounted_ghost());
+        let review_row_id = *tree
+            .labels
+            .get("Card #1 Drag Card 1")
+            .expect("review row mounted");
+        assert_eq!(tree.row_opacity(review_row_id), 0.0);
+
+        finish_all_animations(&mut core, &mut tree, &runtime, |t| !t.has_mounted_ghost());
+        assert!(!tree.has_mounted_ghost());
+        assert_eq!(tree.row_opacity(review_row_id), 1.0);
+    }
+
+    #[test]
+    fn creating_and_archiving_card_plays_entry_and_fade_out_animations() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (mut core, mut tree) = setup_transition_board(&runtime);
+        tree.started_animations.clear();
+
+        press_labeled(&mut core, &tree, "Create Born Card");
+        pump_board(&mut core, &mut tree);
+        assert_eq!(mounted_text_count(&tree, "Born Card"), 1);
+        assert!(
+            tree.started_animations.len() >= 2,
+            "new card creation should start pop-in scale and opacity animations; started={:?}",
+            tree.started_animations
+        );
+
+        finish_all_animations(&mut core, &mut tree, &runtime, |_| true);
+        tree.started_animations.clear();
+
+        press_labeled(&mut core, &tree, "Archive Born Card");
+        pump_board(&mut core, &mut tree);
+        assert_eq!(
+            mounted_text_count(&tree, "Born Card"),
+            1,
+            "archived card should remain mounted in exit overlay while fading out"
+        );
+        assert!(
+            tree.started_animations.len() >= 2,
+            "archiving should start fade-out opacity and scale animations"
+        );
+
+        finish_all_animations(&mut core, &mut tree, &runtime, |t| {
+            mounted_text_count(t, "Born Card") == 0
+        });
+        assert_eq!(
+            mounted_text_count(&tree, "Born Card"),
+            0,
+            "exit ghost must unmount once fade-out completes"
+        );
+    }
+
+    #[test]
+    fn reduced_motion_skips_board_transition_ghosts_and_animations() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let (mut core, mut tree) = setup_transition_board(&runtime);
+
+        press_labeled(&mut core, &tree, "Toggle Reduced Motion");
+        pump_board(&mut core, &mut tree);
+        tree.started_animations.clear();
+
+        press_labeled(&mut core, &tree, "Move c-1 to develop");
+        pump_board(&mut core, &mut tree);
+
+        assert!(
+            !tree.has_mounted_ghost(),
+            "reduced motion must not mount flight ghosts"
+        );
+        assert!(
+            tree.started_animations.is_empty(),
+            "reduced motion must not start transition animations"
+        );
+        let row_id = *tree
+            .labels
+            .get("Card #1 Drag Card 1")
+            .expect("destination row mounted");
+        assert_eq!(tree.row_opacity(row_id), 1.0);
     }
 }

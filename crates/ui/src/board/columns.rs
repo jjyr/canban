@@ -1,5 +1,8 @@
 //! Stable column and Card owners; only animated offsets change during a drag.
-use super::drag::{BoardDrag, settle};
+use super::{
+    drag::{BoardDrag, settle},
+    transitions::{self, EntryKind},
+};
 use crate::{
     components::card_tile::{CardTileModel, card_tile_from_model},
     drafts::*,
@@ -237,7 +240,36 @@ fn row(ui: Ui, state: BoardDrag, card: ReadSignal<Card>) -> impl IntoElement {
             .with(|l| l.resting.get(&top_id).copied().unwrap_or(0.))
     });
     let tile_model = computed(move || CardTileModel::build(ui, card.get()));
+    let entry = state.take_entry(&id);
+    let tile = dynamic(move || card_tile_from_model(ui, tile_model.get()));
+    let content = if let Some(kind) = entry {
+        let entry_scale = animated_value(if kind == EntryKind::PopIn {
+            transitions::ENTRY_SCALE_FROM
+        } else {
+            1.0
+        });
+        let entry_opacity = animated_value(0.0);
+        match kind {
+            EntryKind::PopIn => {
+                let _ = entry_scale.spring(1.0, transitions::entry_spring());
+                let _ = entry_opacity.timing(1.0, transitions::ENTRY_OPACITY_MS, Easing::EaseOut);
+            }
+            EntryKind::CompactFadeIn => {
+                let _ = entry_opacity.timing(1.0, transitions::COMPACT_FADE_MS, Easing::EaseOut);
+            }
+        }
+        view()
+            .w_full()
+            .bind_scale(&entry_scale)
+            .bind_opacity(&entry_opacity)
+            .child(tile)
+            .into_element()
+    } else {
+        tile.into_element()
+    };
     let last_delta = stored(None::<f32>);
+    let seen_flip = stored(0u64);
+    let seen_reset = stored(0u64);
     effect(move || {
         let phase = state.phase.get();
         let lifted = state.lifted.get();
@@ -251,7 +283,16 @@ fn row(ui: Ui, state: BoardDrag, card: ReadSignal<Card>) -> impl IntoElement {
         });
         let old = last_delta.replace(Some(delta));
         if phase == 0 {
-            y.set(0.);
+            let (flip_seq, reset_seq, reset_changed, flip_offset) =
+                state.take_flip(&position_id, seen_flip.get(), seen_reset.get());
+            seen_flip.replace(flip_seq);
+            seen_reset.replace(reset_seq);
+            if let Some(offset) = flip_offset {
+                y.set(offset);
+                let _ = settle(y, 0.);
+            } else if reset_changed || old.is_some_and(|d| d.abs() >= 0.1) {
+                y.set(0.);
+            }
             return;
         }
         if old.is_some_and(|old| (old - delta).abs() < 0.1) {
@@ -334,5 +375,5 @@ fn row(ui: Ui, state: BoardDrag, card: ReadSignal<Card>) -> impl IntoElement {
         .on_context_menu(move |e: &nsh_core::ContextMenuEvent| {
             crate::card_actions::menu(ui, card.get_untracked(), e.page_position)
         })
-        .child(dynamic(move || card_tile_from_model(ui, tile_model.get())))
+        .child(content)
 }

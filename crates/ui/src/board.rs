@@ -5,6 +5,7 @@ mod drag;
 mod model;
 #[cfg(test)]
 mod performance;
+mod transitions;
 use crate::presenter::*;
 use canban_ui_kit::*;
 use nsh_core::prelude::*;

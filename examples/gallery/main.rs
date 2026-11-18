@@ -645,6 +645,104 @@ fn controls() -> impl IntoElement {
     )
 }
 
+fn board_transitions_bar(ui: Ui, reduced_motion: Signal<bool>) -> impl IntoElement {
+    let next_id = signal(100_u64);
+    let stages = ["backlog", "develop", "review"];
+    view()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .py_2()
+        .bg(SURFACE)
+        .border_b_1()
+        .border_color(BORDER)
+        .child(label("Board Transitions"))
+        .child(action("Move next stage", Variant::Primary, move |_| {
+            ui.snapshot.update(|s| {
+                if let Some(c) = s.cards.iter_mut().find(|c| c.active()) {
+                    let pos = stages.iter().position(|st| *st == c.stage).unwrap_or(0);
+                    c.stage = stages[(pos + 1) % stages.len()].into();
+                    c.revision += 1;
+                }
+            });
+        }))
+        .child(action("Batch move (2)", Variant::Secondary, move |_| {
+            ui.snapshot.update(|s| {
+                for c in s.cards.iter_mut().filter(|c| c.active()).take(2) {
+                    let pos = stages.iter().position(|st| *st == c.stage).unwrap_or(0);
+                    c.stage = stages[(pos + 1) % stages.len()].into();
+                    c.revision += 1;
+                }
+            });
+        }))
+        .child(action("Rapid redirect", Variant::Secondary, move |_| {
+            let target_id = ui
+                .snapshot
+                .with_untracked(|s| s.cards.iter().find(|c| c.active()).map(|c| c.id.clone()));
+            let Some(cid) = target_id else {
+                return;
+            };
+            let first = cid.clone();
+            ui.snapshot.update(|s| {
+                if let Some(c) = s.cards.iter_mut().find(|c| c.id == first) {
+                    c.stage = "develop".into();
+                    c.revision += 1;
+                }
+            });
+            set_timeout(std::time::Duration::from_millis(80), move || {
+                ui.snapshot.update(|s| {
+                    if let Some(c) = s.cards.iter_mut().find(|c| c.id == cid) {
+                        c.stage = "review".into();
+                        c.revision += 1;
+                    }
+                });
+            });
+        }))
+        .child(action("New card (duang)", Variant::Secondary, move |_| {
+            let n = next_id.get_untracked();
+            next_id.set(n + 1);
+            ui.snapshot.update(|s| {
+                let mut template = fixtures::workspace().cards.remove(2);
+                template.id = format!("gallery-new-{n}");
+                template.number = n;
+                template.title = format!("Freshly popped Card #{n}");
+                template.stage = "backlog".into();
+                template.board_order = Some(-(n as i64) * 1024);
+                template.archived_at = None;
+                template.removed_at = None;
+                template.revision = 1;
+                template.created_at = canban_types::now();
+                s.cards.push(template);
+            });
+        }))
+        .child(action("Archive card (fade)", Variant::Quiet, move |_| {
+            ui.snapshot.update(|s| {
+                if let Some(c) = s.cards.iter_mut().find(|c| c.active()) {
+                    c.archived_at = Some(canban_types::now());
+                    c.revision += 1;
+                }
+            });
+        }))
+        .child(action("Reset", Variant::Quiet, move |_| {
+            ui.snapshot.set(fixtures::board_cards());
+            ui.card.set(String::new());
+            ui.page.set("board".into());
+        }))
+        .child(action(
+            move || {
+                if reduced_motion.get() {
+                    SharedString::from("Reduced motion: On")
+                } else {
+                    SharedString::from("Reduced motion: Off")
+                }
+            },
+            Variant::Quiet,
+            move |_| reduced_motion.set(!reduced_motion.get_untracked()),
+        ))
+}
+
 #[component]
 pub fn Gallery() -> impl IntoElement {
     canban_ui_kit::tokens::install_theme();
@@ -1448,6 +1546,18 @@ pub fn Gallery() -> impl IntoElement {
         ui.page.set("board".into());
         return canban_ui::frame::screen(ui).into_element();
     }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("board-transitions") {
+        ui.snapshot.set(fixtures::board_cards());
+        ui.project.set("gallery-project".into());
+        ui.card.set(String::new());
+        ui.page.set("board".into());
+        return view()
+            .flex_1()
+            .min_h(px(0.0))
+            .child(board_transitions_bar(ui, reduced_motion))
+            .child(canban_ui::frame::screen(ui))
+            .into_element();
+    }
     // Card header quick merge: `card-quick-merge` shows the header Merge action;
     // `card-quick-merge-warning` opens the running-Agent confirmation it raises.
     if matches!(
@@ -2106,6 +2216,13 @@ pub fn Gallery() -> impl IntoElement {
                     ui.card.set("card-1".into());
                     ui.page.set("card".into());
                 }))
+                .child(action("Board transitions", Variant::Secondary, move |_| {
+                    scene.set("board-transitions".into());
+                    ui.snapshot.set(fixtures::board_cards());
+                    ui.select_project("gallery-project".into());
+                    ui.card.set(String::new());
+                    ui.page.set("board".into());
+                }))
                 .child(action("Overflowing Board", Variant::Secondary, move |_| {
                     scene.set("workspace".into());
                     ui.snapshot.set(fixtures::overflowing_board());
@@ -2663,11 +2780,16 @@ pub fn Gallery() -> impl IntoElement {
                 .into_element();
             }
             let narrow_preview = constrained.get();
+            let current_scene = scene.get();
             view()
                 .flex_1()
                 .w_full()
                 .max_w(px(if narrow_preview { 720.0 } else { 10000.0 }))
                 .min_h(px(0.0))
+                .children(
+                    (current_scene == "board-transitions")
+                        .then(|| board_transitions_bar(ui, reduced_motion)),
+                )
                 .child(canban_ui::frame::screen(ui))
                 .into_element()
         })).into_element()
