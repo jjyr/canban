@@ -37,22 +37,45 @@ pub fn split_agy_effort_suffix(model_id: &str) -> Option<(&str, &'static str)> {
     None
 }
 
-/// Populate `ModelOption.supported_efforts` for a flat list of `agy models` entries by
-/// grouping sibling variants by base family (matching `agy`'s own family grouping):
-/// - Multi-variant families (such as `gemini-4-carbon-{low,medium,high}` or
-///   `gemini-4-hydrogen-{low,medium,high,xhigh}`) expose the exact sibling effort set.
-/// - Standalone models with no effort variants (such as `gemini-pro-orchestrator` or
-///   `gemini-pro-orchestrator-argon`) or single-fixed-tier families (such as
-///   `gpt-oss-120b-medium`) receive `Some(vec![])` (effort unsupported).
-pub fn annotate_agy_model_efforts(models: &mut [ModelOption]) {
+/// Strip a trailing ` (<Effort>)` tier suffix from an Antigravity (`agy`) display label.
+fn strip_agy_effort_label_suffix(label: &str, eff: &str) -> String {
+    let trimmed = label.trim();
+    if let Some(prefix) = trimmed.strip_suffix(')')
+        && let Some((base, inner)) = prefix.rsplit_once(" (")
+        && inner.trim().eq_ignore_ascii_case(eff)
+        && !base.trim().is_empty()
+    {
+        return base.trim().to_owned();
+    }
+    trimmed.to_owned()
+}
+
+/// Collapse flat `agy models` tier-suffixed entries into base-model families with exact
+/// `supported_efforts`, while keeping orchestrator and single fixed-tier models effort-less:
+/// - Multi-variant families (`gemini-4-carbon-{low,medium,high}` -> `gemini-4-carbon`,
+///   `gemini-4-hydrogen-{low,medium,high,xhigh}` -> `gemini-4-hydrogen`) collapse into one
+///   base entry with sorted `supported_efforts` so `canban` passes `--model <base> --effort <tier>`.
+/// - Orchestrator models (`gemini-pro-orchestrator`, `gemini-pro-orchestrator-argon`) and
+///   single fixed-tier models (`gpt-oss-120b-medium`) stay standalone with `Some(vec![])`.
+pub fn collapse_agy_models(models: Vec<ModelOption>) -> Vec<ModelOption> {
     let mut family_efforts: std::collections::BTreeMap<String, Vec<&'static str>> =
         std::collections::BTreeMap::new();
-    for opt in models.iter() {
-        if let Some((base, eff)) = split_agy_effort_suffix(&opt.id) {
+    let mut unsuffixed_labels: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    for opt in &models {
+        let id = opt.id.trim();
+        if id.to_ascii_lowercase().contains("orchestrator") {
+            continue;
+        }
+        if let Some((base, eff)) = split_agy_effort_suffix(id) {
             let entry = family_efforts.entry(base.to_owned()).or_default();
             if !entry.contains(&eff) {
                 entry.push(eff);
             }
+        } else if !id.is_empty() && !opt.label.trim().is_empty() {
+            unsuffixed_labels
+                .entry(id.to_owned())
+                .or_insert_with(|| opt.label.trim().to_owned());
         }
     }
     for list in family_efforts.values_mut() {
@@ -63,22 +86,68 @@ pub fn annotate_agy_model_efforts(models: &mut [ModelOption]) {
                 .unwrap_or(usize::MAX)
         });
     }
-    for opt in models.iter_mut() {
-        if let Some((base, _)) = split_agy_effort_suffix(&opt.id) {
+
+    let mut out = Vec::with_capacity(models.len());
+    let mut seen_families = std::collections::BTreeSet::new();
+    for opt in models {
+        let id = opt.id.trim().to_owned();
+        if id.is_empty() {
+            continue;
+        }
+        if id.to_ascii_lowercase().contains("orchestrator") {
+            if seen_families.insert(id.clone()) {
+                out.push(ModelOption {
+                    id,
+                    label: opt.label.trim().to_owned(),
+                    supported_efforts: Some(Vec::new()),
+                });
+            }
+            continue;
+        }
+        if let Some((base, eff)) = split_agy_effort_suffix(&id) {
             let siblings = family_efforts.get(base).map(Vec::as_slice).unwrap_or(&[]);
             if siblings.len() > 1 {
-                opt.supported_efforts = Some(siblings.iter().map(|s| (*s).to_owned()).collect());
-            } else {
-                opt.supported_efforts = Some(Vec::new());
+                if seen_families.insert(base.to_owned()) {
+                    let label = unsuffixed_labels
+                        .get(base)
+                        .cloned()
+                        .unwrap_or_else(|| strip_agy_effort_label_suffix(&opt.label, eff));
+                    out.push(ModelOption {
+                        id: base.to_owned(),
+                        label,
+                        supported_efforts: Some(siblings.iter().map(|s| (*s).to_owned()).collect()),
+                    });
+                }
+            } else if seen_families.insert(id.clone()) {
+                out.push(ModelOption {
+                    id,
+                    label: opt.label.trim().to_owned(),
+                    supported_efforts: Some(Vec::new()),
+                });
             }
-        } else if let Some(siblings) = family_efforts.get(opt.id.trim())
-            && !siblings.is_empty()
+        } else if let Some(siblings) = family_efforts.get(&id)
+            && siblings.len() > 1
         {
-            opt.supported_efforts = Some(siblings.iter().map(|s| (*s).to_owned()).collect());
-        } else {
-            opt.supported_efforts = Some(Vec::new());
+            if seen_families.insert(id.clone()) {
+                out.push(ModelOption {
+                    id,
+                    label: opt.label.trim().to_owned(),
+                    supported_efforts: Some(siblings.iter().map(|s| (*s).to_owned()).collect()),
+                });
+            }
+        } else if seen_families.insert(id.clone()) {
+            let preserved = opt
+                .supported_efforts
+                .filter(|levels| !levels.is_empty())
+                .unwrap_or_default();
+            out.push(ModelOption {
+                id,
+                label: opt.label.trim().to_owned(),
+                supported_efforts: Some(preserved),
+            });
         }
     }
+    out
 }
 
 /// Resolve the supported reasoning effort levels for a given model on an Agent catalog entry.
@@ -101,27 +170,11 @@ pub fn model_supported_efforts(
         return Some(effs.clone());
     }
     if entry.id == "agy" {
-        // Handle custom/unlisted `agy` model IDs consistently: known orchestrator slugs and
-        // single fixed-tier slugs without multi-tier siblings in `models` omit `--effort`.
+        // Orchestrator models and already-suffixed tier slugs (such as `gemini-4-hydrogen-high`
+        // or `gpt-oss-120b-medium`) do not accept `--effort` in `agy`.
         let lower = mid.to_ascii_lowercase();
-        if lower.contains("orchestrator") {
+        if lower.contains("orchestrator") || split_agy_effort_suffix(mid).is_some() {
             return Some(Vec::new());
-        }
-        if let Some((base, _)) = split_agy_effort_suffix(mid) {
-            let sibling_efforts: Vec<String> = AGY_EFFORT_ORDER
-                .iter()
-                .filter(|eff| {
-                    let candidate = format!("{base}-{eff}");
-                    models.iter().any(|m| m.id == candidate)
-                })
-                .map(|eff| (*eff).to_owned())
-                .collect();
-            if sibling_efforts.len() > 1 {
-                return Some(sibling_efforts);
-            }
-            if sibling_efforts.len() == 1 {
-                return Some(Vec::new());
-            }
         }
     }
     if entry.id == "claude" && mid.to_ascii_lowercase().contains("haiku") {
@@ -186,7 +239,7 @@ fn m(items: &[(&str, &str)]) -> Vec<ModelOption> {
 }
 
 fn agy_default_models() -> Vec<ModelOption> {
-    let mut list = m(&[
+    let list = m(&[
         ("gemini-4-carbon-high", "Gemini 4 Carbon (High)"),
         ("gemini-4-carbon-medium", "Gemini 4 Carbon (Medium)"),
         ("gemini-4-carbon-low", "Gemini 4 Carbon (Low)"),
@@ -210,8 +263,7 @@ fn agy_default_models() -> Vec<ModelOption> {
         ("claude-sonnet-5-5-low", "Claude Sonnet 5.5 (Low)"),
         ("gpt-oss-120b-medium", "GPT-OSS 120B (Medium)"),
     ]);
-    annotate_agy_model_efforts(&mut list);
-    list
+    collapse_agy_models(list)
 }
 
 fn bind_session_instruction(env_var: &str) -> String {
@@ -1306,6 +1358,87 @@ mod tests {
                 "foreground": {"name": "agy", "argv": ["agy"]}
             })),
             None
+        );
+    }
+
+    #[test]
+    fn collapses_agy_models_and_keeps_orchestrators_effortless() {
+        let collapsed = collapse_agy_models(vec![
+            ModelOption {
+                id: "gemini-4-hydrogen-xhigh".into(),
+                label: "Gemini 4 Hydrogen (XHigh)".into(),
+                supported_efforts: None,
+            },
+            ModelOption {
+                id: "gemini-4-hydrogen-high".into(),
+                label: "Gemini 4 Hydrogen (High)".into(),
+                supported_efforts: None,
+            },
+            ModelOption {
+                id: "gemini-4-hydrogen".into(),
+                label: "Gemini 4 Hydrogen".into(),
+                supported_efforts: None,
+            },
+            ModelOption {
+                id: "gemini-pro-orchestrator".into(),
+                label: "Orchestrator (Carbon)".into(),
+                supported_efforts: None,
+            },
+            ModelOption {
+                id: "gemini-pro-orchestrator-high".into(),
+                label: "Orchestrator (High)".into(),
+                supported_efforts: None,
+            },
+            ModelOption {
+                id: "gpt-oss-120b-medium".into(),
+                label: "GPT-OSS 120B (Medium)".into(),
+                supported_efforts: None,
+            },
+        ]);
+
+        assert_eq!(
+            collapsed,
+            vec![
+                ModelOption {
+                    id: "gemini-4-hydrogen".into(),
+                    label: "Gemini 4 Hydrogen".into(),
+                    supported_efforts: Some(vec!["high".into(), "xhigh".into()]),
+                },
+                ModelOption {
+                    id: "gemini-pro-orchestrator".into(),
+                    label: "Orchestrator (Carbon)".into(),
+                    supported_efforts: Some(Vec::new()),
+                },
+                ModelOption {
+                    id: "gemini-pro-orchestrator-high".into(),
+                    label: "Orchestrator (High)".into(),
+                    supported_efforts: Some(Vec::new()),
+                },
+                ModelOption {
+                    id: "gpt-oss-120b-medium".into(),
+                    label: "GPT-OSS 120B (Medium)".into(),
+                    supported_efforts: Some(Vec::new()),
+                },
+            ]
+        );
+        // Re-running collapse_agy_models is idempotent.
+        assert_eq!(collapse_agy_models(collapsed.clone()), collapsed);
+
+        let agy_entry = builtin_catalog()
+            .into_iter()
+            .find(|e| e.id == "agy")
+            .unwrap();
+        assert_eq!(
+            model_supported_efforts(&agy_entry, &collapsed, Some("gemini-4-hydrogen")),
+            Some(vec!["high".into(), "xhigh".into()])
+        );
+        assert_eq!(
+            model_supported_efforts(&agy_entry, &collapsed, Some("gemini-4-hydrogen-high")),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            model_supported_efforts(&agy_entry, &collapsed, Some("custom-orchestrator")),
+            Some(Vec::new())
         );
     }
 }

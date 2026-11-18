@@ -4,9 +4,9 @@ pub mod launch;
 pub use launch::{LaunchRequest, LaunchSpec, prepare_launch};
 pub mod catalog;
 pub use catalog::{
-    CatalogEntry, ModelOption, annotate_agy_model_efforts, builtin_catalog,
-    catalog_entry_for_profile, display_name, herdr_template_profile, identify_agent_process,
-    identify_herdr_agent, model_supported_efforts, split_agy_effort_suffix,
+    CatalogEntry, ModelOption, builtin_catalog, catalog_entry_for_profile, collapse_agy_models,
+    display_name, herdr_template_profile, identify_agent_process, identify_herdr_agent,
+    model_supported_efforts, split_agy_effort_suffix,
 };
 
 use anyhow::{Context, Result, bail, ensure};
@@ -1101,7 +1101,7 @@ mod tests {
         cfg.profiles.push(Profile {
             id: "agy".into(),
             preset: Some("agy".into()),
-            model: Some("gemini-4-carbon-high".into()),
+            model: Some("gemini-4-carbon".into()),
             effort: Some("high".into()),
             ..Default::default()
         });
@@ -1115,7 +1115,7 @@ mod tests {
         let cfg = resolve(cfg, dir.path()).unwrap();
         let agy_dev = cfg.profiles.iter().find(|p| p.id == "agy-dev").unwrap();
         // Identity inherits model & effort from @agy when not explicitly set on the identity
-        assert_eq!(agy_dev.model.as_deref(), Some("gemini-4-carbon-high"));
+        assert_eq!(agy_dev.model.as_deref(), Some("gemini-4-carbon"));
         assert_eq!(agy_dev.effort.as_deref(), Some("high"));
 
         let home_s = home_dir.to_string_lossy().into_owned();
@@ -1134,10 +1134,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(argv[0], "agy");
-        assert!(
-            argv.windows(2)
-                .any(|w| w == ["--model", "gemini-4-carbon-high"])
-        );
+        assert!(argv.windows(2).any(|w| w == ["--model", "gemini-4-carbon"]));
         assert!(argv.windows(2).any(|w| w == ["--effort", "high"]));
         assert!(argv.windows(2).any(|w| w == ["--add-dir", home_s.as_str()]));
         assert!(argv.windows(2).any(|w| w == ["--add-dir", cwd_s.as_str()]));
@@ -1217,8 +1214,9 @@ mod tests {
         let carbon = agy_entry
             .default_models
             .iter()
-            .find(|m| m.id == "gemini-4-carbon-high")
+            .find(|m| m.id == "gemini-4-carbon")
             .unwrap();
+        assert_eq!(carbon.label, "Gemini 4 Carbon");
         assert_eq!(
             carbon.supported_efforts,
             Some(vec!["low".into(), "medium".into(), "high".into()])
@@ -1226,8 +1224,9 @@ mod tests {
         let hydrogen = agy_entry
             .default_models
             .iter()
-            .find(|m| m.id == "gemini-4-hydrogen-high")
+            .find(|m| m.id == "gemini-4-hydrogen")
             .unwrap();
+        assert_eq!(hydrogen.label, "Gemini 4 Hydrogen");
         assert_eq!(
             hydrogen.supported_efforts,
             Some(vec![
@@ -1237,14 +1236,20 @@ mod tests {
                 "xhigh".into()
             ])
         );
+        assert!(
+            !agy_entry
+                .default_models
+                .iter()
+                .any(|m| m.id == "gemini-4-carbon-high" || m.id == "gemini-4-hydrogen-high")
+        );
 
         // Inherited effort (`medium` from `@agy`) is omitted when `@merger` overrides to
-        // `gemini-pro-orchestrator` or when `xhigh` is paired with `gemini-4-carbon-high`.
+        // `gemini-pro-orchestrator` or when `xhigh` is paired with `gemini-4-carbon`.
         let mut cfg = Config::default();
         cfg.profiles.push(Profile {
             id: "agy".into(),
             preset: Some("agy".into()),
-            model: Some("gemini-4-carbon-medium".into()),
+            model: Some("gemini-4-carbon".into()),
             effort: Some("medium".into()),
             ..Default::default()
         });
@@ -1274,19 +1279,32 @@ mod tests {
             "--effort must be omitted for gemini-pro-orchestrator: {merger_argv:?}"
         );
 
-        // Unsupported effort tier (`xhigh`) on a `low/medium/high` model (`gemini-4-carbon-high`)
-        // is also omitted, while supported `xhigh` on `gemini-4-hydrogen-high` is passed through.
+        // Unsupported effort tier (`xhigh`) on a `low/medium/high` model (`gemini-4-carbon`)
+        // is also omitted, while supported `xhigh` on `gemini-4-hydrogen` is passed through.
         let mut carbon_xhigh = merger.clone();
-        carbon_xhigh.model = Some("gemini-4-carbon-high".into());
+        carbon_xhigh.model = Some("gemini-4-carbon".into());
         carbon_xhigh.effort = Some("xhigh".into());
         let carbon_argv = command(&carbon_xhigh, None, true, &[("home", "/tmp/h")]).unwrap();
         assert!(!carbon_argv.iter().any(|a| a == "--effort"));
 
         let mut hydrogen_xhigh = merger.clone();
-        hydrogen_xhigh.model = Some("gemini-4-hydrogen-high".into());
+        hydrogen_xhigh.model = Some("gemini-4-hydrogen".into());
         hydrogen_xhigh.effort = Some("xhigh".into());
         let hydrogen_argv = command(&hydrogen_xhigh, None, true, &[("home", "/tmp/h")]).unwrap();
+        assert!(
+            hydrogen_argv
+                .windows(2)
+                .any(|w| w == ["--model", "gemini-4-hydrogen"])
+        );
         assert!(hydrogen_argv.windows(2).any(|w| w == ["--effort", "xhigh"]));
+
+        // Even if a custom tier-suffixed model ID is supplied manually, `--effort` is omitted
+        // because `agy` rejects or ignores `--effort` alongside suffixed slugs.
+        let mut suffixed_hydrogen = merger.clone();
+        suffixed_hydrogen.model = Some("gemini-4-hydrogen-high".into());
+        suffixed_hydrogen.effort = Some("high".into());
+        let suffixed_argv = command(&suffixed_hydrogen, None, true, &[("home", "/tmp/h")]).unwrap();
+        assert!(!suffixed_argv.iter().any(|a| a == "--effort"));
 
         // Claude Haiku also omits `--effort` even when global `@claude` sets an effort.
         let claude = cfg.profiles.iter().find(|p| p.id == "claude").unwrap();

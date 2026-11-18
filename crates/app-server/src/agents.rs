@@ -93,8 +93,7 @@ pub(super) fn parse_agy_models_output(text: &str) -> Vec<ModelOption> {
             }
         }
     }
-    canban_profiles::annotate_agy_model_efforts(&mut parsed);
-    parsed
+    canban_profiles::collapse_agy_models(parsed)
 }
 
 fn probe_agy_models(agy_path: &str, defaults: &[ModelOption]) -> Vec<ModelOption> {

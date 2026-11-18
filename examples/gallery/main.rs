@@ -1657,7 +1657,7 @@ pub fn Gallery() -> impl IntoElement {
             "developer".into(),
             canban_types::ProjectAgentOverride {
                 agent: Some("agy".into()),
-                model: Some("gemini-4-carbon-high".into()),
+                model: Some("gemini-4-carbon".into()),
                 effort: Some("high".into()),
             },
         );
@@ -2565,7 +2565,7 @@ pub fn Gallery() -> impl IntoElement {
                         "developer".into(),
                         canban_types::ProjectAgentOverride {
                             agent: Some("agy".into()),
-                            model: Some("gemini-4-carbon-high".into()),
+                            model: Some("gemini-4-carbon".into()),
                             effort: Some("high".into()),
                         },
                     );

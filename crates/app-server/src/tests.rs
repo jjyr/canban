@@ -2561,18 +2561,25 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
         find_agy("gpt-oss-120b-medium").supported_efforts,
         Some(Vec::new())
     );
+    assert_eq!(find_agy("gemini-4-carbon").label, "Gemini 4 Carbon");
     assert_eq!(
-        find_agy("gemini-4-carbon-high").supported_efforts,
+        find_agy("gemini-4-carbon").supported_efforts,
         Some(vec!["low".into(), "medium".into(), "high".into()])
     );
+    assert_eq!(find_agy("gemini-4-hydrogen").label, "Gemini 4 Hydrogen");
     assert_eq!(
-        find_agy("gemini-4-hydrogen-high").supported_efforts,
+        find_agy("gemini-4-hydrogen").supported_efforts,
         Some(vec![
             "low".into(),
             "medium".into(),
             "high".into(),
             "xhigh".into()
         ])
+    );
+    assert!(
+        !parsed_agy
+            .iter()
+            .any(|m| m.id == "gemini-4-carbon-high" || m.id == "gemini-4-hydrogen-high")
     );
 
     let codex_defaults = canban_profiles::builtin_catalog()

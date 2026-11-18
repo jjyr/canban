@@ -448,7 +448,7 @@ pub fn workspace() -> canban_types::Snapshot {
             "developer".into(),
             ProjectAgentOverride {
                 agent: Some("agy".into()),
-                model: Some("gemini-4-carbon-high".into()),
+                model: Some("gemini-4-carbon".into()),
                 effort: Some("high".into()),
             },
         )]),
@@ -2224,12 +2224,12 @@ pub fn agent_config() -> canban_types::Config {
     // Enable Antigravity (`agy`) alongside Codex and keep Claude disabled so Gallery
     // demonstrates enabled-agent gating + custom identities (`@qa`) + per-model effort gating
     // (`@merger` uses `gemini-pro-orchestrator` which hides `--effort` while `@reviewer` uses
-    // `gemini-4-carbon-medium` with `medium` effort).
+    // `gemini-4-carbon` with `medium` effort).
     cfg.profiles.push(Profile {
         id: "agy".into(),
         enabled: true,
         preset: Some("agy".into()),
-        model: Some("gemini-4-carbon-medium".into()),
+        model: Some("gemini-4-carbon".into()),
         effort: Some("medium".into()),
         ..Default::default()
     });
@@ -2238,7 +2238,7 @@ pub fn agent_config() -> canban_types::Config {
     }
     if let Some(rev) = cfg.profiles.iter_mut().find(|p| p.id == "reviewer") {
         rev.preset = Some("agy".into());
-        rev.model = Some("gemini-4-carbon-medium".into());
+        rev.model = Some("gemini-4-carbon".into());
         rev.effort = Some("medium".into());
     }
     if let Some(merger) = cfg.profiles.iter_mut().find(|p| p.id == "merger") {
@@ -2293,7 +2293,7 @@ pub fn agent_catalog() -> serde_json::Value {
         "agents": agents,
         "herdr_templates": ["codex", "claude", "agy", "gemini", "opencode"],
         "raw_profiles": [
-            { "id": "agy", "preset": "agy", "model": "gemini-4-carbon-medium", "effort": "medium" },
+            { "id": "agy", "preset": "agy", "model": "gemini-4-carbon", "effort": "medium" },
             { "id": "reviewer", "identity": true, "preset": "agy" },
             { "id": "merger", "identity": true, "preset": "agy", "model": "gemini-pro-orchestrator" },
             { "id": "qa", "identity": true, "preset": "codex", "model": "gpt-6.1-sol", "effort": "high" }

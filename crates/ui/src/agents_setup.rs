@@ -1439,7 +1439,7 @@ fn custom_model_inline_editor(
                 bound_field(
                     move || custom_model_draft.get(),
                     move |v| custom_model_draft.set(v.to_owned()),
-                    "e.g. gemini-4-carbon-high, gpt-6.1-sol, claude-opus-4-6…",
+                    "e.g. gemini-4-carbon, gpt-6.1-sol, claude-opus-4-6…",
                 )
                 .label("Custom model ID"),
             ),
@@ -3255,7 +3255,7 @@ fn project_custom_model_inline_editor(
                 bound_field(
                     move || custom_model_draft.get(),
                     move |v| custom_model_draft.set(v.to_owned()),
-                    "e.g. gemini-4-carbon-high, gpt-6.1-sol, claude-opus-4-6…",
+                    "e.g. gemini-4-carbon, gpt-6.1-sol, claude-opus-4-6…",
                 )
                 .label("Custom model ID"),
             ),
