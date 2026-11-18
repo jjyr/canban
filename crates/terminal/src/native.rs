@@ -148,6 +148,8 @@ unsafe extern "C" {
         height: u32,
         out_rgba: *mut u8,
     ) -> bool;
+    #[cfg(test)]
+    fn cb_terminal_test_occluded_cursor_guard(view: *mut c_void) -> bool;
 }
 
 pub fn installed_fonts() -> crate::InstalledFonts {
@@ -1906,6 +1908,46 @@ mod tests {
                 );
             }
         }
+
+        unsafe {
+            cb_terminal_detach(raw_view as *mut c_void);
+            drop(Retained::from_raw(raw_view));
+        }
+    }
+
+    #[test]
+    fn occluded_terminal_does_not_overwrite_overlay_cursor_or_leak_mouse_motion() {
+        let mut host = Box::new(Host::new());
+        let (tx, rx) = mpsc::channel();
+        host.input = Some(tx);
+        {
+            let mut s = host.state.lock().unwrap();
+            s.connected = true;
+            // Enable any-event mouse tracking + SGR encoding to confirm occluded
+            // hover events also do not leak PTY motion sequences.
+            s.model.write(b"\x1b[?1003;1006h");
+        }
+
+        let raw_view = unsafe { cb_terminal_new(&mut *host as *mut _ as *mut c_void, callbacks()) };
+        assert!(!raw_view.is_null());
+
+        let ok = unsafe { cb_terminal_test_occluded_cursor_guard(raw_view as *mut c_void) };
+        assert!(
+            ok,
+            "occluded CanbanTerminal must preserve overlay NSCursor, forward cursorUpdate:, and still update cursor when uncovered"
+        );
+
+        let mut motion_payloads = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let Input::Bytes(bytes) = msg {
+                motion_payloads.push(String::from_utf8_lossy(&bytes).into_owned());
+            }
+        }
+        assert_eq!(
+            motion_payloads.len(),
+            1,
+            "expected only the uncovered mouseMoved: to emit PTY motion, got {motion_payloads:?}"
+        );
 
         unsafe {
             cb_terminal_detach(raw_view as *mut c_void);

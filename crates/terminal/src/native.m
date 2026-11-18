@@ -1021,6 +1021,7 @@ static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
 @property(nonatomic) CGFloat scrollAccumX;
 
 @property(nonatomic, strong) NSTrackingArea *trackingArea;
+@property(nonatomic, weak) NSView *testContentView;
 @property(nonatomic) BOOL hoverLinkValid;
 @property(nonatomic) uint16_t hoverLinkRow;
 @property(nonatomic) uint16_t hoverLinkStartCol;
@@ -1620,6 +1621,7 @@ static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
   if (!self.window || !self.window.isKeyWindow) {
     _physicalKeyDownLo = 0;
     _physicalKeyDownHi = 0;
+    [self clearHoveredLink];
     [self.inputContext discardMarkedText];
     [self unmarkText];
     [self clearCommitCursorHold];
@@ -1749,6 +1751,7 @@ static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
   if (ok) {
     _physicalKeyDownLo = 0;
     _physicalKeyDownHi = 0;
+    [self clearHoveredLink];
     [self.inputContext discardMarkedText];
     [self unmarkText];
     [self clearCommitCursorHold];
@@ -3134,8 +3137,12 @@ static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
        (NSEventModifierFlagCommand | NSEventModifierFlagOption)) != 0 &&
       self.window) {
     NSPoint winPt = [self.window mouseLocationOutsideOfEventStream];
-    NSPoint localPt = [self convertPoint:winPt fromView:nil];
-    [self refreshHoverStateAtPoint:localPt modifierFlags:flags];
+    if ([self isPointerHitAtWindowPoint:winPt]) {
+      NSPoint localPt = [self convertPoint:winPt fromView:nil];
+      [self refreshHoverStateAtPoint:localPt modifierFlags:flags];
+    } else {
+      [self clearHoveredLink];
+    }
   }
 }
 
@@ -3336,9 +3343,59 @@ static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
   }
 }
 
+- (NSView *)activeContentView {
+  if (self.window)
+    return self.window.contentView;
+  return self.testContentView;
+}
+
+- (NSPoint)contentPointFromWindowPoint:(NSPoint)winPt
+                         inContentView:(NSView *)contentView {
+  if (self.window) {
+    return [contentView convertPoint:winPt fromView:nil];
+  }
+  return winPt;
+}
+
+- (BOOL)isPointerHitAtContentPoint:(NSPoint)contentPt
+                     inContentView:(NSView *)contentView {
+  if (!_host || !contentView || self.isHiddenOrHasHiddenAncestor)
+    return NO;
+  if (self.window) {
+    if ([NSApp keyWindow] && [NSApp keyWindow] != self.window)
+      return NO;
+    if (self.window.attachedSheet != nil)
+      return NO;
+  }
+  NSPoint localPt = [self convertPoint:contentPt fromView:contentView];
+  if (!NSPointInRect(localPt, self.bounds))
+    return NO;
+  NSPoint contentSuperPt =
+      contentView.superview
+          ? [contentView.superview convertPoint:contentPt fromView:contentView]
+          : contentPt;
+  NSView *hit = [contentView hitTest:contentSuperPt];
+  return hit != nil && [hit isDescendantOf:self];
+}
+
+- (BOOL)isPointerHitAtWindowPoint:(NSPoint)winPt {
+  NSView *contentView = [self activeContentView];
+  if (!contentView)
+    return NO;
+  NSPoint contentPt =
+      [self contentPointFromWindowPoint:winPt inContentView:contentView];
+  return [self isPointerHitAtContentPoint:contentPt inContentView:contentView];
+}
+
 - (void)refreshHoverStateAtPoint:(NSPoint)pt
                    modifierFlags:(NSEventModifierFlags)flags {
-  if (!_host || !NSPointInRect(pt, self.bounds)) {
+  NSView *contentView = [self activeContentView];
+  if (!_host || !contentView || !NSPointInRect(pt, self.bounds)) {
+    [self clearHoveredLink];
+    return;
+  }
+  NSPoint contentPt = [self convertPoint:pt toView:contentView];
+  if (![self isPointerHitAtContentPoint:contentPt inContentView:contentView]) {
     [self clearHoveredLink];
     return;
   }
@@ -3381,13 +3438,36 @@ static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
   }
 }
 
+- (NSPoint)localPointFromWindowPoint:(NSPoint)winPt {
+  NSView *contentView = [self activeContentView];
+  if (!self.window && contentView) {
+    return [self convertPoint:winPt fromView:contentView];
+  }
+  return [self convertPoint:winPt fromView:nil];
+}
+
 - (void)cursorUpdate:(NSEvent *)event {
-  NSPoint pt = [self convertPoint:event.locationInWindow fromView:nil];
+  NSPoint winPt = event.locationInWindow;
+  if (![self isPointerHitAtWindowPoint:winPt]) {
+    [self clearHoveredLink];
+    if (self.nextResponder) {
+      [self.nextResponder cursorUpdate:event];
+    } else {
+      [super cursorUpdate:event];
+    }
+    return;
+  }
+  NSPoint pt = [self localPointFromWindowPoint:winPt];
   [self refreshHoverStateAtPoint:pt modifierFlags:event.modifierFlags];
 }
 
 - (void)mouseEntered:(NSEvent *)event {
-  NSPoint pt = [self convertPoint:event.locationInWindow fromView:nil];
+  NSPoint winPt = event.locationInWindow;
+  if (![self isPointerHitAtWindowPoint:winPt]) {
+    [self clearHoveredLink];
+    return;
+  }
+  NSPoint pt = [self localPointFromWindowPoint:winPt];
   [self refreshHoverStateAtPoint:pt modifierFlags:event.modifierFlags];
 }
 
@@ -3399,7 +3479,12 @@ static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
 - (void)mouseMoved:(NSEvent *)event {
   if (!_host)
     return;
-  NSPoint pt = [self convertPoint:event.locationInWindow fromView:nil];
+  NSPoint winPt = event.locationInWindow;
+  if (![self isPointerHitAtWindowPoint:winPt]) {
+    [self clearHoveredLink];
+    return;
+  }
+  NSPoint pt = [self localPointFromWindowPoint:winPt];
   [self refreshHoverStateAtPoint:pt modifierFlags:event.modifierFlags];
 
   if (_snap && _snap->mouse_tracking && _cb.mouse &&
@@ -4397,6 +4482,145 @@ bool cb_terminal_test_render_rgba(void *view, uint32_t width, uint32_t height,
     CGContextFlush(cg);
     [NSGraphicsContext restoreGraphicsState];
     CGContextRelease(cg);
+    return true;
+  }
+}
+
+@interface CbTestCursorRootView : NSView
+@property(nonatomic, assign) NSInteger cursorUpdateCount;
+@property(nonatomic, strong) NSCursor *lastCursorOnForward;
+@end
+
+@implementation CbTestCursorRootView
+- (void)cursorUpdate:(NSEvent *)event {
+  (void)event;
+  self.cursorUpdateCount += 1;
+  self.lastCursorOnForward = [NSCursor currentCursor];
+}
+@end
+
+bool cb_terminal_test_occluded_cursor_guard(void *view) {
+  if (!view)
+    return false;
+  @autoreleasepool {
+    CanbanTerminal *term = (__bridge CanbanTerminal *)view;
+    NSRect frame = NSMakeRect(0.0, 0.0, 800.0, 600.0);
+    CbTestCursorRootView *root =
+        [[CbTestCursorRootView alloc] initWithFrame:frame];
+
+    [term setFrame:frame];
+    term.testContentView = root;
+    [root addSubview:term];
+    [term pollSnapshotForceFull:YES];
+
+    NSView *overlay =
+        [[NSView alloc] initWithFrame:NSMakeRect(300.0, 200.0, 500.0, 400.0)];
+    [root addSubview:overlay positioned:NSWindowAbove relativeTo:term];
+
+    NSPoint occludedPt = NSMakePoint(600.0, 500.0);
+    NSPoint uncoveredPt = NSMakePoint(100.0, 100.0);
+
+    if ([term isPointerHitAtWindowPoint:occludedPt]) {
+      term.testContentView = nil;
+      [term removeFromSuperview];
+      return false;
+    }
+    if (![term isPointerHitAtWindowPoint:uncoveredPt]) {
+      term.testContentView = nil;
+      [term removeFromSuperview];
+      return false;
+    }
+
+    NSEvent *moveOccluded = [NSEvent
+        mouseEventWithType:NSEventTypeMouseMoved
+                  location:occludedPt
+             modifierFlags:0
+                 timestamp:0.0
+              windowNumber:0
+                   context:nil
+               eventNumber:1
+                clickCount:0
+                  pressure:0.0];
+    NSEvent *enterOccluded = [NSEvent
+        enterExitEventWithType:NSEventTypeMouseEntered
+                      location:occludedPt
+                 modifierFlags:0
+                     timestamp:0.0
+                  windowNumber:0
+                       context:nil
+                   eventNumber:2
+                trackingNumber:0
+                      userData:NULL];
+    NSEvent *cursorOccluded = [NSEvent
+        enterExitEventWithType:NSEventTypeCursorUpdate
+                      location:occludedPt
+                 modifierFlags:0
+                     timestamp:0.0
+                  windowNumber:0
+                       context:nil
+                   eventNumber:3
+                trackingNumber:0
+                      userData:NULL];
+
+    NSCursor *hand = [NSCursor pointingHandCursor];
+    [hand set];
+
+    [term mouseMoved:moveOccluded];
+    [term mouseEntered:enterOccluded];
+    [term cursorUpdate:cursorOccluded];
+
+    if (root.cursorUpdateCount != 1) {
+      term.testContentView = nil;
+      [term removeFromSuperview];
+      return false;
+    }
+    if ([NSCursor currentCursor] != hand) {
+      term.testContentView = nil;
+      [term removeFromSuperview];
+      return false;
+    }
+
+    // Moving over an uncovered region of the terminal still updates the cursor
+    // and does not forward cursorUpdate: away from the terminal.
+    NSEvent *moveUncovered = [NSEvent
+        mouseEventWithType:NSEventTypeMouseMoved
+                  location:uncoveredPt
+             modifierFlags:0
+                 timestamp:0.0
+              windowNumber:0
+                   context:nil
+               eventNumber:4
+                clickCount:0
+                  pressure:0.0];
+    NSEvent *cursorUncovered = [NSEvent
+        enterExitEventWithType:NSEventTypeCursorUpdate
+                      location:uncoveredPt
+                 modifierFlags:0
+                     timestamp:0.0
+                  windowNumber:0
+                       context:nil
+                   eventNumber:5
+                trackingNumber:0
+                      userData:NULL];
+
+    [hand set];
+    [term mouseMoved:moveUncovered];
+    if ([NSCursor currentCursor] == hand) {
+      term.testContentView = nil;
+      [term removeFromSuperview];
+      return false;
+    }
+
+    [hand set];
+    [term cursorUpdate:cursorUncovered];
+    if ([NSCursor currentCursor] == hand || root.cursorUpdateCount != 1) {
+      term.testContentView = nil;
+      [term removeFromSuperview];
+      return false;
+    }
+
+    term.testContentView = nil;
+    [term removeFromSuperview];
     return true;
   }
 }

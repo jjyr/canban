@@ -248,6 +248,10 @@ fn attention_summary(ui: Ui) -> (usize, usize, usize) {
 pub fn trigger_pill(ui: Ui) -> impl IntoElement {
     let stats = computed(move || attention_summary(ui));
     let is_open = computed(move || ui.utility_popup.get() == "notifications");
+    let has_alerts = computed(move || {
+        let (actionable, unread, _) = stats.get();
+        actionable + unread > 0
+    });
     view()
         .flex_shrink_0()
         .window_drag(false)
@@ -264,90 +268,227 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
             })
             .placement(Placement::Bottom),
         )
-        .child(dynamic(move || {
-            let (actionable, unread, running) = stats.get();
-            let total_alerts = actionable + unread;
-            let open = is_open.get();
-            let has_urgent = actionable > 0;
-            let border = if open {
-                ACCENT
-            } else if has_urgent {
-                ATTENTION
-            } else {
-                BORDER
-            };
-            let bg = if open {
-                SELECTED
-            } else if has_urgent {
-                ATTENTION_SURFACE
-            } else {
-                INSET
-            };
-            let mut btn = canban_ui_kit::press_target()
+        .child(
+            canban_ui_kit::press_target()
                 .h(px(28.))
                 .px_2p5()
                 .rounded(px(RADIUS))
                 .border_1()
-                .border_color(border)
-                .bg(bg)
+                .border_color(move || {
+                    if is_open.get() {
+                        ACCENT
+                    } else if stats.get().0 > 0 {
+                        ATTENTION
+                    } else {
+                        BORDER
+                    }
+                })
+                .bg(move || {
+                    if is_open.get() {
+                        SELECTED
+                    } else if stats.get().0 > 0 {
+                        ATTENTION_SURFACE
+                    } else {
+                        INSET
+                    }
+                })
                 .hover(|s| s.bg(CARD_HOVER))
                 .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
                 .flex_row()
                 .items_center()
                 .gap_1p5()
                 .accessibility_label(move || {
+                    let (actionable, unread, running) = stats.get();
                     Some(
                         format!(
                             "Activity & Notifications, {} alerts, {} running",
-                            total_alerts, running
+                            actionable + unread,
+                            running
                         )
                         .into(),
                     )
                 })
-                .on_press(move |_: &()| toggle(ui));
-            btn = btn.child(
-                icon_tinted(
-                    Icon::Overview,
-                    if has_urgent {
-                        ATTENTION
-                    } else if unread > 0 || open {
-                        ACCENT
-                    } else {
-                        MUTED
-                    },
+                .on_press(move |_: &()| toggle(ui))
+                .child(
+                    icon_tinted(Icon::Overview, move || {
+                        let (actionable, unread, _) = stats.get();
+                        if actionable > 0 {
+                            ATTENTION
+                        } else if unread > 0 || is_open.get() {
+                            ACCENT
+                        } else {
+                            MUTED
+                        }
+                    })
+                    .w(px(13.5))
+                    .h(px(13.5)),
                 )
-                .w(px(13.5))
-                .h(px(13.5)),
-            );
-            if total_alerts > 0 {
-                btn = btn
-                    .child(
-                        label(total_alerts.to_string())
-                            .text_size(px(12.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(if has_urgent { ATTENTION } else { TEXT }),
-                    )
-                    .child(muted("·").text_size(px(11.)));
-            }
-            btn = btn
+                .child(when(
+                    move || has_alerts.get(),
+                    move || {
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_1p5()
+                            .child(
+                                label(move || {
+                                    let (actionable, unread, _) = stats.get();
+                                    (actionable + unread).to_string()
+                                })
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(move || {
+                                    if stats.get().0 > 0 { ATTENTION } else { TEXT }
+                                }),
+                            )
+                            .child(muted("·").text_size(px(11.)))
+                    },
+                ))
                 .child(
                     view()
                         .w(px(6.))
                         .h(px(6.))
                         .rounded_full()
-                        .bg(if running > 0 { SUCCESS } else { MUTED }),
+                        .bg(move || if stats.get().2 > 0 { SUCCESS } else { MUTED }),
                 )
                 .child(
-                    muted(running.to_string())
+                    muted(move || stats.get().2.to_string())
                         .text_size(px(11.5))
                         .font_family(canban_ui_kit::tokens::MONO_FONT),
-                );
-            btn
-        }))
+                ),
+        )
 }
 
 pub fn popover(ui: Ui) -> impl IntoElement {
     let project_scope = signal(String::new());
+    let valid_scope = computed(move || {
+        let scope = project_scope.get();
+        if scope.is_empty() {
+            return None;
+        }
+        let known = canban_types::is_global_project_id(&scope)
+            || ui
+                .snapshot
+                .with(|s| s.projects.iter().any(|p| p.id == scope));
+        known.then_some(scope)
+    });
+    let running_count = computed(move || {
+        let scope = valid_scope.get();
+        ui.snapshot.with(|s| {
+            ui.overview_rows.with(|all_rows| {
+                ui.terminal_entries.with(|entries| {
+                    running_agents_count_from(s, all_rows, entries, scope.as_deref())
+                })
+            })
+        })
+    });
+    let has_running = computed(move || running_count.get() > 0);
+    let queued_count = computed(move || {
+        let scope = valid_scope.get();
+        ui.snapshot.with(|s| {
+            s.terminals
+                .iter()
+                .filter(|t| {
+                    t.agent.as_ref().is_some_and(|a| {
+                        scope.as_deref().is_none_or(|pid| a.project_id == pid)
+                            && (a.state == "queued" || a.pending.is_some())
+                    })
+                })
+                .count()
+        })
+    });
+    let has_queued = computed(move || queued_count.get() > 0);
+    let has_unread = computed(move || {
+        let scope = valid_scope.get();
+        ui.snapshot.with(|s| {
+            ui.reminder_counts.with(|counts| {
+                s.cards.iter().any(|c| {
+                    scope.as_deref().is_none_or(|pid| c.project_id == pid)
+                        && counts.get(&c.id).is_some_and(|n| n.unread > 0)
+                })
+            })
+        })
+    });
+    let filter_chips = computed(move || -> Option<Vec<(String, String)>> {
+        ui.snapshot.with(|s| {
+            ui.reminder_counts.with(|counts| {
+                ui.overview_rows.with(|all_rows| {
+                    ui.terminal_entries.with(|entries| {
+                        let has_global = entries.iter().any(|e| {
+                            e.listed()
+                                && e.project_id
+                                    .as_deref()
+                                    .is_some_and(canban_types::is_global_project_id)
+                        }) || s.scheduled_runs.iter().any(|r| {
+                            canban_types::is_global_project_id(&r.project_id)
+                                && (r.active() || r.state == "blocked")
+                        });
+                        if s.projects.len() <= 1 && !has_global {
+                            return None;
+                        }
+                        let mut chips = vec![(String::new(), "All".to_owned())];
+                        if has_global {
+                            let global_alerts = entries
+                                .iter()
+                                .filter(|e| {
+                                    e.project_id
+                                        .as_deref()
+                                        .is_some_and(canban_types::is_global_project_id)
+                                        && standalone_terminal_needs_you(s, e)
+                                })
+                                .count();
+                            let glabel = if global_alerts > 0 {
+                                format!("Global · {global_alerts}")
+                            } else {
+                                "Global".into()
+                            };
+                            chips.push((canban_types::GLOBAL_PROJECT_ID.into(), glabel));
+                        }
+                        for p in &s.projects {
+                            let pid = p.id.clone();
+                            let actionable_cards: std::collections::BTreeSet<_> = all_rows
+                                .iter()
+                                .filter(|r| r.card.project_id == pid && r.actionable())
+                                .map(|r| r.card.id.clone())
+                                .collect();
+                            let proj_alerts = all_rows
+                                .iter()
+                                .filter(|r| r.card.project_id == pid && r.actionable())
+                                .count()
+                                + entries
+                                    .iter()
+                                    .filter(|e| {
+                                        e.project_id.as_deref() == Some(pid.as_str())
+                                            && standalone_terminal_needs_you(s, e)
+                                    })
+                                    .count()
+                                + s.cards
+                                    .iter()
+                                    .filter(|c| {
+                                        c.project_id == pid
+                                            && counts.get(&c.id).is_some_and(|n| n.unread > 0)
+                                            && !actionable_cards.contains(&c.id)
+                                    })
+                                    .count();
+                            let hid = s.project_host(&pid);
+                            let base_name = if hid != "local" && s.has_remote_hosts() {
+                                format!("{} ({})", p.name, s.host_display_name(hid))
+                            } else {
+                                p.name.clone()
+                            };
+                            let seg_label = if proj_alerts > 0 {
+                                format!("{base_name} · {proj_alerts}")
+                            } else {
+                                base_name
+                            };
+                            chips.push((pid, seg_label));
+                        }
+                        Some(chips)
+                    })
+                })
+            })
+        })
+    });
     nsh_base::dialog()
         .animation(canban_ui_kit::motion::modal)
         .close_on_escape(true)
@@ -388,44 +529,8 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                 .border_b_1()
                                 .border_color(BORDER)
                                 .gap_2()
-                                .child(dynamic(move || {
-                                    let s = ui.snapshot.get();
-                                    let counts = ui.reminder_counts.get();
-                                    let all_rows = ui.overview_rows.get();
-                                    let entries = ui.terminal_entries.get();
-                                    let scope = project_scope.get();
-                                    let valid_scope = if !scope.is_empty()
-                                        && (canban_types::is_global_project_id(&scope)
-                                            || s.projects.iter().any(|p| p.id == scope))
-                                    {
-                                        Some(scope)
-                                    } else {
-                                        None
-                                    };
-                                    let running_count = running_agents_count_from(
-                                        &s,
-                                        &all_rows,
-                                        &entries,
-                                        valid_scope.as_deref(),
-                                    );
-                                    let queued_count = s
-                                        .terminals
-                                        .iter()
-                                        .filter(|t| {
-                                            t.agent.as_ref().is_some_and(|a| {
-                                                valid_scope
-                                                    .as_deref()
-                                                    .is_none_or(|pid| a.project_id == pid)
-                                                    && (a.state == "queued" || a.pending.is_some())
-                                            })
-                                        })
-                                        .count();
-                                    let has_unread = s.cards.iter().any(|c| {
-                                        valid_scope.as_deref().is_none_or(|pid| c.project_id == pid)
-                                            && counts.get(&c.id).is_some_and(|n| n.unread > 0)
-                                    });
-                                    let scope_for_read = valid_scope.clone();
-                                    let mut top = view()
+                                .child(
+                                    view()
                                         .flex_row()
                                         .items_center()
                                         .justify_between()
@@ -440,148 +545,95 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                                     label("Activity & Notifications")
                                                         .font_weight(FontWeight::SEMIBOLD),
                                                 )
-                                                .child(status(
-                                                    format!("{running_count} running"),
-                                                    if running_count > 0 {
-                                                        Tone::Info
-                                                    } else {
-                                                        Tone::Neutral
+                                                .child(when(
+                                                    move || has_running.get(),
+                                                    move || {
+                                                        status(
+                                                            move || {
+                                                                format!(
+                                                                    "{} running",
+                                                                    running_count.get()
+                                                                )
+                                                            },
+                                                            Tone::Info,
+                                                        )
                                                     },
                                                 ))
                                                 .child(when(
-                                                    move || queued_count > 0,
-                                                    move || badge(format!("{queued_count} queued")),
+                                                    move || !has_running.get(),
+                                                    move || status("0 running", Tone::Neutral),
+                                                ))
+                                                .child(when(
+                                                    move || has_queued.get(),
+                                                    move || {
+                                                        badge(move || {
+                                                            format!("{} queued", queued_count.get())
+                                                        })
+                                                    },
                                                 )),
-                                        );
-                                    let mut right = view().flex_row().items_center().gap_1();
-                                    if has_unread {
-                                        right = right.child(compact_action(
-                                            "✓ Read all",
-                                            Variant::Quiet,
-                                            move |_| mark_all_read(ui, scope_for_read.clone()),
-                                        ));
-                                    }
-                                    right = right.child(chrome_button(
-                                        Icon::Close,
-                                        "Close Activity & Notifications",
-                                        move |_| close(ui),
-                                    ));
-                                    top = top.child(right);
-
-                                    let has_global = entries.iter().any(|e| {
-                                        e.listed()
-                                            && e.project_id
-                                                .as_deref()
-                                                .is_some_and(canban_types::is_global_project_id)
-                                    }) || s.scheduled_runs.iter().any(|r| {
-                                        canban_types::is_global_project_id(&r.project_id)
-                                            && (r.active() || r.state == "blocked")
-                                    });
-                                    if s.projects.len() > 1 || has_global {
-                                        let all_selected = valid_scope.is_none();
-                                        let mut filter_seg = segmented().child(compact_segment(
-                                            "All",
-                                            None,
-                                            move || all_selected,
-                                            move |_| project_scope.set(String::new()),
-                                        ));
-                                        if has_global {
-                                            let global_selected = valid_scope
-                                                .as_deref()
-                                                .is_some_and(canban_types::is_global_project_id);
-                                            let global_alerts = entries
-                                                .iter()
-                                                .filter(|e| {
-                                                    e.project_id.as_deref().is_some_and(
-                                                        canban_types::is_global_project_id,
-                                                    ) && standalone_terminal_needs_you(&s, e)
-                                                })
-                                                .count();
-                                            let glabel = if global_alerts > 0 {
-                                                format!("Global · {global_alerts}")
-                                            } else {
-                                                "Global".into()
+                                        )
+                                        .child(
+                                            view()
+                                                .flex_row()
+                                                .items_center()
+                                                .gap_1()
+                                                .child(when(
+                                                    move || has_unread.get(),
+                                                    move || {
+                                                        compact_action(
+                                                            "✓ Read all",
+                                                            Variant::Quiet,
+                                                            move |_| {
+                                                                mark_all_read(
+                                                                    ui,
+                                                                    valid_scope.get_untracked(),
+                                                                )
+                                                            },
+                                                        )
+                                                    },
+                                                ))
+                                                .child(chrome_button(
+                                                    Icon::Close,
+                                                    "Close Activity & Notifications",
+                                                    move |_| close(ui),
+                                                )),
+                                        ),
+                                )
+                                .child(when(
+                                    move || filter_chips.with(Option::is_some),
+                                    move || {
+                                        dynamic(move || {
+                                            let Some(chips) = filter_chips.get() else {
+                                                return view().into_element();
                                             };
-                                            filter_seg = filter_seg.child(compact_segment(
-                                                glabel,
-                                                None,
-                                                move || global_selected,
-                                                move |_| {
-                                                    project_scope
-                                                        .set(canban_types::GLOBAL_PROJECT_ID.into())
-                                                },
-                                            ));
-                                        }
-                                        for p in &s.projects {
-                                            let pid = p.id.clone();
-                                            let is_selected =
-                                                valid_scope.as_deref() == Some(pid.as_str());
-                                            let actionable_cards: std::collections::BTreeSet<_> =
-                                                all_rows
-                                                    .iter()
-                                                    .filter(|r| {
-                                                        r.card.project_id == pid && r.actionable()
-                                                    })
-                                                    .map(|r| r.card.id.clone())
-                                                    .collect();
-                                            let proj_alerts = all_rows
-                                                .iter()
-                                                .filter(|r| {
-                                                    r.card.project_id == pid && r.actionable()
-                                                })
-                                                .count()
-                                                + entries
-                                                    .iter()
-                                                    .filter(|e| {
-                                                        e.project_id.as_deref()
-                                                            == Some(pid.as_str())
-                                                            && standalone_terminal_needs_you(&s, e)
-                                                    })
-                                                    .count()
-                                                + s.cards
-                                                    .iter()
-                                                    .filter(|c| {
-                                                        c.project_id == pid
-                                                            && counts
-                                                                .get(&c.id)
-                                                                .is_some_and(|n| n.unread > 0)
-                                                            && !actionable_cards.contains(&c.id)
-                                                    })
-                                                    .count();
-                                            let hid = s.project_host(&pid);
-                                            let base_name = if hid != "local"
-                                                && s.has_remote_hosts()
-                                            {
-                                                format!("{} ({})", p.name, s.host_display_name(hid))
-                                            } else {
-                                                p.name.clone()
-                                            };
-                                            let seg_label = if proj_alerts > 0 {
-                                                format!("{base_name} · {proj_alerts}")
-                                            } else {
-                                                base_name
-                                            };
-                                            filter_seg = filter_seg.child(compact_segment(
-                                                seg_label,
-                                                None,
-                                                move || is_selected,
-                                                move |_| project_scope.set(pid.clone()),
-                                            ));
-                                        }
-                                        view()
-                                            .gap_2()
-                                            .child(top)
-                                            .child(
-                                                scroll()
-                                                    .horizontal()
-                                                    .scrollbar(false)
-                                                    .child(filter_seg),
-                                            )
-                                            .into_element()
-                                    } else {
-                                        top.into_element()
-                                    }
-                                })),
+                                            let mut filter_seg = segmented();
+                                            for (scope_id, seg_label) in chips {
+                                                let id_sel = scope_id.clone();
+                                                let id_press = scope_id;
+                                                filter_seg = filter_seg.child(compact_segment(
+                                                    seg_label,
+                                                    None,
+                                                    move || {
+                                                        valid_scope.with(|v| {
+                                                            if id_sel.is_empty() {
+                                                                v.is_none()
+                                                            } else {
+                                                                v.as_deref()
+                                                                    == Some(id_sel.as_str())
+                                                            }
+                                                        })
+                                                    },
+                                                    move |_| project_scope.set(id_press.clone()),
+                                                ));
+                                            }
+                                            scroll()
+                                                .horizontal()
+                                                .scrollbar(false)
+                                                .child(filter_seg)
+                                                .into_element()
+                                        })
+                                    },
+                                )),
                         )
                         .child(scroll().max_h(px(560.)).p_3p5().child(dynamic(move || {
                             activity_body(ui, project_scope.get(), stored(true), true)
@@ -2686,6 +2738,127 @@ mod tests {
         assert!(
             !texts.iter().any(|t| t.contains("/8") || t.contains("/ 8")),
             "did not expect `/8` Scheduler slot denominator in Activity & Notifications, got {texts:?}"
+        );
+    }
+
+    #[test]
+    fn read_all_and_close_keep_stable_node_ids_across_snapshot_updates() {
+        use nsh_core::{
+            ApproxTextEngine, Core, EventKind, EventPayload, MountItem, NodeId, ROOT_ID,
+            geometry::size,
+        };
+
+        fn snapshot_with_unread(unread_msg: &str, running: bool) -> canban_types::Snapshot {
+            let mut s = canban_types::Snapshot::default();
+            s.projects.push(
+                serde_json::from_value(json!({
+                    "id": "p1",
+                    "name": "Canban",
+                    "directory": "/tmp/canban",
+                    "workflow": canban_types::Workflow::default(),
+                    "created_at": 1
+                }))
+                .unwrap(),
+            );
+            s.cards.push(base_card());
+            s.events.push(canban_types::Event {
+                id: "e1".into(),
+                project_id: "p1".into(),
+                card_id: "c1".into(),
+                sequence: 1,
+                kind: "comment.replied".into(),
+                actor: "agent:agy".into(),
+                message: unread_msg.into(),
+                data: json!({"question_id": "q1"}),
+                created_at: 10,
+            });
+            if running {
+                let mut managed = canban_scheduler::agent_run(
+                    "p1",
+                    "c1",
+                    1,
+                    "develop",
+                    "stage_entry",
+                    canban_types::Config::default().profiles[0].clone(),
+                    "implement".into(),
+                    None,
+                );
+                managed.state = "running".into();
+                managed.terminal = Some("pty-card".into());
+                managed.connection_state = "connected".into();
+                managed.observed =
+                    Some(json!({"state": "live", "turn": 1, "status": {"state": "working"}}));
+                managed.lifecycle.observed_at = Some(u64::MAX);
+                s.terminals.push(canban_types::TerminalEntry {
+                    id: "c1:developer".into(),
+                    conversation_id: Some("c1:developer".into()),
+                    number: 1,
+                    name: None,
+                    origin_project_id: None,
+                    origin_card_id: Some("c1".into()),
+                    agent_engine: None,
+                    runtime: None,
+                    agent: Some(managed),
+                    created_at: 1,
+                });
+            }
+            s
+        }
+
+        #[component]
+        fn ProbePopoverStability() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            ui.snapshot
+                .set(snapshot_with_unread("Initial report", false));
+            ui.utility_popup.set("notifications".into());
+            view()
+                .w(px(1200.))
+                .h(px(900.))
+                .on_press(move |_: &()| {
+                    ui.snapshot
+                        .set(snapshot_with_unread("Updated report", true));
+                })
+                .child(trigger_pill(ui))
+                .child(popover(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1200.), px(900.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<ProbePopoverStability>());
+        let initial = core.commit().expect("initial mount");
+        let host = initial
+            .items
+            .iter()
+            .find_map(|item| match item {
+                MountItem::Insert { parent, child, .. } if *parent == ROOT_ID => Some(*child),
+                _ => None,
+            })
+            .expect("root host node");
+        let read_all_id: NodeId = initial
+            .items
+            .iter()
+            .find_map(|item| match item {
+                MountItem::Text { id, text, .. } if text.text == "✓ Read all" => Some(*id),
+                _ => None,
+            })
+            .expect("expected `✓ Read all` in initial mount");
+
+        assert!(core.component_event(host, EventKind::Press, &EventPayload::None));
+        let update = core.commit().expect("update batch");
+        assert!(
+            !update
+                .items
+                .iter()
+                .any(|item| matches!(item, MountItem::Delete { id } if *id == read_all_id)),
+            "`✓ Read all` must not be deleted/recreated on background snapshot updates: {:?}",
+            update.items
+        );
+        assert!(
+            !update.items.iter().any(
+                |item| matches!(item, MountItem::Text { text, .. } if text.text == "✓ Read all")
+            ),
+            "`✓ Read all` must not be re-emitted as a new Text node on background snapshot updates"
         );
     }
 }

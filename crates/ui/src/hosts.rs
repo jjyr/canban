@@ -372,6 +372,29 @@ pub(crate) fn dot_color_for_tone(tone: Tone) -> ThemeColor {
 /// Top-chrome status pill mounted next to `Activity & Notifications`.
 pub fn trigger_pill(ui: Ui) -> impl IntoElement {
     let hosts_memo = computed(move || effective_hosts(ui));
+    let pill_summary = computed(move || {
+        hosts_memo.with(|list| {
+            let remote_count = list.iter().filter(|h| !h.is_local).count();
+            let any_attention = list.iter().any(|h| !h.is_local && h.needs_attention());
+            let updating_count = list.iter().filter(|h| h.is_updating()).count();
+            let any_updating = list.iter().any(|h| !h.is_local && h.is_updating());
+            let any_offline = list
+                .iter()
+                .any(|h| !h.is_local && h.is_offline() && !h.is_updating());
+            let online_remotes = list
+                .iter()
+                .filter(|h| !h.is_local && h.is_connected())
+                .count();
+            (
+                remote_count,
+                any_attention,
+                any_updating,
+                any_offline,
+                online_remotes,
+                updating_count,
+            )
+        })
+    });
     let is_open = computed(move || {
         let p = ui.utility_popup.get();
         p == "hosts" || p == "connect-host"
@@ -382,98 +405,70 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
         .window_drag(false)
         .tooltip(
             hint_tooltip(move || {
-                let list = hosts_memo.get();
-                let remote_count = list.iter().filter(|h| !h.is_local).count();
+                let (remote_count, _, _, _, online, updating) = pill_summary.get();
                 if remote_count == 0 {
                     format!(
                         "Connected Hosts\n{} (local) · Click to connect a remote machine",
                         crate::platform::LOCAL_HOST_NAME
                     )
+                } else if updating > 0 {
+                    format!(
+                        "Connected Hosts\n{} + {} / {} remote online ({} updating…)",
+                        crate::platform::LOCAL_HOST_NAME,
+                        online,
+                        remote_count,
+                        updating
+                    )
                 } else {
-                    let online = list
-                        .iter()
-                        .filter(|h| !h.is_local && h.is_connected())
-                        .count();
-                    let updating = list.iter().filter(|h| h.is_updating()).count();
-                    if updating > 0 {
-                        format!(
-                            "Connected Hosts\n{} + {} / {} remote online ({} updating…)",
-                            crate::platform::LOCAL_HOST_NAME,
-                            online,
-                            remote_count,
-                            updating
-                        )
-                    } else {
-                        format!(
-                            "Connected Hosts\n{} + {} / {} remote online",
-                            crate::platform::LOCAL_HOST_NAME,
-                            online,
-                            remote_count
-                        )
-                    }
+                    format!(
+                        "Connected Hosts\n{} + {} / {} remote online",
+                        crate::platform::LOCAL_HOST_NAME,
+                        online,
+                        remote_count
+                    )
                 }
             })
             .placement(Placement::Bottom),
         )
-        .child(dynamic(move || {
-            let list = hosts_memo.get();
-            let remote_count = list.iter().filter(|h| !h.is_local).count();
-            let any_attention = list.iter().any(|h| !h.is_local && h.needs_attention());
-            let any_updating = list.iter().any(|h| !h.is_local && h.is_updating());
-            let any_offline = list
-                .iter()
-                .any(|h| !h.is_local && h.is_offline() && !h.is_updating());
-            let online_remotes = list
-                .iter()
-                .filter(|h| !h.is_local && h.is_connected())
-                .count();
-            let open = is_open.get();
-
-            let border = if open {
-                ACCENT
-            } else if any_attention {
-                DANGER
-            } else if any_updating {
-                ACCENT
-            } else if any_offline {
-                ATTENTION
-            } else {
-                BORDER
-            };
-            let bg = if open {
-                SELECTED
-            } else if any_attention || any_offline {
-                ATTENTION_SURFACE
-            } else if any_updating {
-                SELECTED
-            } else {
-                INSET
-            };
-            let dot_color = if any_attention {
-                DANGER
-            } else if any_updating {
-                ACCENT
-            } else if any_offline {
-                ATTENTION
-            } else if remote_count > 0 {
-                SUCCESS
-            } else {
-                MUTED
-            };
-
-            let mut btn = press_target()
+        .child(
+            press_target()
                 .h(px(28.))
                 .px_2p5()
                 .rounded(px(RADIUS))
                 .border_1()
-                .border_color(border)
-                .bg(bg)
+                .border_color(move || {
+                    let (_, any_attention, any_updating, any_offline, _, _) = pill_summary.get();
+                    if is_open.get() {
+                        ACCENT
+                    } else if any_attention {
+                        DANGER
+                    } else if any_updating {
+                        ACCENT
+                    } else if any_offline {
+                        ATTENTION
+                    } else {
+                        BORDER
+                    }
+                })
+                .bg(move || {
+                    let (_, any_attention, any_updating, any_offline, _, _) = pill_summary.get();
+                    if is_open.get() {
+                        SELECTED
+                    } else if any_attention || any_offline {
+                        ATTENTION_SURFACE
+                    } else if any_updating {
+                        SELECTED
+                    } else {
+                        INSET
+                    }
+                })
                 .hover(|s| s.bg(CARD_HOVER))
                 .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
                 .flex_row()
                 .items_center()
                 .gap_1p5()
                 .accessibility_label(move || {
+                    let (remote_count, _, any_updating, _, online_remotes, _) = pill_summary.get();
                     Some(
                         if remote_count == 0 {
                             format!("Connected Hosts, {} only", crate::platform::LOCAL_HOST_NAME)
@@ -491,46 +486,156 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                         .into(),
                     )
                 })
-                .on_press(move |_: &()| toggle_popover(ui));
-
-            btn = btn.child(
-                icon_tinted(
-                    Icon::Server,
-                    if open {
-                        ACCENT
-                    } else if any_attention {
-                        DANGER
-                    } else if any_updating {
-                        ACCENT
-                    } else if any_offline {
-                        ATTENTION
-                    } else {
-                        MUTED
-                    },
-                )
-                .w(px(13.5))
-                .h(px(13.5)),
-            );
-
-            if remote_count > 0 {
-                btn = btn
-                    .child(if any_updating {
-                        live_dot(dot_color)
-                    } else {
-                        view().w(px(6.)).h(px(6.)).rounded_full().bg(dot_color)
+                .on_press(move |_: &()| toggle_popover(ui))
+                .child(
+                    icon_tinted(Icon::Server, move || {
+                        let (_, any_attention, any_updating, any_offline, _, _) =
+                            pill_summary.get();
+                        if is_open.get() {
+                            ACCENT
+                        } else if any_attention {
+                            DANGER
+                        } else if any_updating {
+                            ACCENT
+                        } else if any_offline {
+                            ATTENTION
+                        } else {
+                            MUTED
+                        }
                     })
-                    .child(
-                        muted(format!("{}/{}", online_remotes + 1, remote_count + 1))
-                            .text_size(px(11.5))
-                            .font_family(MONO_FONT),
-                    );
-            }
-            btn
-        }))
+                    .w(px(13.5))
+                    .h(px(13.5)),
+                )
+                .child(when(
+                    move || pill_summary.get().0 > 0,
+                    move || {
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_1p5()
+                            .child(when(
+                                move || pill_summary.get().2,
+                                move || {
+                                    live_dot({
+                                        let (_, any_attention, any_updating, any_offline, _, _) =
+                                            pill_summary.get_untracked();
+                                        if any_attention {
+                                            DANGER
+                                        } else if any_updating {
+                                            ACCENT
+                                        } else if any_offline {
+                                            ATTENTION
+                                        } else {
+                                            SUCCESS
+                                        }
+                                    })
+                                },
+                            ))
+                            .child(when(
+                                move || !pill_summary.get().2,
+                                move || {
+                                    view().w(px(6.)).h(px(6.)).rounded_full().bg(move || {
+                                        let (
+                                            remote_count,
+                                            any_attention,
+                                            any_updating,
+                                            any_offline,
+                                            _,
+                                            _,
+                                        ) = pill_summary.get();
+                                        if any_attention {
+                                            DANGER
+                                        } else if any_updating {
+                                            ACCENT
+                                        } else if any_offline {
+                                            ATTENTION
+                                        } else if remote_count > 0 {
+                                            SUCCESS
+                                        } else {
+                                            MUTED
+                                        }
+                                    })
+                                },
+                            ))
+                            .child(
+                                muted(move || {
+                                    let (remote_count, _, _, _, online_remotes, _) =
+                                        pill_summary.get();
+                                    format!("{}/{}", online_remotes + 1, remote_count + 1)
+                                })
+                                .text_size(px(11.5))
+                                .font_family(MONO_FONT),
+                            )
+                    },
+                )),
+        )
+}
+
+#[derive(Clone)]
+struct PopoverHostRow {
+    summary: HostSummary,
+    err_opt: Option<String>,
+    status_key: String,
+    initial_status: String,
+    is_conn: bool,
+    is_upd: bool,
+    is_mismatch: bool,
+    needs_attn: bool,
+}
+
+impl PopoverHostRow {
+    fn from_summary(summary: HostSummary) -> Self {
+        let err_opt = summary.connection.error_detail().map(str::to_owned);
+        let initial_status = summary.connection.short_status();
+        let is_conn = summary.is_connected();
+        let status_key = if is_conn {
+            "Connected".to_owned()
+        } else {
+            initial_status.clone()
+        };
+        let is_upd = summary.is_updating();
+        let is_mismatch = matches!(summary.connection, HostConnectionState::ApiMismatch { .. });
+        let needs_attn = summary.needs_attention();
+        Self {
+            summary,
+            err_opt,
+            status_key,
+            initial_status,
+            is_conn,
+            is_upd,
+            is_mismatch,
+            needs_attn,
+        }
+    }
+}
+
+impl PartialEq for PopoverHostRow {
+    fn eq(&self, other: &Self) -> bool {
+        self.summary.id == other.summary.id
+            && self.summary.name == other.summary.name
+            && self.summary.is_local == other.summary.is_local
+            && self.summary.transport_label == other.summary.transport_label
+            && self.summary.endpoint_label == other.summary.endpoint_label
+            && self.summary.project_count == other.summary.project_count
+            && self.summary.active_agents == other.summary.active_agents
+            && self.summary.max_agents == other.summary.max_agents
+            && self.err_opt == other.err_opt
+            && self.status_key == other.status_key
+            && self.is_conn == other.is_conn
+            && self.is_upd == other.is_upd
+            && self.is_mismatch == other.is_mismatch
+            && self.needs_attn == other.needs_attn
+    }
 }
 
 /// Top-right anchored `Hosts` quick popover (`popup == "hosts"`).
 pub fn popover(ui: Ui) -> impl IntoElement {
+    let rows_memo = computed(move || {
+        effective_hosts(ui)
+            .into_iter()
+            .map(PopoverHostRow::from_summary)
+            .collect::<Vec<_>>()
+    });
     nsh_base::dialog()
         .animation(canban_ui_kit::motion::modal)
         .close_on_escape(true)
@@ -591,19 +696,37 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                 )),
                         )
                         .child(scroll().max_h(px(420.)).child(dynamic(move || {
-                            let list = effective_hosts(ui);
+                            let list = rows_memo.get();
                             let mut col = view().gap_0().min_w(px(0.));
-                            for (idx, h) in list.iter().enumerate() {
+                            for (idx, row_entry) in list.iter().enumerate() {
+                                let h = &row_entry.summary;
                                 let hid_term = h.id.clone();
                                 let hid_rec = h.id.clone();
                                 let hid_set = h.id.clone();
                                 let hid_diag = h.id.clone();
                                 let tone = status_tone(h);
-                                let status_chip = host_status_badge(h);
-                                let err_opt = h.connection.error_detail().map(str::to_owned);
+                                let err_opt = row_entry.err_opt.clone();
                                 let is_local = h.is_local;
-                                let is_conn = h.is_connected();
-                                let is_upd = h.is_updating();
+                                let is_conn = row_entry.is_conn;
+                                let is_upd = row_entry.is_upd;
+                                let hid_status = h.id.clone();
+                                let initial_status = row_entry.initial_status.clone();
+                                let status_text = move || {
+                                    effective_hosts(ui)
+                                        .into_iter()
+                                        .find(|row| row.id == hid_status)
+                                        .map(|row| {
+                                            SharedString::from(row.connection.short_status())
+                                        })
+                                        .unwrap_or_else(|| {
+                                            SharedString::from(initial_status.clone())
+                                        })
+                                };
+                                let status_chip = if is_upd {
+                                    live_status(status_text, tone)
+                                } else {
+                                    status(status_text, tone)
+                                };
 
                                 let mut actions =
                                     view().flex_row().flex_wrap().items_center().gap_1();
@@ -614,10 +737,7 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                                 .disabled(|| true),
                                         );
                                     } else {
-                                        if matches!(
-                                            h.connection,
-                                            HostConnectionState::ApiMismatch { .. }
-                                        ) {
+                                        if row_entry.is_mismatch {
                                             let h_upd = h.clone();
                                             actions = actions.child(compact_action(
                                                 "Update Daemon",
@@ -2451,5 +2571,119 @@ mod tests {
             !texts.iter().any(|t| t == "Update Daemon"),
             "expected `Update Daemon` button hidden during optimistic update, got {texts:?}"
         );
+    }
+
+    #[test]
+    fn hosts_popover_keeps_stable_action_nodes_when_only_rtt_polls_change() {
+        use nsh_core::{EventKind, EventPayload, ROOT_ID};
+
+        fn make_hosts(rtt_ms: u64, synced_at: u64) -> Vec<HostSummary> {
+            vec![
+                HostSummary {
+                    id: "local".into(),
+                    name: "This Mac".into(),
+                    is_local: true,
+                    transport_label: "Local socket".into(),
+                    endpoint_label: "~/.canban/app.sock".into(),
+                    ssh_target: None,
+                    server_id: None,
+                    connection: HostConnectionState::Connected {
+                        rtt_ms: 0,
+                        api_version: canban_updater::DESKTOP_API,
+                        version: "0.4.2".into(),
+                        platform: "macos-aarch64".into(),
+                    },
+                    active_agents: 0,
+                    max_agents: 5,
+                    project_count: 1,
+                    reconnect_count: 0,
+                    last_synced_at: Some(synced_at),
+                },
+                HostSummary {
+                    id: "home-linux".into(),
+                    name: "Home Linux".into(),
+                    is_local: false,
+                    transport_label: "Tailscale / TCP".into(),
+                    endpoint_label: "100.64.0.10:7680".into(),
+                    ssh_target: None,
+                    server_id: Some("srv-home".into()),
+                    connection: HostConnectionState::Connected {
+                        rtt_ms,
+                        api_version: canban_updater::DESKTOP_API,
+                        version: "0.4.2".into(),
+                        platform: "linux-x86_64".into(),
+                    },
+                    active_agents: 0,
+                    max_agents: 8,
+                    project_count: 1,
+                    reconnect_count: 0,
+                    last_synced_at: Some(synced_at),
+                },
+            ]
+        }
+
+        #[component]
+        fn ProbeHostsStability() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            ui.hosts.set(make_hosts(12, 1_000));
+            ui.utility_popup.set("hosts".into());
+            view()
+                .w(px(1200.))
+                .h(px(800.))
+                .on_press(move |_: &()| {
+                    ui.hosts.set(make_hosts(47, 2_500));
+                })
+                .child(trigger_pill(ui))
+                .child(popover(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1200.), px(800.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<ProbeHostsStability>());
+        let initial = core.commit().expect("initial mount");
+        let host = initial
+            .items
+            .iter()
+            .find_map(|item| match item {
+                MountItem::Insert { parent, child, .. } if *parent == ROOT_ID => Some(*child),
+                _ => None,
+            })
+            .expect("root host node");
+        let manage_id = initial
+            .items
+            .iter()
+            .find_map(|item| match item {
+                MountItem::Text { id, text, .. } if text.text == "Manage Hosts…" => Some(*id),
+                _ => None,
+            })
+            .expect("expected `Manage Hosts…` in initial mount");
+        let settings_id = initial
+            .items
+            .iter()
+            .find_map(|item| match item {
+                MountItem::Text { id, text, .. } if text.text == "Settings" => Some(*id),
+                _ => None,
+            })
+            .expect("expected `Settings` in initial mount");
+
+        assert!(core.component_event(host, EventKind::Press, &EventPayload::None));
+        if let Some(update) = core.commit() {
+            assert!(
+                !update
+                    .items
+                    .iter()
+                    .any(|item| matches!(item, MountItem::Delete { id } if *id == manage_id || *id == settings_id)),
+                "Manage Hosts… ({manage_id:?}) and Settings ({settings_id:?}) must not be deleted/remounted when only rtt_ms/last_synced_at change: {:?}",
+                update.items
+            );
+            assert!(
+                !update.items.iter().any(|item| matches!(
+                    item,
+                    MountItem::Text { text, .. } if text.text == "Manage Hosts…" || text.text == "Settings"
+                )),
+                "Manage Hosts… and Settings must not be re-emitted as new Text nodes when only rtt_ms/last_synced_at change"
+            );
+        }
     }
 }
