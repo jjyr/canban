@@ -123,11 +123,11 @@ fn anchored(ui: Ui, id: String, anchor: ElementRef) {
         }
     });
 }
-fn tab(ui: Ui, e: Entry, capacity: Memo<f32>) -> impl IntoElement {
+fn tab(ui: Ui, e: Entry, max_tab_w: Memo<f32>, show_card_number: bool) -> impl IntoElement {
     let id = e.saved.id.clone();
     let id_sel = id.clone();
     let is_selected = computed(move || ui.terminal_selection.get() == id_sel);
-    let base_width = super::labels::tab_width(&e);
+    let base_width = super::labels::tab_width(&e, show_card_number);
     dynamic(move || {
         let selected = is_selected.get();
         let id = id.clone();
@@ -158,7 +158,7 @@ fn tab(ui: Ui, e: Entry, capacity: Memo<f32>) -> impl IntoElement {
             tab_button = tab_button.child(mark_el);
         }
         tab_button = tab_button
-            .child(super::labels::tab(&e, selected))
+            .child(super::labels::tab(&e, selected, show_card_number))
             .on_press_down(move |event: &nsh_core::PressEvent| {
                 if event.clicks >= 2 {
                     ui.terminal_rename.set(Some(rename.clone()));
@@ -170,7 +170,7 @@ fn tab(ui: Ui, e: Entry, capacity: Memo<f32>) -> impl IntoElement {
             .on_press(move |_: &nsh_core::PressEvent| ui.open_terminal(id.clone()));
         let mut cell = view()
             .relative()
-            .w(move || px(base_width.min(capacity.get())))
+            .w(move || px(base_width.min(max_tab_w.get())))
             .h_full()
             .flex_shrink_0()
             .window_drag(false)
@@ -209,10 +209,17 @@ pub fn header(ui: Ui) -> impl IntoElement {
         let cur = current(ui)?;
         Some(ui.snapshot.with(|s| super::worktrees::entry_scope(s, &cur)))
     });
+    let show_card_number = computed(move || {
+        !matches!(
+            active_scope.get(),
+            Some(super::worktrees::WorktreeScope::CardWorktree(_))
+        )
+    });
     let inventory = computed(move || {
         let Some(target_scope) = active_scope.get() else {
             return Vec::new();
         };
+        let show_num = show_card_number.get();
         ui.snapshot.with(|s| {
             ui.closing_terminals.with(|closing| {
                 ui.terminal_entries.with(|rows| {
@@ -225,7 +232,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                         .map(|e| {
                             (
                                 e.saved.id.clone(),
-                                e.title(),
+                                super::labels::tab_label_text(e, show_num),
                                 e.hint(),
                                 e.ended(),
                                 e.inactive(),
@@ -278,29 +285,21 @@ pub fn header(ui: Ui) -> impl IntoElement {
         )
     });
     let width = signal(1000f32);
-    let capacity = computed(move || {
-        let w = width.get();
-        let controls = if ui.terminal_sidebar.get() {
-            0.
-        } else {
-            96. + (crate::frame::chrome_left_padding() - 56.).max(0.)
-        };
-        let right_controls = crate::frame::chrome_right_padding() - 10.;
-        (w - (w * 0.35).min(340.) - 196. - controls - right_controls).max(40.)
-    });
+    let max_tab_w = computed(move || (width.get() * 0.5).max(80.));
     let strip = element_ref();
     let active = computed(move || ui.terminal_selection.get());
     effect(move || {
         let selected = active.get();
         let tabs = super::scope_tabs(ui);
-        let cap = capacity.get();
+        let cap = max_tab_w.get();
+        let show_num = show_card_number.get();
         let _ = inventory.get();
         let mut offset = 0.;
         for e in &tabs {
             if e.saved.id == selected {
                 break;
             }
-            offset += super::labels::tab_width(e).min(cap);
+            offset += super::labels::tab_width(e, show_num).min(cap);
         }
         strip.scroll_to(
             Point {
@@ -334,91 +333,142 @@ pub fn header(ui: Ui) -> impl IntoElement {
             move || super::controls(ui),
         ))
         .child(
-            scroll()
-                .horizontal()
-                .scrollbar(false)
-                .element_ref(&strip)
-                .w(move || {
-                    let cap = capacity.get();
-                    let total = super::scope_tabs(ui)
-                        .iter()
-                        .map(|e| super::labels::tab_width(e).min(cap))
-                        .sum::<f32>();
-                    px(total.min(cap).max(0.))
-                })
+            view()
+                .flex_1()
                 .min_w(px(0.))
                 .h_full()
-                .child(dynamic(move || {
-                    let _ = inventory.get();
-                    let tabs = untracked(|| super::scope_tabs(ui));
-                    let mut strip = view().h_full().flex_row().items_center().window_drag(true);
-                    for e in tabs {
-                        strip = strip.child(tab(ui, e, capacity));
-                    }
-                    strip
-                })),
-        )
-        .child(chrome_button_disabled(
-            Icon::Plus,
-            format!(
-                "New terminal in current worktree · {}",
-                crate::commands::shortcuts::NEW_TERMINAL_DISPLAY
-            ),
-            move || ui.pending.get(),
-            move |_| new_tab(ui),
-        ))
-        .child(
-            action("▾", Variant::Quiet, move |_| machine_menu(ui))
-                .accessibility_label(|| Some("Choose terminal worktree or machine".into())),
-        )
-        .child(chrome_button_disabled(
-            Icon::Agent,
-            "Open Agent",
-            move || ui.pending.get(),
-            move |_| open_ephemeral_agent(ui),
-        ))
-        .child(view().flex_1().min_w(px(24.)).h_full().window_drag(true))
-        .child(dynamic(move || {
-            let _ = context.get();
-            let s = ui.snapshot.get_untracked();
-            let cur = untracked(|| current(ui));
-            let scope_tabs_now = untracked(|| super::scope_tabs(ui));
-            let more_anchor = element_ref();
-
-            let mut context_bar = view()
-                .window_drag(false)
+                .overflow_hidden()
                 .flex_row()
                 .items_center()
-                .justify_end()
-                .gap_1p5()
-                .min_w(px(0.))
-                .w(move || px((width.get() * 0.35).min(340.)))
-                .flex_shrink_0();
-
-            if let Some(ref e) = cur {
-                if let Some(card) = e.card.clone() {
-                    let terminal = e.saved.id.clone();
-                    context_bar = context_bar.child(
-                        view()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .overflow_hidden()
-                            .tooltip(
-                                hint_tooltip(format!(
-                                    "#{} {}\n{}",
-                                    card.number,
-                                    card.title,
-                                    if e.inferred_card {
-                                        "Card inferred from directory or branch"
-                                    } else {
-                                        "Open task Card"
+                .gap_1()
+                .window_drag(true)
+                .child(
+                    view()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .h_full()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .window_drag(true)
+                        .child(
+                            scroll()
+                                .horizontal()
+                                .scrollbar(false)
+                                .element_ref(&strip)
+                                .min_w(px(0.))
+                                .h_full()
+                                .child(dynamic(move || {
+                                    let _ = inventory.get();
+                                    let show_num = show_card_number.get_untracked();
+                                    let tabs = untracked(|| super::scope_tabs(ui));
+                                    let mut strip =
+                                        view().h_full().flex_row().items_center().window_drag(true);
+                                    for e in tabs {
+                                        strip = strip.child(tab(ui, e, max_tab_w, show_num));
                                     }
-                                ))
-                                .placement(Placement::Bottom),
-                            )
-                            .child(
+                                    strip
+                                })),
+                        )
+                        .child(chrome_button_disabled(
+                            Icon::Plus,
+                            format!(
+                                "New terminal in current worktree · {}",
+                                crate::commands::shortcuts::NEW_TERMINAL_DISPLAY
+                            ),
+                            move || ui.pending.get(),
+                            move |_| new_tab(ui),
+                        ))
+                        .child(
+                            action("▾", Variant::Quiet, move |_| machine_menu(ui))
+                                .flex_shrink_0()
+                                .accessibility_label(|| {
+                                    Some("Choose terminal worktree or machine".into())
+                                }),
+                        )
+                        .child(chrome_button_disabled(
+                            Icon::Agent,
+                            "Open Agent",
+                            move || ui.pending.get(),
+                            move |_| open_ephemeral_agent(ui),
+                        ))
+                        .child(view().flex_1().min_w(px(0.)).h_full().window_drag(true)),
+                )
+                .child(dynamic(move || {
+                    let _ = context.get();
+                    let s = ui.snapshot.get_untracked();
+                    let cur = untracked(|| current(ui));
+                    let scope_tabs_now = untracked(|| super::scope_tabs(ui));
+                    let more_anchor = element_ref();
+
+                    let mut context_bar = view()
+                        .window_drag(false)
+                        .flex_row()
+                        .items_center()
+                        .justify_end()
+                        .gap_1p5()
+                        .min_w(px(0.))
+                        .max_w(move || px((width.get() * 0.35).min(340.)))
+                        .overflow_hidden()
+                        .flex_shrink(1.);
+
+                    if let Some(ref e) = cur {
+                        if let Some(card) = e.card.clone() {
+                            let terminal = e.saved.id.clone();
+                            context_bar = context_bar.child(
+                                view()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .overflow_hidden()
+                                    .tooltip(
+                                        hint_tooltip(format!(
+                                            "#{} {}\n{}",
+                                            card.number,
+                                            card.title,
+                                            if e.inferred_card {
+                                                "Card inferred from directory or branch"
+                                            } else {
+                                                "Open task Card"
+                                            }
+                                        ))
+                                        .placement(Placement::Bottom),
+                                    )
+                                    .child(
+                                        canban_ui_kit::press_target()
+                                            .w_full()
+                                            .min_w(px(0.))
+                                            .h(px(30.))
+                                            .justify_center()
+                                            .px_2()
+                                            .rounded(px(5.))
+                                            .bg(CLEAR)
+                                            .hover(|st| st.bg(SURFACE))
+                                            .focus(|st| st.border_1().border_color(ACCENT))
+                                            .child(
+                                                label(format!("#{} {}", card.number, card.title))
+                                                    .text_color(if e.inferred_card {
+                                                        MUTED
+                                                    } else {
+                                                        TEXT
+                                                    })
+                                                    .w_full()
+                                                    .truncate(),
+                                            )
+                                            .accessibility_label(move || {
+                                                Some("Open current Card".into())
+                                            })
+                                            .on_press(move |_: &()| {
+                                                ui.terminal_card(
+                                                    card.id.clone(),
+                                                    Some(terminal.clone()),
+                                                )
+                                            }),
+                                    ),
+                            );
+                        } else if let Some(project) = e.project_id.clone() {
+                            context_bar = context_bar.child(
                                 canban_ui_kit::press_target()
-                                    .w_full()
+                                    .flex_1()
                                     .min_w(px(0.))
                                     .h(px(30.))
                                     .justify_center()
@@ -427,69 +477,51 @@ pub fn header(ui: Ui) -> impl IntoElement {
                                     .bg(CLEAR)
                                     .hover(|st| st.bg(SURFACE))
                                     .focus(|st| st.border_1().border_color(ACCENT))
-                                    .child(
-                                        label(format!("#{} {}", card.number, card.title))
-                                            .text_color(if e.inferred_card { MUTED } else { TEXT })
-                                            .w_full()
-                                            .truncate(),
+                                    .child(label(e.project_name.clone()).w_full().truncate())
+                                    .accessibility_label(move || {
+                                        Some("Open current Project".into())
+                                    })
+                                    .on_press(move |_: &()| ui.select_project(project.clone())),
+                            );
+                        } else if let Some(cwd) = e.cwd() {
+                            let machine = e
+                                .location
+                                .as_ref()
+                                .map(|l| l.machine.as_str())
+                                .unwrap_or("local");
+                            let title =
+                                super::worktrees::display_directory_path(&cwd, &e.host_id, machine);
+                            context_bar = context_bar.child(
+                                view()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .h(px(30.))
+                                    .justify_center()
+                                    .px_2()
+                                    .overflow_hidden()
+                                    .tooltip(
+                                        hint_tooltip(e.cwd().unwrap_or_default())
+                                            .placement(Placement::Bottom),
                                     )
-                                    .accessibility_label(move || Some("Open current Card".into()))
-                                    .on_press(move |_: &()| {
-                                        ui.terminal_card(card.id.clone(), Some(terminal.clone()))
-                                    }),
-                            ),
-                    );
-                } else if let Some(project) = e.project_id.clone() {
-                    context_bar = context_bar.child(
-                        canban_ui_kit::press_target()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .h(px(30.))
-                            .justify_center()
-                            .px_2()
-                            .rounded(px(5.))
-                            .bg(CLEAR)
-                            .hover(|st| st.bg(SURFACE))
-                            .focus(|st| st.border_1().border_color(ACCENT))
-                            .child(label(e.project_name.clone()).w_full().truncate())
-                            .accessibility_label(move || Some("Open current Project".into()))
-                            .on_press(move |_: &()| ui.select_project(project.clone())),
-                    );
-                } else if let Some(cwd) = e.cwd() {
-                    let machine = e
-                        .location
-                        .as_ref()
-                        .map(|l| l.machine.as_str())
-                        .unwrap_or("local");
-                    let title = super::worktrees::display_directory_path(&cwd, &e.host_id, machine);
-                    context_bar = context_bar.child(
-                        view()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .h(px(30.))
-                            .justify_center()
-                            .px_2()
-                            .overflow_hidden()
-                            .tooltip(
-                                hint_tooltip(e.cwd().unwrap_or_default())
-                                    .placement(Placement::Bottom),
-                            )
-                            .child(
-                                muted(compact(&title, if ui.narrow.get() { 14 } else { 32 }))
-                                    .w_full()
-                                    .truncate(),
-                            ),
-                    );
-                }
-            }
+                                    .child(
+                                        muted(compact(
+                                            &title,
+                                            if ui.narrow.get() { 14 } else { 32 },
+                                        ))
+                                        .w_full()
+                                        .truncate(),
+                                    ),
+                            );
+                        }
+                    }
 
-            // Compare the observed directory; workspace selection belongs to the tree.
-            if let Some(ref e) = cur {
-                let scope = super::worktrees::entry_scope(&s, e);
-                let git = super::worktrees::scope_git_summary(&s, &scope, &scope_tabs_now);
-                let branch = e.location.as_ref().and_then(|l| l.branch.clone());
-                let target = super::worktrees::compare_target(&s, e);
-                let hint = match &target {
+                    // Compare the observed directory; workspace selection belongs to the tree.
+                    if let Some(ref e) = cur {
+                        let scope = super::worktrees::entry_scope(&s, e);
+                        let git = super::worktrees::scope_git_summary(&s, &scope, &scope_tabs_now);
+                        let branch = e.location.as_ref().and_then(|l| l.branch.clone());
+                        let target = super::worktrees::compare_target(&s, e);
+                        let hint = match &target {
                     Some(_) => format!(
                         "View changes in Git\nBranch: {}\nDirectory: {}\nWorking tree: {}",
                         branch.as_deref().unwrap_or("Detached HEAD"),
@@ -501,83 +533,92 @@ pub fn header(ui: Ui) -> impl IntoElement {
                             .into()
                     }
                 };
-                let limit = if ui.narrow.get() { 10 } else { 18 };
-                let mut pill = canban_ui_kit::press_target()
-                    .h(px(30.))
-                    .max_w(move || px(if ui.narrow.get() { 160. } else { 250. }))
-                    .min_w(px(0.))
-                    .px_2()
-                    .rounded(px(5.))
-                    .flex_row()
-                    .gap_1()
-                    .items_center()
-                    .bg(CLEAR)
-                    .hover(|st| st.bg(SURFACE))
-                    .focus(|st| st.border_1().border_color(ACCENT))
-                    .disabled(target.is_none())
-                    .accessibility_label(|| Some("View terminal changes in Git".into()))
-                    .child(icon(Icon::Branch).w(px(13.)).h(px(13.)).flex_shrink_0())
-                    .child(
-                        muted(compact(
-                            branch.as_deref().unwrap_or("No Git checkout"),
-                            limit,
-                        ))
-                        .min_w(px(0.))
-                        .truncate(),
-                    );
-                if git.dirty {
-                    pill = pill
-                        .child(
-                            label(format!("+{}", git.additions))
-                                .text_size(px(11.))
-                                .font_family(MONO_FONT)
-                                .text_color(SUCCESS)
-                                .flex_shrink_0(),
-                        )
-                        .child(
-                            label(format!("−{}", git.deletions))
-                                .text_size(px(11.))
-                                .font_family(MONO_FONT)
-                                .text_color(DANGER)
-                                .flex_shrink_0(),
-                        );
-                }
-                for (count, arrow) in [(git.ahead, "↑"), (git.behind, "↓")] {
-                    if count > 0 {
-                        pill = pill.child(
-                            muted(format!("{arrow}{count}"))
-                                .text_size(px(11.))
-                                .flex_shrink_0(),
+                        let limit = if ui.narrow.get() { 10 } else { 18 };
+                        let mut pill = canban_ui_kit::press_target()
+                            .h(px(30.))
+                            .max_w(move || px(if ui.narrow.get() { 160. } else { 250. }))
+                            .min_w(px(0.))
+                            .px_2()
+                            .rounded(px(5.))
+                            .flex_row()
+                            .gap_1()
+                            .items_center()
+                            .bg(CLEAR)
+                            .hover(|st| st.bg(SURFACE))
+                            .focus(|st| st.border_1().border_color(ACCENT))
+                            .disabled(target.is_none())
+                            .accessibility_label(|| Some("View terminal changes in Git".into()))
+                            .child(icon(Icon::Branch).w(px(13.)).h(px(13.)).flex_shrink_0())
+                            .child(
+                                muted(compact(
+                                    branch.as_deref().unwrap_or("No Git checkout"),
+                                    limit,
+                                ))
+                                .min_w(px(0.))
+                                .truncate(),
+                            );
+                        if git.dirty {
+                            pill = pill
+                                .child(
+                                    label(format!("+{}", git.additions))
+                                        .text_size(px(11.))
+                                        .font_family(MONO_FONT)
+                                        .text_color(SUCCESS)
+                                        .flex_shrink_0(),
+                                )
+                                .child(
+                                    label(format!("−{}", git.deletions))
+                                        .text_size(px(11.))
+                                        .font_family(MONO_FONT)
+                                        .text_color(DANGER)
+                                        .flex_shrink_0(),
+                                );
+                        }
+                        for (count, arrow) in [(git.ahead, "↑"), (git.behind, "↓")] {
+                            if count > 0 {
+                                pill = pill.child(
+                                    muted(format!("{arrow}{count}"))
+                                        .text_size(px(11.))
+                                        .flex_shrink_0(),
+                                );
+                            }
+                        }
+                        pill = pill.on_press(move |_: &()| {
+                            if let Some(target) = &target {
+                                super::worktrees::open_compare_target(ui, target);
+                            }
+                        });
+                        context_bar = context_bar.child(
+                            view()
+                                .flex_shrink(1.)
+                                .min_w(px(0.))
+                                .tooltip(hint_tooltip(hint).placement(Placement::Bottom))
+                                .child(pill),
                         );
                     }
-                }
-                pill = pill.on_press(move |_: &()| {
-                    if let Some(target) = &target {
-                        super::worktrees::open_compare_target(ui, target);
-                    }
-                });
-                context_bar = context_bar.child(
-                    view()
-                        .flex_shrink_0()
-                        .min_w(px(0.))
-                        .tooltip(hint_tooltip(hint).placement(Placement::Bottom))
-                        .child(pill),
-                );
-            }
 
-            if let Some(e) = cur {
-                let id = e.saved.id.clone();
-                context_bar = context_bar.child(
-                    chrome_button(Icon::More, "Terminal actions", move |_| {
-                        anchored(ui, id.clone(), more_anchor)
-                    })
-                    .element_ref(&more_anchor),
-                );
-            }
-            context_bar
-        }))
-        .child(crate::hosts::trigger_pill(ui))
-        .child(crate::overview::trigger_pill(ui))
+                    if let Some(e) = cur {
+                        let id = e.saved.id.clone();
+                        context_bar = context_bar.child(
+                            chrome_button(Icon::More, "Terminal actions", move |_| {
+                                anchored(ui, id.clone(), more_anchor)
+                            })
+                            .element_ref(&more_anchor),
+                        );
+                    }
+                    context_bar
+                })),
+        )
+        .child(
+            view()
+                .flex_shrink_0()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .window_drag(false)
+                .child(crate::hosts::trigger_pill(ui))
+                .child(crate::overview::trigger_pill(ui)),
+        )
 }
 pub fn rename_dialog(ui: Ui) -> impl IntoElement {
     when(

@@ -1,24 +1,5 @@
 //! Shared Terminal presentation: sidebar metadata and compact tab labels.
 use super::*;
-
-pub fn provider(e: &Entry) -> View {
-    let Some((mark, name)) = e.provider() else {
-        return view();
-    };
-    view()
-        .flex_row()
-        .items_center()
-        .gap_1()
-        .min_w(px(0.))
-        .tooltip(hint_tooltip(name).placement(Placement::Bottom))
-        .child(icon(mark).w(px(14.)).h(px(14.)))
-        .child(
-            muted(e.profile().unwrap_or_default().to_owned())
-                .flex_1()
-                .min_w(px(0.))
-                .truncate(),
-        )
-}
 pub const SIDEBAR_TITLE_MAX_CHARS: usize = 32;
 
 /// Truncates a sidebar session title to at most `SIDEBAR_TITLE_MAX_CHARS` characters,
@@ -219,99 +200,67 @@ fn sidebar_status_label_raw(e: &Entry) -> Option<AnyElement> {
             .into_element(),
     )
 }
-pub fn profile_width(e: &Entry) -> f32 {
-    (text_width(e.profile().unwrap_or_default()) + 22.).clamp(52., 128.)
-}
-pub fn stage_width(e: &Entry) -> f32 {
-    (text_width(e.stage.as_deref().unwrap_or_default()) + 4.).clamp(40., 112.)
-}
 fn text_width(text: &str) -> f32 {
     text.chars()
         .map(|c| if c.is_ascii() { 7.5 } else { 12. })
         .sum()
 }
-pub fn tab_width(e: &Entry) -> f32 {
-    let text = e.title().chars().count() as f32 * 7.;
-    if e.agent.is_some() {
-        (text + profile_width(e) + stage_width(e) + 78.).clamp(280., 380.)
-    } else {
-        let icon_extra = if e.provider().is_some() { 20. } else { 0. };
-        (text + 58. + icon_extra).clamp(136. + icon_extra, 230.)
+
+/// Compact display label for a Terminal tab; full Card title and column stay in
+/// `context_bar`, the sidebar, and the hover tooltip.
+pub fn tab_label_text(e: &Entry, show_card_number: bool) -> String {
+    if let Some(name) = &e.saved.name {
+        return name.clone();
     }
+    if e.agent.is_some() {
+        let profile = e.profile().unwrap_or("agent");
+        if show_card_number && let Some(card) = &e.card {
+            return format!("#{} @{profile}", card.number);
+        }
+        return format!("@{profile}");
+    }
+    e.title()
 }
-pub fn tab(e: &Entry, selected: bool) -> View {
+
+pub fn has_status_mark(e: &Entry) -> bool {
+    use canban_types::HerdrStatus;
+    !matches!(
+        e.herdr_status(),
+        HerdrStatus::PlainShell | HerdrStatus::Ended
+    )
+}
+
+pub fn tab_width(e: &Entry, show_card_number: bool) -> f32 {
+    let label_w = text_width(&tab_label_text(e, show_card_number));
+    let status_extra = if has_status_mark(e) { 18. } else { 0. };
+    let icon_extra = if e.provider().is_some() { 20. } else { 0. };
+    (label_w + 68. + status_extra + icon_extra).clamp(112., 210.)
+}
+
+pub fn tab(e: &Entry, selected: bool, show_card_number: bool) -> View {
     let weight = if selected {
         FontWeight::SEMIBOLD
     } else {
         FontWeight::NORMAL
     };
     let title_color = if selected { TEXT } else { MUTED };
-    let title = if e.agent.is_some() && e.saved.name.is_none() {
-        let card = e.card.as_ref().unwrap();
-        let number = format!("#{}", card.number);
-        view()
-            .flex_1()
-            .min_w(px(text_width(&number) + 2.))
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .child(
-                label(number)
-                    .font_weight(weight)
-                    .text_color(title_color)
-                    .flex_shrink_0(),
-            )
-            .child(
-                label(card.title.clone())
-                    .font_weight(weight)
-                    .text_color(title_color)
-                    .flex_1()
-                    .min_w(px(0.))
-                    .truncate(),
-            )
-    } else {
-        view().flex_1().min_w(px(0.)).child(
-            label(e.title())
-                .font_weight(weight)
-                .text_color(title_color)
-                .w_full()
-                .truncate(),
-        )
-    };
-    if e.agent.is_some() {
-        view()
-            .flex_1()
-            .min_w(px(0.))
-            .overflow_hidden()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .child(title)
-            .child(
-                muted(e.stage.clone().unwrap_or_default())
-                    .w(px(stage_width(e)))
-                    .flex_shrink_0()
-                    .truncate(),
-            )
-            .child(provider(e).w(px(profile_width(e))).flex_shrink_0())
-    } else if let Some((mark, _)) = e.provider() {
-        view()
-            .flex_1()
-            .min_w(px(0.))
-            .overflow_hidden()
-            .flex_row()
-            .items_center()
-            .gap_1p5()
-            .child(icon(mark).w(px(14.)).h(px(14.)).flex_shrink_0())
-            .child(title)
-    } else {
-        view()
-            .flex_1()
-            .min_w(px(0.))
-            .overflow_hidden()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .child(title)
+    let label_text = tab_label_text(e, show_card_number);
+    let mut row = view()
+        .flex_1()
+        .min_w(px(0.))
+        .overflow_hidden()
+        .flex_row()
+        .items_center()
+        .gap_1p5();
+    if let Some((mark, _)) = e.provider() {
+        row = row.child(icon(mark).w(px(14.)).h(px(14.)).flex_shrink_0());
     }
+    row.child(
+        label(label_text)
+            .font_weight(weight)
+            .text_color(title_color)
+            .flex_1()
+            .min_w(px(0.))
+            .truncate(),
+    )
 }

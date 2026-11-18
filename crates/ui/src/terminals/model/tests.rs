@@ -2391,11 +2391,22 @@ fn mounted_tabs_header_updates_across_project_root_and_worktree_selection_and_ma
             .any(|(t, w)| t == "Terminal 18" && *w == FontWeight::SEMIBOLD),
         "current CardWorktree shell `Terminal 18` must appear in top tabs as SEMIBOLD: {texts_card:?}"
     );
+    let default_profile_tag = format!("@{}", Config::default().profiles[0].id);
     assert!(
         texts_card
             .iter()
-            .any(|(t, w)| t == "Worktree Card Task" && *w == FontWeight::NORMAL),
-        "sibling CardWorktree Agent tab must appear alongside current shell in NORMAL weight: {texts_card:?}"
+            .any(|(t, w)| t == &default_profile_tag && *w == FontWeight::NORMAL),
+        "sibling CardWorktree Agent tab must appear as compact `@profile` in NORMAL weight: {texts_card:?}"
+    );
+    assert!(
+        texts_card.iter().any(|(t, _)| t == "#1 Worktree Card Task"),
+        "top-right context_bar must still render full Card title `#1 Worktree Card Task`: {texts_card:?}"
+    );
+    assert!(
+        !texts_card
+            .iter()
+            .any(|(t, _)| t == "Worktree Card Task" || t == "develop"),
+        "managed Agent tab must not duplicate standalone Card title or column name: {texts_card:?}"
     );
     assert!(
         texts_card.iter().any(|(t, _)| t == "+27") && texts_card.iter().any(|(t, _)| t == "−5"),
@@ -3731,4 +3742,342 @@ fn external_directories_render_under_other_section_header_and_compact_local_home
         remote_scope.display_name(&s, std::slice::from_ref(remote_entry), None),
         scratch_path
     );
+}
+
+#[test]
+fn compact_terminal_tabs_never_push_notifications_or_hosts_out_of_header_bounds() {
+    use nsh_core::{
+        ApproxTextEngine, Bounds, Core, EventKind, EventPayload, MountItem, NodeId, Points,
+        element::JsEvent, geometry::size, prelude::*,
+    };
+    use std::collections::{HashMap, HashSet};
+
+    // 1. Unit checks for compact tab labels and widths across scopes.
+    let mut s = fixture();
+    s.projects[0].directory = "/repo/p1".into();
+    s.cards[0].number = 124;
+    s.cards[0].stage = "develop".into();
+    s.cards[0].title =
+        "terminal tab 上如果显示了 card title + column + agent 会非常长，现在还会把通知中心挤到窗口外"
+            .into();
+    s.cards[0].worktree = Some("/repo/p1-wt/c1".into());
+    observe_fixture_locations(&mut s);
+
+    let entries = crate::terminals::entries(&s);
+    let card_agent = entries
+        .iter()
+        .find(|e| e.card.as_ref().is_some_and(|c| c.id == "c1") && e.agent.is_some())
+        .expect("card agent entry");
+    let expected_profile = format!("@{}", card_agent.profile().unwrap());
+    assert_eq!(
+        crate::terminals::labels::tab_label_text(card_agent, false),
+        expected_profile
+    );
+    assert_eq!(
+        crate::terminals::labels::tab_label_text(card_agent, true),
+        format!("#124 {expected_profile}")
+    );
+    assert!(
+        crate::terminals::labels::tab_width(card_agent, false) <= 210.0,
+        "compact agent tab width must stay <= 210pt"
+    );
+    assert!(
+        crate::terminals::labels::tab_width(card_agent, true) <= 210.0,
+        "shared-scope agent tab width with #num must stay <= 210pt"
+    );
+
+    // 2. Layout checks across widths (884pt normal split, 640pt narrow, 420pt extreme narrow)
+    //    with 5 tabs in the same CardWorktree, remote hosts pill, and notification alerts.
+    fn run_layout_probe(header_width: f32, sidebar_open: bool) {
+        #[component]
+        fn BoundsProbe() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = crate::presenter::Ui::new();
+            let mut s = fixture();
+            s.projects[0].directory = "/repo/p1".into();
+            s.projects[0].target_branch = Some("main".into());
+            s.cards[0].number = 124;
+            s.cards[0].stage = "develop".into();
+            s.cards[0].title =
+                "terminal tab 上如果显示了 card title + column + agent 会非常长，现在还会把通知中心挤到窗口外"
+                    .into();
+            s.cards[0].worktree = Some("/repo/p1-wt/c1".into());
+            s.cards[0].branch = Some("canban-0afd/124-very-long-branch-name".into());
+            s.cards[0].attention = Some("Needs review".into());
+            s.host_summaries.insert(
+                "gpu-box".into(),
+                HostSummary {
+                    id: "gpu-box".into(),
+                    name: "gpu-box".into(),
+                    is_local: false,
+                    transport_label: "SSH".into(),
+                    endpoint_label: "gpu-box".into(),
+                    ssh_target: Some("gpu-box".into()),
+                    server_id: None,
+                    connection: HostConnectionState::Connected {
+                        rtt_ms: 4,
+                        api_version: canban_updater::DESKTOP_API,
+                        version: "test".into(),
+                        platform: "linux-x86_64".into(),
+                    },
+                    active_agents: 2,
+                    max_agents: 4,
+                    project_count: 1,
+                    reconnect_count: 0,
+                    last_synced_at: None,
+                },
+            );
+
+            // Add a second managed agent + 3 shells in the same CardWorktree (5 tabs total).
+            let mut rev_run = s.terminals[0].agent.clone().unwrap();
+            rev_run.profile.id = "reviewer".into();
+            rev_run.profile.preset = Some("claude".into());
+            rev_run.stage = "review".into();
+            rev_run.terminal = Some("pty-rev".into());
+            let rev_id = Conversation::key("c1", "reviewer");
+            s.terminals.push(TerminalEntry {
+                id: rev_id.clone(),
+                conversation_id: Some(rev_id),
+                number: 2,
+                name: None,
+                origin_project_id: Some("p1".into()),
+                origin_card_id: Some("c1".into()),
+                agent_engine: None,
+                runtime: None,
+                agent: Some(rev_run),
+                created_at: 2,
+            });
+            for idx in 1..=3u64 {
+                let id = format!("c1-shell-{idx}");
+                s.terminals.push(TerminalEntry {
+                    id: id.clone(),
+                    conversation_id: None,
+                    number: idx + 10,
+                    name: Some(format!("Terminal {idx}")),
+                    origin_project_id: Some("p1".into()),
+                    origin_card_id: Some("c1".into()),
+                    agent_engine: None,
+                    runtime: Some(TerminalRuntime {
+                        machine: "local".into(),
+                        owner_core_id: None,
+                        core_id: Some("core".into()),
+                        terminal: Some(format!("pty-{id}")),
+                        state: "running".into(),
+                        connection: "connected".into(),
+                        error: None,
+                        agent_status: None,
+                        agent_turn: None,
+                        observed_agent: None,
+                        waiting: None,
+                    }),
+                    agent: None,
+                    created_at: idx + 10,
+                });
+                s.terminal_contexts.push(TerminalContext {
+                    machine: "local".into(),
+                    terminal_id: id.clone(),
+                    core_id: "core".into(),
+                    terminal: format!("pty-{id}"),
+                    cwd: Some("/repo/p1-wt/c1".into()),
+                    project_id: Some("p1".into()),
+                    card_id: Some("c1".into()),
+                    branch: Some("canban-0afd/124-very-long-branch-name".into()),
+                    dirty: true,
+                    additions: 120,
+                    deletions: 45,
+                    ..Default::default()
+                });
+            }
+            observe_fixture_locations(&mut s);
+
+            let first_id = s.terminals[0].id.clone();
+            ui.snapshot.set(s);
+            ui.snapshot_ready.set(true);
+            ui.project.set("p1".into());
+            ui.page.set("terminals".into());
+            ui.terminal_sidebar.set(true);
+            ui.open_terminal(first_id);
+
+            view()
+                .w_full()
+                .h(px(42.))
+                .child(
+                    canban_ui_kit::press_target()
+                        .w(px(0.))
+                        .h(px(0.))
+                        .accessibility_label(Some("Hide Sidebar".into()))
+                        .on_press(move |_: &()| ui.terminal_sidebar.set(false)),
+                )
+                .child(crate::terminals::tabs::header(ui))
+        }
+
+        struct FrameTree {
+            alive: HashSet<NodeId>,
+            parents: HashMap<NodeId, NodeId>,
+            frames: HashMap<NodeId, Bounds<Points>>,
+            labels: HashMap<String, NodeId>,
+        }
+
+        impl FrameTree {
+            fn new() -> Self {
+                Self {
+                    alive: HashSet::new(),
+                    parents: HashMap::new(),
+                    frames: HashMap::new(),
+                    labels: HashMap::new(),
+                }
+            }
+            fn apply(&mut self, batch: &nsh_core::MountBatch) {
+                for item in &batch.items {
+                    match item {
+                        MountItem::Create { id, .. } => {
+                            self.alive.insert(*id);
+                        }
+                        MountItem::Insert { parent, child, .. } => {
+                            self.parents.insert(*child, *parent);
+                        }
+                        MountItem::Remove { id } => {
+                            self.parents.remove(id);
+                        }
+                        MountItem::Delete { id } => {
+                            self.alive.remove(id);
+                            self.parents.remove(id);
+                            self.frames.remove(id);
+                        }
+                        MountItem::Frame { id, frame } => {
+                            self.frames.insert(*id, *frame);
+                        }
+                        MountItem::ViewProps { id, props } => {
+                            if let Some(label) = &props.accessibility.label {
+                                self.labels.insert(label.to_string(), *id);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            fn is_mounted(&self, mut id: NodeId) -> bool {
+                if !self.alive.contains(&id) {
+                    return false;
+                }
+                let mut guard = 0;
+                while id != nsh_core::ROOT_ID {
+                    let Some(&parent) = self.parents.get(&id) else {
+                        return false;
+                    };
+                    id = parent;
+                    guard += 1;
+                    if guard > 256 {
+                        return false;
+                    }
+                }
+                true
+            }
+            fn page_bounds(&self, mut id: NodeId) -> Option<(f32, f32)> {
+                let frame = *self.frames.get(&id)?;
+                let mut x = 0.0f32;
+                let mut guard = 0;
+                while id != nsh_core::ROOT_ID {
+                    let f = self.frames.get(&id)?;
+                    x += f.origin.x.0;
+                    id = *self.parents.get(&id)?;
+                    guard += 1;
+                    if guard > 256 {
+                        return None;
+                    }
+                }
+                Some((x, x + frame.size.width.0))
+            }
+            fn find_label_prefix(&self, prefix: &str) -> NodeId {
+                *self
+                    .labels
+                    .iter()
+                    .find(|(lbl, id)| lbl.starts_with(prefix) && self.is_mounted(**id))
+                    .unwrap_or_else(|| panic!("mounted label starting with `{prefix}` not found"))
+                    .1
+            }
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(header_width), px(42.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<BoundsProbe>());
+        let mut tree = FrameTree::new();
+
+        let pump = |core: &mut Core<ApproxTextEngine>, tree: &mut FrameTree| {
+            for _ in 0..8 {
+                let had_batch = if let Some(batch) = core.commit() {
+                    tree.apply(&batch);
+                    true
+                } else {
+                    false
+                };
+                let mut events = Vec::new();
+                core.take_events(&mut events);
+                let mut dispatched = false;
+                for ev in events {
+                    match ev {
+                        JsEvent::Event(id, kind, payload) => {
+                            core.component_event(id, kind, &payload);
+                            dispatched = true;
+                        }
+                        JsEvent::LayoutListener {
+                            host,
+                            id,
+                            listener,
+                            frame,
+                        } => {
+                            core.component_layout(host, id, &listener, frame);
+                            dispatched = true;
+                        }
+                        _ => {}
+                    }
+                }
+                if !had_batch && !dispatched {
+                    break;
+                }
+            }
+        };
+
+        pump(&mut core, &mut tree);
+        if !sidebar_open {
+            let btn = *tree.labels.get("Hide Sidebar").unwrap();
+            assert!(core.component_event(btn, EventKind::Press, &EventPayload::None));
+            pump(&mut core, &mut tree);
+        }
+
+        let notif_id = tree.find_label_prefix("Activity & Notifications");
+        let (notif_left, notif_right) = tree
+            .page_bounds(notif_id)
+            .expect("Activity & Notifications bounds");
+        assert!(
+            notif_right - notif_left > 20.0,
+            "Notification Center pill collapsed at width {header_width}: ({notif_left}, {notif_right})"
+        );
+        assert!(
+            notif_left >= 0.0 && notif_right <= header_width + 0.5,
+            "Notification Center pushed out of {header_width}pt header (sidebar_open={sidebar_open}): left={notif_left}, right={notif_right}"
+        );
+
+        let hosts_id = tree.find_label_prefix("Connected Hosts");
+        let (hosts_left, hosts_right) = tree.page_bounds(hosts_id).expect("Connected Hosts bounds");
+        assert!(
+            hosts_right - hosts_left > 20.0,
+            "Hosts pill collapsed at width {header_width}: ({hosts_left}, {hosts_right})"
+        );
+        assert!(
+            hosts_left >= 0.0 && hosts_right <= notif_left + 0.5,
+            "Hosts pill overlaps or overflows at {header_width}pt (sidebar_open={sidebar_open}): ({hosts_left}, {hosts_right}) vs notif_left={notif_left}"
+        );
+    }
+
+    for (w, sidebar_open) in [
+        (1200.0, true),
+        (884.0, true),
+        (640.0, true),
+        (420.0, true),
+        (884.0, false),
+        (560.0, false),
+    ] {
+        run_layout_probe(w, sidebar_open);
+    }
 }
