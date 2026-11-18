@@ -7,6 +7,13 @@
 **Turn Kanban cards into automated coding workflows, without replacing your native agent CLIs.**
 
 <p align="center">
+  <a href="https://github.com/jjyr/canban/releases"><img src="https://img.shields.io/github/v/release/jjyr/canban?label=release" alt="Latest release" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/jjyr/canban" alt="Apache-2.0 License" /></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue" alt="macOS and Linux" />
+  <img src="https://img.shields.io/badge/built%20with-Rust-orange" alt="Built with Rust" />
+</p>
+
+<p align="center">
   <img src="docs/assets/canban_intro.gif" width="1000" alt="Canban demo: Kanban, Workflow, and Herdr" />
 </p>
 
@@ -19,6 +26,7 @@
   <a href="#philosophy">Philosophy</a> ·
   <a href="#highlights">Highlights</a> ·
   <a href="#installation">Installation</a> ·
+  <a href="docs/README.md">Docs</a> ·
   <a href="#related-software-and-acknowledgements">Related Software</a> ·
   <a href="#license">License</a>
 </p>

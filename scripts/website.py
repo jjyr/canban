@@ -230,20 +230,69 @@ def changelog_body(lang, labels, releases):
       </main>{footer(lang, labels)}</div>'''
 
 
-def document(lang, page, body, strings, labels):
+def structured_data(lang, page, title, description, strings, labels, latest_release=None):
+    """Build page-scoped Schema.org JSON-LD without invisible FAQ claims."""
+    language = "zh-CN" if lang == "zh" else "en"
+    home_url = ORIGIN + route(lang)
+    page_url = ORIGIN + route(lang, page)
+    schema = copy.deepcopy(load("schema.json"))
+    graph = schema["@graph"]
+    for item in graph:
+        item["@id"] = home_url + ("#website" if item["@type"] == "WebSite" else "#software")
+        item["url"] = home_url
+        item["inLanguage"] = language
+        item["description"] = strings["meta_desc"]
+        if item["@type"] == "SoftwareApplication":
+            item["installUrl"] = ORIGIN + route(lang, "install")
+            item["releaseNotes"] = ORIGIN + route(lang, "changelog")
+            if page:
+                item.pop("featureList", None)
+            if latest_release:
+                item["softwareVersion"] = latest_release["tag_name"]
+                item["dateModified"] = latest_release["published_at"]
+    graph.append({
+        "@type": "CollectionPage" if page == "changelog" else "WebPage",
+        "@id": page_url + "#webpage",
+        "url": page_url,
+        "name": title,
+        "description": description,
+        "inLanguage": language,
+        "isPartOf": {"@id": home_url + "#website"},
+        "about": {"@id": home_url + "#software"},
+    })
+    if page:
+        graph.append({
+            "@type": "BreadcrumbList",
+            "@id": page_url + "#breadcrumb",
+            "itemListElement": [
+                {"@type": "ListItem", "position": 1, "name": labels["home"], "item": home_url},
+                {"@type": "ListItem", "position": 2, "name": labels[page], "item": page_url},
+            ],
+        })
+    if page == "install":
+        graph.append({
+            "@type": "FAQPage",
+            "@id": page_url + "#faq",
+            "url": page_url,
+            "inLanguage": language,
+            "mainEntity": [
+                {
+                    "@type": "Question",
+                    "name": question,
+                    "acceptedAnswer": {"@type": "Answer", "text": answer},
+                }
+                for question, answer in labels["faq_items"]
+            ],
+        })
+    return schema
+
+
+def document(lang, page, body, strings, labels, latest_release=None):
     path = route(lang, page)
     title = strings["meta_title"] if not page else labels["install_title"] if page == "install" else labels["changelog"] + " — Canban"
     description = strings["meta_desc"] if not page else labels["install_desc"] if page == "install" else labels["release_intro"]
     locale, language = ("zh_CN", "zh-CN") if lang == "zh" else ("en_US", "en")
-    schema = copy.deepcopy(load("schema.json"))
-    for item in schema["@graph"]:
-        item["@id"] = ORIGIN + route(lang) + ("#website" if item["@type"] == "WebSite" else "#software")
-        item["url"] = ORIGIN + route(lang)
-        item["inLanguage"] = language
-        item["description"] = strings["meta_desc"]
-        item.pop("featureList", None)
-        if item["@type"] == "SoftwareApplication":
-            item["installUrl"] = ORIGIN + route(lang, "install")
+    schema = structured_data(lang, page, title, description, strings, labels, latest_release)
     alternates = "\n".join(f'<link rel="alternate" hreflang="{code}" href="{ORIGIN + route(value, page)}">'
                             for code, value in (("en", "en"), ("zh-CN", "zh"), ("x-default", "en")))
     # A tiny early redirect preserves legacy bookmarks, other parameters and channel hashes.
@@ -291,18 +340,20 @@ def build(output, releases):
             shutil.copyfile(source, output / source.name)
     shutil.copyfile(ROOT / "scripts/install.sh", output / "install.sh")
     locales, pages = load("locales.json"), load("pages.json")
+    latest_release = releases[0] if releases else None
+    lastmod = f'<lastmod>{latest_release["published_at"][:10]}</lastmod>' if latest_release else ""
     for lang in ("en", "zh"):
         for page in ("", "install", "changelog"):
             body = localize_home(lang, locales[lang]) if not page else install_body(lang, pages[lang]) if page == "install" else changelog_body(lang, pages[lang], releases)
             destination = output / route(lang, page).lstrip("/") / "index.html"
             destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_text(document(lang, page, body, locales[lang], pages[lang]))
+            destination.write_text(document(lang, page, body, locales[lang], pages[lang], latest_release))
     urls = []
     for page in ("", "install", "changelog"):
         alternates = "".join(f'<xhtml:link rel="alternate" hreflang="{code}" href="{ORIGIN + route(lang, page)}" />'
                              for code, lang in (("en", "en"), ("zh-CN", "zh"), ("x-default", "en")))
         for lang in ("en", "zh"):
-            urls.append(f'<url><loc>{ORIGIN + route(lang, page)}</loc>{alternates}</url>')
+            urls.append(f'<url><loc>{ORIGIN + route(lang, page)}</loc>{lastmod}{alternates}</url>')
     (output / "sitemap.xml").write_text('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">\n' + "\n".join(urls) + "\n</urlset>\n")
 
 

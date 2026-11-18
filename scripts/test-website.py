@@ -75,8 +75,32 @@ class WebsiteTest(unittest.TestCase):
                     self.assertNotIn("localStorage", text)
                     for attrs, script in page.scripts:
                         if attrs.get("type") == "application/ld+json":
-                            self.assertNotIn("FAQPage", script)
-                            json.loads(script)
+                            graph = json.loads(script)["@graph"]
+                            by_type = {item["@type"]: item for item in graph}
+                            software = by_type["SoftwareApplication"]
+                            self.assertEqual(software["softwareVersion"], self.releases[0]["tag_name"])
+                            self.assertEqual(software["dateModified"], self.releases[0]["published_at"])
+                            self.assertEqual(software["releaseNotes"], website.ORIGIN + website.route(lang, "changelog"))
+                            webpage = by_type["CollectionPage" if section == "changelog" else "WebPage"]
+                            self.assertEqual(webpage["url"], website.ORIGIN + route)
+                            if not section:
+                                self.assertIn("featureList", software)
+                                self.assertNotIn("FAQPage", by_type)
+                                self.assertNotIn("BreadcrumbList", by_type)
+                            else:
+                                self.assertIn("BreadcrumbList", by_type)
+                            if section == "install":
+                                faq = by_type["FAQPage"]
+                                expected_faqs = [
+                                    (q, a) for q, a in website.load("pages.json")[lang]["faq_items"]
+                                ]
+                                actual_faqs = [
+                                    (item["name"], item["acceptedAnswer"]["text"])
+                                    for item in faq["mainEntity"]
+                                ]
+                                self.assertEqual(actual_faqs, expected_faqs)
+                            elif section == "changelog":
+                                self.assertNotIn("FAQPage", by_type)
                         if attrs.get("type") == "application/json":
                             self.assertIn("copied_label", json.loads(script))
                     if section == "install":
@@ -116,6 +140,7 @@ class WebsiteTest(unittest.TestCase):
         expected = {website.ORIGIN + website.route(lang, page) for lang in ("en", "zh") for page in ("", "install", "changelog")}
         self.assertEqual({entry.find("s:loc", ns).text for entry in entries}, expected)
         for entry in entries:
+            self.assertEqual(entry.find("s:lastmod", ns).text, self.releases[0]["published_at"][:10])
             self.assertEqual(len(entry.findall("x:link", ns)), 3)
             self.assertTrue(all(link.attrib["href"] in expected for link in entry.findall("x:link", ns)))
 

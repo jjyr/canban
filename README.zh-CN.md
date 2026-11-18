@@ -2,11 +2,15 @@
   <img src="crates/ui/assets/app-icon.svg" width="84" alt="Canban 图标" />
 </p>
 
-<h1 align="center">Canban</h1>
+# Canban
+
+**把 Kanban 卡片变成自动化编码工作流，同时完整保留你的原生 Agent CLI。**
 
 <p align="center">
-  <strong>Focus on Human Context.</strong><br />
-  Canban = Kanban + Workflow + Herdr
+  <a href="https://github.com/jjyr/canban/releases"><img src="https://img.shields.io/github/v/release/jjyr/canban?label=release" alt="最新版本" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/jjyr/canban" alt="Apache-2.0 协议" /></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue" alt="支持 macOS 与 Linux" />
+  <img src="https://img.shields.io/badge/built%20with-Rust-orange" alt="使用 Rust 构建" />
 </p>
 
 <p align="center">
@@ -18,10 +22,11 @@
 </p>
 
 <p align="center">
-  <a href="https://canban.dev/?lang=zh"><strong>官网 (canban.dev)</strong></a> ·
+  <a href="https://canban.dev/zh/"><strong>官网 (canban.dev)</strong></a> ·
   <a href="#设计哲学">设计哲学</a> ·
   <a href="#核心亮点">核心亮点</a> ·
   <a href="#安装">安装</a> ·
+  <a href="docs/README.md">架构文档</a> ·
   <a href="#相关软件与致谢">相关软件与致谢</a> ·
   <a href="#开源协议">开源协议</a>
 </p>

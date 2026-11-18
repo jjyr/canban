@@ -1,7 +1,7 @@
 {
   "en": {
-    "meta_title": "Canban — AI-Native Kanban Workbench for Coding Agents (Kanban + Workflow + Herdr)",
-    "meta_desc": "Canban is an open-source native macOS and Linux Kanban workbench for coding agents. Maintain Human Context on Kanban cards, automate isolated Git worktrees & Queue Merge with custom Workflows, and run Claude Code, Codex, or Agy inside Herdr persistent PTY terminals.",
+    "meta_title": "Canban — Native Kanban Workbench for Coding Agents",
+    "meta_desc": "Open-source macOS & Linux Kanban workbench for Claude Code, Codex, and native agent CLIs with isolated Git worktree workflows and persistent PTYs.",
     "ch_1": "WORKBENCH",
     "ch_2": "CONTEXT",
     "ch_3": "TOPOLOGY",
@@ -69,8 +69,8 @@
     "changelog": "Changelog"
   },
   "zh": {
-    "meta_title": "Canban — 面向 AI 编程 Agent 的原生 Kanban 工作台 (Kanban + Workflow + Herdr)",
-    "meta_desc": "Canban 是开源原生 macOS 与 Linux 编程 Agent 看板工作台：用 Kanban 卡片维护 Human Context，通过自定义 Workflow 自动隔离 Git Worktree 与 Queue Merge，并在 Herdr 持久化 PTY 终端中直接运行 Claude Code、Codex、Agy 等原生 Agent CLI。",
+    "meta_title": "Canban — 面向 AI 编程 Agent 的原生 Kanban 工作台",
+    "meta_desc": "开源原生 macOS 与 Linux 编程 Agent 看板工作台：支持 Claude Code、Codex 等原生 CLI，提供 Git Worktree 隔离工作流、Queue Merge 与持久化终端。",
     "ch_1": "工作台",
     "ch_2": "上下文",
     "ch_3": "并行拓扑",
