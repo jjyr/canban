@@ -163,8 +163,12 @@ pub fn overview_at(snapshot: &Snapshot, at: u64) -> Vec<OverviewRow> {
                     .as_ref()
                     .is_some_and(|v| v["status"]["state"].as_str().is_none())
                 && at.saturating_sub(run.updated_at) < 3_000;
+            let checking_on_restart = run.connection_state == "checking" && run.error.is_none();
             if !run.finished()
-                && (runtime == "unknown" && run.state != "starting" && !awaiting_first_status
+                && (runtime == "unknown"
+                    && run.state != "starting"
+                    && !awaiting_first_status
+                    && !checking_on_restart
                     || run.close_state == "error")
             {
                 reasons.push(OverviewReason {

@@ -732,3 +732,32 @@ fn pr_updates_notify_skip_self_actions_and_chime_only_on_changes_requested_or_cl
     project(&mut s, &events);
     assert_eq!(delivery.observe(&sound_items(&s)), vec!["event:pr-closed"]);
 }
+
+#[test]
+fn checking_connection_state_does_not_emit_transient_recovery_reminder() {
+    let (mut s, events) = fixture();
+    s.terminals.push(agent_terminal(
+        "c:codex",
+        json!({
+            "project_id":"p","card_id":"c","number":1,"stage":"develop","trigger":"interactive",
+            "profile":Config::default().profiles[0],"instruction":"Chat","state":"blocked",
+            "terminal":"t-gate","cwd":"/tmp","input_path":"in","connection_state":"checking",
+            "observed":{"state":"live","turn":1,"status":{"state":"done"}},
+            "lifecycle":{"observed_at":null,"idle_since":null},
+            "updated_at":1
+        }),
+    ));
+    project(&mut s, &events);
+    assert!(
+        reminders(&s).is_empty(),
+        "transient post-restart checking state should not emit recovery reminders: {:?}",
+        reminders(&s)
+    );
+
+    // Once the probe reports an actual disconnect, recovery surfaces immediately.
+    s.terminals[0].agent.as_mut().unwrap().connection_state = "unavailable".into();
+    project(&mut s, &events);
+    let rems = reminders(&s);
+    assert_eq!(rems.len(), 1);
+    assert_eq!(rems[0].id, "recovery:c:codex");
+}

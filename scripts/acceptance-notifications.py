@@ -9,6 +9,8 @@ import subprocess
 import tempfile
 import time
 
+import acceptance_lib as al
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--native-bundle', type=Path)
 args = parser.parse_args()
@@ -25,29 +27,22 @@ log = (base/'server.log').open('w')
 server = subprocess.Popen([str(cli), 'serve'], env=env, stdout=log, stderr=log)
 
 def call(method, params=None):
-    r = subprocess.run([str(cli), "--full",'call', method, json.dumps(params or {})],
-                       env=env, capture_output=True, text=True, timeout=45)
-    if r.returncode:
-        raise RuntimeError(r.stderr)
-    return json.loads(r.stdout)
+    return al.call(cli, env, method, params, timeout=45)
 
-def wait(predicate, label):
-    deadline = time.monotonic()+40
-    while time.monotonic() < deadline:
-        try:
-            snapshot = call('app.snapshot')
-            if predicate(snapshot):
-                return snapshot
-        except RuntimeError:
-            pass
-        time.sleep(.15)
-    raise RuntimeError(f'Timed out: {label}\n{(base/"server.log").read_text()}')
+def wait(predicate, label, timeout=40):
+    return al.wait_until(
+        lambda: call('app.snapshot'),
+        predicate,
+        label,
+        timeout=timeout,
+        log_path=base / 'server.log',
+    )
 
 def items(card):
     return [i for i in call('notifications.list') if i['card_id'] == card['id']]
 
 def read(card):
-    sequence = max(e['sequence'] for e in call('timeline.list', {'card_id': card['id'], 'limit': 200})['events'])
+    sequence = max(e['sequence'] for e in al.card_events(call, card['id']))
     return call('notifications.read', {'card_id':card['id'], 'sequence':sequence})
 
 def run(card):
@@ -121,16 +116,16 @@ try:
     assert call('utilities.state')['preferences']['notification_sound'] is False
     call('utilities.configure', {'notification_sound':True})
     saved = call('app.snapshot')['card_reads']
-    call('app.shutdown');server.wait(timeout=15)
-    server = subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log)
-    wait(
-        lambda s: s['card_reads'] == saved
-        and any(
-            t['id'] == gate_run['id']
-            and (t.get('agent') or {}).get('connection_state') == 'connected'
-            for t in s['terminals']
-        ),
-        'durable read positions and reconnected gate terminal',
+    server, _ = al.restart_server(
+        cli,
+        env,
+        log,
+        server,
+        call,
+        terminal_ids=[gate_run['id']],
+        extra_predicate=lambda s: s['card_reads'] == saved,
+        label='durable read positions and reconnected gate terminal',
+        log_path=base / 'server.log',
     )
     gate_items = items(cards['gate'])
     assert len(gate_items) == 1 and not gate_items[0]['unread'], gate_items

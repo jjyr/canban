@@ -14,6 +14,8 @@ import subprocess
 import tempfile
 import time
 
+import acceptance_lib as al
+
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--native', action='store_true')
 options = parser.parse_args()
@@ -78,25 +80,17 @@ server = ui = None
 
 
 def call(method, params=None):
-    r = subprocess.run([str(cli), '--full', 'call', method, json.dumps(params or {})],
-                       env=env, capture_output=True, text=True, timeout=45)
-    if r.returncode:
-        raise RuntimeError(r.stderr)
-    return json.loads(r.stdout)
+    return al.call(cli, env, method, params, timeout=45)
 
 
 def wait(predicate, label, timeout=50):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            snapshot = call('app.snapshot')
-        except RuntimeError:
-            time.sleep(.15)
-            continue
-        if predicate(snapshot):
-            return snapshot
-        time.sleep(.15)
-    raise RuntimeError(label + ' timed out: ' + str(base) + '\n' + (base / 'server.log').read_text())
+    return al.wait_until(
+        lambda: call('app.snapshot'),
+        predicate,
+        label,
+        timeout=timeout,
+        log_path=base / 'server.log',
+    )
 
 
 def start():
@@ -158,18 +152,22 @@ try:
     time.sleep(.5)
     assert agent(call('app.snapshot'))['number'] == run['number']
     # Restart only AppServer. The Core still owns the original live process.
-    call('app.shutdown')
-    server.wait(timeout=15)
-    start()
-    restored = wait(lambda s: agent(s)['connection_state'] == 'connected', 'restored binding')
+    server, restored = al.restart_server(
+        cli, env, log, server, call, label='restored binding', log_path=base / 'server.log'
+    )
     assert agent(restored)['observed']['pid'] == before['pid']
     assert agent(restored)['provider_session_id'] == before['session']
-    completed_at = time.monotonic()
     send(terminal, 'finish')
     ended = wait(lambda s: agent(s)['state'] == 'idle_closed'
                  and (agent(s).get('observed') or {}).get('state') == 'finished',
                  'completed idle exit', timeout=50)
-    assert time.monotonic() - completed_at >= 28
+    al.assert_event_interval(
+        call,
+        card['id'],
+        'execution.reported',
+        'execution.idle_close_requested',
+        min_ms=28_000,
+    )
     closed = agent(ended)
     assert closed['state'] == 'idle_closed' and closed['lifecycle']['close_reason'] == 'idle'
     assert any(r['state'] == 'completed' and r['terminal_id'] == entry['id'] for r in ended['reports'])

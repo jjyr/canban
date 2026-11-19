@@ -4,6 +4,7 @@
 """
 import argparse, json, os, plistlib, shutil, subprocess, tempfile, time
 from pathlib import Path
+import acceptance_lib as al
 
 args=argparse.ArgumentParser();args.add_argument('--native',action='store_true');options=args.parse_args()
 repo=Path(__file__).resolve().parents[1]
@@ -24,9 +25,7 @@ def start():
   except RuntimeError:time.sleep(.1)
  raise RuntimeError('AppServer failed to start')
 def call(method,p=None):
- r=subprocess.run([str(cli),"--full",'call',method,json.dumps(p or {})],env=env,text=True,capture_output=True,timeout=90)
- if r.returncode:raise RuntimeError(r.stderr)
- return json.loads(r.stdout)
+ return al.call(cli,env,method,p,timeout=90)
 def agents(s,card_id=None):
  return [t['agent'] for t in s['terminals'] if t.get('agent') and (card_id is None or t['agent']['card_id']==card_id)]
 def wait(predicate,label):
@@ -385,7 +384,7 @@ workspace:
  assert [(a['profile']['id'],a['number']) for a in agents(s,developed['id'])]==before_agents,'manual Review restarted an Agent'
  transition_runs=[r for r in s['workflow_runs'] if r['card_id']==developed['id']]
  assert len(transition_runs)==2 and all(r['state']=='completed' for r in transition_runs)
- move_event=next(e for e in call('timeline.list',{'card_id':developed['id'],'limit':200})['events'] if e['kind']=='card.stage_changed' and e['data']['to']=='review')
+ move_event=next(e for e in al.card_events(call,developed['id']) if e['kind']=='card.stage_changed' and e['data']['to']=='review')
  assert move_event['data']['stage']=='review' and move_event['data']['card_revision']==developed['revision']+1
  assert (transition_source/'canban-acceptance.txt').read_text()=='Herdr executed the Canban Card task.\n'
  evidence['column_transition']={'project_id':transition_project['id'],'card_id':developed['id'],'event_id':move_event['id'],'agents':before_agents}

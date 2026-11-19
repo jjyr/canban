@@ -2,23 +2,18 @@
 """Real Herdr transport, interactive fixture, durable replies and exact resume."""
 from pathlib import Path
 import json,os,subprocess,tempfile,time
+import acceptance_lib as al
 repo=Path(__file__).resolve().parents[1];base=Path(tempfile.mkdtemp(prefix='cb-interactive-',dir='/private/tmp'));home=base/'home';cli=repo/'target/debug/canban'
 env={**{k:v for k,v in os.environ.items() if not k.startswith('CANBAN_')},'CANBAN_HOME':str(home)};core_env={'HC_SESSION':'default','HC_SOCKET':str(base/'hc.sock'),'XDG_STATE_HOME':str(base/'hc-state'),'XDG_CONFIG_HOME':str(base/'hc-config')}
 env.update(core_env)
 log=open(base/'server.log','w');server=subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log)
 def call(method,p=None):
- r=subprocess.run([str(cli),"--full",'call',method,json.dumps(p or {})],env=env,capture_output=True,text=True,timeout=90)
- if r.returncode:raise RuntimeError(r.stderr)
- return json.loads(r.stdout)
+ return al.call(cli,env,method,p,timeout=90)
 def wait(predicate,label,timeout=45):
- deadline=time.monotonic()+timeout
- while time.monotonic()<deadline:
+ def fetch():
   if server.poll() is not None:raise RuntimeError((base/'server.log').read_text())
-  try:s=call('app.snapshot')
-  except (RuntimeError,FileNotFoundError):time.sleep(.1);continue
-  if predicate(s):return s
-  time.sleep(.15)
- raise RuntimeError(f'{label} timed out\n{(base/"server.log").read_text()}\n{json.dumps(s)[:1500]}')
+  return call('app.snapshot')
+ return al.wait_until(fetch,predicate,label,timeout=timeout,log_path=base/'server.log')
 def agents(s):
  return [{'id':t['id'],**t['agent']} for t in s['terminals'] if t.get('agent')]
 def agent_for(s,profile='developer'):
@@ -89,7 +84,7 @@ steps:
  s=wait(lambda s:any(n['id']==note['id'] and n['body']=='Agent-written database Note' for n in s['notes']),'Agent Note CLI write')
  event=next(e for e in s['note_events'] if e['note_id']==note['id'] and e['kind']=='note.updated')
  assert event['actor']=='@developer' and event['card_id']==card['id'] and event['revision']==2
- card_events=lambda cid:call('timeline.list',{'card_id':cid,'limit':200})['events']
+ card_events=lambda cid:al.card_events(call,cid)
  assert any(e['kind']=='note.updated' and e['data'].get('terminal_id')==first['id'] for e in card_events(card['id']))
  raw=subprocess.run([str(cli),'note','read',note['id']],env=env,capture_output=True,text=True,check=True);assert raw.stdout=='Agent-written database Note'
  stale=subprocess.run([str(cli),'note','write',note['id'],'--revision','1'],input='Stale human overwrite',env=env,capture_output=True,text=True);assert stale.returncode!=0
@@ -98,8 +93,7 @@ steps:
  historical=call('note.revision',{'note_id':note['id'],'revision':1});assert historical['body']=='Original captured context'
  assert json.loads((home/first['input_path']).with_name('context.json').read_text())['notes']==[]
  # Restart the host while the provider is live; reconnect exact binding.
- server.terminate();server.wait(timeout=10);server=subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log)
- s=wait(lambda s:agents(s) and agents(s)[0].get('connection_state')=='connected','live host restart')
+ server,s=al.restart_server(cli,env,log,server,call,graceful=False,label='live host restart',log_path=base/'server.log')
  assert len(agents(s))==1 and agents(s)[0]['terminal']==terminal
  # Temporary transport loss is visible, deduplicated, and never relaunches.
  config['hc']='/usr/bin/false';(home/'config/agents.json').write_text(json.dumps(config));call('config.reload')

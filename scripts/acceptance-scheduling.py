@@ -2,6 +2,7 @@
 """Disposable remote Git + real Herdr PTYs: global slots, depth-first work and human gates."""
 from pathlib import Path
 import json, os, subprocess, tempfile, time
+import acceptance_lib as al
 repo = Path(__file__).resolve().parents[1]
 base = Path(tempfile.mkdtemp(prefix='cb-scheduling-', dir='/private/tmp'))
 home = base / 'home'
@@ -12,18 +13,12 @@ log = open(base/'server.log','w')
 env.update(core_env)
 server = subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log)
 def call(method, params=None):
-    result = subprocess.run([str(cli),"--full",'call',method,json.dumps(params or {})],env=env,capture_output=True,text=True,timeout=90)
-    if result.returncode: raise RuntimeError(result.stderr)
-    return json.loads(result.stdout)
+    return al.call(cli,env,method,params,timeout=90)
 def wait(predicate, label, timeout=60):
-    deadline=time.monotonic()+timeout
-    while time.monotonic()<deadline:
+    def fetch():
         if server.poll() is not None: raise RuntimeError((base/'server.log').read_text())
-        try: snapshot=call('app.snapshot')
-        except RuntimeError: time.sleep(.1);continue
-        if predicate(snapshot): return snapshot
-        time.sleep(.15)
-    raise RuntimeError(label+' timed out; evidence '+str(base))
+        return call('app.snapshot')
+    return al.wait_until(fetch,predicate,label,timeout=timeout,log_path=base/'server.log')
 def git(cwd,*args):
     clean={k:v for k,v in os.environ.items() if k not in ('GIT_DIR','GIT_WORK_TREE','GIT_INDEX_FILE')}
     return subprocess.run(['git','-C',str(cwd),*args],env=clean,capture_output=True,text=True,check=True).stdout.strip()
@@ -36,7 +31,7 @@ def run_for(snapshot,id,stage='develop'):
     return next(a for a in agents(snapshot) if a['card_id']==id and a['stage']==stage and a.get('provider_session_id'))
 def started_seq(snapshot,tid):
     cid=next(a['card_id'] for a in agents(snapshot) if a['id']==tid)
-    return next(e['created_at'] for e in call('timeline.list',{'card_id':cid,'limit':200})['events'] if e['kind']=='execution.started' and e['data'].get('terminal_id')==tid)
+    return next(e['created_at'] for e in al.card_events(call,cid) if e['kind']=='execution.started' and e['data'].get('terminal_id')==tid)
 try:
     wait(lambda _:True,'startup')
     config=json.loads((home/'config/agents.json').read_text());config.update(hc_env=core_env,hc_session=core_env['HC_SESSION'])
