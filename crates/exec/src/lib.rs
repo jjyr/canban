@@ -11,9 +11,12 @@ use std::{
 };
 
 pub use shell_env::{
-    apply_local_path_env_to_command, invalidate_local_shell_path_cache, local_merged_path_string,
-    local_search_paths, merge_local_path_env, probe_shell_path_with,
-    refresh_local_shell_path_if_stale,
+    LocalEnvPolicy, ShellEnvSnapshot, apply_local_path_env_to_command,
+    invalidate_local_shell_env_cache, invalidate_local_shell_path_cache, is_denied_shell_env_key,
+    local_merged_path_string, local_search_paths, local_shell_env_snapshot,
+    merge_local_env_with_policy, merge_local_path_env, merge_shell_env_snapshot,
+    probe_shell_env_with, probe_shell_path_with, probe_shell_snapshot_with,
+    refresh_local_shell_env, refresh_local_shell_path_if_stale,
 };
 
 fn is_executable_file(path: &Path) -> bool {

@@ -18,18 +18,26 @@ pub const DEFAULT_TERMINAL_IDENTITY_ENV: [(&str, &str); 3] = [
 
 /// Merge default Ghostty terminal identity + `hc_env` defaults into a launch environment map
 /// without overwriting any key already set by the caller (`env` > `hc_env` > defaults).
+///
+/// `PATH` in `hc_env` is intentionally deferred to `merge_local_path_env` so remote-machine
+/// launches do not receive the local host's `PATH`.
 pub fn merge_default_terminal_env(
     env: &mut BTreeMap<String, String>,
     hc_env: &BTreeMap<String, String>,
 ) {
+    for (k, v) in hc_env {
+        if k == "PATH" || env.contains_key(k) {
+            continue;
+        }
+        let is_empty_identity =
+            v.is_empty() && DEFAULT_TERMINAL_IDENTITY_ENV.iter().any(|(ik, _)| *ik == k);
+        if !is_empty_identity {
+            env.insert(k.clone(), v.clone());
+        }
+    }
     for (k, default_v) in DEFAULT_TERMINAL_IDENTITY_ENV {
         if !env.contains_key(k) {
-            let v = hc_env
-                .get(k)
-                .filter(|s| !s.is_empty())
-                .map(String::as_str)
-                .unwrap_or(default_v);
-            env.insert(k.to_owned(), v.to_owned());
+            env.insert(k.to_owned(), default_v.to_owned());
         }
     }
 }
@@ -112,13 +120,31 @@ impl Client {
         machine: &str,
         argv: Vec<String>,
         cwd: &str,
+        env: BTreeMap<String, String>,
+        labels: BTreeMap<String, String>,
+    ) -> Result<Value> {
+        self.launch_on_with_policy(
+            machine,
+            argv,
+            cwd,
+            env,
+            labels,
+            LocalEnvPolicy::MinimalPathOnly,
+        )
+    }
+    pub fn launch_on_with_policy(
+        &self,
+        machine: &str,
+        argv: Vec<String>,
+        cwd: &str,
         mut env: BTreeMap<String, String>,
         labels: BTreeMap<String, String>,
+        env_policy: LocalEnvPolicy,
     ) -> Result<Value> {
         ensure!(!argv.is_empty(), "Agent profile has no launch command");
         merge_default_terminal_env(&mut env, &self.config.hc_env);
         if machine == "local" {
-            merge_local_path_env(&mut env, &self.config.hc_env);
+            merge_local_env_with_policy(&mut env, &self.config.hc_env, env_policy);
         }
         let mut p = json!({"argv":argv,"cwd":cwd,"env":env,"labels":labels,"no_parent":true,"no_notify":true,"outlive_parent":true,"wait":false});
         if machine != "local" {
@@ -176,8 +202,12 @@ pub mod stream;
 pub mod transport;
 
 pub use shell_env::{
-    apply_local_path_env_to_command, invalidate_local_shell_path_cache, local_merged_path_string,
-    local_search_paths, merge_local_path_env, refresh_local_shell_path_if_stale,
+    LocalEnvPolicy, ShellEnvSnapshot, apply_local_path_env_to_command,
+    invalidate_local_shell_env_cache, invalidate_local_shell_path_cache, is_denied_shell_env_key,
+    local_merged_path_string, local_search_paths, local_shell_env_snapshot,
+    merge_local_env_with_policy, merge_local_path_env, merge_shell_env_snapshot,
+    probe_shell_env_with, probe_shell_path_with, probe_shell_snapshot_with,
+    refresh_local_shell_env, refresh_local_shell_path_if_stale,
 };
 
 #[cfg(test)]
@@ -228,6 +258,11 @@ mod tests {
             caller_env.get("COLORTERM").map(String::as_str),
             Some("truecolor")
         );
+        assert_eq!(
+            caller_env.get("CUSTOM_FLAG").map(String::as_str),
+            Some("1"),
+            "non-identity hc_env variables must be forwarded into launch env"
+        );
 
         // 3. transport::command injects default Ghostty identity for GUI-launched hc processes
         //    and respects non-empty config.hc_env overrides.
@@ -267,5 +302,40 @@ mod tests {
             override_cmd_envs.get("CUSTOM_FLAG"),
             Some(&Some("1".into()))
         );
+    }
+
+    #[test]
+    fn merge_default_terminal_env_forwards_hc_env_without_overwriting_caller_or_injecting_path() {
+        let mut env = BTreeMap::from([
+            ("CALLER_ONLY".into(), "keep-caller".into()),
+            ("SHARED".into(), "from-caller".into()),
+        ]);
+        let hc_env = BTreeMap::from([
+            ("SHARED".into(), "from-hc".into()),
+            ("HTTP_PROXY".into(), "http://127.0.0.1:7890".into()),
+            ("CARGO_HOME".into(), "/Users/demo/.cargo".into()),
+            ("PATH".into(), "/local/only/bin".into()),
+        ]);
+
+        merge_default_terminal_env(&mut env, &hc_env);
+
+        assert_eq!(
+            env.get("CALLER_ONLY").map(String::as_str),
+            Some("keep-caller")
+        );
+        assert_eq!(env.get("SHARED").map(String::as_str), Some("from-caller"));
+        assert_eq!(
+            env.get("HTTP_PROXY").map(String::as_str),
+            Some("http://127.0.0.1:7890")
+        );
+        assert_eq!(
+            env.get("CARGO_HOME").map(String::as_str),
+            Some("/Users/demo/.cargo")
+        );
+        assert!(
+            !env.contains_key("PATH"),
+            "PATH must remain deferred to merge_local_path_env so remote machines stay isolated"
+        );
+        assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
     }
 }

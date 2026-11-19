@@ -50,9 +50,10 @@ mod tests {
             argv: argv.iter().map(|s| (*s).into()).collect(),
             env: BTreeMap::from([
                 ("CANBAN_CARD".into(), "99".into()),
+                ("CARD_ID".into(), "card-99".into()),
                 ("CANBAN_RUN_DIR".into(), "/tmp/路径 with spaces".into()),
                 (
-                    "CUSTOM".into(),
+                    "CANBAN_CUSTOM".into(),
                     "quotes \" slash \\ newline\n$(touch nope)\u{7f}".into(),
                 ),
             ]),
@@ -134,9 +135,80 @@ mod tests {
     fn rejects_ambiguous_codex_keys_and_empty_commands() {
         let p = profile(Some("codex"));
         let mut req = request(Some(&p), &["codex"]);
-        req.env.insert("a.b".into(), "value".into());
-        assert!(prepare_launch(req).unwrap_err().to_string().contains("a.b"));
+        req.env.insert("CANBAN_BAD.KEY".into(), "value".into());
+        assert!(
+            prepare_launch(req)
+                .unwrap_err()
+                .to_string()
+                .contains("CANBAN_BAD.KEY")
+        );
         assert!(prepare_launch(request(None, &[])).is_err());
+    }
+
+    #[test]
+    fn codex_does_not_leak_secrets_or_host_env_onto_cli_argv() {
+        let p = profile(Some("codex"));
+        let mut req = request(Some(&p), &["codex", "resume", "session-id"]);
+        req.env
+            .insert("OPENAI_API_KEY".into(), "sk-secret-123".into());
+        req.env
+            .insert("ANTHROPIC_API_KEY".into(), "sk-ant-456".into());
+        req.env
+            .insert("AWS_SECRET_ACCESS_KEY".into(), "aws-secret".into());
+        req.env.insert("GH_TOKEN".into(), "ghp_secret".into());
+        req.env
+            .insert("CANBAN_RELAY_TOKEN".into(), "relay-secret".into());
+        req.env
+            .insert("CANBAN_AUTH_SECRET".into(), "auth-secret".into());
+        req.env
+            .insert("SSH_AUTH_SOCK".into(), "/tmp/ssh-agent.sock".into());
+        req.env.insert("HOME".into(), "/Users/demo".into());
+        req.env
+            .insert("PATH".into(), "/opt/homebrew/bin:/usr/bin".into());
+        // Non-allowlisted host keys containing dots must not fail launch.
+        req.env
+            .insert("npm_config_foo.bar".into(), "host-dotted".into());
+
+        let expected_env = req.env.clone();
+        let spec = prepare_launch(req).unwrap();
+
+        // Full env stays in process environment for direct mode and CLI hooks.
+        assert_eq!(spec.env, expected_env);
+
+        let joined_argv = spec.argv.join(" ");
+        for forbidden in [
+            "OPENAI_API_KEY",
+            "sk-secret-123",
+            "ANTHROPIC_API_KEY",
+            "sk-ant-456",
+            "AWS_SECRET_ACCESS_KEY",
+            "aws-secret",
+            "GH_TOKEN",
+            "ghp_secret",
+            "CANBAN_RELAY_TOKEN",
+            "relay-secret",
+            "CANBAN_AUTH_SECRET",
+            "auth-secret",
+            "SSH_AUTH_SOCK",
+            "HOME",
+            "PATH",
+            "npm_config_foo.bar",
+        ] {
+            assert!(
+                !joined_argv.contains(forbidden),
+                "Codex CLI argv must not contain {forbidden:?}: {joined_argv}"
+            );
+        }
+
+        // Allowlisted Canban thread-identity keys still travel on CLI argv.
+        for allowed in ["CANBAN_CARD", "CARD_ID", "CANBAN_RUN_DIR", "CANBAN_CUSTOM"] {
+            let prefix = format!("shell_environment_policy.set.{allowed}=");
+            assert!(
+                spec.argv.iter().any(|arg| arg.starts_with(&prefix)),
+                "expected {allowed} override in Codex argv: {:?}",
+                spec.argv
+            );
+        }
     }
 }
 
@@ -173,7 +245,7 @@ mod acceptance {
                     format!("spool:/tmp/{version}/rpc"),
                 ),
                 (
-                    "CUSTOM_VALUE".into(),
+                    "CANBAN_CUSTOM_VALUE".into(),
                     format!("{version}: \"quote\" \\ newline\n世界\u{7f}"),
                 ),
             ]);

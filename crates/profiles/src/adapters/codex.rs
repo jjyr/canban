@@ -2,11 +2,52 @@ use anyhow::{Result, ensure};
 
 use crate::launch::LaunchSpec;
 
+/// Sensitive key markers that must never be placed on CLI argv (visible in `ps`),
+/// even under an allowlisted prefix such as `CANBAN_*`.
+const SENSITIVE_KEY_MARKERS: &[&str] = &[
+    "SECRET",
+    "TOKEN",
+    "PASSWORD",
+    "PASSWD",
+    "API_KEY",
+    "APIKEY",
+    "PRIVATE_KEY",
+    "AUTH",
+    "CREDENTIAL",
+    "COOKIE",
+    "SESSION_KEY",
+];
+
+/// Returns true if `key` looks like a secret/credential variable that must never
+/// appear on process CLI `argv`.
+pub(crate) fn is_sensitive_env_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    SENSITIVE_KEY_MARKERS
+        .iter()
+        .any(|marker| upper.contains(marker))
+}
+
+/// Only small, non-secret Canban thread-identity variables are forwarded via
+/// Codex's `-c shell_environment_policy.set.<KEY>=<VAL>` CLI override so that
+/// shared Codex daemons isolate per-thread Card/run context without leaking
+/// host secrets onto `ps` argv or risking `ARG_MAX` when host env is inherited.
+///
+/// All other variables remain in `spec.env` for process-environment forwarding.
+pub(crate) fn is_codex_argv_allowlisted_key(key: &str) -> bool {
+    if is_sensitive_env_key(key) {
+        return false;
+    }
+    key == "CARD_ID" || key.starts_with("CANBAN_")
+}
+
 /// Explicit config travels with the thread even when an existing daemon owns
 /// execution. Keep process env as well, for direct mode and CLI-side hooks.
 pub(super) fn prepare(spec: &mut LaunchSpec) -> Result<()> {
-    let mut overrides = Vec::with_capacity(spec.env.len() * 2);
+    let mut overrides = Vec::new();
     for (key, value) in &spec.env {
+        if !is_codex_argv_allowlisted_key(key) {
+            continue;
+        }
         // Codex splits override paths on dots literally, without TOML key parsing.
         ensure!(
             !key.is_empty() && !key.contains(['.', '=', '\0']),
