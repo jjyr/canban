@@ -34,6 +34,22 @@ impl Ops {
         self.git(dir, &["merge-base", "--is-ancestor", branch, base])
             .is_ok_and(|out| out.status.success())
     }
+    /// Best-effort commit SHA of a Card's worktree `HEAD` or local branch.
+    pub fn card_head_sha(&self, project: &Project, card: &Card) -> Option<String> {
+        if let Some(wt) = card.worktree.as_deref().filter(|s| !s.trim().is_empty())
+            && let Ok(sha) = self.checked(Path::new(wt), &["rev-parse", "--verify", "HEAD"])
+            && !sha.trim().is_empty()
+        {
+            return Some(sha.trim().to_owned());
+        }
+        let branch = card.branch.as_deref().filter(|s| !s.trim().is_empty())?;
+        let dir = Path::new(&project.directory);
+        let ref_name = format!("refs/heads/{branch}");
+        self.checked(dir, &["rev-parse", "--verify", &ref_name])
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+    }
 }
 mod names;
 

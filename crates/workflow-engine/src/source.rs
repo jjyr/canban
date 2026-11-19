@@ -693,6 +693,8 @@ pub fn column_details(
                 let text = match event {
                     "card.column_entered" => "Entering this column",
                     "card.column_left" => "Leaving this column",
+                    "github.pr.ci_failed" => "PR CI failed",
+                    "github.pr.ci_succeeded" => "PR CI passed",
                     _ => event,
                 };
                 lines.push(format!("{text} → {} ({name})", rule.start_at));

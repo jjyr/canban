@@ -36,6 +36,7 @@ pub struct AppServer {
     state_signal: (Mutex<()>, std::sync::Condvar),
     github_cli: Arc<canban_github::cli::Service>,
     github_queries: Mutex<std::collections::BTreeMap<String, Value>>,
+    branch_pr_probes: Mutex<std::collections::HashMap<(String, String), std::time::Instant>>,
     identity: String,
     started_at: u64,
     bound_tcp: Mutex<Vec<String>>,
@@ -658,6 +659,7 @@ impl AppServer {
                     .and_then(|b| serde_json::from_slice(&b).ok())
                     .unwrap_or_default(),
             ),
+            branch_pr_probes: Mutex::new(std::collections::HashMap::new()),
             github_cli: Arc::new(canban_github::cli::Service::new(
                 home.join("cache/github/gh"),
             )),

@@ -297,6 +297,52 @@ fn controls() -> impl IntoElement {
                                 .child(status("Needs review", Tone::Attention))
                                 .child(status("Merge held", Tone::Neutral)),
                         )
+                        .child(
+                            view()
+                                .gap_1p5()
+                                .child(muted("PR & CI status pills (Running / Passed / Failed)"))
+                                .child({
+                                    let mk = |num: u64, state: &str, passed: u32, failed: u32, running: u32| {
+                                        canban_ui::components::pr_status::CardPrView {
+                                            card_id: format!("gallery-{num}"),
+                                            repository: "jjyr/canban".into(),
+                                            number: num,
+                                            pr_url: format!("https://github.com/jjyr/canban/pull/{num}"),
+                                            head_sha: "abcdef12".into(),
+                                            merged: false,
+                                            pr_state: "open".into(),
+                                            ci_state: state.into(),
+                                            checks: Some(canban_types::GitHubPrChecks {
+                                                state: state.into(),
+                                                head_sha: "abcdef12".into(),
+                                                url: Some(format!("https://github.com/jjyr/canban/pull/{num}/checks")),
+                                                total: 4,
+                                                passed,
+                                                failed,
+                                                running,
+                                                failed_checks: if failed > 0 {
+                                                    vec![canban_types::GitHubPrCheck {
+                                                        name: "clippy".into(),
+                                                        status: "completed".into(),
+                                                        conclusion: Some("failure".into()),
+                                                        url: Some("https://github.com/jjyr/canban/actions/runs/1/job/2".into()),
+                                                    }]
+                                                } else {
+                                                    vec![]
+                                                },
+                                            }),
+                                            show_pr_chip: true,
+                                        }
+                                    };
+                                    view()
+                                        .flex_row()
+                                        .flex_wrap()
+                                        .gap_2()
+                                        .children(canban_ui::components::pr_status::pill(ui, &mk(148, "running", 2, 0, 2), true))
+                                        .children(canban_ui::components::pr_status::pill(ui, &mk(146, "success", 4, 0, 0), true))
+                                        .children(canban_ui::components::pr_status::pill(ui, &mk(147, "failure", 3, 1, 0), false))
+                                }),
+                        )
                         .child(loading_indicator(
                             "Scanning installed monospaced font families…",
                         ))
@@ -1014,7 +1060,7 @@ pub fn Gallery() -> impl IntoElement {
                     source: source.clone(),
                 }
             };
-            snapshot.github_issues.push(canban_types::GitHubIssueSnapshot { id:"source".into(),project_id:snapshot.cards[0].project_id.clone(),source,title:snapshot.cards[0].title.clone(),body:"## GitHub description\n\nThis is the remote source. Local context remains separate.".into(),state:if pr {"draft".into()} else {"open".into()},author_id:1,author_login:"octocat".into(),labels:vec![],assignees:vec![],updated_at:String::new(),synced_at:canban_types::now() });
+            snapshot.github_issues.push(canban_types::GitHubIssueSnapshot { id:"source".into(),project_id:snapshot.cards[0].project_id.clone(),source,title:snapshot.cards[0].title.clone(),body:"## GitHub description\n\nThis is the remote source. Local context remains separate.".into(),state:if pr {"draft".into()} else {"open".into()},author_id:1,author_login:"octocat".into(),labels:vec![],assignees:vec![],updated_at:String::new(),synced_at:canban_types::now(),pr_head_sha:None,pr_checks:None });
         }
         let prof = canban_types::Config::default().profiles[0].clone();
         let fixture_tid = canban_types::Conversation::key("card-1", &prof.id);
@@ -2813,7 +2859,7 @@ pub fn Gallery() -> impl IntoElement {
                     let source=canban_types::GitHubIssueRef{repository:"jjyr/canban".into(),repository_id:1,issue_id:186,number:186,url:"https://github.com/jjyr/canban/issues/186".into()};
                     snapshot.cards[0].id="github-card".into();
                     snapshot.cards[0].content=canban_types::CardContent::GitHubIssue{source:source.clone()};
-                    snapshot.github_issues.push(canban_types::GitHubIssueSnapshot{assignees:vec![],id:"gallery-issue".into(),project_id:"gallery-project".into(),source,title:"Improve search".into(),body:"## Remote issue\nPreserve context when searching.".into(),state:"open".into(),author_id:1,author_login:"jjyr".into(),labels:vec![],updated_at:"2026-11-09".into(),synced_at:0});
+                    snapshot.github_issues.push(canban_types::GitHubIssueSnapshot{assignees:vec![],id:"gallery-issue".into(),project_id:"gallery-project".into(),source,title:"Improve search".into(),body:"## Remote issue\nPreserve context when searching.".into(),state:"open".into(),author_id:1,author_login:"jjyr".into(),labels:vec![],updated_at:"2026-11-09".into(),synced_at:0,pr_head_sha:None,pr_checks:None});
                     ui.snapshot.set(snapshot);scene.set("workspace".into());ui.open_card("github-card".into());
                 }))
                 .child(action("Settings", Variant::Quiet, move |_| {

@@ -607,3 +607,535 @@ fn github_pr_delivery_is_isolated_from_main_checkout_and_other_cards() {
         .to_string();
     assert_eq!(c2_err, "Connect this Project to GitHub first");
 }
+
+#[test]
+fn branch_pr_discovery_tracks_fast_fail_ci_dedup_rerun_and_triggers_workflow() {
+    let (_dir, app, mut p) = github_setup();
+    let client = app.github.cached_client().unwrap();
+    let seed = |path: &str, data: Value| {
+        client.seed_response(
+            path,
+            &canban_github::cache::Response {
+                data,
+                link: None,
+                etag: None,
+                modified: None,
+                poll_interval: None,
+                validated_at: 1,
+                fetched_at: u64::MAX,
+                cached: false,
+            },
+        );
+    };
+    seed(
+        "/repos/owner/repo",
+        json!({
+            "id": 42,
+            "full_name": "owner/repo",
+            "default_branch": "main",
+            "html_url": "https://github.com/owner/repo"
+        }),
+    );
+
+    p.github = Some(GitHubSource {
+        repository: "owner/repo".into(),
+        repository_id: 42,
+        generation: "gen-1".into(),
+        intake: GitHubIntake::Off,
+        pr_intake: GitHubPrIntake::Off,
+        authors: vec![],
+        labels: vec![],
+        include_drafts: false,
+        paused: false,
+        synced_at: None,
+        error: None,
+    });
+    app.store.lock().unwrap().write(|db| db.save(&p)).unwrap();
+
+    let sources = app
+        .call("workflow.sources", json!({"project_id": p.id}))
+        .unwrap();
+    let wf_yaml = format!(
+        r#"schema: {}
+id: ci-watcher
+name: CI Watcher
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  ci_fix:
+    event: github.pr.ci_failed
+    start_at: notify_ci_fail
+steps:
+  - id: notify_ci_fail
+    uses: notify
+    with:
+      message: "CI failure noticed"
+  - id: done
+    uses: complete
+"#,
+        canban_workflow_engine::migrations::CURRENT
+    );
+    app.call(
+        "workflow.apply",
+        json!({
+            "project_id": p.id,
+            "revision": sources["revision"],
+            "sources": [{"filename": "development.yaml", "source": wf_yaml}],
+        }),
+    )
+    .unwrap();
+
+    let mut card: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"view": "full", "project_id": p.id, "title": "Track PR CI"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            card.branch = Some("canban-0afd/143".into());
+            card.revision += 1;
+            db.save(&card)
+        })
+        .unwrap();
+
+    let sha = "1234567890abcdef1234567890abcdef12345678";
+    seed(
+        "/repos/owner/repo/pulls?state=open&sort=updated&direction=desc&per_page=100",
+        json!([{
+            "number": 148,
+            "state": "open",
+            "html_url": "https://github.com/owner/repo/pull/148",
+            "head": {"ref": "canban-0afd/143", "sha": sha, "label": "owner:canban-0afd/143", "repo": {"id": 42}, "user": {"login": "fixture"}},
+            "base": {"ref": "main"}
+        }]),
+    );
+    seed(
+        "/repos/owner/repo/pulls/148",
+        json!({
+            "number": 148,
+            "state": "open",
+            "merged": false,
+            "html_url": "https://github.com/owner/repo/pull/148",
+            "head": {"ref": "canban-0afd/143", "sha": sha, "label": "owner:canban-0afd/143", "repo": {"id": 42}, "user": {"login": "fixture"}},
+            "base": {"ref": "main"}
+        }),
+    );
+    seed(
+        "/repos/owner/repo/pulls/148/reviews?per_page=100&page=1",
+        json!([]),
+    );
+    seed(
+        "/repos/owner/repo/issues/148/comments?per_page=100&page=1",
+        json!([]),
+    );
+    seed(
+        "/repos/owner/repo/pulls/148/comments?per_page=100&page=1",
+        json!([]),
+    );
+    seed(
+        &format!("/repos/owner/repo/commits/{sha}/status"),
+        json!({"total_count": 0, "statuses": []}),
+    );
+    // Option B fast-fail: clippy failed while test is still in_progress.
+    seed(
+        &format!("/repos/owner/repo/commits/{sha}/check-runs?per_page=100&page=1"),
+        json!({
+            "check_runs": [
+                {"name": "clippy", "status": "completed", "conclusion": "failure", "html_url": "https://github.com/owner/repo/actions/runs/1/job/9"},
+                {"name": "test", "status": "in_progress"}
+            ]
+        }),
+    );
+
+    app.github_discover_branch_prs(&p).unwrap();
+
+    let snap1 = app.snapshot().unwrap();
+    let card1 = snap1.cards.iter().find(|c| c.id == card.id).unwrap();
+    let pr1 = card1.pull_request.as_ref().expect("PR linked from branch");
+    assert_eq!(pr1.number, 148);
+    assert_eq!(pr1.checks, "failure");
+    let summary1 = pr1.checks_summary.as_ref().unwrap();
+    assert_eq!(summary1.failed, 1);
+    assert_eq!(summary1.running, 1);
+    assert_eq!(summary1.failed_checks[0].name, "clippy");
+
+    let failed_events: Vec<_> = snap1
+        .events
+        .iter()
+        .filter(|e| e.card_id == card.id && e.kind == "github.pr.ci_failed")
+        .collect();
+    assert_eq!(failed_events.len(), 1);
+    assert!(
+        snap1
+            .events
+            .iter()
+            .any(|e| e.card_id == card.id && e.kind == "github.pr_linked")
+    );
+    let wf_run = snap1
+        .workflow_runs
+        .iter()
+        .find(|r| r.card_id == card.id && r.workflow_id == "ci-watcher")
+        .expect("CI failed workflow must trigger");
+    assert_eq!(
+        wf_run.inputs["trigger_event"]["kind"],
+        "github.pr.ci_failed"
+    );
+    assert_eq!(wf_run.inputs["trigger_event"]["data"]["number"], 148);
+    // Automated CI workflow took over, clearing passive attention banner.
+    assert!(card1.attention.is_none());
+
+    // Repeated refresh on the same SHA & outcome must not emit a duplicate failure event.
+    app.call("github.pr.refresh", json!({"card_id": card.id}))
+        .unwrap();
+    let snap2 = app.snapshot().unwrap();
+    assert_eq!(
+        snap2
+            .events
+            .iter()
+            .filter(|e| e.card_id == card.id && e.kind == "github.pr.ci_failed")
+            .count(),
+        1
+    );
+
+    // Re-run on GitHub transitions to running, then to success -> emits `github.pr.ci_succeeded`.
+    seed(
+        &format!("/repos/owner/repo/commits/{sha}/check-runs?per_page=100&page=1"),
+        json!({
+            "check_runs": [
+                {"name": "clippy", "status": "in_progress"},
+                {"name": "test", "status": "in_progress"}
+            ]
+        }),
+    );
+    app.call("github.pr.refresh", json!({"card_id": card.id}))
+        .unwrap();
+    let snap_running = app.snapshot().unwrap();
+    assert_eq!(
+        snap_running
+            .cards
+            .iter()
+            .find(|c| c.id == card.id)
+            .unwrap()
+            .pull_request
+            .as_ref()
+            .unwrap()
+            .checks,
+        "running"
+    );
+
+    seed(
+        &format!("/repos/owner/repo/commits/{sha}/check-runs?per_page=100&page=1"),
+        json!({
+            "check_runs": [
+                {"name": "clippy", "status": "completed", "conclusion": "success"},
+                {"name": "test", "status": "completed", "conclusion": "success"}
+            ]
+        }),
+    );
+    app.call("github.pr.refresh", json!({"card_id": card.id}))
+        .unwrap();
+    let snap3 = app.snapshot().unwrap();
+    let pr3 = snap3
+        .cards
+        .iter()
+        .find(|c| c.id == card.id)
+        .unwrap()
+        .pull_request
+        .as_ref()
+        .unwrap();
+    assert_eq!(pr3.checks, "success");
+    assert_eq!(
+        snap3
+            .events
+            .iter()
+            .filter(|e| e.card_id == card.id && e.kind == "github.pr.ci_succeeded")
+            .count(),
+        1
+    );
+
+    // Remote CI summaries stay out of durable SQLite `cards` JSON.
+    let raw_card: String = app
+        .store
+        .lock()
+        .unwrap()
+        .db()
+        .conn
+        .query_row("SELECT data FROM cards WHERE id=?1", [&card.id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(!raw_card.contains("checks_summary"));
+}
+
+#[test]
+fn pr_activity_updates_record_commits_comments_reviews_and_hydrate_ephemeral_bodies() {
+    let (_dir, app, mut project) = github_setup();
+    project.github = Some(GitHubSource {
+        repository: "owner/repo".into(),
+        repository_id: 99,
+        generation: "gen-1".into(),
+        intake: GitHubIntake::Off,
+        pr_intake: GitHubPrIntake::Off,
+        authors: vec![],
+        labels: vec![],
+        include_drafts: false,
+        paused: false,
+        synced_at: None,
+        error: None,
+    });
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| db.save(&project))
+        .unwrap();
+
+    let mut card: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"view": "full", "project_id": project.id, "title": "Track PR activity"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            card.branch = Some("feat/pr-updates".into());
+            card.revision += 1;
+            db.save(&card)
+        })
+        .unwrap();
+
+    let client = app.github.cached_client().unwrap();
+    let seed = |path: &str, data: Value| {
+        client.seed_response(
+            path,
+            &canban_github::cache::Response {
+                data,
+                link: None,
+                etag: None,
+                modified: None,
+                poll_interval: None,
+                validated_at: 1,
+                fetched_at: u64::MAX,
+                cached: false,
+            },
+        );
+    };
+
+    let sha1 = "1111111111111111111111111111111111111111";
+    let sha2 = "2222222222222222222222222222222222222222";
+    let pr1_json = json!({
+        "number": 149,
+        "state": "open",
+        "draft": false,
+        "html_url": "https://github.com/owner/repo/pull/149",
+        "updated_at": "2026-11-19T00:00:00Z",
+        "head": {"ref": "feat/pr-updates", "sha": sha1, "label": "owner:feat/pr-updates", "repo": {"id": 99}, "user": {"login": "fixture"}},
+        "base": {"ref": "main", "repo": {"id": 99}}
+    });
+
+    seed(
+        "/repos/owner/repo",
+        json!({
+            "id": 99,
+            "full_name": "owner/repo",
+            "default_branch": "main",
+            "html_url": "https://github.com/owner/repo"
+        }),
+    );
+    seed(
+        "/repos/owner/repo/pulls?state=open&sort=updated&direction=desc&per_page=100",
+        json!([pr1_json.clone()]),
+    );
+    seed("/repos/owner/repo/pulls/149", pr1_json.clone());
+    seed(
+        &format!(
+            "/repos/owner/repo/pulls?state=open&head={}&per_page=10",
+            canban_github::segment("owner:feat/pr-updates")
+        ),
+        json!([pr1_json]),
+    );
+    seed(
+        &format!("/repos/owner/repo/commits/{sha1}/check-runs?per_page=100&page=1"),
+        json!({"check_runs": [{"name": "test", "status": "completed", "conclusion": "success"}]}),
+    );
+    seed(
+        &format!("/repos/owner/repo/commits/{sha1}/status"),
+        json!({"state": "success", "statuses": []}),
+    );
+    seed(
+        "/repos/owner/repo/issues/149/comments?per_page=100&page=1",
+        json!([]),
+    );
+    seed(
+        "/repos/owner/repo/pulls/149/comments?per_page=100&page=1",
+        json!([]),
+    );
+    seed(
+        "/repos/owner/repo/pulls/149/reviews?per_page=100&page=1",
+        json!([]),
+    );
+
+    // First refresh baselines existing PR state & head SHA.
+    app.call("github.pr.refresh", json!({"card_id": card.id}))
+        .unwrap();
+
+    // Push new commits, add external comment + inline review comment + CHANGES_REQUESTED review + own comment.
+    let pr2_json = json!({
+        "number": 149,
+        "state": "open",
+        "draft": false,
+        "html_url": "https://github.com/owner/repo/pull/149",
+        "updated_at": "2026-11-19T01:00:00Z",
+        "head": {"ref": "feat/pr-updates", "sha": sha2, "repo": {"id": 99}},
+        "base": {"ref": "main", "repo": {"id": 99}}
+    });
+    seed("/repos/owner/repo/pulls/149", pr2_json);
+    seed(
+        &format!("/repos/owner/repo/commits/{sha2}/check-runs?per_page=100&page=1"),
+        json!({"check_runs": [{"name": "test", "status": "completed", "conclusion": "success"}]}),
+    );
+    seed(
+        &format!("/repos/owner/repo/commits/{sha2}/status"),
+        json!({"state": "success", "statuses": []}),
+    );
+    seed(
+        &format!("/repos/owner/repo/compare/{sha1}...{sha2}"),
+        json!({
+            "html_url": format!("https://github.com/owner/repo/compare/{sha1}...{sha2}"),
+            "commits": [
+                {"sha": sha2, "commit": {"message": "Fix edge case"}, "author": {"login": "alice"}}
+            ]
+        }),
+    );
+    seed(
+        "/repos/owner/repo/issues/149/comments?per_page=100&page=1",
+        json!([
+            {
+                "id": 9001,
+                "user": {"login": "alice"},
+                "body": "Remote PR discussion body should stay ephemeral",
+                "html_url": "https://github.com/owner/repo/pull/149#issuecomment-9001"
+            }
+        ]),
+    );
+    seed(
+        "/repos/owner/repo/pulls/149/comments?per_page=100&page=1",
+        json!([
+            {
+                "id": 9002,
+                "user": {"login": "bob"},
+                "path": "crates/ui/src/overview.rs",
+                "line": 42,
+                "body": "Inline review comment body",
+                "html_url": "https://github.com/owner/repo/pull/149#discussion_r9002"
+            }
+        ]),
+    );
+    seed(
+        "/repos/owner/repo/pulls/149/reviews?per_page=100&page=1",
+        json!([
+            {
+                "id": 9003,
+                "user": {"login": "bob"},
+                "state": "CHANGES_REQUESTED",
+                "body": "Please address inline note",
+                "html_url": "https://github.com/owner/repo/pull/149#pullrequestreview-9003"
+            }
+        ]),
+    );
+
+    app.call("github.pr.refresh", json!({"card_id": card.id}))
+        .unwrap();
+
+    let snap = app.snapshot().unwrap();
+    let updated_card = snap.cards.iter().find(|c| c.id == card.id).unwrap();
+    assert!(
+        updated_card
+            .attention
+            .as_deref()
+            .is_some_and(|a| a.starts_with("Changes requested on PR #149"))
+    );
+
+    let updated_ev = snap
+        .events
+        .iter()
+        .find(|e| e.card_id == card.id && e.kind == "github.pr.updated")
+        .unwrap();
+    assert_eq!(
+        updated_ev.data["commits"][0].as_str(),
+        Some("2222222 · Fix edge case")
+    );
+
+    let issue_cmt = snap
+        .events
+        .iter()
+        .find(|e| {
+            e.card_id == card.id
+                && e.kind == "github.pr.commented"
+                && e.data["kind"] == "issue_comment"
+        })
+        .unwrap();
+    assert_eq!(
+        issue_cmt.data["projected_body"].as_str(),
+        Some("Remote PR discussion body should stay ephemeral")
+    );
+
+    let inline_cmt = snap
+        .events
+        .iter()
+        .find(|e| {
+            e.card_id == card.id
+                && e.kind == "github.pr.commented"
+                && e.data["kind"] == "review_comment"
+        })
+        .unwrap();
+    assert_eq!(
+        inline_cmt.data["projected_body"].as_str(),
+        Some("Inline review comment body")
+    );
+    assert_eq!(inline_cmt.data["line"].as_u64(), Some(42));
+
+    let review_ev = snap
+        .events
+        .iter()
+        .find(|e| e.card_id == card.id && e.kind == "github.pr.reviewed")
+        .unwrap();
+    assert_eq!(review_ev.data["state"].as_str(), Some("CHANGES_REQUESTED"));
+    assert_eq!(
+        review_ev.data["projected_body"].as_str(),
+        Some("Please address inline note")
+    );
+
+    // Durable SQLite `events` JSON must NOT mirror remote comment/review prose bodies.
+    let raw_events: Vec<String> = {
+        let store = app.store.lock().unwrap();
+        let mut stmt = store
+            .db()
+            .conn
+            .prepare("SELECT data FROM events WHERE card_id=?1")
+            .unwrap();
+        stmt.query_map([&card.id], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+    for raw in raw_events {
+        assert!(!raw.contains("Remote PR discussion body should stay ephemeral"));
+        assert!(!raw.contains("Inline review comment body"));
+        assert!(!raw.contains("Please address inline note"));
+        assert!(!raw.contains("projected_body"));
+    }
+}

@@ -54,12 +54,14 @@ fn milestone_style(kind: &str) -> MilestoneStyle {
         "review.merged"
         | "github.pr_merged"
         | "github.pr_delivered"
+        | "github.pr.ci_succeeded"
         | "workflow.approved"
         | "card.resolved" => MilestoneStyle::Success,
         "execution.failed"
         | "execution.missing"
         | "review.merge_failed"
         | "review.upstream_sync_failed"
+        | "github.pr.ci_failed"
         | "workflow.script_failed" => MilestoneStyle::Danger,
         "workflow.waiting_for_human"
         | "execution.input_required"
@@ -69,9 +71,31 @@ fn milestone_style(kind: &str) -> MilestoneStyle {
         | "github.pr_publish_unknown"
         | "scheduler.blocked"
         | "card.auto_merge_held" => MilestoneStyle::Attention,
-        "github.pr_published" => MilestoneStyle::PullRequest,
+        "github.pr_published" | "github.pr_linked" | "github.pr.updated" => {
+            MilestoneStyle::PullRequest
+        }
         "card.archived" | "card.removed" => MilestoneStyle::Archive,
         _ => MilestoneStyle::Neutral,
+    }
+}
+
+fn milestone_style_for_event(event: &Event) -> MilestoneStyle {
+    match event.kind.as_str() {
+        "github.pr.reviewed" => match event.data["state"].as_str() {
+            Some("APPROVED") => MilestoneStyle::Success,
+            Some("CHANGES_REQUESTED") => MilestoneStyle::Danger,
+            _ => MilestoneStyle::PullRequest,
+        },
+        "github.pr.state_changed" => {
+            if event.data["merged"] == true {
+                MilestoneStyle::Success
+            } else if event.data["state"].as_str() == Some("closed") {
+                MilestoneStyle::Attention
+            } else {
+                MilestoneStyle::PullRequest
+            }
+        }
+        _ => milestone_style(&event.kind),
     }
 }
 
@@ -160,8 +184,8 @@ pub fn render_connected_interactive(
     render_narrative(ui, event, spine, trailing_detail, on_disclosure).into_element()
 }
 
-fn milestone_badge(kind: &str) -> AnyElement {
-    let style = milestone_style(kind);
+fn milestone_badge(event: &Event) -> AnyElement {
+    let style = milestone_style_for_event(event);
     let circle = |bg_color: ThemeColor, border_color: ThemeColor| {
         view()
             .flex_shrink_0()
@@ -276,6 +300,50 @@ fn fold_pill(fold: MilestoneFold) -> impl IntoElement {
         .child(pill)
 }
 
+fn render_pr_updated_commits(event: &Event) -> Option<AnyElement> {
+    if event.kind != "github.pr.updated" {
+        return None;
+    }
+    let commits = event.data["commits"].as_array().filter(|c| !c.is_empty())?;
+    let mut box_view = view()
+        .gap_1()
+        .px_2p5()
+        .py_1p5()
+        .rounded(px(6.))
+        .bg(INSET)
+        .border_1()
+        .border_color(BORDER);
+    for commit in commits.iter().take(4) {
+        let label_text = if let Some(line) = commit.as_str() {
+            line.trim().to_owned()
+        } else {
+            let sha = commit["sha"].as_str().unwrap_or("");
+            let short_sha: String = sha.chars().take(7).collect();
+            let msg = commit["message"].as_str().unwrap_or("").trim();
+            let first_line = msg.lines().next().unwrap_or("");
+            if short_sha.is_empty() {
+                first_line.to_owned()
+            } else {
+                format!("{short_sha}  {first_line}")
+            }
+        };
+        if label_text.is_empty() {
+            continue;
+        }
+        box_view = box_view.child(
+            text(label_text)
+                .text_size(px(11.5))
+                .text_color(MUTED)
+                .truncate(),
+        );
+    }
+    if commits.len() > 4 {
+        box_view = box_view
+            .child(muted(format!("+{} more commit(s)", commits.len() - 4)).text_size(px(11.)));
+    }
+    Some(box_view.into_element())
+}
+
 fn render_milestone(
     ui: Ui,
     event: Event,
@@ -285,7 +353,7 @@ fn render_milestone(
 ) -> impl IntoElement {
     let top_pad: f32 = if spine.first { 2. } else { 6. };
     let bottom_pad: f32 = if spine.last { 2. } else { 6. };
-    let style = milestone_style(&event.kind);
+    let style = milestone_style_for_event(&event);
     let msg_color = match style {
         MilestoneStyle::Danger => DANGER,
         MilestoneStyle::Attention | MilestoneStyle::Success | MilestoneStyle::PullRequest => TEXT,
@@ -327,12 +395,82 @@ fn render_milestone(
             crate::terminals::open_request(ui, &terminal_id)
         }));
     }
+    if matches!(
+        event.kind.as_str(),
+        "github.pr.ci_failed"
+            | "github.pr.ci_succeeded"
+            | "github.pr_linked"
+            | "github.pr_published"
+    ) {
+        let single_failed_url = event.data["failed_checks"]
+            .as_array()
+            .filter(|arr| arr.len() == 1)
+            .and_then(|arr| arr[0]["url"].as_str())
+            .filter(|u| !u.is_empty())
+            .map(str::to_owned);
+        if let Some(checks_url) = single_failed_url.or_else(|| {
+            event.data["checks_url"]
+                .as_str()
+                .filter(|u| !u.is_empty())
+                .map(str::to_owned)
+        }) {
+            line = line.child(compact_action("Checks ↗", Variant::Quiet, move |_| {
+                crate::github::open_url(ui, checks_url.clone())
+            }));
+        }
+        if let Some(pr_url) = event.data["url"]
+            .as_str()
+            .filter(|u| !u.is_empty())
+            .map(str::to_owned)
+        {
+            line = line.child(compact_action("PR ↗", Variant::Quiet, move |_| {
+                crate::github::open_url(ui, pr_url.clone())
+            }));
+        }
+    } else if matches!(
+        event.kind.as_str(),
+        "github.pr.updated" | "github.pr.reviewed" | "github.pr.state_changed"
+    ) {
+        if let Some(diff_url) = event.data["diff_url"]
+            .as_str()
+            .filter(|u| !u.is_empty())
+            .map(str::to_owned)
+        {
+            line = line.child(compact_action("Diff ↗", Variant::Quiet, move |_| {
+                crate::github::open_url(ui, diff_url.clone())
+            }));
+        }
+        let primary_url = event.data["url"]
+            .as_str()
+            .filter(|u| !u.is_empty())
+            .map(str::to_owned);
+        let pr_url = event.data["pr_url"]
+            .as_str()
+            .filter(|u| !u.is_empty())
+            .map(str::to_owned);
+        if event.kind == "github.pr.reviewed" {
+            if let Some(review_url) = primary_url {
+                line = line.child(compact_action("Review ↗", Variant::Quiet, move |_| {
+                    crate::github::open_url(ui, review_url.clone())
+                }));
+            } else if let Some(pr_url) = pr_url {
+                line = line.child(compact_action("PR ↗", Variant::Quiet, move |_| {
+                    crate::github::open_url(ui, pr_url.clone())
+                }));
+            }
+        } else if let Some(pr_url) = primary_url.or(pr_url) {
+            line = line.child(compact_action("PR ↗", Variant::Quiet, move |_| {
+                crate::github::open_url(ui, pr_url.clone())
+            }));
+        }
+    }
     line = line.child(
         muted(crate::components::activity::age(event.created_at))
             .text_size(px(11.5))
             .flex_shrink_0(),
     );
 
+    let commit_detail = render_pr_updated_commits(&event);
     let mut right = view()
         .flex_1()
         .min_w(px(0.))
@@ -340,6 +478,9 @@ fn render_milestone(
         .pb(px(bottom_pad))
         .gap_2()
         .child(line);
+    if let Some(commits_box) = commit_detail {
+        right = right.child(commits_box);
+    }
     if let Some(detail) = trailing_detail {
         right = right.child(detail);
     }
@@ -355,7 +496,7 @@ fn render_milestone(
                 .flex_shrink_0()
                 .bg(if spine.first { CLEAR } else { BORDER }),
         )
-        .child(milestone_badge(&event.kind))
+        .child(milestone_badge(&event))
         .child(
             view()
                 .w(px(SPINE_WIDTH))
@@ -384,16 +525,27 @@ fn render_narrative(
     let bottom_pad = if spine.last { 0. } else { 8. };
 
     let card = event.card_id.clone();
-    let report_path = event.data["path"].as_str().map(str::to_owned);
+    let is_github_pr_narrative = matches!(
+        event.kind.as_str(),
+        "github.pr.commented" | "github.pr.reviewed"
+    );
+    let report_path = (!event.kind.starts_with("github."))
+        .then(|| event.data["path"].as_str().map(str::to_owned))
+        .flatten();
     let report_version = crate::presenter::event_body_version(&event);
     let cached_report = report_path
         .as_deref()
         .and_then(|p| ui.cached_report_body(&card, p, report_version));
-    let body = signal(
-        cached_report
-            .clone()
-            .unwrap_or_else(|| event.message.clone()),
-    );
+    let initial_body = cached_report
+        .clone()
+        .or_else(|| {
+            event.data["projected_body"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| event.message.clone());
+    let body = signal(initial_body);
     let error = signal(String::new());
     let expanded = signal(false);
     let project_id = event.project_id.clone();
@@ -457,6 +609,7 @@ fn render_narrative(
         .actor
         .strip_prefix("agent:")
         .map(|a| format!("@{a}"))
+        .or_else(|| event.actor.strip_prefix("github:").map(|g| format!("@{g}")))
         .unwrap_or_else(|| {
             if event.actor == "user" {
                 github_login(ui).unwrap_or_else(|| "Me".into())
@@ -472,13 +625,73 @@ fn render_narrative(
         .gap_2()
         .px_3()
         .py_1()
-        .bg(INSET)
-        .child(label(actor).font_weight(FontWeight::MEDIUM))
-        .child(muted(crate::components::activity::age(event.created_at)));
+        .bg(INSET);
+    if is_github_pr_narrative {
+        heading = heading.child(icon_tinted(Icon::GitHub, MUTED).w(px(13.)).h(px(13.)));
+    }
+    heading = heading.child(label(actor).font_weight(FontWeight::MEDIUM));
+    if is_github_pr_narrative {
+        if event.kind == "github.pr.reviewed" {
+            let (badge_label, badge_color, badge_bg) = match event.data["state"].as_str() {
+                Some("APPROVED") => ("Approved", SUCCESS, SUCCESS_SURFACE),
+                Some("CHANGES_REQUESTED") => ("Changes requested", DANGER, DANGER_SURFACE),
+                _ => ("Reviewed", MUTED, CLEAR),
+            };
+            heading = heading.child(
+                view()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded(px(4.))
+                    .bg(badge_bg)
+                    .border_1()
+                    .border_color(BORDER)
+                    .child(
+                        text(badge_label)
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(badge_color),
+                    ),
+            );
+        }
+        if let Some(number) = event.data["number"].as_u64().filter(|n| *n > 0) {
+            heading = heading.child(muted(format!("PR #{number}")).text_size(px(11.5)));
+        }
+        if event.kind == "github.pr.commented"
+            && event.data["kind"].as_str() == Some("review_comment")
+            && let Some(file_path) = event.data["path"].as_str().filter(|p| !p.is_empty())
+        {
+            let loc = match event.data["line"].as_u64() {
+                Some(line) if line > 0 => format!("{file_path}:{line}"),
+                _ => file_path.to_owned(),
+            };
+            heading = heading.child(
+                view()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded(px(4.))
+                    .bg(SURFACE)
+                    .border_1()
+                    .border_color(BORDER)
+                    .child(muted(loc).text_size(px(11.)).truncate()),
+            );
+        }
+    }
+    heading = heading.child(muted(crate::components::activity::age(event.created_at)));
     if was_edited {
         heading = heading.child(muted("· edited").text_size(px(11.5)));
     }
     heading = heading.child(view().flex_1());
+    if is_github_pr_narrative
+        && let Some(gh_url) = event.data["url"]
+            .as_str()
+            .filter(|u| !u.is_empty())
+            .or_else(|| event.data["pr_url"].as_str().filter(|u| !u.is_empty()))
+            .map(str::to_owned)
+    {
+        heading = heading.child(compact_action("GitHub ↗", Variant::Quiet, move |_| {
+            crate::github::open_url(ui, gh_url.clone())
+        }));
+    }
     if is_own_comment {
         let menu_cid = comment_id.clone();
         heading = heading.child(when(
@@ -983,6 +1196,25 @@ fn avatar(ui: Ui, event: &Event) -> AnyElement {
         return frame()
             .tooltip(hint_tooltip(format!("@{profile}")))
             .child(icon_colored(mark, 16.))
+            .into_element();
+    }
+    if let Some(login) = event.actor.strip_prefix("github:") {
+        let short = login
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .take(2)
+            .collect::<String>()
+            .to_uppercase();
+        return frame()
+            .child(initials(if short.is_empty() { "GH" } else { &short }))
+            .child(
+                image(format!("https://github.com/{login}.png?size=64"))
+                    .absolute()
+                    .top(px(0.))
+                    .left(px(0.))
+                    .w(px(AVATAR))
+                    .h(px(AVATAR)),
+            )
             .into_element();
     }
     if event.actor == "user" {

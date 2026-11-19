@@ -27,6 +27,7 @@ pub(crate) struct CardTileModel {
     pub replies: usize,
     pub review_draft: Option<canban_types::ReviewDraft>,
     pub review_running: bool,
+    pub pr_view: Option<crate::components::pr_status::CardPrView>,
 }
 
 impl CardTileModel {
@@ -143,6 +144,7 @@ impl CardTileModel {
         let replies = idx.reply_count(&card.id);
         let review_draft = idx.review_draft(&card.id).cloned();
         let review_running = crate::review::active_review_run(snapshot, &card.id).is_some();
+        let pr_view = crate::components::pr_status::from_card(snapshot, idx, &card);
         Self {
             card,
             live_entries,
@@ -157,6 +159,7 @@ impl CardTileModel {
             replies,
             review_draft,
             review_running,
+            pr_view,
         }
     }
 }
@@ -179,6 +182,7 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
         replies,
         review_draft,
         review_running,
+        pr_view,
         ..
     } = model;
     let reminder_id = card.id.clone();
@@ -405,10 +409,14 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
         })
         .collect();
     let branch = card.branch.clone().filter(|b| !b.is_empty());
+    let pr_pill = pr_view
+        .as_ref()
+        .and_then(|info| crate::components::pr_status::pill(ui, info, true));
     if !chips.is_empty()
         || !running.is_empty()
         || !ephemeral_agents.is_empty()
         || branch.is_some()
+        || pr_pill.is_some()
         || replies > 0
         || review_draft.is_some()
     {
@@ -421,6 +429,9 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
             .gap_1p5()
             .min_w(px(0.))
             .children(chips);
+        if let Some(pr_pill) = pr_pill {
+            left = left.child(pr_pill.key("footer-pr-ci"));
+        }
         if let Some(draft) = &review_draft {
             left = left.child(review_draft_pill(ui, &card.id, draft));
         }

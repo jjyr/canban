@@ -51,6 +51,19 @@ pub(crate) fn reply_count_iter<'a>(
         .count()
 }
 
+fn is_pr_narrative_event(event: &Event) -> bool {
+    match event.kind.as_str() {
+        "github.pr.commented" => true,
+        "github.pr.reviewed" => {
+            event.data["projected_body"]
+                .as_str()
+                .is_some_and(|b| !b.trim().is_empty())
+                || event.data["has_body"] == true
+        }
+        _ => false,
+    }
+}
+
 fn is_narrative_event(event: &Event, events: &[Event]) -> bool {
     let echoed_report = event.kind == "execution.reported"
         && (event.data["comment_replied"] == true
@@ -58,7 +71,8 @@ fn is_narrative_event(event: &Event, events: &[Event]) -> bool {
     matches!(
         event.kind.as_str(),
         "comment.created" | "comment.replied" | "github.comment"
-    ) || event.kind == "execution.reported" && !echoed_report
+    ) || is_pr_narrative_event(event)
+        || (event.kind == "execution.reported" && !echoed_report)
 }
 
 fn is_narrative_event_ref(event: &Event, events: &[&Event]) -> bool {
@@ -68,7 +82,8 @@ fn is_narrative_event_ref(event: &Event, events: &[&Event]) -> bool {
     matches!(
         event.kind.as_str(),
         "comment.created" | "comment.replied" | "github.comment"
-    ) || event.kind == "execution.reported" && !echoed_report
+    ) || is_pr_narrative_event(event)
+        || (event.kind == "execution.reported" && !echoed_report)
 }
 
 fn is_echoing_reply(event: &Event, other: &Event) -> bool {

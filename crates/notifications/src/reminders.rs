@@ -26,6 +26,19 @@ pub fn read_sequence(s: &Snapshot, card: &str) -> u64 {
 /// Only explicit Agent replies and final reports are messages, never PTY output
 /// or progress. Echoed replies share their originating report's identity.
 pub fn message_id(s: &Snapshot, e: &Event) -> Option<String> {
+    match e.kind.as_str() {
+        "github.pr.ci_succeeded" => return Some(format!("ci-pass:{}", e.id)),
+        "github.pr.ci_failed" => return Some(format!("ci-fail:{}", e.id)),
+        "github.pr.updated"
+        | "github.pr.commented"
+        | "github.pr.reviewed"
+        | "github.pr.state_changed"
+            if e.data["self_action"] != true =>
+        {
+            return Some(format!("pr-update:{}", e.id));
+        }
+        _ => {}
+    }
     if !e.actor.starts_with("agent:") {
         return None;
     }
@@ -263,7 +276,20 @@ pub fn sound_items_with_reminders(s: &Snapshot, reminder_items: &[Reminder]) -> 
             "execution.failed" | "execution.missing" => {
                 ids.insert(format!("event:{}", e.id));
             }
-            "review.merge_failed" | "review.upstream_sync_failed" | "github.pr_merge_attention" => {
+            "review.merge_failed"
+            | "review.upstream_sync_failed"
+            | "github.pr_merge_attention"
+            | "github.pr.ci_failed" => {
+                ids.insert(format!("event:{}", e.id));
+            }
+            "github.pr.reviewed"
+                if e.data["state"] == "CHANGES_REQUESTED" && e.data["self_action"] != true =>
+            {
+                ids.insert(format!("event:{}", e.id));
+            }
+            "github.pr.state_changed"
+                if e.data["state"] == "closed" && e.data["self_action"] != true =>
+            {
                 ids.insert(format!("event:{}", e.id));
             }
             "review.merged" | "github.pr_merged" | "github.pr_delivered" if e.actor != "user" => {

@@ -562,7 +562,114 @@ pub fn workspace() -> canban_types::Snapshot {
             3 => "\n\nTags: #ux",
             _ => "",
         };
-        s.cards.push(Card{schedule_source:None,source_trust:Some("local".into()),hold_auto_merge:false,github_links:vec![],created_by:"Gallery".into(),content:Default::default(),removed_at:None,pull_request:None,pull_request_history:Vec::new(),delivery_mode:None,workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,board_order:None,title:title.into(),body:format!("## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.{tag_suffix}"),context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),terminal_id:None,next_stage:None}),delivery,resolution,created_at:now()});
+        let pull_request = match i {
+            1 => Some(canban_types::GitHubPr {
+                review_summary: "0 approvals".into(),
+                repository: "jjyr/canban".into(),
+                repository_id: 1,
+                number: 148,
+                url: "https://github.com/jjyr/canban/pull/148".into(),
+                state: "open".into(),
+                head: "abcdef1234567890".into(),
+                head_branch: format!("canban/gallery/{i}"),
+                base_branch: "main".into(),
+                merged: false,
+                checks: "running".into(),
+                checks_summary: Some(canban_types::GitHubPrChecks {
+                    state: "running".into(),
+                    head_sha: "abcdef1234567890".into(),
+                    url: Some("https://github.com/jjyr/canban/pull/148/checks".into()),
+                    total: 4,
+                    passed: 2,
+                    failed: 0,
+                    running: 2,
+                    failed_checks: vec![],
+                }),
+                workspace: canban_types::WorkspaceBinding {
+                    location: canban_types::WorkLocation {
+                        machine: "local".into(),
+                        directory: "/preview".into(),
+                    },
+                    path: format!("/preview/worktrees/card-{i}"),
+                    branch: Some(format!("canban/gallery/{i}")),
+                    base_commit: Some("abcdef0123".into()),
+                    target_branch: Some("main".into()),
+                },
+            }),
+            2 => Some(canban_types::GitHubPr {
+                review_summary: "1 approval".into(),
+                repository: "jjyr/canban".into(),
+                repository_id: 1,
+                number: 147,
+                url: "https://github.com/jjyr/canban/pull/147".into(),
+                state: "open".into(),
+                head: "bcdef12345678901".into(),
+                head_branch: format!("canban/gallery/{i}"),
+                base_branch: "main".into(),
+                merged: false,
+                checks: "failure".into(),
+                checks_summary: Some(canban_types::GitHubPrChecks {
+                    state: "failure".into(),
+                    head_sha: "bcdef12345678901".into(),
+                    url: Some("https://github.com/jjyr/canban/pull/147/checks".into()),
+                    total: 4,
+                    passed: 3,
+                    failed: 1,
+                    running: 0,
+                    failed_checks: vec![canban_types::GitHubPrCheck {
+                        name: "clippy".into(),
+                        status: "completed".into(),
+                        conclusion: Some("failure".into()),
+                        url: Some("https://github.com/jjyr/canban/actions/runs/1/job/2".into()),
+                    }],
+                }),
+                workspace: canban_types::WorkspaceBinding {
+                    location: canban_types::WorkLocation {
+                        machine: "local".into(),
+                        directory: "/preview".into(),
+                    },
+                    path: format!("/preview/worktrees/card-{i}"),
+                    branch: Some(format!("canban/gallery/{i}")),
+                    base_commit: Some("abcdef0123".into()),
+                    target_branch: Some("main".into()),
+                },
+            }),
+            3 => Some(canban_types::GitHubPr {
+                review_summary: "1 approval".into(),
+                repository: "jjyr/canban".into(),
+                repository_id: 1,
+                number: 146,
+                url: "https://github.com/jjyr/canban/pull/146".into(),
+                state: "open".into(),
+                head: "cdef123456789012".into(),
+                head_branch: format!("canban/gallery/{i}"),
+                base_branch: "main".into(),
+                merged: false,
+                checks: "success".into(),
+                checks_summary: Some(canban_types::GitHubPrChecks {
+                    state: "success".into(),
+                    head_sha: "cdef123456789012".into(),
+                    url: Some("https://github.com/jjyr/canban/pull/146/checks".into()),
+                    total: 4,
+                    passed: 4,
+                    failed: 0,
+                    running: 0,
+                    failed_checks: vec![],
+                }),
+                workspace: canban_types::WorkspaceBinding {
+                    location: canban_types::WorkLocation {
+                        machine: "local".into(),
+                        directory: "/preview".into(),
+                    },
+                    path: format!("/preview/worktrees/card-{i}"),
+                    branch: Some(format!("canban/gallery/{i}")),
+                    base_commit: Some("abcdef0123".into()),
+                    target_branch: Some("main".into()),
+                },
+            }),
+            _ => None,
+        };
+        s.cards.push(Card{schedule_source:None,source_trust:Some("local".into()),hold_auto_merge:false,github_links:vec![],created_by:"Gallery".into(),content:Default::default(),removed_at:None,pull_request,pull_request_history:Vec::new(),delivery_mode:None,workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,board_order:None,title:title.into(),body:format!("## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.{tag_suffix}"),context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),terminal_id:None,next_stage:None}),delivery,resolution,created_at:now()});
     }
     s.cards.push(Card {
         schedule_source: None,
@@ -3455,6 +3562,8 @@ pub fn board_filters() -> canban_types::Snapshot {
                     assignees: vec![],
                     updated_at: String::new(),
                     synced_at: 0,
+                    pr_head_sha: None,
+                    pr_checks: None,
                 });
             }
             if i == 2 {

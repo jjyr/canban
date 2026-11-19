@@ -249,6 +249,7 @@ impl AppServer {
         let weak = Arc::downgrade(self);
         std::thread::spawn(move || {
             let mut next_sync = std::time::Instant::now();
+            let mut next_fast_pr = std::time::Instant::now() + Duration::from_secs(25);
             let mut prev_auth_state = String::new();
             while let Some(server) = weak.upgrade() {
                 if server.stopped() {
@@ -270,10 +271,11 @@ impl AppServer {
                     }
                     prev_auth_state = auth_state;
                 }
-                if std::time::Instant::now() >= next_sync
-                    || server.github_sync_due.swap(false, Ordering::SeqCst)
+                let now_instant = std::time::Instant::now();
+                if now_instant >= next_sync || server.github_sync_due.swap(false, Ordering::SeqCst)
                 {
-                    next_sync = std::time::Instant::now() + Duration::from_secs(120);
+                    next_sync = now_instant + Duration::from_secs(120);
+                    next_fast_pr = now_instant + Duration::from_secs(25);
                     server.reconcile_project_github_bindings();
                     let projects = server
                         .store
@@ -294,9 +296,52 @@ impl AppServer {
                         .list::<Card>()
                         .unwrap_or_default();
                     for c in cards.into_iter().filter(|c| {
-                        c.active() && c.pull_request.as_ref().is_some_and(|pr| !pr.merged)
+                        c.active()
+                            && !c.resolved()
+                            && (c.pull_request.as_ref().is_some_and(|pr| !pr.merged)
+                                || c.is_github_pr())
                     }) {
                         let _ = server.github_pr_refresh(json!({"card_id":c.id}));
+                    }
+                } else if now_instant >= next_fast_pr {
+                    next_fast_pr = now_instant + Duration::from_secs(25);
+                    if let Ok(snapshot) = server.snapshot() {
+                        for c in snapshot.cards.into_iter().filter(|c| {
+                            if !c.active() || c.resolved() {
+                                return false;
+                            }
+                            if let Some(pr) = &c.pull_request {
+                                return !pr.merged
+                                    && matches!(
+                                        pr.checks.as_str(),
+                                        "" | "unknown" | "pending" | "running"
+                                    );
+                            }
+                            if c.is_github_pr()
+                                && let Some(src) = c.github_issue()
+                            {
+                                return snapshot
+                                    .github_issues
+                                    .iter()
+                                    .find(|g| {
+                                        g.project_id == c.project_id
+                                            && g.source.repository_id == src.repository_id
+                                            && g.source.issue_id == src.issue_id
+                                    })
+                                    .is_some_and(|g| {
+                                        g.state == "open"
+                                            && g.pr_checks.as_ref().is_some_and(|ch| {
+                                                matches!(
+                                                    ch.state.as_str(),
+                                                    "running" | "pending" | "unknown"
+                                                )
+                                            })
+                                    });
+                            }
+                            false
+                        }) {
+                            let _ = server.github_pr_refresh(json!({"card_id":c.id}));
+                        }
                     }
                 }
                 drop(server);

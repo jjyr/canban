@@ -942,6 +942,29 @@ fn classify_reason(
                     headline,
                     (!msg.is_empty()).then_some(msg),
                 )
+            } else if msg.starts_with("CI failed") || msg.starts_with("GitHub checks failed") {
+                (
+                    Icon::TriangleAlert,
+                    Tone::Danger,
+                    "CI failed",
+                    (!msg.is_empty()).then_some(msg),
+                )
+            } else if msg.starts_with("Changes requested on PR") {
+                (
+                    Icon::Edit,
+                    Tone::Danger,
+                    "Changes requested",
+                    (!msg.is_empty()).then_some(msg),
+                )
+            } else if msg.starts_with("Delivery PR was closed")
+                || msg.starts_with("PR #") && msg.contains("closed")
+            {
+                (
+                    Icon::Close,
+                    Tone::Danger,
+                    "PR closed",
+                    (!msg.is_empty()).then_some(msg),
+                )
             } else if matches!(outcome_state, Some("failed" | "needs_report"))
                 || msg.to_lowercase().contains("exited without")
                 || msg.to_lowercase().contains("unavailable")
@@ -1184,6 +1207,176 @@ fn describe_unread_update(
         .map(|a| format!("@{a}"));
 
     if let Some(ev) = matched_event {
+        if ev.kind == "github.pr.ci_succeeded" {
+            let number = ev.data["number"].as_u64().unwrap_or(0);
+            let headline = if number > 0 {
+                format!("CI passed · PR #{number}")
+            } else {
+                "CI passed".into()
+            };
+            let detail = ev.data["summary"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    let s = strip_machine_prefix(raw_msg);
+                    (!s.is_empty()).then_some(s)
+                });
+            return RowEvent {
+                icon: Icon::Check,
+                tone: Tone::Success,
+                live: false,
+                headline,
+                detail,
+            };
+        }
+        if ev.kind == "github.pr.ci_failed" {
+            let number = ev.data["number"].as_u64().unwrap_or(0);
+            let headline = if number > 0 {
+                format!("CI failed · PR #{number}")
+            } else {
+                "CI failed".into()
+            };
+            let detail = ev.data["summary"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    let s = strip_machine_prefix(raw_msg);
+                    (!s.is_empty()).then_some(s)
+                });
+            return RowEvent {
+                icon: Icon::TriangleAlert,
+                tone: Tone::Danger,
+                live: false,
+                headline,
+                detail,
+            };
+        }
+        if ev.kind == "github.pr.updated" {
+            let number = ev.data["number"].as_u64().unwrap_or(0);
+            let headline = if number > 0 {
+                format!("PR #{number} updated")
+            } else {
+                "PR updated".into()
+            };
+            let detail = ev.data["commits"]
+                .as_array()
+                .and_then(|c| c.first())
+                .and_then(|c| c.as_str().or_else(|| c["message"].as_str()))
+                .map(|m| m.lines().next().unwrap_or("").trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    let s = strip_machine_prefix(raw_msg);
+                    (!s.is_empty()).then_some(s)
+                });
+            return RowEvent {
+                icon: Icon::Branch,
+                tone: Tone::Info,
+                live: false,
+                headline,
+                detail,
+            };
+        }
+        if ev.kind == "github.pr.commented" {
+            let author = ev
+                .actor
+                .strip_prefix("github:")
+                .map(|g| format!("@{g}"))
+                .unwrap_or_else(|| ev.actor.clone());
+            let number = ev.data["number"].as_u64().unwrap_or(0);
+            let headline = if number > 0 {
+                format!("{author} commented · PR #{number}")
+            } else {
+                format!("{author} commented on PR")
+            };
+            let detail = ev.data["projected_body"]
+                .as_str()
+                .and_then(|b| b.lines().find(|l| !l.trim().is_empty()))
+                .map(|l| l.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    let s = strip_machine_prefix(raw_msg);
+                    (!s.is_empty()).then_some(s)
+                });
+            return RowEvent {
+                icon: Icon::GitHub,
+                tone: Tone::Info,
+                live: false,
+                headline,
+                detail,
+            };
+        }
+        if ev.kind == "github.pr.reviewed" {
+            let author = ev
+                .actor
+                .strip_prefix("github:")
+                .map(|g| format!("@{g}"))
+                .unwrap_or_else(|| ev.actor.clone());
+            let number = ev.data["number"].as_u64().unwrap_or(0);
+            let state = ev.data["state"].as_str().unwrap_or("");
+            let (icon, tone, verb) = match state {
+                "APPROVED" => (Icon::Check, Tone::Success, "approved"),
+                "CHANGES_REQUESTED" => (Icon::Edit, Tone::Danger, "requested changes on"),
+                "DISMISSED" => (Icon::Info, Tone::Info, "dismissed review on"),
+                _ => (Icon::GitHub, Tone::Info, "reviewed"),
+            };
+            let headline = if number > 0 {
+                format!("{author} {verb} PR #{number}")
+            } else {
+                format!("{author} {verb} PR")
+            };
+            let detail = ev.data["projected_body"]
+                .as_str()
+                .and_then(|b| b.lines().find(|l| !l.trim().is_empty()))
+                .map(|l| l.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    let s = strip_machine_prefix(raw_msg);
+                    (!s.is_empty()).then_some(s)
+                });
+            return RowEvent {
+                icon,
+                tone,
+                live: false,
+                headline,
+                detail,
+            };
+        }
+        if ev.kind == "github.pr.state_changed" {
+            let number = ev.data["number"].as_u64().unwrap_or(0);
+            let to = ev.data["state"]
+                .as_str()
+                .or_else(|| ev.data["to"].as_str())
+                .unwrap_or("updated");
+            let state_label = match to {
+                "ready_for_review" => "ready for review",
+                _ => to,
+            };
+            let tone = match to {
+                "closed" => Tone::Danger,
+                "ready_for_review" | "ready" | "reopened" => Tone::Success,
+                _ => Tone::Info,
+            };
+            let icon = match to {
+                "closed" => Icon::Close,
+                "ready_for_review" | "ready" | "reopened" => Icon::Check,
+                _ => Icon::GitHub,
+            };
+            let headline = if number > 0 {
+                format!("PR #{number} {state_label}")
+            } else {
+                format!("PR {state_label}")
+            };
+            let s = strip_machine_prefix(raw_msg);
+            return RowEvent {
+                icon,
+                tone,
+                live: false,
+                headline,
+                detail: (!s.is_empty()).then_some(s),
+            };
+        }
         if ev.kind == "comment.replied" {
             let headline = match &agent_tag {
                 Some(tag) => format!("{tag} replied"),
@@ -1947,6 +2140,31 @@ fn row_view(
     let button_row = row.clone();
     let mut actions = view().flex_row().items_center().gap_1p5().flex_shrink_0();
 
+    if let Some(pr_view) = ui.snapshot.with_untracked(|s| {
+        ui.index
+            .with_untracked(|idx| crate::components::pr_status::from_card(s, idx, &row.card))
+    }) {
+        if pr_view.normalized_ci_state() == Some("failure")
+            && let Some(ci_url) = pr_view.checks_url()
+        {
+            actions = actions.child(compact_action("Checks ↗", Variant::Quiet, move |_| {
+                close(ui);
+                crate::github::open_url(ui, ci_url.clone());
+            }));
+        } else if (row.reasons.iter().any(|r| {
+            r.message.starts_with("Changes requested on PR")
+                || r.message.starts_with("Delivery PR was closed")
+                || (r.message.starts_with("PR #") && r.message.contains("closed"))
+        })) && let Some(pr_url) =
+            (!pr_view.pr_url.is_empty()).then(|| pr_view.pr_url.clone())
+        {
+            actions = actions.child(compact_action("PR ↗", Variant::Quiet, move |_| {
+                close(ui);
+                crate::github::open_url(ui, pr_url.clone());
+            }));
+        }
+    }
+
     if row.reasons.iter().any(|r| r.source == "review") {
         let project = ui.snapshot.with_untracked(|s| {
             s.projects
@@ -2082,65 +2300,114 @@ fn unread_updates(ui: Ui, scope: Option<&str>) -> Option<SectionGroup> {
         );
         let extra_pill =
             (unread_count > 1).then(|| badge(format!("+{}", unread_count - 1)).into_element());
+        let latest_pr_action: Option<(String, &'static str)> = latest.and_then(|rem| {
+            let ev = s
+                .events
+                .iter()
+                .filter(|e| e.card_id == id && e.sequence == rem.sequence)
+                .max_by_key(|e| e.created_at)?;
+            match ev.kind.as_str() {
+                "github.pr.ci_succeeded" | "github.pr.ci_failed" => ev.data["failed_checks"]
+                    .as_array()
+                    .filter(|arr| arr.len() == 1)
+                    .and_then(|arr| arr[0]["url"].as_str())
+                    .filter(|u| !u.is_empty())
+                    .or_else(|| ev.data["checks_url"].as_str().filter(|u| !u.is_empty()))
+                    .or_else(|| ev.data["url"].as_str().filter(|u| !u.is_empty()))
+                    .map(|u| (u.to_owned(), "Checks ↗")),
+                "github.pr.updated" => ev.data["diff_url"]
+                    .as_str()
+                    .filter(|u| !u.is_empty())
+                    .map(|u| (u.to_owned(), "Diff ↗"))
+                    .or_else(|| {
+                        ev.data["url"]
+                            .as_str()
+                            .filter(|u| !u.is_empty())
+                            .map(|u| (u.to_owned(), "PR ↗"))
+                    }),
+                "github.pr.commented" => ev.data["url"]
+                    .as_str()
+                    .filter(|u| !u.is_empty())
+                    .or_else(|| ev.data["pr_url"].as_str().filter(|u| !u.is_empty()))
+                    .map(|u| (u.to_owned(), "View ↗")),
+                "github.pr.reviewed" => ev.data["url"]
+                    .as_str()
+                    .filter(|u| !u.is_empty())
+                    .or_else(|| ev.data["pr_url"].as_str().filter(|u| !u.is_empty()))
+                    .map(|u| (u.to_owned(), "Review ↗")),
+                "github.pr.state_changed" => ev.data["url"]
+                    .as_str()
+                    .filter(|u| !u.is_empty())
+                    .map(|u| (u.to_owned(), "PR ↗")),
+                _ => None,
+            }
+        });
 
+        let mut row_view = view()
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .py_0p5()
+            .min_w(px(0.))
+            .border_b_1()
+            .border_color(BORDER)
+            .child(
+                view()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .tooltip(hint_tooltip(hint))
+                    .child(
+                        canban_ui_kit::press_target()
+                            .w_full()
+                            .min_w(px(0.))
+                            .items_center()
+                            .flex_row()
+                            .gap_2p5()
+                            .py_2()
+                            .px_2()
+                            .rounded(px(RADIUS))
+                            .bg(CLEAR)
+                            .hover(|s| s.bg(CARD_HOVER))
+                            .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
+                            .accessibility_label(format!(
+                                "{event_summary} · #{} {} · {project} · Card →",
+                                card.number, card.title
+                            ))
+                            .on_press(move |_: &()| {
+                                close(ui);
+                                ui.open_card(id.clone());
+                                ui.card_event.set(sequence);
+                            })
+                            .child(tone_icon_badge(event.icon, event.tone, false))
+                            .child(
+                                view()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .gap_1()
+                                    .child(event_headline_row(
+                                        event.headline,
+                                        event.tone,
+                                        event.detail,
+                                        extra_pill,
+                                    ))
+                                    .child(card_context_row(
+                                        card.number,
+                                        card.title.clone(),
+                                        show_project.then_some(project),
+                                        None,
+                                        Vec::new(),
+                                    )),
+                            ),
+                    ),
+            );
+        if let Some((action_url, action_label)) = latest_pr_action {
+            row_view = row_view.child(compact_action(action_label, Variant::Quiet, move |_| {
+                close(ui);
+                crate::github::open_url(ui, action_url.clone());
+            }));
+        }
         rows = rows.child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap_1p5()
-                .py_0p5()
-                .min_w(px(0.))
-                .border_b_1()
-                .border_color(BORDER)
-                .child(
-                    view()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .tooltip(hint_tooltip(hint))
-                        .child(
-                            canban_ui_kit::press_target()
-                                .w_full()
-                                .min_w(px(0.))
-                                .items_center()
-                                .flex_row()
-                                .gap_2p5()
-                                .py_2()
-                                .px_2()
-                                .rounded(px(RADIUS))
-                                .bg(CLEAR)
-                                .hover(|s| s.bg(CARD_HOVER))
-                                .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
-                                .accessibility_label(format!(
-                                    "{event_summary} · #{} {} · {project} · Card →",
-                                    card.number, card.title
-                                ))
-                                .on_press(move |_: &()| {
-                                    close(ui);
-                                    ui.open_card(id.clone());
-                                    ui.card_event.set(sequence);
-                                })
-                                .child(tone_icon_badge(event.icon, event.tone, false))
-                                .child(
-                                    view()
-                                        .flex_1()
-                                        .min_w(px(0.))
-                                        .gap_1()
-                                        .child(event_headline_row(
-                                            event.headline,
-                                            event.tone,
-                                            event.detail,
-                                            extra_pill,
-                                        ))
-                                        .child(card_context_row(
-                                            card.number,
-                                            card.title.clone(),
-                                            show_project.then_some(project),
-                                            None,
-                                            Vec::new(),
-                                        )),
-                                ),
-                        ),
-                )
+            row_view
                 .child(compact_action("✓ Read", Variant::Quiet, move |_| {
                     mark_card_read(ui, id_read.clone(), max_seq);
                 }))

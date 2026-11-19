@@ -973,6 +973,30 @@ pub const CATALOG: &[Command] = &[
         keywords: "jump link external web browser anchor comment discussion pr issue",
     },
     Command {
+        id: "open-card-pr",
+        title: "Open Card PR on GitHub",
+        key: "",
+        display: "GitHub",
+        context: "Card",
+        keywords: "pull request github browser link jump",
+    },
+    Command {
+        id: "open-card-ci",
+        title: "Open Card PR CI Checks on GitHub",
+        key: "",
+        display: "GitHub",
+        context: "Card",
+        keywords: "ci checks pull request github actions status jump",
+    },
+    Command {
+        id: "refresh-card-pr",
+        title: "Refresh Card PR & CI Status",
+        key: "",
+        display: "GitHub",
+        context: "Card",
+        keywords: "ci checks pull request refresh sync",
+    },
+    Command {
         id: "card-workspace-details",
         title: "Toggle Card Workspace Details",
         key: "",
@@ -1907,6 +1931,38 @@ pub fn execute(ui: Ui, id: &str) {
                 crate::github::open_url(ui, src.url.clone());
             } else {
                 ui.notify("Open a GitHub conversation or GitHub Card first");
+            }
+        }
+        "open-card-pr" => {
+            if let Some(c) = ui.current_card()
+                && let Some(pr_view) = ui.snapshot.with_untracked(|s| {
+                    ui.index
+                        .with_untracked(|idx| crate::components::pr_status::from_card(s, idx, &c))
+                })
+            {
+                crate::github::open_url(ui, pr_view.pr_url);
+            } else {
+                ui.notify("This Card has no linked GitHub PR");
+            }
+        }
+        "open-card-ci" => {
+            if let Some(c) = ui.current_card()
+                && let Some(pr_view) = ui.snapshot.with_untracked(|s| {
+                    ui.index
+                        .with_untracked(|idx| crate::components::pr_status::from_card(s, idx, &c))
+                })
+                && let Some(url) = pr_view.checks_url()
+            {
+                crate::github::open_url(ui, url);
+            } else {
+                ui.notify("This Card has no linked GitHub PR CI checks");
+            }
+        }
+        "refresh-card-pr" => {
+            if let Some(c) = ui.current_card() {
+                dispatch(ui, "github.pr.refresh", json!({ "card_id": c.id }));
+            } else {
+                ui.notify("Open a Card first to refresh its PR");
             }
         }
         "card-workspace-details" => {

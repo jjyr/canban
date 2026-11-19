@@ -165,6 +165,11 @@ impl Client {
                 return;
             }
             let now = crate::cache::now();
+            let preserved_fetched_at = cache
+                .get(&path_key)
+                .map(|old| old.fetched_at)
+                .filter(|&ts| ts > now)
+                .unwrap_or(0);
             let value = crate::cache::Response {
                 data,
                 link: None,
@@ -172,7 +177,7 @@ impl Client {
                 modified: None,
                 poll_interval: None,
                 validated_at: now,
-                fetched_at: 0,
+                fetched_at: preserved_fetched_at,
                 cached: false,
             };
             let _ = cache.put(&format!("{scope}:{path}"), &value, self.cache_generation);

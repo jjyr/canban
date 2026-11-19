@@ -76,11 +76,52 @@ pub(crate) fn build_step_env(
         ctx.run_dir.to_string_lossy().into_owned(),
     );
 
+    if let Some(pr) = &ctx.card.pull_request {
+        if pr.number > 0 {
+            env.insert("CANBAN_PR_NUMBER".into(), pr.number.to_string());
+        }
+        if !pr.url.is_empty() {
+            env.insert("CANBAN_PR_URL".into(), pr.url.clone());
+        }
+        if !pr.checks.is_empty() {
+            env.insert("CANBAN_PR_CHECKS".into(), pr.checks.clone());
+        }
+        if let Some(url) = pr
+            .checks_summary
+            .as_ref()
+            .and_then(|s| s.url.as_deref())
+            .filter(|u| !u.is_empty())
+        {
+            env.insert("CANBAN_PR_CHECKS_URL".into(), url.to_owned());
+        }
+    }
+
     if let Some(run) = ctx.workflow_run {
         env.insert("CANBAN_WORKFLOW".into(), run.workflow_id.clone());
         env.insert("CANBAN_RUN_ID".into(), run.id.clone());
         if let Some(step_id) = run.resolve_step_id(ctx.step_ref) {
             env.insert("CANBAN_STEP_ID".into(), step_id.to_owned());
+        }
+        if let Some(ev) = run.inputs.get("trigger_event").filter(|v| v.is_object()) {
+            if let Some(kind) = ev["kind"].as_str().filter(|s| !s.is_empty()) {
+                env.insert("CANBAN_TRIGGER_EVENT".into(), kind.to_owned());
+            }
+            let data = &ev["data"];
+            if !env.contains_key("CANBAN_PR_NUMBER")
+                && let Some(num) = data["number"].as_u64()
+            {
+                env.insert("CANBAN_PR_NUMBER".into(), num.to_string());
+            }
+            if !env.contains_key("CANBAN_PR_URL")
+                && let Some(url) = data["url"].as_str().filter(|s| !s.is_empty())
+            {
+                env.insert("CANBAN_PR_URL".into(), url.to_owned());
+            }
+            if !env.contains_key("CANBAN_PR_CHECKS_URL")
+                && let Some(url) = data["checks_url"].as_str().filter(|s| !s.is_empty())
+            {
+                env.insert("CANBAN_PR_CHECKS_URL".into(), url.to_owned());
+            }
         }
     }
     if let Some(path) = ctx.script_env_file {

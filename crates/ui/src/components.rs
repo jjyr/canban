@@ -1,5 +1,6 @@
 pub mod activity;
 pub mod git_workspace;
+pub mod pr_status;
 pub mod scheduling;
 pub use activity::{activity_header, empty};
 pub(crate) mod card_tile;

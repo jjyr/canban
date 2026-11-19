@@ -1151,11 +1151,32 @@ pub fn pr_panel(ui: Ui) -> impl IntoElement {
                         dispatch(ui, "github.pr.refresh", json!({"card_id":refresh}))
                     }))
                     .child(
-                        compact_action("Open on GitHub", Variant::Quiet, move |_| {
+                        compact_action("Open on GitHub ↗", Variant::Quiet, move |_| {
                             open_url(ui, url.clone())
                         })
                         .disabled(pr.url.is_empty()),
-                    ),
+                    )
+                    .child(when(
+                        {
+                            let has_checks = pr.number > 0 && !pr.url.is_empty();
+                            move || has_checks
+                        },
+                        {
+                            let checks_url = pr
+                                .checks_summary
+                                .as_ref()
+                                .and_then(|s| s.url.clone())
+                                .unwrap_or_else(|| {
+                                    format!("{}/checks", pr.url.trim_end_matches('/'))
+                                });
+                            move || {
+                                let url = checks_url.clone();
+                                compact_action("Open CI Checks ↗", Variant::Quiet, move |_| {
+                                    open_url(ui, url.clone())
+                                })
+                            }
+                        },
+                    )),
             );
         if pr.number > 0 && pr.state == "open" && !pr.merged {
             area = area.child(

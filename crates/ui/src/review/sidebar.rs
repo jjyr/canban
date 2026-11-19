@@ -1081,35 +1081,26 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
         .child(status(c.stage.clone(), Tone::Neutral));
 
     if let Some(pr) = &c.pull_request {
-        let state_label = if pr.merged {
-            "merged".to_owned()
+        if let Some(pr_view) = ui.snapshot.with(|s| {
+            ui.index
+                .with(|idx| crate::components::pr_status::from_card(s, idx, &c))
+        }) && let Some(pr_pill) = crate::components::pr_status::pill(ui, &pr_view, false)
+        {
+            left_info = left_info.child(pr_pill);
         } else {
-            pr.state.clone()
-        };
-        let pr_summary = if pr.number > 0 {
-            if pr.checks.is_empty() {
-                format!("PR #{} · {state_label}", pr.number)
+            let pr_summary: String = if pr.state == "not_published" {
+                "No PR yet".into()
             } else {
-                format!("PR #{} · {state_label} · {}", pr.number, pr.checks)
+                "PR sync needed".into()
+            };
+            left_info = left_info.child(status(pr_summary, Tone::Neutral));
+            if !pr.url.is_empty() {
+                let url = pr.url.clone();
+                left_info =
+                    left_info.child(compact_action("GitHub ↗", Variant::Quiet, move |_| {
+                        crate::github::open_url(ui, url.clone());
+                    }));
             }
-        } else if pr.state == "not_published" {
-            "No PR yet".into()
-        } else {
-            "PR sync needed".into()
-        };
-        let pr_tone = if pr.merged {
-            Tone::Success
-        } else if pr.state == "open" {
-            Tone::Info
-        } else {
-            Tone::Neutral
-        };
-        left_info = left_info.child(status(pr_summary, pr_tone));
-        if !pr.url.is_empty() {
-            let url = pr.url.clone();
-            left_info = left_info.child(compact_action("GitHub ↗", Variant::Quiet, move |_| {
-                crate::github::open_url(ui, url.clone());
-            }));
         }
         let refresh_cid = c.id.clone();
         left_info = left_info.child(chrome_button(

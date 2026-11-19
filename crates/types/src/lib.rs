@@ -1756,6 +1756,35 @@ impl Card {
         self.removed_at.is_none() && self.archived_at.is_none()
     }
 }
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitHubPrCheck {
+    pub name: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conclusion: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitHubPrChecks {
+    /// Aggregated CI state: `"running" | "success" | "failure" | "none" | "unknown"`.
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub head_sha: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub total: u32,
+    #[serde(default)]
+    pub passed: u32,
+    #[serde(default)]
+    pub failed: u32,
+    #[serde(default)]
+    pub running: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_checks: Vec<GitHubPrCheck>,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct GitHubIssueSnapshot {
     #[serde(default)]
@@ -1771,6 +1800,10 @@ pub struct GitHubIssueSnapshot {
     pub labels: Vec<String>,
     pub updated_at: String,
     pub synced_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_head_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_checks: Option<GitHubPrChecks>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct GitHubAccount {
@@ -1797,6 +1830,8 @@ pub struct GitHubPr {
     pub base_branch: String,
     pub merged: bool,
     pub checks: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks_summary: Option<GitHubPrChecks>,
     pub workspace: WorkspaceBinding,
 }
 

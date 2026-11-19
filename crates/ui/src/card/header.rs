@@ -592,6 +592,16 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             } else if c.worktree.is_none() && !c.is_github_pr() && c.pull_request.is_none() {
                 row = row.child(muted("Workspace not created"));
             }
+            let pr_view = ui.snapshot.with(|s| {
+                ui.index
+                    .with(|idx| crate::components::pr_status::from_card(s, idx, &c))
+            });
+            if let Some(pr_pill) = pr_view
+                .as_ref()
+                .and_then(|info| crate::components::pr_status::pill(ui, info, false))
+            {
+                row = row.child(pr_pill);
+            }
 
             if attachment_count > 0 {
                 row = row.child(

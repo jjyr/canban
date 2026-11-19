@@ -126,6 +126,51 @@ fn status_chip(value: impl IntoReactive<SharedString>, tone: Tone, live: bool) -
             .text_color(fg),
     )
 }
+
+/// Interactive semantic status pill with optional live dot or leading icon.
+pub fn status_button(
+    value: impl IntoReactive<SharedString>,
+    tone: Tone,
+    live: bool,
+    leading: Option<Icon>,
+    compact: bool,
+    on_press: impl Fn(&()) + 'static,
+) -> nsh_base::ButtonElement {
+    let (bg, fg) = tone_colors(tone);
+    let mut chip = super::press_target()
+        .self_start()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .h(px(if compact { 20. } else { 24. }))
+        .px(px(if compact { 6. } else { 8. }))
+        .rounded(px(5.0))
+        .bg(bg)
+        .border_1()
+        .border_color(CLEAR)
+        .hover(|s| s.border_color(BORDER).opacity(0.92))
+        .active(|s| s.opacity(0.72))
+        .focus(|s| s.border_color(ACCENT))
+        .on_press(on_press);
+    if live {
+        chip = chip.child(live_dot(fg));
+    } else if let Some(kind) = leading {
+        let size = if compact { 11. } else { 12. };
+        chip = chip.child(
+            icon_tinted(kind, fg)
+                .w(px(size))
+                .h(px(size))
+                .flex_shrink_0(),
+        );
+    }
+    chip.child(
+        text(value)
+            .text_size(px(if compact { 11. } else { CAPTION_SIZE }))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(fg)
+            .truncate(),
+    )
+}
 pub fn notice(message: impl IntoReactive<SharedString>, tone: Tone) -> impl IntoElement {
     let (bg, border, color) = match tone {
         Tone::Danger => (DANGER_SURFACE, DANGER, DANGER),

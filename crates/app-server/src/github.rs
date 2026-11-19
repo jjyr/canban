@@ -1,7 +1,7 @@
 //! Thin operation/lifecycle adapter; intake and reconciliation live in Kanban.
 use super::*;
 mod browse;
-mod delivery;
+pub(super) mod delivery;
 mod projection;
 pub(super) mod worker;
 use canban_kanban::github::{self as integration, Change};
@@ -520,11 +520,13 @@ impl AppServer {
         let issues = self.github_sync_issues(&project);
         self.github_phase(&project, "prs");
         let prs = self.github_pr_intake(&project);
+        let branch_prs = self.github_discover_branch_prs(&project);
         self.github_phase(&project, "observations");
         let observations = self.github_event_refresh(&project);
         let errors: Vec<_> = [
             ("Issues", issues),
             ("PRs", prs),
+            ("Branch PRs", branch_prs),
             ("Observations", observations),
         ]
         .into_iter()

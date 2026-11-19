@@ -982,6 +982,7 @@ fn remote_pr_merge_defers_archive_while_agent_live_then_archives_and_handles_pr_
                 state: "open".into(),
                 merged: false,
                 checks: "success".into(),
+                checks_summary: None,
                 review_summary: "approved".into(),
                 workspace: WorkspaceBinding {
                     location: project.work_location(),

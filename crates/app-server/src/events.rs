@@ -137,6 +137,23 @@ pub(super) fn pump(db: Db<'_>, config: &Config) -> Result<()> {
                 &entry.clone(),
                 &d.event_id,
             )?;
+            if event.kind == "github.pr.ci_failed"
+                && card
+                    .attention
+                    .as_deref()
+                    .is_some_and(crate::github::delivery::is_ci_attention_message)
+            {
+                let mut latest_card: Card = db.get(&card.id)?;
+                if latest_card
+                    .attention
+                    .as_deref()
+                    .is_some_and(crate::github::delivery::is_ci_attention_message)
+                {
+                    latest_card.attention = None;
+                    latest_card.revision += 1;
+                    db.save(&latest_card)?;
+                }
+            }
             Ok(run.id)
         })();
         match result {

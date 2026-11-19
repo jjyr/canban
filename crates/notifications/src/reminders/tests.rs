@@ -556,3 +556,137 @@ fn unfinished_idle_turns_and_ephemeral_cli_agents_keep_visual_reminders_silent_w
     manual_rt.waiting = None;
     assert!(delivery.observe(&sound_items(&s)).is_empty());
 }
+
+#[test]
+fn pr_ci_results_notify_and_failures_play_sound_while_passes_stay_silent() {
+    let mut s = fixture();
+    let mut delivery = DeliveryTracker::default();
+    delivery.baseline(&sound_items(&s));
+
+    push_event(
+        &mut s,
+        "ci-ok",
+        1,
+        "github.pr.ci_succeeded",
+        "github",
+        None,
+        json!({"number": 148, "state": "success"}),
+    );
+    let rems = reminders(&s);
+    assert_eq!(rems.len(), 1);
+    assert_eq!(rems[0].id, "ci-pass:ci-ok");
+    assert!(rems[0].unread);
+    assert!(delivery.observe(&sound_items(&s)).is_empty());
+
+    push_event(
+        &mut s,
+        "ci-bad",
+        2,
+        "github.pr.ci_failed",
+        "github",
+        None,
+        json!({"number": 148, "state": "failure"}),
+    );
+    let rems = reminders(&s);
+    assert_eq!(rems.len(), 2);
+    assert!(rems.iter().any(|r| r.id == "ci-fail:ci-bad" && r.unread));
+    assert_eq!(delivery.observe(&sound_items(&s)), vec!["event:ci-bad"]);
+
+    s.card_reads.push(CardRead {
+        id: "c".into(),
+        project_id: "p".into(),
+        card_id: "c".into(),
+        sequence: 2,
+    });
+    assert!(reminders(&s).is_empty());
+}
+
+#[test]
+fn pr_updates_notify_skip_self_actions_and_chime_only_on_changes_requested_or_closed() {
+    let mut s = fixture();
+    let mut delivery = DeliveryTracker::default();
+    delivery.baseline(&sound_items(&s));
+
+    // Self-action comment & commit are silent and skipped from unread notifications.
+    push_event(
+        &mut s,
+        "pr-upd-self",
+        1,
+        "github.pr.updated",
+        "github",
+        None,
+        json!({"number": 149, "self_action": true}),
+    );
+    push_event(
+        &mut s,
+        "pr-cmt-self",
+        2,
+        "github.pr.commented",
+        "github:jjy",
+        None,
+        json!({"number": 149, "self_action": true}),
+    );
+    assert!(reminders(&s).is_empty());
+    assert!(delivery.observe(&sound_items(&s)).is_empty());
+
+    // External update, comment, and APPROVED review notify silently.
+    push_event(
+        &mut s,
+        "pr-upd-ext",
+        3,
+        "github.pr.updated",
+        "github",
+        None,
+        json!({"number": 149, "self_action": false}),
+    );
+    push_event(
+        &mut s,
+        "pr-cmt-ext",
+        4,
+        "github.pr.commented",
+        "github:alice",
+        None,
+        json!({"number": 149, "self_action": false}),
+    );
+    push_event(
+        &mut s,
+        "pr-rev-ok",
+        5,
+        "github.pr.reviewed",
+        "github:alice",
+        None,
+        json!({"number": 149, "state": "APPROVED", "self_action": false}),
+    );
+    let rems = reminders(&s);
+    assert_eq!(rems.len(), 3);
+    assert!(rems.iter().any(|r| r.id == "pr-update:pr-upd-ext"));
+    assert!(rems.iter().any(|r| r.id == "pr-update:pr-cmt-ext"));
+    assert!(rems.iter().any(|r| r.id == "pr-update:pr-rev-ok"));
+    assert!(delivery.observe(&sound_items(&s)).is_empty());
+
+    // External CHANGES_REQUESTED review and unmerged close both chime.
+    push_event(
+        &mut s,
+        "pr-rev-changes",
+        6,
+        "github.pr.reviewed",
+        "github:bob",
+        None,
+        json!({"number": 149, "state": "CHANGES_REQUESTED", "self_action": false}),
+    );
+    assert_eq!(
+        delivery.observe(&sound_items(&s)),
+        vec!["event:pr-rev-changes"]
+    );
+
+    push_event(
+        &mut s,
+        "pr-closed",
+        7,
+        "github.pr.state_changed",
+        "github",
+        None,
+        json!({"number": 149, "state": "closed", "merged": false, "self_action": false}),
+    );
+    assert_eq!(delivery.observe(&sound_items(&s)), vec!["event:pr-closed"]);
+}

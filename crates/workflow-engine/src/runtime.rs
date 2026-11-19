@@ -182,6 +182,77 @@ pub fn stop_card(db: Db<'_>, card: &str, state: &str) -> Result<()> {
     }
     Ok(())
 }
+
+fn build_run_inputs(
+    db: Db<'_>,
+    card: &Card,
+    legacy: bool,
+    adopted: bool,
+    event_id: Option<&str>,
+) -> Value {
+    let mut inputs = json!({
+        "title": card.title,
+        "body": card.body,
+        "content": card.content,
+        "legacy": legacy,
+    });
+    if adopted {
+        inputs["adopted"] = json!(true);
+    }
+    if let Some(eid) = event_id
+        && let Ok(ev) = db.get::<Event>(eid)
+    {
+        inputs["trigger_event"] = json!({
+            "id": ev.id,
+            "kind": ev.kind,
+            "actor": ev.actor,
+            "message": ev.message,
+            "data": ev.data,
+        });
+    }
+    inputs
+}
+
+fn trigger_event_note(inputs: &Value) -> String {
+    let Some(ev) = inputs.get("trigger_event").filter(|v| v.is_object()) else {
+        return String::new();
+    };
+    let kind = ev["kind"].as_str().unwrap_or("");
+    if !matches!(kind, "github.pr.ci_failed" | "github.pr.ci_succeeded") {
+        return String::new();
+    }
+    let data = &ev["data"];
+    let number = data["number"].as_u64().unwrap_or(0);
+    let url = data["url"].as_str().unwrap_or("");
+    let checks_url = data["checks_url"].as_str().unwrap_or("");
+    let sha = data["head_sha"].as_str().unwrap_or("");
+    let short_sha: String = sha.chars().take(10).collect();
+    let mut lines = vec![format!(
+        "Triggered by `{kind}` on PR #{number} ({short_sha}): {}",
+        ev["message"].as_str().unwrap_or("")
+    )];
+    if !url.is_empty() {
+        lines.push(format!("- PR: {url}"));
+    }
+    if !checks_url.is_empty() {
+        lines.push(format!("- Checks: {checks_url}"));
+    }
+    if let Some(failed) = data["failed_checks"].as_array() {
+        for item in failed.iter().take(10) {
+            let name = item["name"].as_str().unwrap_or("check");
+            let conclusion = item["conclusion"].as_str().unwrap_or("failure");
+            if let Some(check_url) = item["url"].as_str().filter(|u| !u.is_empty()) {
+                lines.push(format!(
+                    "- Failed check `{name}` ({conclusion}): {check_url}"
+                ));
+            } else {
+                lines.push(format!("- Failed check `{name}` ({conclusion})"));
+            }
+        }
+    }
+    format!("\n\n{}", lines.join("\n"))
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "Transaction-scoped entry captures definition, causality and queue adapter"
@@ -219,6 +290,7 @@ pub fn start(
     } else {
         bail!("Unknown workflow entry")
     };
+    let inputs = build_run_inputs(db, card, legacy, false, event.as_deref());
     let mut run = WorkflowRun {
         id: id(),
         project_id: card.project_id.clone(),
@@ -232,7 +304,7 @@ pub fn start(
         terminal_id: None,
         trigger_event_id: event,
         input_digest: digest(db, card),
-        inputs: json!({"title":card.title,"body":card.body,"content":card.content,"legacy":legacy}),
+        inputs,
         outputs: BTreeMap::new(),
         history: Vec::new(),
         error: None,
@@ -287,6 +359,7 @@ pub fn start_adopted(
     } else {
         bail!("Unknown workflow entry")
     };
+    let inputs = build_run_inputs(db, card, legacy, true, event.as_deref());
     let mut run = WorkflowRun {
         id: id(),
         project_id: card.project_id.clone(),
@@ -300,7 +373,7 @@ pub fn start_adopted(
         terminal_id: None,
         trigger_event_id: event,
         input_digest: digest(db, card),
-        inputs: json!({"title":card.title,"body":card.body,"content":card.content,"legacy":legacy,"adopted":true}),
+        inputs,
         outputs: BTreeMap::new(),
         history: Vec::new(),
         error: None,
@@ -494,12 +567,13 @@ fn drive(
                         serde_json::to_string(&run.outputs)?
                     )
                 };
+                let trigger_note = trigger_event_note(&run.inputs);
                 let stage = Stage {
                     id: card.stage.clone(),
                     name: card.stage.clone(),
                     execute: true,
                     profile,
-                    instruction: format!("{instruction}{rework_note}{prior_steps}"),
+                    instruction: format!("{instruction}{rework_note}{trigger_note}{prior_steps}"),
                     on_completed: None,
                     require_human_review: false,
                 };

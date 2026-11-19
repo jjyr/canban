@@ -159,6 +159,7 @@ impl Record for Card {
             .chain(saved.pull_request_history.iter_mut())
         {
             pr.checks.clear();
+            pr.checks_summary = None;
             pr.review_summary.clear();
             if matches!(pr.state.as_str(), "open" | "closed") {
                 pr.state = "published".into();

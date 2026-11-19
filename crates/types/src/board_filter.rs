@@ -128,6 +128,8 @@ mod tests {
             assignees: vec![],
             updated_at: String::new(),
             synced_at: 0,
+            pr_head_sha: None,
+            pr_checks: None,
         }
     }
     #[test]

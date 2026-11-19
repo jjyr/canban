@@ -455,13 +455,28 @@ impl AppServer {
                 })
                 .collect::<Result<Vec<_>>>()?;
             self.github_apply_changes(project, generation, changes, observations, Some("pr"))?;
-            for number in pr_numbers {
+            for number in &pr_numbers {
                 if let Some(pr_value) =
                     client.cached::<Value>(&format!("/repos/{}/pulls/{number}", source.repository))
                     && pr_value["merged"] == true
                 {
-                    let _ = self.reconcile_remote_pr_merge(&source.repository, number, &pr_value);
+                    let _ = self.reconcile_remote_pr_merge(&source.repository, *number, &pr_value);
                 }
+            }
+            // Refresh CI checks for open external PR cards (baselining newly imported ones silently).
+            let current_cards = self.store.lock().unwrap().db().list::<Card>()?;
+            for card in current_cards.into_iter().filter(|c| {
+                c.project_id == project.id
+                    && c.active()
+                    && !c.resolved()
+                    && c.is_github_pr()
+                    && c.pull_request.is_none()
+            }) {
+                let is_newly_added = card
+                    .github_issue()
+                    .is_some_and(|s| pr_numbers.contains(&s.number))
+                    && !cards.iter().any(|old| old.id == card.id);
+                let _ = self.refresh_external_pr_checks(&card, is_newly_added);
             }
             self.emit("github", None);
         }
