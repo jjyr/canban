@@ -443,17 +443,18 @@ pub fn probe_tcp_host(raw_addr: &str, timeout: Duration) -> Result<Value> {
     let _ = stream.set_nodelay(true);
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
-    writeln!(
-        stream,
-        "{}",
-        json!({"jsonrpc":"2.0","id":1,"method":"host.probe","params":{}})
+    crate::runtime::write_json_line(
+        &mut stream,
+        &json!({"jsonrpc":"2.0","id":1,"method":"host.probe","params":{}}),
     )?;
-    stream.flush()?;
     let mut line = String::new();
-    BufReader::new(stream)
+    let n = BufReader::new(stream)
         .take(16 * 1024)
         .read_line(&mut line)?;
-    ensure!(!line.is_empty(), "Remote daemon closed probe socket");
+    ensure!(
+        n > 0 && line.ends_with('\n'),
+        "Remote daemon closed probe socket"
+    );
     let reply: Value = serde_json::from_str(&line).context("Invalid probe JSON response")?;
     if let Some(err) = reply.get("error") {
         bail!(

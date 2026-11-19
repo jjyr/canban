@@ -82,9 +82,9 @@ fn resolve_now(ui: Ui, card_id: &str, revision: u64) {
 }
 
 fn apply_gallery_resolve(ui: Ui, card_id: &str) {
+    let now_ms = canban_types::now();
+    let mut proj = None;
     ui.snapshot.update(|s| {
-        let now_ms = canban_types::now();
-        let mut proj = None;
         if let Some(c) = s.cards.iter_mut().find(|c| c.id == card_id) {
             c.resolution = Some(CardResolution {
                 resolved_at: now_ms,
@@ -97,16 +97,12 @@ fn apply_gallery_resolve(ui: Ui, card_id: &str) {
             c.revision += 1;
             proj = Some(c.project_id.clone());
         }
-        if let Some(project_id) = proj {
-            let seq = s
-                .events
-                .iter()
-                .filter(|e| e.card_id == card_id)
-                .map(|e| e.sequence)
-                .max()
-                .unwrap_or(0)
-                + 1;
-            s.events.push(canban_types::Event {
+    });
+    if let Some(project_id) = proj {
+        ui.card_timelines.update(|timelines| {
+            let entry = timelines.entry(card_id.to_owned()).or_default();
+            let seq = entry.events.iter().map(|e| e.sequence).max().unwrap_or(0) + 1;
+            entry.events.push(canban_types::Event {
                 id: canban_types::id(),
                 project_id,
                 card_id: card_id.to_owned(),
@@ -117,14 +113,17 @@ fn apply_gallery_resolve(ui: Ui, card_id: &str) {
                 data: json!({"kind": "manual", "resolved_at": now_ms}),
                 created_at: now_ms,
             });
-        }
-    });
+            entry.highwater = entry.highwater.max(seq);
+            entry.oldest_seq.get_or_insert(seq);
+            entry.initialized = true;
+        });
+    }
 }
 
 fn apply_gallery_reopen(ui: Ui, card_id: &str) {
+    let now_ms = canban_types::now();
+    let mut proj = None;
     ui.snapshot.update(|s| {
-        let now_ms = canban_types::now();
-        let mut proj = None;
         if let Some(c) = s.cards.iter_mut().find(|c| c.id == card_id) {
             if c.merged() {
                 return;
@@ -133,16 +132,12 @@ fn apply_gallery_reopen(ui: Ui, card_id: &str) {
             c.revision += 1;
             proj = Some(c.project_id.clone());
         }
-        if let Some(project_id) = proj {
-            let seq = s
-                .events
-                .iter()
-                .filter(|e| e.card_id == card_id)
-                .map(|e| e.sequence)
-                .max()
-                .unwrap_or(0)
-                + 1;
-            s.events.push(canban_types::Event {
+    });
+    if let Some(project_id) = proj {
+        ui.card_timelines.update(|timelines| {
+            let entry = timelines.entry(card_id.to_owned()).or_default();
+            let seq = entry.events.iter().map(|e| e.sequence).max().unwrap_or(0) + 1;
+            entry.events.push(canban_types::Event {
                 id: canban_types::id(),
                 project_id,
                 card_id: card_id.to_owned(),
@@ -153,8 +148,11 @@ fn apply_gallery_reopen(ui: Ui, card_id: &str) {
                 data: json!({}),
                 created_at: now_ms,
             });
-        }
-    });
+            entry.highwater = entry.highwater.max(seq);
+            entry.oldest_seq.get_or_insert(seq);
+            entry.initialized = true;
+        });
+    }
 }
 
 pub(crate) fn start(ui: Ui, card: Card) {

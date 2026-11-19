@@ -56,9 +56,8 @@ fn board_reorder_is_durable_idempotent_and_preserves_human_gates() {
         c.human_gate
     );
     assert_eq!(
-        app.snapshot()
+        app.events()
             .unwrap()
-            .events
             .iter()
             .filter(|e| e.kind == "card.order_changed")
             .count(),

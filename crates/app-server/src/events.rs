@@ -1,12 +1,27 @@
 //! Durable journal dispatch. Channels are hints; cursors and receipts survive restart.
 use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+const CARDLESS_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+const CARDLESS_KEEP_RECENT: usize = 2_000;
+const PRUNE_INTERVAL_MS: u64 = 5 * 60 * 1000;
+static LAST_CARDLESS_PRUNE_AT: AtomicU64 = AtomicU64::new(0);
 
 pub(super) fn highwater(db: Db<'_>) -> Result<u64> {
-    Ok(db.conn.query_row(
+    let max_offset: u64 = db.conn.query_row(
         "SELECT coalesce(max(offset),0) FROM event_journal",
         [],
         |r| r.get(0),
-    )?)
+    )?;
+    let seq: u64 = db
+        .conn
+        .query_row(
+            "SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name='event_journal'), 0)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(max_offset.max(seq))
 }
 fn page(db: Db<'_>, after: u64, limit: usize) -> Result<Vec<JournalEvent>> {
     let mut q=db.conn.prepare("SELECT j.offset,e.data FROM event_journal j JOIN events e ON e.id=j.event_id WHERE j.offset>?1 ORDER BY j.offset LIMIT ?2")?;
@@ -25,10 +40,12 @@ fn page(db: Db<'_>, after: u64, limit: usize) -> Result<Vec<JournalEvent>> {
 pub(super) fn pump(db: Db<'_>, config: &Config) -> Result<()> {
     super::workflow::reconcile(db)?;
     let top = highwater(db)?;
+    let mut min_enabled_cursor: Option<u64> = None;
     for mut sub in db.list::<EventSubscription>()? {
         if !sub.enabled {
             continue;
         }
+        let initial_cursor = sub.cursor;
         for row in page(db, sub.cursor, 256)? {
             if row.offset > top {
                 break;
@@ -86,10 +103,23 @@ pub(super) fn pump(db: Db<'_>, config: &Config) -> Result<()> {
             }
             sub.cursor = row.offset;
         }
-        db.save(&sub)?;
+        if sub.cursor != initial_cursor {
+            db.save(&sub)?;
+        }
+        min_enabled_cursor = Some(match min_enabled_cursor {
+            Some(prev) => prev.min(sub.cursor),
+            None => sub.cursor,
+        });
     }
-    for mut d in db
-        .list::<EventDelivery>()?
+    let pending_deliveries: Vec<EventDelivery> = {
+        let mut q = db.conn.prepare(
+            "SELECT data FROM event_deliveries WHERE json_extract(data, '$.state') = 'pending' ORDER BY rowid",
+        )?;
+        let rows = q.query_map([], |r| r.get::<_, String>(0))?;
+        rows.map(|r| Ok(serde_json::from_str::<EventDelivery>(&r?)?))
+            .collect::<Result<Vec<_>>>()?
+    };
+    for mut d in pending_deliveries
         .into_iter()
         .filter(|d| {
             matches!(d.target, SubscriptionTarget::Workflow { .. })
@@ -209,6 +239,17 @@ pub(super) fn pump(db: Db<'_>, config: &Config) -> Result<()> {
             }
         }
         db.save(&d)?;
+    }
+    let current_ts = now();
+    let last_prune = LAST_CARDLESS_PRUNE_AT.load(Ordering::Relaxed);
+    if current_ts.saturating_sub(last_prune) >= PRUNE_INTERVAL_MS
+        && LAST_CARDLESS_PRUNE_AT
+            .compare_exchange(last_prune, current_ts, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        let safe_offset = min_enabled_cursor.unwrap_or(top);
+        let _ =
+            db.prune_cardless_events(CARDLESS_RETENTION_MS, CARDLESS_KEEP_RECENT, safe_offset)?;
     }
     Ok(())
 }

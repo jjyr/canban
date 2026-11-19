@@ -832,11 +832,12 @@ fn render_narrative(
                                             if crate::APP.get().is_none() {
                                                 let card_id = confirm_card.clone();
                                                 let cid = confirm_cid.clone();
-                                                ui.snapshot.update(|s| {
-                                                    if let Some(ev) =
-                                                        s.events.iter_mut().find(|e| {
-                                                            e.card_id == card_id && e.id == cid
-                                                        })
+                                                ui.card_timelines.update(|timelines| {
+                                                    if let Some(st) = timelines.get_mut(&card_id)
+                                                        && let Some(ev) = st
+                                                            .events
+                                                            .iter_mut()
+                                                            .find(|e| e.id == cid)
                                                     {
                                                         ev.kind = "comment.deleted".into();
                                                         ev.message = "Comment deleted".into();
@@ -927,11 +928,9 @@ fn render_narrative(
                             body.set(updated.clone());
                             let card_id = save_card.clone();
                             let cid = save_cid.clone();
-                            ui.snapshot.update(|s| {
-                                if let Some(ev) = s
-                                    .events
-                                    .iter_mut()
-                                    .find(|e| e.card_id == card_id && e.id == cid)
+                            ui.card_timelines.update(|timelines| {
+                                if let Some(st) = timelines.get_mut(&card_id)
+                                    && let Some(ev) = st.events.iter_mut().find(|e| e.id == cid)
                                 {
                                     let rev = ev.data["revision"].as_u64().unwrap_or(1) + 1;
                                     ev.message = updated.clone();

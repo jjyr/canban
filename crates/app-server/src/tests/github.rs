@@ -105,8 +105,9 @@ fn legacy_remote_mirror_moves_to_disposable_cache_without_losing_local_history()
     drop(db);
     let migrated = AppServer::open(home.clone(), PathBuf::from("/bin/echo")).unwrap();
     let s = migrated.snapshot().unwrap();
-    assert!(s.events.iter().any(|e| e.message == "LOCAL_HISTORY"));
-    assert!(!s.events.iter().any(|e| e.message == "REMOTE_HISTORY"));
+    let evs = migrated.events().unwrap();
+    assert!(evs.iter().any(|e| e.message == "LOCAL_HISTORY"));
+    assert!(!evs.iter().any(|e| e.message == "REMOTE_HISTORY"));
     assert_eq!(s.cards[0].id, c.id);
     assert!(
         std::fs::read_to_string(home.join("cache/github/legacy/v8.json"))
@@ -769,16 +770,14 @@ steps:
     assert_eq!(summary1.running, 1);
     assert_eq!(summary1.failed_checks[0].name, "clippy");
 
-    let failed_events: Vec<_> = snap1
-        .events
+    let evs1 = app.events().unwrap();
+    let failed_events: Vec<_> = evs1
         .iter()
         .filter(|e| e.card_id == card.id && e.kind == "github.pr.ci_failed")
         .collect();
     assert_eq!(failed_events.len(), 1);
     assert!(
-        snap1
-            .events
-            .iter()
+        evs1.iter()
             .any(|e| e.card_id == card.id && e.kind == "github.pr_linked")
     );
     let wf_run = snap1
@@ -797,10 +796,9 @@ steps:
     // Repeated refresh on the same SHA & outcome must not emit a duplicate failure event.
     app.call("github.pr.refresh", json!({"card_id": card.id}))
         .unwrap();
-    let snap2 = app.snapshot().unwrap();
     assert_eq!(
-        snap2
-            .events
+        app.events()
+            .unwrap()
             .iter()
             .filter(|e| e.card_id == card.id && e.kind == "github.pr.ci_failed")
             .count(),
@@ -855,8 +853,8 @@ steps:
         .unwrap();
     assert_eq!(pr3.checks, "success");
     assert_eq!(
-        snap3
-            .events
+        app.events()
+            .unwrap()
             .iter()
             .filter(|e| e.card_id == card.id && e.kind == "github.pr.ci_succeeded")
             .count(),
@@ -1069,8 +1067,15 @@ fn pr_activity_updates_record_commits_comments_reviews_and_hydrate_ephemeral_bod
             .is_some_and(|a| a.starts_with("Changes requested on PR #149"))
     );
 
-    let updated_ev = snap
-        .events
+    let page = app
+        .call(
+            "timeline.list",
+            json!({"card_id": card.id, "view": "full", "tail": true, "limit": 100}),
+        )
+        .unwrap();
+    let page_events: Vec<Event> = serde_json::from_value(page["events"].clone()).unwrap();
+
+    let updated_ev = page_events
         .iter()
         .find(|e| e.card_id == card.id && e.kind == "github.pr.updated")
         .unwrap();
@@ -1079,8 +1084,7 @@ fn pr_activity_updates_record_commits_comments_reviews_and_hydrate_ephemeral_bod
         Some("2222222 · Fix edge case")
     );
 
-    let issue_cmt = snap
-        .events
+    let issue_cmt = page_events
         .iter()
         .find(|e| {
             e.card_id == card.id
@@ -1093,8 +1097,7 @@ fn pr_activity_updates_record_commits_comments_reviews_and_hydrate_ephemeral_bod
         Some("Remote PR discussion body should stay ephemeral")
     );
 
-    let inline_cmt = snap
-        .events
+    let inline_cmt = page_events
         .iter()
         .find(|e| {
             e.card_id == card.id
@@ -1108,8 +1111,7 @@ fn pr_activity_updates_record_commits_comments_reviews_and_hydrate_ephemeral_bod
     );
     assert_eq!(inline_cmt.data["line"].as_u64(), Some(42));
 
-    let review_ev = snap
-        .events
+    let review_ev = page_events
         .iter()
         .find(|e| e.card_id == card.id && e.kind == "github.pr.reviewed")
         .unwrap();
@@ -1298,17 +1300,16 @@ steps:
     app.pump_scripts().unwrap();
 
     let snap = app.snapshot().unwrap();
+    let evs = app.events().unwrap();
     // Canonical actor format `github:<login>` (never numeric ID)
-    let opened_ev = snap
-        .events
+    let opened_ev = evs
         .iter()
         .find(|e| e.kind == "github.issue.opened" && e.data["number"] == 11)
         .expect("post-baseline issue #11 emits github.issue.opened");
     assert_eq!(opened_ev.actor, "github:alice");
     assert_eq!(opened_ev.data["self_action"], false);
     assert!(
-        snap.events
-            .iter()
+        evs.iter()
             .any(|e| e.kind == "github.issue.discovered" && e.data["number"] == 10),
         "pre-baseline issue #10 must emit discovered, not opened"
     );
@@ -1427,9 +1428,8 @@ fn github_receipt_marks_self_action_and_pr_card_avoids_double_fire() {
         })
         .unwrap();
 
-    let snap = app.snapshot().unwrap();
-    let receipt_ev = snap
-        .events
+    let evs = app.events().unwrap();
+    let receipt_ev = evs
         .iter()
         .find(|e| e.kind == "github.issue.comment_created" && e.data["item_id"] == 8888)
         .expect("issue comment event");
@@ -1439,9 +1439,7 @@ fn github_receipt_marks_self_action_and_pr_card_avoids_double_fire() {
         "receipt-tracked comment ID must mark self_action=true even across different GitHub logins"
     );
     assert!(
-        !snap
-            .events
-            .iter()
+        !evs.iter()
             .any(|e| e.kind == "github.pr.comment_created" && e.data["number"] == 77),
         "PR with linked Card must not emit duplicate github.pr.comment_created alongside github.pr.commented"
     );
@@ -1541,4 +1539,135 @@ fn host_terminal_env_mode_save_and_refresh_rpc() {
     assert!(refreshed["shell"].is_string());
     assert!(refreshed["var_count"].is_u64());
     assert!(refreshed["full_env_captured"].is_boolean());
+}
+
+#[test]
+fn github_observation_canonicalizes_labels_and_head_across_api_and_compact_shapes() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("canban")).unwrap();
+
+    // 1. Observe a PR using raw GitHub REST API JSON (rich label objects + nested head.repo).
+    let rest_pr = json!({
+        "id": 9001,
+        "number": 1754,
+        "title": "Bump crate",
+        "body": null,
+        "state": "open",
+        "draft": false,
+        "merged": false,
+        "html_url": "https://github.com/acme/widgets/pull/1754",
+        "updated_at": "2026-11-16T01:55:27Z",
+        "user": {"id": 49699333, "login": "dependabot[bot]"},
+        "pull_request": {"url": "https://api.github.com/repos/acme/widgets/pulls/1754"},
+        "labels": [
+            {"id": 2, "name": "rust", "color": "ededed"},
+            {"id": 1, "name": "dependencies", "color": "0366d6"}
+        ],
+        "assignees": [{"id": 7, "login": "Alice"}],
+        "requested_reviewers": [{"id": 8, "login": "Bob"}],
+        "head": {
+            "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "ref": "dependabot/cargo/foo",
+            "repo": {"pushed_at": "2026-11-16T01:00:00Z", "open_issues_count": 10}
+        }
+    });
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            crate::events::github::observe_batch(db, "acme/widgets", &[rest_pr], Some("pr"))
+        })
+        .unwrap();
+
+    // 2. Re-observe the exact same PR via compact models::Issue shape (only `{name}`, different order,
+    //    `body: ""`) AND via a second REST fetch with mutated volatile `head.repo` counters.
+    let compact_issue = json!({
+        "id": 9001,
+        "number": 1754,
+        "title": "Bump crate",
+        "body": "",
+        "state": "open",
+        "html_url": "https://github.com/acme/widgets/pull/1754",
+        "updated_at": "2026-11-16T01:55:27Z",
+        "user": {"id": 49699333, "login": "dependabot[bot]"},
+        "pull_request": {},
+        "labels": [{"name": "dependencies"}, {"name": "rust"}],
+        "assignees": ["alice"],
+        "requested_reviewers": ["bob"],
+        "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    });
+    let rest_pr_volatile_repo = json!({
+        "id": 9001,
+        "number": 1754,
+        "title": "Bump crate",
+        "body": null,
+        "state": "open",
+        "draft": false,
+        "merged": false,
+        "html_url": "https://github.com/acme/widgets/pull/1754",
+        "updated_at": "2026-11-16T01:55:27Z",
+        "user": {"id": 49699333, "login": "dependabot[bot]"},
+        "pull_request": {"url": "https://api.github.com/repos/acme/widgets/pulls/1754"},
+        "labels": [{"id": 1, "name": "dependencies", "color": "0366d6"}, {"id": 2, "name": "rust", "color": "ededed"}],
+        "assignees": [{"id": 7, "login": "alice"}],
+        "requested_reviewers": [{"id": 8, "login": "bob"}],
+        "head": {
+            "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "ref": "dependabot/cargo/foo",
+            "repo": {"pushed_at": "2026-11-19T21:00:00Z", "open_issues_count": 99}
+        }
+    });
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            crate::events::github::observe_batch(db, "acme/widgets", &[compact_issue], Some("pr"))?;
+            crate::events::github::observe_batch(
+                db,
+                "acme/widgets",
+                &[rest_pr_volatile_repo],
+                Some("pr"),
+            )
+        })
+        .unwrap();
+
+    let evs = app.events().unwrap();
+    let spurious: Vec<_> = evs
+        .iter()
+        .filter(|e| e.kind != "github.pr.discovered")
+        .map(|e| e.kind.as_str())
+        .collect();
+    assert!(
+        spurious.is_empty(),
+        "alternating compact/REST shapes must not emit spurious events: {spurious:?}"
+    );
+
+    // 3. Real label and head SHA changes must still emit labels_changed and head_changed.
+    let changed_pr = json!({
+        "id": 9001,
+        "number": 1754,
+        "title": "Bump crate",
+        "body": null,
+        "state": "open",
+        "draft": false,
+        "merged": false,
+        "html_url": "https://github.com/acme/widgets/pull/1754",
+        "updated_at": "2026-11-16T02:00:00Z",
+        "user": {"id": 49699333, "login": "dependabot[bot]"},
+        "pull_request": {"url": "https://api.github.com/repos/acme/widgets/pulls/1754"},
+        "labels": [{"id": 1, "name": "dependencies"}, {"id": 3, "name": "automerge"}],
+        "head": {"sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+    });
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            crate::events::github::observe_batch(db, "acme/widgets", &[changed_pr], Some("pr"))
+        })
+        .unwrap();
+
+    let evs = app.events().unwrap();
+    let kinds: Vec<_> = evs.iter().map(|e| e.kind.as_str()).collect();
+    assert!(kinds.contains(&"github.pr.labels_changed"), "{kinds:?}");
+    assert!(kinds.contains(&"github.pr.head_changed"), "{kinds:?}");
 }

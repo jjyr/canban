@@ -3,10 +3,52 @@ use canban_types::Config;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, BufWriter, Read, Write},
     process::{Command, Stdio},
     time::Duration,
 };
+
+pub(crate) const MAX_JSON_FRAME_BYTES: u64 = 48 * 1024 * 1024;
+
+pub(crate) fn write_json_line<W: Write + ?Sized>(
+    writer: &mut W,
+    value: &Value,
+) -> std::io::Result<()> {
+    serde_json::to_writer(&mut *writer, value)?;
+    writer.write_all(b"\n")?;
+    writer.flush()
+}
+
+pub(crate) fn read_bounded_json_line_into(
+    reader: &mut impl BufRead,
+    line: &mut String,
+    max_bytes: u64,
+) -> std::io::Result<()> {
+    line.clear();
+    let n = reader.by_ref().take(max_bytes + 1).read_line(line)?;
+    if line.len() as u64 > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Herdr frame too large",
+        ));
+    }
+    if n == 0 || !line.ends_with('\n') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "Herdr disconnected before completing frame",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn read_bounded_json_line(
+    reader: &mut impl BufRead,
+    max_bytes: u64,
+) -> std::io::Result<String> {
+    let mut line = String::new();
+    read_bounded_json_line_into(reader, &mut line, max_bytes)?;
+    Ok(line)
+}
 
 /// Default Ghostty terminal identity injected when starting or launching Herdr PTYs
 /// unless explicitly overridden by caller `env` or configured `hc_env`.

@@ -52,11 +52,9 @@ fn apply_all_cards_read_local(ui: Ui, project_scope: Option<&str>) -> Vec<canban
             .collect();
         for (cid, pid) in cards {
             let max_seq = s
-                .events
-                .iter()
-                .filter(|e| e.card_id == cid)
-                .map(|e| e.sequence)
-                .max()
+                .card_summaries
+                .get(&cid)
+                .map(|summary| summary.last_event_seq)
                 .unwrap_or(0);
             if max_seq == 0 {
                 continue;
@@ -1189,33 +1187,24 @@ fn describe_row(snapshot: &canban_types::Snapshot, row: &OverviewRow) -> RowEven
     }
 }
 
-fn describe_unread_update(
-    snapshot: &canban_types::Snapshot,
-    card_id: &str,
-    latest: Option<&canban_notifications::Reminder>,
-) -> RowEvent {
+fn describe_unread_update(latest: Option<&canban_notifications::Reminder>) -> RowEvent {
     let raw_msg = latest.map(|i| i.message.as_str()).unwrap_or("");
-    let matched_event = latest.and_then(|rem| {
-        snapshot
-            .events
-            .iter()
-            .filter(|e| e.card_id == card_id && e.sequence == rem.sequence)
-            .max_by_key(|e| e.created_at)
-    });
+    let matched_event = latest.and_then(|rem| rem.event.as_ref());
     let agent_tag = matched_event
         .and_then(|e| e.actor.strip_prefix("agent:"))
         .map(|a| format!("@{a}"));
 
     if let Some(ev) = matched_event {
         if ev.kind == "github.pr.ci_succeeded" {
-            let number = ev.data["number"].as_u64().unwrap_or(0);
+            let number = ev.pr_number.unwrap_or(0);
             let headline = if number > 0 {
                 format!("CI passed · PR #{number}")
             } else {
                 "CI passed".into()
             };
-            let detail = ev.data["summary"]
-                .as_str()
+            let detail = ev
+                .summary
+                .as_deref()
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned)
                 .or_else(|| {
@@ -1231,14 +1220,15 @@ fn describe_unread_update(
             };
         }
         if ev.kind == "github.pr.ci_failed" {
-            let number = ev.data["number"].as_u64().unwrap_or(0);
+            let number = ev.pr_number.unwrap_or(0);
             let headline = if number > 0 {
                 format!("CI failed · PR #{number}")
             } else {
                 "CI failed".into()
             };
-            let detail = ev.data["summary"]
-                .as_str()
+            let detail = ev
+                .summary
+                .as_deref()
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned)
                 .or_else(|| {
@@ -1254,18 +1244,17 @@ fn describe_unread_update(
             };
         }
         if ev.kind == "github.pr.updated" {
-            let number = ev.data["number"].as_u64().unwrap_or(0);
+            let number = ev.pr_number.unwrap_or(0);
             let headline = if number > 0 {
                 format!("PR #{number} updated")
             } else {
                 "PR updated".into()
             };
-            let detail = ev.data["commits"]
-                .as_array()
-                .and_then(|c| c.first())
-                .and_then(|c| c.as_str().or_else(|| c["message"].as_str()))
-                .map(|m| m.lines().next().unwrap_or("").trim().to_owned())
+            let detail = ev
+                .summary
+                .as_deref()
                 .filter(|s| !s.is_empty())
+                .map(str::to_owned)
                 .or_else(|| {
                     let s = strip_machine_prefix(raw_msg);
                     (!s.is_empty()).then_some(s)
@@ -1284,17 +1273,17 @@ fn describe_unread_update(
                 .strip_prefix("github:")
                 .map(|g| format!("@{g}"))
                 .unwrap_or_else(|| ev.actor.clone());
-            let number = ev.data["number"].as_u64().unwrap_or(0);
+            let number = ev.pr_number.unwrap_or(0);
             let headline = if number > 0 {
                 format!("{author} commented · PR #{number}")
             } else {
                 format!("{author} commented on PR")
             };
-            let detail = ev.data["projected_body"]
-                .as_str()
-                .and_then(|b| b.lines().find(|l| !l.trim().is_empty()))
-                .map(|l| l.trim().to_owned())
+            let detail = ev
+                .summary
+                .as_deref()
                 .filter(|s| !s.is_empty())
+                .map(str::to_owned)
                 .or_else(|| {
                     let s = strip_machine_prefix(raw_msg);
                     (!s.is_empty()).then_some(s)
@@ -1313,8 +1302,8 @@ fn describe_unread_update(
                 .strip_prefix("github:")
                 .map(|g| format!("@{g}"))
                 .unwrap_or_else(|| ev.actor.clone());
-            let number = ev.data["number"].as_u64().unwrap_or(0);
-            let state = ev.data["state"].as_str().unwrap_or("");
+            let number = ev.pr_number.unwrap_or(0);
+            let state = ev.state.as_deref().unwrap_or("");
             let (icon, tone, verb) = match state {
                 "APPROVED" => (Icon::Check, Tone::Success, "approved"),
                 "CHANGES_REQUESTED" => (Icon::Edit, Tone::Danger, "requested changes on"),
@@ -1326,11 +1315,11 @@ fn describe_unread_update(
             } else {
                 format!("{author} {verb} PR")
             };
-            let detail = ev.data["projected_body"]
-                .as_str()
-                .and_then(|b| b.lines().find(|l| !l.trim().is_empty()))
-                .map(|l| l.trim().to_owned())
+            let detail = ev
+                .summary
+                .as_deref()
                 .filter(|s| !s.is_empty())
+                .map(str::to_owned)
                 .or_else(|| {
                     let s = strip_machine_prefix(raw_msg);
                     (!s.is_empty()).then_some(s)
@@ -1344,11 +1333,8 @@ fn describe_unread_update(
             };
         }
         if ev.kind == "github.pr.state_changed" {
-            let number = ev.data["number"].as_u64().unwrap_or(0);
-            let to = ev.data["state"]
-                .as_str()
-                .or_else(|| ev.data["to"].as_str())
-                .unwrap_or("updated");
+            let number = ev.pr_number.unwrap_or(0);
+            let to = ev.state.as_deref().unwrap_or("updated");
             let state_label = match to {
                 "ready_for_review" => "ready for review",
                 _ => to,
@@ -1392,7 +1378,7 @@ fn describe_unread_update(
             };
         }
         if ev.kind == "execution.reported" {
-            let state = ev.data["state"].as_str().unwrap_or("completed");
+            let state = ev.state.as_deref().unwrap_or("completed");
             let detail = strip_machine_prefix(raw_msg);
             let detail_opt = (!detail.is_empty()).then_some(detail);
             return match state {
@@ -2272,14 +2258,12 @@ fn unread_updates(ui: Ui, scope: Option<&str>) -> Option<SectionGroup> {
             .iter()
             .filter(|i| i.card_id == id && i.unread)
             .max_by_key(|i| i.sequence);
-        let event = describe_unread_update(&s, &id, latest);
+        let event = describe_unread_update(latest);
         let sequence = latest.map(|i| i.sequence);
         let max_seq = s
-            .events
-            .iter()
-            .filter(|e| e.card_id == id)
-            .map(|e| e.sequence)
-            .max()
+            .card_summaries
+            .get(&id)
+            .map(|summary| summary.last_event_seq)
             .unwrap_or(0);
         let unread_count = counts[&id].unread;
         let project = s
@@ -2300,47 +2284,11 @@ fn unread_updates(ui: Ui, scope: Option<&str>) -> Option<SectionGroup> {
         );
         let extra_pill =
             (unread_count > 1).then(|| badge(format!("+{}", unread_count - 1)).into_element());
-        let latest_pr_action: Option<(String, &'static str)> = latest.and_then(|rem| {
-            let ev = s
-                .events
-                .iter()
-                .filter(|e| e.card_id == id && e.sequence == rem.sequence)
-                .max_by_key(|e| e.created_at)?;
-            match ev.kind.as_str() {
-                "github.pr.ci_succeeded" | "github.pr.ci_failed" => ev.data["failed_checks"]
-                    .as_array()
-                    .filter(|arr| arr.len() == 1)
-                    .and_then(|arr| arr[0]["url"].as_str())
-                    .filter(|u| !u.is_empty())
-                    .or_else(|| ev.data["checks_url"].as_str().filter(|u| !u.is_empty()))
-                    .or_else(|| ev.data["url"].as_str().filter(|u| !u.is_empty()))
-                    .map(|u| (u.to_owned(), "Checks ↗")),
-                "github.pr.updated" => ev.data["diff_url"]
-                    .as_str()
-                    .filter(|u| !u.is_empty())
-                    .map(|u| (u.to_owned(), "Diff ↗"))
-                    .or_else(|| {
-                        ev.data["url"]
-                            .as_str()
-                            .filter(|u| !u.is_empty())
-                            .map(|u| (u.to_owned(), "PR ↗"))
-                    }),
-                "github.pr.commented" => ev.data["url"]
-                    .as_str()
-                    .filter(|u| !u.is_empty())
-                    .or_else(|| ev.data["pr_url"].as_str().filter(|u| !u.is_empty()))
-                    .map(|u| (u.to_owned(), "View ↗")),
-                "github.pr.reviewed" => ev.data["url"]
-                    .as_str()
-                    .filter(|u| !u.is_empty())
-                    .or_else(|| ev.data["pr_url"].as_str().filter(|u| !u.is_empty()))
-                    .map(|u| (u.to_owned(), "Review ↗")),
-                "github.pr.state_changed" => ev.data["url"]
-                    .as_str()
-                    .filter(|u| !u.is_empty())
-                    .map(|u| (u.to_owned(), "PR ↗")),
-                _ => None,
-            }
+        let latest_pr_action: Option<(String, String)> = latest.and_then(|rem| {
+            let meta = rem.event.as_ref()?;
+            let url = meta.action_url.as_deref().filter(|u| !u.is_empty())?;
+            let label = meta.action_label.as_deref().filter(|l| !l.is_empty())?;
+            Some((url.to_owned(), label.to_owned()))
         });
 
         let mut row_view = view()
@@ -2598,7 +2546,7 @@ mod tests {
     fn describe_unread_update_strips_machine_prefixes_and_maps_semantic_icons() {
         let mut s = canban_types::Snapshot::default();
         s.cards.push(base_card());
-        s.events.push(canban_types::Event {
+        let mut events = vec![canban_types::Event {
             id: "e1".into(),
             project_id: "p1".into(),
             card_id: "c1".into(),
@@ -2608,16 +2556,17 @@ mod tests {
             message: "已整理好 ASCII 方案，请确认".into(),
             data: json!({"question_id": "q1"}),
             created_at: 1,
-        });
+        }];
+        s.reminders = canban_notifications::reminders_from_events(&s, &events);
         let items = canban_notifications::reminders(&s);
-        let ev = describe_unread_update(&s, "c1", items.first());
+        let ev = describe_unread_update(items.first());
         assert_eq!(ev.icon, Icon::MessageSquare);
         assert_eq!(ev.tone, Tone::Info);
         assert_eq!(ev.headline, "@agy replied");
         assert_eq!(ev.detail.as_deref(), Some("已整理好 ASCII 方案，请确认"));
 
         // Stage completed report strips `completed: ` prefix.
-        s.events.push(canban_types::Event {
+        events.push(canban_types::Event {
             id: "e2".into(),
             project_id: "p1".into(),
             card_id: "c1".into(),
@@ -2628,16 +2577,17 @@ mod tests {
             data: json!({"report_id": "r2", "state": "completed"}),
             created_at: 2,
         });
+        s.reminders = canban_notifications::reminders_from_events(&s, &events);
         let items = canban_notifications::reminders(&s);
         let latest = items.iter().max_by_key(|i| i.sequence);
-        let done_ev = describe_unread_update(&s, "c1", latest);
+        let done_ev = describe_unread_update(latest);
         assert_eq!(done_ev.icon, Icon::Check);
         assert_eq!(done_ev.tone, Tone::Success);
         assert_eq!(done_ev.headline, "Stage completed · @developer");
         assert_eq!(done_ev.detail.as_deref(), Some("All unit tests passed"));
 
         // Returned to Backlog strips `Returned to Backlog: ` prefix.
-        s.events.push(canban_types::Event {
+        events.push(canban_types::Event {
             id: "e3".into(),
             project_id: "p1".into(),
             card_id: "c1".into(),
@@ -2648,9 +2598,10 @@ mod tests {
             data: json!({"report_id": "r3", "state": "backlog"}),
             created_at: 3,
         });
+        s.reminders = canban_notifications::reminders_from_events(&s, &events);
         let items = canban_notifications::reminders(&s);
         let latest = items.iter().max_by_key(|i| i.sequence);
-        let backlog_ev = describe_unread_update(&s, "c1", latest);
+        let backlog_ev = describe_unread_update(latest);
         assert_eq!(backlog_ev.icon, Icon::Undo);
         assert_eq!(backlog_ev.tone, Tone::Neutral);
         assert_eq!(backlog_ev.headline, "Returned to Backlog");
@@ -3029,7 +2980,7 @@ mod tests {
                 .unwrap(),
             );
             s.cards.push(base_card());
-            s.events.push(canban_types::Event {
+            let events = vec![canban_types::Event {
                 id: "e1".into(),
                 project_id: "p1".into(),
                 card_id: "c1".into(),
@@ -3039,7 +2990,15 @@ mod tests {
                 message: unread_msg.into(),
                 data: json!({"question_id": "q1"}),
                 created_at: 10,
-            });
+            }];
+            s.reminders = canban_notifications::reminders_from_events(&s, &events);
+            s.card_summaries.insert(
+                "c1".into(),
+                canban_types::CardEventSummary {
+                    last_event_seq: 1,
+                    reply_count: 1,
+                },
+            );
             if running {
                 let mut managed = canban_scheduler::agent_run(
                     "p1",

@@ -2,7 +2,7 @@
 use super::*;
 mod browse;
 pub(super) mod delivery;
-mod projection;
+pub(crate) mod projection;
 pub(super) mod worker;
 use canban_kanban::github::{self as integration, Change};
 impl AppServer {

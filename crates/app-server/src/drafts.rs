@@ -82,6 +82,6 @@ mod tests {
                 .to_string()
                 .contains("draft_conflict")
         );
-        assert!(app.snapshot().unwrap().events.is_empty());
+        assert!(app.events().unwrap().is_empty());
     }
 }

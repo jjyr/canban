@@ -565,6 +565,73 @@ impl Db<'_> {
         Ok(snapshot)
     }
 
+    pub fn events_for_card(&self, card_id: &str) -> Result<Vec<Event>> {
+        let mut q = self
+            .conn
+            .prepare("SELECT data FROM events WHERE card_id=?1 ORDER BY number")?;
+        let rows = q.query_map([card_id], |r| r.get::<_, String>(0))?;
+        rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
+    }
+
+    pub fn card_events(&self) -> Result<Vec<Event>> {
+        let mut q = self.conn.prepare(
+            "SELECT data FROM events WHERE card_id IS NOT NULL ORDER BY card_id, number",
+        )?;
+        let rows = q.query_map([], |r| r.get::<_, String>(0))?;
+        rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
+    }
+
+    pub fn prune_cardless_events(
+        &self,
+        max_age_ms: u64,
+        keep_recent: usize,
+        max_journal_offset: u64,
+    ) -> Result<usize> {
+        let cutoff = now().saturating_sub(max_age_ms);
+        let mut q = self.conn.prepare(
+            "SELECT e.id, COALESCE(CAST(json_extract(e.data, '$.created_at') AS INTEGER), 0) AS created_at \
+             FROM events e \
+             JOIN event_journal j ON j.event_id = e.id \
+             WHERE e.card_id IS NULL \
+               AND j.offset <= ?1 \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM event_deliveries d \
+                   WHERE json_extract(d.data, '$.event_id') = e.id \
+                     AND json_extract(d.data, '$.state') = 'pending' \
+               ) \
+             ORDER BY j.offset DESC",
+        )?;
+        let rows = q
+            .query_map(params![max_journal_offset], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let to_delete: Vec<String> = rows
+            .into_iter()
+            .enumerate()
+            .filter_map(|(idx, (id, created_at))| {
+                if idx >= keep_recent || created_at < cutoff {
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if to_delete.is_empty() {
+            return Ok(0);
+        }
+        // Delete from event_journal before events (FK event_journal.event_id REFERENCES events(id)).
+        let mut del_journal = self
+            .conn
+            .prepare("DELETE FROM event_journal WHERE event_id = ?1")?;
+        let mut del_event = self.conn.prepare("DELETE FROM events WHERE id = ?1")?;
+        for id in &to_delete {
+            del_journal.execute([id])?;
+            del_event.execute([id])?;
+        }
+        Ok(to_delete.len())
+    }
+
     pub fn timeline_page(&self, card: &str, after: u64, limit: usize) -> Result<Vec<Event>> {
         let mut span = canban_profiler::Span::new("timeline.load");
         let mut query = self.conn.prepare(
@@ -619,7 +686,7 @@ impl Db<'_> {
             scheduled_runs: self.list()?,
             card_reads: self.list()?,
             github: Default::default(),
-            github_issues: self.list()?,
+            github_issues: Vec::new(),
             worktrees: self.list()?,
             terminals: self.list()?,
             terminal_contexts: Vec::new(),
@@ -630,7 +697,6 @@ impl Db<'_> {
                 .into_iter()
                 .filter(|c| c.removed_at.is_none())
                 .collect(),
-            events: self.list()?,
             reports: self.list()?,
             notes: self.list()?,
             notices: self.list()?,

@@ -440,7 +440,9 @@ impl Snapshot {
         self.scheduled_runs.extend(remote.scheduled_runs);
         self.card_reads.extend(remote.card_reads);
         self.github_issues.extend(remote.github_issues);
-        self.events.extend(remote.events);
+        self.card_summaries.extend(remote.card_summaries);
+        self.reminders.extend(remote.reminders);
+        self.sound_event_ids.extend(remote.sound_event_ids);
         self.reports.extend(remote.reports);
         self.notes.extend(remote.notes);
         self.notices.extend(remote.notices);

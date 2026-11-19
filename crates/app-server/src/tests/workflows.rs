@@ -34,8 +34,8 @@ fn manual_column_moves_dispatch_only_destination_and_record_resulting_card() {
             )
             .unwrap();
         let after = app.snapshot().unwrap();
-        let event = after
-            .events
+        let evs = app.events().unwrap();
+        let event = evs
             .iter()
             .rev()
             .find(|e| e.card_id == c.id && e.kind == "card.stage_changed")
@@ -117,10 +117,10 @@ fn admission_projection_matches_full_state_without_loading_history() {
     )
     .unwrap();
     let full = app.snapshot().unwrap();
-    assert!(!full.events.is_empty());
+    assert!(!full.card_summaries.is_empty());
     assert!(!full.questions.is_empty());
     let narrow = app.store.lock().unwrap().db().admission_snapshot().unwrap();
-    assert!(narrow.events.is_empty());
+    assert!(narrow.card_summaries.is_empty());
     assert!(narrow.workflow_revisions.is_empty());
     assert_eq!(narrow.questions, full.questions);
     assert_eq!(
@@ -347,9 +347,8 @@ fn event_workflows_use_final_card_binding_and_failures_do_not_rollback_source_co
     )
     .unwrap();
     assert!(
-        app.snapshot()
+        app.events()
             .unwrap()
-            .events
             .iter()
             .any(|e| e.message == "Still committed")
     );
@@ -453,7 +452,7 @@ fn remote_metadata_deduplication_survives_cache_clear_and_has_source_scope() {
         .unwrap();
     assert_eq!(events["events"].as_array().unwrap().len(), 2);
     assert_eq!(events["events"][1]["kind"], "github.issue.edited");
-    let persisted = serde_json::to_string(&app.snapshot().unwrap().events).unwrap();
+    let persisted = serde_json::to_string(&app.events().unwrap()).unwrap();
     assert!(!persisted.contains("DO_NOT_PERSIST"));
     assert!(!persisted.contains("CHANGED_SECRET"));
 }
@@ -555,7 +554,7 @@ fn complete_remote_collection_detects_removal_without_persisting_bodies() {
         .unwrap();
     assert_eq!(events["events"].as_array().unwrap().len(), 1);
     assert!(
-        !serde_json::to_string(&app.snapshot().unwrap().events)
+        !serde_json::to_string(&app.events().unwrap())
             .unwrap()
             .contains("PRIVATE BODY")
     );
@@ -639,9 +638,8 @@ fn compatible_continue_records_one_human_approval_fact() {
     )
     .unwrap();
     let facts = app
-        .snapshot()
+        .events()
         .unwrap()
-        .events
         .into_iter()
         .filter(|e| e.kind == "workflow.approved")
         .collect::<Vec<_>>();
@@ -1520,7 +1518,7 @@ fn default_workflow_queue_merge_syncs_upstream_and_respects_local_only_option() 
     let delivered_c1 = snap.cards.iter().find(|x| x.id == c1.id).unwrap();
     assert_eq!(delivered_c1.delivery.as_ref().unwrap().commit, merged_sha_1);
     assert!(
-        snap.events.iter().any(|e| {
+        app.events().unwrap().iter().any(|e| {
             e.card_id == c1.id && e.kind == "review.merged" && e.data["synced_upstream"] == true
         }),
         "review.merged event should record synced_upstream: true"
@@ -1601,9 +1599,8 @@ fn default_workflow_queue_merge_syncs_upstream_and_respects_local_only_option() 
         merged_sha_1,
         "Upstream remote must NOT advance when sync_upstream is false"
     );
-    let snap = app.snapshot().unwrap();
     assert!(
-        snap.events.iter().any(|e| {
+        app.events().unwrap().iter().any(|e| {
             e.card_id == c2.id && e.kind == "review.merged" && e.data["synced_upstream"] == false
         }),
         "review.merged event should record synced_upstream: false"
@@ -1912,7 +1909,7 @@ fn queue_merge_conflict_routes_to_agent_then_fast_forwards_after_resolution() {
     assert!(card.human_gate.is_none() && card.attention.is_none());
     assert!(card.delivery.is_none());
     assert_eq!(git_in(&source, &["rev-parse", "HEAD"]), target_before);
-    assert!(snap.events.iter().any(|e| e.card_id == c.id
+    assert!(app.events().unwrap().iter().any(|e| e.card_id == c.id
         && e.kind == "review.merge_conflict"
         && e.data["files"] == json!(["README.md"])));
     let resolve = snap
@@ -2364,7 +2361,7 @@ fn removing_a_column_returns_its_cards_to_the_first_column() {
     let snap = app.snapshot().unwrap();
     let card = snap.cards.iter().find(|x| x.id == c.id).unwrap();
     assert_eq!(card.stage, "backlog");
-    assert!(snap.events.iter().any(|e| e.card_id == c.id
+    assert!(app.events().unwrap().iter().any(|e| e.card_id == c.id
         && e.kind == "card.stage_changed"
         && e.data["reason"] == "column_removed"));
     let project = snap.projects.iter().find(|x| x.id == p.id).unwrap();
@@ -2842,7 +2839,8 @@ fn streamlined_prompt_omits_manifest_instruction_and_inlines_context_conditional
                 .is_some_and(|a| a.card_id == moved.id && a.state == "queued")
         })
         .unwrap();
-    let rel_prompt = canban_context::capture(&app.home, &p, &moved, req, &snap).unwrap();
+    let rel_prompt =
+        canban_context::capture(&app.home, &p, &moved, req, &snap, &app.events().unwrap()).unwrap();
     // Internal context.json remains persisted for audit/archival, never referenced in prompt.md.
     assert!(
         app.home
@@ -2890,7 +2888,15 @@ fn streamlined_prompt_omits_manifest_instruction_and_inlines_context_conditional
     let card2 = snap2.cards.iter().find(|x| x.id == c.id).unwrap();
     let mut next_att = attempt.clone();
     next_att.agent.as_mut().unwrap().number = 2;
-    let rel_prompt2 = canban_context::capture(&app.home, &p, card2, &next_att, &snap2).unwrap();
+    let rel_prompt2 = canban_context::capture(
+        &app.home,
+        &p,
+        card2,
+        &next_att,
+        &snap2,
+        &app.events().unwrap(),
+    )
+    .unwrap();
     let rich_prompt = std::fs::read_to_string(app.home.join(&rel_prompt2)).unwrap();
     assert!(!rich_prompt.contains("context.json"));
     assert!(rich_prompt.contains("## Card discussion"));
@@ -3033,11 +3039,8 @@ workspace:
     );
 
     // Timeline records both the Agent's narrative explanation and the stage return reason.
-    let card_events: Vec<_> = after
-        .events
-        .iter()
-        .filter(|e| e.card_id == card.id)
-        .collect();
+    let all_events = app.events().unwrap();
+    let card_events: Vec<_> = all_events.iter().filter(|e| e.card_id == card.id).collect();
     assert!(card_events.iter().any(|e| {
         e.kind == "execution.reported"
             && e.data["state"] == "backlog"
@@ -3430,9 +3433,15 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
     let term_entry = admit(&app, &req);
 
     // Prompt teaches both user-confirmed Card updates and permission-gated `card adopt`.
-    let prompt_rel =
-        canban_context::capture(&app.home, &p, &card, &term_entry, &app.snapshot().unwrap())
-            .unwrap();
+    let prompt_rel = canban_context::capture(
+        &app.home,
+        &p,
+        &card,
+        &term_entry,
+        &app.snapshot().unwrap(),
+        &app.events().unwrap(),
+    )
+    .unwrap();
     let prompt = std::fs::read_to_string(app.home.join(prompt_rel)).unwrap();
     assert!(prompt.contains("card update"));
     assert!(prompt.contains("card adopt"));
@@ -3464,9 +3473,8 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
     assert!(updated_card.body.contains("Confirmed Design"));
     assert_eq!(updated_card.stage, "backlog");
     let update_event = app
-        .snapshot()
+        .events()
         .unwrap()
-        .events
         .into_iter()
         .rev()
         .find(|e| e.card_id == card.id && e.kind == "card.updated")
@@ -3533,7 +3541,7 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
         .unwrap();
     assert_eq!(wf_run.state, "waiting_agent");
     assert_eq!(wf_run.terminal_id.as_deref(), Some(term_entry.id.as_str()));
-    assert!(after_adopt.events.iter().any(|e| {
+    assert!(app.events().unwrap().iter().any(|e| {
         e.card_id == card.id
             && e.kind == "card.stage_changed"
             && e.data["from"] == "backlog"
@@ -3783,8 +3791,8 @@ fn comment_session_completed_then_adopted_in_same_live_terminal_advances_to_merg
         .find(|r| r.id == run_id)
         .unwrap();
     assert_eq!(final_run.state, "completed");
-    let second_reported = final_snap
-        .events
+    let final_events = app.events().unwrap();
+    let second_reported = final_events
         .iter()
         .rev()
         .find(|e| e.card_id == card.id && e.kind == "execution.reported")
@@ -5552,8 +5560,8 @@ workspace:
     assert_eq!(run3.state, "waiting_approval");
     assert_eq!(run3.step.as_deref(), Some("script:timeout_check"));
     assert!(
-        snap3
-            .events
+        app.events()
+            .unwrap()
             .iter()
             .any(|e| e.kind == "workflow.script_failed" && e.message.contains("timed out"))
     );
@@ -6480,8 +6488,9 @@ fn batch_merge_queue_test_failure_supports_evicting_bad_card_and_delivering_rema
         .unwrap();
     assert_eq!(bad_run.state, "waiting_approval");
     assert!(
-        snap_after
-            .events
+        env.app
+            .events()
+            .unwrap()
             .iter()
             .any(|e| e.card_id == c2.id && e.kind == "review.batch_evicted"),
         "Evicted Card must record review.batch_evicted event"
@@ -7051,10 +7060,9 @@ fn batch_delivery_releases_main_checkout_gate_during_test_command_and_retries_ta
     std::fs::write(&continue_flag, "ok").unwrap();
     pump_thread.join().unwrap();
 
-    let mid_snap = app.snapshot().unwrap();
     assert!(
-        mid_snap
-            .events
+        app.events()
+            .unwrap()
             .iter()
             .any(|e| e.card_id == card.id && e.kind == "review.merge_retry"),
         "expected TargetAdvanced retry log after concurrent main commit"

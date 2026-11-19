@@ -748,7 +748,9 @@ mod tests {
             .map(|(id, _)| id)
             .expect("Review column scroll view");
 
-        // Scroll deep to the bottom (past 3x viewport height = ~2200pt where Card #29..#35 live).
+        // Scroll deep to the bottom (past 3x viewport height = ~2200pt).
+        // Resolved cards (#16..=#35, merged_at = base + n) sort by resolved_at descending,
+        // so the oldest resolved cards (#16..=#22) sit at the bottom of the Review column.
         let scroll_measure = core.measure(review_scroll).unwrap();
         let viewport_h = scroll_measure.frame.size.height.0;
         let (_, content, viewport, _) = core.scroll_listener(review_scroll).unwrap();
@@ -768,7 +770,7 @@ mod tests {
         pump(&mut core, &mut tree);
 
         let mounted = tree.mounted_texts();
-        for n in 29..=35 {
+        for n in 16..=22 {
             let expected_title = format!("Review Card Title #{n}");
             assert!(
                 mounted.contains(&expected_title),
@@ -790,7 +792,7 @@ mod tests {
         pump(&mut core, &mut tree);
 
         let mounted_after = tree.mounted_texts();
-        for n in 29..=35 {
+        for n in 16..=22 {
             let expected_title = format!("Review Card Title #{n}");
             let occurrences = tree
                 .texts

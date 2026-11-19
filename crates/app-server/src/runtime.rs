@@ -305,43 +305,55 @@ impl AppServer {
                     }
                 } else if now_instant >= next_fast_pr {
                     next_fast_pr = now_instant + Duration::from_secs(25);
-                    if let Ok(snapshot) = server.snapshot() {
-                        for c in snapshot.cards.into_iter().filter(|c| {
-                            if !c.active() || c.resolved() {
+                    let cards = server
+                        .store
+                        .lock()
+                        .unwrap()
+                        .db()
+                        .list::<Card>()
+                        .unwrap_or_default();
+                    let client = server.github_cached_client().ok();
+                    for c in cards.into_iter().filter(|c| {
+                        if !c.active() || c.resolved() {
+                            return false;
+                        }
+                        if let Some(pr) = &c.pull_request {
+                            return !pr.merged
+                                && matches!(
+                                    pr.checks.as_str(),
+                                    "" | "unknown" | "pending" | "running"
+                                );
+                        }
+                        if c.is_github_pr()
+                            && let Some(src) = c.github_issue()
+                            && let Some(client) = client.as_ref()
+                        {
+                            let is_open = client
+                                .cached::<Value>(&format!(
+                                    "/repos/{}/pulls/{}",
+                                    src.repository, src.number
+                                ))
+                                .is_some_and(|p| {
+                                    p["merged"] != true && p["state"].as_str() == Some("open")
+                                });
+                            if !is_open {
                                 return false;
                             }
-                            if let Some(pr) = &c.pull_request {
-                                return !pr.merged
-                                    && matches!(
-                                        pr.checks.as_str(),
-                                        "" | "unknown" | "pending" | "running"
-                                    );
-                            }
-                            if c.is_github_pr()
-                                && let Some(src) = c.github_issue()
-                            {
-                                return snapshot
-                                    .github_issues
-                                    .iter()
-                                    .find(|g| {
-                                        g.project_id == c.project_id
-                                            && g.source.repository_id == src.repository_id
-                                            && g.source.issue_id == src.issue_id
-                                    })
-                                    .is_some_and(|g| {
-                                        g.state == "open"
-                                            && g.pr_checks.as_ref().is_some_and(|ch| {
-                                                matches!(
-                                                    ch.state.as_str(),
-                                                    "running" | "pending" | "unknown"
-                                                )
-                                            })
-                                    });
-                            }
-                            false
-                        }) {
-                            let _ = server.github_pr_refresh(json!({"card_id":c.id}));
+                            return client
+                                .cached::<Value>(&format!(
+                                    "/repos/{}/pulls/{}/canban-summary",
+                                    src.repository, src.number
+                                ))
+                                .and_then(|s| {
+                                    s["checks_summary"]["state"].as_str().map(str::to_owned)
+                                })
+                                .is_some_and(|st| {
+                                    matches!(st.as_str(), "running" | "pending" | "unknown")
+                                });
                         }
+                        false
+                    }) {
+                        let _ = server.github_pr_refresh(json!({"card_id":c.id}));
                     }
                 }
                 drop(server);
@@ -353,6 +365,17 @@ impl AppServer {
             accept_handles,
         })
     }
+}
+
+pub(crate) fn write_json_line<W: Write>(writer: &mut W, value: &Value) -> std::io::Result<()> {
+    let mut buf = std::io::BufWriter::with_capacity(64 * 1024, writer);
+    serde_json::to_writer(&mut buf, value)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    buf.write_all(b"\n")?;
+    buf.flush()
+}
+
+impl AppServer {
     pub(super) fn serve(&self, mut stream: UnixStream) -> Result<()> {
         // macOS accept() can inherit O_NONBLOCK from the listener. Explicitly
         // use blocking per-client IO so large JSON frames cannot be truncated.
@@ -364,7 +387,7 @@ impl AppServer {
         loop {
             let mut line = String::new();
             let n = (&mut reader).take(48 * 1024 * 1024).read_line(&mut line)?;
-            if n == 0 {
+            if n == 0 || !line.ends_with('\n') {
                 return Ok(());
             }
             let input: Value = serde_json::from_str(&line)?;
@@ -390,8 +413,7 @@ impl AppServer {
             };
             {
                 let _span = canban_profiler::Span::new("rpc.encode");
-                writeln!(stream, "{reply}")?;
-                stream.flush()?;
+                write_json_line(&mut stream, &reply)?;
             }
             if self.stopped() {
                 return Ok(());
@@ -414,9 +436,9 @@ impl AppServer {
         let mut authed = false;
         loop {
             let mut line = String::new();
-            let max_frame = if authed { 48 * 1024 * 1024 } else { 64 * 1024 };
+            let max_frame = 48 * 1024 * 1024;
             let n = (&mut reader).take(max_frame).read_line(&mut line)?;
-            if n == 0 {
+            if n == 0 || !line.ends_with('\n') {
                 return Ok(());
             }
             let Some(this) = weak.upgrade() else {
@@ -432,8 +454,7 @@ impl AppServer {
             let method = strp(&input, "method")?;
             if method == "host.probe" && first {
                 let reply = json!({"jsonrpc":"2.0","id":id,"result":this.host_probe_payload()});
-                writeln!(stream, "{reply}")?;
-                stream.flush()?;
+                write_json_line(&mut stream, &reply)?;
                 first = false;
                 continue;
             }
@@ -449,8 +470,7 @@ impl AppServer {
                             "message": "Authentication required: invalid or missing server token"
                         }
                     });
-                    let _ = writeln!(stream, "{err_reply}");
-                    let _ = stream.flush();
+                    let _ = write_json_line(&mut stream, &err_reply);
                     let _ = stream.shutdown(std::net::Shutdown::Both);
                     return Ok(());
                 }
@@ -477,8 +497,7 @@ impl AppServer {
             };
             {
                 let _span = canban_profiler::Span::new("rpc.encode");
-                writeln!(stream, "{reply}")?;
-                stream.flush()?;
+                write_json_line(&mut stream, &reply)?;
             }
             if this.stopped() {
                 let _ = stream.shutdown(std::net::Shutdown::Both);
@@ -1255,8 +1274,21 @@ impl AppServer {
         } else {
             self.cli.clone()
         };
-        let input =
-            canban_context::capture_for(&self.home, &project, &prepared, entry, snapshot, &home)?;
+        let card_events = self
+            .store
+            .lock()
+            .unwrap()
+            .db()
+            .events_for_card(&prepared.id)?;
+        let input = canban_context::capture_for(
+            &self.home,
+            &project,
+            &prepared,
+            entry,
+            snapshot,
+            &card_events,
+            &home,
+        )?;
         if remote {
             self.stage_remote(&ops.host, &home, card)?;
         }

@@ -62,7 +62,14 @@ pub fn rpc(endpoint: &Path, method: &str, params: Value) -> Result<Value> {
         .as_bytes(),
     )?;
     let mut line = String::new();
-    BufReader::new(s).read_line(&mut line)?;
+    let n = BufReader::new(s).read_line(&mut line)?;
+    if n == 0 || !line.ends_with('\n') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "connection closed before completing frame",
+        )
+        .into());
+    }
     let r: Value = serde_json::from_str(&line)?;
     if let Some(error) = r.get("error") {
         bail!("RPC {method}: {error}");
@@ -174,6 +181,40 @@ mod tests {
         // whereas `flush_settled` leaves fresh (<2s) in-flight CLI files untouched.
         flush_settled(t.path()).unwrap();
         assert!(path.is_file());
+    }
+
+    #[test]
+    fn rpc_returns_unexpected_eof_on_truncated_or_empty_frame() {
+        use std::os::unix::net::UnixListener;
+
+        for payload in [
+            b"".as_slice(),
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let sock = dir.path().join("app.sock");
+            let listener = UnixListener::bind(&sock).unwrap();
+            let reply = payload.to_vec();
+            let handle = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut req = String::new();
+                let _ = BufReader::new(&stream).read_line(&mut req);
+                let _ = stream.write_all(&reply);
+                let _ = stream.flush();
+            });
+
+            let err = rpc(&sock, "test.ping", json!({})).unwrap_err();
+            handle.join().unwrap();
+            assert_eq!(
+                err.downcast_ref::<std::io::Error>().map(|e| e.kind()),
+                Some(std::io::ErrorKind::UnexpectedEof),
+                "expected UnexpectedEof for {payload:?}, got: {err:#}"
+            );
+            assert!(
+                !err.to_string().starts_with("RPC "),
+                "transient EOF must not be classified as an RPC rejection: {err}"
+            );
+        }
     }
 }
 

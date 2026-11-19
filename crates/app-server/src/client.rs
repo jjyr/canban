@@ -84,12 +84,10 @@ impl RpcConn {
         let mut line = String::new();
         match &mut self.stream {
             ClientStream::Unix { writer, reader } => {
-                writeln!(
+                runtime::write_json_line(
                     writer,
-                    "{}",
-                    json!({"jsonrpc":"2.0","id":req_id,"method":method,"params":params})
+                    &json!({"jsonrpc":"2.0","id":req_id,"method":method,"params":params}),
                 )?;
-                writer.flush()?;
                 if extended_timeout {
                     writer.set_read_timeout(Some(read_timeout))?;
                     reader.get_ref().set_read_timeout(Some(read_timeout))?;
@@ -102,10 +100,14 @@ impl RpcConn {
                         .set_read_timeout(Some(DEFAULT_RPC_READ_TIMEOUT));
                 }
                 let n = read_res?;
-                if n == 0 {
+                if n == 0 || !line.ends_with('\n') {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
-                        "AppServer closed RPC socket",
+                        if n == 0 {
+                            "AppServer closed RPC socket"
+                        } else {
+                            "AppServer closed RPC socket mid-frame"
+                        },
                     )
                     .into());
                 }
@@ -115,18 +117,16 @@ impl RpcConn {
                 reader,
                 token,
             } => {
-                writeln!(
+                runtime::write_json_line(
                     writer,
-                    "{}",
-                    json!({
+                    &json!({
                         "jsonrpc": "2.0",
                         "id": req_id,
                         "method": method,
                         "params": params,
                         "auth": token
-                    })
+                    }),
                 )?;
-                writer.flush()?;
                 if extended_timeout {
                     writer.set_read_timeout(Some(read_timeout))?;
                     reader.get_ref().set_read_timeout(Some(read_timeout))?;
@@ -139,10 +139,14 @@ impl RpcConn {
                         .set_read_timeout(Some(DEFAULT_RPC_READ_TIMEOUT));
                 }
                 let n = read_res?;
-                if n == 0 {
+                if n == 0 || !line.ends_with('\n') {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
-                        "Remote AppServer closed TCP socket",
+                        if n == 0 {
+                            "Remote AppServer closed TCP socket"
+                        } else {
+                            "Remote AppServer closed TCP socket mid-frame"
+                        },
                     )
                     .into());
                 }
@@ -883,5 +887,37 @@ mod tests {
         server.join().unwrap();
         assert_eq!(res["updated"], true);
         assert_eq!(restored_timeout, Some(DEFAULT_RPC_READ_TIMEOUT));
+    }
+
+    #[test]
+    fn truncated_rpc_frame_returns_unexpected_eof_instead_of_json_error() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            // Write a partial JSON frame without trailing newline, then close.
+            stream
+                .write_all(br#"{"jsonrpc":"2.0","id":1,"result":{"partial":"#)
+                .unwrap();
+            stream.flush().unwrap();
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        });
+
+        let mut conn = RpcConn::connect(&ClientEndpoint::Tcp {
+            addr,
+            token: "test-token".into(),
+        })
+        .unwrap();
+        let err = conn.call("app.state", &json!({})).unwrap_err();
+        server.join().unwrap();
+
+        let io_err = err
+            .downcast_ref::<std::io::Error>()
+            .expect("truncated frame must surface as std::io::Error so pooling/respawn can retry");
+        assert_eq!(io_err.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 }

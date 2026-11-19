@@ -60,6 +60,7 @@ pub(crate) fn with_ui_projection(method: &str, mut params: serde_json::Value) ->
                 | "card.context.update"
                 | "comment.add"
                 | "comment.update"
+                | "timeline.list"
         )
     {
         params["view"] = serde_json::json!("full");
@@ -81,6 +82,23 @@ pub(crate) fn routed_call(
         .get()
         .ok_or_else(|| anyhow::anyhow!("Gallery preview: no AppServer connected"))?;
     app.call(method, params)
+}
+
+pub(crate) fn call_all_hosts(
+    method: &str,
+    params: serde_json::Value,
+) -> Vec<(String, Result<serde_json::Value>)> {
+    let params = with_ui_projection(method, params);
+    if let Some(hosts) = HOSTS.get() {
+        return hosts.call_all_hosts(method, params);
+    }
+    if let Some(app) = APP.get() {
+        return vec![("local".to_string(), app.call(method, params))];
+    }
+    vec![(
+        "local".to_string(),
+        Err(anyhow::anyhow!("Gallery preview: no AppServer connected")),
+    )]
 }
 
 pub(crate) fn merged_snapshot() -> Result<canban_types::Snapshot> {

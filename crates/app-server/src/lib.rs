@@ -926,8 +926,17 @@ impl AppServer {
         Ok(snapshot)
     }
 
+    pub fn events(&self) -> Result<Vec<Event>> {
+        self.store.lock().unwrap().db().list::<Event>()
+    }
+
     pub fn snapshot(&self) -> Result<Snapshot> {
-        let mut snapshot = self.store.lock().unwrap().snapshot()?;
+        let (mut snapshot, mut card_events) = {
+            let store = self.store.lock().unwrap();
+            let snapshot = store.snapshot()?;
+            let card_events = store.db().card_events()?;
+            (snapshot, card_events)
+        };
         snapshot.github_sync = self.github_jobs.lock().unwrap().status.clone();
         snapshot.github = serde_json::from_value(serde_json::to_value(self.github.status())?)?;
         self.project_github(&mut snapshot);
@@ -946,9 +955,113 @@ impl AppServer {
             .collect();
         self.populate_terminal_contexts(&mut snapshot);
         self.project_observation_freshness(&mut snapshot);
+
+        let present_cards: std::collections::BTreeSet<&str> =
+            snapshot.cards.iter().map(|c| c.id.as_str()).collect();
+        card_events.retain(|e| present_cards.contains(e.card_id.as_str()));
+
+        // Enrich only unread PR comment/review events so ReminderEventMeta.summary has body text.
+        if let Ok(client) = self.github_cached_client() {
+            let read_seqs: std::collections::BTreeMap<&str, u64> = snapshot
+                .card_reads
+                .iter()
+                .map(|r| (r.card_id.as_str(), r.sequence))
+                .collect();
+            let mut unread_pr_indices = Vec::new();
+            for (idx, ev) in card_events.iter().enumerate() {
+                if matches!(
+                    ev.kind.as_str(),
+                    "github.pr.commented" | "github.pr.reviewed"
+                ) {
+                    let read_seq = read_seqs.get(ev.card_id.as_str()).copied().unwrap_or(0);
+                    if ev.sequence > read_seq {
+                        unread_pr_indices.push(idx);
+                    }
+                }
+            }
+            if !unread_pr_indices.is_empty() {
+                let mut subset: Vec<Event> = unread_pr_indices
+                    .iter()
+                    .map(|&i| card_events[i].clone())
+                    .collect();
+                github::projection::enrich_pr_events(&client, &mut subset);
+                for (i, ev) in unread_pr_indices.into_iter().zip(subset) {
+                    card_events[i] = ev;
+                }
+            }
+        }
+
+        let mut by_card: std::collections::BTreeMap<&str, Vec<&Event>> =
+            std::collections::BTreeMap::new();
+        for ev in &card_events {
+            by_card.entry(ev.card_id.as_str()).or_default().push(ev);
+        }
+        for (card_id, evs) in &by_card {
+            let last_event_seq = evs.iter().map(|e| e.sequence).max().unwrap_or(0);
+            let reply_count = evs.iter().filter(|e| is_narrative_event(e, evs)).count() as u32;
+            snapshot.card_summaries.insert(
+                (*card_id).to_owned(),
+                CardEventSummary {
+                    last_event_seq,
+                    reply_count,
+                },
+            );
+        }
+        for t in &mut snapshot.terminals {
+            if let Some(a) = &mut t.agent
+                && !a.finished()
+                && a.started_at.is_none_or(|ts| ts <= 1_000_000_000_000)
+                && let Some(evs) = by_card.get(a.card_id.as_str())
+                && let Some(ev) = evs.iter().rev().find(|e| {
+                    matches!(e.kind.as_str(), "execution.started" | "execution.continued")
+                        && e.data["run_number"].as_u64() == Some(u64::from(a.number))
+                        && e.created_at > 1_000_000_000_000
+                })
+            {
+                a.started_at = Some(ev.created_at);
+            }
+        }
+        snapshot.reminders = canban_notifications::reminders_from_events(&snapshot, &card_events);
+        snapshot.sound_event_ids =
+            canban_notifications::sound_event_ids_from_events(&snapshot, &card_events);
         Ok(snapshot)
     }
+}
 
+fn is_pr_narrative_event(event: &Event) -> bool {
+    match event.kind.as_str() {
+        "github.pr.commented" => true,
+        "github.pr.reviewed" => {
+            event.data["projected_body"]
+                .as_str()
+                .is_some_and(|b| !b.trim().is_empty())
+                || event.data["has_body"] == true
+        }
+        _ => false,
+    }
+}
+
+fn is_echoing_reply(event: &Event, other: &Event) -> bool {
+    other.kind == "comment.replied"
+        && other.data["terminal_id"] == event.data["terminal_id"]
+        && event.data["terminal_id"].as_str().is_some()
+        && ((event.data["report_id"].as_str().is_some()
+            && other.data["report_id"] == event.data["report_id"])
+            || (event.data["path"].as_str().is_some() && other.data["path"] == event.data["path"]))
+}
+
+fn is_narrative_event(event: &Event, events: &[&Event]) -> bool {
+    let echoed_report = event.kind == "execution.reported"
+        && (event.data["comment_replied"] == true
+            || events.iter().any(|other| is_echoing_reply(event, other)));
+    matches!(
+        event.kind.as_str(),
+        "comment.created" | "comment.replied" | "github.comment"
+    ) || is_pr_narrative_event(event)
+        || (event.kind == "execution.reported" && !echoed_report)
+}
+
+impl AppServer {
     fn project_observation_freshness(&self, snapshot: &mut Snapshot) {
         let inv = self.inventory.lock().unwrap();
         if inv.error.is_none() && inv.last_at > 0 {
@@ -1092,13 +1205,20 @@ pub fn rpc(endpoint: &Path, method: &str, params: Value) -> Result<Value> {
     let mut stream = UnixStream::connect(endpoint)
         .with_context(|| format!("Canban is not running at {}", endpoint.display()))?;
     stream.set_read_timeout(Some(client::rpc_read_timeout(method)))?;
-    writeln!(
-        stream,
-        "{}",
-        json!({"jsonrpc":"2.0","id":1,"method":method,"params":params})
+    stream.set_write_timeout(Some(Duration::from_secs(90)))?;
+    runtime::write_json_line(
+        &mut stream,
+        &json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}),
     )?;
     let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line)?;
+    let n = BufReader::new(stream).read_line(&mut line)?;
+    if n == 0 || !line.ends_with('\n') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "AppServer closed RPC socket",
+        )
+        .into());
+    }
     let reply: Value = serde_json::from_str(&line)?;
     ensure!(
         reply.get("error").is_none(),

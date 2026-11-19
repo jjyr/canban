@@ -1,5 +1,74 @@
-use canban_types::{Event, ReviewPreview};
+use canban_types::{CardEventSummary, Event, ReviewPreview, Snapshot};
 use serde_json::json;
+
+pub fn apply_fixture_events(s: &mut Snapshot, events: &[Event]) {
+    let mut by_card: std::collections::BTreeMap<String, Vec<&Event>> =
+        std::collections::BTreeMap::new();
+    for ev in events {
+        if ev.card_id.is_empty() {
+            continue;
+        }
+        by_card.entry(ev.card_id.clone()).or_default().push(ev);
+    }
+    for (cid, evs) in by_card {
+        let last_event_seq = evs.iter().map(|e| e.sequence).max().unwrap_or(0);
+        let reply_count = evs
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.kind.as_str(),
+                    "comment.created"
+                        | "comment.replied"
+                        | "github.comment"
+                        | "github.pr.commented"
+                        | "execution.reported"
+                )
+            })
+            .count() as u32;
+        s.card_summaries.insert(
+            cid,
+            CardEventSummary {
+                last_event_seq,
+                reply_count,
+            },
+        );
+    }
+    s.reminders = canban_notifications::reminders_from_events(s, events);
+    s.sound_event_ids = canban_notifications::sound_event_ids_from_events(s, events);
+}
+
+pub fn seed_ui_timelines(ui: canban_ui::presenter::Ui, events: &[Event]) {
+    let mut by_card: std::collections::BTreeMap<String, Vec<Event>> =
+        std::collections::BTreeMap::new();
+    for ev in events {
+        if ev.card_id.is_empty() {
+            continue;
+        }
+        by_card
+            .entry(ev.card_id.clone())
+            .or_default()
+            .push(ev.clone());
+    }
+    ui.card_timelines.update(|timelines| {
+        for (cid, mut evs) in by_card {
+            evs.sort_by_key(|e| e.sequence);
+            let oldest_seq = evs.first().map(|e| e.sequence);
+            let highwater = evs.last().map(|e| e.sequence).unwrap_or(0);
+            timelines.insert(
+                cid,
+                canban_ui::presenter::CardTimelineState {
+                    events: evs,
+                    oldest_seq,
+                    highwater,
+                    has_more_before: false,
+                    loading: false,
+                    loading_older: false,
+                    initialized: true,
+                },
+            );
+        }
+    });
+}
 
 pub fn timeline() -> Event {
     Event {id:"gallery-event".into(),project_id:"gallery-project".into(),card_id:"gallery-card".into(),sequence:1,kind:"comment.created".into(),actor:"user".into(),message:"A **shared component**, rendered from deterministic fixture data.\n\n中文输入、选择、复制与长文本。".into(),data:json!({}),created_at:canban_types::now()}
@@ -725,7 +794,7 @@ pub fn workspace() -> canban_types::Snapshot {
     let mut event = timeline();
     event.card_id = "card-1".into();
     event.created_at = now();
-    s.events.push(event);
+    apply_fixture_events(&mut s, &[event]);
     s.note_events.push(NoteEvent {
         id: "note-event".into(),
         project_id: "gallery-project".into(),
@@ -1016,8 +1085,8 @@ pub fn project_activity() -> canban_types::Snapshot {
             event.project_id = project.id.clone();
             event.card_id = card.id.clone();
             event.created_at = now() - i as u64 * 1000;
-            s.events.push(event);
             s.cards.push(card);
+            apply_fixture_events(&mut s, &[event]);
         }
         s.projects.push(project);
     }
@@ -1197,6 +1266,7 @@ pub fn overview() -> canban_types::Snapshot {
     attempt.profile.id = "reviewer".into();
     attempt.terminal = Some("reviewer-pty".into());
     push_agent_terminal(&mut s, attempt);
+    let mut overview_events = Vec::new();
     for (index, (card_index, tid)) in [(1, (0, &card0_tid)), (2, (2, &card2_tid))] {
         let mut event = timeline();
         event.id = format!("overview-unread-{index}");
@@ -1207,7 +1277,7 @@ pub fn overview() -> canban_types::Snapshot {
         event.actor = "agent:codex".into();
         event.message = "Added regression coverage; please check the new boundary case.".into();
         event.data = json!({"terminal_id": tid});
-        s.events.push(event);
+        overview_events.push(event);
     }
     s.cards[2].body=(0..20).map(|i|format!("### Context {i}\n\nLong task context tests direct navigation to an unread reply.\n\n")).collect();
     let mut stage_done = timeline();
@@ -1219,7 +1289,8 @@ pub fn overview() -> canban_types::Snapshot {
     stage_done.actor = "agent:developer".into();
     stage_done.message = "completed: Unit tests passed; queued for next stage".into();
     stage_done.data = json!({"report_id": "overview-stage-rep", "state": "completed"});
-    s.events.push(stage_done);
+    overview_events.push(stage_done);
+    apply_fixture_events(&mut s, &overview_events);
 
     let mut merge_card = base.clone();
     merge_card.id = "overview-merge-conflict".into();
@@ -2025,6 +2096,7 @@ pub fn board_cards() -> canban_types::Snapshot {
     long.title="Keep a long Card title readable without repeating the stage, routing configuration or empty execution state".into();
     long.body = String::new();
     s.cards.push(long);
+    let mut board_events = Vec::new();
     for (seq, card_id, kind, actor, message) in [
         (
             2,
@@ -2062,7 +2134,7 @@ pub fn board_cards() -> canban_types::Snapshot {
             "Keep the collapsed rail at 56pt so Board columns stay roomy.",
         ),
     ] {
-        s.events.push(Event {
+        board_events.push(Event {
             id: format!("board-reply-{seq}"),
             project_id: "gallery-project".into(),
             card_id: card_id.into(),
@@ -2074,18 +2146,19 @@ pub fn board_cards() -> canban_types::Snapshot {
             created_at: base_now.saturating_sub((10 - seq) * 60_000),
         });
     }
+    apply_fixture_events(&mut s, &board_events);
     s
 }
 
 /// The production Card reader under long conversational history and background activity.
-pub fn conversation() -> canban_types::Snapshot {
+pub fn conversation() -> (canban_types::Snapshot, Vec<Event>) {
     let mut s = workspace();
     s.cards[0].body = "## Goal\nKeep the Card conversation readable while task context stays available.\n\n- [x] Full Markdown description\n- [ ] Keep selection and undo through background updates\n\n> Description, comments and events share one scroll owner.\n\n| Surface | Behavior |\n| --- | --- |\n| Editor | Write / Preview |\n| Agent | Type @ to choose |\n\n```rust\nlet context = card.history();\n```\n\n[Canban](https://github.com/jjyr/canban) · **Readable** and _editable_.\n".into();
     let base = canban_types::now();
     let mut seq = 1_u64;
-    s.events.retain(|e| e.card_id != "card-1");
+    let mut events = Vec::new();
     let mut push = |kind: &str, actor: &str, msg: String, mins_ago: u64| {
-        s.events.push(Event {
+        events.push(Event {
             id: format!("conversation-{seq}"),
             project_id: "gallery-project".into(),
             card_id: "card-1".into(),
@@ -2175,8 +2248,7 @@ pub fn conversation() -> canban_types::Snapshot {
             45_u64.saturating_sub(i * 2),
         );
     }
-    if let Some(first_comment) = s
-        .events
+    if let Some(first_comment) = events
         .iter_mut()
         .find(|e| e.card_id == "card-1" && e.kind == "comment.created")
     {
@@ -2186,7 +2258,8 @@ pub fn conversation() -> canban_types::Snapshot {
             "edited_at": base.saturating_sub(89 * 60_000),
         });
     }
-    s
+    apply_fixture_events(&mut s, &events);
+    (s, events)
 }
 
 /// Production GitHub surfaces with deterministic paginated and versioned fixtures.
@@ -2630,7 +2703,7 @@ pub fn multi_host_workspace(
 
 pub const INSIGHTS_NOW: u64 = 1_794_900_600_000;
 
-pub fn insights() -> canban_types::Snapshot {
+pub fn insights() -> (canban_types::Snapshot, Vec<Event>) {
     use canban_types::*;
     let base_now = INSIGHTS_NOW;
     let day_ms: u64 = 86_400_000;
@@ -2638,6 +2711,7 @@ pub fn insights() -> canban_types::Snapshot {
     let min_ms: u64 = 60_000;
 
     let mut s = workspace();
+    let mut events = Vec::new();
     s.projects[0].name = "Canban".into();
     let mut second_proj = s.projects[0].clone();
     second_proj.id = "herdr-core".into();
@@ -2739,7 +2813,7 @@ pub fn insights() -> canban_types::Snapshot {
             s.cards.push(card);
 
             seq += 1;
-            s.events.push(Event {
+            events.push(Event {
                 id: format!("ins-ev-{seq}"),
                 project_id: pid.into(),
                 card_id: cid.clone(),
@@ -2766,7 +2840,7 @@ pub fn insights() -> canban_types::Snapshot {
                 let mq_queued_at = merged_at.saturating_sub(((card_num % 5) + 2) * min_ms);
 
                 seq += 1;
-                s.events.push(Event {
+                events.push(Event {
                     id: format!("ins-ev-{seq}"),
                     project_id: pid.into(),
                     card_id: cid.clone(),
@@ -2780,7 +2854,7 @@ pub fn insights() -> canban_types::Snapshot {
 
                 if !is_pr {
                     seq += 1;
-                    s.events.push(Event {
+                    events.push(Event {
                         id: format!("ins-ev-{seq}"),
                         project_id: pid.into(),
                         card_id: cid.clone(),
@@ -2804,7 +2878,7 @@ pub fn insights() -> canban_types::Snapshot {
                     let reply_ts = (comment_ts + ((card_num % 4) + 1) * 90_000).min(merged_at);
                     let comment_ev_id = format!("ins-ev-{}", seq + 1);
                     seq += 1;
-                    s.events.push(Event {
+                    events.push(Event {
                         id: comment_ev_id.clone(),
                         project_id: pid.into(),
                         card_id: cid.clone(),
@@ -2816,7 +2890,7 @@ pub fn insights() -> canban_types::Snapshot {
                         created_at: comment_ts,
                     });
                     seq += 1;
-                    s.events.push(Event {
+                    events.push(Event {
                         id: format!("ins-ev-{seq}"),
                         project_id: pid.into(),
                         card_id: cid.clone(),
@@ -2862,7 +2936,7 @@ pub fn insights() -> canban_types::Snapshot {
                 let has_wf = trig == "workflow";
 
                 seq += 1;
-                s.events.push(Event {
+                events.push(Event {
                     id: format!("ins-ev-{seq}"),
                     project_id: pid.into(),
                     card_id: cid.clone(),
@@ -2881,7 +2955,7 @@ pub fn insights() -> canban_types::Snapshot {
                 });
 
                 seq += 1;
-                s.events.push(Event {
+                events.push(Event {
                     id: format!("ins-ev-{seq}"),
                     project_id: pid.into(),
                     card_id: cid.clone(),
@@ -2900,7 +2974,7 @@ pub fn insights() -> canban_types::Snapshot {
 
                 if outcome == "failed" {
                     seq += 1;
-                    s.events.push(Event {
+                    events.push(Event {
                         id: format!("ins-ev-{seq}"),
                         project_id: pid.into(),
                         card_id: cid.clone(),
@@ -2916,7 +2990,7 @@ pub fn insights() -> canban_types::Snapshot {
                     });
                 } else if outcome != "running" {
                     seq += 1;
-                    s.events.push(Event {
+                    events.push(Event {
                         id: format!("ins-ev-{seq}"),
                         project_id: pid.into(),
                         card_id: cid.clone(),
@@ -2982,7 +3056,7 @@ pub fn insights() -> canban_types::Snapshot {
         card.human_gate = None;
         s.cards.push(card);
         seq += 1;
-        s.events.push(Event {
+        events.push(Event {
             id: format!("ins-ev-{seq}"),
             project_id: "herdr-core".into(),
             card_id: cid,
@@ -3000,7 +3074,8 @@ pub fn insights() -> canban_types::Snapshot {
         });
     }
 
-    s
+    apply_fixture_events(&mut s, &events);
+    (s, events)
 }
 
 pub fn schedules() -> (canban_types::Snapshot, canban_ui::workflows::Draft) {
@@ -3686,7 +3761,6 @@ pub fn large_board() -> canban_types::Snapshot {
         let sources = s.github_issues.clone();
         s.cards.clear();
         s.github_issues.clear();
-        s.events.clear();
         for i in 0..count {
             let mut c = originals[i % originals.len()].clone();
             let original_source = c.github_issue().cloned();

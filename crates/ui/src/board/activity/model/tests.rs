@@ -44,8 +44,8 @@ fn agent_terminal(s: &mut Snapshot, card: &str, profile: usize, state: &str) -> 
     });
     tid
 }
-fn event(s: &mut Snapshot, project: &str, kind: &str, time: u64) {
-    s.events.push(Event {
+fn event(events: &mut Vec<Event>, project: &str, kind: &str, time: u64) {
+    events.push(Event {
         id: format!("{project}-{time}"),
         project_id: project.into(),
         card_id: project.into(),
@@ -78,6 +78,7 @@ fn attention_unifies_review_and_input_by_card_and_ignores_working_and_archived()
     });
     agent_terminal(&mut s, "working", 0, "starting");
     agent_terminal(&mut s, "working", 1, "queued");
+    s.reminders = canban_notifications::reminders_from_events(&s, &[]);
     let rows = projects(&s, &[]);
     assert_eq!(
         rows.iter().find(|r| r.id == "attention").unwrap().attention,
@@ -90,6 +91,7 @@ fn attention_unifies_review_and_input_by_card_and_ignores_working_and_archived()
     );
     // A Review column alone is not an outstanding human decision.
     s.cards[3].stage = "review".into();
+    s.reminders = canban_notifications::reminders_from_events(&s, &[]);
     assert_eq!(
         projects(&s, &[])
             .iter()
@@ -100,6 +102,7 @@ fn attention_unifies_review_and_input_by_card_and_ignores_working_and_archived()
     );
     s.cards[0].archived_at = Some(20);
     s.cards[1].removed_at = Some(20);
+    s.reminders = canban_notifications::reminders_from_events(&s, &[]);
     assert!(projects(&s, &[]).iter().all(|r| r.attention == 0));
 }
 
@@ -116,8 +119,10 @@ fn every_project_is_switchable_and_visits_win_over_events_or_attention() {
     assert_eq!(original[0].id, "quiet");
     assert_eq!(original[1].id, "working");
     s.cards[0].attention = Some("New input".into());
-    event(&mut s, "attention", "comment.created", 99999);
-    event(&mut s, "updated", "note.updated", 100000);
+    let mut events = Vec::new();
+    event(&mut events, "attention", "comment.created", 99999);
+    event(&mut events, "updated", "note.updated", 100000);
+    s.reminders = canban_notifications::reminders_from_events(&s, &events);
     assert_eq!(
         projects(&s, &recent)
             .iter()
@@ -134,15 +139,17 @@ fn every_project_is_switchable_and_visits_win_over_events_or_attention() {
 #[test]
 fn project_badges_count_cards_once_across_unread_replies_and_pending_actions() {
     let mut s = fixture();
+    let mut events = Vec::new();
     for sequence in [100, 101] {
-        event(&mut s, "quiet", "comment.replied", sequence);
-        s.events.last_mut().unwrap().actor = "agent:developer".into();
+        event(&mut events, "quiet", "comment.replied", sequence);
+        events.last_mut().unwrap().actor = "agent:developer".into();
     }
     s.cards
         .iter_mut()
         .find(|c| c.id == "quiet")
         .unwrap()
         .attention = Some("Review this outcome".into());
+    s.reminders = canban_notifications::reminders_from_events(&s, &events);
     let quiet = |s: &Snapshot| {
         projects(s, &[])
             .into_iter()
@@ -163,6 +170,7 @@ fn project_badges_count_cards_once_across_unread_replies_and_pending_actions() {
         .find(|c| c.id == "quiet")
         .unwrap()
         .attention = None;
+    s.reminders = canban_notifications::reminders_from_events(&s, &events);
     assert_eq!(quiet(&s).attention, 0);
 }
 

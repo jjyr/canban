@@ -1,4 +1,5 @@
 use super::*;
+use canban_types::Event;
 use canban_types::{Card, Snapshot};
 
 fn may_contain_github_url(text: &str) -> bool {
@@ -43,7 +44,7 @@ fn collect_filtered_refs<'a>(
 }
 
 /// A read-only index of saved content. Drafts never mutate Card identity or GitHub.
-pub fn related(card: &Card, snapshot: &Snapshot) -> Vec<GitHubReference> {
+pub fn related(card: &Card, snapshot: &Snapshot, card_events: &[Event]) -> Vec<GitHubReference> {
     let mut bodies = vec![card.body.as_str()];
     if let Some(source) = card.github_issue()
         && let Some(issue) = snapshot
@@ -53,7 +54,7 @@ pub fn related(card: &Card, snapshot: &Snapshot) -> Vec<GitHubReference> {
     {
         bodies.push(&issue.body);
     }
-    for event in snapshot.events.iter().filter(|e| {
+    for event in card_events.iter().filter(|e| {
         e.card_id == card.id && matches!(e.kind.as_str(), "comment.created" | "comment.replied")
     }) {
         bodies.push(event.data["body"].as_str().unwrap_or(&event.message));
@@ -64,7 +65,7 @@ pub fn related(card: &Card, snapshot: &Snapshot) -> Vec<GitHubReference> {
 pub(crate) fn related_indexed(
     card: &Card,
     index: &crate::index::SnapshotIndex,
-    snapshot: &Snapshot,
+    card_events: &[Event],
 ) -> Vec<GitHubReference> {
     let mut bodies = vec![card.body.as_str()];
     if let Some(source) = card.github_issue()
@@ -73,14 +74,10 @@ pub(crate) fn related_indexed(
     {
         bodies.push(&issue.body);
     }
-    if let Some(events) = index.events_by_card.get(&card.id) {
-        for event in events
-            .iter()
-            .map(|&p| &snapshot.events[p])
-            .filter(|e| matches!(e.kind.as_str(), "comment.created" | "comment.replied"))
-        {
-            bodies.push(event.data["body"].as_str().unwrap_or(&event.message));
-        }
+    for event in card_events.iter().filter(|e| {
+        e.card_id == card.id && matches!(e.kind.as_str(), "comment.created" | "comment.replied")
+    }) {
+        bodies.push(event.data["body"].as_str().unwrap_or(&event.message));
     }
     collect_filtered_refs(card, bodies)
 }
@@ -90,9 +87,8 @@ pub fn panel(ui: Ui) -> impl IntoElement {
         let Some(c) = ui.current_card() else {
             return view().into_element();
         };
-        let refs = ui
-            .snapshot
-            .with(|s| ui.index.with(|idx| related_indexed(&c, idx, s)));
+        let card_events = ui.card_timeline_events(&c.id);
+        let refs = ui.index.with(|idx| related_indexed(&c, idx, &card_events));
         let mut area = view().gap_1();
         if !refs.is_empty() {
             let mut row = view()
@@ -144,15 +140,17 @@ pub fn panel(ui: Ui) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use canban_types::Event;
     #[test]
     fn saved_content_index_deduplicates_excludes_source_delivery_and_code() {
         let mut card: Card = serde_json::from_value(json!({"id":"c", "project_id":"p", "number":1, "title":"Task", "body":"[Issue](https://github.com/a/b/issues/42) https://github.com/a/b/issues/42 `https://github.com/a/b/issues/99`\n\n```\nhttps://github.com/a/b/pull/98\n```", "stage":"backlog", "revision":1, "created_at":1})).unwrap();
-        let mut snapshot = Snapshot::default();
-        assert_eq!(related(&card, &snapshot).len(), 1);
-        snapshot.events.push(serde_json::from_value(json!({"id":"e", "sequence":1, "project_id":"p", "card_id":"c", "kind":"comment.created", "actor":"user", "message":"https://github.com/a/b/pull/43", "data":{}, "created_at":1})).unwrap());
-        assert_eq!(related(&card, &snapshot).len(), 2);
+        let snapshot = Snapshot::default();
+        let mut events: Vec<Event> = Vec::new();
+        assert_eq!(related(&card, &snapshot, &events).len(), 1);
+        events.push(serde_json::from_value(json!({"id":"e", "sequence":1, "project_id":"p", "card_id":"c", "kind":"comment.created", "actor":"user", "message":"https://github.com/a/b/pull/43", "data":{}, "created_at":1})).unwrap());
+        assert_eq!(related(&card, &snapshot, &events).len(), 2);
         card.body.clear();
-        assert_eq!(related(&card, &snapshot)[0].number, Some(43));
+        assert_eq!(related(&card, &snapshot, &events)[0].number, Some(43));
         card.content = canban_types::CardContent::GitHubPr {
             source: canban_types::GitHubIssueRef {
                 repository: "a/b".into(),
@@ -162,9 +160,9 @@ mod tests {
                 url: "https://github.com/a/b/pull/43".into(),
             },
         };
-        assert!(related(&card, &snapshot).is_empty());
-        snapshot.events[0].card_id = "another-card".into();
+        assert!(related(&card, &snapshot, &events).is_empty());
+        events[0].card_id = "another-card".into();
         card.content = canban_types::CardContent::Local;
-        assert!(related(&card, &snapshot).is_empty());
+        assert!(related(&card, &snapshot, &events).is_empty());
     }
 }

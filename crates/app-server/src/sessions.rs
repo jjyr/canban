@@ -466,12 +466,14 @@ impl AppServer {
             run.lifecycle.idle_since = None;
             run.lifecycle.close_reason.clear();
         }
+        let card_events = self.store.lock().unwrap().db().events_for_card(&card.id)?;
         let input = canban_context::capture_for(
             &self.home,
             project,
             card,
             &promoted_entry,
             snapshot,
+            &card_events,
             &runtime_home,
         )?;
         promoted_entry.agent.as_mut().unwrap().input_path = input.clone();

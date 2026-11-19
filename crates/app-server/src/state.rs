@@ -48,7 +48,7 @@ impl AppServer {
             // refresh, but an old snapshot can never acknowledge a newer commit.
             let snapshot = self.snapshot()?;
             let mut span = canban_profiler::Span::new("state.encode");
-            span.counts(snapshot.events.len(), 0);
+            span.counts(snapshot.cards.len(), 0);
             response["snapshot"] = serde_json::to_value(snapshot)?;
             response["config"] = serde_json::to_value(self.config())?;
             response["home"] = json!(self.home);

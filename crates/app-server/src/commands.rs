@@ -1,6 +1,82 @@
 use super::*;
 
 impl AppServer {
+    pub(super) fn insights_events(&self, p: &Value) -> Result<Value> {
+        const INSIGHTS_EVENT_KINDS: &[&str] = &[
+            "card.created",
+            "card.stage_changed",
+            "card.resolved",
+            "review.merged",
+            "review.merge_conflict",
+            "github.pr_merged",
+            "github.pr_delivered",
+            "github.pr.merged",
+            "execution.queued",
+            "execution.retry_queued",
+            "execution.started",
+            "execution.continued",
+            "execution.reported",
+            "execution.failed",
+            "execution.missing",
+            "execution.close_requested",
+            "execution.idle_closed",
+            "execution.input_required",
+            "comment.created",
+            "comment.replied",
+        ];
+        const INSIGHTS_DATA_KEYS: &[&str] = &[
+            "from",
+            "to",
+            "initial_sync",
+            "source_kind",
+            "queued_for_delivery",
+            "terminal_id",
+            "run_number",
+            "workflow_run_id",
+            "trigger",
+            "origin",
+            "state",
+            "question_id",
+            "reply_to",
+        ];
+
+        let store = self.store.lock().unwrap();
+        let db = store.db();
+        let project = p
+            .get("project_id")
+            .filter(|v| !v.is_null())
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|pid| super::resolve_project_id(db, pid))
+            .transpose()?;
+        let kinds_json = serde_json::to_string(INSIGHTS_EVENT_KINDS)?;
+        let mut q = db.conn.prepare(
+            "SELECT data FROM events \
+             WHERE card_id IS NOT NULL \
+               AND (?1 IS NULL OR project_id = ?1) \
+               AND json_extract(data, '$.kind') IN (SELECT value FROM json_each(?2)) \
+             ORDER BY card_id, number",
+        )?;
+        let rows = q.query_map(rusqlite::params![project, kinds_json], |r| {
+            r.get::<_, String>(0)
+        })?;
+        let mut events = Vec::new();
+        for row in rows {
+            let mut ev: Event = serde_json::from_str(&row?)?;
+            ev.message.clear();
+            ev.data = match ev.data {
+                Value::Object(mut map) => {
+                    map.retain(|k, _| INSIGHTS_DATA_KEYS.contains(&k.as_str()));
+                    Value::Object(map)
+                }
+                _ => Value::Object(serde_json::Map::new()),
+            };
+            events.push(ev);
+        }
+        Ok(json!({"events": events}))
+    }
+
     pub fn call(&self, method: &str, p: Value) -> Result<Value> {
         representation::validate(method, &p)?;
         let mut business = p.clone();
@@ -174,6 +250,7 @@ impl AppServer {
             }
             "card.list" => self.card_page(&p),
             "timeline.list" => self.timeline_page(&p),
+            "insights.events" => self.insights_events(&p),
             "execution.get" => {
                 let s = self.snapshot()?;
                 if let Some(tid) = p["terminal_id"].as_str().filter(|v| !v.is_empty()) {

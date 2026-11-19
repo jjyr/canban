@@ -1486,6 +1486,8 @@ impl HostRegistry {
                     | "review.preview"
                     | "execution.output"
                     | "resource.read"
+                    | "timeline.list"
+                    | "insights.events"
                     | "usage.status"
                     | "usage.refresh"
             )
@@ -1559,6 +1561,22 @@ impl HostRegistry {
             );
         }
         Ok(res)
+    }
+
+    pub fn call_all_hosts(&self, method: &str, params: Value) -> Vec<(String, Result<Value>)> {
+        let mut results = Vec::new();
+        results.push(("local".into(), self.local.call(method, params.clone())));
+        let remote_clients: Vec<(String, Arc<AppClient>)> = {
+            let guard = self.remotes.lock().unwrap();
+            guard
+                .iter()
+                .filter_map(|(id, slot)| Some((id.clone(), slot.client.clone()?)))
+                .collect()
+        };
+        for (hid, client) in remote_clients {
+            results.push((hid, client.call(method, params.clone())));
+        }
+        results
     }
 }
 

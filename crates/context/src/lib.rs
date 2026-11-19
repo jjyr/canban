@@ -1,5 +1,5 @@
 use anyhow::{Result, ensure};
-use canban_types::{Artifact, Card, ExecutionTrigger, Project, Snapshot, TerminalEntry, id};
+use canban_types::{Artifact, Card, Event, ExecutionTrigger, Project, Snapshot, TerminalEntry, id};
 use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Write},
@@ -146,8 +146,9 @@ pub fn capture(
     card: &Card,
     entry: &TerminalEntry,
     snapshot: &Snapshot,
+    card_events: &[Event],
 ) -> Result<String> {
-    capture_for(home, project, card, entry, snapshot, home)
+    capture_for(home, project, card, entry, snapshot, card_events, home)
 }
 pub fn capture_for(
     home: &Path,
@@ -155,6 +156,7 @@ pub fn capture_for(
     card: &Card,
     entry: &TerminalEntry,
     snapshot: &Snapshot,
+    card_events: &[Event],
     execution_home: &Path,
 ) -> Result<String> {
     let run = entry
@@ -173,8 +175,7 @@ pub fn capture_for(
             .join("agents")
             .join(&run.profile.id)
     };
-    let timeline: Vec<_> = snapshot
-        .events
+    let timeline: Vec<_> = card_events
         .iter()
         .filter(|e| e.card_id == card.id)
         .collect();
@@ -394,7 +395,12 @@ pub fn attachment(
         bytes: bytes.len() as u64,
     })
 }
-pub fn pack(home: &Path, card: &Card, snapshot: &Snapshot) -> Result<String> {
+pub fn pack(
+    home: &Path,
+    card: &Card,
+    snapshot: &Snapshot,
+    card_events: &[Event],
+) -> Result<String> {
     let dir = home
         .join("archives")
         .join(&card.project_id)
@@ -421,6 +427,12 @@ pub fn pack(home: &Path, card: &Card, snapshot: &Snapshot) -> Result<String> {
     header.set_mode(0o600);
     header.set_cksum();
     archive.append_data(&mut header, "records.json", &bytes[..])?;
+    let events_bytes = serde_json::to_vec_pretty(card_events)?;
+    let mut events_header = tar::Header::new_gnu();
+    events_header.set_size(events_bytes.len() as u64);
+    events_header.set_mode(0o600);
+    events_header.set_cksum();
+    archive.append_data(&mut events_header, "events.json", &events_bytes[..])?;
     let files = card_dir(home, &card.project_id, card.number);
     if files.exists() {
         archive.append_dir_all("files", files)?;

@@ -1,7 +1,7 @@
 //! Shared derived `Snapshot` indexes so Board tiles, Card timelines, and Markdown readers
 //! borrow pre-indexed `O(log N)` maps instead of cloning or scanning the full `Snapshot`.
 use canban_types::{
-    Card, Event, GitHubIssueSnapshot, Project, ReviewDraft, Snapshot, TerminalEntry, WorkflowStep,
+    Card, GitHubIssueSnapshot, Project, ReviewDraft, Snapshot, TerminalEntry, WorkflowStep,
     normalize_tag,
 };
 use canban_ui_kit::Tone;
@@ -28,8 +28,6 @@ pub struct SnapshotIndex {
     pub project_order: Vec<Project>,
     pub project_has_deliver: BTreeSet<String>,
     pub cards: BTreeMap<String, Card>,
-    /// Positions into the matching Snapshot; no duplicated event bodies.
-    pub events_by_card: BTreeMap<String, Vec<usize>>,
     pub last_event_by_card: BTreeMap<String, u64>,
     pub reply_counts: BTreeMap<String, usize>,
     pub artifact_counts: BTreeMap<String, usize>,
@@ -43,7 +41,7 @@ pub struct SnapshotIndex {
 impl SnapshotIndex {
     pub fn build(snapshot: &Snapshot) -> Self {
         let mut span = canban_profiler::Span::new("index.build");
-        span.counts(snapshot.events.len(), 0);
+        span.counts(snapshot.cards.len(), snapshot.card_summaries.len());
         let mut projects = BTreeMap::new();
         for p in &snapshot.projects {
             projects.insert(p.id.clone(), p.clone());
@@ -75,24 +73,14 @@ impl SnapshotIndex {
             }
         }
 
-        let mut events_by_card: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         let mut last_event_by_card: BTreeMap<String, u64> = BTreeMap::new();
-        for (position, ev) in snapshot.events.iter().enumerate() {
-            events_by_card
-                .entry(ev.card_id.clone())
-                .or_default()
-                .push(position);
-            let last = last_event_by_card.entry(ev.card_id.clone()).or_default();
-            *last = (*last).max(ev.sequence);
-        }
         let mut reply_counts = BTreeMap::new();
-        for (card_id, positions) in &events_by_card {
-            let count = crate::card::timeline::reply_count_iter(
-                positions.iter().map(|&p| &snapshot.events[p]),
-                card_id,
-            );
-            if count > 0 {
-                reply_counts.insert(card_id.clone(), count);
+        for (card_id, summary) in &snapshot.card_summaries {
+            if summary.last_event_seq > 0 {
+                last_event_by_card.insert(card_id.clone(), summary.last_event_seq);
+            }
+            if summary.reply_count > 0 {
+                reply_counts.insert(card_id.clone(), summary.reply_count as usize);
             }
         }
 
@@ -159,12 +147,6 @@ impl SnapshotIndex {
                     .get(&c.id)
                     .map(Vec::as_slice)
                     .unwrap_or(&[]),
-                &events_by_card
-                    .get(&c.id)
-                    .into_iter()
-                    .flatten()
-                    .map(|&p| &snapshot.events[p])
-                    .collect::<Vec<_>>(),
             );
             card_status.insert(
                 c.id.clone(),
@@ -188,7 +170,6 @@ impl SnapshotIndex {
             project_order,
             project_has_deliver,
             cards,
-            events_by_card,
             last_event_by_card,
             reply_counts,
             artifact_counts,
@@ -206,18 +187,6 @@ impl SnapshotIndex {
 
     pub fn reply_count(&self, card_id: &str) -> usize {
         self.reply_counts.get(card_id).copied().unwrap_or(0)
-    }
-
-    /// Materialize only the selected Card's history, paired with this index's source.
-    pub fn card_events(&self, snapshot: &Snapshot, card_id: &str) -> Rc<Vec<Event>> {
-        Rc::new(
-            self.events_by_card
-                .get(card_id)
-                .into_iter()
-                .flatten()
-                .map(|&p| snapshot.events[p].clone())
-                .collect(),
-        )
     }
 
     pub fn github_issue(
@@ -238,17 +207,10 @@ impl PartialEq for SnapshotIndex {
 }
 impl Eq for SnapshotIndex {}
 
-fn agent_started_at_from_events(entry: &TerminalEntry, card_events: &[&Event]) -> Option<u64> {
+fn agent_started_at_indexed(entry: &TerminalEntry) -> Option<u64> {
     let agent = entry.agent.as_ref()?;
     if let Some(ts) = agent.started_at.filter(|&t| t > 1_000_000_000_000) {
         return Some(ts);
-    }
-    if let Some(ev) = card_events.iter().rev().find(|e| {
-        matches!(e.kind.as_str(), "execution.started" | "execution.continued")
-            && e.data["run_number"].as_u64() == Some(u64::from(agent.number))
-    }) && ev.created_at > 1_000_000_000_000
-    {
-        return Some(ev.created_at);
     }
     if agent.updated_at > 1_000_000_000_000 {
         Some(agent.updated_at)
@@ -259,10 +221,7 @@ fn agent_started_at_from_events(entry: &TerminalEntry, card_events: &[&Event]) -
     }
 }
 
-fn running_agents_indexed(
-    card_terminals: &[&TerminalEntry],
-    card_events: &[&Event],
-) -> Vec<(TerminalEntry, Option<u64>)> {
+fn running_agents_indexed(card_terminals: &[&TerminalEntry]) -> Vec<(TerminalEntry, Option<u64>)> {
     let mut profiles = BTreeSet::new();
     let mut running: Vec<&TerminalEntry> = card_terminals
         .iter()
@@ -284,7 +243,7 @@ fn running_agents_indexed(
                 .as_ref()
                 .is_some_and(|a| profiles.insert(a.profile.id.clone()))
         })
-        .map(|t| (t.clone(), agent_started_at_from_events(t, card_events)))
+        .map(|t| (t.clone(), agent_started_at_indexed(t)))
         .collect()
 }
 
@@ -438,20 +397,6 @@ mod tests {
         .unwrap()
     }
 
-    fn make_event(seq: u64, card_id: &str, kind: &str, message: &str) -> Event {
-        Event {
-            id: format!("ev-{seq}"),
-            sequence: seq,
-            project_id: "p1".into(),
-            card_id: card_id.into(),
-            kind: kind.into(),
-            actor: "agent:agy".into(),
-            message: message.into(),
-            data: json!({}),
-            created_at: seq,
-        }
-    }
-
     #[test]
     fn queue_index_preserves_fifo_hold_and_pause_status_across_projects() {
         let mut s = Snapshot::default();
@@ -505,7 +450,7 @@ mod tests {
         }
     }
     #[test]
-    fn snapshot_index_groups_card_events_reply_counts_tags_and_preserves_link_lookup_equality() {
+    fn snapshot_index_maps_card_summaries_tags_and_preserves_link_lookup_equality() {
         let mut s1 = Snapshot::default();
         s1.projects
             .push(make_project("p1", "Canban", vec!["perf", "ui"]));
@@ -517,23 +462,28 @@ mod tests {
             "Investigate #perf and [#lru-cache](tag:lru-cache) bottlenecks",
         ));
         s1.cards.push(make_card("c2", "p1", 89, "Other Card", ""));
-        s1.events
-            .push(make_event(1, "c1", "comment.created", "First reply"));
-        s1.events
-            .push(make_event(2, "c1", "stage.changed", "Moved to develop"));
-        s1.events
-            .push(make_event(3, "c1", "execution.completed", "Finished"));
-        s1.events
-            .push(make_event(4, "c2", "comment.created", "Unrelated reply"));
+        s1.card_summaries.insert(
+            "c1".into(),
+            canban_types::CardEventSummary {
+                last_event_seq: 3,
+                reply_count: 1,
+            },
+        );
+        s1.card_summaries.insert(
+            "c2".into(),
+            canban_types::CardEventSummary {
+                last_event_seq: 4,
+                reply_count: 1,
+            },
+        );
 
         let idx1 = SnapshotIndex::build(&s1);
-        assert_eq!(idx1.card_events(&s1, "c1").len(), 3);
-        assert_eq!(idx1.card_events(&s1, "c2").len(), 1);
-        assert_eq!(idx1.card_events(&s1, "missing").len(), 0);
-        assert_eq!(
-            idx1.reply_count("c1"),
-            crate::card::timeline::reply_count(&s1.events, "c1")
-        );
+        assert_eq!(idx1.last_event_by_card.get("c1"), Some(&3));
+        assert_eq!(idx1.last_event_by_card.get("c2"), Some(&4));
+        assert_eq!(idx1.last_event_by_card.get("missing"), None);
+        assert_eq!(idx1.reply_count("c1"), 1);
+        assert_eq!(idx1.reply_count("c2"), 1);
+        assert_eq!(idx1.reply_count("missing"), 0);
 
         let known = KnownTagsIndex::build(&idx1, &BTreeSet::from(["local-tag".to_owned()]));
         let c1_tags = known.tags_for_card("c1");
@@ -544,11 +494,16 @@ mod tests {
         assert_eq!(lookup1.resolve_card_number("p1", 88), Some("c1"));
         assert_eq!(lookup1.resolve_card_number("p1", 89), Some("c2"));
 
-        // Appending timeline events changes `SnapshotIndex` generation, while `LinkLookup`
+        // Updating card_summaries changes `SnapshotIndex` generation, while `LinkLookup`
         // remains equal so open Markdown readers skip re-decoration.
         let mut s2 = s1.clone();
-        s2.events
-            .push(make_event(5, "c2", "comment.created", "Another reply"));
+        s2.card_summaries.insert(
+            "c2".into(),
+            canban_types::CardEventSummary {
+                last_event_seq: 5,
+                reply_count: 2,
+            },
+        );
         let idx2 = SnapshotIndex::build(&s2);
         assert_ne!(idx1, idx2);
         let lookup2 = LinkLookup::build(&idx2);

@@ -90,17 +90,28 @@ fn handshake_relay<S: Read + Write>(
     if let Some(token) = auth_token.filter(|t| !t.is_empty()) {
         req["auth"] = json!(token);
     }
-    writeln!(socket, "{req}")?;
-    socket.flush()?;
+    {
+        let mut writer = BufWriter::new(&mut *socket);
+        write_json_line(&mut writer, &req)?;
+    }
     // Consume precisely one line; no buffered reader may eat Core bytes.
     let mut bytes = Vec::new();
     let mut byte = [0];
+    let mut saw_newline = false;
     while socket.read(&mut byte)? == 1 {
         if byte[0] == b'\n' {
+            saw_newline = true;
             break;
         }
         bytes.push(byte[0]);
         ensure!(bytes.len() < 65536, "Invalid relay greeting");
+    }
+    if !saw_newline {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "Relay closed before completing greeting",
+        )
+        .into());
     }
     let reply: Value = serde_json::from_slice(&bytes)?;
     if let Some(err) = reply.get("error") {
@@ -171,4 +182,64 @@ pub fn connect_view_fenced(
         child: Some(child),
         socket: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    struct MockStream {
+        read: Cursor<Vec<u8>>,
+        written: Vec<u8>,
+    }
+
+    impl Read for MockStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.read.read(buf)
+        }
+    }
+
+    impl Write for MockStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.written.write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn handshake_relay_returns_unexpected_eof_on_truncated_greeting() {
+        for payload in [
+            b"".as_slice(),
+            b"{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"ready\":true}}",
+        ] {
+            let mut stream = MockStream {
+                read: Cursor::new(payload.to_vec()),
+                written: Vec::new(),
+            };
+            let err = handshake_relay(&mut stream, None, None, None).unwrap_err();
+            assert_eq!(
+                err.downcast_ref::<std::io::Error>().map(|e| e.kind()),
+                Some(std::io::ErrorKind::UnexpectedEof),
+                "expected UnexpectedEof for {payload:?}, got: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn handshake_relay_accepts_newline_terminated_greeting_without_overreading() {
+        let mut stream = MockStream {
+            read: Cursor::new(
+                b"{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"ready\":true}}\nNEXT".to_vec(),
+            ),
+            written: Vec::new(),
+        };
+        handshake_relay(&mut stream, Some("t1"), None, None).unwrap();
+        let mut rest = Vec::new();
+        stream.read_to_end(&mut rest).unwrap();
+        assert_eq!(rest, b"NEXT");
+    }
 }

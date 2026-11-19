@@ -1092,37 +1092,16 @@ mod tests {
         );
         assert_eq!(branch_svgs, 2, "branch + [>_] SVGs only when replies == 0");
 
-        // Positive replies (3 narrative messages; echoed report + deleted comment ignored):
+        // Positive replies (3 narrative messages):
         // renders MessageSquare SVG + exact count "3".
         let mut with_replies = sample_snapshot();
-        let push_ev = |s: &mut Snapshot, seq: u64, kind: &str, data: serde_json::Value| {
-            s.events.push(Event {
-                id: format!("ev-{seq}"),
-                sequence: seq,
-                project_id: "p1".into(),
-                card_id: "c-idle".into(),
-                kind: kind.into(),
-                actor: "user".into(),
-                message: "hello".into(),
-                data,
-                created_at: seq,
-            });
-        };
-        push_ev(&mut with_replies, 1, "comment.created", json!({}));
-        push_ev(&mut with_replies, 2, "comment.deleted", json!({}));
-        push_ev(
-            &mut with_replies,
-            3,
-            "execution.reported",
-            json!({"report_id": "r1", "terminal_id": "t1"}),
+        with_replies.card_summaries.insert(
+            "c-idle".into(),
+            canban_types::CardEventSummary {
+                last_event_seq: 5,
+                reply_count: 3,
+            },
         );
-        push_ev(
-            &mut with_replies,
-            4,
-            "comment.replied",
-            json!({"report_id": "r1", "terminal_id": "t1"}),
-        );
-        push_ev(&mut with_replies, 5, "github.comment", json!({}));
 
         let (reply_texts, reply_svgs) = collect_texts_and_svgs(with_replies, "c-idle");
         assert!(

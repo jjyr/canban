@@ -214,11 +214,6 @@ impl AppServer {
                 .collect(),
             projects: vec![project.clone()],
             cards: vec![card.clone()],
-            events: snapshot
-                .events
-                .into_iter()
-                .filter(|v| v.card_id == card_id)
-                .collect(),
             reports: snapshot
                 .reports
                 .into_iter()
@@ -241,11 +236,12 @@ impl AppServer {
                 .collect(),
             ..Default::default()
         };
+        let card_events = self.store.lock().unwrap().db().events_for_card(card_id)?;
         // Repack after restore first, so previously compressed bytes are not omitted.
         if let Some(old) = &card.archive {
             canban_context::restore_files(&self.home, &card, old)?;
         }
-        let result = canban_context::pack(&self.home, &card, &filtered);
+        let result = canban_context::pack(&self.home, &card, &filtered, &card_events);
         match result {
             Ok(path) => {
                 self.store.lock().unwrap().write(|db| {

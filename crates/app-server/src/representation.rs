@@ -331,17 +331,30 @@ impl super::AppServer {
     }
 
     pub(super) fn timeline_page(&self, p: &Value) -> Result<Value> {
-        let store = self.store.lock().unwrap();
-        let db = store.db();
-        let card = super::resolve_card(db, p)?.id;
-        let after = p
+        let after_param = p
             .get("after_sequence")
+            .filter(|v| !v.is_null())
             .map(|v| v.as_u64().context("after_sequence must be an integer"))
+            .transpose()?;
+        let before_param = p
+            .get("before_sequence")
+            .filter(|v| !v.is_null())
+            .map(|v| v.as_u64().context("before_sequence must be an integer"))
+            .transpose()?;
+        ensure!(
+            after_param.is_none() || before_param.is_none(),
+            "after_sequence and before_sequence are mutually exclusive"
+        );
+        let tail = p
+            .get("tail")
+            .filter(|v| !v.is_null())
+            .map(|v| v.as_bool().context("tail must be a boolean"))
             .transpose()?
-            .unwrap_or(0);
+            .unwrap_or(false);
         let limit = limit(p, 50)?;
         let kinds = p
             .get("kinds")
+            .filter(|v| !v.is_null())
             .map(|v| -> Result<String> {
                 let kinds = v.as_array().context("kinds must be an array")?;
                 ensure!(
@@ -351,28 +364,116 @@ impl super::AppServer {
                 Ok(serde_json::to_string(kinds)?)
             })
             .transpose()?;
-        let highwater: u64 = db.conn.query_row(
-            "SELECT COALESCE(MAX(number),0) FROM events WHERE card_id=?1",
-            [&card],
-            |r| r.get(0),
-        )?;
-        let mut q = db.conn.prepare("SELECT data FROM events WHERE card_id=?1 AND number>?2 AND number<=?3 AND (?4 IS NULL OR json_extract(data,'$.kind') IN (SELECT value FROM json_each(?4))) ORDER BY number LIMIT ?5")?;
-        let mut events = q
-            .query_map(
-                rusqlite::params![card, after, highwater, kinds, limit + 1],
-                |r| r.get::<_, String>(0),
-            )?
-            .map(|r| Ok(serde_json::from_str::<Value>(&r?)?))
-            .collect::<Result<Vec<_>>>()?;
-        let more = events.len() > limit;
-        events.truncate(limit);
-        let progress = if more {
-            events.last().unwrap()["sequence"].as_u64().unwrap()
-        } else {
-            highwater.max(after)
+
+        let (mut events, next_cursor, last_sequence, highwater, has_more_before, oldest_sequence) = {
+            let store = self.store.lock().unwrap();
+            let db = store.db();
+            let card = super::resolve_card(db, p)?.id;
+            let highwater: u64 = db.conn.query_row(
+                "SELECT COALESCE(MAX(number),0) FROM events WHERE card_id=?1",
+                [&card],
+                |r| r.get(0),
+            )?;
+            if let Some(before) = before_param {
+                let mut q = db.conn.prepare(
+                    "SELECT data FROM events WHERE card_id=?1 AND number<?2 AND (?3 IS NULL OR json_extract(data,'$.kind') IN (SELECT value FROM json_each(?3))) ORDER BY number DESC LIMIT ?4",
+                )?;
+                let mut events = q
+                    .query_map(rusqlite::params![card, before, kinds, limit + 1], |r| {
+                        r.get::<_, String>(0)
+                    })?
+                    .map(|r| Ok(serde_json::from_str::<canban_types::Event>(&r?)?))
+                    .collect::<Result<Vec<_>>>()?;
+                let has_more_before = events.len() > limit;
+                events.truncate(limit);
+                events.reverse();
+                let oldest_sequence = events.first().map(|e| e.sequence);
+                let last_sequence = events.last().map(|e| e.sequence).unwrap_or(0);
+                (
+                    events,
+                    None,
+                    last_sequence,
+                    highwater,
+                    has_more_before,
+                    oldest_sequence,
+                )
+            } else if tail && after_param.is_none() {
+                let mut q = db.conn.prepare(
+                    "SELECT data FROM events WHERE card_id=?1 AND number<=?2 AND (?3 IS NULL OR json_extract(data,'$.kind') IN (SELECT value FROM json_each(?3))) ORDER BY number DESC LIMIT ?4",
+                )?;
+                let mut events = q
+                    .query_map(rusqlite::params![card, highwater, kinds, limit + 1], |r| {
+                        r.get::<_, String>(0)
+                    })?
+                    .map(|r| Ok(serde_json::from_str::<canban_types::Event>(&r?)?))
+                    .collect::<Result<Vec<_>>>()?;
+                let has_more_before = events.len() > limit;
+                events.truncate(limit);
+                events.reverse();
+                let oldest_sequence = events.first().map(|e| e.sequence);
+                (
+                    events,
+                    None,
+                    highwater,
+                    highwater,
+                    has_more_before,
+                    oldest_sequence,
+                )
+            } else {
+                let after = after_param.unwrap_or(0);
+                let mut q = db.conn.prepare(
+                    "SELECT data FROM events WHERE card_id=?1 AND number>?2 AND number<=?3 AND (?4 IS NULL OR json_extract(data,'$.kind') IN (SELECT value FROM json_each(?4))) ORDER BY number LIMIT ?5",
+                )?;
+                let mut events = q
+                    .query_map(
+                        rusqlite::params![card, after, highwater, kinds, limit + 1],
+                        |r| r.get::<_, String>(0),
+                    )?
+                    .map(|r| Ok(serde_json::from_str::<canban_types::Event>(&r?)?))
+                    .collect::<Result<Vec<_>>>()?;
+                let more = events.len() > limit;
+                events.truncate(limit);
+                let progress = if more {
+                    events.last().unwrap().sequence
+                } else {
+                    highwater.max(after)
+                };
+                let oldest_sequence = events.first().map(|e| e.sequence);
+                let has_more_before = if after > 0 {
+                    let bound = oldest_sequence.unwrap_or(after.saturating_add(1));
+                    db.conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM events WHERE card_id=?1 AND number<?2 AND (?3 IS NULL OR json_extract(data,'$.kind') IN (SELECT value FROM json_each(?3))))",
+                        rusqlite::params![card, bound, kinds],
+                        |r| r.get::<_, i64>(0),
+                    )? != 0
+                } else {
+                    false
+                };
+                (
+                    events,
+                    more.then_some(progress),
+                    progress,
+                    highwater,
+                    has_more_before,
+                    oldest_sequence,
+                )
+            }
         };
-        Ok(
-            json!({"events":events,"next_cursor":more.then_some(progress),"last_sequence":progress,"highwater":highwater}),
-        )
+
+        if let Ok(client) = self.github_cached_client() {
+            crate::github::projection::enrich_pr_events(&client, &mut events);
+        }
+        let events: Vec<Value> = events
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<serde_json::Result<Vec<_>>>()?;
+        Ok(json!({
+            "events": events,
+            "next_cursor": next_cursor,
+            "last_sequence": last_sequence,
+            "highwater": highwater,
+            "has_more_before": has_more_before,
+            "oldest_sequence": oldest_sequence,
+        }))
     }
 }

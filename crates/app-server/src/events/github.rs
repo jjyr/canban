@@ -239,6 +239,67 @@ pub(crate) fn observe_repo_comments_batch(
     Ok(())
 }
 
+const CANONICAL_OBSERVATION_VERSION: u64 = 2;
+
+/// Normalize fields whose JSON representation varies between GitHub REST endpoints
+/// and compact internal projections (`models::Issue`, `GitHubIssueSnapshot`) or
+/// embeds volatile nested repo counters (`head.repo.pushed_at`, `open_issues_count`).
+fn canonicalize_observed_field(field: &str, value: &Value) -> Value {
+    match field {
+        "labels" => {
+            if let Some(arr) = value.as_array() {
+                let mut names: Vec<String> = arr
+                    .iter()
+                    .filter_map(|item| {
+                        item.as_str()
+                            .or_else(|| item.get("name").and_then(Value::as_str))
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned)
+                    })
+                    .collect();
+                names.sort();
+                names.dedup();
+                json!(names)
+            } else {
+                value.clone()
+            }
+        }
+        "assignees" | "requested_reviewers" => {
+            if let Some(arr) = value.as_array() {
+                let mut logins: Vec<String> = arr
+                    .iter()
+                    .filter_map(|item| {
+                        item.as_str()
+                            .or_else(|| item.get("login").and_then(Value::as_str))
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_ascii_lowercase())
+                    })
+                    .collect();
+                logins.sort();
+                logins.dedup();
+                json!(logins)
+            } else {
+                value.clone()
+            }
+        }
+        "head" => {
+            if let Some(sha) = value
+                .as_str()
+                .or_else(|| value.get("sha").and_then(Value::as_str))
+            {
+                json!(sha)
+            } else {
+                value.clone()
+            }
+        }
+        "body" if value.is_null() => json!(""),
+        "merged" if value.is_null() => json!(false),
+        _ => value.clone(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn observe_with_cards(
     db: Db<'_>,
@@ -280,15 +341,20 @@ fn observe_with_cards(
         "in_reply_to_id",
     ] {
         if let Some(v) = value.get(field) {
+            let canonical = canonicalize_observed_field(field, v);
             metadata.insert(
                 field.into(),
-                json!(canban_context::digest(&serde_json::to_vec(v)?)),
+                json!(canban_context::digest(&serde_json::to_vec(&canonical)?)),
             );
         }
     }
     metadata.insert("observed_state".into(), value["state"].clone());
     metadata.insert("merged_state".into(), value["merged"].clone());
     metadata.insert("updated_at".into(), value["updated_at"].clone());
+    metadata.insert(
+        "canonical_version".into(),
+        json!(CANONICAL_OBSERVATION_VERSION),
+    );
 
     let old: Option<String> = db
         .conn
@@ -303,6 +369,9 @@ fn observe_with_cards(
         .map(|s| serde_json::from_str(s))
         .transpose()?
         .unwrap_or(Value::Null);
+    let migrating_canonical = old.is_some()
+        && before.get("canonical_version").and_then(Value::as_u64)
+            != Some(CANONICAL_OBSERVATION_VERSION);
     // Sparse Issue projections cannot erase PR-only fields observed earlier.
     let mut merged = before.as_object().cloned().unwrap_or_default();
     for (key, value) in metadata {
@@ -327,7 +396,14 @@ fn observe_with_cards(
         .unwrap()
         .keys()
         .filter(|k| {
-            !matches!(k.as_str(), "updated_at" | "observed_state" | "merged_state")
+            !matches!(
+                k.as_str(),
+                "updated_at" | "observed_state" | "merged_state" | "canonical_version"
+            ) && !(migrating_canonical
+                && matches!(
+                    k.as_str(),
+                    "labels" | "assignees" | "requested_reviewers" | "head" | "body"
+                ))
                 && before.get(*k) != new.get(*k)
         })
         .cloned()
@@ -633,9 +709,12 @@ pub(crate) fn complete_collection_with_login(
         })
         .map(|c| json!({"card_id":c.id,"project_id":c.project_id,"kind":"source"}))
         .collect();
+    let changed = old.is_none() || ids != before;
     for removed in before.into_iter().filter(|id| !ids.contains(id)) {
         db.append(canban_timeline::event("","",&format!("github.{kind}.{}",if section=="checks"{"check_removed"}else if section=="reviews"{"review_removed"}else{"comment_deleted"}),"github","Remote collection item removed",json!({"origin":"github","repository":repo,"number":number,"subject":subject(db,repo,kind,number)?,"section":section,"item_id":removed,"related_cards":related,"observation":"complete_poll"})))?;
     }
-    db.conn.execute("INSERT INTO source_observations(id,data) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET data=excluded.data",params![key,serde_json::to_string(&ids)?])?;
+    if changed {
+        db.conn.execute("INSERT INTO source_observations(id,data) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET data=excluded.data",params![key,serde_json::to_string(&ids)?])?;
+    }
     Ok(())
 }

@@ -62,7 +62,8 @@ fn state_history_and_queue_are_atomic_and_retries_do_not_dispatch_twice() {
     assert_eq!(snap.terminals.len(), 1);
     assert_eq!(snap.reports.len(), 1);
     assert!(
-        snap.events
+        app.events()
+            .unwrap()
             .windows(2)
             .all(|w| w[0].sequence < w[1].sequence)
     );
@@ -96,7 +97,7 @@ fn failed_revision_leaves_no_event_or_request() {
         .is_err()
     );
     let s = app.snapshot().unwrap();
-    assert_eq!(s.events.len(), 1);
+    assert_eq!(app.events().unwrap().len(), 1);
     assert!(s.terminals.is_empty());
     assert_eq!(s.cards[0].stage, "backlog");
 }
@@ -334,7 +335,9 @@ fn deferred_notes_preserve_legacy_data_without_injecting_it_into_new_executions(
     let snapshot = app.snapshot().unwrap();
     let req = &snapshot.terminals[0];
     let card = &snapshot.cards[0];
-    let path = canban_context::capture(&app.home, &project, card, req, &snapshot).unwrap();
+    let card_events = app.events().unwrap();
+    let path =
+        canban_context::capture(&app.home, &project, card, req, &snapshot, &card_events).unwrap();
     let manifest = app.home.join(&path).with_file_name("context.json");
     let original = std::fs::read(&manifest).unwrap();
     let value: Value = serde_json::from_slice(&original).unwrap();
@@ -528,8 +531,16 @@ fn queued_role_and_stage_task_are_immutable_after_config_reload() {
     app.call("config.reload", json!({})).unwrap();
     assert_eq!(app.snapshot().unwrap().terminals[0], before);
     let snapshot = app.snapshot().unwrap();
-    let path = canban_context::capture(&app.home, &project, &snapshot.cards[0], &before, &snapshot)
-        .unwrap();
+    let card_events = app.events().unwrap();
+    let path = canban_context::capture(
+        &app.home,
+        &project,
+        &snapshot.cards[0],
+        &before,
+        &snapshot,
+        &card_events,
+    )
+    .unwrap();
     let prompt = std::fs::read_to_string(app.home.join(path)).unwrap();
     let before_agent = before.agent.as_ref().unwrap();
     assert!(prompt.contains(&before_agent.profile.role_instruction));
@@ -641,7 +652,8 @@ fn live_replies_preserve_task_callback_and_require_current_invocation() {
     assert!(snap.reports.is_empty());
     assert_eq!(snap.cards[0].stage, "develop");
     assert_eq!(
-        snap.events
+        app.events()
+            .unwrap()
             .iter()
             .filter(|e| e.kind == "comment.replied")
             .count(),
@@ -900,9 +912,8 @@ fn review_delivery_receipt_survives_retry_restart_and_archive_is_separate() {
     assert!(snap.cards[0].resolved());
     assert_eq!(app.call("review.merge", request.clone()).unwrap(), accepted);
     assert_eq!(
-        app.snapshot()
+        app.events()
             .unwrap()
-            .events
             .iter()
             .filter(|e| e.kind == "review.merged")
             .count(),
@@ -1398,9 +1409,8 @@ fn notes_keep_revisions_links_and_provenance_atomically() {
         .unwrap();
     assert_eq!(original["body"], "Original");
     assert!(
-        app.snapshot()
+        app.events()
             .unwrap()
-            .events
             .iter()
             .any(|e| e.card_id == card.id && e.data["note_id"] == b.id)
     );
@@ -1878,7 +1888,8 @@ fn explicit_comment_recipients_override_prose_scanning() {
     assert_eq!(s.terminals[0].agent.as_ref().unwrap().profile.id, "codex");
     assert_eq!(s.questions.len(), 1);
     assert_eq!(
-        s.events
+        app.events()
+            .unwrap()
             .iter()
             .filter(|e| e.kind == "comment.created")
             .count(),
@@ -1907,7 +1918,12 @@ fn local_card_removal_is_reversible_cancels_queue_and_retains_history() {
             .iter()
             .all(|r| r.agent.as_ref().unwrap().state == "cancelled")
     );
-    assert!(s.events.iter().any(|e| e.kind == "card.removed"));
+    assert!(
+        app.events()
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "card.removed")
+    );
     let removed: Card = serde_json::from_value(
         app.call("card.get", json!({"view":"full","card_id":c.id}))
             .unwrap(),
@@ -1952,7 +1968,12 @@ fn local_card_removal_cannot_orphan_a_live_agent() {
     let s = app.snapshot().unwrap();
     assert!(s.cards[0].active());
     assert_eq!(s.terminals[0].id, run.id);
-    assert!(!s.events.iter().any(|e| e.kind == "card.removed"));
+    assert!(
+        !app.events()
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "card.removed")
+    );
 }
 
 #[test]
@@ -2021,7 +2042,8 @@ fn read_positions_are_monotonic_durable_and_never_approve_a_gate() {
         })
         .unwrap();
     let before = app.snapshot().unwrap();
-    let last = before.events.iter().map(|e| e.sequence).max().unwrap();
+    let before_events = app.events().unwrap();
+    let last = before_events.iter().map(|e| e.sequence).max().unwrap();
     app.call(
         "notifications.read",
         json!({"card_id":card.id,"sequence":last-1}),
@@ -2044,7 +2066,7 @@ fn read_positions_are_monotonic_durable_and_never_approve_a_gate() {
     let after = app.snapshot().unwrap();
     assert_eq!(canban_notifications::read_sequence(&after, &card.id), last);
     assert_eq!(before.cards, after.cards);
-    assert_eq!(before.events, after.events);
+    assert_eq!(before_events, app.events().unwrap());
     assert_eq!(before.terminals, after.terminals);
     assert!(
         app.call(
@@ -2078,6 +2100,7 @@ fn reminder_upgrade_baselines_existing_history_without_changing_cards() {
         })
         .unwrap();
     let before = app.snapshot().unwrap();
+    let before_events = app.events().unwrap();
     let home = app.home.clone();
     drop(app);
     let conn = rusqlite::Connection::open(home.join("canban.sqlite")).unwrap();
@@ -2087,7 +2110,7 @@ fn reminder_upgrade_baselines_existing_history_without_changing_cards() {
     let upgraded = AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
     let after = upgraded.snapshot().unwrap();
     assert_eq!(before.cards, after.cards);
-    assert_eq!(before.events, after.events);
+    assert_eq!(before_events, upgraded.events().unwrap());
     assert!(canban_notifications::reminders(&after).is_empty());
     assert!(canban_notifications::read_sequence(&after, &card.id) > 0);
 }
@@ -2993,7 +3016,8 @@ fn request_trigger_prompts_omit_duplicate_reply_for_comments_and_dedupe_completi
 
     let capture_prompt = |card: &Card, att: &TerminalEntry| -> String {
         let s = app.snapshot().unwrap();
-        let rel = canban_context::capture(&app.home, &project, card, att, &s).unwrap();
+        let evs = app.events().unwrap();
+        let rel = canban_context::capture(&app.home, &project, card, att, &s, &evs).unwrap();
         std::fs::read_to_string(app.home.join(rel)).unwrap()
     };
 
@@ -3049,16 +3073,15 @@ fn request_trigger_prompts_omit_duplicate_reply_for_comments_and_dedupe_completi
     )
     .unwrap();
     let snap = app.snapshot().unwrap();
+    let evs = app.events().unwrap();
     assert_eq!(
-        snap.events
-            .iter()
+        evs.iter()
             .filter(|e| e.data["terminal_id"].as_str() == Some(&comment_req.id)
                 && e.kind == "comment.replied")
             .count(),
         1
     );
-    let reported_ev = snap
-        .events
+    let reported_ev = evs
         .iter()
         .find(|e| {
             e.data["terminal_id"].as_str() == Some(&comment_req.id)
@@ -3328,8 +3351,8 @@ fn comment_update_edits_own_local_comment_preserves_mentions_and_rejects_non_use
     )
     .unwrap();
     let snap1 = app.snapshot().unwrap();
-    let created = snap1
-        .events
+    let evs1 = app.events().unwrap();
+    let created = evs1
         .iter()
         .find(|e| e.kind == "comment.created")
         .unwrap()
@@ -3373,10 +3396,11 @@ fn comment_update_edits_own_local_comment_preserves_mentions_and_rejects_non_use
     assert!(updated.message.contains("Refined thought"));
 
     let snap2 = app.snapshot().unwrap();
-    let stored = snap2.events.iter().find(|e| e.id == created.id).unwrap();
+    let evs2 = app.events().unwrap();
+    let stored = evs2.iter().find(|e| e.id == created.id).unwrap();
     assert_eq!(stored.sequence, created.sequence);
     assert_eq!(stored.data["revision"], 2);
-    assert!(snap2.events.iter().any(|e| e.kind == "comment.updated"));
+    assert!(evs2.iter().any(|e| e.kind == "comment.updated"));
 
     // Existing @codex Question was updated in-place (not duplicated); new @reviewer Question was added.
     let codex_qs: Vec<_> = snap2
@@ -3417,12 +3441,8 @@ fn comment_update_edits_own_local_comment_preserves_mentions_and_rejects_non_use
         }),
     )
     .unwrap();
-    let snap3 = app.snapshot().unwrap();
-    let agent_reply = snap3
-        .events
-        .iter()
-        .find(|e| e.kind == "comment.replied")
-        .unwrap();
+    let evs3 = app.events().unwrap();
+    let agent_reply = evs3.iter().find(|e| e.kind == "comment.replied").unwrap();
     assert!(
         app.call(
             "comment.update",
@@ -3501,8 +3521,8 @@ fn comment_delete_tombstones_own_comment_cancels_pending_questions_and_preserves
     assert_eq!(replay, del_res);
 
     let snap2 = app.snapshot().unwrap();
-    let tombstoned = snap2
-        .events
+    let evs2 = app.events().unwrap();
+    let tombstoned = evs2
         .iter()
         .find(|e| e.id == comment1.id)
         .expect("tombstoned event keeps sequence slot");
@@ -3597,12 +3617,8 @@ fn comment_delete_tombstones_own_comment_cancels_pending_questions_and_preserves
         }),
     )
     .unwrap();
-    let snap5 = app.snapshot().unwrap();
-    let reply = snap5
-        .events
-        .iter()
-        .find(|e| e.kind == "comment.replied")
-        .unwrap();
+    let evs5 = app.events().unwrap();
+    let reply = evs5.iter().find(|e| e.kind == "comment.replied").unwrap();
     assert!(
         app.call(
             "comment.delete",
@@ -4247,8 +4263,8 @@ fn card_create_mentions_launch_mention_reply_tasks_while_card_update_never_trigg
     .unwrap();
     assert_eq!(created.stage, "backlog");
     let snap = app.snapshot().unwrap();
-    let created_ev = snap
-        .events
+    let evs = app.events().unwrap();
+    let created_ev = evs
         .iter()
         .find(|e| e.card_id == created.id && e.kind == "card.created")
         .expect("card.created event");
@@ -4305,12 +4321,14 @@ fn card_create_mentions_launch_mention_reply_tasks_while_card_update_never_trigg
         .unwrap();
     let dev_admitted = admit(&app, dev_req);
     let snap_for_prompt = app.snapshot().unwrap();
+    let prompt_events = app.events().unwrap();
     let rel_prompt = canban_context::capture(
         &app.home,
         &project,
         &created,
         &dev_admitted,
         &snap_for_prompt,
+        &prompt_events,
     )
     .unwrap();
     let rendered_prompt = std::fs::read_to_string(app.home.join(rel_prompt)).unwrap();
@@ -4333,9 +4351,8 @@ fn card_create_mentions_launch_mention_reply_tasks_while_card_update_never_trigg
         }),
     )
     .unwrap();
-    let snap_after = app.snapshot().unwrap();
-    let reply_events: Vec<_> = snap_after
-        .events
+    let evs_after = app.events().unwrap();
+    let reply_events: Vec<_> = evs_after
         .iter()
         .filter(|e| e.card_id == created.id && e.kind == "comment.replied")
         .collect();
@@ -4442,8 +4459,8 @@ fn manual_and_agent_card_resolve_reopen_and_next_day_auto_archive() {
         Some("Already answered in discussion")
     );
 
-    let snap = app.snapshot().unwrap();
-    assert!(snap.events.iter().any(|e| {
+    let evs = app.events().unwrap();
+    assert!(evs.iter().any(|e| {
         e.card_id == card.id
             && e.kind == "card.resolved"
             && e.actor == "user"

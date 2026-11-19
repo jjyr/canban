@@ -1,12 +1,16 @@
 use super::*;
 use serde_json::json;
-fn fixture() -> Snapshot {
+fn fixture() -> (Snapshot, Vec<Event>) {
     let mut s = Snapshot::default();
     s.cards.push(serde_json::from_value(json!({"id":"c","project_id":"p","number":1,"title":"Task","body":"","stage":"review","revision":1,"created_at":1})).unwrap());
-    s
+    (s, Vec::new())
 }
-fn reply(s: &mut Snapshot, id: &str, sequence: u64) {
-    s.events.push(Event {
+fn project(s: &mut Snapshot, events: &[Event]) {
+    s.reminders = reminders_from_events(s, events);
+    s.sound_event_ids = sound_event_ids_from_events(s, events);
+}
+fn reply(events: &mut Vec<Event>, id: &str, sequence: u64) {
+    events.push(Event {
         id: id.into(),
         project_id: "p".into(),
         card_id: "c".into(),
@@ -20,21 +24,22 @@ fn reply(s: &mut Snapshot, id: &str, sequence: u64) {
 }
 #[test]
 fn card_counts_items_and_project_counts_cards_without_progress_or_own_comments() {
-    let mut s = fixture();
-    reply(&mut s, "one", 1);
-    reply(&mut s, "two", 2);
+    let (mut s, mut events) = fixture();
+    reply(&mut events, "one", 1);
+    reply(&mut events, "two", 2);
     s.cards[0].attention = Some("Check configuration".into());
-    let mut event = s.events[0].clone();
+    let mut event = events[0].clone();
     event.id = "own".into();
     event.actor = "user".into();
     event.sequence = 3;
-    s.events.push(event);
-    let mut event = s.events[0].clone();
+    events.push(event);
+    let mut event = events[0].clone();
     event.id = "working".into();
     event.kind = "execution.reported".into();
     event.data = json!({"state":"working"});
     event.sequence = 4;
-    s.events.push(event);
+    events.push(event);
+    project(&mut s, &events);
     let counts = counts(&reminders(&s));
     assert_eq!(counts.len(), 1);
     assert_eq!(
@@ -45,6 +50,7 @@ fn card_counts_items_and_project_counts_cards_without_progress_or_own_comments()
             pending: 1
         }
     );
+    // Optimistic local read-marking works without re-running reminders_from_events.
     s.card_reads.push(CardRead {
         id: "c".into(),
         project_id: "p".into(),
@@ -81,7 +87,7 @@ fn agent_terminal(id: &str, agent: serde_json::Value) -> TerminalEntry {
 }
 #[test]
 fn report_reply_and_human_gate_share_one_item_even_without_a_resource_file() {
-    let mut s = fixture();
+    let (mut s, mut events) = fixture();
     s.terminals.push(agent_terminal(
         "c:codex",
         json!({"project_id":"p","card_id":"c","number":1,"stage":"review","trigger":"stage_entry","profile":Config::default().profiles[0],"instruction":"Review","state":"completed","updated_at":1}),
@@ -91,13 +97,14 @@ fn report_reply_and_human_gate_share_one_item_even_without_a_resource_file() {
         terminal_id: Some("c:codex".into()),
         next_stage: None,
     });
-    reply(&mut s, "report-event", 1);
-    s.events[0].kind = "execution.reported".into();
-    s.events[0].data =
+    reply(&mut events, "report-event", 1);
+    events[0].kind = "execution.reported".into();
+    events[0].data =
         json!({"terminal_id":"c:codex","report_id":"report","state":"completed","path":null});
-    reply(&mut s, "echo", 2);
-    s.events[1].data =
+    reply(&mut events, "echo", 2);
+    events[1].data =
         json!({"terminal_id":"c:codex","report_id":"report","question_id":"q","path":null});
+    project(&mut s, &events);
     assert_eq!(
         counts_count(&s),
         ReminderCount {
@@ -121,26 +128,31 @@ fn report_reply_and_human_gate_share_one_item_even_without_a_resource_file() {
         }
     );
     s.cards[0].human_gate = None;
+    project(&mut s, &events);
     assert!(reminders(&s).is_empty());
 }
 #[test]
 fn delivery_baselines_and_duplicate_snapshots_are_silent() {
-    let mut s = fixture();
-    reply(&mut s, "old", 1);
+    let (mut s, mut events) = fixture();
+    reply(&mut events, "old", 1);
+    project(&mut s, &events);
     let mut delivery = DeliveryTracker::default();
     assert!(delivery.observe(&reminders(&s)).is_empty());
-    reply(&mut s, "new", 2);
+    reply(&mut events, "new", 2);
+    project(&mut s, &events);
     assert_eq!(delivery.observe(&reminders(&s)), vec!["reply:new"]);
     assert!(delivery.observe(&reminders(&s)).is_empty());
-    reply(&mut s, "offline", 3);
+    reply(&mut events, "offline", 3);
+    project(&mut s, &events);
     delivery.baseline(&reminders(&s));
     assert!(delivery.observe(&reminders(&s)).is_empty());
-    reply(&mut s, "live", 4);
+    reply(&mut events, "live", 4);
+    project(&mut s, &events);
     assert_eq!(delivery.observe(&reminders(&s)), vec!["reply:live"]);
 }
 
 fn push_event(
-    s: &mut Snapshot,
+    events: &mut Vec<Event>,
     id: &str,
     sequence: u64,
     kind: &str,
@@ -151,7 +163,7 @@ fn push_event(
     if let Some(tid) = terminal_id {
         data["terminal_id"] = json!(tid);
     }
-    s.events.push(Event {
+    events.push(Event {
         id: id.into(),
         project_id: "p".into(),
         card_id: "c".into(),
@@ -166,11 +178,11 @@ fn push_event(
 
 #[test]
 fn sound_items_filter_automated_completed_reports_and_in_budget_conflicts_while_keeping_badges() {
-    let mut s = fixture();
+    let (mut s, mut events) = fixture();
     // 1. Automated stage `completed` report without human_gate or @agent question:
     //    must remain a visual unread Reminder, but MUST NOT produce a sound item.
     push_event(
-        &mut s,
+        &mut events,
         "ev-auto-done",
         1,
         "execution.reported",
@@ -178,6 +190,7 @@ fn sound_items_filter_automated_completed_reports_and_in_budget_conflicts_while_
         Some("req-1"),
         json!({"report_id":"rep-auto","state":"completed"}),
     );
+    project(&mut s, &events);
     assert_eq!(
         counts_count(&s),
         ReminderCount {
@@ -190,7 +203,7 @@ fn sound_items_filter_automated_completed_reports_and_in_budget_conflicts_while_
 
     // 2. Automatic in-budget merge conflict routed back to Agent: silent.
     push_event(
-        &mut s,
+        &mut events,
         "ev-conflict-rework",
         2,
         "review.merge_conflict",
@@ -198,11 +211,12 @@ fn sound_items_filter_automated_completed_reports_and_in_budget_conflicts_while_
         None,
         json!({"attempt": 1}),
     );
+    project(&mut s, &events);
     assert!(sound_items(&s).is_empty());
 
     // 3. Same `completed` report when echoed for a user's `@agent` question: audible!
     push_event(
-        &mut s,
+        &mut events,
         "ev-question-echo",
         3,
         "comment.replied",
@@ -210,6 +224,7 @@ fn sound_items_filter_automated_completed_reports_and_in_budget_conflicts_while_
         Some("req-1"),
         json!({"report_id":"rep-auto","question_id":"q-1"}),
     );
+    project(&mut s, &events);
     assert_eq!(sound_items(&s), vec!["report:rep-auto"]);
 
     // Reading the card clears the unread reply/report from sound_items.
@@ -224,8 +239,9 @@ fn sound_items_filter_automated_completed_reports_and_in_budget_conflicts_while_
 
 #[test]
 fn sound_items_cover_permissions_gates_backlog_replies_failures_and_merges() {
-    let mut s = fixture();
+    let (mut s, mut events) = fixture();
     let mut delivery = DeliveryTracker::default();
+    project(&mut s, &events);
     assert!(delivery.observe(&sound_items(&s)).is_empty());
 
     // 1a. Runtime permission/input wait (`wait:*`)
@@ -240,14 +256,16 @@ fn sound_items_cover_permissions_gates_backlog_replies_failures_and_merges() {
             "updated_at":1
         }),
     ));
+    project(&mut s, &events);
     assert_eq!(delivery.observe(&sound_items(&s)), vec!["wait:w1"]);
     // Resolving the wait clears it from active sound_items.
     s.terminals.clear();
+    project(&mut s, &events);
     assert!(sound_items(&s).is_empty());
 
     // 1b. Agent returned to Backlog (`report --state backlog`)
     push_event(
-        &mut s,
+        &mut events,
         "ev-backlog",
         1,
         "execution.reported",
@@ -255,13 +273,15 @@ fn sound_items_cover_permissions_gates_backlog_replies_failures_and_merges() {
         None,
         json!({"report_id":"rep-backlog","state":"backlog"}),
     );
+    project(&mut s, &events);
     assert_eq!(
         delivery.observe(&sound_items(&s)),
         vec!["report:rep-backlog"]
     );
 
     // 1c. Direct `comment.replied` (`canban reply`)
-    reply(&mut s, "q-direct", 2);
+    reply(&mut events, "q-direct", 2);
+    project(&mut s, &events);
     assert_eq!(delivery.observe(&sound_items(&s)), vec!["reply:q-direct"]);
 
     // 1d. Explicit workflow approval / human gate on completed step
@@ -273,7 +293,7 @@ fn sound_items_cover_permissions_gates_backlog_replies_failures_and_merges() {
         }),
     ));
     push_event(
-        &mut s,
+        &mut events,
         "ev-rev-done",
         3,
         "execution.reported",
@@ -286,12 +306,13 @@ fn sound_items_cover_permissions_gates_backlog_replies_failures_and_merges() {
         terminal_id: Some("c:reviewer".into()),
         next_stage: None,
     });
+    project(&mut s, &events);
     assert_eq!(delivery.observe(&sound_items(&s)), vec!["report:rep-rev"]);
     s.cards[0].human_gate = None;
 
     // 2. Agent failures (`report --state failed` and unreported exit `execution.failed`)
     push_event(
-        &mut s,
+        &mut events,
         "ev-rep-fail",
         4,
         "execution.reported",
@@ -300,7 +321,7 @@ fn sound_items_cover_permissions_gates_backlog_replies_failures_and_merges() {
         json!({"report_id":"rep-fail","state":"failed"}),
     );
     push_event(
-        &mut s,
+        &mut events,
         "ev-proc-fail",
         5,
         "execution.failed",
@@ -308,6 +329,7 @@ fn sound_items_cover_permissions_gates_backlog_replies_failures_and_merges() {
         None,
         json!({"attempt":1,"exit_code":1}),
     );
+    project(&mut s, &events);
     assert_eq!(
         delivery.observe(&sound_items(&s)),
         vec!["event:ev-proc-fail", "report:rep-fail"]
@@ -315,7 +337,7 @@ fn sound_items_cover_permissions_gates_backlog_replies_failures_and_merges() {
 
     // 3. Merge failures (`review.merge_failed`, `review.upstream_sync_failed`, `github.pr_merge_attention`)
     push_event(
-        &mut s,
+        &mut events,
         "ev-merge-fail",
         6,
         "review.merge_failed",
@@ -324,7 +346,7 @@ fn sound_items_cover_permissions_gates_backlog_replies_failures_and_merges() {
         json!({"target_branch":"main"}),
     );
     push_event(
-        &mut s,
+        &mut events,
         "ev-sync-fail",
         7,
         "review.upstream_sync_failed",
@@ -332,6 +354,7 @@ fn sound_items_cover_permissions_gates_backlog_replies_failures_and_merges() {
         None,
         json!({"target_branch":"main"}),
     );
+    project(&mut s, &events);
     assert_eq!(
         delivery.observe(&sound_items(&s)),
         vec!["event:ev-merge-fail", "event:ev-sync-fail"]
@@ -339,7 +362,7 @@ fn sound_items_cover_permissions_gates_backlog_replies_failures_and_merges() {
 
     // 4a. Manual user merge (`actor == "user"`) stays silent (UI shows immediate toast)
     push_event(
-        &mut s,
+        &mut events,
         "ev-manual-merge",
         8,
         "review.merged",
@@ -347,11 +370,12 @@ fn sound_items_cover_permissions_gates_backlog_replies_failures_and_merges() {
         None,
         json!({"target_branch":"main","request_key":"manual-1"}),
     );
+    project(&mut s, &events);
     assert!(delivery.observe(&sound_items(&s)).is_empty());
 
     // 4b. Automatic Queue merge (`actor == "system"`) and GitHub PR delivery (`actor == "github"`) chime once!
     push_event(
-        &mut s,
+        &mut events,
         "ev-auto-merge",
         9,
         "review.merged",
@@ -360,7 +384,7 @@ fn sound_items_cover_permissions_gates_backlog_replies_failures_and_merges() {
         json!({"target_branch":"main","request_key":"workflow-deliver:run1:1"}),
     );
     push_event(
-        &mut s,
+        &mut events,
         "ev-gh-merge",
         10,
         "github.pr_delivered",
@@ -368,6 +392,7 @@ fn sound_items_cover_permissions_gates_backlog_replies_failures_and_merges() {
         None,
         json!({"number":42,"commit":"abc"}),
     );
+    project(&mut s, &events);
     assert_eq!(
         delivery.observe(&sound_items(&s)),
         vec!["merged:c:pr:42", "merged:c:workflow-deliver:run1:1"]
@@ -377,14 +402,16 @@ fn sound_items_cover_permissions_gates_backlog_replies_failures_and_merges() {
 
     // Archived cards clear sound items cleanly.
     s.cards[0].archived_at = Some(99);
+    project(&mut s, &events);
     assert!(sound_items(&s).is_empty());
 }
 
 #[test]
 fn unfinished_idle_turns_and_ephemeral_cli_agents_keep_visual_reminders_silent_while_blocked_chimes()
  {
-    let mut s = fixture();
+    let (mut s, mut events) = fixture();
     let mut delivery = DeliveryTracker::default();
+    project(&mut s, &events);
     assert!(delivery.observe(&sound_items(&s)).is_empty());
 
     // Interactive Card Agent finishes Turn 1 without closing -> creates pending visual
@@ -400,6 +427,7 @@ fn unfinished_idle_turns_and_ephemeral_cli_agents_keep_visual_reminders_silent_w
             "updated_at":1
         }),
     ));
+    project(&mut s, &events);
     assert_eq!(counts_count(&s).pending, 1);
     assert_eq!(reminders(&s)[0].id, "idle:c:codex:1");
     assert!(sound_items(&s).is_empty());
@@ -408,6 +436,7 @@ fn unfinished_idle_turns_and_ephemeral_cli_agents_keep_visual_reminders_silent_w
     // produces neither a pending notification badge nor a sound (background task protection).
     s.terminals[0].agent.as_mut().unwrap().trigger = ExecutionTrigger::parse("stage_entry");
     s.terminals[0].agent.as_mut().unwrap().lifecycle.idle_since = Some(canban_types::now());
+    project(&mut s, &events);
     assert_eq!(counts_count(&s).pending, 0);
     assert!(reminders(&s).is_empty());
     assert!(sound_items(&s).is_empty());
@@ -418,6 +447,7 @@ fn unfinished_idle_turns_and_ephemeral_cli_agents_keep_visual_reminders_silent_w
     let stalled_anchor =
         canban_types::now().saturating_sub(crate::UNREPORTED_IDLE_ALERT_MS + 5_000);
     s.terminals[0].agent.as_mut().unwrap().lifecycle.idle_since = Some(stalled_anchor);
+    project(&mut s, &events);
     assert_eq!(counts_count(&s).pending, 1);
     let expected_stalled_id = format!("stalled:c:codex:{stalled_anchor}");
     assert_eq!(reminders(&s)[0].id, expected_stalled_id);
@@ -435,18 +465,21 @@ fn unfinished_idle_turns_and_ephemeral_cli_agents_keep_visual_reminders_silent_w
     // User replies -> Agent resumes working -> pending clears.
     s.terminals[0].agent.as_mut().unwrap().observed =
         Some(json!({"state":"live","turn":2,"status":{"state":"working"}}));
+    project(&mut s, &events);
     assert!(reminders(&s).is_empty());
     assert!(sound_items(&s).is_empty());
 
     // Turn 2 finishes (`done`) -> visual pending reminder updates, still silent!
     s.terminals[0].agent.as_mut().unwrap().observed =
         Some(json!({"state":"live","turn":2,"status":{"state":"done"}}));
+    project(&mut s, &events);
     assert_eq!(counts_count(&s).pending, 1);
     assert_eq!(reminders(&s)[0].id, "idle:c:codex:2");
     assert!(sound_items(&s).is_empty());
 
     // If the same idle Card also has an unread `@agent` reply, the reply still chimes!
-    reply(&mut s, "q-while-idle", 1);
+    reply(&mut events, "q-while-idle", 1);
+    project(&mut s, &events);
     assert_eq!(
         delivery.observe(&sound_items(&s)),
         vec!["reply:q-while-idle"]
@@ -461,6 +494,7 @@ fn unfinished_idle_turns_and_ephemeral_cli_agents_keep_visual_reminders_silent_w
 
     // Once reported `completed`, the live idle terminal becomes quiet (no pending reminder or sound).
     s.terminals[0].agent.as_mut().unwrap().state = "completed".into();
+    project(&mut s, &events);
     assert!(reminders(&s).is_empty());
     assert!(sound_items(&s).is_empty());
 
@@ -559,12 +593,13 @@ fn unfinished_idle_turns_and_ephemeral_cli_agents_keep_visual_reminders_silent_w
 
 #[test]
 fn pr_ci_results_notify_and_failures_play_sound_while_passes_stay_silent() {
-    let mut s = fixture();
+    let (mut s, mut events) = fixture();
     let mut delivery = DeliveryTracker::default();
+    project(&mut s, &events);
     delivery.baseline(&sound_items(&s));
 
     push_event(
-        &mut s,
+        &mut events,
         "ci-ok",
         1,
         "github.pr.ci_succeeded",
@@ -572,6 +607,7 @@ fn pr_ci_results_notify_and_failures_play_sound_while_passes_stay_silent() {
         None,
         json!({"number": 148, "state": "success"}),
     );
+    project(&mut s, &events);
     let rems = reminders(&s);
     assert_eq!(rems.len(), 1);
     assert_eq!(rems[0].id, "ci-pass:ci-ok");
@@ -579,7 +615,7 @@ fn pr_ci_results_notify_and_failures_play_sound_while_passes_stay_silent() {
     assert!(delivery.observe(&sound_items(&s)).is_empty());
 
     push_event(
-        &mut s,
+        &mut events,
         "ci-bad",
         2,
         "github.pr.ci_failed",
@@ -587,6 +623,7 @@ fn pr_ci_results_notify_and_failures_play_sound_while_passes_stay_silent() {
         None,
         json!({"number": 148, "state": "failure"}),
     );
+    project(&mut s, &events);
     let rems = reminders(&s);
     assert_eq!(rems.len(), 2);
     assert!(rems.iter().any(|r| r.id == "ci-fail:ci-bad" && r.unread));
@@ -603,13 +640,14 @@ fn pr_ci_results_notify_and_failures_play_sound_while_passes_stay_silent() {
 
 #[test]
 fn pr_updates_notify_skip_self_actions_and_chime_only_on_changes_requested_or_closed() {
-    let mut s = fixture();
+    let (mut s, mut events) = fixture();
     let mut delivery = DeliveryTracker::default();
+    project(&mut s, &events);
     delivery.baseline(&sound_items(&s));
 
     // Self-action comment & commit are silent and skipped from unread notifications.
     push_event(
-        &mut s,
+        &mut events,
         "pr-upd-self",
         1,
         "github.pr.updated",
@@ -618,7 +656,7 @@ fn pr_updates_notify_skip_self_actions_and_chime_only_on_changes_requested_or_cl
         json!({"number": 149, "self_action": true}),
     );
     push_event(
-        &mut s,
+        &mut events,
         "pr-cmt-self",
         2,
         "github.pr.commented",
@@ -626,12 +664,13 @@ fn pr_updates_notify_skip_self_actions_and_chime_only_on_changes_requested_or_cl
         None,
         json!({"number": 149, "self_action": true}),
     );
+    project(&mut s, &events);
     assert!(reminders(&s).is_empty());
     assert!(delivery.observe(&sound_items(&s)).is_empty());
 
     // External update, comment, and APPROVED review notify silently.
     push_event(
-        &mut s,
+        &mut events,
         "pr-upd-ext",
         3,
         "github.pr.updated",
@@ -640,7 +679,7 @@ fn pr_updates_notify_skip_self_actions_and_chime_only_on_changes_requested_or_cl
         json!({"number": 149, "self_action": false}),
     );
     push_event(
-        &mut s,
+        &mut events,
         "pr-cmt-ext",
         4,
         "github.pr.commented",
@@ -649,7 +688,7 @@ fn pr_updates_notify_skip_self_actions_and_chime_only_on_changes_requested_or_cl
         json!({"number": 149, "self_action": false}),
     );
     push_event(
-        &mut s,
+        &mut events,
         "pr-rev-ok",
         5,
         "github.pr.reviewed",
@@ -657,6 +696,7 @@ fn pr_updates_notify_skip_self_actions_and_chime_only_on_changes_requested_or_cl
         None,
         json!({"number": 149, "state": "APPROVED", "self_action": false}),
     );
+    project(&mut s, &events);
     let rems = reminders(&s);
     assert_eq!(rems.len(), 3);
     assert!(rems.iter().any(|r| r.id == "pr-update:pr-upd-ext"));
@@ -666,7 +706,7 @@ fn pr_updates_notify_skip_self_actions_and_chime_only_on_changes_requested_or_cl
 
     // External CHANGES_REQUESTED review and unmerged close both chime.
     push_event(
-        &mut s,
+        &mut events,
         "pr-rev-changes",
         6,
         "github.pr.reviewed",
@@ -674,13 +714,14 @@ fn pr_updates_notify_skip_self_actions_and_chime_only_on_changes_requested_or_cl
         None,
         json!({"number": 149, "state": "CHANGES_REQUESTED", "self_action": false}),
     );
+    project(&mut s, &events);
     assert_eq!(
         delivery.observe(&sound_items(&s)),
         vec!["event:pr-rev-changes"]
     );
 
     push_event(
-        &mut s,
+        &mut events,
         "pr-closed",
         7,
         "github.pr.state_changed",
@@ -688,5 +729,6 @@ fn pr_updates_notify_skip_self_actions_and_chime_only_on_changes_requested_or_cl
         None,
         json!({"number": 149, "state": "closed", "merged": false, "self_action": false}),
     );
+    project(&mut s, &events);
     assert_eq!(delivery.observe(&sound_items(&s)), vec!["event:pr-closed"]);
 }

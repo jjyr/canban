@@ -147,11 +147,10 @@ impl Reader {
                 }
                 let sequence = ui.snapshot.with_untracked(|s| {
                     let through = canban_notifications::read_sequence(s, &card);
-                    ui.index.with_untracked(|idx| {
-                        let card_events = idx
-                            .events_by_card
+                    ui.card_timelines.with_untracked(|timelines| {
+                        let card_events = timelines
                             .get(&card)
-                            .map(|rc| rc.as_slice())
+                            .map(|st| st.events.as_slice())
                             .unwrap_or(&[]);
                         self.rows.with(|rows| {
                             rows.iter()
@@ -160,10 +159,13 @@ impl Reader {
                                         && visible(b.origin.y.0, b.size.height.0, offset, height)
                                 })
                                 .filter(|(seq, _)| {
-                                    card_events.iter().any(|&p| {
-                                        let e = &s.events[p];
+                                    card_events.iter().any(|e| {
                                         e.sequence == **seq
-                                            && canban_notifications::message_id(s, e).is_some()
+                                            && canban_notifications::message_id_in_card(
+                                                card_events,
+                                                e,
+                                            )
+                                            .is_some()
                                     })
                                 })
                                 .map(|(seq, _)| *seq)

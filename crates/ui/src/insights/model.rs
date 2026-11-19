@@ -1355,6 +1355,7 @@ fn provider_name(profile: &Profile) -> String {
 #[cfg(test)]
 pub fn compute<Tz: TimeZone>(
     snapshot: &Snapshot,
+    events: &[Event],
     scope_project: Option<&str>,
     range: RangeWindow,
     now_ms: u64,
@@ -1362,6 +1363,7 @@ pub fn compute<Tz: TimeZone>(
 ) -> Dashboard {
     compute_view(
         snapshot,
+        events,
         scope_project,
         range,
         now_ms,
@@ -1378,6 +1380,7 @@ pub fn compute<Tz: TimeZone>(
 #[allow(clippy::too_many_arguments)]
 pub fn compute_view<Tz: TimeZone>(
     snapshot: &Snapshot,
+    events: &[Event],
     scope_project: Option<&str>,
     range: RangeWindow,
     now_ms: u64,
@@ -1391,7 +1394,7 @@ pub fn compute_view<Tz: TimeZone>(
 ) -> Dashboard {
     compute_full(
         snapshot,
-        None,
+        events,
         scope_project,
         range,
         now_ms,
@@ -1410,7 +1413,7 @@ pub fn compute_view<Tz: TimeZone>(
 #[allow(clippy::too_many_arguments)]
 pub fn compute_full<Tz: TimeZone>(
     snapshot: &Snapshot,
-    indexed_events_by_card: Option<&BTreeMap<String, Vec<usize>>>,
+    events: &[Event],
     scope_project: Option<&str>,
     range: RangeWindow,
     now_ms: u64,
@@ -1469,31 +1472,14 @@ pub fn compute_full<Tz: TimeZone>(
         .collect();
 
     let mut events_by_card: BTreeMap<&str, Vec<&Event>> = BTreeMap::new();
-    if let Some(idx_map) = indexed_events_by_card {
-        for &cid in valid_cards.keys() {
-            if let Some(positions) = idx_map.get(cid) {
-                let mut evs: Vec<&Event> = positions
-                    .iter()
-                    .filter_map(|&pos| snapshot.events.get(pos))
-                    .filter(|e| e.created_at <= now_ms)
-                    .collect();
-                evs.sort_by_key(|e| (e.created_at, e.sequence));
-                if !evs.is_empty() {
-                    events_by_card.insert(cid, evs);
-                }
-            }
-        }
-    } else {
-        for ev in snapshot
-            .events
-            .iter()
-            .filter(|e| e.created_at <= now_ms && valid_cards.contains_key(e.card_id.as_str()))
-        {
-            events_by_card.entry(&ev.card_id).or_default().push(ev);
-        }
-        for events in events_by_card.values_mut() {
-            events.sort_by_key(|e| (e.created_at, e.sequence));
-        }
+    for ev in events
+        .iter()
+        .filter(|e| e.created_at <= now_ms && valid_cards.contains_key(e.card_id.as_str()))
+    {
+        events_by_card.entry(&ev.card_id).or_default().push(ev);
+    }
+    for card_events in events_by_card.values_mut() {
+        card_events.sort_by_key(|e| (e.created_at, e.sequence));
     }
 
     let history_start = valid_cards
@@ -2788,7 +2774,7 @@ mod tests {
     fn empty_snapshot_produces_clean_zero_metrics() {
         let snap = Snapshot::default();
         let now = ts_utc8(2026, 11, 15, 18, 0);
-        let dash = compute(&snap, None, RangeWindow::Days30, now, &tz_plus_8());
+        let dash = compute(&snap, &[], None, RangeWindow::Days30, now, &tz_plus_8());
         assert_eq!(dash.merged_total, 0);
         assert_eq!(dash.scheduled_total, 0);
         assert_eq!(dash.created_total, 0);
@@ -2851,7 +2837,7 @@ mod tests {
         });
         snap.cards.push(c_manual);
 
-        let dash = compute(&snap, None, RangeWindow::Days7, now, &tz_plus_8());
+        let dash = compute(&snap, &[], None, RangeWindow::Days7, now, &tz_plus_8());
         assert_eq!(dash.merged_total, 3);
         assert_eq!(dash.local_merges, 1);
         assert_eq!(dash.pr_merges, 1);
@@ -2879,7 +2865,7 @@ mod tests {
         let c_organic = sample_card("c-org", "p1", 1, ts_utc8(2026, 11, 18, 10, 0));
         let c_sync = sample_card("c-sync", "p1", 2, ts_utc8(2026, 11, 18, 10, 5));
         snap.cards.extend([c_organic, c_sync]);
-        snap.events.push(Event {
+        let events = vec![Event {
             id: "ev-sync".into(),
             project_id: "p1".into(),
             card_id: "c-sync".into(),
@@ -2889,9 +2875,9 @@ mod tests {
             message: "Card created".into(),
             data: json!({"initial_sync": true, "source_kind": "github.issue", "origin": "github"}),
             created_at: ts_utc8(2026, 11, 18, 10, 5),
-        });
+        }];
 
-        let default_dash = compute(&snap, None, RangeWindow::Today, now, &tz_plus_8());
+        let default_dash = compute(&snap, &events, None, RangeWindow::Today, now, &tz_plus_8());
         assert_eq!(default_dash.created_total, 1);
         assert_eq!(default_dash.initial_sync_period, 1);
         assert_eq!(default_dash.intake.initial_sync, 1);
@@ -2899,7 +2885,7 @@ mod tests {
 
         let inclusive = compute_full(
             &snap,
-            None,
+            &events,
             None,
             RangeWindow::Today,
             now,
@@ -2930,7 +2916,7 @@ mod tests {
             merged_at: ts_utc8(2026, 11, 10, 12, 0),
         });
         snap.cards.push(c_prev);
-        snap.events.extend([
+        let mut events = vec![
             Event {
                 id: "ep-1".into(),
                 project_id: "p1".into(),
@@ -2964,7 +2950,7 @@ mod tests {
                 data: json!({"terminal_id": "c-prev:merger", "run_number": 1, "state": "completed"}),
                 created_at: ts_utc8(2026, 11, 10, 11, 50),
             },
-        ]);
+        ];
 
         for (idx, d, prov, q_sec) in [(2u64, 17u32, "codex", 10u64), (3u64, 18u32, "agy", 40u64)] {
             let cid = format!("c-{idx}");
@@ -2979,7 +2965,7 @@ mod tests {
             let tid = format!("{cid}:merger");
             let q_at = ts_utc8(2026, 11, d, 10, 0) - q_sec * 1_000;
             let s_at = ts_utc8(2026, 11, d, 10, 0);
-            snap.events.extend([
+            events.extend([
                 Event {
                     id: format!("eq-{idx}"),
                     project_id: "p1".into(),
@@ -3044,7 +3030,7 @@ mod tests {
             snap.terminals.push(entry);
         }
 
-        let dash = compute(&snap, None, RangeWindow::Days7, now, &tz_plus_8());
+        let dash = compute(&snap, &events, None, RangeWindow::Days7, now, &tz_plus_8());
         assert_eq!(dash.profile_stats.len(), 2);
         let codex_row = dash
             .profile_stats
@@ -3080,10 +3066,11 @@ mod tests {
             .push(sample_card("c2", "p2", 20, ts_utc8(2026, 11, 15, 8, 0)));
 
         let mut seq = 0u64;
+        let mut events = Vec::new();
         let mut push_ev =
             |pid: &str, cid: &str, kind: &str, actor: &str, ts: u64, data: serde_json::Value| {
                 seq += 1;
-                snap.events.push(Event {
+                events.push(Event {
                     id: format!("ev-{seq}"),
                     project_id: pid.into(),
                     card_id: cid.into(),
@@ -3238,7 +3225,7 @@ mod tests {
             json!({"terminal_id": "c2:planner", "run_number": 1}),
         );
 
-        let all = compute(&snap, None, RangeWindow::Days7, now, &tz_plus_8());
+        let all = compute(&snap, &events, None, RangeWindow::Days7, now, &tz_plus_8());
         assert_eq!(all.scheduled_total, 5);
         assert_eq!(all.completed_runs, 3);
         assert_eq!(all.blocked_runs, 1);
@@ -3246,7 +3233,14 @@ mod tests {
         assert_eq!(all.active_runs, 0);
         assert_eq!(all.success_rate_pct, Some(60));
 
-        let p1_only = compute(&snap, Some("p1"), RangeWindow::Days7, now, &tz_plus_8());
+        let p1_only = compute(
+            &snap,
+            &events,
+            Some("p1"),
+            RangeWindow::Days7,
+            now,
+            &tz_plus_8(),
+        );
         assert_eq!(p1_only.scheduled_total, 4);
         assert_eq!(p1_only.completed_runs, 3);
         assert_eq!(p1_only.blocked_runs, 1);
@@ -3288,6 +3282,7 @@ mod tests {
             merged_at: ts_utc8(2026, 11, 5, 10, 0),
         });
         snap.cards.push(prev_card);
+        let mut events = Vec::new();
 
         for (idx, hours) in [(2u64, 2u64), (3u64, 4u64)] {
             let cid = format!("c-{idx}");
@@ -3302,7 +3297,7 @@ mod tests {
                 merged_at: merged,
             });
             snap.cards.push(c);
-            snap.events.push(Event {
+            events.push(Event {
                 id: format!("ev-{idx}"),
                 project_id: "p1".into(),
                 card_id: cid,
@@ -3315,7 +3310,7 @@ mod tests {
             });
         }
 
-        let dash = compute(&snap, None, RangeWindow::Days7, now, &tz_plus_8());
+        let dash = compute(&snap, &events, None, RangeWindow::Days7, now, &tz_plus_8());
         assert_eq!(dash.merged_total, 2);
         assert_eq!(dash.prev_merged_total, 1);
         assert_eq!(
@@ -3326,12 +3321,12 @@ mod tests {
         assert_eq!(format_duration_compact(3 * 3_600_000), "3h");
     }
 
-    fn event(s: &mut Snapshot, card: &str, profile: &str, kind: &str, at: u64, number: u32) {
-        s.events.push(Event {
-            id: format!("event-{}", s.events.len()),
+    fn event(events: &mut Vec<Event>, card: &str, profile: &str, kind: &str, at: u64, number: u32) {
+        events.push(Event {
+            id: format!("event-{}", events.len()),
             project_id: "p1".into(),
             card_id: card.into(),
-            sequence: s.events.len() as u64 + 1,
+            sequence: events.len() as u64 + 1,
             kind: kind.into(),
             actor: format!("agent:{profile}"),
             message: String::new(),
@@ -3367,7 +3362,7 @@ mod tests {
             merged(&mut s, id, ts_utc8(2026, 11, d, h, 0));
         }
         merged(&mut s, "future", ts_utc8(2026, 11, 17, 20, 0));
-        let d = compute(&s, None, RangeWindow::Today, now, &tz);
+        let d = compute(&s, &[], None, RangeWindow::Today, now, &tz);
         assert_eq!(
             (d.created_total, d.merged_total, d.prev_merged_total),
             (1, 1, 1)
@@ -3377,6 +3372,7 @@ mod tests {
         assert_eq!(d.reference_days, 7);
         let longer_trend = compute_view(
             &s,
+            &[],
             None,
             RangeWindow::Today,
             now,
@@ -3393,6 +3389,7 @@ mod tests {
         assert_eq!(longer_trend.prev_merged_total, d.prev_merged_total);
         let week = compute_view(
             &s,
+            &[],
             None,
             RangeWindow::Today,
             now,
@@ -3407,6 +3404,7 @@ mod tests {
         assert_eq!(week.prev_merged_total, 1);
         let historical = compute_view(
             &s,
+            &[],
             None,
             RangeWindow::Today,
             now,
@@ -3444,10 +3442,10 @@ mod tests {
         s.projects.push(sample_project("p1", "Canban"));
         merged(&mut s, "last-minute", ts_utc8(2026, 11, 16, 23, 59));
         merged(&mut s, "midnight", now);
-        let d = compute(&s, None, RangeWindow::Today, now, &tz_plus_8());
+        let d = compute(&s, &[], None, RangeWindow::Today, now, &tz_plus_8());
         assert_eq!(d.merged_ids, vec!["midnight"]);
         assert_eq!(d.prev_merged_total, 0);
-        let utc = compute(&s, None, RangeWindow::Today, now, &chrono::Utc);
+        let utc = compute(&s, &[], None, RangeWindow::Today, now, &chrono::Utc);
         assert_eq!(utc.today_key, "2026-11-16");
         assert_eq!(utc.merged_total, 2);
     }
@@ -3458,15 +3456,16 @@ mod tests {
         let mut s = Snapshot::default();
         s.projects.push(sample_project("p1", "Canban"));
         merged(&mut s, "leap", ts_utc8(2028, 2, 29, 12, 0));
+        let mut events = Vec::new();
         event(
-            &mut s,
+            &mut events,
             "leap",
             "codex",
             "execution.started",
             ts_utc8(2028, 2, 29, 11, 0),
             1,
         );
-        let d = compute(&s, None, RangeWindow::Days90, now, &tz_plus_8());
+        let d = compute(&s, &events, None, RangeWindow::Days90, now, &tz_plus_8());
         let valid: Vec<_> = d
             .heatmap_weeks
             .iter()
@@ -3488,8 +3487,9 @@ mod tests {
         s.projects.push(sample_project("p1", "Canban"));
         s.cards
             .push(sample_card("c1", "p1", 1, ts_utc8(2026, 11, 15, 10, 0)));
+        let mut events = Vec::new();
         event(
-            &mut s,
+            &mut events,
             "c1",
             "codex",
             "execution.started",
@@ -3497,7 +3497,7 @@ mod tests {
             1,
         );
         event(
-            &mut s,
+            &mut events,
             "c1",
             "reviewer",
             "execution.started",
@@ -3505,7 +3505,7 @@ mod tests {
             2,
         );
         event(
-            &mut s,
+            &mut events,
             "c1",
             "pending",
             "execution.queued",
@@ -3513,15 +3513,15 @@ mod tests {
             3,
         );
         event(
-            &mut s,
+            &mut events,
             "c1",
             "unobserved",
             "execution.reported",
             ts_utc8(2026, 11, 17, 11, 0),
             4,
         );
-        s.events.last_mut().unwrap().data["state"] = json!("completed");
-        s.events.push(s.events[1].clone());
+        events.last_mut().unwrap().data["state"] = json!("completed");
+        events.push(events[1].clone());
         let profiles = vec![
             Profile {
                 id: "codex".into(),
@@ -3536,6 +3536,7 @@ mod tests {
         ];
         let d = compute_view(
             &s,
+            &events,
             None,
             RangeWindow::Today,
             now,
@@ -3554,14 +3555,14 @@ mod tests {
         assert_eq!(d.project_stats[0].cards.len(), 1);
         assert_eq!(d.profile_stats.len(), 2);
         event(
-            &mut s,
+            &mut events,
             "c1",
             "codex",
             "execution.close_requested",
             ts_utc8(2026, 11, 16, 23, 50),
             1,
         );
-        let d = compute(&s, None, RangeWindow::Today, now, &tz_plus_8());
+        let d = compute(&s, &events, None, RangeWindow::Today, now, &tz_plus_8());
         assert_eq!((d.used_profiles, d.used_runs), (1, 1));
     }
 
@@ -3574,27 +3575,28 @@ mod tests {
         s.cards[0].delivery.as_mut().unwrap().merged_at = 0;
         s.cards[0].archived_at = Some(now - 60_000);
         merged(&mut s, "known-merge", now - 120_000);
+        let mut events = Vec::new();
         event(
-            &mut s,
+            &mut events,
             "known-merge",
             "developer",
             "execution.queued",
             now - 600_000,
             1,
         );
-        let d = compute(&s, None, RangeWindow::Today, now, &tz_plus_8());
+        let d = compute(&s, &events, None, RangeWindow::Today, now, &tz_plus_8());
         assert_eq!(d.unknown_merge_dates, 1);
         assert_eq!(d.merged_total, 1);
         assert!(d.efficiency.cycle.is_empty());
         event(
-            &mut s,
+            &mut events,
             "known-merge",
             "developer",
             "execution.started",
             now - 300_000,
             1,
         );
-        let d = compute(&s, None, RangeWindow::Today, now, &tz_plus_8());
+        let d = compute(&s, &events, None, RangeWindow::Today, now, &tz_plus_8());
         assert_eq!(d.efficiency.cycle[0].duration, 180_000);
         assert_eq!(d.efficiency.queue[0].duration, 300_000);
     }
@@ -3607,7 +3609,7 @@ mod tests {
         project.created_at = now - 3_600_000;
         s.projects.push(project);
         merged(&mut s, "new", now - 60_000);
-        let d = compute(&s, None, RangeWindow::Today, now, &tz_plus_8());
+        let d = compute(&s, &[], None, RangeWindow::Today, now, &tz_plus_8());
         assert!(!d.baseline_known);
         assert_eq!(d.reference_merged, None);
         assert_eq!(format_delta_pct(2, 0), "+2 vs prev");
@@ -3673,6 +3675,7 @@ mod tests {
         let c1_merged = ts_utc8(2026, 11, 17, 15, 0);
         merged(&mut s, "c1", c1_merged);
         let mut seq = 1u64;
+        let mut events = Vec::new();
         let mut push_ev = |card_id: &str,
                            kind: &str,
                            actor: &str,
@@ -3680,7 +3683,7 @@ mod tests {
                            data: serde_json::Value,
                            at: u64| {
             let id = format!("ev-{seq}");
-            s.events.push(Event {
+            events.push(Event {
                 id: id.clone(),
                 project_id: "p1".into(),
                 card_id: card_id.into(),
@@ -3840,7 +3843,7 @@ mod tests {
             updated_at: c1_merged - 4 * min,
         });
 
-        let d = compute(&s, None, RangeWindow::Today, now, &tz_plus_8());
+        let d = compute(&s, &events, None, RangeWindow::Today, now, &tz_plus_8());
         assert_eq!(d.timings.develop_stage.avg_ms, Some(30 * min));
         assert_eq!(d.timings.develop_stage.samples, 1);
         assert_eq!(d.timings.develop_exec.avg_ms, Some(8 * min));

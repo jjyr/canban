@@ -127,14 +127,14 @@ impl Client {
         let setup = (|| -> Result<_> {
             let mut stdin = transport.writer.take().unwrap();
             let mut reader = BufReader::new(transport.reader.take().unwrap());
-            writeln!(
-                stdin,
-                "{}",
-                json!({"jsonrpc":"2.0","id":1,"method":"hello","params":{"generation":1,"framed":true,"features":["automatic_input"]}})
-            )?;
-            stdin.flush()?;
-            let mut line = String::new();
-            reader.read_line(&mut line)?;
+            {
+                let mut writer = BufWriter::new(&mut *stdin);
+                write_json_line(
+                    &mut writer,
+                    &json!({"jsonrpc":"2.0","id":1,"method":"hello","params":{"generation":1,"framed":true,"features":["automatic_input"]}}),
+                )?;
+            }
+            let line = read_bounded_json_line(&mut reader, MAX_JSON_FRAME_BYTES)?;
             let hello: Value = serde_json::from_str(&line)?;
             ensure!(hello.get("error").is_none(), "Herdr handshake: {hello}");
             let mut attach_params =
@@ -340,5 +340,43 @@ mod relay_tests {
         frame(&mut bytes, 7, 0, b"human input").unwrap();
         relay_input(bytes.as_slice(), Vec::new(), target).unwrap();
         assert!(crate::activity::get("relay-test", "terminal").last_at > before);
+    }
+
+    #[test]
+    fn attach_returns_unexpected_eof_on_truncated_hello_frame() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("mock-hc-stream-truncated");
+        std::fs::write(
+            &script,
+            r#"#!/usr/bin/python3
+import sys, json
+line = sys.stdin.readline()
+req = json.loads(line)
+sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': {'features': []}}))
+sys.stdout.flush()
+sys.exit(0)
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let client = Client {
+            config: Config {
+                hc: script.to_string_lossy().into_owned(),
+                hc_session: "stream-truncated-test".into(),
+                ..Default::default()
+            },
+        };
+        let err = match client.attach("t1", 80, 24) {
+            Ok(_) => panic!("expected truncated hello to fail"),
+            Err(err) => err,
+        };
+        assert_eq!(
+            err.downcast_ref::<std::io::Error>().map(|e| e.kind()),
+            Some(std::io::ErrorKind::UnexpectedEof),
+            "expected UnexpectedEof, got: {err:#}"
+        );
     }
 }

@@ -623,6 +623,50 @@ pub struct ReviewPreview {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
 }
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CardEventSummary {
+    pub last_event_seq: u64,
+    pub reply_count: u32,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReminderEventMeta {
+    pub kind: String,
+    pub actor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_label: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Reminder {
+    pub id: String,
+    pub project_id: String,
+    pub card_id: String,
+    pub message: String,
+    pub unread: bool,
+    pub pending: bool,
+    /// Card-local Timeline position. Zero denotes a state-only recovery item.
+    pub sequence: u64,
+    pub created_at: u64,
+    #[serde(default)]
+    pub audible_when_unread: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<ReminderEventMeta>,
+}
+impl AsRef<str> for Reminder {
+    fn as_ref(&self) -> &str {
+        &self.id
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Event {
     pub id: String,
@@ -1155,7 +1199,12 @@ pub struct Snapshot {
     pub merging_cards: Vec<String>,
     pub projects: Vec<Project>,
     pub cards: Vec<Card>,
-    pub events: Vec<Event>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub card_summaries: BTreeMap<String, CardEventSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reminders: Vec<Reminder>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sound_event_ids: Vec<String>,
     pub reports: Vec<Report>,
     pub notes: Vec<Note>,
     pub notices: Vec<Notice>,

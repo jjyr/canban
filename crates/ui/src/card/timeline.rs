@@ -40,6 +40,7 @@ pub(crate) fn reply_count(events: &[Event], card_id: &str) -> usize {
     reply_count_iter(events.iter(), card_id)
 }
 
+#[cfg(test)]
 pub(crate) fn reply_count_iter<'a>(
     events: impl Iterator<Item = &'a Event>,
     card_id: &str,
@@ -75,6 +76,7 @@ fn is_narrative_event(event: &Event, events: &[Event]) -> bool {
         || (event.kind == "execution.reported" && !echoed_report)
 }
 
+#[cfg(test)]
 fn is_narrative_event_ref(event: &Event, events: &[&Event]) -> bool {
     let echoed_report = event.kind == "execution.reported"
         && (event.data["comment_replied"] == true
@@ -347,8 +349,23 @@ pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
     let pause_follow: Rc<dyn Fn()> = Rc::new(move || reading.pause_follow());
     let events = computed(move || {
         let cid = ui.card_id();
-        ui.snapshot
-            .with(|s| ui.index.with(|idx| idx.card_events(s, &cid)))
+        ui.card_timeline_events(&cid)
+    });
+    let timeline_state = computed(move || {
+        let cid = ui.card_id();
+        ui.card_timeline_state(&cid)
+    });
+    effect(move || {
+        let cid = ui.card_id();
+        let target = ui.card_event.get();
+        let state = timeline_state.get();
+        if let Some(seq) = target
+            && state.initialized
+            && state.oldest_seq.is_some_and(|oldest| seq < oldest)
+            && !state.loading_older
+        {
+            ui.load_card_timeline_around(cid, seq);
+        }
     });
     let rows = computed(move || {
         let expanded = expanded_groups.get();
@@ -360,6 +377,25 @@ pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
         .child(when(
             move || !rows.with(Vec::is_empty),
             move || muted("Activity"),
+        ))
+        .child(when(
+            move || timeline_state.with(|st| st.has_more_before),
+            move || {
+                let loading_older = timeline_state.with(|st| st.loading_older);
+                let label = if loading_older {
+                    "Loading older activity…"
+                } else {
+                    "Load older activity"
+                };
+                view().flex().justify_center().child(
+                    compact_action(label, Variant::Quiet, move |_| {
+                        reading.pause_follow();
+                        let cid = ui.card_id();
+                        ui.load_older_card_timeline(cid);
+                    })
+                    .disabled(move || timeline_state.with(|st| st.loading_older)),
+                )
+            },
         ))
         .child(view().gap_0().child(each(
             move || rows.get(),

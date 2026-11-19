@@ -1708,9 +1708,11 @@ pub fn execute(ui: Ui, id: &str) {
                     ui.notify("Open Discussion, Threads, or Reviews to edit a GitHub comment");
                 }
             } else if let Some(c) = ui.current_card().filter(|c| c.active()) {
-                let latest = ui.snapshot.with_untracked(|s| {
-                    s.events
-                        .iter()
+                let latest = ui.card_timelines.with_untracked(|timelines| {
+                    timelines
+                        .get(&c.id)
+                        .into_iter()
+                        .flat_map(|st| st.events.iter())
                         .filter(|e| {
                             e.card_id == c.id && e.kind == "comment.created" && e.actor == "user"
                         })
@@ -1794,9 +1796,11 @@ pub fn execute(ui: Ui, id: &str) {
                     ui.notify("No inline PR comments authored by you on this diff");
                 }
             } else if let Some(c) = ui.current_card().filter(|c| c.active()) {
-                let latest = ui.snapshot.with_untracked(|s| {
-                    s.events
-                        .iter()
+                let latest = ui.card_timelines.with_untracked(|timelines| {
+                    timelines
+                        .get(&c.id)
+                        .into_iter()
+                        .flat_map(|st| st.events.iter())
                         .filter(|e| {
                             e.card_id == c.id && e.kind == "comment.created" && e.actor == "user"
                         })

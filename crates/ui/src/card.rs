@@ -671,7 +671,7 @@ mod tests {
                 .map(|i| format!("Report paragraph line {i}: detailed verification output."))
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            snapshot.events.push(Event {
+            let report_event = Event {
                 id: "ev-1".into(),
                 sequence: 1,
                 project_id: "proj-1".into(),
@@ -681,9 +681,30 @@ mod tests {
                 message: long_report.clone(),
                 data: serde_json::json!({ "body": long_report }),
                 created_at: 2,
-            });
+            };
+            snapshot.card_summaries.insert(
+                "card-1".into(),
+                canban_types::CardEventSummary {
+                    last_event_seq: 1,
+                    reply_count: 1,
+                },
+            );
 
             ui.snapshot.set(snapshot);
+            ui.card_timelines.update(|timelines| {
+                timelines.insert(
+                    "card-1".into(),
+                    CardTimelineState {
+                        events: vec![report_event],
+                        oldest_seq: Some(1),
+                        highwater: 1,
+                        has_more_before: false,
+                        loading: false,
+                        loading_older: false,
+                        initialized: true,
+                    },
+                );
+            });
             ui.project.set("proj-1".into());
             ui.card.set("card-1".into());
             ui.page.set("card".into());

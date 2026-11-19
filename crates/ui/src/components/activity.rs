@@ -32,20 +32,12 @@ pub fn compact_duration(elapsed_ms: u64) -> String {
 
 /// Start timestamp (ms) of a running Card-role Agent execution, returning `None` if unavailable/sentinel.
 pub fn agent_started_at(
-    snapshot: &canban_types::Snapshot,
+    _snapshot: &canban_types::Snapshot,
     entry: &canban_types::TerminalEntry,
 ) -> Option<u64> {
     let agent = entry.agent.as_ref()?;
     if let Some(ts) = agent.started_at.filter(|&t| t > 1_000_000_000_000) {
         return Some(ts);
-    }
-    if let Some(ev) = snapshot.events.iter().rev().find(|e| {
-        e.card_id == agent.card_id
-            && matches!(e.kind.as_str(), "execution.started" | "execution.continued")
-            && e.data["run_number"].as_u64() == Some(u64::from(agent.number))
-    }) && ev.created_at > 1_000_000_000_000
-    {
-        return Some(ev.created_at);
     }
     if agent.updated_at > 1_000_000_000_000 {
         Some(agent.updated_at)
@@ -656,7 +648,7 @@ mod tests {
     #[test]
     fn agent_and_workflow_step_elapsed_resolve_start_and_completion_timestamps() {
         let t0 = 1_760_000_000_000_u64;
-        let mut snapshot = canban_types::Snapshot::default();
+        let snapshot = canban_types::Snapshot::default();
         let mut attempt = canban_scheduler::agent_run(
             "p",
             "c",
@@ -681,21 +673,10 @@ mod tests {
             agent: Some(attempt),
             created_at: t0,
         };
-        // Legacy run without `started_at` resolves matching `execution.started` event first.
-        snapshot.events.push(canban_types::Event {
-            id: "ev1".into(),
-            project_id: "p".into(),
-            card_id: "c".into(),
-            sequence: 1,
-            kind: "execution.started".into(),
-            actor: "system".into(),
-            message: "@developer started".into(),
-            data: serde_json::json!({"run_number": 2}),
-            created_at: t0 + 5_000,
-        });
-        assert_eq!(agent_started_at(&snapshot, &entry), Some(t0 + 5_000));
+        // Without explicit `started_at`, falls back to `agent.updated_at` / `entry.created_at`.
+        assert_eq!(agent_started_at(&snapshot, &entry), Some(t0 + 10_000));
 
-        // Explicit `started_at` on `AgentRun` takes precedence.
+        // Explicit `started_at` on `AgentRun` (backfilled by AppServer) takes precedence.
         entry.agent.as_mut().unwrap().started_at = Some(t0 + 2_000);
         assert_eq!(agent_started_at(&snapshot, &entry), Some(t0 + 2_000));
 

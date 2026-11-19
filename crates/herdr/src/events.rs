@@ -16,14 +16,12 @@ fn request(
     method: &str,
     params: Value,
 ) -> Result<Value> {
-    writeln!(
-        input,
-        "{}",
-        json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+    let mut writer = BufWriter::new(input);
+    write_json_line(
+        &mut writer,
+        &json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}),
     )?;
-    input.flush()?;
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
+    let line = read_bounded_json_line(reader, MAX_JSON_FRAME_BYTES)?;
     let reply: Value = serde_json::from_str(&line)?;
     ensure!(
         reply["id"] == id && reply.get("error").is_none(),
@@ -62,13 +60,8 @@ impl Client {
                 return;
             }
             loop {
-                let mut line = String::new();
                 let value = (|| -> Result<Value> {
-                    ensure!(
-                        reader.read_line(&mut line)? > 0,
-                        "Herdr event connection closed"
-                    );
-                    ensure!(line.len() <= 48 * 1024 * 1024, "Herdr event too large");
+                    let line = read_bounded_json_line(&mut reader, MAX_JSON_FRAME_BYTES)?;
                     Ok(serde_json::from_str(&line)?)
                 })();
                 let failed = value.is_err();
@@ -98,5 +91,53 @@ impl Subscription {
         timeout: Duration,
     ) -> std::result::Result<Result<Value>, RecvTimeoutError> {
         self.receiver.recv_timeout(timeout)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn request_returns_unexpected_eof_on_truncated_or_empty_frame() {
+        for payload in [
+            b"".as_slice(),
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}",
+        ] {
+            let mut out = Vec::new();
+            let mut reader = Cursor::new(payload);
+            let err = request(&mut out, &mut reader, 1, "hello", json!({})).unwrap_err();
+            assert_eq!(
+                err.downcast_ref::<std::io::Error>().map(|e| e.kind()),
+                Some(std::io::ErrorKind::UnexpectedEof),
+                "expected UnexpectedEof for {payload:?}, got: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn read_bounded_json_line_enforces_limit_and_newline() {
+        let mut exact = Cursor::new(b"{\"a\":1}\n");
+        assert_eq!(
+            read_bounded_json_line(&mut exact, 8).unwrap(),
+            "{\"a\":1}\n"
+        );
+
+        let mut oversized = Cursor::new(b"{\"a\":12345}\n");
+        assert_eq!(
+            read_bounded_json_line(&mut oversized, 8)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+
+        let mut truncated = Cursor::new(b"{\"a\":1}");
+        assert_eq!(
+            read_bounded_json_line(&mut truncated, 8)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
     }
 }

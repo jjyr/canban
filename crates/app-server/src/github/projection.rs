@@ -123,54 +123,53 @@ impl AppServer {
                 }
             }
         }
-        if let Some(client) = client.as_ref() {
-            let mut activity_cache: std::collections::HashMap<(String, u64), Option<Value>> =
-                std::collections::HashMap::new();
-            for ev in &mut snapshot.events {
-                if !matches!(
-                    ev.kind.as_str(),
-                    "github.pr.commented" | "github.pr.reviewed"
-                ) {
-                    continue;
-                }
-                let Some(repo) = ev.data["repository"].as_str().map(str::to_owned) else {
-                    continue;
+    }
+}
+
+pub(crate) fn enrich_pr_events(client: &canban_github::Client, events: &mut [Event]) {
+    let mut activity_cache: std::collections::HashMap<(String, u64), Option<Value>> =
+        std::collections::HashMap::new();
+    for ev in events {
+        if !matches!(
+            ev.kind.as_str(),
+            "github.pr.commented" | "github.pr.reviewed"
+        ) {
+            continue;
+        }
+        let Some(repo) = ev.data["repository"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(number) = ev.data["number"].as_u64() else {
+            continue;
+        };
+        let key = (repo.to_lowercase(), number);
+        let cached = activity_cache
+            .entry(key)
+            .or_insert_with(|| {
+                client.cached::<Value>(&format!("/repos/{repo}/pulls/{number}/canban-activity"))
+            })
+            .as_ref();
+        let Some(activity) = cached else {
+            continue;
+        };
+        let body = match ev.kind.as_str() {
+            "github.pr.commented" => {
+                let section = if ev.data["kind"].as_str() == Some("review_comment") {
+                    "review_comments"
+                } else {
+                    "issue_comments"
                 };
-                let Some(number) = ev.data["number"].as_u64() else {
-                    continue;
-                };
-                let key = (repo.to_lowercase(), number);
-                let cached = activity_cache
-                    .entry(key)
-                    .or_insert_with(|| {
-                        client.cached::<Value>(&format!(
-                            "/repos/{repo}/pulls/{number}/canban-activity"
-                        ))
-                    })
-                    .as_ref();
-                let Some(activity) = cached else {
-                    continue;
-                };
-                let body = match ev.kind.as_str() {
-                    "github.pr.commented" => {
-                        let section = if ev.data["kind"].as_str() == Some("review_comment") {
-                            "review_comments"
-                        } else {
-                            "issue_comments"
-                        };
-                        ev.data["comment_id"]
-                            .as_u64()
-                            .and_then(|cid| activity[section][cid.to_string()]["body"].as_str())
-                    }
-                    "github.pr.reviewed" => ev.data["review_id"]
-                        .as_u64()
-                        .and_then(|rid| activity["reviews"][rid.to_string()]["body"].as_str()),
-                    _ => None,
-                };
-                if let Some(body) = body.filter(|b| !b.trim().is_empty()) {
-                    ev.data["projected_body"] = json!(body);
-                }
+                ev.data["comment_id"]
+                    .as_u64()
+                    .and_then(|cid| activity[section][cid.to_string()]["body"].as_str())
             }
+            "github.pr.reviewed" => ev.data["review_id"]
+                .as_u64()
+                .and_then(|rid| activity["reviews"][rid.to_string()]["body"].as_str()),
+            _ => None,
+        };
+        if let Some(body) = body.filter(|b| !b.trim().is_empty()) {
+            ev.data["projected_body"] = json!(body);
         }
     }
 }

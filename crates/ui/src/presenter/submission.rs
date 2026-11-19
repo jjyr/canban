@@ -338,25 +338,6 @@ impl CommittedWrites {
                 saved.revision = rev;
             }
         }
-        for event in self.comments.values() {
-            if let Some(saved) = snapshot.events.iter_mut().find(|e| e.id == event.id) {
-                if saved.kind != "comment.deleted" && event_revision(event) > event_revision(saved)
-                {
-                    *saved = event.clone();
-                }
-            } else {
-                snapshot.events.push(event.clone());
-            }
-        }
-        if !self.deleted_comments.is_empty() {
-            for ev in &mut snapshot.events {
-                if self.deleted_comments.contains(&ev.id) && ev.kind != "comment.deleted" {
-                    ev.kind = "comment.deleted".into();
-                    ev.message = "Comment deleted".into();
-                    ev.data["comment_id"] = json!(ev.id);
-                }
-            }
-        }
         for read in self.card_reads.values() {
             if let Some(existing) = snapshot
                 .card_reads
@@ -454,18 +435,6 @@ impl CommittedWrites {
                 .any(|c| &c.id == id && c.revision < *rev)
                 || self.cards.contains_key(id)
         });
-        self.comments.retain(|id, ev| {
-            !snapshot.events.iter().any(|e| {
-                &e.id == id
-                    && (event_revision(e) >= event_revision(ev) || e.kind == "comment.deleted")
-            })
-        });
-        self.deleted_comments.retain(|id| {
-            snapshot
-                .events
-                .iter()
-                .any(|e| &e.id == id && e.kind != "comment.deleted")
-        });
         self.card_reads.retain(|id, read| {
             !snapshot
                 .card_reads
@@ -500,6 +469,52 @@ impl CommittedWrites {
                 .any(|s| &s.id == id && s.generation >= session.generation)
         });
         self.overlay(snapshot);
+    }
+
+    pub(super) fn overlay_card_events(&self, card_id: &str, events: &mut Vec<Event>) {
+        let mut inserted = false;
+        for event in self.comments.values().filter(|e| e.card_id == card_id) {
+            if let Some(saved) = events.iter_mut().find(|e| e.id == event.id) {
+                if saved.kind != "comment.deleted" && event_revision(event) > event_revision(saved)
+                {
+                    *saved = event.clone();
+                }
+            } else {
+                events.push(event.clone());
+                inserted = true;
+            }
+        }
+        if !self.deleted_comments.is_empty() {
+            for ev in events.iter_mut() {
+                if self.deleted_comments.contains(&ev.id) && ev.kind != "comment.deleted" {
+                    ev.kind = "comment.deleted".into();
+                    ev.message = "Comment deleted".into();
+                    ev.data["comment_id"] = json!(ev.id);
+                }
+            }
+        }
+        if inserted {
+            events.sort_by_key(|e| e.sequence);
+        }
+    }
+
+    pub(super) fn reconcile_card_events(&mut self, card_id: &str, authoritative: &[Event]) {
+        self.comments.retain(|id, ev| {
+            if ev.card_id != card_id {
+                return true;
+            }
+            !authoritative.iter().any(|e| {
+                let same_target = e.id == *id || e.data["comment_id"].as_str() == Some(id.as_str());
+                same_target
+                    && (event_revision(e) >= event_revision(ev) || e.kind == "comment.deleted")
+            })
+        });
+        self.deleted_comments.retain(|id| {
+            !authoritative.iter().any(|e| {
+                e.kind == "comment.deleted"
+                    && (e.id == *id || e.data["comment_id"].as_str() == Some(id.as_str()))
+            })
+        });
     }
 }
 
@@ -656,11 +671,14 @@ mod tests {
         );
         let mut stale = Snapshot::default();
         stale.entity_hosts.insert("p1".into(), "remote".into());
+        let mut stale_events = Vec::new();
         writes.reconcile(&mut stale);
         writes.overlay(&mut stale);
+        writes.reconcile_card_events("c1", &stale_events);
+        writes.overlay_card_events("c1", &mut stale_events);
         assert_eq!(stale.cards, vec![card(2)]);
         assert_eq!(stale.card_host("c1"), "remote");
-        assert_eq!(stale.events, vec![event.clone()]);
+        assert_eq!(stale_events, vec![event.clone()]);
         assert_eq!(writes.cards.len(), 1);
         assert_eq!(writes.comments.len(), 1);
 
@@ -670,12 +688,14 @@ mod tests {
         edited.data = json!({"body":"Edited", "revision":2});
         let mut fresh = Snapshot {
             cards: vec![newer.clone()],
-            events: vec![edited.clone()],
             ..Default::default()
         };
+        let mut fresh_events = vec![edited.clone()];
         writes.reconcile(&mut fresh);
+        writes.reconcile_card_events("c1", &fresh_events);
+        writes.overlay_card_events("c1", &mut fresh_events);
         assert_eq!(fresh.cards, vec![newer]);
-        assert_eq!(fresh.events, vec![edited]);
+        assert_eq!(fresh_events, vec![edited]);
         assert!(writes.cards.is_empty());
         assert!(writes.comments.is_empty());
 
@@ -761,17 +781,6 @@ mod tests {
 
         let mut stale = Snapshot {
             cards: vec![card(1)],
-            events: vec![Event {
-                id: "ev1".into(),
-                project_id: "p1".into(),
-                card_id: "c1".into(),
-                sequence: 2,
-                kind: "comment.created".into(),
-                actor: "user".into(),
-                message: "Original".into(),
-                data: json!({"body":"Original","revision":1}),
-                created_at: 2,
-            }],
             card_reads: vec![CardRead {
                 id: "c1".into(),
                 project_id: "p1".into(),
@@ -796,10 +805,23 @@ mod tests {
             ],
             ..Default::default()
         };
+        let mut stale_events = vec![Event {
+            id: "ev1".into(),
+            project_id: "p1".into(),
+            card_id: "c1".into(),
+            sequence: 2,
+            kind: "comment.created".into(),
+            actor: "user".into(),
+            message: "Original".into(),
+            data: json!({"body":"Original","revision":1}),
+            created_at: 2,
+        }];
         writes.reconcile(&mut stale);
+        writes.reconcile_card_events("c1", &stale_events);
+        writes.overlay_card_events("c1", &mut stale_events);
         assert_eq!(stale.cards[0].stage, "develop");
         assert!(stale.cards[0].hold_auto_merge);
-        assert_eq!(stale.events[0].message, "Edited");
+        assert_eq!(stale_events[0].message, "Edited");
         assert_eq!(stale.card_reads[0].sequence, 2);
         assert!(!stale.schedule_states[0].enabled);
 
@@ -809,12 +831,15 @@ mod tests {
             "local",
         );
         writes.overlay(&mut stale);
-        assert_eq!(stale.events[0].kind, "comment.deleted");
+        writes.overlay_card_events("c1", &mut stale_events);
+        assert_eq!(stale_events[0].kind, "comment.deleted");
         assert_eq!(stale.cards[0].revision, 3);
 
         let mut fresh = stale.clone();
         fresh.schedule_states[0].updated_at = 200;
+        let fresh_events = stale_events.clone();
         writes.reconcile(&mut fresh);
+        writes.reconcile_card_events("c1", &fresh_events);
         assert!(writes.cards.is_empty());
         assert!(writes.card_revisions.is_empty());
         assert!(writes.comments.is_empty());

@@ -1840,6 +1840,8 @@ fn record_pr_activity_updates(
         emitted = true;
     }
 
-    save_obs()?;
+    if next_obs != prev_json {
+        save_obs()?;
+    }
     Ok(emitted)
 }

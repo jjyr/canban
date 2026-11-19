@@ -1,5 +1,6 @@
 use crate::drafts::Draft;
 pub(crate) mod submission;
+use canban_types::Event;
 use canban_types::*;
 use nsh_core::prelude::*;
 use serde_json::{Value, json};
@@ -25,6 +26,17 @@ pub fn event_body_version(event: &canban_types::Event) -> u64 {
         .as_u64()
         .or_else(|| event.data["revision"].as_u64())
         .unwrap_or(event.created_at)
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CardTimelineState {
+    pub events: Vec<Event>,
+    pub oldest_seq: Option<u64>,
+    pub highwater: u64,
+    pub has_more_before: bool,
+    pub loading: bool,
+    pub loading_older: bool,
+    pub initialized: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -159,6 +171,7 @@ pub struct Ui {
     pub refreshing: Signal<bool>,
     pub(crate) refresh_requested: Signal<bool>,
     pub snapshot_epoch: Signal<u64>,
+    pub card_timelines: Signal<BTreeMap<String, CardTimelineState>>,
     pub(crate) committed_writes: Stored<submission::CommittedWrites>,
     pub output: Signal<String>,
     pub output_observed_at: Signal<Option<u64>>,
@@ -567,6 +580,7 @@ impl Ui {
             refreshing: signal(false),
             refresh_requested: signal(false),
             snapshot_epoch: signal(0),
+            card_timelines: signal(BTreeMap::new()),
             committed_writes: stored(Default::default()),
             output: signal(String::new()),
             output_observed_at: signal(None),
@@ -783,22 +797,22 @@ impl Ui {
         let pending_keys = self.snapshot.with_untracked(|s| {
             self.index.with_untracked(|idx| {
                 let mut candidates: Vec<(u64, String, String, u64)> = Vec::new();
-                for card in idx
-                    .cards
-                    .values()
-                    .filter(|c| c.active() && (project.is_empty() || c.project_id == project))
-                {
-                    let Some(events) = idx.events_by_card.get(&card.id) else {
+                for report in &s.reports {
+                    let Some(path) = report.path.as_deref() else {
                         continue;
                     };
-                    for &position in events.iter().rev() {
-                        let ev = &s.events[position];
-                        let Some(path) = ev.data["path"].as_str() else {
-                            continue;
-                        };
-                        let ver = event_body_version(ev);
-                        candidates.push((ev.created_at, card.id.clone(), path.to_owned(), ver));
+                    let Some(card) = idx.cards.get(&report.card_id) else {
+                        continue;
+                    };
+                    if !card.active() || (!project.is_empty() && card.project_id != project) {
+                        continue;
                     }
+                    candidates.push((
+                        report.created_at,
+                        card.id.clone(),
+                        path.to_owned(),
+                        report.created_at,
+                    ));
                 }
                 candidates.sort_by_key(|(created_at, _, _, _)| std::cmp::Reverse(*created_at));
                 let mut selected = Vec::new();
@@ -871,6 +885,7 @@ impl Ui {
                 m.insert(id.clone(), default_tab.clone());
             });
         }
+        let timeline_id = id.clone();
         batch(move || {
             if self.card.get_untracked() != id {
                 self.editing_comment.set(None);
@@ -902,6 +917,283 @@ impl Ui {
             self.output_request
                 .set(self.output_request.get_untracked() + 1);
             self.page.set("card".into());
+        });
+        self.ensure_card_timeline(timeline_id);
+    }
+
+    pub fn card_timeline_events(self, card_id: &str) -> Rc<Vec<Event>> {
+        self.card_timelines.with(|timelines| {
+            Rc::new(
+                timelines
+                    .get(card_id)
+                    .map(|state| state.events.clone())
+                    .unwrap_or_default(),
+            )
+        })
+    }
+
+    pub fn card_timeline_state(self, card_id: &str) -> CardTimelineState {
+        self.card_timelines
+            .with(|timelines| timelines.get(card_id).cloned().unwrap_or_default())
+    }
+
+    pub fn overlay_card_timeline_writes(self, card_id: &str) {
+        if card_id.is_empty() {
+            return;
+        }
+        self.committed_writes.with(|writes| {
+            self.card_timelines.update(|timelines| {
+                let entry = timelines.entry(card_id.to_owned()).or_default();
+                writes.overlay_card_events(card_id, &mut entry.events);
+                if let Some(first) = entry.events.first() {
+                    entry.oldest_seq = Some(
+                        entry
+                            .oldest_seq
+                            .map_or(first.sequence, |old| old.min(first.sequence)),
+                    );
+                }
+            });
+        });
+    }
+
+    pub fn ensure_card_timeline(self, card_id: String) {
+        if card_id.is_empty() || crate::APP.get().is_none() {
+            return;
+        }
+        let existing = self
+            .card_timelines
+            .with_untracked(|m| m.get(&card_id).cloned())
+            .unwrap_or_default();
+        if existing.loading {
+            return;
+        }
+        let project_id = self
+            .index
+            .with_untracked(|idx| idx.cards.get(&card_id).map(|c| c.project_id.clone()));
+        if !existing.initialized {
+            self.card_timelines.update(|m| {
+                m.entry(card_id.clone()).or_default().loading = true;
+            });
+            let cid = card_id.clone();
+            self.spawn(async move {
+                let cid_call = cid.clone();
+                let res = blocking(move || {
+                    crate::routed_call(
+                        "timeline.list",
+                        json!({"card_id": cid_call, "tail": true, "limit": 200}),
+                        project_id.as_deref(),
+                    )
+                })
+                .await;
+                match res {
+                    Ok(Ok(val)) => {
+                        let parsed = parse_timeline_page(&val);
+                        self.committed_writes.with(|writes| {
+                            self.card_timelines.update(|m| {
+                                let state = m.entry(cid.clone()).or_default();
+                                apply_tail_page(
+                                    state,
+                                    parsed.events,
+                                    parsed.highwater,
+                                    parsed.has_more_before,
+                                    parsed.oldest_sequence,
+                                    writes,
+                                    &cid,
+                                );
+                            });
+                        });
+                        if let Some(target_seq) = self.card_event.get_untracked() {
+                            let needs_around = self.card_timelines.with_untracked(|m| {
+                                m.get(&cid).is_some_and(|st| {
+                                    st.oldest_seq.is_some_and(|oldest| target_seq < oldest)
+                                        && !st.loading_older
+                                })
+                            });
+                            if needs_around {
+                                self.load_card_timeline_around(cid, target_seq);
+                            }
+                        }
+                    }
+                    _ => {
+                        self.card_timelines.update(|m| {
+                            if let Some(st) = m.get_mut(&cid) {
+                                st.loading = false;
+                            }
+                        });
+                    }
+                }
+            });
+            return;
+        }
+
+        let snapshot_last_seq = self
+            .index
+            .with_untracked(|idx| idx.last_event_by_card.get(&card_id).copied().unwrap_or(0));
+        if snapshot_last_seq > existing.highwater {
+            let after_seq = existing.highwater;
+            self.card_timelines.update(|m| {
+                m.entry(card_id.clone()).or_default().loading = true;
+            });
+            let cid = card_id.clone();
+            self.spawn(async move {
+                let cid_call = cid.clone();
+                let res = blocking(move || {
+                    crate::routed_call(
+                        "timeline.list",
+                        json!({"card_id": cid_call, "after_sequence": after_seq, "limit": 200}),
+                        project_id.as_deref(),
+                    )
+                })
+                .await;
+                match res {
+                    Ok(Ok(val)) => {
+                        let parsed = parse_timeline_page(&val);
+                        self.committed_writes.with(|writes| {
+                            self.card_timelines.update(|m| {
+                                let state = m.entry(cid.clone()).or_default();
+                                apply_incremental_page(
+                                    state,
+                                    parsed.events,
+                                    parsed.highwater,
+                                    writes,
+                                    &cid,
+                                );
+                            });
+                        });
+                    }
+                    _ => {
+                        self.card_timelines.update(|m| {
+                            if let Some(st) = m.get_mut(&cid) {
+                                st.loading = false;
+                            }
+                        });
+                    }
+                }
+            });
+        }
+
+        if let Some(target_seq) = self.card_event.get_untracked()
+            && existing
+                .oldest_seq
+                .is_some_and(|oldest| target_seq < oldest)
+            && !existing.loading_older
+        {
+            self.load_card_timeline_around(card_id, target_seq);
+        }
+    }
+
+    pub fn load_older_card_timeline(self, card_id: String) {
+        if card_id.is_empty() || crate::APP.get().is_none() {
+            return;
+        }
+        let existing = self
+            .card_timelines
+            .with_untracked(|m| m.get(&card_id).cloned())
+            .unwrap_or_default();
+        let Some(before_seq) = existing.oldest_seq else {
+            return;
+        };
+        if !existing.has_more_before || existing.loading_older {
+            return;
+        }
+        let project_id = self
+            .index
+            .with_untracked(|idx| idx.cards.get(&card_id).map(|c| c.project_id.clone()));
+        self.card_timelines.update(|m| {
+            m.entry(card_id.clone()).or_default().loading_older = true;
+        });
+        let cid = card_id.clone();
+        self.spawn(async move {
+            let cid_call = cid.clone();
+            let res = blocking(move || {
+                crate::routed_call(
+                    "timeline.list",
+                    json!({"card_id": cid_call, "before_sequence": before_seq, "limit": 200}),
+                    project_id.as_deref(),
+                )
+            })
+            .await;
+            match res {
+                Ok(Ok(val)) => {
+                    let parsed = parse_timeline_page(&val);
+                    self.committed_writes.with(|writes| {
+                        self.card_timelines.update(|m| {
+                            let state = m.entry(cid.clone()).or_default();
+                            apply_older_page(
+                                state,
+                                parsed.events,
+                                parsed.has_more_before,
+                                parsed.oldest_sequence,
+                                writes,
+                                &cid,
+                            );
+                        });
+                    });
+                }
+                _ => {
+                    self.card_timelines.update(|m| {
+                        if let Some(st) = m.get_mut(&cid) {
+                            st.loading_older = false;
+                        }
+                    });
+                }
+            }
+        });
+    }
+
+    pub fn load_card_timeline_around(self, card_id: String, target_seq: u64) {
+        if card_id.is_empty() || crate::APP.get().is_none() {
+            return;
+        }
+        let existing = self
+            .card_timelines
+            .with_untracked(|m| m.get(&card_id).cloned())
+            .unwrap_or_default();
+        if existing.loading_older {
+            return;
+        }
+        let project_id = self
+            .index
+            .with_untracked(|idx| idx.cards.get(&card_id).map(|c| c.project_id.clone()));
+        let after_seq = target_seq.saturating_sub(20);
+        self.card_timelines.update(|m| {
+            m.entry(card_id.clone()).or_default().loading_older = true;
+        });
+        let cid = card_id.clone();
+        self.spawn(async move {
+            let cid_call = cid.clone();
+            let res = blocking(move || {
+                crate::routed_call(
+                    "timeline.list",
+                    json!({"card_id": cid_call, "after_sequence": after_seq, "limit": 200}),
+                    project_id.as_deref(),
+                )
+            })
+            .await;
+            match res {
+                Ok(Ok(val)) => {
+                    let parsed = parse_timeline_page(&val);
+                    self.committed_writes.with(|writes| {
+                        self.card_timelines.update(|m| {
+                            let state = m.entry(cid.clone()).or_default();
+                            apply_around_page(
+                                state,
+                                parsed.events,
+                                parsed.has_more_before,
+                                writes,
+                                &cid,
+                            );
+                        });
+                    });
+                }
+                _ => {
+                    self.card_timelines.update(|m| {
+                        if let Some(st) = m.get_mut(&cid) {
+                            st.loading_older = false;
+                        }
+                    });
+                }
+            }
         });
     }
     pub fn open_card_with_terminal(self, card_id: String, conversation: Option<String>) {
@@ -1047,6 +1339,10 @@ pub fn refresh(ui: Ui) {
                 });
                 if different {
                     ui.prefetch_active_reports();
+                    let open_card = ui.card.get_untracked();
+                    if !open_card.is_empty() {
+                        ui.ensure_card_timeline(open_card);
+                    }
                 }
             }
             Ok(Err(e)) => ui.operation_error.set(format!("Could not refresh: {e:#}")),
@@ -1227,8 +1523,23 @@ pub fn dispatch_complete(
                     }
                     ui.runtime_clock.set(now());
                 });
+                if !config_only
+                    && matches!(method, "comment.add" | "comment.update" | "comment.delete")
+                {
+                    let cid = value["card_id"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| ui.card.get_untracked());
+                    if !cid.is_empty() {
+                        ui.overlay_card_timeline_writes(&cid);
+                    }
+                }
                 if !skip_snapshot && !stale {
                     ui.prefetch_active_reports();
+                    let open_card = ui.card.get_untracked();
+                    if !open_card.is_empty() {
+                        ui.ensure_card_timeline(open_card);
+                    }
                 }
                 let failed = matches!(value["state"].as_str(), Some("failed" | "unknown"));
                 if failed {
@@ -1606,6 +1917,157 @@ pub fn copy_text(ui: Ui, value: String) {
     set_clipboard(&value);
     ui.notify("Copied to clipboard");
 }
+struct ParsedTimelinePage {
+    events: Vec<Event>,
+    highwater: u64,
+    has_more_before: bool,
+    oldest_sequence: Option<u64>,
+}
+
+fn parse_timeline_page(val: &Value) -> ParsedTimelinePage {
+    let events = val["events"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| serde_json::from_value::<Event>(v.clone()).ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let highwater = val["highwater"]
+        .as_u64()
+        .unwrap_or_else(|| events.last().map(|e| e.sequence).unwrap_or(0));
+    let has_more_before = val["has_more_before"].as_bool().unwrap_or(false);
+    let oldest_sequence = val["oldest_sequence"]
+        .as_u64()
+        .or_else(|| events.first().map(|e| e.sequence));
+    ParsedTimelinePage {
+        events,
+        highwater,
+        has_more_before,
+        oldest_sequence,
+    }
+}
+
+fn merge_events_by_id(target: &mut Vec<Event>, incoming: Vec<Event>) {
+    for ev in incoming {
+        if let Some(existing) = target.iter_mut().find(|e| e.id == ev.id) {
+            *existing = ev;
+        } else {
+            target.push(ev);
+        }
+    }
+    target.sort_by_key(|e| e.sequence);
+}
+
+pub(crate) fn apply_tail_page(
+    state: &mut CardTimelineState,
+    mut events: Vec<Event>,
+    highwater: u64,
+    has_more_before: bool,
+    oldest_seq: Option<u64>,
+    writes: &mut submission::CommittedWrites,
+    card_id: &str,
+) {
+    writes.reconcile_card_events(card_id, &events);
+    writes.overlay_card_events(card_id, &mut events);
+    state.oldest_seq = oldest_seq.or_else(|| events.first().map(|e| e.sequence));
+    state.highwater = state
+        .highwater
+        .max(highwater)
+        .max(events.last().map(|e| e.sequence).unwrap_or(0));
+    state.has_more_before = has_more_before;
+    state.events = events;
+    state.loading = false;
+    state.initialized = true;
+}
+
+pub(crate) fn apply_incremental_page(
+    state: &mut CardTimelineState,
+    events: Vec<Event>,
+    highwater: u64,
+    writes: &mut submission::CommittedWrites,
+    card_id: &str,
+) {
+    writes.reconcile_card_events(card_id, &events);
+    for ev in &events {
+        if ev.kind == "comment.updated"
+            && let Some(target_id) = ev.data["comment_id"].as_str()
+            && let Some(target) = state.events.iter_mut().find(|e| e.id == target_id)
+            && target.kind != "comment.deleted"
+        {
+            if let Some(body) = ev.data["body"].as_str() {
+                target.message = body.to_owned();
+                target.data["body"] = json!(body);
+            }
+            if let Some(rev) = ev.data["revision"].as_u64() {
+                target.data["revision"] = json!(rev);
+            }
+            if let Some(edited_at) = ev.data["edited_at"].as_u64() {
+                target.data["edited_at"] = json!(edited_at);
+            }
+        } else if ev.kind == "comment.deleted"
+            && let Some(target_id) = ev.data["comment_id"].as_str()
+            && let Some(target) = state.events.iter_mut().find(|e| e.id == target_id)
+        {
+            target.kind = "comment.deleted".into();
+            target.message = "Comment deleted".into();
+            target.data["comment_id"] = json!(target_id);
+            if let Some(rev) = ev.data["revision"].as_u64() {
+                target.data["revision"] = json!(rev);
+            }
+            if let Some(deleted_at) = ev.data["deleted_at"].as_u64() {
+                target.data["deleted_at"] = json!(deleted_at);
+            }
+        }
+    }
+    merge_events_by_id(&mut state.events, events);
+    writes.overlay_card_events(card_id, &mut state.events);
+    if state.oldest_seq.is_none() {
+        state.oldest_seq = state.events.first().map(|e| e.sequence);
+    }
+    state.highwater = state
+        .highwater
+        .max(highwater)
+        .max(state.events.last().map(|e| e.sequence).unwrap_or(0));
+    state.loading = false;
+    state.initialized = true;
+}
+
+pub(crate) fn apply_older_page(
+    state: &mut CardTimelineState,
+    events: Vec<Event>,
+    has_more_before: bool,
+    oldest_seq: Option<u64>,
+    writes: &mut submission::CommittedWrites,
+    card_id: &str,
+) {
+    writes.reconcile_card_events(card_id, &events);
+    merge_events_by_id(&mut state.events, events);
+    writes.overlay_card_events(card_id, &mut state.events);
+    state.oldest_seq = match (state.oldest_seq, oldest_seq) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+    .or_else(|| state.events.first().map(|e| e.sequence));
+    state.has_more_before = has_more_before;
+    state.loading_older = false;
+}
+
+pub(crate) fn apply_around_page(
+    state: &mut CardTimelineState,
+    events: Vec<Event>,
+    has_more_before: bool,
+    writes: &mut submission::CommittedWrites,
+    card_id: &str,
+) {
+    writes.reconcile_card_events(card_id, &events);
+    merge_events_by_id(&mut state.events, events);
+    writes.overlay_card_events(card_id, &mut state.events);
+    state.oldest_seq = state.events.first().map(|e| e.sequence);
+    state.has_more_before = has_more_before;
+    state.loading_older = false;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1679,5 +2141,130 @@ mod tests {
         );
         core.mount_root(&nsh_core::element::Root::of::<ProbeRoot>());
         let _ = core.commit();
+    }
+
+    #[test]
+    fn card_timeline_pagination_incremental_refresh_and_optimistic_comment_overlay() {
+        let ev = |seq: u64, id: &str, kind: &str, msg: &str, data: Value| Event {
+            id: id.into(),
+            sequence: seq,
+            project_id: "p1".into(),
+            card_id: "c1".into(),
+            kind: kind.into(),
+            actor: "user".into(),
+            message: msg.into(),
+            data,
+            created_at: seq * 1000,
+        };
+
+        let mut writes = submission::CommittedWrites::default();
+        let mut state = CardTimelineState::default();
+
+        // 1. Initial tail load returns sequences 10..=12 with older history available.
+        apply_tail_page(
+            &mut state,
+            vec![
+                ev(
+                    10,
+                    "e10",
+                    "comment.created",
+                    "Ten",
+                    json!({"body": "Ten", "revision": 1}),
+                ),
+                ev(11, "e11", "stage.changed", "Moved", json!({})),
+                ev(
+                    12,
+                    "e12",
+                    "comment.created",
+                    "Twelve",
+                    json!({"body": "Twelve", "revision": 1}),
+                ),
+            ],
+            12,
+            true,
+            Some(10),
+            &mut writes,
+            "c1",
+        );
+        assert!(state.initialized);
+        assert!(state.has_more_before);
+        assert_eq!(state.oldest_seq, Some(10));
+        assert_eq!(state.highwater, 12);
+        assert_eq!(state.events.len(), 3);
+
+        // 2. Optimistic comment.add overlays immediately before incremental refresh arrives.
+        let optimistic_comment = ev(
+            13,
+            "e13",
+            "comment.created",
+            "Optimistic",
+            json!({"body": "Optimistic", "revision": 1}),
+        );
+        writes.record(
+            "comment.add",
+            &serde_json::to_value(&optimistic_comment).unwrap(),
+            "local",
+        );
+        writes.overlay_card_events("c1", &mut state.events);
+        assert_eq!(state.events.len(), 4);
+        assert_eq!(state.events[3].message, "Optimistic");
+
+        // 3. Incremental refresh brings authoritative e13 plus a comment.updated for e10
+        //    and a comment.deleted for e12.
+        apply_incremental_page(
+            &mut state,
+            vec![
+                optimistic_comment,
+                ev(
+                    14,
+                    "e14",
+                    "comment.updated",
+                    "Comment updated",
+                    json!({"comment_id": "e10", "body": "Ten edited", "revision": 2, "edited_at": 14000}),
+                ),
+                ev(
+                    15,
+                    "e15",
+                    "comment.deleted",
+                    "Comment deleted",
+                    json!({"comment_id": "e12", "revision": 2, "deleted_at": 15000}),
+                ),
+            ],
+            15,
+            &mut writes,
+            "c1",
+        );
+        assert_eq!(state.highwater, 15);
+        assert_eq!(
+            state.events.iter().find(|e| e.id == "e10").unwrap().message,
+            "Ten edited"
+        );
+        assert_eq!(
+            state.events.iter().find(|e| e.id == "e12").unwrap().kind,
+            "comment.deleted"
+        );
+
+        // 4. "Load older activity" prepends sequences 1..=2 and clears has_more_before.
+        apply_older_page(
+            &mut state,
+            vec![
+                ev(1, "e1", "card.created", "Created", json!({})),
+                ev(
+                    2,
+                    "e2",
+                    "comment.created",
+                    "Early",
+                    json!({"body": "Early"}),
+                ),
+            ],
+            false,
+            Some(1),
+            &mut writes,
+            "c1",
+        );
+        assert!(!state.has_more_before);
+        assert_eq!(state.oldest_seq, Some(1));
+        assert_eq!(state.events.first().unwrap().sequence, 1);
+        assert_eq!(state.events.last().unwrap().sequence, 15);
     }
 }

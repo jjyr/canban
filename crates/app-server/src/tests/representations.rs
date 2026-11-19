@@ -157,9 +157,8 @@ fn comment_views_filter_before_paging_and_do_not_rewrite_stored_events() {
         .unwrap();
     assert_eq!(empty["events"], json!([]));
     assert_eq!(empty["last_sequence"], after);
-    let stored = app.snapshot().unwrap();
+    let stored = app.events().unwrap();
     let comments = stored
-        .events
         .iter()
         .filter(|e| e.kind == "comment.created")
         .collect::<Vec<_>>();
@@ -199,7 +198,7 @@ fn revision_conflicts_and_legacy_operation_replays_survive_projection() {
     assert_eq!(receipt["id"], old["id"]);
     assert_eq!(receipt["revision"], 2);
     assert_eq!(receipt["body"], card.body);
-    let before = app.snapshot().unwrap().events.len();
+    let before = app.events().unwrap().len();
     assert!(
         app.call(
             "card.move",
@@ -207,7 +206,7 @@ fn revision_conflicts_and_legacy_operation_replays_survive_projection() {
         )
         .is_err()
     );
-    assert_eq!(app.snapshot().unwrap().events.len(), before);
+    assert_eq!(app.events().unwrap().len(), before);
     let receipt = app
         .call(
             "card.move",
@@ -216,4 +215,239 @@ fn revision_conflicts_and_legacy_operation_replays_survive_projection() {
         .unwrap();
     assert_eq!(receipt["stage"], "backlog");
     assert!(receipt.get("body").is_none());
+}
+
+#[test]
+fn timeline_list_supports_tail_and_before_sequence_paging() {
+    let (_dir, app, _project, card) = setup();
+    for i in 1..=7 {
+        app.call(
+            "comment.add",
+            json!({"card_id": card.id, "body": format!("msg-{i}")}),
+        )
+        .unwrap();
+    }
+    // Tail page returns the latest 3 events in ascending sequence order.
+    let tail = app
+        .call(
+            "timeline.list",
+            json!({"card_id": card.id, "tail": true, "limit": 3, "view": "full"}),
+        )
+        .unwrap();
+    let tail_events = tail["events"].as_array().unwrap();
+    assert_eq!(tail_events.len(), 3);
+    assert_eq!(tail["has_more_before"], true);
+    let seqs: Vec<u64> = tail_events
+        .iter()
+        .map(|e| e["sequence"].as_u64().unwrap())
+        .collect();
+    assert!(seqs.windows(2).all(|w| w[0] < w[1]));
+    assert_eq!(tail["oldest_sequence"], json!(seqs[0]));
+    assert_eq!(tail["highwater"], json!(seqs[2]));
+
+    // Page backwards with before_sequence.
+    let older = app
+        .call(
+            "timeline.list",
+            json!({"card_id": card.id, "before_sequence": seqs[0], "limit": 3, "view": "full"}),
+        )
+        .unwrap();
+    let older_events = older["events"].as_array().unwrap();
+    assert_eq!(older_events.len(), 3);
+    let older_seqs: Vec<u64> = older_events
+        .iter()
+        .map(|e| e["sequence"].as_u64().unwrap())
+        .collect();
+    assert!(older_seqs.windows(2).all(|w| w[0] < w[1]));
+    assert!(older_seqs[2] < seqs[0]);
+    assert_eq!(older["oldest_sequence"], json!(older_seqs[0]));
+    assert_eq!(older["has_more_before"], true);
+
+    // Final older page reaches the start (card.created + first comment = 2 events left).
+    let earliest = app
+        .call(
+            "timeline.list",
+            json!({"card_id": card.id, "before_sequence": older_seqs[0], "limit": 10, "view": "full"}),
+        )
+        .unwrap();
+    assert_eq!(earliest["has_more_before"], false);
+    assert_eq!(earliest["oldest_sequence"], json!(1));
+}
+
+#[test]
+fn insights_events_filters_kinds_strips_message_and_data_and_skips_cardless() {
+    let (_dir, app, project, card) = setup();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            // Card-bound insights event with extra data keys and message.
+            db.append(canban_timeline::event(
+                &project.id,
+                &card.id,
+                "execution.reported",
+                "agent:developer",
+                "Long secret report prose",
+                json!({
+                    "state": "completed",
+                    "terminal_id": "t-1",
+                    "run_number": 2,
+                    "extra_secret": "drop-me",
+                    "path": "/tmp/file"
+                }),
+            ))?;
+            // Card-bound non-insights event (should be excluded).
+            db.append(canban_timeline::event(
+                &project.id,
+                &card.id,
+                "card.updated",
+                "user",
+                "Updated title",
+                json!({"from": "a", "to": "b"}),
+            ))?;
+            // Cardless event (should be excluded).
+            db.append(canban_timeline::event(
+                &project.id,
+                "",
+                "github.issue.opened",
+                "github",
+                "Cardless event",
+                json!({"origin": "github"}),
+            ))?;
+            Ok(())
+        })
+        .unwrap();
+
+    let res = app
+        .call("insights.events", json!({"project_id": project.id}))
+        .unwrap();
+    let events: Vec<Event> = serde_json::from_value(res["events"].clone()).unwrap();
+    assert!(events.iter().all(|e| !e.card_id.is_empty()));
+    assert!(events.iter().all(|e| e.message.is_empty()));
+    assert!(!events.iter().any(|e| e.kind == "card.updated"));
+    assert!(!events.iter().any(|e| e.kind == "github.issue.opened"));
+
+    let reported = events
+        .iter()
+        .find(|e| e.kind == "execution.reported")
+        .expect("execution.reported must be returned");
+    assert_eq!(reported.data["state"], json!("completed"));
+    assert_eq!(reported.data["terminal_id"], json!("t-1"));
+    assert_eq!(reported.data["run_number"], json!(2));
+    assert!(reported.data.get("extra_secret").is_none());
+    assert!(reported.data.get("path").is_none());
+}
+
+#[test]
+fn prune_cardless_events_preserves_highwater_pending_deliveries_and_card_events() {
+    let (_dir, app, project, card) = setup();
+    let (ev_old_id, ev_pending_id, ev_recent_id) = app
+        .store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut old = canban_timeline::event(
+                &project.id,
+                "",
+                "github.issue.opened",
+                "github",
+                "Old cardless",
+                json!({}),
+            );
+            old.created_at = 1; // ancient
+            let old = db.append(old)?;
+
+            let mut pending_ev = canban_timeline::event(
+                &project.id,
+                "",
+                "github.issue.opened",
+                "github",
+                "Pending delivery cardless",
+                json!({}),
+            );
+            pending_ev.created_at = 1; // ancient, but has pending delivery
+            let pending_ev = db.append(pending_ev)?;
+            db.save(&EventDelivery {
+                id: format!("sub1:{}", pending_ev.id),
+                subscription_id: "sub1".into(),
+                subscription_revision: 1,
+                event_id: pending_ev.id.clone(),
+                offset: 2,
+                selector: EventSelector::default(),
+                target: SubscriptionTarget::Workflow {
+                    workflow_id: "wf".into(),
+                    entry: "main".into(),
+                    card_id: None,
+                },
+                definition_revision: None,
+                state: "pending".into(),
+                attempts: 0,
+                next_attempt_at: 0,
+                error: None,
+                workflow_run_id: None,
+            })?;
+
+            let recent = db.append(canban_timeline::event(
+                &project.id,
+                "",
+                "github.issue.opened",
+                "github",
+                "Recent cardless",
+                json!({}),
+            ))?;
+            Ok((old.id, pending_ev.id, recent.id))
+        })
+        .unwrap();
+
+    let hw_before = crate::events::highwater(app.store.lock().unwrap().db()).unwrap();
+    let pruned = app
+        .store
+        .lock()
+        .unwrap()
+        .write(|db| db.prune_cardless_events(60_000, 100, hw_before))
+        .unwrap();
+    assert_eq!(
+        pruned, 1,
+        "only the old consumed event without pending delivery is pruned"
+    );
+
+    let hw_after = crate::events::highwater(app.store.lock().unwrap().db()).unwrap();
+    assert!(
+        hw_after >= hw_before,
+        "highwater must never decrease after pruning ({hw_after} < {hw_before})"
+    );
+
+    let remaining = app.events().unwrap();
+    assert!(!remaining.iter().any(|e| e.id == ev_old_id));
+    assert!(remaining.iter().any(|e| e.id == ev_pending_id));
+    assert!(remaining.iter().any(|e| e.id == ev_recent_id));
+    assert!(remaining.iter().any(|e| e.card_id == card.id));
+}
+
+#[test]
+fn tcp_first_frame_accepts_payloads_over_64_kib() {
+    let (_dir, app, _project, card) = setup();
+    let token = crate::network::ensure_server_token(&app.home).unwrap();
+    let _running = app
+        .start_with_listen(Some(ServerListenConfig {
+            tailscale: false,
+            port: 0,
+            listen: Some("127.0.0.1:0".into()),
+        }))
+        .unwrap();
+    let addr = app.bound_tcp_addrs()[0].clone();
+    let large_body = "x".repeat(100 * 1024);
+    let reply = crate::client::rpc_tcp(
+        &addr,
+        Some(&token),
+        "card.update",
+        json!({
+            "card_id": card.id,
+            "revision": card.revision,
+            "body": large_body,
+            "view": "full",
+        }),
+    )
+    .expect("first TCP RPC > 64 KiB must succeed without truncation");
+    assert_eq!(reply["body"].as_str().unwrap().len(), 100 * 1024);
 }

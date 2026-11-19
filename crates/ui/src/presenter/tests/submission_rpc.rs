@@ -276,7 +276,7 @@ fn submissions_finish_before_refresh_and_refresh_failure_does_not_fail_the_write
                     move |result| {
                         assert!(result.is_ok());
                         assert!(!ui.is_method_pending("comment.add"));
-                        assert_eq!(ui.snapshot.with_untracked(|s| s.events.len()), 1);
+                        assert_eq!(ui.card_timeline_events("c1").len(), 1);
                         // A late create receipt must not replace a different draft.
                         ui.page.set("new-card".into());
                         ui.new_draft.set("new-card:submitted".into());
@@ -480,14 +480,15 @@ fn ui_projection_hydrates_real_app_server_card_and_comment_writes_for_overlay() 
     );
     let comment_id = added_comment["id"].as_str().unwrap().to_owned();
     writes.record("comment.add", &added_comment, "local");
-    let mut overlayed = stale_card_snap.clone();
-    writes.reconcile(&mut overlayed);
-    assert_eq!(overlayed.events.len(), 1);
-    assert_eq!(overlayed.events[0].id, comment_id);
-    assert_eq!(overlayed.events[0].message, "First comment");
+    let mut overlayed_events = Vec::new();
+    writes.reconcile_card_events(&card_id, &overlayed_events);
+    writes.overlay_card_events(&card_id, &mut overlayed_events);
+    assert_eq!(overlayed_events.len(), 1);
+    assert_eq!(overlayed_events[0].id, comment_id);
+    assert_eq!(overlayed_events[0].message, "First comment");
 
     // 6. `comment.update` (without `fields: ["body"]`, hydrates both `val["body"]` and `CommittedWrites`)
-    let stale_with_comment = overlayed.clone();
+    let stale_with_comment = overlayed_events.clone();
     let updated_comment = call_projected(
         "comment.update",
         json!({
@@ -499,9 +500,10 @@ fn ui_projection_hydrates_real_app_server_card_and_comment_writes_for_overlay() 
     );
     assert_eq!(updated_comment["body"], json!("Updated comment body"));
     writes.record("comment.update", &updated_comment, "local");
-    let mut overlayed = stale_with_comment;
-    writes.reconcile(&mut overlayed);
-    assert_eq!(overlayed.events.len(), 1);
-    assert_eq!(overlayed.events[0].message, "Updated comment body");
-    assert_eq!(overlayed.events[0].data["revision"], json!(2));
+    let mut overlayed_events = stale_with_comment;
+    writes.reconcile_card_events(&card_id, &overlayed_events);
+    writes.overlay_card_events(&card_id, &mut overlayed_events);
+    assert_eq!(overlayed_events.len(), 1);
+    assert_eq!(overlayed_events[0].message, "Updated comment body");
+    assert_eq!(overlayed_events[0].data["revision"], json!(2));
 }

@@ -92,7 +92,8 @@ fn runtime_wait_episodes_are_durable_deduplicated_and_never_approve_task_gates()
     assert_eq!(s.notices.len(), 1);
     assert!(s.notices[0].message.contains("diff"));
     assert_eq!(
-        s.events
+        app.events()
+            .unwrap()
             .iter()
             .filter(|e| e.kind == "execution.input_required")
             .count(),
@@ -116,11 +117,12 @@ fn runtime_wait_episodes_are_durable_deduplicated_and_never_approve_task_gates()
             .is_none()
     );
     assert_eq!(s.cards[0].human_gate, before);
+    let events = app.events().unwrap();
     assert!(
         s.notices
             .iter()
             .find(|n| n.id
-                == s.events
+                == events
                     .iter()
                     .find(|e| e.kind == "execution.input_required")
                     .unwrap()
@@ -1126,8 +1128,8 @@ for line in sys.stdin:
         assert_eq!(run.lifecycle.close_reason, "");
         assert!(run.error.is_none());
         assert!(
-            !after
-                .events
+            !app.events()
+                .unwrap()
                 .iter()
                 .any(|e| e.kind == "execution.idle_close_failed"),
             "Non-idle race ({mode}) must not emit idle_close_failed"

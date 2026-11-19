@@ -1299,7 +1299,7 @@ pub fn Gallery() -> impl IntoElement {
             agent: Some(attempt),
             created_at: 1,
         });
-        snapshot.events.retain(|e| e.card_id != "card-1");
+        let mut card_events = Vec::new();
         for (index, kind) in [
             "comment.created",
             "execution.queued",
@@ -1326,9 +1326,11 @@ pub fn Gallery() -> impl IntoElement {
                 event.data = json!({"terminal_id": fixture_tid});
             }
             event.message = match index { 0 => "Please preserve the review decision and local discussion scope.".into(), 3 => "## Implementation report\n\n".to_owned() + &"A readable paragraph with **Markdown** and a stable reference [Issue #42](https://github.com/acme/app/issues/42).\n\n".repeat(18), 4 => "Execution failed: check the terminal before continuing.".into(), _ => kind.replace('.', " ") };
-            snapshot.events.push(event);
+            card_events.push(event);
         }
+        fixtures::apply_fixture_events(&mut snapshot, &card_events);
         ui.snapshot.set(snapshot);
+        fixtures::seed_ui_timelines(ui, &card_events);
         ui.card.set("card-1".into());
         ui.page.set("card".into());
         ui.card_standalone.set(true);
@@ -1359,9 +1361,9 @@ pub fn Gallery() -> impl IntoElement {
         comment.actor = "user".into();
         comment.message = "### Comment Markdown\n\n**Bold comment** and *italic comment*.\n\n[Comment local](card:card-2) · @developer · #ux · [Comment website](https://example.com/)".into();
         comment.data = json!({"body":comment.message});
-        snapshot.events.retain(|e| e.card_id != "card-1");
-        snapshot.events.push(comment);
+        fixtures::apply_fixture_events(&mut snapshot, std::slice::from_ref(&comment));
         ui.snapshot.set(snapshot);
+        fixtures::seed_ui_timelines(ui, &[comment]);
         ui.card.set("card-1".into());
         ui.page.set("card".into());
         return canban_ui::frame::screen(ui).into_element();
@@ -1413,8 +1415,11 @@ pub fn Gallery() -> impl IntoElement {
                 .projects
                 .push(fixtures::workspace().projects.remove(0));
             ui.snapshot.set(empty);
+            ui.insights.events.set(std::rc::Rc::new(Vec::new()));
         } else {
-            ui.snapshot.set(fixtures::insights());
+            let (snap, events) = fixtures::insights();
+            ui.snapshot.set(snap);
+            ui.insights.events.set(std::rc::Rc::new(events));
         }
         ui.insights.anchor_ms.set(Some(fixtures::INSIGHTS_NOW));
         if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("insights-weekly") {
@@ -1443,10 +1448,17 @@ pub fn Gallery() -> impl IntoElement {
             let cutoff = fixtures::INSIGHTS_NOW - 3_600_000;
             ui.snapshot.update(|s| {
                 s.cards.retain(|c| c.created_at >= cutoff);
-                s.events.retain(|e| e.created_at >= cutoff);
                 for p in &mut s.projects {
                     p.created_at = cutoff;
                 }
+            });
+            ui.insights.events.update(|evs| {
+                let filtered: Vec<_> = evs
+                    .iter()
+                    .filter(|e| e.created_at >= cutoff)
+                    .cloned()
+                    .collect();
+                *evs = std::rc::Rc::new(filtered);
             });
         }
         ui.project.set("gallery-project".into());
@@ -1474,6 +1486,7 @@ pub fn Gallery() -> impl IntoElement {
         card.project_id = "gallery-other".into();
         card.body = "Another Project reply".into();
         snapshot.cards.push(card);
+        let mut initial_events = Vec::new();
         for (id, project) in [
             ("card-3", "gallery-project"),
             ("card-other", "gallery-other"),
@@ -1486,33 +1499,48 @@ pub fn Gallery() -> impl IntoElement {
             event.project_id = project.into();
             event.sequence = 2;
             event.message = "**Agent reply:** ready for you to read.".into();
-            snapshot.events.push(event);
+            initial_events.push(event);
         }
+        fixtures::apply_fixture_events(&mut snapshot, &initial_events);
         ui.snapshot.set(snapshot);
+        fixtures::seed_ui_timelines(ui, &initial_events);
         ui.page.set("board".into());
         ui.card.set(String::new());
         canban_ui::reminders::init(ui);
-        let append = move |card: &str, count: usize| {
-            ui.snapshot.update(|s| {
-                for _ in 0..count {
-                    let seq = s
-                        .events
-                        .iter()
-                        .filter(|e| e.card_id == card)
-                        .map(|e| e.sequence)
-                        .max()
-                        .unwrap_or(0)
-                        + 1;
-                    let mut e = fixtures::timeline();
-                    e.id = format!("reply-{card}-{seq}");
-                    e.card_id = card.into();
-                    e.sequence = seq;
-                    e.actor = "agent:developer".into();
-                    e.kind = "comment.replied".into();
-                    e.message = format!("Agent reply **{seq}**: notification acceptance.");
-                    s.events.push(e);
+        let push_event = move |card: &str, make: Box<dyn FnOnce(u64) -> canban_types::Event>| {
+            let mut all_events = Vec::new();
+            ui.card_timelines.update(|timelines| {
+                let entry = timelines.entry(card.to_owned()).or_default();
+                let seq = entry.events.iter().map(|e| e.sequence).max().unwrap_or(0) + 1;
+                entry.events.push(make(seq));
+                entry.highwater = entry.highwater.max(seq);
+                entry.oldest_seq.get_or_insert(seq);
+                entry.initialized = true;
+                for st in timelines.values() {
+                    all_events.extend(st.events.iter().cloned());
                 }
             });
+            ui.snapshot.update(|s| {
+                fixtures::apply_fixture_events(s, &all_events);
+            });
+        };
+        let append = move |card: &str, count: usize| {
+            for _ in 0..count {
+                let card_owned = card.to_owned();
+                push_event(
+                    card,
+                    Box::new(move |seq| {
+                        let mut e = fixtures::timeline();
+                        e.id = format!("reply-{card_owned}-{seq}");
+                        e.card_id = card_owned;
+                        e.sequence = seq;
+                        e.actor = "agent:developer".into();
+                        e.kind = "comment.replied".into();
+                        e.message = format!("Agent reply **{seq}**: notification acceptance.");
+                        e
+                    }),
+                );
+            }
         };
         return view()
             .flex_1()
@@ -1535,25 +1563,20 @@ pub fn Gallery() -> impl IntoElement {
                         });
                     }))
                     .child(action("Silent stage done #1", Variant::Quiet, move |_| {
-                        ui.snapshot.update(|s| {
-                            let seq = s
-                                .events
-                                .iter()
-                                .filter(|e| e.card_id == "card-1")
-                                .map(|e| e.sequence)
-                                .max()
-                                .unwrap_or(0)
-                                + 1;
-                            let mut e = fixtures::timeline();
-                            e.id = format!("auto-completed-{seq}");
-                            e.card_id = "card-1".into();
-                            e.sequence = seq;
-                            e.actor = "agent:developer".into();
-                            e.kind = "execution.reported".into();
-                            e.message = "completed: Stage completed automatically".into();
-                            e.data = json!({"report_id": format!("auto-{seq}"), "state": "completed"});
-                            s.events.push(e);
-                        });
+                        push_event(
+                            "card-1",
+                            Box::new(|seq| {
+                                let mut e = fixtures::timeline();
+                                e.id = format!("auto-completed-{seq}");
+                                e.card_id = "card-1".into();
+                                e.sequence = seq;
+                                e.actor = "agent:developer".into();
+                                e.kind = "execution.reported".into();
+                                e.message = "completed: Stage completed automatically".into();
+                                e.data = json!({"report_id": format!("auto-{seq}"), "state": "completed"});
+                                e
+                            }),
+                        );
                     }))
                     .child(action("Silent idle #1", Variant::Quiet, move |_| {
                         ui.snapshot.update(|s| {
@@ -1603,67 +1626,52 @@ pub fn Gallery() -> impl IntoElement {
                         });
                     }))
                     .child(action("Return #1 to Backlog", Variant::Quiet, move |_| {
-                        ui.snapshot.update(|s| {
-                            let seq = s
-                                .events
-                                .iter()
-                                .filter(|e| e.card_id == "card-1")
-                                .map(|e| e.sequence)
-                                .max()
-                                .unwrap_or(0)
-                                + 1;
-                            let mut e = fixtures::timeline();
-                            e.id = format!("backlog-{seq}");
-                            e.card_id = "card-1".into();
-                            e.sequence = seq;
-                            e.actor = "agent:developer".into();
-                            e.kind = "execution.reported".into();
-                            e.message = "Returned to Backlog: Already implemented".into();
-                            e.data = json!({"report_id": format!("backlog-{seq}"), "state": "backlog"});
-                            s.events.push(e);
-                        });
+                        push_event(
+                            "card-1",
+                            Box::new(|seq| {
+                                let mut e = fixtures::timeline();
+                                e.id = format!("backlog-{seq}");
+                                e.card_id = "card-1".into();
+                                e.sequence = seq;
+                                e.actor = "agent:developer".into();
+                                e.kind = "execution.reported".into();
+                                e.message = "Returned to Backlog: Already implemented".into();
+                                e.data = json!({"report_id": format!("backlog-{seq}"), "state": "backlog"});
+                                e
+                            }),
+                        );
                     }))
                     .child(action("Auto-merge #1", Variant::Quiet, move |_| {
-                        ui.snapshot.update(|s| {
-                            let seq = s
-                                .events
-                                .iter()
-                                .filter(|e| e.card_id == "card-1")
-                                .map(|e| e.sequence)
-                                .max()
-                                .unwrap_or(0)
-                                + 1;
-                            let mut e = fixtures::timeline();
-                            e.id = format!("merged-{seq}");
-                            e.card_id = "card-1".into();
-                            e.sequence = seq;
-                            e.actor = "system".into();
-                            e.kind = "review.merged".into();
-                            e.message = "Auto-merged into main".into();
-                            e.data = json!({"target_branch": "main", "request_key": format!("auto-merge-{seq}")});
-                            s.events.push(e);
-                        });
+                        push_event(
+                            "card-1",
+                            Box::new(|seq| {
+                                let mut e = fixtures::timeline();
+                                e.id = format!("merged-{seq}");
+                                e.card_id = "card-1".into();
+                                e.sequence = seq;
+                                e.actor = "system".into();
+                                e.kind = "review.merged".into();
+                                e.message = "Auto-merged into main".into();
+                                e.data = json!({"target_branch": "main", "request_key": format!("auto-merge-{seq}")});
+                                e
+                            }),
+                        );
                     }))
                     .child(action("Merge failed #1", Variant::Quiet, move |_| {
-                        ui.snapshot.update(|s| {
-                            let seq = s
-                                .events
-                                .iter()
-                                .filter(|e| e.card_id == "card-1")
-                                .map(|e| e.sequence)
-                                .max()
-                                .unwrap_or(0)
-                                + 1;
-                            let mut e = fixtures::timeline();
-                            e.id = format!("merge-failed-{seq}");
-                            e.card_id = "card-1".into();
-                            e.sequence = seq;
-                            e.actor = "system".into();
-                            e.kind = "review.merge_failed".into();
-                            e.message = "Auto-merge failed: dirty target branch".into();
-                            e.data = json!({"target_branch": "main"});
-                            s.events.push(e);
-                        });
+                        push_event(
+                            "card-1",
+                            Box::new(|seq| {
+                                let mut e = fixtures::timeline();
+                                e.id = format!("merge-failed-{seq}");
+                                e.card_id = "card-1".into();
+                                e.sequence = seq;
+                                e.actor = "system".into();
+                                e.kind = "review.merge_failed".into();
+                                e.message = "Auto-merge failed: dirty target branch".into();
+                                e.data = json!({"target_branch": "main"});
+                                e
+                            }),
+                        );
                     }))
                     .child(action("Board", Variant::Quiet, move |_| {
                         ui.navigate("board")
@@ -2225,7 +2233,9 @@ pub fn Gallery() -> impl IntoElement {
         return canban_ui::frame::screen(ui).into_element();
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("card-terminal") {
-        ui.snapshot.set(fixtures::conversation());
+        let (snap, events) = fixtures::conversation();
+        ui.snapshot.set(snap);
+        fixtures::seed_ui_timelines(ui, &events);
         ui.open_card_with_terminal("card-1".into(), None);
         return canban_ui::frame::screen(ui).into_element();
     }
@@ -2695,7 +2705,9 @@ pub fn Gallery() -> impl IntoElement {
                 }))
                 .child(action("Card conversation", Variant::Secondary, move |_| {
                     scene.set("workspace".into());
-                    ui.snapshot.set(fixtures::conversation());
+                    let (snap, events) = fixtures::conversation();
+                    ui.snapshot.set(snap);
+                    fixtures::seed_ui_timelines(ui, &events);
                     ui.open_card("card-1".into());
                 }))
                 .child(action("Card Terminals", Variant::Secondary, move |_| {
@@ -2705,7 +2717,9 @@ pub fn Gallery() -> impl IntoElement {
                 }))
                 .child(action("Card + Live Terminal", Variant::Secondary, move |_| {
                     scene.set("workspace".into());
-                    ui.snapshot.set(fixtures::conversation());
+                    let (snap, events) = fixtures::conversation();
+                    ui.snapshot.set(snap);
+                    fixtures::seed_ui_timelines(ui, &events);
                     ui.open_card_with_terminal("card-1".into(), None);
                 }))
                 .child(action("Activity Popover", Variant::Secondary, move |_| {
@@ -2823,25 +2837,35 @@ pub fn Gallery() -> impl IntoElement {
                     ui.page.set("review".into());
                 }))
                 .child(action("Append reply", Variant::Quiet, move |_| {
-                    ui.snapshot.update(|s| {
-                        let mut event=fixtures::timeline();
-                        event.sequence=s.events.iter().map(|e|e.sequence).max().unwrap_or(0)+1;
-                        event.id=format!("new-{}",event.sequence); event.card_id="card-1".into();
-                        event.kind="comment.replied".into(); event.actor="agent:developer".into();
-                        event.message="New reply arrived while you were reading.\n\nContinue from your current position, or jump to latest.".into();
-                        s.events.push(event);
+                    ui.card_timelines.update(|timelines| {
+                        let entry = timelines.entry("card-1".into()).or_default();
+                        let mut event = fixtures::timeline();
+                        event.sequence = entry.events.iter().map(|e| e.sequence).max().unwrap_or(0) + 1;
+                        event.id = format!("new-{}", event.sequence);
+                        event.card_id = "card-1".into();
+                        event.kind = "comment.replied".into();
+                        event.actor = "agent:developer".into();
+                        event.message = "New reply arrived while you were reading.\n\nContinue from your current position, or jump to latest.".into();
+                        entry.highwater = entry.highwater.max(event.sequence);
+                        entry.oldest_seq.get_or_insert(event.sequence);
+                        entry.initialized = true;
+                        entry.events.push(event);
                     });
                 }))
                 .child(action("Reply in 5s", Variant::Quiet, move |_| {
                     set_timeout(std::time::Duration::from_secs(5), move || {
-                        ui.snapshot.update(|s| {
+                        ui.card_timelines.update(|timelines| {
+                            let entry = timelines.entry("card-1".into()).or_default();
                             let mut event = fixtures::timeline();
-                            event.sequence = s.events.iter().map(|e| e.sequence).max().unwrap_or(0) + 1;
+                            event.sequence = entry.events.iter().map(|e| e.sequence).max().unwrap_or(0) + 1;
                             event.id = format!("delayed-{}", event.sequence);
                             event.card_id = "card-1".into();
                             event.kind = "comment.replied".into();
                             event.message = "**Background reply**: editor focus, selection and undo should survive.".into();
-                            s.events.push(event);
+                            entry.highwater = entry.highwater.max(event.sequence);
+                            entry.oldest_seq.get_or_insert(event.sequence);
+                            entry.initialized = true;
+                            entry.events.push(event);
                         });
                     });
                 }))
@@ -3148,7 +3172,9 @@ pub fn Gallery() -> impl IntoElement {
                     canban_ui::diagnostics::refresh_diagnostics(ui);
                 }))
                 .child(action("Insights", Variant::Quiet, move |_| {
-                    ui.snapshot.set(fixtures::insights());
+                    let (snap, events) = fixtures::insights();
+                    ui.snapshot.set(snap);
+                    ui.insights.events.set(std::rc::Rc::new(events));
                     ui.project.set("gallery-project".into());
                     ui.insights.scope_project.set(String::new());
                     scene.set("workspace".into());

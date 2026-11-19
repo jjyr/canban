@@ -38,7 +38,7 @@ impl PoolKey {
 
 struct PooledConn {
     transport: transport::Transport,
-    writer: Box<dyn Write + Send>,
+    writer: BufWriter<Box<dyn Write + Send>>,
     replies: Receiver<Result<Value>>,
     closed: Arc<AtomicBool>,
     next_id: u64,
@@ -48,7 +48,7 @@ struct PooledConn {
 impl PooledConn {
     fn connect(config: &Config) -> Result<Self> {
         let mut transport = transport::connect(config)?;
-        let mut writer = transport.writer.take().unwrap();
+        let mut writer = BufWriter::new(transport.writer.take().unwrap());
         let output = transport.reader.take().unwrap();
         let closed = Arc::new(AtomicBool::new(false));
         let reader_closed = closed.clone();
@@ -57,14 +57,8 @@ impl PooledConn {
             let mut reader = BufReader::new(output);
             let mut line = String::new();
             loop {
-                line.clear();
-                match reader.read_line(&mut line) {
-                    Ok(0) => {
-                        reader_closed.store(true, Ordering::SeqCst);
-                        let _ = tx.send(Err(anyhow::anyhow!("Herdr disconnected before replying")));
-                        break;
-                    }
-                    Ok(_) => {
+                match read_bounded_json_line_into(&mut reader, &mut line, MAX_JSON_FRAME_BYTES) {
+                    Ok(()) => {
                         if let Ok(value) = serde_json::from_str::<Value>(&line)
                             && value.get("id").is_some()
                             && tx.send(Ok(value)).is_err()
@@ -80,12 +74,10 @@ impl PooledConn {
                 }
             }
         });
-        writeln!(
-            writer,
-            "{}",
-            json!({"jsonrpc":"2.0","id":1,"method":"hello","params":{"generation":1}})
+        write_json_line(
+            &mut writer,
+            &json!({"jsonrpc":"2.0","id":1,"method":"hello","params":{"generation":1}}),
         )?;
-        writer.flush()?;
         let hello = replies
             .recv_timeout(Duration::from_secs(12))
             .context("Herdr handshake timed out")??;
@@ -124,12 +116,10 @@ impl PooledConn {
     fn send_request(&mut self, method: &str, params: &Value) -> std::io::Result<u64> {
         let req_id = self.next_id;
         self.next_id += 1;
-        writeln!(
-            self.writer,
-            "{}",
-            json!({"jsonrpc":"2.0","id":req_id,"method":method,"params":params})
+        write_json_line(
+            &mut self.writer,
+            &json!({"jsonrpc":"2.0","id":req_id,"method":method,"params":params}),
         )?;
-        self.writer.flush()?;
         Ok(req_id)
     }
 
@@ -324,6 +314,44 @@ for line in sys.stdin:
         assert_eq!(
             spawns_after, 2,
             "Pool must open one replacement process after exit"
+        );
+    }
+
+    #[test]
+    fn pooled_call_returns_unexpected_eof_on_truncated_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("mock-hc-truncated");
+        std::fs::write(
+            &script,
+            r#"#!/usr/bin/python3
+import sys, json
+for line in sys.stdin:
+    req = json.loads(line)
+    if req['method'] == 'hello':
+        print(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': {'generation': 1}}), flush=True)
+    else:
+        # Write a frame without terminating newline and exit (mid-frame EOF).
+        sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': {'ok': True}}))
+        sys.stdout.flush()
+        sys.exit(0)
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let config = Config {
+            hc: script.to_string_lossy().into_owned(),
+            hc_session: "pool-truncated-test".into(),
+            ..Default::default()
+        };
+        let client = Client { config };
+        let err = client
+            .call("terminal.kill", json!({"terminal": "t1"}))
+            .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<std::io::Error>().map(|e| e.kind()),
+            Some(std::io::ErrorKind::UnexpectedEof),
+            "expected UnexpectedEof, got: {err:#}"
         );
     }
 }

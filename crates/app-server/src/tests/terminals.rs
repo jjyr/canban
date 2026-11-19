@@ -176,7 +176,7 @@ fn close_refuses_a_replaced_core_and_preserves_an_inspectable_terminal() {
 fn manual_launch_is_idempotent_and_preserves_workflow_budget_names_and_runtime_on_restart() {
     let (dir, app, p, c) = setup();
     core(&app, dir.path());
-    let before = app.snapshot().unwrap().events;
+    let before = app.events().unwrap();
     let args = json!({"project_id":p.id,"card_id":c.id,"request_key":"shell-once"});
     let item: TerminalEntry =
         serde_json::from_value(app.call("terminal.create", args.clone()).unwrap()).unwrap();
@@ -203,7 +203,7 @@ fn manual_launch_is_idempotent_and_preserves_workflow_budget_names_and_runtime_o
     assert_eq!(launch["env"]["CANBAN_PROJECT"], p.id);
     let s = app.snapshot().unwrap();
     assert!(s.terminals.iter().all(|t| t.agent.is_none()));
-    assert_eq!(s.events, before);
+    assert_eq!(app.events().unwrap(), before);
     assert_eq!(s.cards[0].stage, "backlog");
     assert_eq!(s.cards[0].revision, c.revision);
     assert_eq!(canban_scheduler::active_count(&s), 0);
@@ -903,7 +903,8 @@ fn opening_card_shell_and_agent_terminals_immediately_creates_card_worktree_and_
     assert!(Path::new(&wt_path).is_dir());
     assert!(updated_card.branch.is_some());
     assert_eq!(
-        snap.events
+        app.events()
+            .unwrap()
             .iter()
             .filter(|e| e.card_id == c.id && e.kind == "workspace.prepared")
             .count(),
@@ -968,9 +969,8 @@ fn opening_card_shell_and_agent_terminals_immediately_creates_card_worktree_and_
     assert!(agent_launch["env"].get("CANBAN_REQUEST_ID").is_none());
     assert!(agent_launch["env"].get("CANBAN_ATTEMPT").is_none());
     assert_eq!(
-        app.snapshot()
+        app.events()
             .unwrap()
-            .events
             .iter()
             .filter(|e| e.card_id == c.id && e.kind == "workspace.prepared")
             .count(),

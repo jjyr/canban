@@ -39,6 +39,9 @@ pub struct State {
     pub drilldown: Signal<String>,
     /// Optional fixed timestamp (ms) for deterministic Gallery/test rendering; `None` uses live clock.
     pub anchor_ms: Signal<Option<u64>>,
+    pub events: Signal<std::rc::Rc<Vec<canban_types::Event>>>,
+    pub events_loading: Signal<bool>,
+    pub events_key: Signal<Option<(String, u64)>>,
 }
 
 impl Default for State {
@@ -67,8 +70,76 @@ impl State {
             project_sort: signal(ProjectSort::Merged),
             drilldown: signal(String::new()),
             anchor_ms: signal(None),
+            events: signal(std::rc::Rc::new(Vec::new())),
+            events_loading: signal(false),
+            events_key: signal(None),
         }
     }
+}
+
+pub fn refresh_events(ui: Ui) {
+    if crate::APP.get().is_none() || ui.page.get_untracked() != "insights" {
+        return;
+    }
+    let scope = ui.insights.scope_project.get_untracked();
+    let generation = ui.index.with_untracked(|idx| idx.generation);
+    let key = (scope.clone(), generation);
+    if ui.insights.events_key.get_untracked().as_ref() == Some(&key)
+        || ui.insights.events_loading.get_untracked()
+    {
+        return;
+    }
+    ui.insights.events_loading.set(true);
+    ui.spawn(async move {
+        let scope_req = scope.clone();
+        let fetched = blocking(move || -> Vec<canban_types::Event> {
+            let parse_events = |val: serde_json::Value| -> Vec<canban_types::Event> {
+                val["events"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| {
+                                serde_json::from_value::<canban_types::Event>(v.clone()).ok()
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            if !scope_req.is_empty() {
+                crate::routed_call(
+                    "insights.events",
+                    serde_json::json!({"project_id": scope_req}),
+                    Some(scope_req.as_str()),
+                )
+                .map(parse_events)
+                .unwrap_or_default()
+            } else {
+                let mut all = Vec::new();
+                for (_host, res) in crate::call_all_hosts("insights.events", serde_json::json!({}))
+                {
+                    if let Ok(val) = res {
+                        all.extend(parse_events(val));
+                    }
+                }
+                all
+            }
+        })
+        .await;
+        ui.insights.events_loading.set(false);
+        if let Ok(events) = fetched {
+            batch(move || {
+                ui.insights.events.set(std::rc::Rc::new(events));
+                ui.insights.events_key.set(Some(key));
+            });
+            let current_scope = ui.insights.scope_project.get_untracked();
+            let current_gen = ui.index.with_untracked(|idx| idx.generation);
+            if ui.page.get_untracked() == "insights"
+                && (current_scope != scope || current_gen != generation)
+            {
+                refresh_events(ui);
+            }
+        }
+    });
 }
 
 pub fn set_range(ui: Ui, next: RangeWindow) {
@@ -3004,11 +3075,11 @@ fn dashboard(ui: Ui) -> Dashboard {
     let trend_days = ui.insights.trend_days.get();
     let trend_weeks = ui.insights.trend_weeks.get();
     let excl_sync = ui.insights.exclude_initial_sync.get();
-    ui.index.with(|idx| {
+    ui.insights.events.with(|evs| {
         ui.snapshot.with(|s| {
             model::compute_full(
                 s,
-                Some(&idx.events_by_card),
+                evs,
                 (!scope.is_empty()).then_some(scope.as_str()),
                 range,
                 now,
@@ -3027,6 +3098,14 @@ fn dashboard(ui: Ui) -> Dashboard {
 }
 
 pub fn screen(ui: Ui) -> impl IntoElement {
+    effect(move || {
+        let page = ui.page.get();
+        let _scope = ui.insights.scope_project.get();
+        let _gen = ui.index.with(|idx| idx.generation);
+        if page == "insights" {
+            refresh_events(ui);
+        }
+    });
     let dashboard = computed(move || dashboard(ui));
     let scroll_ref = element_ref();
     ui.insights.scroll.set(Some(scroll_ref));
@@ -3306,30 +3385,33 @@ mod tests {
                 merged_at: now_ms - 1_800_000,
             });
             snap.cards.push(card);
-            snap.events.push(Event {
-                id: "ev-1".into(),
-                project_id: "p1".into(),
-                card_id: "card-41".into(),
-                sequence: 1,
-                kind: "execution.queued".into(),
-                actor: "system".into(),
-                message: String::new(),
-                data: json!({"terminal_id": "card-41:developer", "run_number": 1, "trigger": "workflow", "workflow_run_id": "wf-41"}),
-                created_at: now_ms - 5_400_000,
-            });
-            snap.events.push(Event {
-                id: "ev-2".into(),
-                project_id: "p1".into(),
-                card_id: "card-41".into(),
-                sequence: 2,
-                kind: "execution.reported".into(),
-                actor: "agent:developer".into(),
-                message: String::new(),
-                data: json!({"state": "completed", "workflow_run_id": "wf-41"}),
-                created_at: now_ms - 2_400_000,
-            });
+            let events = vec![
+                Event {
+                    id: "ev-1".into(),
+                    project_id: "p1".into(),
+                    card_id: "card-41".into(),
+                    sequence: 1,
+                    kind: "execution.queued".into(),
+                    actor: "system".into(),
+                    message: String::new(),
+                    data: json!({"terminal_id": "card-41:developer", "run_number": 1, "trigger": "workflow", "workflow_run_id": "wf-41"}),
+                    created_at: now_ms - 5_400_000,
+                },
+                Event {
+                    id: "ev-2".into(),
+                    project_id: "p1".into(),
+                    card_id: "card-41".into(),
+                    sequence: 2,
+                    kind: "execution.reported".into(),
+                    actor: "agent:developer".into(),
+                    message: String::new(),
+                    data: json!({"state": "completed", "workflow_run_id": "wf-41"}),
+                    created_at: now_ms - 2_400_000,
+                },
+            ];
 
             ui.snapshot.set(snap);
+            ui.insights.events.set(std::rc::Rc::new(events));
             ui.project.set("p1".into());
             ui.page.set("insights".into());
 
