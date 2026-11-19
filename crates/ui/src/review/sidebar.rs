@@ -96,7 +96,6 @@ fn render_commits(ui: Ui) -> impl IntoElement {
     let st = ui.review_state;
     let commits_scroll = element_ref();
     let last_commits_metrics = stored(Option::<ScrollEvent>::None);
-    let wheel_overscroll = stored((0.0_f32, std::time::Instant::now()));
     watch_scroll(
         move || commits_scroll.node(),
         move |e: &ScrollEvent| {
@@ -227,46 +226,9 @@ fn render_commits(ui: Ui) -> impl IntoElement {
                     )
                 })),
         )
-        .child(
+        .child(pull_refresh_scroll(
             scroll()
                 .label("Git commits list")
-                .element_ref(&commits_scroll)
-                .flex_1()
-                .min_h(px(0.))
-                .refreshing(move || st.log_refreshing.get())
-                .on_refresh(move |_: &()| git_ops::refresh_commits_from_git(ui))
-                .on_wheel(move |ev: &nsh_core::WheelEvent| {
-                    // Support non-precise discrete mouse wheels overscrolling past top (offset == 0)
-                    // in addition to native trackpad pull-to-refresh (`on_refresh`).
-                    if ev.delta.precise()
-                        || st.log_refreshing.get_untracked()
-                        || st.log_loading.get_untracked()
-                        || st.refs_loading.get_untracked()
-                    {
-                        return;
-                    }
-                    let dy = ev.delta.points(px(20.)).y.0;
-                    let at_top = last_commits_metrics
-                        .get()
-                        .is_none_or(|m| m.offset.y.0 <= 1.0);
-                    if dy < 0.0 && at_top {
-                        let now = std::time::Instant::now();
-                        let (prev, ts) = wheel_overscroll.get();
-                        let accum = if now.duration_since(ts).as_millis() <= 600 {
-                            prev + (-dy)
-                        } else {
-                            -dy
-                        };
-                        if accum >= 80.0 {
-                            wheel_overscroll.replace((0.0, now));
-                            git_ops::refresh_commits_from_git(ui);
-                        } else {
-                            wheel_overscroll.replace((accum, now));
-                        }
-                    } else if dy > 0.0 {
-                        wheel_overscroll.replace((0.0, std::time::Instant::now()));
-                    }
-                })
                 .on_scroll(move |e: &ScrollEvent| {
                     last_commits_metrics.replace(Some(*e));
                     maybe_auto_load_more_commits(ui, e);
@@ -277,7 +239,10 @@ fn render_commits(ui: Ui) -> impl IntoElement {
                         .py_1p5()
                         .child(dynamic(move || render_commit_rows(ui))),
                 ),
-        )
+            commits_scroll,
+            move || st.log_refreshing.get(),
+            move || git_ops::pull_refresh(ui, super::PullRefreshTarget::Commits),
+        ))
 }
 
 fn render_commit_rows(ui: Ui) -> AnyElement {

@@ -118,6 +118,19 @@ fn controls() -> impl IntoElement {
         error: String::new(),
     });
     let markdown = canban_ui_kit::markdown::MarkdownInput::new();
+    let pull_refreshing = signal(false);
+    let pull_count = signal(0_u32);
+    let pull_scroll = element_ref();
+    let trigger_demo_pull = move || {
+        if pull_refreshing.get_untracked() {
+            return;
+        }
+        pull_refreshing.set(true);
+        set_timeout(std::time::Duration::from_millis(500), move || {
+            pull_count.update(|n| *n += 1);
+            pull_refreshing.set(false);
+        });
+    };
     let title_line = canban_ui_kit::markdown::MarkdownInput::new();
     let title_text = signal(String::from("@developer Fix #ui-kit title completion"));
     let group_open = signal(true);
@@ -350,6 +363,56 @@ fn controls() -> impl IntoElement {
                             "Loading Settings…",
                             "Preparing preferences, connected hosts, and agent configuration.",
                         ))
+                        .child(
+                            view()
+                                .gap_1p5()
+                                .child(
+                                    view()
+                                        .flex_row()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(muted(move || {
+                                            format!(
+                                                "Pull-to-refresh (trackpad / wheel) · refreshed {}×",
+                                                pull_count.get()
+                                            )
+                                        }))
+                                        .child(compact_action(
+                                            "Simulate Refresh",
+                                            Variant::Secondary,
+                                            move |_| trigger_demo_pull(),
+                                        )),
+                                )
+                                .child(
+                                    view()
+                                        .h(px(136.))
+                                        .rounded(px(RADIUS))
+                                        .border_1()
+                                        .border_color(BORDER)
+                                        .bg(INSET)
+                                        .overflow_hidden()
+                                        .child(pull_refresh_scroll(
+                                            scroll().child(
+                                                view().p_2().gap_1().children((1..=8).map(|i| {
+                                                    view()
+                                                        .px_2()
+                                                        .py_1()
+                                                        .rounded(px(5.))
+                                                        .bg(SURFACE)
+                                                        .child(label(move || {
+                                                            format!(
+                                                                "Commit item #{i} · rev {}",
+                                                                pull_count.get()
+                                                            )
+                                                        }))
+                                                })),
+                                            ),
+                                            pull_scroll,
+                                            move || pull_refreshing.get(),
+                                            trigger_demo_pull,
+                                        )),
+                                ),
+                        )
                         .child(
                             action("Disabled action", Variant::Secondary, |_| {}).disabled(true),
                         ),

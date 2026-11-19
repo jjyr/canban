@@ -37,6 +37,13 @@ pub enum AnchorEdge {
     HunkEnd,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PullRefreshTarget {
+    Commits,
+    Files,
+    Diff,
+}
+
 #[derive(Clone, Copy)]
 pub struct DiffViewport {
     pub scroll: ElementRef,
@@ -110,6 +117,14 @@ pub struct State {
     pub log_has_more: Signal<bool>,
     pub log_loading: Signal<bool>,
     pub log_refreshing: Signal<bool>,
+    pub files_refreshing: Signal<bool>,
+    pub diff_refreshing: Signal<bool>,
+    pub log_refresh_hold_ready: Signal<bool>,
+    pub files_refresh_hold_ready: Signal<bool>,
+    pub diff_refresh_hold_ready: Signal<bool>,
+    pub log_refresh_ticket: Signal<u64>,
+    pub files_refresh_ticket: Signal<u64>,
+    pub diff_refresh_ticket: Signal<u64>,
     pub log_ticket: Signal<u64>,
     /// Saved `(mode, base_ref, compare_ref)` when drilling into a commit from `Commits in range`.
     pub range_backup: Signal<Option<(String, String, String)>>,
@@ -201,6 +216,14 @@ impl State {
             log_has_more: signal(false),
             log_loading: signal(false),
             log_refreshing: signal(false),
+            files_refreshing: signal(false),
+            diff_refreshing: signal(false),
+            log_refresh_hold_ready: signal(false),
+            files_refresh_hold_ready: signal(false),
+            diff_refresh_hold_ready: signal(false),
+            log_refresh_ticket: signal(0),
+            files_refresh_ticket: signal(0),
+            diff_refresh_ticket: signal(0),
             log_ticket: signal(0),
             range_backup: signal(None),
             commit_parent_idx: signal(0),
@@ -220,6 +243,26 @@ impl State {
             file_lines_errors: signal(Default::default()),
             file_lines_revision: signal(0),
             anchor_targets: stored(Default::default()),
+        }
+    }
+
+    pub fn pull_slot(self, target: PullRefreshTarget) -> (Signal<bool>, Signal<bool>, Signal<u64>) {
+        match target {
+            PullRefreshTarget::Commits => (
+                self.log_refreshing,
+                self.log_refresh_hold_ready,
+                self.log_refresh_ticket,
+            ),
+            PullRefreshTarget::Files => (
+                self.files_refreshing,
+                self.files_refresh_hold_ready,
+                self.files_refresh_ticket,
+            ),
+            PullRefreshTarget::Diff => (
+                self.diff_refreshing,
+                self.diff_refresh_hold_ready,
+                self.diff_refresh_ticket,
+            ),
         }
     }
 }

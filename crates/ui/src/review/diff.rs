@@ -157,10 +157,9 @@ pub fn workbench(ui: Ui) -> impl IntoElement {
                 .min_w(px(0.))
                 .min_h(px(0.))
                 .flex_row()
-                .child(dynamic(move || file_list(ui, &data.get())))
+                .child(files_pane(ui, data))
                 .child(
                     view()
-                        .label("Git diff code")
                         .flex_1()
                         .min_h(px(0.))
                         .min_w(px(0.))
@@ -178,186 +177,207 @@ pub fn workbench(ui: Ui) -> impl IntoElement {
                                 ),
                         )
                         .child(
-                            scroll()
-                                .element_ref(&viewport.scroll)
-                                .flex_1()
-                                .min_h(px(0.))
-                                .min_w(px(0.))
-                                .on_scroll(move |e: &ScrollEvent| {
-                                    last_diff_scroll.replace(Some(*e));
-                                    let total = data.with_untracked(|v| {
-                                        v["files"].as_array().map_or(0, Vec::len)
-                                    });
-                                    maybe_auto_expand_files(ui, total, e);
-                                })
-                                .child(
-                                    view()
-                                        .element_ref(&viewport.content)
-                                        .child(dynamic(move || {
-                                            code_content(ui, &data.get(), login)
-                                        }))
-                                        .child(view().h(move || px(viewport.bottom_space.get()))),
-                                ),
+                            pull_refresh_scroll(
+                                scroll()
+                                    .min_w(px(0.))
+                                    .on_scroll(move |e: &ScrollEvent| {
+                                        last_diff_scroll.replace(Some(*e));
+                                        let total = data.with_untracked(|v| {
+                                            v["files"].as_array().map_or(0, Vec::len)
+                                        });
+                                        maybe_auto_expand_files(ui, total, e);
+                                    })
+                                    .child(
+                                        view()
+                                            .element_ref(&viewport.content)
+                                            .child(dynamic(move || {
+                                                code_content(ui, &data.get(), login)
+                                            }))
+                                            .child(
+                                                view().h(move || px(viewport.bottom_space.get())),
+                                            ),
+                                    ),
+                                viewport.scroll,
+                                move || st.diff_refreshing.get(),
+                                move || git_ops::pull_refresh(ui, super::PullRefreshTarget::Diff),
+                            )
+                            .label("Git diff code"),
                         ),
                 )
         }),
     )
 }
 
-fn file_list(ui: Ui, data: &Value) -> AnyElement {
+fn files_pane(ui: Ui, data: Memo<Value>) -> impl IntoElement {
+    let st = ui.review_state;
+    let files_scroll = element_ref();
+    view()
+        .w(move || px(if working_tree_mode(ui) { 268. } else { 216. }))
+        .flex_shrink_0()
+        .min_h(px(0.))
+        .border_r_1()
+        .border_color(BORDER)
+        .bg(SURFACE)
+        .child(
+            view()
+                .h(px(36.))
+                .px_3()
+                .justify_center()
+                .border_b_1()
+                .border_color(BORDER)
+                .child(
+                    label("Files")
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::SEMIBOLD),
+                ),
+        )
+        .child(pull_refresh_scroll(
+            scroll().label("Git files list").child(dynamic(move || {
+                let d = data.get();
+                if working_tree_mode(ui) {
+                    git_ops::render_working_tree_list(ui, &d)
+                } else {
+                    standard_file_list(ui, &d)
+                }
+            })),
+            files_scroll,
+            move || st.files_refreshing.get(),
+            move || git_ops::pull_refresh(ui, super::PullRefreshTarget::Files),
+        ))
+        .child(when(
+            move || working_tree_mode(ui),
+            move || git_ops::render_commit_composer(ui, data),
+        ))
+}
+
+fn standard_file_list(ui: Ui, data: &Value) -> AnyElement {
     let st = ui.review_state;
     let files = data["files"].as_array().cloned().unwrap_or_default();
     let total_add = data["total_additions"].as_u64().unwrap_or(0);
     let total_del = data["total_deletions"].as_u64().unwrap_or(0);
     let selected = st.selected_file.get();
     let pending_all = st.pending_comments.get();
-    let is_workdir_mode = working_tree_mode(ui);
-    if is_workdir_mode {
-        git_ops::render_working_tree_pane(ui, data)
-    } else {
-        // Standard file list pane (216px)
-        let file_count = files.len();
-        let mut file_list = view().gap_0p5().p_1p5();
-        let all_selected = selected.is_empty();
+    // Standard file list pane (216px)
+    let file_count = files.len();
+    let mut file_list = view().gap_0p5().p_1p5();
+    let all_selected = selected.is_empty();
+    file_list = file_list.child(
+        canban_ui_kit::press_target()
+            .w_full()
+            .min_h(px(28.))
+            .px_2()
+            .py_1()
+            .rounded(px(5.))
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_1p5()
+            .bg(if all_selected { SELECTED } else { CLEAR })
+            .hover(|s| s.bg(if all_selected { SELECTED } else { CARD_HOVER }))
+            .on_press(move |_: &()| {
+                super::show_all_files(ui);
+            })
+            .child(
+                label(format!("All files ({file_count})"))
+                    .text_size(px(12.))
+                    .font_weight(if all_selected {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        FontWeight::MEDIUM
+                    }),
+            )
+            .child(
+                muted(format!("+{total_add} −{total_del}"))
+                    .font_family(MONO_FONT)
+                    .text_size(px(10.5)),
+            ),
+    );
+
+    for f in &files {
+        let fname = f["filename"].as_str().unwrap_or("").to_owned();
+        let f_add = f["additions"].as_u64().unwrap_or(0);
+        let f_del = f["deletions"].as_u64().unwrap_or(0);
+        let f_status = f["status"].as_str().unwrap_or("modified");
+        let key = super::model::file_key(f);
+        let is_sel = selected == key;
+        let click_name = key.clone();
+        let fold_key = key;
+        let fold_path = fname.clone();
+        let pending_for_file = pending_all.iter().filter(|c| c.path == fname).count();
+        let short_name = fname.rsplit('/').next().unwrap_or(&fname).to_owned();
+        let status_char = match f_status {
+            "added" => ("A", SUCCESS),
+            "removed" => ("D", DANGER),
+            "renamed" => ("R", ACCENT),
+            _ => ("M", MUTED),
+        };
+
+        let mut right_meta = view().flex_row().items_center().gap_1().flex_shrink_0();
+        if pending_for_file > 0 {
+            right_meta = right_meta.child(status(pending_for_file.to_string(), Tone::Info));
+        }
+        right_meta = right_meta
+            .child(
+                label(format!("+{f_add}"))
+                    .font_family(MONO_FONT)
+                    .text_size(px(10.5))
+                    .text_color(SUCCESS),
+            )
+            .child(
+                label(format!("−{f_del}"))
+                    .font_family(MONO_FONT)
+                    .text_size(px(10.5))
+                    .text_color(DANGER),
+            );
+
         file_list = file_list.child(
-            canban_ui_kit::press_target()
-                .w_full()
-                .min_h(px(28.))
-                .px_2()
-                .py_1()
-                .rounded(px(5.))
+            view()
+                .tooltip(hint_tooltip(fname.clone()))
                 .flex_row()
                 .items_center()
-                .justify_between()
-                .gap_1p5()
-                .bg(if all_selected { SELECTED } else { CLEAR })
-                .hover(|s| s.bg(if all_selected { SELECTED } else { CARD_HOVER }))
-                .on_press(move |_: &()| {
-                    super::show_all_files(ui);
-                })
+                .child(fold_button(ui, fold_key, fold_path))
                 .child(
-                    label(format!("All files ({file_count})"))
-                        .text_size(px(12.))
-                        .font_weight(if all_selected {
-                            FontWeight::SEMIBOLD
-                        } else {
-                            FontWeight::MEDIUM
-                        }),
-                )
-                .child(
-                    muted(format!("+{total_add} −{total_del}"))
-                        .font_family(MONO_FONT)
-                        .text_size(px(10.5)),
+                    canban_ui_kit::press_target()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .min_h(px(27.))
+                        .px_2()
+                        .py_0p5()
+                        .rounded(px(5.))
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap_1p5()
+                        .bg(if is_sel { SELECTED } else { CLEAR })
+                        .hover(|s| s.bg(if is_sel { SELECTED } else { CARD_HOVER }))
+                        .on_press(move |_: &()| super::focus_file(ui, click_name.clone()))
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_1p5()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .child(
+                                    label(status_char.0)
+                                        .font_family(MONO_FONT)
+                                        .text_size(px(10.5))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(status_char.1),
+                                )
+                                .child(
+                                    label(short_name)
+                                        .text_size(px(12.))
+                                        .truncate()
+                                        .min_w(px(0.)),
+                                ),
+                        )
+                        .child(right_meta),
                 ),
         );
-
-        for f in &files {
-            let fname = f["filename"].as_str().unwrap_or("").to_owned();
-            let f_add = f["additions"].as_u64().unwrap_or(0);
-            let f_del = f["deletions"].as_u64().unwrap_or(0);
-            let f_status = f["status"].as_str().unwrap_or("modified");
-            let key = super::model::file_key(f);
-            let is_sel = selected == key;
-            let click_name = key.clone();
-            let fold_key = key;
-            let fold_path = fname.clone();
-            let pending_for_file = pending_all.iter().filter(|c| c.path == fname).count();
-            let short_name = fname.rsplit('/').next().unwrap_or(&fname).to_owned();
-            let status_char = match f_status {
-                "added" => ("A", SUCCESS),
-                "removed" => ("D", DANGER),
-                "renamed" => ("R", ACCENT),
-                _ => ("M", MUTED),
-            };
-
-            let mut right_meta = view().flex_row().items_center().gap_1().flex_shrink_0();
-            if pending_for_file > 0 {
-                right_meta = right_meta.child(status(pending_for_file.to_string(), Tone::Info));
-            }
-            right_meta = right_meta
-                .child(
-                    label(format!("+{f_add}"))
-                        .font_family(MONO_FONT)
-                        .text_size(px(10.5))
-                        .text_color(SUCCESS),
-                )
-                .child(
-                    label(format!("−{f_del}"))
-                        .font_family(MONO_FONT)
-                        .text_size(px(10.5))
-                        .text_color(DANGER),
-                );
-
-            file_list = file_list.child(
-                view()
-                    .tooltip(hint_tooltip(fname.clone()))
-                    .flex_row()
-                    .items_center()
-                    .child(fold_button(ui, fold_key, fold_path))
-                    .child(
-                        canban_ui_kit::press_target()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .min_h(px(27.))
-                            .px_2()
-                            .py_0p5()
-                            .rounded(px(5.))
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .gap_1p5()
-                            .bg(if is_sel { SELECTED } else { CLEAR })
-                            .hover(|s| s.bg(if is_sel { SELECTED } else { CARD_HOVER }))
-                            .on_press(move |_: &()| super::focus_file(ui, click_name.clone()))
-                            .child(
-                                view()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap_1p5()
-                                    .flex_1()
-                                    .min_w(px(0.))
-                                    .child(
-                                        label(status_char.0)
-                                            .font_family(MONO_FONT)
-                                            .text_size(px(10.5))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(status_char.1),
-                                    )
-                                    .child(
-                                        label(short_name)
-                                            .text_size(px(12.))
-                                            .truncate()
-                                            .min_w(px(0.)),
-                                    ),
-                            )
-                            .child(right_meta),
-                    ),
-            );
-        }
-
-        view()
-            .w(px(216.))
-            .flex_shrink_0()
-            .min_h(px(0.))
-            .border_r_1()
-            .border_color(BORDER)
-            .bg(SURFACE)
-            .child(
-                view()
-                    .h(px(36.))
-                    .px_3()
-                    .justify_center()
-                    .border_b_1()
-                    .border_color(BORDER)
-                    .child(
-                        label("Files")
-                            .text_size(px(12.))
-                            .font_weight(FontWeight::SEMIBOLD),
-                    ),
-            )
-            .child(scroll().flex_1().min_h(px(0.)).child(file_list))
-            .into_element()
     }
+
+    file_list.into_element()
 }
 
 fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement {
@@ -2483,6 +2503,177 @@ mod tests {
         assert!(
             tree.texts.values().any(|t| t == "commit #0"),
             "pull-to-refresh on Commits list must reload from head"
+        );
+    }
+
+    #[test]
+    fn unified_pull_to_refresh_across_commits_files_and_changes_respects_min_hold_and_retains_hosts()
+     {
+        #[component]
+        fn UnifiedPullProbe() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let st = ui.review_state;
+            let data = json!({
+                "base_ref": "main",
+                "compare_ref": "feat/pull-refresh",
+                "compare_sha": "abc1234",
+                "files": [{
+                    "filename": "src/lib.rs",
+                    "status": "modified",
+                    "additions": 1,
+                    "deletions": 1,
+                    "patch": "@@ -1 +1 @@\n-old\n+retained diff line",
+                }],
+            });
+            let prepared = super::super::cache::ReadValue::new(data);
+            st.mode.set("git".into());
+            st.compare_ref.set("feat/pull-refresh".into());
+            super::super::apply_compare(ui, &prepared);
+            let commits = vec![json!({
+                "sha": "abc1234000000000000000000000000000000000",
+                "short_sha": "abc1234",
+                "subject": "feat: pull refresh",
+                "author": "Dev",
+                "relative_time": "1m ago",
+            })];
+            st.refs_data.set(json!({
+                "current_branch": "feat/pull-refresh",
+                "default_branch": "main",
+                "commits": commits,
+            }));
+            st.log_branch.set("feat/pull-refresh".into());
+            st.log_commits.set(commits);
+
+            view()
+                .w(px(1200.))
+                .h(px(700.))
+                .child(
+                    view()
+                        .flex_row()
+                        .child(
+                            canban_ui_kit::press_target()
+                                .accessibility_label("slow-compare-start")
+                                .on_press(move |_: &()| st.compare_loading.set(true)),
+                        )
+                        .child(
+                            canban_ui_kit::press_target()
+                                .accessibility_label("slow-compare-end")
+                                .on_press(move |_: &()| {
+                                    st.compare_loading.set(false);
+                                    super::super::maybe_finish_pull_refresh(st);
+                                }),
+                        )
+                        .child(label(move || {
+                            format!(
+                                "pull:{}:{}:{}",
+                                st.log_refreshing.get(),
+                                st.files_refreshing.get(),
+                                st.diff_refreshing.get()
+                            )
+                        })),
+                )
+                .child(
+                    view()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .flex_row()
+                        .child(super::super::sidebar::render_left_sidebar(ui))
+                        .child(workbench(ui)),
+                )
+        }
+
+        let clock = nsh_core::time::Clock::manual(std::time::SystemTime::UNIX_EPOCH);
+        let _clock = clock.enter();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let mut core = Core::new(ApproxTextEngine, size(px(1200.), px(700.)));
+        core.set_content_culling(false);
+        core.set_components(nsh_base::registry());
+        core.set_task_runtime(runtime.handle().clone());
+
+        core.mount_root(&nsh_core::element::Root::of::<UnifiedPullProbe>());
+        let mut tree = ProbeTree::new();
+        pump(&mut core, &mut tree);
+
+        let commits_scroll_id = tree.labels["Git commits list"];
+        let files_scroll_id = tree.labels["Git files list"];
+        let diff_code_node = tree.labels["Git diff code"];
+        let diff_scroll_id = *tree
+            .scroll_nodes
+            .iter()
+            .find(|id| tree.parents.get(id) == Some(&diff_code_node))
+            .expect("diff scroll view mounted under Git diff code");
+
+        let advance = |core: &mut Core<ApproxTextEngine>, tree: &mut ProbeTree, ms: u64| {
+            clock.advance_to(nsh_core::time::now() + std::time::Duration::from_millis(ms));
+            pump(core, tree);
+        };
+
+        assert!(tree.texts.values().any(|t| t == "pull:false:false:false"));
+
+        // 1. Triggering pull-to-refresh on each pane holds `refreshing == true` for at least 450ms,
+        //    even when underlying reads finish immediately, then clears cleanly and keeps scroll hosts mounted.
+        for (scroll_id, expected_active) in [
+            (commits_scroll_id, "pull:true:false:false"),
+            (files_scroll_id, "pull:false:true:false"),
+            (diff_scroll_id, "pull:false:false:true"),
+        ] {
+            assert!(core.component_event(scroll_id, EventKind::Refresh, &EventPayload::None));
+            advance(&mut core, &mut tree, 16);
+            assert!(
+                tree.texts.values().any(|t| t == expected_active),
+                "expected {expected_active} immediately after refresh"
+            );
+            assert!(tree.labels.contains_key("Refreshing"));
+            advance(&mut core, &mut tree, 250);
+            assert!(
+                tree.texts.values().any(|t| t == expected_active),
+                "minimum spin hold must keep spinner visible before 450ms"
+            );
+            advance(&mut core, &mut tree, 250);
+            assert!(
+                tree.texts.values().any(|t| t == "pull:false:false:false"),
+                "refreshing must clear after 450ms hold so scroll bounces back"
+            );
+            assert!(!tree.labels.contains_key("Refreshing"));
+            assert_eq!(
+                tree.labels.get("Git commits list"),
+                Some(&commits_scroll_id)
+            );
+            assert_eq!(tree.labels.get("Git files list"), Some(&files_scroll_id));
+            assert_eq!(tree.labels.get("Git diff code"), Some(&diff_code_node));
+            // Allow 320ms settle hold to finish before next pane.
+            advance(&mut core, &mut tree, 350);
+        }
+
+        // 2. If a read is still loading after 450ms, `maybe_finish_pull_refresh` keeps `refreshing`
+        //    active until `compare_loading` finishes.
+        assert!(core.component_event(diff_scroll_id, EventKind::Refresh, &EventPayload::None));
+        assert!(core.component_event(
+            tree.labels["slow-compare-start"],
+            EventKind::Press,
+            &EventPayload::None
+        ));
+        advance(&mut core, &mut tree, 16);
+        assert!(tree.texts.values().any(|t| t == "pull:false:false:true"));
+        advance(&mut core, &mut tree, 500);
+        assert!(
+            tree.texts.values().any(|t| t == "pull:false:false:true"),
+            "must remain refreshing while compare_loading is true past 450ms"
+        );
+        assert!(core.component_event(
+            tree.labels["slow-compare-end"],
+            EventKind::Press,
+            &EventPayload::None
+        ));
+        advance(&mut core, &mut tree, 16);
+        assert!(
+            tree.texts.values().any(|t| t == "pull:false:false:false"),
+            "must bounce back once compare_loading finishes after hold"
         );
     }
 }

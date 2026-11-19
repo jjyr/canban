@@ -145,7 +145,7 @@ pub fn load_branch_log(ui: Ui, branch: String, append: bool) {
             st.log_commits.set(page);
         }
         st.log_has_more.set(has_more);
-        st.log_refreshing.set(false);
+        super::maybe_finish_pull_refresh(st);
         return;
     }
 
@@ -158,7 +158,7 @@ pub fn load_branch_log(ui: Ui, branch: String, append: bool) {
             "query": query,
         }),
     ) else {
-        st.log_refreshing.set(false);
+        super::maybe_finish_pull_refresh(st);
         return;
     };
 
@@ -179,7 +179,6 @@ pub fn load_branch_log(ui: Ui, branch: String, append: bool) {
         }
         batch(|| {
             st.log_loading.set(false);
-            st.log_refreshing.set(false);
             if let Ok(value) = &res {
                 let val = &value.data;
                 let page = val["commits"].as_array().cloned().unwrap_or_default();
@@ -193,28 +192,64 @@ pub fn load_branch_log(ui: Ui, branch: String, append: bool) {
             } else if let Err(e) = res {
                 st.error.set(e);
             }
+            super::maybe_finish_pull_refresh(st);
         });
     });
 }
 
-/// Pull-to-refresh action on the Commits sidebar: bypasses the UI read cache to query local Git
-/// for newly created commits and updated branch refs.
-pub fn refresh_commits_from_git(ui: Ui) {
+/// Unified pull-to-refresh for the Git workbench (`Commits`, `Files`, and `Changes`).
+/// Holds the indicator spinning for at least `MIN_PULL_REFRESH_HOLD` (~450ms) and until
+/// all triggered Git reads complete, then clears `refreshing` so the scroll view bounces back.
+pub fn pull_refresh(ui: Ui, target: super::PullRefreshTarget) {
     super::prepare_context(ui);
     let st = ui.review_state;
-    if untracked(|| ui.is_active_project_offline()) {
-        st.log_refreshing.set(false);
+    let (refreshing, hold_ready, ticket_sig) = st.pull_slot(target);
+    let ticket = ticket_sig.get_untracked() + 1;
+    ticket_sig.set(ticket);
+
+    if untracked(|| ui.is_active_project_offline())
+        || (crate::APP.get().is_some() && ui.current_project().is_none())
+    {
+        // Briefly toggle `true -> false` across a frame so NSH clears any native
+        // `pulled_to_refresh` latch and smoothly bounces back.
+        hold_ready.set(false);
+        refreshing.set(true);
+        ui.spawn(async move {
+            next_frame().await;
+            if ticket_sig.try_get() == Some(ticket) {
+                refreshing.set(false);
+            }
+        });
         return;
     }
-    st.log_refreshing.set(true);
+
+    hold_ready.set(false);
+    refreshing.set(true);
+    let hold_until = nsh_core::time::now() + super::MIN_PULL_REFRESH_HOLD;
+    ui.spawn(async move {
+        timer_until(hold_until).await;
+        if ticket_sig.try_get() == Some(ticket) {
+            hold_ready.set(true);
+            super::maybe_finish_pull_refresh(st);
+        }
+    });
+
     if crate::APP.get().is_none() {
-        let branch = st.log_branch.get_untracked();
-        load_branch_log(ui, branch, false);
-        ui.notify("Checked local Git commits (Gallery preview)");
+        match target {
+            super::PullRefreshTarget::Commits => {
+                let branch = st.log_branch.get_untracked();
+                load_branch_log(ui, branch, false);
+                ui.notify("Checked local Git commits (Gallery preview)");
+            }
+            super::PullRefreshTarget::Files | super::PullRefreshTarget::Diff => {
+                super::load_active_diff(ui, false);
+                ui.notify("Refreshed diff (Gallery preview)");
+            }
+        }
         return;
     }
+
     let Some(project) = ui.current_project() else {
-        st.log_refreshing.set(false);
         return;
     };
     st.read_cache.with(|c| {
@@ -225,15 +260,50 @@ pub fn refresh_commits_from_git(ui: Ui) {
             Some(&ui.card.get_untracked()),
         )
     });
-    st.refs_ticket.update(|n| *n += 1);
-    st.log_ticket.update(|n| *n += 1);
-    st.refs_request.replace(String::new());
-    st.log_request.replace(String::new());
-    st.refs_loading.set(false);
-    st.log_loading.set(false);
-    load_refs(ui);
-    let branch = st.log_branch.get_untracked();
-    load_branch_log(ui, branch, false);
+    st.summary_revision.update(|n| *n += 1);
+    super::clear_context_expansion(st);
+
+    match target {
+        super::PullRefreshTarget::Commits => {
+            st.refs_ticket.update(|n| *n += 1);
+            st.log_ticket.update(|n| *n += 1);
+            st.refs_request.replace(String::new());
+            st.log_request.replace(String::new());
+            st.refs_loading.set(false);
+            st.log_loading.set(false);
+            load_refs(ui);
+            let branch = st.log_branch.get_untracked();
+            load_branch_log(ui, branch, false);
+            if st.mode.get_untracked() != "github_pr" {
+                st.compare_ticket.update(|n| *n += 1);
+                st.compare_loading.set(false);
+                super::load_active_diff(ui, false);
+            }
+        }
+        super::PullRefreshTarget::Files | super::PullRefreshTarget::Diff => {
+            st.refresh_pending.set(false);
+            st.refs_ticket.update(|n| *n += 1);
+            st.log_ticket.update(|n| *n += 1);
+            st.compare_ticket.update(|n| *n += 1);
+            st.refs_request.replace(String::new());
+            st.log_request.replace(String::new());
+            st.refs_loading.set(false);
+            st.log_loading.set(false);
+            st.compare_loading.set(false);
+            super::load_active_diff(ui, true);
+            load_refs(ui);
+            let branch = st.log_branch.get_untracked();
+            if !branch.is_empty() {
+                load_branch_log(ui, branch, false);
+            }
+        }
+    }
+}
+
+/// Pull-to-refresh action on the Commits sidebar: bypasses the UI read cache to query local Git
+/// for newly created commits and updated branch refs.
+pub fn refresh_commits_from_git(ui: Ui) {
+    pull_refresh(ui, super::PullRefreshTarget::Commits);
 }
 
 /// Inspects a single commit's diff against `parent_idx` (`0` = first parent, `1` = second merge parent).
@@ -929,9 +999,9 @@ pub fn render_commit_detail_card(ui: Ui, detail: &Value) -> AnyElement {
     card.into_element()
 }
 
-/// Renders the Working Tree left pane: Staged Changes, Unstaged/Untracked Changes,
-/// per-file `+` / `−` / context menu actions, and the inline Commit / Amend composer.
-pub fn render_working_tree_pane(ui: Ui, data: &Value) -> AnyElement {
+/// Renders the Working Tree file rows: Staged Changes, Unstaged/Untracked Changes,
+/// and per-file `+` / `−` / context menu actions.
+pub fn render_working_tree_list(ui: Ui, data: &Value) -> AnyElement {
     let st = ui.review_state;
     let selected = st.selected_file.get();
     let pending_all = st.pending_comments.get();
@@ -1098,30 +1168,7 @@ pub fn render_working_tree_pane(ui: Ui, data: &Value) -> AnyElement {
         }
     }
     list = list.child(unstaged_grp);
-
-    view()
-        .w(px(268.))
-        .flex_shrink_0()
-        .min_h(px(0.))
-        .border_r_1()
-        .border_color(BORDER)
-        .bg(SURFACE)
-        .child(
-            view()
-                .h(px(36.))
-                .px_3()
-                .justify_center()
-                .border_b_1()
-                .border_color(BORDER)
-                .child(
-                    label("Files")
-                        .text_size(px(12.))
-                        .font_weight(FontWeight::SEMIBOLD),
-                ),
-        )
-        .child(scroll().flex_1().min_h(px(0.)).child(list))
-        .child(render_commit_composer(ui, staged_len, unstaged_len))
-        .into_element()
+    list.into_element()
 }
 
 fn working_file_row(
@@ -1258,21 +1305,44 @@ fn working_file_row(
         )
 }
 
-fn render_commit_composer(ui: Ui, staged_len: usize, unstaged_len: usize) -> impl IntoElement {
+pub fn render_commit_composer(ui: Ui, data: Memo<Value>) -> impl IntoElement {
     let st = ui.review_state;
     let desc_focused = signal(false);
 
-    let has_remote = st
-        .refs_data
-        .with(|v| v["has_remote"].as_bool().unwrap_or(false));
-    let on_branch = st.refs_data.with(|v| {
-        v["current_branch"]
-            .as_str()
-            .is_some_and(|s| !s.trim().is_empty())
+    let counts = computed(move || {
+        let d = data.get();
+        let status_files: Vec<Value> = d["status_files"]
+            .as_array()
+            .cloned()
+            .or_else(|| st.refs_data.with(|v| v["status_files"].as_array().cloned()))
+            .unwrap_or_default();
+        let mut staged = 0usize;
+        let mut unstaged = 0usize;
+        for sf in &status_files {
+            if sf["staged"].as_bool().unwrap_or(false) {
+                staged += 1;
+            }
+            if sf["unstaged"].as_bool().unwrap_or(false)
+                || sf["untracked"].as_bool().unwrap_or(false)
+            {
+                unstaged += 1;
+            }
+        }
+        (staged, unstaged)
+    });
+
+    let can_push_remote = computed(move || {
+        st.refs_data.with(|v| {
+            v["has_remote"].as_bool().unwrap_or(false)
+                && v["current_branch"]
+                    .as_str()
+                    .is_some_and(|s| !s.trim().is_empty())
+        })
     });
 
     let primary_label = move || {
         let amend = st.commit_amend.get();
+        let (staged_len, unstaged_len) = counts.get();
         if amend {
             "Amend Commit".to_owned()
         } else if staged_len > 0 {
@@ -1287,6 +1357,7 @@ fn render_commit_composer(ui: Ui, staged_len: usize, unstaged_len: usize) -> imp
     let can_commit = move || {
         let has_msg = st.commit_summary.with(|s| !s.trim().is_empty());
         let amend = st.commit_amend.get();
+        let (staged_len, unstaged_len) = counts.get();
         has_msg
             && (amend || staged_len > 0 || unstaged_len > 0)
             && !ui.is_method_pending("git.commit")
@@ -1397,15 +1468,15 @@ fn render_commit_composer(ui: Ui, staged_len: usize, unstaged_len: usize) -> imp
                     })
                     .disabled(move || !can_commit()),
                 )
-                .child(if has_remote && on_branch {
-                    compact_action("Commit & Push", Variant::Secondary, move |_| {
-                        run_commit(ui, true);
-                    })
-                    .disabled(move || !can_commit() || ui.is_method_pending("git.push"))
-                    .into_element()
-                } else {
-                    view().into_element()
-                }),
+                .child(when(
+                    move || can_push_remote.get(),
+                    move || {
+                        compact_action("Commit & Push", Variant::Secondary, move |_| {
+                            run_commit(ui, true);
+                        })
+                        .disabled(move || !can_commit() || ui.is_method_pending("git.push"))
+                    },
+                )),
         )
 }
 

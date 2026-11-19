@@ -10,7 +10,7 @@ pub mod model;
 pub mod sidebar;
 pub mod submit;
 
-pub use model::{LineTarget, PendingInlineComment, State};
+pub use model::{LineTarget, PendingInlineComment, PullRefreshTarget, State};
 
 use crate::presenter::*;
 use canban_types::{Card, ReviewPreview};
@@ -483,6 +483,7 @@ pub fn open_compare(ui: Ui) {
 }
 
 fn reset_git_selection(st: State) {
+    reset_pull_refresh(st);
     cancel_reads(st);
     st.review_card_id.set(String::new());
     st.checkout_cwd.set(String::new());
@@ -776,8 +777,44 @@ fn cancel_reads(st: State) {
     st.log_request.replace(String::new());
     st.refs_loading.set(false);
     st.log_loading.set(false);
-    st.log_refreshing.set(false);
     st.compare_loading.set(false);
+    maybe_finish_pull_refresh(st);
+}
+
+pub(crate) const MIN_PULL_REFRESH_HOLD: std::time::Duration = std::time::Duration::from_millis(450);
+
+fn reads_busy_untracked(st: State) -> bool {
+    st.refs_loading.get_untracked()
+        || st.log_loading.get_untracked()
+        || st.compare_loading.get_untracked()
+}
+
+pub(crate) fn maybe_finish_pull_refresh(st: State) {
+    if reads_busy_untracked(st) {
+        return;
+    }
+    for (refreshing, hold_ready) in [
+        (st.log_refreshing, st.log_refresh_hold_ready),
+        (st.files_refreshing, st.files_refresh_hold_ready),
+        (st.diff_refreshing, st.diff_refresh_hold_ready),
+    ] {
+        if refreshing.get_untracked() && hold_ready.get_untracked() {
+            refreshing.set(false);
+        }
+    }
+}
+
+pub(crate) fn reset_pull_refresh(st: State) {
+    for target in [
+        PullRefreshTarget::Commits,
+        PullRefreshTarget::Files,
+        PullRefreshTarget::Diff,
+    ] {
+        let (refreshing, hold_ready, ticket) = st.pull_slot(target);
+        ticket.update(|n| *n += 1);
+        hold_ready.set(false);
+        refreshing.set(false);
+    }
 }
 
 fn prepare_context(ui: Ui) {
@@ -796,6 +833,7 @@ fn prepare_context(ui: Ui) {
     }
     st.read_context.replace(context);
     st.pending_file.replace(String::new());
+    reset_pull_refresh(st);
     cancel_reads(st);
     batch(|| {
         st.refs_data.set(json!({}));
@@ -1051,7 +1089,6 @@ fn load_refs_impl(ui: Ui, compare: Option<bool>) {
                         }
                         st.refs_data.set(val.clone());
                         sync_log_commits_from_refs(st, val, &current);
-                        st.log_refreshing.set(false);
                     });
                     if st.log_commits.with_untracked(Vec::is_empty)
                         && !st.log_loading.get_untracked()
@@ -1063,10 +1100,11 @@ fn load_refs_impl(ui: Ui, compare: Option<bool>) {
                     if compare.is_some() {
                         refresh_active_diff(ui, false);
                     }
+                    maybe_finish_pull_refresh(st);
                 }
                 Err(e) => {
-                    st.log_refreshing.set(false);
                     st.error.set(e);
+                    maybe_finish_pull_refresh(st);
                 }
             }
         });
@@ -1179,6 +1217,7 @@ fn load_active_diff(ui: Ui, force_remote_refresh: bool) {
                 }
                 Err(error) => st.error.set(error),
             }
+            maybe_finish_pull_refresh(st);
         });
     });
 }
