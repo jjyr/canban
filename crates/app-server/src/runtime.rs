@@ -1568,7 +1568,15 @@ impl AppServer {
             let Some(step_id) = run.step.clone() else {
                 continue;
             };
-            if let Some(meta) = run.inputs.get("agent_terminal").filter(|v| v.is_object()) {
+            if let Some(meta) = run.inputs.get("agent_terminal").filter(|v| {
+                v.is_object()
+                    && v.get("step_id")
+                        .and_then(|s| s.as_str())
+                        .is_none_or(|s| s == step_id)
+                    && v.get("visit")
+                        .and_then(|visit| visit.as_u64())
+                        .is_none_or(|visit| visit == u64::from(run.visit))
+            }) {
                 let Some(addr) = meta["address"].as_str() else {
                     continue;
                 };
@@ -1767,6 +1775,8 @@ impl AppServer {
                             current.inputs["agent_terminal"] = json!({
                                 "address": addr,
                                 "machine": location.machine,
+                                "step_id": step_id,
+                                "visit": run.visit,
                                 "started_at": now(),
                             });
                             current.updated_at = now();
