@@ -45,6 +45,9 @@ pub fn context_updates(ui: Ui) {
     });
     let window = current_window();
     effect(move || {
+        if !matches!(ui.page.get().as_str(), "terminals" | "terminal") {
+            return;
+        }
         let mut attributes = nsh_core::desktop::WindowAttributes::default();
         attributes.title = Some(title.get());
         window.set(attributes);

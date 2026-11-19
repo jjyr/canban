@@ -771,6 +771,36 @@ static bool cb_is_ascii_monospaced(CTFontRef font) {
   return true;
 }
 
+static CTFontRef cb_resolve_font_by_name_or_family(NSString *family,
+                                                  CGFloat size) {
+  if (!family || family.length == 0)
+    return NULL;
+  NSFont *base = [NSFont fontWithName:family size:size];
+  if (base) {
+    return (CTFontRef)CFRetain((__bridge CTFontRef)base);
+  }
+  NSDictionary *attrs = @{(__bridge id)kCTFontFamilyNameAttribute : family};
+  CTFontDescriptorRef rawDesc =
+      CTFontDescriptorCreateWithAttributes((__bridge CFDictionaryRef)attrs);
+  if (rawDesc) {
+    NSSet *mandatory =
+        [NSSet setWithObject:(__bridge id)kCTFontFamilyNameAttribute];
+    CTFontDescriptorRef matched = CTFontDescriptorCreateMatchingFontDescriptor(
+        rawDesc, (__bridge CFSetRef)mandatory);
+    CFRelease(rawDesc);
+    if (matched) {
+      CTFontRef ctFont = CTFontCreateWithFontDescriptor(matched, size, NULL);
+      CFRelease(matched);
+      if (ctFont)
+        return ctFont;
+    }
+  }
+  NSFontDescriptor *desc = [NSFontDescriptor
+      fontDescriptorWithFontAttributes:@{NSFontFamilyAttribute : family}];
+  base = [NSFont fontWithDescriptor:desc size:size];
+  return base ? (CTFontRef)CFRetain((__bridge CTFontRef)base) : NULL;
+}
+
 static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
                                        CTFontSymbolicTraits traits) {
   static NSMutableDictionary<NSString *, id> *sFontCache = nil;
@@ -786,48 +816,46 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
       return (CTFontRef)CFRetain((__bridge CTFontRef)cached);
     }
   }
-  cb_register_user_font_subdirs_once();
-  NSFont *base = nil;
+  CTFontRef ctBase = NULL;
   if (family && family.length > 0) {
-    base = [NSFont fontWithName:family size:size];
-    if (!base) {
-      base = [[NSFontManager sharedFontManager] fontWithFamily:family
-                                                        traits:0
-                                                        weight:5
-                                                          size:size];
-    }
-    if (!base) {
-      NSFontDescriptor *desc = [NSFontDescriptor
-          fontDescriptorWithFontAttributes:@{NSFontFamilyAttribute : family}];
-      base = [NSFont fontWithDescriptor:desc size:size];
+    ctBase = cb_resolve_font_by_name_or_family(family, size);
+    if (!ctBase) {
+      cb_register_user_font_subdirs_once();
+      ctBase = cb_resolve_font_by_name_or_family(family, size);
     }
   }
-  if (!base) {
+  if (!ctBase) {
+    NSFont *base = nil;
     if (@available(macOS 10.15, *)) {
       base = [NSFont monospacedSystemFontOfSize:size weight:NSFontWeightRegular];
     } else {
       base = [NSFont fontWithName:@"Menlo" size:size] ?:
              [NSFont userFixedPitchFontOfSize:size];
     }
+    if (base) {
+      ctBase = (CTFontRef)CFRetain((__bridge CTFontRef)base);
+    }
   }
-  CTFontRef ctBase = (__bridge CTFontRef)base;
   CTFontRef result = NULL;
-  if (traits == 0) {
-    result = (CTFontRef)CFRetain(ctBase);
-  } else {
-    CTFontRef styled =
-        CTFontCreateCopyWithSymbolicTraits(ctBase, size, NULL, traits, traits);
-    if (styled) {
-      result = styled;
-    } else if (traits == (kCTFontBoldTrait | kCTFontItalicTrait)) {
-      CTFontRef boldOnly = CTFontCreateCopyWithSymbolicTraits(
-          ctBase, size, NULL, kCTFontBoldTrait, kCTFontBoldTrait);
-      if (boldOnly)
-        result = boldOnly;
-    }
-    if (!result) {
+  if (ctBase) {
+    if (traits == 0) {
       result = (CTFontRef)CFRetain(ctBase);
+    } else {
+      CTFontRef styled =
+          CTFontCreateCopyWithSymbolicTraits(ctBase, size, NULL, traits, traits);
+      if (styled) {
+        result = styled;
+      } else if (traits == (kCTFontBoldTrait | kCTFontItalicTrait)) {
+        CTFontRef boldOnly = CTFontCreateCopyWithSymbolicTraits(
+            ctBase, size, NULL, kCTFontBoldTrait, kCTFontBoldTrait);
+        if (boldOnly)
+          result = boldOnly;
+      }
+      if (!result) {
+        result = (CTFontRef)CFRetain(ctBase);
+      }
     }
+    CFRelease(ctBase);
   }
   if (result) {
     @synchronized(sFontCache) {
@@ -905,8 +933,9 @@ static NSArray<NSString *> *cb_nerd_fallback_families(void) {
     cb_register_user_font_subdirs_once();
     NSMutableArray<NSString *> *ordered = [NSMutableArray array];
     NSMutableSet<NSString *> *seen = [NSMutableSet set];
-    NSFontManager *fm = [NSFontManager sharedFontManager];
-    NSArray<NSString *> *avail = fm.availableFontFamilies ?: @[];
+    CFArrayRef familiesRef = CTFontManagerCopyAvailableFontFamilyNames();
+    NSArray<NSString *> *avail =
+        familiesRef ? CFBridgingRelease(familiesRef) : @[];
     NSSet<NSString *> *availSet = [NSSet setWithArray:avail];
 
     NSArray<NSString *> *preferred = @[
@@ -1283,6 +1312,14 @@ static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
   return fb;
 }
 
+- (BOOL)hasRenderableBounds {
+  CGFloat cw = _cellWidth > 0.0 ? _cellWidth : 8.0;
+  CGFloat ch = _cellHeight > 0.0 ? _cellHeight : 18.0;
+  NSRect b = self.bounds;
+  return b.size.width >= (kPadX * 2.0 + cw * 2.0) &&
+         b.size.height >= (kPadY * 2.0 + ch);
+}
+
 - (CbGeometry)currentGeometry {
   NSRect b = self.bounds;
   CGFloat cw = _cellWidth > 0.0 ? _cellWidth : 8.0;
@@ -1296,8 +1333,7 @@ static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
   g.pad_bottom = (uint32_t)kPadY;
   // Unlaid-out views mount with NSZeroRect before setFrame:; keep cols/rows at
   // zero so Rust does not attach or resize the PTY to 2x1 before layout.
-  if (b.size.width < kPadX * 2.0 + cw * 2.0 ||
-      b.size.height < kPadY * 2.0 + ch) {
+  if (![self hasRenderableBounds]) {
     g.cols = 0;
     g.rows = 0;
     return g;
@@ -1424,7 +1460,7 @@ static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
 }
 
 - (void)pollSnapshotForceFull:(BOOL)forceFull {
-  if (!_host || !_cb.snapshot)
+  if (!_host || !_cb.snapshot || ![self hasRenderableBounds])
     return;
   uint16_t oldCursorY = (_snap && _snap->cursor.visible) ? _snap->cursor.y : UINT16_MAX;
   const CbSnapshot *next = _cb.snapshot(_host, [self currentGeometry], forceFull);
@@ -1706,9 +1742,15 @@ static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
 }
 
 - (void)setFrameSize:(NSSize)newSize {
+  BOOL sizeChanged = !NSEqualSizes(self.bounds.size, newSize);
   [super setFrameSize:newSize];
   _pendingLayoutRedraws = 0;
-  [self pollSnapshotForceFull:YES];
+  if (![self hasRenderableBounds])
+    return;
+  [self pollSnapshotForceFull:(_snap == NULL)];
+  if (sizeChanged) {
+    [self setNeedsDisplay:YES];
+  }
 }
 
 - (void)layout {
@@ -3895,8 +3937,10 @@ void cb_terminal_set_font(void *view, const char *family, double size) {
   term.fontFamily = nextFamily;
   term.fontSize = nextSize;
   [term rebuildFonts];
-  [term pollSnapshotForceFull:YES];
-  [term setNeedsDisplay:YES];
+  if ([term hasRenderableBounds]) {
+    [term pollSnapshotForceFull:YES];
+    [term setNeedsDisplay:YES];
+  }
 }
 
 void cb_terminal_set_theme_bg(void *view, uint8_t r, uint8_t g, uint8_t b) {
@@ -3964,6 +4008,7 @@ char *cb_terminal_list_fonts_json(void) {
 
     [monospaced sortUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
     [others sortUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+    (void)cb_nerd_fallback_families();
 
     NSDictionary *payload =
         @{@"monospaced" : monospaced, @"others" : others};

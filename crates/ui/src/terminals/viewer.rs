@@ -56,7 +56,13 @@ fn context(ui: Ui) -> impl IntoElement {
     })
 }
 pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
+    let in_terminals = computed(move || matches!(ui.page.get().as_str(), "terminals" | "terminal"));
     let target = computed(move || {
+        // Keep the retained Terminals shell free of an active native PTY viewer when off-page
+        // so the Card split can own the sole active viewer without double-attaching.
+        if !in_terminals.get() {
+            return None;
+        }
         let id = selected_id.get();
         if id.is_empty() || ui.closing_terminals.with(|c| c.contains(&id)) {
             return None;
@@ -77,6 +83,13 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
     let has_live_target = computed(move || target.with(|t| t.is_some()));
     dynamic(move || {
         if !has_live_target.get() {
+            if !in_terminals.get() {
+                return view()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .bg(crate::utilities::terminal_bg_color)
+                    .into_element();
+            }
             let sel = selected_id.get();
             let has_entry = !sel.is_empty()
                 && !ui.closing_terminals.with(|c| c.contains(&sel))

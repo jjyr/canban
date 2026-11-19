@@ -1586,6 +1586,11 @@ mod tests {
         let bind_val = json!({"config": config, "core_id": "core-zero", "terminal": "tty-zero"});
         assert!(mounted_host.bind(&bind_val));
         unsafe { cb_terminal_sync_rebind(raw_view as *mut c_void) };
+        assert_eq!(
+            mounted_host.seen,
+            u64::MAX,
+            "NSZeroRect font/rebind callbacks must skip redundant full snapshots before layout"
+        );
         {
             let s = mounted_host.state.lock().unwrap();
             assert!(
@@ -1598,6 +1603,16 @@ mod tests {
                 "NSZeroRect callbacks must not shrink model to 2 columns"
             );
         }
+        let mut rgba = vec![0u8; 480 * 240 * 4];
+        assert!(unsafe {
+            cb_terminal_test_render_rgba(raw_view as *mut c_void, 480, 240, rgba.as_mut_ptr())
+        });
+        assert_ne!(
+            mounted_host.seen,
+            u64::MAX,
+            "first renderable frame size must poll the initial snapshot"
+        );
+        assert!(mounted_host.state.lock().unwrap().size_ready);
         mounted_host.detach_current_session();
         evict_session("core-zero", "tty-zero");
         unsafe {

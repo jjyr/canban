@@ -278,6 +278,12 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             shell_mounted.set(true);
         }
     });
+    let terminals_mounted = signal(in_terminals.get_untracked());
+    effect(move || {
+        if in_terminals.get() && !terminals_mounted.get_untracked() {
+            terminals_mounted.set(true);
+        }
+    });
     let settings_mounted = signal(is_settings.get_untracked());
     effect(move || {
         if is_settings.get() && !settings_mounted.get_untracked() {
@@ -316,8 +322,23 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         .bg(BACKGROUND)
         .on_layout(move |b: &Bounds<Points>| ui.narrow.set(b.size.width.0 < 950.))
         .child(when(
-            move || in_terminals.get(),
-            move || terminals::screen(ui),
+            move || terminals_mounted.get(),
+            move || {
+                view()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .min_w(px(0.))
+                    .style_when(move || !in_terminals.get(), |s| s.hidden())
+                    .accessibility_elements_hidden(move || !in_terminals.get())
+                    .pointer_events(move || {
+                        if in_terminals.get() {
+                            PointerEvents::Auto
+                        } else {
+                            PointerEvents::None
+                        }
+                    })
+                    .child(terminals::screen(ui))
+            },
         ))
         .child(when(
             move || shell_mounted.get(),
@@ -778,6 +799,10 @@ mod tests {
             0,
             "native terminal must not be mounted while on Board"
         );
+        assert!(
+            tree.mounted_node_for_text("Shell 1").is_none(),
+            "Terminals sidebar must stay unmounted until Terminals is first visited"
+        );
 
         // 1. Opening and closing a Card in split view keeps the exact same Board chrome bar and tile nodes.
         let open_card = *tree.labels.get("harness-open-card").unwrap();
@@ -802,7 +827,7 @@ mod tests {
             "route_chrome must not rebuild Board chrome bar when closing split Card"
         );
 
-        // 2. Navigating to Terminals mounts the single native PTY viewer while keeping the Board subtree retained.
+        // 2. Navigating to Terminals mounts the shell subtree and single native PTY viewer while keeping Board retained.
         let go_terminals = *tree.labels.get("harness-go-terminals").unwrap();
         assert!(core.component_event(go_terminals, EventKind::Press, &EventPayload::None));
         pump(&mut core, &mut tree);
@@ -811,13 +836,16 @@ mod tests {
             1,
             "Terminals route must mount its active native PTY viewer"
         );
+        let initial_terminal_tree_row = tree
+            .mounted_node_for_text("Shell 1")
+            .expect("Terminals sidebar row must mount on first visit");
         assert!(
             tree.is_mounted(initial_tile_node),
             "Board tile node must stay retained (hidden) while visiting Terminals"
         );
 
-        // 3. Returning to Board unmounts the Terminals PTY viewer (preserving single-PTY attachment)
-        //    and reveals the exact same retained Board tile and chrome nodes without remounting.
+        // 3. Returning to Board unmounts the Terminals PTY viewer (preserving single-PTY attachment),
+        //    retains the Terminals shell subtree (hidden), and reveals the exact same Board tile and chrome nodes.
         let go_board = *tree.labels.get("harness-go-board").unwrap();
         assert!(core.component_event(go_board, EventKind::Press, &EventPayload::None));
         pump(&mut core, &mut tree);
@@ -825,6 +853,10 @@ mod tests {
             mounted_terminals(&tree),
             0,
             "leaving Terminals must unmount its native PTY viewer immediately"
+        );
+        assert!(
+            tree.is_mounted(initial_terminal_tree_row),
+            "Terminals sidebar row must stay retained (hidden) after leaving Terminals"
         );
         assert!(
             tree.is_mounted(initial_tile_node),
@@ -835,7 +867,25 @@ mod tests {
             Some(initial_chrome_agents)
         );
 
-        // 4. Switching Projects replaces the workspace subtree per `docs/ui-motion.md`.
+        // 4. Returning to Terminals reuses the exact same retained shell subtree and remounts one native PTY viewer.
+        assert!(core.component_event(go_terminals, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert_eq!(
+            tree.mounted_node_for_text("Shell 1"),
+            Some(initial_terminal_tree_row),
+            "re-entering Terminals must reuse the retained Terminals sidebar subtree"
+        );
+        assert_eq!(
+            mounted_terminals(&tree),
+            1,
+            "re-entering Terminals must mount its active native PTY viewer"
+        );
+
+        assert!(core.component_event(go_board, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert_eq!(mounted_terminals(&tree), 0);
+
+        // 5. Switching Projects replaces the workspace subtree per `docs/ui-motion.md`.
         let switch_proj = *tree.labels.get("harness-switch-project").unwrap();
         assert!(core.component_event(switch_proj, EventKind::Press, &EventPayload::None));
         pump(&mut core, &mut tree);
