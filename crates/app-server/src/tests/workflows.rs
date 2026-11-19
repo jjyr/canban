@@ -70,7 +70,7 @@ fn manual_column_moves_dispatch_only_destination_and_record_resulting_card() {
         let runs: Vec<_> = after
             .workflow_runs
             .iter()
-            .filter(|r| r.card_id == c.id && r.active())
+            .filter(|r| r.card_id.as_deref() == Some(c.id.as_str()) && r.active())
             .collect();
         assert_eq!(runs.len(), 1, "runs: {:?}", after.workflow_runs);
         if to == "review" {
@@ -329,7 +329,7 @@ fn event_workflows_use_final_card_binding_and_failures_do_not_rollback_source_co
         .unwrap();
     let s = app.snapshot().unwrap();
     assert_eq!(s.workflow_runs.len(), 1);
-    assert_eq!(s.workflow_runs[0].card_id, c["id"].as_str().unwrap());
+    assert_eq!(s.workflow_runs[0].card_id.as_deref(), c["id"].as_str());
     assert_eq!(s.terminals.len(), 1);
     assert_eq!(
         app.call(
@@ -1365,7 +1365,7 @@ workspace:
     let ext_run = snap
         .workflow_runs
         .iter()
-        .find(|r| r.card_id == ext_card.id)
+        .find(|r| r.card_id.as_deref() == Some(ext_card.id.as_str()))
         .unwrap();
     assert_eq!(ext_run.state, "waiting_approval");
     assert_eq!(ext_run.step.as_deref(), Some("approval:review"));
@@ -1505,7 +1505,7 @@ fn default_workflow_queue_merge_syncs_upstream_and_respects_local_only_option() 
     let run1 = snap
         .workflow_runs
         .iter()
-        .find(|r| r.card_id == c1.id)
+        .find(|r| r.card_id.as_deref() == Some(c1.id.as_str()))
         .unwrap();
     assert_eq!(run1.state, "completed");
 
@@ -1722,7 +1722,7 @@ fn backlog_and_review_options_drive_card_lifecycle_and_preserve_custom_stages() 
     let run_state = snap
         .workflow_runs
         .iter()
-        .find(|r| r.card_id == c_plan_dev.id)
+        .find(|r| r.card_id.as_deref() == Some(c_plan_dev.id.as_str()))
         .unwrap();
     assert_eq!(run_state.state, "waiting_approval");
     assert_eq!(run_state.step.as_deref(), Some("approval:review"));
@@ -1901,7 +1901,7 @@ fn queue_merge_conflict_routes_to_agent_then_fast_forwards_after_resolution() {
     let run = snap
         .workflow_runs
         .iter()
-        .find(|r| r.card_id == c.id)
+        .find(|r| r.card_id.as_deref() == Some(c.id.as_str()))
         .unwrap();
     assert_eq!(
         run.state, "waiting_agent",
@@ -1957,7 +1957,7 @@ fn queue_merge_conflict_routes_to_agent_then_fast_forwards_after_resolution() {
     let run = snap
         .workflow_runs
         .iter()
-        .find(|r| r.card_id == c.id)
+        .find(|r| r.card_id.as_deref() == Some(c.id.as_str()))
         .unwrap();
     assert_eq!(run.state, "completed");
     assert_eq!(git_in(&source, &["rev-parse", "HEAD"]), resolved);
@@ -2171,7 +2171,7 @@ fn queue_merge_conflict_pauses_for_human_after_attempt_budget() {
     let run = snap
         .workflow_runs
         .iter()
-        .find(|r| r.card_id == c.id)
+        .find(|r| r.card_id.as_deref() == Some(c.id.as_str()))
         .unwrap();
     assert_eq!(run.state, "waiting_approval");
     assert_eq!(
@@ -2241,7 +2241,7 @@ fn backlog_admission_plans_ahead_k_and_starts_in_board_order_when_agent_free() {
     let run_of = |snap: &Snapshot, id: &str| {
         snap.workflow_runs
             .iter()
-            .find(|r| r.card_id == id && r.active())
+            .find(|r| r.card_id.as_deref() == Some(id) && r.active())
             .cloned()
             .unwrap()
     };
@@ -2387,7 +2387,7 @@ fn removing_the_running_step_finishes_it_then_stops_the_run() {
     let run = snap
         .workflow_runs
         .iter()
-        .find(|r| r.card_id == c.id)
+        .find(|r| r.card_id.as_deref() == Some(c.id.as_str()))
         .unwrap();
     assert_eq!(run.state, "waiting_agent", "the current step keeps running");
     assert_eq!(run.inputs["stop_after_step"], "agent:develop");
@@ -2396,7 +2396,7 @@ fn removing_the_running_step_finishes_it_then_stops_the_run() {
     let run = snap
         .workflow_runs
         .iter()
-        .find(|r| r.card_id == c.id)
+        .find(|r| r.card_id.as_deref() == Some(c.id.as_str()))
         .unwrap();
     assert_eq!(run.state, "cancelled");
     assert_eq!(
@@ -2504,7 +2504,7 @@ fn report_auto_commits_card_worktree_and_workflow_deliver_retries_paused_or_stop
     let run1 = snap
         .workflow_runs
         .iter()
-        .find(|r| r.card_id == c1.id && r.active())
+        .find(|r| r.card_id.as_deref() == Some(c1.id.as_str()) && r.active())
         .unwrap();
     assert_eq!(
         run1.state, "waiting_delivery",
@@ -2592,7 +2592,7 @@ fn report_auto_commits_card_worktree_and_workflow_deliver_retries_paused_or_stop
     let run2 = snap
         .workflow_runs
         .iter()
-        .find(|r| r.card_id == c2.id && r.active())
+        .find(|r| r.card_id.as_deref() == Some(c2.id.as_str()) && r.active())
         .unwrap();
     assert_eq!(run2.state, "waiting_agent");
     // User stops the workflow, leaving the Card in `review` with no active run and an unmerged MERGE_HEAD!
@@ -2603,7 +2603,7 @@ fn report_auto_commits_card_worktree_and_workflow_deliver_retries_paused_or_stop
         !snap
             .workflow_runs
             .iter()
-            .any(|r| r.card_id == c2.id && r.active())
+            .any(|r| r.card_id.as_deref() == Some(c2.id.as_str()) && r.active())
     );
 
     let card2 = snap.cards.iter().find(|c| c.id == c2.id).unwrap();
@@ -2768,7 +2768,7 @@ workspace:
         first_run_rev = snap
             .workflow_runs
             .iter()
-            .find(|r| r.card_id == c.id)
+            .find(|r| r.card_id.as_deref() == Some(c.id.as_str()))
             .unwrap()
             .definition_revision;
         assert_eq!(first_run_rev, 1);
@@ -2806,7 +2806,7 @@ workspace:
     let run = snap
         .workflow_runs
         .iter()
-        .find(|r| r.card_id == card_id && r.active())
+        .find(|r| r.card_id.as_deref() == Some(card_id.as_str()) && r.active())
         .unwrap();
     assert_eq!(run.definition_revision, first_run_rev);
 
@@ -3022,7 +3022,7 @@ workspace:
         !after
             .workflow_runs
             .iter()
-            .any(|r| r.card_id == card.id && r.active())
+            .any(|r| r.card_id.as_deref() == Some(card.id.as_str()) && r.active())
     );
     assert!(
         !after
@@ -3208,7 +3208,7 @@ fn queue_merge_waits_for_connected_agent_turn_wrapup_and_falls_back_after_settle
     let run1 = snap
         .workflow_runs
         .iter()
-        .find(|r| r.card_id == c1.id)
+        .find(|r| r.card_id.as_deref() == Some(c1.id.as_str()))
         .unwrap();
     assert_eq!(run1.state, "waiting_delivery");
 
@@ -3326,7 +3326,7 @@ fn queue_merge_waits_for_connected_agent_turn_wrapup_and_falls_back_after_settle
             let mut wf: WorkflowRun = db
                 .list::<WorkflowRun>()?
                 .into_iter()
-                .find(|r| r.card_id == c2.id)
+                .find(|r| r.card_id.as_deref() == Some(c2.id.as_str()))
                 .unwrap();
             wf.updated_at = expired;
             db.save(&wf)
@@ -4013,7 +4013,7 @@ fn merge_queue_drains_fifo_holds_head_during_conflict_and_never_spawns_merger_fo
     let queue_ids: Vec<String> = snap
         .merge_queue(&p.id)
         .into_iter()
-        .map(|r| r.card_id.clone())
+        .filter_map(|r| r.card_id.clone())
         .collect();
     assert_eq!(
         queue_ids,
@@ -4081,7 +4081,7 @@ fn merge_queue_drains_fifo_holds_head_during_conflict_and_never_spawns_merger_fo
     let queue_after_c3: Vec<String> = snap
         .merge_queue(&p.id)
         .into_iter()
-        .map(|r| r.card_id.clone())
+        .filter_map(|r| r.card_id.clone())
         .collect();
     assert_eq!(
         queue_after_c3,
@@ -4703,7 +4703,7 @@ fn queue_merge_supports_rebase_squash_and_merge_strategies_and_routes_conflicts_
         let run2 = snap
             .workflow_runs
             .iter()
-            .find(|r| r.card_id == c2.id && r.active())
+            .find(|r| r.card_id.as_deref() == Some(c2.id.as_str()) && r.active())
             .expect("active run waiting on @merger");
         assert_eq!(
             run2.state, "waiting_agent",
@@ -4873,7 +4873,7 @@ fn failed_rebase_conflict_delivery_retries_via_workflow_deliver_without_burning_
     let run = snap
         .workflow_runs
         .iter()
-        .find(|r| r.card_id == c.id && r.active())
+        .find(|r| r.card_id.as_deref() == Some(c.id.as_str()) && r.active())
         .unwrap();
     assert_eq!(run.state, "waiting_agent");
     assert_eq!(run.inputs["conflict_attempts"], 1);
@@ -5306,7 +5306,7 @@ for line in sys.stdin:
     let run_mid = snap_mid
         .workflow_runs
         .iter()
-        .find(|r| r.card_id == c.id)
+        .find(|r| r.card_id.as_deref() == Some(c.id.as_str()))
         .unwrap();
     assert_eq!(run_mid.step.as_deref(), Some("agent:dev"));
     assert_eq!(run_mid.outputs["script:prep"]["gate"], "pass");
@@ -5624,7 +5624,7 @@ workspace:
         if let Some(run) = snap
             .workflow_runs
             .into_iter()
-            .find(|r| r.card_id == c.id && r.state == "completed")
+            .find(|r| r.card_id.as_deref() == Some(c.id.as_str()) && r.state == "completed")
         {
             break run;
         }
@@ -5768,12 +5768,12 @@ fn failed_merger_retry_joins_tail_of_merge_queue_behind_active_card() {
     let run_a = snap
         .workflow_runs
         .iter()
-        .find(|r| r.card_id == card_a.id && r.active())
+        .find(|r| r.card_id.as_deref() == Some(card_a.id.as_str()) && r.active())
         .unwrap();
     let run_b = snap
         .workflow_runs
         .iter()
-        .find(|r| r.card_id == card_b.id && r.active())
+        .find(|r| r.card_id.as_deref() == Some(card_b.id.as_str()) && r.active())
         .unwrap();
     assert_eq!(run_a.state, "failed");
     assert!(run_a.inputs["queued_at"].is_null());
@@ -5834,7 +5834,7 @@ fn failed_merger_retry_joins_tail_of_merge_queue_behind_active_card() {
     let run_a = snap
         .workflow_runs
         .iter()
-        .find(|r| r.card_id == card_a.id && r.active())
+        .find(|r| r.card_id.as_deref() == Some(card_a.id.as_str()) && r.active())
         .unwrap();
     assert_eq!(run_a.state, "waiting_agent");
     let merger_a2 = admit(&app, &snap_latest_card_terminal(&app, &card_a.id));
@@ -5895,7 +5895,7 @@ fn failed_merger_retry_joins_tail_of_merge_queue_behind_active_card() {
     let run_a = snap
         .workflow_runs
         .iter()
-        .find(|r| r.card_id == card_a.id && r.active())
+        .find(|r| r.card_id.as_deref() == Some(card_a.id.as_str()) && r.active())
         .unwrap();
     assert_eq!(run_a.state, "waiting_delivery");
     assert_eq!(snap.merge_queue_status(&card_c.id).unwrap().0, 1);
@@ -6303,7 +6303,7 @@ fn batch_merge_queue_conflict_dispatches_single_merger_with_agy_trusted_paths_an
         let run = snap
             .workflow_runs
             .iter()
-            .find(|r| r.card_id == c.id && r.active())
+            .find(|r| r.card_id.as_deref() == Some(c.id.as_str()) && r.active())
             .unwrap();
         assert_eq!(run.state, "waiting_batch");
     }
@@ -6476,7 +6476,7 @@ fn batch_merge_queue_test_failure_supports_evicting_bad_card_and_delivering_rema
     let bad_run = snap_after
         .workflow_runs
         .iter()
-        .find(|r| r.card_id == c2.id && r.active())
+        .find(|r| r.card_id.as_deref() == Some(c2.id.as_str()) && r.active())
         .unwrap();
     assert_eq!(bad_run.state, "waiting_approval");
     assert!(

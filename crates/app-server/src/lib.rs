@@ -51,7 +51,7 @@ pub struct AppServer {
     queue_gates: delivery_gates::KeyedGateTable<String>,
     card_delivery_gates: delivery_gates::KeyedGateTable<String>,
     remote_canonical_dirs: Mutex<std::collections::HashMap<(String, String), PathBuf>>,
-    github_action_gate: Mutex<()>,
+    github_action_gate: (Mutex<bool>, std::sync::Condvar),
     merging_cards: Mutex<std::collections::BTreeSet<String>>,
     terminal_gate: Mutex<()>,
     terminal_contexts: Mutex<Vec<TerminalContext>>,
@@ -96,6 +96,17 @@ impl Drop for Running {
         let _ = self.server._service_lock.unlock();
     }
 }
+pub(crate) struct GithubActionGateGuard<'a> {
+    gate: &'a (Mutex<bool>, std::sync::Condvar),
+}
+impl Drop for GithubActionGateGuard<'_> {
+    fn drop(&mut self) {
+        let mut busy = self.gate.0.lock().unwrap();
+        *busy = false;
+        self.gate.1.notify_one();
+    }
+}
+
 pub(crate) struct MergingCard<'a> {
     server: &'a AppServer,
     card_id: String,
@@ -719,7 +730,7 @@ impl AppServer {
             queue_gates: Default::default(),
             card_delivery_gates: Default::default(),
             remote_canonical_dirs: Mutex::new(Default::default()),
-            github_action_gate: Mutex::new(()),
+            github_action_gate: (Mutex::new(false), std::sync::Condvar::new()),
             merging_cards: Mutex::new(Default::default()),
             terminal_gate: Mutex::new(()),
             terminal_contexts: Mutex::new(Vec::new()),

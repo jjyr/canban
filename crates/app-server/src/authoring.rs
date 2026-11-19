@@ -216,16 +216,27 @@ fn publish_scope(
             run.inputs["stop_after_step"] = json!(run.step);
             run.updated_at = now();
             db.save(&run)?;
-            let card: Card = db.get(&run.card_id)?;
-            log(
-                db,
-                &card,
-                "workflow.stop_scheduled",
-                "system",
-                "Current step was removed; the run stops after it finishes",
-                run.terminal_id.clone(),
-                json!({"workflow_run_id":run.id,"step":run.step}),
-            )?;
+            if let Some(card_id) = run.card_id.as_deref() {
+                let card: Card = db.get(card_id)?;
+                log(
+                    db,
+                    &card,
+                    "workflow.stop_scheduled",
+                    "system",
+                    "Current step was removed; the run stops after it finishes",
+                    run.terminal_id.clone(),
+                    json!({"workflow_run_id":run.id,"step":run.step}),
+                )?;
+            } else {
+                db.append(canban_timeline::event(
+                    &run.project_id,
+                    "",
+                    "workflow.stop_scheduled",
+                    "system",
+                    "Current step was removed; the run stops after it finishes",
+                    json!({"workflow_run_id":run.id,"step":run.step}),
+                ))?;
+            }
         }
         let hash = canban_context::digest(raw.as_bytes());
         let existing = old
@@ -266,16 +277,11 @@ fn publish_scope(
             }
             let sub_id = format!("source:{scope_id}:{}:{key}", definition.id);
             let old_sub = db.get::<EventSubscription>(&sub_id).ok();
-            let mut selector = rule.selector.clone();
-            selector.project_id = Some(scope_id.to_owned());
-            selector.types = vec![rule.event.clone()];
-            if matches!(
-                rule.event.as_str(),
-                "card.column_entered" | "card.column_left"
-            ) && selector.origin.is_none()
-            {
-                selector.origin = Some("local".into());
-            }
+            let project_repo = project_opt
+                .and_then(|p| p.github.as_ref())
+                .map(|g| g.repository.as_str());
+            let selector =
+                canban_workflow_engine::compile_rule_selector(scope_id, rule, project_repo);
             let enabled = file.enabled && rule.enabled;
             db.save(&EventSubscription {
                 id: sub_id,

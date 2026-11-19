@@ -406,6 +406,18 @@ enum ReviewCmd {
         #[arg(long, env = "CANBAN_PROJECT")]
         project: Option<String>,
     },
+    /// Publish the local review draft for a PR Card to GitHub.
+    Publish {
+        /// Override the review verdict event: COMMENT | APPROVE | REQUEST_CHANGES.
+        #[arg(long)]
+        event_override: Option<String>,
+        #[arg(long, env = "CANBAN_CARD")]
+        card: Option<u64>,
+        #[arg(long, env = "CANBAN_PROJECT")]
+        project: Option<String>,
+        #[arg(long)]
+        request_key: Option<String>,
+    },
 }
 #[derive(Subcommand)]
 enum CardCmd {
@@ -887,6 +899,38 @@ fn run() -> Result<()> {
                 }
                 ("review.draft.clear".into(), params)
             }
+            ReviewCmd::Publish {
+                event_override,
+                card,
+                project,
+                request_key,
+            } => {
+                let mut params = card_scope(card, project);
+                if let Some(ev) = event_override {
+                    params["event_override"] = json!(ev);
+                }
+                if let Some(key) = request_key {
+                    params["request_key"] = json!(key);
+                }
+                if params.get("card_id").is_none()
+                    && params.get("card").is_none()
+                    && let Ok(cid) = std::env::var("CARD_ID")
+                    && !cid.trim().is_empty()
+                {
+                    params["card_id"] = json!(cid);
+                }
+                if let Ok(run_id) = std::env::var("CANBAN_RUN_ID")
+                    && !run_id.trim().is_empty()
+                {
+                    params["workflow_run_id"] = json!(run_id);
+                }
+                if let Ok(step_id) = std::env::var("CANBAN_STEP_ID")
+                    && !step_id.trim().is_empty()
+                {
+                    params["step_id"] = json!(step_id);
+                }
+                ("github.review.publish".into(), params)
+            }
         },
         Cmd::Card { command } => match command {
             CardCmd::Show { card, project } => {
@@ -1319,7 +1363,7 @@ fn run() -> Result<()> {
     {
         p["request_key"] = json!(canban_types::id());
     }
-    if matches!(
+    if (matches!(
         method.as_str(),
         "note.save"
             | "note.write"
@@ -1340,7 +1384,8 @@ fn run() -> Result<()> {
             | "schedule.toggle"
             | "schedule.delete"
             | "card.hold_auto_merge"
-    ) && p.get("execution").is_none()
+    ) || (method.starts_with("github.") && method != "github.context"))
+        && p.get("execution").is_none()
         && let Ok(profile) = std::env::var("CANBAN_PROFILE_ID")
         && !profile.trim().is_empty()
     {
@@ -1588,6 +1633,38 @@ mod tests {
                 command: WorktreeCmd::Gc { merged_before, .. },
             }) => assert_eq!(merged_before, "3d"),
             _ => panic!("expected worktree gc"),
+        }
+    }
+
+    #[test]
+    fn parses_review_publish_command() {
+        let parsed = Args::try_parse_from([
+            "canban",
+            "review",
+            "publish",
+            "--event-override",
+            "COMMENT",
+            "--card",
+            "150",
+            "--request-key",
+            "rk-150",
+        ])
+        .unwrap();
+        match parsed.command {
+            Some(Cmd::Review {
+                command:
+                    ReviewCmd::Publish {
+                        event_override,
+                        card,
+                        request_key,
+                        ..
+                    },
+            }) => {
+                assert_eq!(event_override.as_deref(), Some("COMMENT"));
+                assert_eq!(card, Some(150));
+                assert_eq!(request_key.as_deref(), Some("rk-150"));
+            }
+            _ => panic!("expected review publish"),
         }
     }
 }

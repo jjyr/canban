@@ -203,7 +203,7 @@ steps:
     let card_runs: Vec<_> = snap
         .workflow_runs
         .iter()
-        .filter(|w| w.card_id == card.id)
+        .filter(|w| w.card_id.as_deref() == Some(card.id.as_str()))
         .collect();
     assert_eq!(card_runs.len(), 1);
 

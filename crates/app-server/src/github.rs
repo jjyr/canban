@@ -201,6 +201,9 @@ impl AppServer {
                 json!({"source":card.github_issue(),"content":content,"references":card.github_links}),
             );
         }
+        if method == "github.review.publish" {
+            return self.github_review_publish(&p);
+        }
         ensure!(
             p["execution"].is_null(),
             "GitHub account/source and delivery operations require a user action"
@@ -666,23 +669,38 @@ impl AppServer {
 
 impl AppServer {
     fn github_event_refresh(&self, project: &Project) -> Result<()> {
+        let project_repo = project.github.as_ref().map(|g| g.repository.as_str());
         let (cards, enabled) = {
             let store = self.store.lock().unwrap();
-            (
-                store.db().list::<Card>()?,
-                store.db().list::<EventSubscription>()?.iter().any(|s| {
-                    s.enabled
-                        && (s.selector.types.is_empty()
-                            || s.selector
-                                .types
-                                .iter()
-                                .any(|t| t == "*" || t.starts_with("github.")))
-                }),
-            )
+            let subs = store.db().list::<EventSubscription>()?;
+            let enabled = subs.iter().any(|s| {
+                s.enabled
+                    && (s.selector.types.is_empty()
+                        || s.selector
+                            .types
+                            .iter()
+                            .any(|t| t == "*" || t.starts_with("github.")))
+                    && (s.selector.project_id.is_none()
+                        || s.selector.project_id.as_deref() == Some(project.id.as_str())
+                        || project_repo.is_some_and(|repo| {
+                            s.selector
+                                .repository
+                                .as_deref()
+                                .is_some_and(|r| r.eq_ignore_ascii_case(repo))
+                        }))
+            });
+            (store.db().list::<Card>()?, enabled)
         };
         if !enabled {
             return Ok(());
         }
+        let current_login = self.github.status().login;
+
+        // Repo-level polling for Issues and Issue comments (works even when `intake: off`).
+        if let Some(source) = &project.github {
+            self.poll_repo_issues_and_comments(&source.repository, current_login.as_deref())?;
+        }
+
         for card in cards
             .iter()
             .filter(|c| c.project_id == project.id && c.active())
@@ -758,17 +776,173 @@ impl AppServer {
                     );
                 }
                 self.store.lock().unwrap().write(|db| {
-                    events::github::complete_collection(
+                    events::github::complete_collection_with_login(
                         db,
                         &source.repository,
                         source.number,
                         if card.is_github_pr() { "pr" } else { "issue" },
                         section,
                         &items,
+                        current_login.as_deref(),
                     )
                 })?;
             }
         }
+        Ok(())
+    }
+
+    /// Polls repo-level `/issues` (filtering out PRs via `pull_request.is_none()`) and
+    /// `/issues/comments`, advancing the durable per-repo watermark only after both scans succeed.
+    fn poll_repo_issues_and_comments(
+        &self,
+        repository: &str,
+        current_login: Option<&str>,
+    ) -> Result<()> {
+        let existing_watermark = {
+            let store = self.store.lock().unwrap();
+            events::github::load_repo_watermark(store.db(), repository)?
+        };
+        let scan_started_iso = events::github::format_iso8601_utc(now());
+
+        let mut issues = Vec::new();
+        let issues_root = match &existing_watermark {
+            Some(wm) => format!(
+                "/repos/{repository}/issues?state=all&sort=updated&direction=asc&since={}&per_page=100",
+                wm.issues_since
+            ),
+            None => {
+                format!(
+                    "/repos/{repository}/issues?state=all&sort=updated&direction=desc&per_page=100"
+                )
+            }
+        };
+        let max_pages = if existing_watermark.is_some() { 10 } else { 1 };
+        for page in 1..=max_pages {
+            let response = self.github_read(&format!("{issues_root}&page={page}"), true, false)?;
+            let values = response
+                .data
+                .as_array()
+                .context("Expected GitHub issues array")?;
+            // GitHub `/issues` returns both Issues and PRs; filter out PRs here.
+            for item in values {
+                if item.get("pull_request").is_none() {
+                    issues.push(item.clone());
+                }
+            }
+            if !response
+                .link
+                .as_ref()
+                .is_some_and(|l| l.contains("rel=\"next\""))
+            {
+                break;
+            }
+            if existing_watermark.is_some() {
+                ensure!(
+                    page < max_pages,
+                    "GitHub repo issues scan hit page bound; watermark not advanced"
+                );
+            }
+        }
+
+        let mut comments = Vec::new();
+        let comments_root = match &existing_watermark {
+            Some(wm) => format!(
+                "/repos/{repository}/issues/comments?sort=updated&direction=asc&since={}&per_page=100",
+                wm.comments_since
+            ),
+            None => {
+                format!(
+                    "/repos/{repository}/issues/comments?sort=updated&direction=desc&per_page=100"
+                )
+            }
+        };
+        for page in 1..=max_pages {
+            let response =
+                self.github_read(&format!("{comments_root}&page={page}"), true, false)?;
+            let values = response
+                .data
+                .as_array()
+                .context("Expected GitHub issue comments array")?;
+            comments.extend(values.iter().cloned());
+            if !response
+                .link
+                .as_ref()
+                .is_some_and(|l| l.contains("rel=\"next\""))
+            {
+                break;
+            }
+            if existing_watermark.is_some() {
+                ensure!(
+                    page < max_pages,
+                    "GitHub repo comments scan hit page bound; watermark not advanced"
+                );
+            }
+        }
+
+        let max_issue_updated = issues
+            .iter()
+            .filter_map(|i| i["updated_at"].as_str())
+            .max()
+            .map(str::to_owned);
+        let max_comment_updated = comments
+            .iter()
+            .filter_map(|c| c["updated_at"].as_str())
+            .max()
+            .map(str::to_owned);
+
+        let next_watermark = match &existing_watermark {
+            Some(wm) => events::github::RepoWatermark {
+                baseline_at: wm.baseline_at.clone(),
+                issues_since: max_issue_updated
+                    .filter(|u| u.as_str() > wm.issues_since.as_str())
+                    .unwrap_or_else(|| {
+                        if scan_started_iso > wm.issues_since {
+                            scan_started_iso.clone()
+                        } else {
+                            wm.issues_since.clone()
+                        }
+                    }),
+                comments_since: max_comment_updated
+                    .filter(|u| u.as_str() > wm.comments_since.as_str())
+                    .unwrap_or_else(|| {
+                        if scan_started_iso > wm.comments_since {
+                            scan_started_iso.clone()
+                        } else {
+                            wm.comments_since.clone()
+                        }
+                    }),
+            },
+            None => events::github::RepoWatermark {
+                baseline_at: scan_started_iso.clone(),
+                issues_since: max_issue_updated
+                    .filter(|u| u.as_str() > scan_started_iso.as_str())
+                    .unwrap_or_else(|| scan_started_iso.clone()),
+                comments_since: max_comment_updated
+                    .filter(|u| u.as_str() > scan_started_iso.as_str())
+                    .unwrap_or_else(|| scan_started_iso.clone()),
+            },
+        };
+
+        self.store.lock().unwrap().write(|db| {
+            events::github::observe_batch_with_context(
+                db,
+                repository,
+                &issues,
+                Some("issue"),
+                existing_watermark.as_ref().map(|w| w.baseline_at.as_str()),
+                current_login,
+            )?;
+            events::github::observe_repo_comments_batch(
+                db,
+                repository,
+                &comments,
+                existing_watermark.is_some(),
+                current_login,
+            )?;
+            events::github::save_repo_watermark(db, repository, &next_watermark)?;
+            Ok(())
+        })?;
+        self.wake_runtime();
         Ok(())
     }
 }

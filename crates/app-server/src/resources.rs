@@ -160,7 +160,7 @@ impl AppServer {
             workflow_runs: snapshot
                 .workflow_runs
                 .iter()
-                .filter(|r| r.card_id == card_id)
+                .filter(|r| r.card_id.as_deref() == Some(card_id))
                 .cloned()
                 .collect(),
             workflow_revisions: snapshot
@@ -548,7 +548,7 @@ impl AppServer {
             let active_workflows = db
                 .list::<WorkflowRun>()?
                 .into_iter()
-                .any(|r| r.card_id == c.id && r.active());
+                .any(|r| r.card_id.as_deref() == Some(c.id.as_str()) && r.active());
             let agent_warning = crate::review::activity_warning(db, &c)?;
             (c, project, active_workflows, agent_warning)
         };

@@ -44,26 +44,115 @@ fn relation_index(cards: &[Card]) -> Relations {
     result
 }
 
-pub(crate) fn observe(
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct RepoWatermark {
+    pub baseline_at: String,
+    pub issues_since: String,
+    pub comments_since: String,
+}
+
+pub(crate) fn format_iso8601_utc(ms: u64) -> String {
+    let secs = (ms / 1000) as i64;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let hour = rem / 3600;
+    let min = (rem % 3600) / 60;
+    let sec = rem % 60;
+    // Howard Hinnant's civil_from_days algorithm (exact UTC proleptic Gregorian).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    format!("{year:04}-{m:02}-{d:02}T{hour:02}:{min:02}:{sec:02}Z")
+}
+
+pub(crate) fn load_repo_watermark(db: Db<'_>, repository: &str) -> Result<Option<RepoWatermark>> {
+    let key = format!("repo-watermark:{}", repository.to_ascii_lowercase());
+    let raw: Option<String> = db
+        .conn
+        .query_row(
+            "SELECT data FROM source_observations WHERE id=?1",
+            [&key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    raw.map(|s| Ok(serde_json::from_str(&s)?)).transpose()
+}
+
+pub(crate) fn save_repo_watermark(
     db: Db<'_>,
     repository: &str,
-    number: u64,
-    kind: &str,
-    section: &str,
-    value: &Value,
-    collection_known: bool,
+    watermark: &RepoWatermark,
 ) -> Result<()> {
-    observe_with_cards(
-        db,
-        repository,
-        number,
-        kind,
-        section,
-        value,
-        collection_known,
-        None,
-    )
+    let key = format!("repo-watermark:{}", repository.to_ascii_lowercase());
+    db.conn.execute(
+        "INSERT INTO source_observations(id,data) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
+        params![key, serde_json::to_string(watermark)?],
+    )?;
+    Ok(())
 }
+
+/// Records a remote GitHub item ID (`comment` or `review`) written by Canban so polling
+/// marks it `self_action: true` even when shell `GH_TOKEN` uses a different account.
+pub(crate) fn record_written_receipt(
+    db: Db<'_>,
+    repository: &str,
+    kind: &str,
+    item_id: u64,
+) -> Result<()> {
+    if item_id == 0 {
+        return Ok(());
+    }
+    let key = format!(
+        "receipt:{}:{kind}:{item_id}",
+        repository.to_ascii_lowercase()
+    );
+    db.conn.execute(
+        "INSERT INTO source_observations(id,data) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
+        params![key, json!({"recorded_at": now()}).to_string()],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn has_written_receipt(db: Db<'_>, repository: &str, kind: &str, item_id: u64) -> bool {
+    if item_id == 0 {
+        return false;
+    }
+    let key = format!(
+        "receipt:{}:{kind}:{item_id}",
+        repository.to_ascii_lowercase()
+    );
+    db.conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM source_observations WHERE id=?1)",
+            [&key],
+            |r| r.get::<_, bool>(0),
+        )
+        .unwrap_or(false)
+}
+
+fn canonical_actor(value: &Value) -> (String, Option<&str>) {
+    let login = value["user"]["login"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let actor = match login {
+        Some(l) => format!("github:{l}"),
+        None => "github".into(),
+    };
+    (actor, login)
+}
+
+fn parse_issue_number_from_url(url: &str) -> Option<u64> {
+    url.trim_end_matches('/').rsplit('/').next()?.parse().ok()
+}
+
 /// Reuse one relation input for a synchronization transaction rather than loading
 /// every Card again for each source observation.
 pub(crate) fn observe_batch(
@@ -72,12 +161,26 @@ pub(crate) fn observe_batch(
     items: &[Value],
     kind: Option<&str>,
 ) -> Result<()> {
+    observe_batch_with_context(db, repository, items, kind, None, None)
+}
+
+pub(crate) fn observe_batch_with_context(
+    db: Db<'_>,
+    repository: &str,
+    items: &[Value],
+    kind: Option<&str>,
+    baseline_at: Option<&str>,
+    current_login: Option<&str>,
+) -> Result<()> {
     let cards = relation_index(&db.list::<Card>()?);
     for item in items {
+        let Some(number) = item["number"].as_u64() else {
+            continue;
+        };
         observe_with_cards(
             db,
             repository,
-            item["number"].as_u64().context("Missing source number")?,
+            number,
             kind.unwrap_or(if item.get("pull_request").is_some() {
                 "pr"
             } else {
@@ -85,12 +188,57 @@ pub(crate) fn observe_batch(
             }),
             "overview",
             item,
-            false,
+            baseline_at.is_some(),
             Some(&cards),
+            baseline_at,
+            current_login,
         )?;
     }
     Ok(())
 }
+
+pub(crate) fn observe_repo_comments_batch(
+    db: Db<'_>,
+    repository: &str,
+    comments: &[Value],
+    collection_known: bool,
+    current_login: Option<&str>,
+) -> Result<()> {
+    let all_cards = db.list::<Card>()?;
+    let cards = relation_index(&all_cards);
+    for comment in comments {
+        let Some(issue_url) = comment["issue_url"].as_str() else {
+            continue;
+        };
+        let Some(number) = parse_issue_number_from_url(issue_url) else {
+            continue;
+        };
+        let is_pr = comment["html_url"]
+            .as_str()
+            .is_some_and(|u| u.contains("/pull/"))
+            || all_cards.iter().any(|c| {
+                c.is_github_pr()
+                    && c.github_issue().is_some_and(|s| {
+                        s.repository.eq_ignore_ascii_case(repository) && s.number == number
+                    })
+            });
+        let kind = if is_pr { "pr" } else { "issue" };
+        observe_with_cards(
+            db,
+            repository,
+            number,
+            kind,
+            "discussion",
+            comment,
+            collection_known,
+            Some(&cards),
+            None,
+            current_login,
+        )?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn observe_with_cards(
     db: Db<'_>,
@@ -101,6 +249,8 @@ fn observe_with_cards(
     value: &Value,
     collection_known: bool,
     cards: Option<&Relations>,
+    baseline_at: Option<&str>,
+    current_login: Option<&str>,
 ) -> Result<()> {
     let object = subject(db, repository, kind, number)?;
     let item = if section == "overview" {
@@ -183,16 +333,29 @@ fn observe_with_cards(
         .cloned()
         .collect();
     let mut kinds = Vec::new();
+    let mut is_baseline = old.is_none() && !collection_known;
     if old.is_none() {
-        kinds.push(if section == "overview" || !collection_known {
-            "discovered"
+        if section == "overview" {
+            let opened = kind == "issue"
+                && baseline_at
+                    .zip(value["created_at"].as_str())
+                    .is_some_and(|(baseline, created)| created >= baseline);
+            if opened {
+                kinds.push("opened");
+                is_baseline = false;
+            } else {
+                kinds.push("discovered");
+                is_baseline = true;
+            }
+        } else if !collection_known {
+            kinds.push("discovered");
         } else if section == "reviews" {
-            "review_submitted"
+            kinds.push("review_submitted");
         } else if section == "checks" {
-            "check_updated"
+            kinds.push("check_updated");
         } else {
-            "comment_created"
-        });
+            kinds.push("comment_created");
+        }
     } else if !changed.is_empty() {
         if section != "overview" {
             kinds.push(if section == "reviews" && value["state"] == "DISMISSED" {
@@ -242,8 +405,62 @@ fn observe_with_cards(
         .get(&(repository.to_lowercase(), number))
         .cloned()
         .unwrap_or_default();
+    let (actor, actor_login) = canonical_actor(value);
+    let receipt_kind = if section == "reviews" {
+        "review"
+    } else {
+        "comment"
+    };
+    let item_id = value["id"].as_u64().unwrap_or(0);
+    let self_action = actor_login
+        .is_some_and(|login| current_login.is_some_and(|cur| cur.eq_ignore_ascii_case(login)))
+        || (section != "overview" && has_written_receipt(db, repository, receipt_kind, item_id));
     for action in kinds {
-        db.append(canban_timeline::event("","",&format!("github.{kind}.{action}"),&format!("github:{}",value["user"]["id"]),"GitHub source observation",json!({"origin":"github","subject":object,"source_kind":format!("github.{kind}"),"repository":repository,"number":number,"item_id":value["id"],"section":section,"reply_to":value["in_reply_to_id"],"changed_fields":changed,"revision":canban_context::digest(&serde_json::to_vec(&new)?),"related_cards":related,"occurred_at":value["updated_at"],"observation":"poll","baseline":old.is_none()&&!collection_known})))?;
+        // Avoid double-firing PR wildcard rules when a PR Card exists and `github/delivery.rs`
+        // already emits canonical Card-scoped PR activity events (`updated`, `state_changed`,
+        // `commented`, `reviewed`, `ci_*`).
+        if kind == "pr"
+            && !related.is_empty()
+            && matches!(
+                action,
+                "comment_created"
+                    | "review_submitted"
+                    | "head_changed"
+                    | "closed"
+                    | "reopened"
+                    | "draft_changed"
+                    | "check_updated"
+            )
+        {
+            continue;
+        }
+        let url = value["html_url"].as_str().unwrap_or("");
+        db.append(canban_timeline::event(
+            "",
+            "",
+            &format!("github.{kind}.{action}"),
+            &actor,
+            "GitHub source observation",
+            json!({
+                "origin": "github",
+                "subject": object,
+                "source_kind": format!("github.{kind}"),
+                "repository": repository,
+                "number": number,
+                "url": url,
+                "item_id": value["id"],
+                "section": section,
+                "reply_to": value["in_reply_to_id"],
+                "changed_fields": changed,
+                "revision": canban_context::digest(&serde_json::to_vec(&new)?),
+                "related_cards": related,
+                "occurred_at": value["updated_at"],
+                "actor_login": actor_login,
+                "self_action": self_action,
+                "observation": "poll",
+                "baseline": is_baseline,
+            }),
+        ))?;
     }
     db.conn.execute("INSERT INTO source_observations(id,data) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET data=excluded.data",params![item,serde_json::to_string(&new)?])?;
     Ok(())
@@ -298,9 +515,21 @@ impl AppServer {
                 _ => return Ok(()),
             }
         };
+        let current_login = self.github.status().login;
         self.store.lock().unwrap().write(|db| {
             if section == "overview" {
-                observe(db, &repo, number, kind, section, data, false)?;
+                observe_with_cards(
+                    db,
+                    &repo,
+                    number,
+                    kind,
+                    section,
+                    data,
+                    false,
+                    None,
+                    None,
+                    current_login.as_deref(),
+                )?;
             } else {
                 let key = format!("collection:{path}");
                 let known = db.conn.query_row(
@@ -316,7 +545,18 @@ impl AppServer {
                         |r| r.get::<_, bool>(0),
                     )?;
                 for item in data.as_array().context("Expected GitHub collection")? {
-                    observe(db, &repo, number, kind, section, item, known)?;
+                    observe_with_cards(
+                        db,
+                        &repo,
+                        number,
+                        kind,
+                        section,
+                        item,
+                        known,
+                        None,
+                        None,
+                        current_login.as_deref(),
+                    )?;
                 }
                 db.conn.execute(
                     "INSERT OR IGNORE INTO source_observations(id,data) VALUES(?1,'{}')",
@@ -334,6 +574,7 @@ impl AppServer {
 }
 
 /// Only a complete successful scan can establish deletion or a collection baseline.
+#[cfg(test)]
 pub(crate) fn complete_collection(
     db: Db<'_>,
     repo: &str,
@@ -341,6 +582,18 @@ pub(crate) fn complete_collection(
     kind: &str,
     section: &str,
     items: &[Value],
+) -> Result<()> {
+    complete_collection_with_login(db, repo, number, kind, section, items, None)
+}
+
+pub(crate) fn complete_collection_with_login(
+    db: Db<'_>,
+    repo: &str,
+    number: u64,
+    kind: &str,
+    section: &str,
+    items: &[Value],
+    current_login: Option<&str>,
 ) -> Result<()> {
     let key = format!("complete:{repo}:{kind}:{number}:{section}");
     let old: Option<String> = db
@@ -358,7 +611,18 @@ pub(crate) fn complete_collection(
         .unwrap_or_default();
     let ids: Vec<_> = items.iter().filter_map(|v| v["id"].as_u64()).collect();
     for value in items {
-        observe(db, repo, number, kind, section, value, old.is_some())?;
+        observe_with_cards(
+            db,
+            repo,
+            number,
+            kind,
+            section,
+            value,
+            old.is_some(),
+            None,
+            None,
+            current_login,
+        )?;
     }
     let related: Vec<_> = db
         .list::<Card>()?

@@ -84,7 +84,7 @@ impl AppServer {
                 let wf_terminal_id = db
                     .list::<WorkflowRun>()?
                     .into_iter()
-                    .find(|r| r.card_id == card.id && r.active())
+                    .find(|r| r.card_id.as_deref() == Some(card.id.as_str()) && r.active())
                     .and_then(|r| r.terminal_id);
                 let terminals = db.list::<TerminalEntry>()?;
                 let matched = wf_terminal_id
@@ -217,7 +217,7 @@ impl AppServer {
                     db.list::<WorkflowRun>()
                         .ok()?
                         .into_iter()
-                        .find(|r| r.card_id == card.id && r.active())
+                        .find(|r| r.card_id.as_deref() == Some(card.id.as_str()) && r.active())
                         .map(|r| r.id)
                 });
             let profile_label = entry_opt

@@ -655,6 +655,12 @@ impl AppServer {
         let mut raw = self.load_unmigrated_config()?;
         let op = p["op"].as_str().unwrap_or("save");
         match op {
+            "set_terminal_env_mode" => {
+                let raw_mode = strp(&p, "terminal_env_mode")?.trim();
+                let mode = HostTerminalEnvMode::parse(raw_mode)
+                    .with_context(|| format!("Invalid terminal_env_mode '{raw_mode}'"))?;
+                raw.terminal_env_mode = mode;
+            }
             "set_default" => {
                 let target = strp(&p, "default_agent")?.trim();
                 let prof = raw

@@ -351,25 +351,25 @@ fn delivery_review_gate_does_not_block_github_remote_actions() {
         .to_string();
     assert_eq!(err, "Comment is empty");
 
-    // Meanwhile, concurrent GitHub remote actions still serialize via `github_action_gate`.
-    let _gh_guard = app.github_action_gate.lock().unwrap();
+    // Meanwhile, concurrent GitHub remote actions serialize via `github_action_gate`
+    // with bounded waiting rather than failing immediately.
+    let gh_guard = app
+        .lock_github_action_gate(std::time::Duration::from_millis(50))
+        .unwrap();
     let busy_err = app
-        .call(
-            "github.remote.comment",
-            json!({
-                "reference": {
-                    "repository": "fixture/repo",
-                    "kind": "pr",
-                    "number": 2,
-                    "url": "https://github.com/fixture/repo/pull/2"
-                },
-                "body": "hello",
-                "request_key": "serialized-gh-action"
-            }),
-        )
-        .unwrap_err()
+        .lock_github_action_gate(std::time::Duration::from_millis(20))
+        .err()
+        .unwrap()
         .to_string();
-    assert_eq!(busy_err, "Another GitHub action is pending");
+    assert!(
+        busy_err.contains("Another GitHub action is pending"),
+        "{busy_err}"
+    );
+    drop(gh_guard);
+    // Once released, a queued caller acquires immediately.
+    let _gh_guard2 = app
+        .lock_github_action_gate(std::time::Duration::from_millis(50))
+        .unwrap();
 }
 
 #[test]
@@ -784,7 +784,7 @@ steps:
     let wf_run = snap1
         .workflow_runs
         .iter()
-        .find(|r| r.card_id == card.id && r.workflow_id == "ci-watcher")
+        .find(|r| r.card_id.as_deref() == Some(card.id.as_str()) && r.workflow_id == "ci-watcher")
         .expect("CI failed workflow must trigger");
     assert_eq!(
         wf_run.inputs["trigger_event"]["kind"],
@@ -1138,4 +1138,407 @@ fn pr_activity_updates_record_commits_comments_reviews_and_hydrate_ephemeral_bod
         assert!(!raw.contains("Please address inline note"));
         assert!(!raw.contains("projected_body"));
     }
+}
+
+#[test]
+fn cardless_github_issue_event_runs_script_condition_notify_and_env_isolation() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo_dir = dir.path().join("repo");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("canban")).unwrap();
+    let project: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({
+                "name": "Cardless Repo",
+                "directory": repo_dir.to_string_lossy(),
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    // Attach GitHub repo metadata directly to the project (with intake: off).
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut p: Project = db.get(&project.id)?;
+            p.github = Some(GitHubSource {
+                repository: "acme/widgets".into(),
+                repository_id: 9001,
+                intake: GitHubIntake::Off,
+                pr_intake: GitHubPrIntake::Off,
+                authors: Vec::new(),
+                labels: Vec::new(),
+                include_drafts: false,
+                generation: "gen-1".into(),
+                paused: false,
+                synced_at: None,
+                error: None,
+            });
+            db.save(&p)?;
+            Ok(())
+        })
+        .unwrap();
+
+    // Apply a cardless workflow listening to `github.issue.opened` with `exclude_self: true`
+    // and running `script -> condition -> notify -> complete`.
+    let yaml = r#"schema: 11
+id: issue-auto-triage
+name: Issue Auto Triage
+enabled: true
+on:
+  on_issue_opened:
+    event: github.issue.opened
+    cardless: true
+    match:
+      exclude_self: true
+    start_at: filter
+steps:
+  - id: filter
+    uses: script
+    run: |
+      echo "matched=true" >> "$CANBAN_OUTPUT"
+      echo "issue_num=$CANBAN_ISSUE_NUMBER" >> "$CANBAN_OUTPUT"
+      echo "pr_num=${CANBAN_PR_NUMBER:-}" >> "$CANBAN_OUTPUT"
+      echo "repo=$CANBAN_GITHUB_REPO" >> "$CANBAN_OUTPUT"
+      echo "trust=$CANBAN_SOURCE_TRUST" >> "$CANBAN_OUTPUT"
+    next: check
+  - id: check
+    uses: condition
+    with:
+      pointer: /outputs/filter/matched
+      equals: "true"
+      then: alert
+      otherwise: done
+  - id: alert
+    uses: notify
+    with:
+      message: "Matched new issue"
+    next: done
+  - id: done
+    uses: complete
+"#;
+    let sources = app
+        .call("workflow.sources", json!({"project_id": project.id}))
+        .unwrap();
+    app.call(
+        "workflow.apply",
+        json!({
+            "project_id": project.id,
+            "revision": sources["revision"],
+            "sources": [{"filename": "issue-triage.yaml", "source": yaml}],
+        }),
+    )
+    .unwrap();
+
+    // Verify `authoring.rs` bound `selector.repository` to `acme/widgets`.
+    let subs: Vec<EventSubscription> =
+        serde_json::from_value(app.call("subscription.list", json!({})).unwrap()).unwrap();
+    let sub = subs
+        .iter()
+        .find(|s| s.id.contains("issue-auto-triage"))
+        .expect("compiled subscription");
+    assert_eq!(sub.selector.repository.as_deref(), Some("acme/widgets"));
+    assert!(sub.selector.exclude_self);
+
+    // 1. Pre-baseline issue emits `discovered` (baseline: true), NOT `opened`.
+    // 2. Post-baseline issue with `created_at >= baseline_at` emits `opened` (canonical actor `github:alice`).
+    // 3. Self-action issue by logged-in user `bot-owner` is suppressed by `exclude_self: true`.
+    let baseline = "2026-11-19T10:00:00Z";
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            crate::events::github::observe_batch_with_context(
+                db,
+                "acme/widgets",
+                &[
+                    json!({
+                        "id": 1001,
+                        "number": 10,
+                        "title": "Old issue",
+                        "state": "open",
+                        "html_url": "https://github.com/acme/widgets/issues/10",
+                        "created_at": "2026-11-18T09:00:00Z",
+                        "updated_at": "2026-11-19T10:01:00Z",
+                        "user": {"id": 55, "login": "alice"}
+                    }),
+                    json!({
+                        "id": 1002,
+                        "number": 11,
+                        "title": "Brand new issue",
+                        "state": "open",
+                        "html_url": "https://github.com/acme/widgets/issues/11",
+                        "created_at": "2026-11-19T10:05:00Z",
+                        "updated_at": "2026-11-19T10:05:00Z",
+                        "user": {"id": 56, "login": "alice"}
+                    }),
+                    json!({
+                        "id": 1003,
+                        "number": 12,
+                        "title": "Self-created issue",
+                        "state": "open",
+                        "html_url": "https://github.com/acme/widgets/issues/12",
+                        "created_at": "2026-11-19T10:06:00Z",
+                        "updated_at": "2026-11-19T10:06:00Z",
+                        "user": {"id": 99, "login": "bot-owner"}
+                    }),
+                ],
+                Some("issue"),
+                Some(baseline),
+                Some("bot-owner"),
+            )?;
+            crate::events::pump(db, &app.config())?;
+            Ok(())
+        })
+        .unwrap();
+
+    // Pump inline scripts so the cardless WorkflowRun executes `script -> condition -> notify -> complete`.
+    app.pump_scripts().unwrap();
+
+    let snap = app.snapshot().unwrap();
+    // Canonical actor format `github:<login>` (never numeric ID)
+    let opened_ev = snap
+        .events
+        .iter()
+        .find(|e| e.kind == "github.issue.opened" && e.data["number"] == 11)
+        .expect("post-baseline issue #11 emits github.issue.opened");
+    assert_eq!(opened_ev.actor, "github:alice");
+    assert_eq!(opened_ev.data["self_action"], false);
+    assert!(
+        snap.events
+            .iter()
+            .any(|e| e.kind == "github.issue.discovered" && e.data["number"] == 10),
+        "pre-baseline issue #10 must emit discovered, not opened"
+    );
+
+    // Exactly ONE cardless WorkflowRun was created (for issue #11; #10 was discovered, #12 was self_action).
+    let cardless_runs: Vec<_> = snap
+        .workflow_runs
+        .iter()
+        .filter(|r| r.is_cardless() && r.workflow_id == "issue-auto-triage")
+        .collect();
+    assert_eq!(cardless_runs.len(), 1);
+    let run = cardless_runs[0];
+    assert_eq!(run.state, "completed");
+    let out = run.outputs.get("filter").expect("script output");
+    assert_eq!(out["matched"], "true");
+    assert_eq!(out["issue_num"], "11");
+    assert_eq!(
+        out["pr_num"], "",
+        "github.issue.* must NEVER inject CANBAN_PR_NUMBER"
+    );
+    assert_eq!(out["repo"], "acme/widgets");
+    assert_eq!(out["trust"], "external");
+    assert!(
+        snap.notices
+            .iter()
+            .any(|n| n.project_id == project.id && n.message == "Matched new issue"),
+        "Condition step must branch to `alert` Notify step"
+    );
+}
+
+#[test]
+fn github_receipt_marks_self_action_and_pr_card_avoids_double_fire() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo_dir = dir.path().join("repo");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("canban")).unwrap();
+    let project: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Receipt Test", "directory": repo_dir.to_string_lossy()}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let card: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"view": "full", "project_id": project.id, "title": "PR #77"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut c: Card = db.get(&card.id)?;
+            c.pull_request = Some(GitHubPr {
+                review_summary: String::new(),
+                repository: "acme/widgets".into(),
+                repository_id: 9001,
+                number: 77,
+                url: "https://github.com/acme/widgets/pull/77".into(),
+                state: "open".into(),
+                head: "abc1234".into(),
+                head_branch: "feat/77".into(),
+                base_branch: "main".into(),
+                merged: false,
+                checks: String::new(),
+                checks_summary: None,
+                workspace: WorkspaceBinding {
+                    location: WorkLocation {
+                        machine: "local".into(),
+                        directory: repo_dir.to_string_lossy().into_owned(),
+                    },
+                    path: repo_dir.to_string_lossy().into_owned(),
+                    branch: Some("feat/77".into()),
+                    base_commit: None,
+                    target_branch: Some("main".into()),
+                },
+            });
+            db.save(&c)?;
+            // Record a Canban-written comment receipt for comment_id 8888 (posted by a different GH_TOKEN login).
+            crate::events::github::record_written_receipt(db, "acme/widgets", "comment", 8888)?;
+            // Observe an issue comment on issue #50 matching receipt 8888 under a different login.
+            crate::events::github::observe_repo_comments_batch(
+                db,
+                "acme/widgets",
+                &[json!({
+                    "id": 8888,
+                    "issue_url": "https://api.github.com/repos/acme/widgets/issues/50",
+                    "html_url": "https://github.com/acme/widgets/issues/50#issuecomment-8888",
+                    "body": "Automated reply",
+                    "updated_at": "2026-11-19T10:10:00Z",
+                    "user": {"id": 777, "login": "secondary-pat-bot"}
+                })],
+                true,
+                Some("primary-user"),
+            )?;
+            // Observe a PR comment on PR #77 (which has a linked PR Card) -> must NOT emit duplicate `github.pr.comment_created`.
+            crate::events::github::observe_repo_comments_batch(
+                db,
+                "acme/widgets",
+                &[json!({
+                    "id": 9999,
+                    "issue_url": "https://api.github.com/repos/acme/widgets/issues/77",
+                    "html_url": "https://github.com/acme/widgets/pull/77#issuecomment-9999",
+                    "body": "PR comment",
+                    "updated_at": "2026-11-19T10:11:00Z",
+                    "user": {"id": 123, "login": "reviewer"}
+                })],
+                true,
+                Some("primary-user"),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    let snap = app.snapshot().unwrap();
+    let receipt_ev = snap
+        .events
+        .iter()
+        .find(|e| e.kind == "github.issue.comment_created" && e.data["item_id"] == 8888)
+        .expect("issue comment event");
+    assert_eq!(receipt_ev.actor, "github:secondary-pat-bot");
+    assert_eq!(
+        receipt_ev.data["self_action"], true,
+        "receipt-tracked comment ID must mark self_action=true even across different GitHub logins"
+    );
+    assert!(
+        !snap
+            .events
+            .iter()
+            .any(|e| e.kind == "github.pr.comment_created" && e.data["number"] == 77),
+        "PR with linked Card must not emit duplicate github.pr.comment_created alongside github.pr.commented"
+    );
+}
+
+#[test]
+fn review_publish_enforces_step_authorization_and_skips_empty_draft() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo_dir = dir.path().join("repo");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("canban")).unwrap();
+    let project: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Review Auth", "directory": repo_dir.to_string_lossy()}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let card: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"view": "full", "project_id": project.id, "title": "PR Review"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    // 1. Untrusted Agent invocation (`execution.agent = true`) is rejected.
+    let agent_err = app
+        .call(
+            "github.review.publish",
+            json!({
+                "card_id": card.id,
+                "execution": {"agent": true, "profile_id": "reviewer"}
+            }),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        agent_err.contains("Review publishing is only permitted"),
+        "{agent_err}"
+    );
+
+    // 2. Bogus `workflow_run_id` is rejected.
+    let bad_run_err = app
+        .call(
+            "github.review.publish",
+            json!({
+                "card_id": card.id,
+                "workflow_run_id": "nonexistent-run"
+            }),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        bad_run_err.contains("Workflow run not found"),
+        "{bad_run_err}"
+    );
+
+    // 3. Valid user invocation with no draft skips cleanly.
+    let skipped = app
+        .call("github.review.publish", json!({"card_id": card.id}))
+        .unwrap();
+    assert_eq!(skipped["state"], "skipped");
+}
+
+#[test]
+fn host_terminal_env_mode_save_and_refresh_rpc() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("canban")).unwrap();
+    assert_eq!(app.config().terminal_env_mode, HostTerminalEnvMode::Inherit);
+
+    let saved: Config = serde_json::from_value(
+        app.call(
+            "config.agents.save",
+            json!({"op": "set_terminal_env_mode", "terminal_env_mode": "minimal"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved.terminal_env_mode, HostTerminalEnvMode::Minimal);
+    assert_eq!(app.config().terminal_env_mode, HostTerminalEnvMode::Minimal);
+
+    let restored: Config = serde_json::from_value(
+        app.call(
+            "config.agents.save",
+            json!({"op": "set_terminal_env_mode", "terminal_env_mode": "inherit"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(restored.terminal_env_mode, HostTerminalEnvMode::Inherit);
+
+    let refreshed = app.call("host.env.refresh", json!({})).unwrap();
+    assert_eq!(refreshed["ok"], true);
+    assert!(refreshed["shell"].is_string());
+    assert!(refreshed["var_count"].is_u64());
+    assert!(refreshed["full_env_captured"].is_boolean());
 }

@@ -504,6 +504,7 @@ impl AppServer {
             .write(|db| events::pump(db, &self.config()))?;
         self.request_deliveries();
         self.request_scripts();
+        let _ = self.pump_cardless_agents();
         let _ = self.pump_resolved_archives();
         self.observe_terminals()?;
         self.reconcile_merge_batches()?;
@@ -1320,7 +1321,7 @@ impl AppServer {
                 exec_home: &home,
                 endpoint: &endpoint,
                 project: &project,
-                card,
+                card: Some(card),
                 workspace: run.workspace.as_ref().or(card.workspace.as_ref()),
                 run_dir: &run_dir_path,
                 workflow_run: wf_run.as_ref(),
@@ -1391,8 +1392,18 @@ impl AppServer {
             env,
             cwd: run.cwd.clone(),
         })?;
-        let terminal =
-            client.launch_on(&location.machine, spec.argv, &spec.cwd, spec.env, labels)?;
+        let env_policy = canban_exec::shell_env::LocalEnvPolicy::for_source_trust(
+            client.config.terminal_env_mode.is_inherit(),
+            Some(card.trust_level()),
+        );
+        let terminal = client.launch_on_with_policy(
+            &location.machine,
+            spec.argv,
+            &spec.cwd,
+            spec.env,
+            labels,
+            env_policy,
+        )?;
         let terminal_address = strp(&terminal, "address")?.to_owned();
         run.owner_core_id = if remote {
             Some(location.machine.clone())
@@ -1529,6 +1540,257 @@ impl AppServer {
             )
         })?;
         self.emit("execution", Some(card_id));
+        Ok(())
+    }
+
+    /// Drives cardless `WorkflowRun`s (`card_id: None`) paused at `waiting_agent` steps.
+    pub(crate) fn pump_cardless_agents(&self) -> Result<()> {
+        if !self.observer_running.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let runs: Vec<WorkflowRun> = {
+            let store = self.store.lock().unwrap();
+            store
+                .db()
+                .list::<WorkflowRun>()?
+                .into_iter()
+                .filter(|r| r.is_cardless() && r.active() && r.state == "waiting_agent")
+                .collect()
+        };
+        if runs.is_empty() {
+            return Ok(());
+        }
+        let config = self.config();
+        let client = canban_herdr::Client {
+            config: config.clone(),
+        };
+        for run in runs {
+            let Some(step_id) = run.step.clone() else {
+                continue;
+            };
+            if let Some(meta) = run.inputs.get("agent_terminal").filter(|v| v.is_object()) {
+                let Some(addr) = meta["address"].as_str() else {
+                    continue;
+                };
+                let (finished, exit_code) = match client.get(addr) {
+                    Ok(v) if v["state"] == "finished" => (true, v["exit_code"].as_i64()),
+                    Ok(_) => (false, None),
+                    Err(_) => (true, None),
+                };
+                if finished {
+                    let report_state = if exit_code == Some(0) {
+                        "completed"
+                    } else {
+                        "failed"
+                    };
+                    let output = json!({
+                        "terminal": addr,
+                        "exit_code": exit_code,
+                    });
+                    let _ = self.store.lock().unwrap().write(|db| {
+                        let mut current: WorkflowRun = db.get(&run.id)?;
+                        if current.active()
+                            && current.state == "waiting_agent"
+                            && current.step.as_deref() == Some(&step_id)
+                            && current.visit == run.visit
+                        {
+                            canban_workflow_engine::runtime::complete_cardless_agent(
+                                db,
+                                &mut current,
+                                output,
+                                report_state,
+                            )?;
+                        }
+                        Ok(())
+                    });
+                    self.emit("application", None);
+                    self.request_scripts();
+                    self.wake_runtime();
+                }
+                continue;
+            }
+
+            // Respect global `max_agents` capacity before launching a new cardless agent.
+            let has_slot = self
+                .snapshot()
+                .ok()
+                .is_some_and(|s| canban_scheduler::active_count(&s) < config.scheduler.max_agents);
+            if !has_slot {
+                continue;
+            }
+
+            let pending = &run.inputs["pending_agent"];
+            let requested_profile = pending["profile"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let instruction = pending["instruction"].as_str().unwrap_or("");
+            let profile = requested_profile
+                .and_then(|pid| config.profiles.iter().find(|p| p.id == pid))
+                .or_else(|| {
+                    config
+                        .profiles
+                        .iter()
+                        .find(|p| p.id == config.default_agent)
+                })
+                .or_else(|| config.profiles.first())
+                .cloned();
+            let Some(profile) = profile else {
+                let _ = self.store.lock().unwrap().write(|db| {
+                    let mut current: WorkflowRun = db.get(&run.id)?;
+                    canban_workflow_engine::runtime::complete_cardless_agent(
+                        db,
+                        &mut current,
+                        json!({"error": "No configured agent profile"}),
+                        "failed",
+                    )
+                });
+                continue;
+            };
+
+            let project = {
+                let store = self.store.lock().unwrap();
+                let db = store.db();
+                if is_global_project_id(&run.project_id) {
+                    Project {
+                        id: GLOBAL_PROJECT_ID.into(),
+                        name: "Global".into(),
+                        directory: self.home.to_string_lossy().into_owned(),
+                        location: Some(WorkLocation {
+                            machine: "local".into(),
+                            directory: self.home.to_string_lossy().into_owned(),
+                        }),
+                        target_branch: None,
+                        workflow: Workflow::default(),
+                        github: None,
+                        detected_github: None,
+                        github_disconnected: false,
+                        delivery_mode: DeliveryMode::default(),
+                        agent_overrides: std::collections::BTreeMap::new(),
+                        tags: Vec::new(),
+                        created_at: 0,
+                    }
+                } else {
+                    match db.get::<Project>(&run.project_id) {
+                        Ok(p) => p,
+                        Err(_) => continue,
+                    }
+                }
+            };
+            let location = project.work_location();
+            let remote = location.machine != "local";
+            let Ok(exec_home) = self.execution_home(&location.machine) else {
+                continue;
+            };
+            let endpoint = if remote {
+                format!("spool:{}", exec_home.join("rpc").display())
+            } else {
+                self.endpoint().to_string_lossy().into_owned()
+            };
+            let cli = if remote {
+                exec_home.join("bin/canban")
+            } else {
+                self.cli.clone()
+            };
+            let run_dir = crate::scripts::cardless_run_dir(&exec_home, &run.project_id, &run.id);
+            let _ = std::fs::create_dir_all(&run_dir);
+            let (mut env, _) = crate::scripts::build_step_env(crate::scripts::StepEnvContext {
+                cli: &cli,
+                exec_home: &exec_home,
+                endpoint: &endpoint,
+                project: &project,
+                card: None,
+                workspace: None,
+                run_dir: &run_dir,
+                workflow_run: Some(&run),
+                step_ref: Some(&step_id),
+                script_env_file: None,
+                script_output_file: None,
+            });
+            env.insert("CANBAN_PROFILE_ID".into(), profile.id.clone());
+
+            let Ok(mut argv) = canban_profiles::command(
+                &profile,
+                None,
+                true,
+                &[
+                    ("home", &exec_home.to_string_lossy()),
+                    ("cwd", &location.directory),
+                    ("project_dir", &project.directory),
+                    ("prompt", instruction),
+                    ("cli", &cli.to_string_lossy()),
+                ],
+            ) else {
+                continue;
+            };
+            let is_herdr_template = profile
+                .preset
+                .as_deref()
+                .is_some_and(|s| s.starts_with("herdr:"));
+            if !is_herdr_template && !remote {
+                argv[0] = canban_profiles::executable_with_env(&argv[0], &config.hc_env);
+            }
+            let Ok(spec) = canban_profiles::prepare_launch(canban_profiles::LaunchRequest {
+                profile: Some(&profile),
+                argv,
+                env,
+                cwd: location.directory.clone(),
+            }) else {
+                continue;
+            };
+            let env_policy = canban_exec::shell_env::LocalEnvPolicy::for_source_trust(
+                config.terminal_env_mode.is_inherit(),
+                crate::scripts::cardless_run_source_trust(&run),
+            );
+            let labels = std::collections::BTreeMap::from([
+                ("canban.project".into(), run.project_id.clone()),
+                ("canban.workflow_run".into(), run.id.clone()),
+                ("canban.workflow_step".into(), step_id.clone()),
+            ]);
+            match client.launch_on_with_policy(
+                &location.machine,
+                spec.argv,
+                &spec.cwd,
+                spec.env,
+                labels,
+                env_policy,
+            ) {
+                Ok(launched) => {
+                    let addr = launched["address"].as_str().unwrap_or("").to_owned();
+                    let _ = self.store.lock().unwrap().write(|db| {
+                        let mut current: WorkflowRun = db.get(&run.id)?;
+                        if current.active()
+                            && current.state == "waiting_agent"
+                            && current.step.as_deref() == Some(&step_id)
+                            && current.visit == run.visit
+                        {
+                            current.inputs["agent_terminal"] = json!({
+                                "address": addr,
+                                "machine": location.machine,
+                                "started_at": now(),
+                            });
+                            current.updated_at = now();
+                            db.save(&current)?;
+                        }
+                        Ok(())
+                    });
+                    self.emit("application", None);
+                }
+                Err(e) => {
+                    let msg = format!("Failed to launch cardless agent `{step_id}`: {e:#}");
+                    let _ = self.store.lock().unwrap().write(|db| {
+                        let mut current: WorkflowRun = db.get(&run.id)?;
+                        canban_workflow_engine::runtime::complete_cardless_agent(
+                            db,
+                            &mut current,
+                            json!({"error": msg}),
+                            "failed",
+                        )
+                    });
+                    self.emit("application", None);
+                }
+            }
+        }
         Ok(())
     }
 }

@@ -287,7 +287,11 @@ impl AppServer {
             cards.iter().map(|c| (c.id.as_str(), c)).collect();
         let terminals: Vec<TerminalEntry> = db.list()?;
         let now_ms = now();
-        let Some(head_card) = cards_by_id.get(head.card_id.as_str()).copied() else {
+        let Some(head_card) = head
+            .card_id
+            .as_deref()
+            .and_then(|cid| cards_by_id.get(cid).copied())
+        else {
             return Ok(BatchSelection::Single(head.id.clone()));
         };
         let (head_pending, head_settling) =
@@ -319,7 +323,11 @@ impl AppServer {
             if run.state != "waiting_delivery" {
                 break;
             }
-            let Some(card) = cards_by_id.get(run.card_id.as_str()).copied() else {
+            let Some(card) = run
+                .card_id
+                .as_deref()
+                .and_then(|cid| cards_by_id.get(cid).copied())
+            else {
                 break;
             };
             if !card.active()
@@ -368,7 +376,10 @@ impl AppServer {
                 if run.state != "waiting_delivery" {
                     continue;
                 }
-                let Ok(card) = db.get::<Card>(&run.card_id) else {
+                let Some(card_id) = run.card_id.as_deref() else {
+                    continue;
+                };
+                let Ok(card) = db.get::<Card>(card_id) else {
                     continue;
                 };
                 if !card.active() || card.hold_auto_merge || card.worktree.is_none() {

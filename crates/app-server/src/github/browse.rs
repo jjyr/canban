@@ -482,14 +482,197 @@ impl AppServer {
         }
         Ok(())
     }
+    pub(crate) fn lock_github_action_gate(
+        &self,
+        timeout: Duration,
+    ) -> Result<GithubActionGateGuard<'_>> {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut busy = self.github_action_gate.0.lock().unwrap();
+        while *busy {
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                bail!("Another GitHub action is pending (timed out waiting for lock)");
+            };
+            let (next_busy, wait_res) = self
+                .github_action_gate
+                .1
+                .wait_timeout(busy, remaining)
+                .unwrap();
+            busy = next_busy;
+            if wait_res.timed_out() && *busy {
+                bail!("Another GitHub action is pending (timed out waiting for lock)");
+            }
+        }
+        *busy = true;
+        Ok(GithubActionGateGuard {
+            gate: &self.github_action_gate,
+        })
+    }
+
+    pub(super) fn github_review_publish(&self, p: &Value) -> Result<Value> {
+        ensure!(
+            p["execution"].is_null(),
+            "Review publishing is only permitted from a user action or an active workflow script step"
+        );
+        let (card, draft) = {
+            let store = self.store.lock().unwrap();
+            let db = store.db();
+            let card = super::resolve_card(db, p)?;
+            if let Some(run_id) = p["workflow_run_id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let run: WorkflowRun = db
+                    .get(run_id)
+                    .context("Workflow run not found for review publish authorization")?;
+                ensure!(
+                    run.active() && run.state == "waiting_script",
+                    "Workflow run is not currently executing a script step"
+                );
+                ensure!(
+                    run.card_id.as_deref() == Some(card.id.as_str()),
+                    "Workflow run does not belong to the target Card"
+                );
+                let active_step = run
+                    .step
+                    .as_deref()
+                    .context("Workflow run has no active step")?;
+                if let Some(step_id) = p["step_id"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    ensure!(
+                        active_step == step_id,
+                        "Workflow step `{step_id}` is not the active script step"
+                    );
+                }
+                ensure!(
+                    matches!(
+                        run.definition.steps.get(active_step),
+                        Some(WorkflowStep::Script { .. })
+                    ),
+                    "Review publish is only authorized for workflow script steps"
+                );
+            }
+            let key = format!("review-draft:{}", card.id);
+            let raw: Option<String> = db
+                .conn
+                .query_row(
+                    "SELECT data FROM editor_drafts WHERE id=?1 AND data != 'null'",
+                    [&key],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let draft: Option<ReviewDraft> = raw
+                .map(|s| serde_json::from_str(&s))
+                .transpose()
+                .context("Stored review draft is malformed")?;
+            (card, draft)
+        };
+
+        let Some(draft) = draft else {
+            return Ok(json!({
+                "state": "skipped",
+                "reason": "No unpublished review draft",
+                "card_id": card.id,
+            }));
+        };
+        if draft.summary.trim().is_empty() && draft.comments.is_empty() {
+            return Ok(json!({
+                "state": "skipped",
+                "reason": "Review draft is empty",
+                "card_id": card.id,
+            }));
+        }
+
+        let (repository, number) = if let Some(pr) = &card.pull_request {
+            (pr.repository.clone(), pr.number)
+        } else if card.is_github_pr()
+            && let Some(source) = card.github_issue()
+        {
+            (source.repository.clone(), source.number)
+        } else {
+            bail!("Card is not linked to a GitHub pull request");
+        };
+
+        let event = if let Some(raw_override) = p["event_override"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            match raw_override.to_ascii_uppercase().as_str() {
+                "COMMENT" => "COMMENT",
+                "APPROVE" => "APPROVE",
+                "REQUEST_CHANGES" => "REQUEST_CHANGES",
+                other => bail!(
+                    "Invalid event_override `{other}` (expected COMMENT, APPROVE, or REQUEST_CHANGES)"
+                ),
+            }
+        } else {
+            match draft.verdict.trim() {
+                v if v.eq_ignore_ascii_case("approve") => "APPROVE",
+                v if v.eq_ignore_ascii_case("request_changes") => "REQUEST_CHANGES",
+                _ => "COMMENT",
+            }
+        };
+
+        let head = if let Some(sha) = draft
+            .compare_sha
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            sha.to_owned()
+        } else {
+            let client = self.github_client()?.refreshing();
+            let live: Value = client.get(&format!("/repos/{repository}/pulls/{number}"))?;
+            live["head"]["sha"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .context("Unable to resolve PR head SHA")?
+                .to_owned()
+        };
+
+        let comments: Vec<Value> = draft
+            .comments
+            .iter()
+            .map(|c| {
+                json!({
+                    "path": c.path,
+                    "line": c.line,
+                    "side": c.side,
+                    "body": c.body,
+                })
+            })
+            .collect();
+        let request_key = p["request_key"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(id);
+        let review_payload = json!({
+            "request_key": request_key,
+            "card_id": card.id,
+            "reference": {
+                "kind": "pr",
+                "repository": repository,
+                "number": number,
+            },
+            "head": head,
+            "event": event,
+            "body": draft.summary,
+            "comments": comments,
+        });
+        self.github_remote_action("github.remote.review", &review_payload)
+    }
+
     fn github_remote_action(&self, method: &str, p: &Value) -> Result<Value> {
         if let Some(receipt) = self.github_receipt(method, p)? {
             return Ok(receipt);
         }
-        let _guard = self
-            .github_action_gate
-            .try_lock()
-            .map_err(|_| anyhow::anyhow!("Another GitHub action is pending"))?;
+        let _guard = self.lock_github_action_gate(Duration::from_secs(30))?;
         if let Some(receipt) = self.github_receipt(method, p)? {
             return Ok(receipt);
         }
@@ -640,6 +823,20 @@ impl AppServer {
             params![key, serde_json::to_string(&result)?],
         )?;
         if result["state"] == "published" {
+            if let Some(item_id) = result["id"].as_u64() {
+                let receipt_kind = if method == "github.remote.review" {
+                    Some("review")
+                } else if matches!(method, "github.remote.comment" | "github.remote.reply") {
+                    Some("comment")
+                } else {
+                    None
+                };
+                if let Some(kind) = receipt_kind {
+                    let _ = self.store.lock().unwrap().write(|db| {
+                        events::github::record_written_receipt(db, &r.repository, kind, item_id)
+                    });
+                }
+            }
             let page = p["page"].as_u64().filter(|n| *n > 1);
             for section in ["overview", "discussion", "reviews", "threads"] {
                 if section == "overview" || section == "discussion" || r.kind == "pr" {
@@ -683,10 +880,7 @@ impl AppServer {
         if let Some(receipt) = self.github_receipt(method, p)? {
             return Ok(receipt);
         }
-        let _guard = self
-            .github_action_gate
-            .try_lock()
-            .map_err(|_| anyhow::anyhow!("Another GitHub action is pending"))?;
+        let _guard = self.lock_github_action_gate(Duration::from_secs(30))?;
         if let Some(receipt) = self.github_receipt(method, p)? {
             return Ok(receipt);
         }

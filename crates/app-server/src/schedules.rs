@@ -1357,15 +1357,28 @@ impl AppServer {
                     let timeout_secs =
                         crate::scripts::script_timeout_secs(*timeout_minutes, *timeout_seconds);
                     let (exit_code, timed_out) = if !remote {
-                        crate::scripts::run_local_process(
+                        let cfg = self.config();
+                        let env_policy = canban_exec::shell_env::LocalEnvPolicy::for_source_trust(
+                            cfg.terminal_env_mode.is_inherit(),
+                            Some("local"),
+                        );
+                        crate::scripts::run_local_process_with_policy(
                             &argv,
                             &script_cwd,
                             &env,
+                            &cfg.hc_env,
+                            env_policy,
                             &log_file,
                             timeout_secs,
                         )?
                     } else {
-                        let args_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
+                        let mut wrapped_argv = Vec::with_capacity(env.len() + argv.len() + 1);
+                        wrapped_argv.push("env".to_owned());
+                        for (k, v) in &env {
+                            wrapped_argv.push(format!("{k}={v}"));
+                        }
+                        wrapped_argv.extend(argv.iter().cloned());
+                        let args_ref: Vec<&str> = wrapped_argv.iter().map(String::as_str).collect();
                         let out = ops.host.run(&script_cwd, &args_ref, None)?;
                         let mut combined = out.stdout;
                         combined.extend_from_slice(&out.stderr);
@@ -1681,8 +1694,18 @@ impl AppServer {
             env,
             cwd: location.directory.clone(),
         })?;
-        let receipt =
-            client.launch_on(&location.machine, spec.argv, &spec.cwd, spec.env, labels)?;
+        let env_policy = canban_exec::shell_env::LocalEnvPolicy::for_source_trust(
+            client.config.terminal_env_mode.is_inherit(),
+            Some("local"),
+        );
+        let receipt = client.launch_on_with_policy(
+            &location.machine,
+            spec.argv,
+            &spec.cwd,
+            spec.env,
+            labels,
+            env_policy,
+        )?;
         let terminal_address = strp(&receipt, "address")?.to_owned();
         {
             let mut inv = self.inventory.lock().unwrap();

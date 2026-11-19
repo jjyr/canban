@@ -262,7 +262,7 @@ impl AppServer {
             if let Some(wf_run) = db
                 .list::<WorkflowRun>()?
                 .into_iter()
-                .find(|r| r.card_id == c.id && r.active())
+                .find(|r| r.card_id.as_deref() == Some(c.id.as_str()) && r.active())
             {
                 bound.workflow.workspace = wf_run.definition.workspace;
             } else if let Some(primary) = db

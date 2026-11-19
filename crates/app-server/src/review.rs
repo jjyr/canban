@@ -8,7 +8,7 @@ pub(super) fn activity_warning(db: Db<'_>, card: &Card) -> Result<Option<String>
 
 fn default_project_merge_strategy(db: Db<'_>, card: &Card) -> Result<MergeStrategy> {
     for run in db.list::<WorkflowRun>()? {
-        if run.card_id == card.id
+        if run.card_id.as_deref() == Some(card.id.as_str())
             && run.active()
             && let Some(step_id) = &run.step
             && let Some(WorkflowStep::Deliver { strategy, .. }) = run.definition.steps.get(step_id)
@@ -203,7 +203,7 @@ impl AppServer {
                     let gate = current.human_gate.take();
                     let mut completed_deliver = false;
                     for mut active_run in db.list::<WorkflowRun>()? {
-                        if active_run.card_id == current.id
+                        if active_run.card_id.as_deref() == Some(current.id.as_str())
                             && active_run.active()
                             && active_run.step.as_ref().is_some_and(|k| {
                                 matches!(active_run.definition.steps.get(k), Some(WorkflowStep::Deliver { .. }))
@@ -406,14 +406,19 @@ impl AppServer {
                     .collect();
                 db.list::<WorkflowRun>()?
                     .into_iter()
-                    .filter(|r| {
-                        r.project_id == project_id
+                    .filter_map(|r| {
+                        let card_id = r.card_id?;
+                        if r.project_id == project_id
                             && r.state == "waiting_delivery"
                             && cards
-                                .get(&r.card_id)
+                                .get(&card_id)
                                 .is_some_and(|c| c.active() && c.hold_auto_merge)
+                        {
+                            Some((card_id, r.id))
+                        } else {
+                            None
+                        }
                     })
-                    .map(|r| (r.card_id, r.id))
                     .collect()
             };
             for (card_id, run_id) in held_runs {
@@ -529,7 +534,10 @@ impl AppServer {
             if run.state != "waiting_delivery" {
                 return Ok(false);
             }
-            let card: Card = db.get(&run.card_id)?;
+            let Some(card_id) = run.card_id.as_deref() else {
+                return Ok(false);
+            };
+            let card: Card = db.get(card_id)?;
             if !card.active() {
                 return Ok(false);
             }

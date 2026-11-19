@@ -15,13 +15,49 @@ pub(crate) struct StepEnvContext<'a> {
     pub exec_home: &'a Path,
     pub endpoint: &'a str,
     pub project: &'a Project,
-    pub card: &'a Card,
+    pub card: Option<&'a Card>,
     pub workspace: Option<&'a WorkspaceBinding>,
     pub run_dir: &'a Path,
     pub workflow_run: Option<&'a WorkflowRun>,
     pub step_ref: Option<&'a str>,
     pub script_env_file: Option<&'a Path>,
     pub script_output_file: Option<&'a Path>,
+}
+
+pub(crate) fn cardless_run_dir(home: &Path, project_id: &str, run_id: &str) -> PathBuf {
+    if is_global_project_id(project_id) {
+        home.join("workflow-runs").join(run_id)
+    } else {
+        home.join("projects")
+            .join(project_id)
+            .join("workflow-runs")
+            .join(run_id)
+    }
+}
+
+pub(crate) fn cardless_run_source_trust(run: &WorkflowRun) -> Option<&str> {
+    let Some(ev) = run.inputs.get("trigger_event").filter(|v| v.is_object()) else {
+        return Some("local");
+    };
+    if let Some(trust) = ev["data"]["source_trust"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+    {
+        return Some(trust);
+    }
+    if ev["data"]["origin"].as_str() == Some("github")
+        || ev["kind"]
+            .as_str()
+            .is_some_and(|k| k.starts_with("github."))
+    {
+        if ev["data"]["self_action"] == true {
+            Some("collaborator")
+        } else {
+            Some("external")
+        }
+    } else {
+        Some("local")
+    }
 }
 
 /// Builds the merged environment map for an `agent` or `script` step:
@@ -34,13 +70,13 @@ pub(crate) fn build_step_env(
     let workspace_dir = ctx
         .workspace
         .map(|w| w.path.as_str())
-        .or(ctx.card.worktree.as_deref())
+        .or_else(|| ctx.card.and_then(|c| c.worktree.as_deref()))
         .filter(|s| !s.is_empty())
         .unwrap_or(&ctx.project.directory);
     let branch = ctx
         .workspace
         .and_then(|w| w.branch.as_deref())
-        .or(ctx.card.branch.as_deref())
+        .or_else(|| ctx.card.and_then(|c| c.branch.as_deref()))
         .unwrap_or("");
     let base_branch = ctx
         .workspace
@@ -51,6 +87,11 @@ pub(crate) fn build_step_env(
                 .and_then(|r| r.definition.workspace.base_branch.as_deref())
         })
         .unwrap_or("");
+    let source_trust = ctx
+        .card
+        .map(Card::trust_level)
+        .or_else(|| ctx.workflow_run.and_then(cardless_run_source_trust))
+        .unwrap_or("local");
 
     env.insert("CANBAN_CLI".into(), ctx.cli.to_string_lossy().into_owned());
     env.insert(
@@ -61,38 +102,73 @@ pub(crate) fn build_step_env(
     env.insert("CANBAN_PROJECT".into(), ctx.project.id.clone());
     env.insert("CANBAN_PROJECT_DIR".into(), ctx.project.directory.clone());
     env.insert("CANBAN_WORKSPACE".into(), workspace_dir.to_owned());
-    env.insert("CANBAN_CARD".into(), ctx.card.number.to_string());
-    env.insert("CARD_ID".into(), ctx.card.id.clone());
-    env.insert("CANBAN_CARD_TITLE".into(), ctx.card.title.clone());
+    if let Some(card) = ctx.card {
+        env.insert("CANBAN_CARD".into(), card.number.to_string());
+        env.insert("CARD_ID".into(), card.id.clone());
+        env.insert("CANBAN_CARD_TITLE".into(), card.title.clone());
+        env.insert("CANBAN_STAGE".into(), card.stage.clone());
+    }
     env.insert("CANBAN_BRANCH".into(), branch.to_owned());
     env.insert("CANBAN_BASE_BRANCH".into(), base_branch.to_owned());
-    env.insert(
-        "CANBAN_SOURCE_TRUST".into(),
-        ctx.card.trust_level().to_owned(),
-    );
-    env.insert("CANBAN_STAGE".into(), ctx.card.stage.clone());
+    env.insert("CANBAN_SOURCE_TRUST".into(), source_trust.to_owned());
     env.insert(
         "CANBAN_RUN_DIR".into(),
         ctx.run_dir.to_string_lossy().into_owned(),
     );
 
-    if let Some(pr) = &ctx.card.pull_request {
-        if pr.number > 0 {
-            env.insert("CANBAN_PR_NUMBER".into(), pr.number.to_string());
+    if let Some(gh) = &ctx.project.github
+        && !gh.repository.is_empty()
+    {
+        env.insert("CANBAN_GITHUB_REPO".into(), gh.repository.clone());
+    }
+
+    if let Some(card) = ctx.card {
+        if let Some(pr) = &card.pull_request {
+            if !pr.repository.is_empty() {
+                env.insert("CANBAN_GITHUB_REPO".into(), pr.repository.clone());
+            }
+            if pr.number > 0 {
+                env.insert("CANBAN_PR_NUMBER".into(), pr.number.to_string());
+            }
+            if !pr.url.is_empty() {
+                env.insert("CANBAN_PR_URL".into(), pr.url.clone());
+            }
+            if !pr.checks.is_empty() {
+                env.insert("CANBAN_PR_CHECKS".into(), pr.checks.clone());
+            }
+            if let Some(url) = pr
+                .checks_summary
+                .as_ref()
+                .and_then(|s| s.url.as_deref())
+                .filter(|u| !u.is_empty())
+            {
+                env.insert("CANBAN_PR_CHECKS_URL".into(), url.to_owned());
+            }
         }
-        if !pr.url.is_empty() {
-            env.insert("CANBAN_PR_URL".into(), pr.url.clone());
-        }
-        if !pr.checks.is_empty() {
-            env.insert("CANBAN_PR_CHECKS".into(), pr.checks.clone());
-        }
-        if let Some(url) = pr
-            .checks_summary
-            .as_ref()
-            .and_then(|s| s.url.as_deref())
-            .filter(|u| !u.is_empty())
-        {
-            env.insert("CANBAN_PR_CHECKS_URL".into(), url.to_owned());
+        if let Some(source) = card.github_issue() {
+            if !source.repository.is_empty() {
+                env.entry("CANBAN_GITHUB_REPO".into())
+                    .or_insert_with(|| source.repository.clone());
+            }
+            if card.is_github_pr() {
+                if source.number > 0 {
+                    env.entry("CANBAN_PR_NUMBER".into())
+                        .or_insert_with(|| source.number.to_string());
+                }
+                if !source.url.is_empty() {
+                    env.entry("CANBAN_PR_URL".into())
+                        .or_insert_with(|| source.url.clone());
+                }
+            } else {
+                if source.number > 0 {
+                    env.entry("CANBAN_ISSUE_NUMBER".into())
+                        .or_insert_with(|| source.number.to_string());
+                }
+                if !source.url.is_empty() {
+                    env.entry("CANBAN_ISSUE_URL".into())
+                        .or_insert_with(|| source.url.clone());
+                }
+            }
         }
     }
 
@@ -103,24 +179,48 @@ pub(crate) fn build_step_env(
             env.insert("CANBAN_STEP_ID".into(), step_id.to_owned());
         }
         if let Some(ev) = run.inputs.get("trigger_event").filter(|v| v.is_object()) {
-            if let Some(kind) = ev["kind"].as_str().filter(|s| !s.is_empty()) {
+            let kind = ev["kind"].as_str().unwrap_or("");
+            if !kind.is_empty() {
                 env.insert("CANBAN_TRIGGER_EVENT".into(), kind.to_owned());
             }
             let data = &ev["data"];
-            if !env.contains_key("CANBAN_PR_NUMBER")
-                && let Some(num) = data["number"].as_u64()
-            {
-                env.insert("CANBAN_PR_NUMBER".into(), num.to_string());
+            if let Some(repo) = data["repository"].as_str().filter(|s| !s.is_empty()) {
+                env.entry("CANBAN_GITHUB_REPO".into())
+                    .or_insert_with(|| repo.to_owned());
             }
-            if !env.contains_key("CANBAN_PR_URL")
-                && let Some(url) = data["url"].as_str().filter(|s| !s.is_empty())
-            {
-                env.insert("CANBAN_PR_URL".into(), url.to_owned());
+            let is_issue_event = kind.starts_with("github.issue.")
+                || data["source_kind"].as_str() == Some("github.issue");
+            let is_pr_event =
+                kind.starts_with("github.pr.") || data["source_kind"].as_str() == Some("github.pr");
+            if is_issue_event {
+                if let Some(num) = data["number"].as_u64() {
+                    env.entry("CANBAN_ISSUE_NUMBER".into())
+                        .or_insert_with(|| num.to_string());
+                }
+                if let Some(url) = data["url"].as_str().filter(|s| !s.is_empty()) {
+                    env.entry("CANBAN_ISSUE_URL".into())
+                        .or_insert_with(|| url.to_owned());
+                }
+            } else if is_pr_event {
+                if let Some(num) = data["number"].as_u64() {
+                    env.entry("CANBAN_PR_NUMBER".into())
+                        .or_insert_with(|| num.to_string());
+                }
+                if let Some(url) = data["url"].as_str().filter(|s| !s.is_empty()) {
+                    env.entry("CANBAN_PR_URL".into())
+                        .or_insert_with(|| url.to_owned());
+                }
+                if let Some(url) = data["checks_url"].as_str().filter(|s| !s.is_empty()) {
+                    env.entry("CANBAN_PR_CHECKS_URL".into())
+                        .or_insert_with(|| url.to_owned());
+                }
             }
-            if !env.contains_key("CANBAN_PR_CHECKS_URL")
-                && let Some(url) = data["checks_url"].as_str().filter(|s| !s.is_empty())
+            if let Some(comment_id) = data["comment_id"]
+                .as_u64()
+                .or_else(|| data["item_id"].as_u64())
             {
-                env.insert("CANBAN_PR_CHECKS_URL".into(), url.to_owned());
+                env.entry("CANBAN_GITHUB_ITEM_ID".into())
+                    .or_insert_with(|| comment_id.to_string());
             }
         }
     }
@@ -344,6 +444,7 @@ struct PreparedScript {
     exec_home: PathBuf,
     cwd: PathBuf,
     env: BTreeMap<String, String>,
+    env_policy: canban_exec::shell_env::LocalEnvPolicy,
     argv: Vec<String>,
     script_file: PathBuf,
     env_file: PathBuf,
@@ -403,7 +504,7 @@ pub(crate) fn kill_card_scripts_db(db: Db<'_>, config: &Config, card_id: &str) {
     };
     for run in all
         .into_iter()
-        .filter(|r| r.card_id == card_id && r.state == "waiting_script")
+        .filter(|r| r.card_id.as_deref() == Some(card_id) && r.state == "waiting_script")
     {
         if let Some(addr) = run
             .inputs
@@ -412,6 +513,26 @@ pub(crate) fn kill_card_scripts_db(db: Db<'_>, config: &Config, card_id: &str) {
         {
             let _ = client.call("terminal.kill", json!({ "terminal": addr }));
         }
+    }
+}
+
+/// Best-effort termination for any active script on `run_id` using an already-held DB lock.
+pub(crate) fn kill_run_scripts_db(db: Db<'_>, config: &Config, run_id: &str) {
+    let Ok(run) = db.get::<WorkflowRun>(run_id) else {
+        return;
+    };
+    if run.state != "waiting_script" {
+        return;
+    }
+    let client = canban_herdr::Client {
+        config: config.clone(),
+    };
+    if let Some(addr) = run
+        .inputs
+        .get("script_terminal")
+        .and_then(|v| v["address"].as_str())
+    {
+        let _ = client.call("terminal.kill", json!({ "terminal": addr }));
     }
 }
 
@@ -472,16 +593,41 @@ impl AppServer {
         let (project, card) = {
             let store = self.store.lock().unwrap();
             let db = store.db();
-            let card: Card = db.get(&run.card_id)?;
-            ensure!(card.active(), "Card was archived before running script");
-            let project: Project = db.get(&run.project_id)?;
+            let card = if let Some(card_id) = run.card_id.as_deref() {
+                let card: Card = db.get(card_id)?;
+                ensure!(card.active(), "Card was archived before running script");
+                Some(card)
+            } else {
+                None
+            };
+            let project = if is_global_project_id(&run.project_id) {
+                Project {
+                    id: GLOBAL_PROJECT_ID.into(),
+                    name: "Global".into(),
+                    directory: self.home.to_string_lossy().into_owned(),
+                    location: Some(WorkLocation {
+                        machine: "local".into(),
+                        directory: self.home.to_string_lossy().into_owned(),
+                    }),
+                    target_branch: None,
+                    workflow: Workflow::default(),
+                    github: None,
+                    detected_github: None,
+                    github_disconnected: false,
+                    delivery_mode: DeliveryMode::default(),
+                    agent_overrides: BTreeMap::new(),
+                    tags: Vec::new(),
+                    created_at: 0,
+                }
+            } else {
+                db.get::<Project>(&run.project_id)?
+            };
             (project, card)
         };
 
         let location = card
-            .workspace
             .as_ref()
-            .map(|w| w.location.clone())
+            .and_then(|c| c.workspace.as_ref().map(|w| w.location.clone()))
             .unwrap_or_else(|| project.work_location());
         if self.observer_running.load(Ordering::SeqCst) {
             self.resolve_machine(&location.machine, true)?;
@@ -495,69 +641,76 @@ impl AppServer {
         bound.directory = location.directory.clone();
         bound.location = Some(location.clone());
 
-        let mut prepared = card.clone();
-        let (ws_path, workspace) = if let Some(existing) = &card.workspace
-            && existing.location == location
-        {
-            let path = if bound.workflow.workspace.create_worktree || card.worktree.is_some() {
-                ops.resume(&exec_home, &bound, &prepared)?
-            } else {
-                PathBuf::from(&existing.path)
-            };
-            (path, Some(existing.clone()))
-        } else {
-            let pr_tracking = self.prepare_pr_card_source(&prepared, &mut bound, &ops)?;
-            let path = ops.prepare(&exec_home, &bound, &prepared)?;
-            let path_str = path.to_string_lossy().into_owned();
-            if card.worktree.as_deref() != Some(path_str.as_str()) {
-                self.git_changed(&location.machine);
-            }
-            prepared.worktree = Some(path_str.clone());
-            let (branch, base_commit) = ops.workspace_head_meta(&path, &prepared);
-            if let Some(target) = &pr_tracking
-                && path != Path::new(&location.directory)
-                && let Some(branch) = branch.as_deref().filter(|b| !b.is_empty())
+        let (ws_path, workspace) = if let Some(card) = &card {
+            let mut prepared = card.clone();
+            if let Some(existing) = &card.workspace
+                && existing.location == location
             {
-                ops.configure_pr_tracking(&path, branch, target)?;
-            }
-            let binding = WorkspaceBinding {
-                location: location.clone(),
-                path: path_str,
-                branch,
-                base_commit,
-                target_branch: bound.target_branch.clone(),
-            };
-            self.store.lock().unwrap().write(|db| {
-                let mut current: Card = db.get(&card.id)?;
-                if current.workspace.as_ref() != Some(&binding) {
-                    if let Some(old) = current.workspace.replace(binding.clone())
-                        && old.location != binding.location
-                    {
-                        current.workspace_history.push(old);
-                        current.delivery = None;
-                    }
-                    current.worktree = Some(binding.path.clone());
-                    current.branch = binding.branch.clone();
-                    current.base_commit = binding.base_commit.clone();
-                    log(
-                        db,
-                        &current,
-                        "workspace.prepared",
-                        "system",
-                        "Card workspace prepared",
-                        None,
-                        json!({"workspace": binding}),
-                    )?;
-                    db.save(&current)?;
+                let path = if bound.workflow.workspace.create_worktree || card.worktree.is_some() {
+                    ops.resume(&exec_home, &bound, &prepared)?
+                } else {
+                    PathBuf::from(&existing.path)
+                };
+                (path, Some(existing.clone()))
+            } else {
+                let pr_tracking = self.prepare_pr_card_source(&prepared, &mut bound, &ops)?;
+                let path = ops.prepare(&exec_home, &bound, &prepared)?;
+                let path_str = path.to_string_lossy().into_owned();
+                if card.worktree.as_deref() != Some(path_str.as_str()) {
+                    self.git_changed(&location.machine);
                 }
-                Ok(())
-            })?;
-            (path, Some(binding))
+                prepared.worktree = Some(path_str.clone());
+                let (branch, base_commit) = ops.workspace_head_meta(&path, &prepared);
+                if let Some(target) = &pr_tracking
+                    && path != Path::new(&location.directory)
+                    && let Some(branch) = branch.as_deref().filter(|b| !b.is_empty())
+                {
+                    ops.configure_pr_tracking(&path, branch, target)?;
+                }
+                let binding = WorkspaceBinding {
+                    location: location.clone(),
+                    path: path_str,
+                    branch,
+                    base_commit,
+                    target_branch: bound.target_branch.clone(),
+                };
+                self.store.lock().unwrap().write(|db| {
+                    let mut current: Card = db.get(&card.id)?;
+                    if current.workspace.as_ref() != Some(&binding) {
+                        if let Some(old) = current.workspace.replace(binding.clone())
+                            && old.location != binding.location
+                        {
+                            current.workspace_history.push(old);
+                            current.delivery = None;
+                        }
+                        current.worktree = Some(binding.path.clone());
+                        current.branch = binding.branch.clone();
+                        current.base_commit = binding.base_commit.clone();
+                        log(
+                            db,
+                            &current,
+                            "workspace.prepared",
+                            "system",
+                            "Card workspace prepared",
+                            None,
+                            json!({"workspace": binding}),
+                        )?;
+                        db.save(&current)?;
+                    }
+                    Ok(())
+                })?;
+                (path, Some(binding))
+            }
+        } else {
+            (PathBuf::from(&location.directory), None)
         };
 
         let cwd = resolve_working_directory(&ops.host, &ws_path, working_directory.as_deref())?;
-        let scripts_dir =
-            canban_context::card_dir(&exec_home, &card.project_id, card.number).join("scripts");
+        let scripts_dir = if let Some(card) = &card {
+            canban_context::card_dir(&exec_home, &card.project_id, card.number).join("scripts")
+        } else {
+            cardless_run_dir(&exec_home, &run.project_id, &run.id).join("scripts")
+        };
         ops.host.mkdir(&scripts_dir)?;
 
         let slug = sanitized_step_slug(step_id);
@@ -583,8 +736,8 @@ impl AppServer {
         } else {
             self.cli.clone()
         };
-        if remote {
-            self.stage_remote(&ops.host, &exec_home, &card)?;
+        if remote && let Some(card) = &card {
+            self.stage_remote(&ops.host, &exec_home, card)?;
         }
 
         let (env, _) = build_step_env(StepEnvContext {
@@ -592,7 +745,7 @@ impl AppServer {
             exec_home: &exec_home,
             endpoint: &endpoint,
             project: &bound,
-            card: &card,
+            card: card.as_ref(),
             workspace: workspace.as_ref(),
             run_dir: &scripts_dir,
             workflow_run: Some(run),
@@ -600,6 +753,15 @@ impl AppServer {
             script_env_file: Some(&env_file),
             script_output_file: Some(&output_file),
         });
+        let config = self.config();
+        let source_trust = card
+            .as_ref()
+            .map(Card::trust_level)
+            .or_else(|| cardless_run_source_trust(run));
+        let env_policy = canban_exec::shell_env::LocalEnvPolicy::for_source_trust(
+            config.terminal_env_mode.is_inherit(),
+            source_trust,
+        );
         let argv = shell_argv(shell.as_deref(), &script_file)?;
 
         Ok(PreparedScript {
@@ -607,6 +769,7 @@ impl AppServer {
             exec_home,
             cwd,
             env,
+            env_policy,
             argv,
             script_file,
             env_file,
@@ -674,7 +837,7 @@ impl AppServer {
         let parse_out_res = parse_key_value_file(&out_raw);
 
         let config = self.config();
-        let card_id = self.store.lock().unwrap().write(|db| {
+        let finalized: Option<Option<String>> = self.store.lock().unwrap().write(|db| {
             let mut current_run: WorkflowRun = db.get(out.run_id)?;
             if !current_run.active()
                 || current_run.state != "waiting_script"
@@ -683,14 +846,25 @@ impl AppServer {
             {
                 return Ok(None);
             }
-            let mut card: Card = db.get(&current_run.card_id)?;
-            if !card.active() {
-                return Ok(None);
-            }
             let slug = sanitized_step_slug(out.step_id);
-            let local_log = canban_context::card_dir(&self.home, &card.project_id, card.number)
-                .join("scripts")
-                .join(format!("{slug}-v{}.log", out.visit));
+            let mut card_opt = if let Some(card_id) = current_run.card_id.as_deref() {
+                let card: Card = db.get(card_id)?;
+                if !card.active() {
+                    return Ok(None);
+                }
+                Some(card)
+            } else {
+                None
+            };
+            let local_log = if let Some(card) = &card_opt {
+                canban_context::card_dir(&self.home, &card.project_id, card.number)
+                    .join("scripts")
+                    .join(format!("{slug}-v{}.log", out.visit))
+            } else {
+                cardless_run_dir(&self.home, &current_run.project_id, &current_run.id)
+                    .join("scripts")
+                    .join(format!("{slug}-v{}.log", out.visit))
+            };
             let mut log_body = raw_log.clone();
             if out.timed_out {
                 log_body.push_str(&format!(
@@ -738,17 +912,56 @@ impl AppServer {
                 succeeded,
                 &outputs,
             );
-            let cid = card.id.clone();
+            let cid = card_opt.as_ref().map(|c| c.id.clone());
 
-            if succeeded || out.continue_on_error {
-                canban_workflow_engine::runtime::complete_script(
+            if let Some(card) = &mut card_opt {
+                if succeeded || out.continue_on_error {
+                    canban_workflow_engine::runtime::complete_script(
+                        db,
+                        &config,
+                        card,
+                        &mut current_run,
+                        output_val,
+                        &exported_env,
+                        enqueue,
+                    )?;
+                } else {
+                    let code_desc = if out.timed_out {
+                        format!("timed out after {}s", out.timeout_secs)
+                    } else {
+                        out.exit_code
+                            .map_or_else(|| "killed by signal".into(), |c| c.to_string())
+                    };
+                    let tail = log_tail(&log_body);
+                    let detail = if tail.trim().is_empty() {
+                        format!(
+                            "Step: {}\nExit code: {code_desc}\nLog: {log_rel}",
+                            out.step_id
+                        )
+                    } else {
+                        format!(
+                            "Step: {}\nExit code: {code_desc}\nLog: {log_rel}\n\nLast output lines:\n{tail}",
+                            out.step_id
+                        )
+                    };
+                    canban_workflow_engine::runtime::fail_script(
+                        db,
+                        &config,
+                        card,
+                        &mut current_run,
+                        output_val,
+                        &exported_env,
+                        &summary,
+                        &detail,
+                        enqueue,
+                    )?;
+                }
+            } else if succeeded || out.continue_on_error {
+                canban_workflow_engine::runtime::complete_cardless_script(
                     db,
-                    &config,
-                    &mut card,
                     &mut current_run,
                     output_val,
                     &exported_env,
-                    enqueue,
                 )?;
             } else {
                 let code_desc = if out.timed_out {
@@ -769,24 +982,21 @@ impl AppServer {
                         out.step_id
                     )
                 };
-                canban_workflow_engine::runtime::fail_script(
+                canban_workflow_engine::runtime::fail_cardless_script(
                     db,
-                    &config,
-                    &mut card,
                     &mut current_run,
                     output_val,
                     &exported_env,
                     &summary,
                     &detail,
-                    enqueue,
                 )?;
             }
             Ok(Some(cid))
         })?;
 
-        if let Some(cid) = card_id {
+        if let Some(cid) = finalized {
             let _ = self.pump_admissions();
-            self.emit("application", Some(cid));
+            self.emit("application", cid);
             self.request_deliveries();
             self.wake_runtime();
         }
@@ -915,19 +1125,22 @@ impl AppServer {
                 }
             };
             let core_id = self.verified_core_id().ok();
-            let labels = BTreeMap::from([
+            let mut labels = BTreeMap::from([
                 ("canban.project".into(), run.project_id.clone()),
-                ("canban.card_id".into(), run.card_id.clone()),
                 ("canban.script_run".into(), run.id.clone()),
                 ("canban.script_step".into(), step_id.clone()),
             ]);
+            if let Some(cid) = &run.card_id {
+                labels.insert("canban.card_id".into(), cid.clone());
+            }
             let wrapped = wrapped_herdr_argv(&prep.remote_log_file, &prep.argv);
-            match client.launch_on(
+            match client.launch_on_with_policy(
                 &prep.machine,
                 wrapped,
                 &prep.cwd.to_string_lossy(),
                 prep.env.clone(),
                 labels,
+                prep.env_policy,
             ) {
                 Ok(launched) => {
                     let addr = launched["address"].as_str().unwrap_or("").to_owned();
@@ -953,7 +1166,7 @@ impl AppServer {
                         }
                         Ok(())
                     });
-                    self.emit("application", Some(run.card_id.clone()));
+                    self.emit("application", run.card_id.clone());
                 }
                 Err(e) => {
                     let msg = format!("Failed to launch script `{step_id}`: {e:#}");
@@ -1010,10 +1223,13 @@ impl AppServer {
                     continue;
                 }
             };
-            let (exit_code, timed_out) = run_local_process(
+            let hc_env = self.config().hc_env;
+            let (exit_code, timed_out) = run_local_process_with_policy(
                 &prep.argv,
                 &prep.cwd,
                 &prep.env,
+                &hc_env,
+                prep.env_policy,
                 &prep.remote_log_file,
                 prep.timeout_secs,
             )?;
@@ -1039,7 +1255,7 @@ impl AppServer {
         continue_on_error: bool,
     ) -> Result<()> {
         let config = self.config();
-        let card_id = self.store.lock().unwrap().write(|db| {
+        let finalized: Option<Option<String>> = self.store.lock().unwrap().write(|db| {
             let mut current_run: WorkflowRun = db.get(run_id)?;
             if !current_run.active()
                 || current_run.state != "waiting_script"
@@ -1048,11 +1264,21 @@ impl AppServer {
             {
                 return Ok(None);
             }
-            let mut card: Card = db.get(&current_run.card_id)?;
             let slug = sanitized_step_slug(step_id);
-            let local_log = canban_context::card_dir(&self.home, &card.project_id, card.number)
-                .join("scripts")
-                .join(format!("{slug}-v{visit}.log"));
+            let mut card_opt = if let Some(card_id) = current_run.card_id.as_deref() {
+                Some(db.get::<Card>(card_id)?)
+            } else {
+                None
+            };
+            let local_log = if let Some(card) = &card_opt {
+                canban_context::card_dir(&self.home, &card.project_id, card.number)
+                    .join("scripts")
+                    .join(format!("{slug}-v{visit}.log"))
+            } else {
+                cardless_run_dir(&self.home, &current_run.project_id, &current_run.id)
+                    .join("scripts")
+                    .join(format!("{slug}-v{visit}.log"))
+            };
             canban_context::atomic(&local_log, summary.as_bytes())?;
             let log_rel = canban_context::relative(&self.home, &local_log)?;
             let output_val = collect_script_outputs(
@@ -1064,35 +1290,53 @@ impl AppServer {
                 false,
                 &BTreeMap::new(),
             );
-            let cid = card.id.clone();
-            if continue_on_error {
-                canban_workflow_engine::runtime::complete_script(
+            let cid = card_opt.as_ref().map(|c| c.id.clone());
+            if let Some(card) = &mut card_opt {
+                if continue_on_error {
+                    canban_workflow_engine::runtime::complete_script(
+                        db,
+                        &config,
+                        card,
+                        &mut current_run,
+                        output_val,
+                        &BTreeMap::new(),
+                        enqueue,
+                    )?;
+                } else {
+                    canban_workflow_engine::runtime::fail_script(
+                        db,
+                        &config,
+                        card,
+                        &mut current_run,
+                        output_val,
+                        &BTreeMap::new(),
+                        summary,
+                        summary,
+                        enqueue,
+                    )?;
+                }
+            } else if continue_on_error {
+                canban_workflow_engine::runtime::complete_cardless_script(
                     db,
-                    &config,
-                    &mut card,
                     &mut current_run,
                     output_val,
                     &BTreeMap::new(),
-                    enqueue,
                 )?;
             } else {
-                canban_workflow_engine::runtime::fail_script(
+                canban_workflow_engine::runtime::fail_cardless_script(
                     db,
-                    &config,
-                    &mut card,
                     &mut current_run,
                     output_val,
                     &BTreeMap::new(),
                     summary,
                     summary,
-                    enqueue,
                 )?;
             }
             Ok(Some(cid))
         })?;
-        if let Some(cid) = card_id {
+        if let Some(cid) = finalized {
             let _ = self.pump_admissions();
-            self.emit("application", Some(cid));
+            self.emit("application", cid);
             self.request_deliveries();
             self.wake_runtime();
         }
@@ -1100,10 +1344,12 @@ impl AppServer {
     }
 }
 
-pub(crate) fn run_local_process(
+pub(crate) fn run_local_process_with_policy(
     argv: &[String],
     cwd: &Path,
     env: &BTreeMap<String, String>,
+    hc_env: &BTreeMap<String, String>,
+    env_policy: canban_exec::shell_env::LocalEnvPolicy,
     log_path: &Path,
     timeout_secs: u64,
 ) -> Result<(Option<i64>, bool)> {
@@ -1115,13 +1361,16 @@ pub(crate) fn run_local_process(
         .open(log_path)?;
     let stderr_file = stdout_file.try_clone()?;
 
+    let mut merged_env = env.clone();
+    canban_exec::shell_env::merge_local_env_with_policy(&mut merged_env, hc_env, env_policy);
+
     let mut cmd = canban_exec::command(&argv[0]);
     cmd.args(&argv[1..])
         .current_dir(cwd)
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
-        .envs(env)
+        .envs(&merged_env)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file));

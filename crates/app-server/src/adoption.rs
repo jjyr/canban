@@ -196,7 +196,7 @@ pub(super) fn bind(
         ensure!(
             !db.list::<WorkflowRun>()?
                 .iter()
-                .any(|w| w.card_id == card.id
+                .any(|w| w.card_id.as_deref() == Some(card.id.as_str())
                     && w.active()
                     && w.state == "waiting_agent"
                     && w.terminal_id.as_deref().is_some_and(|id| id != context.id)),

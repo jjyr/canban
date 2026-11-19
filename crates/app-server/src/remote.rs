@@ -24,11 +24,12 @@ fn active_remote_script_machines(s: &Snapshot) -> impl Iterator<Item = String> +
         .iter()
         .filter(|r| r.active() && r.state == "waiting_script")
         .filter_map(|r| {
-            let card_machine = s
-                .cards
-                .iter()
-                .find(|c| c.id == r.card_id)
-                .and_then(|c| c.workspace.as_ref().map(|w| w.location.machine.clone()));
+            let card_machine = r.card_id.as_deref().and_then(|cid| {
+                s.cards
+                    .iter()
+                    .find(|c| c.id == cid)
+                    .and_then(|c| c.workspace.as_ref().map(|w| w.location.machine.clone()))
+            });
             let project_machine = s
                 .projects
                 .iter()

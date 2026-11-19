@@ -298,7 +298,12 @@ pub fn admissions(snapshot: &canban_types::Snapshot, max_agents: usize) -> Vec<S
         let (Some(step), Some(column)) = (gate["step"].as_str(), gate["column"].as_str()) else {
             continue;
         };
-        if card(&run.card_id).is_some_and(|c| c.active() && c.stage == column) {
+        if run
+            .card_id
+            .as_deref()
+            .and_then(card)
+            .is_some_and(|c| c.active() && c.stage == column)
+        {
             *ready
                 .entry((
                     run.project_id.clone(),
@@ -314,7 +319,7 @@ pub fn admissions(snapshot: &canban_types::Snapshot, max_agents: usize) -> Vec<S
         .iter()
         .filter(|r| r.active() && r.state == "waiting_capacity")
         .filter_map(|run| {
-            let c = card(&run.card_id)?;
+            let c = run.card_id.as_deref().and_then(card)?;
             if !c.active() || c.resolved() || c.human_gate.is_some() || c.attention.is_some() {
                 return None;
             }
@@ -552,7 +557,7 @@ mod tests {
         let wf2 = canban_types::WorkflowRun {
             id: "wf2".into(),
             project_id: "p1".into(),
-            card_id: "c2".into(),
+            card_id: Some("c2".into()),
             workflow_id: "dev".into(),
             definition_revision: 1,
             definition: def,

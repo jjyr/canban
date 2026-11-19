@@ -1718,6 +1718,8 @@ fn record_pr_activity_updates(
             continue;
         }
         let author = c["user"]["login"].as_str().unwrap_or("github");
+        let self_action = is_self(author)
+            || crate::events::github::has_written_receipt(db, repository, "comment", cid);
         let url = c["html_url"].as_str().unwrap_or(pr_url);
         log(
             db,
@@ -1736,7 +1738,7 @@ fn record_pr_activity_updates(
                 "url": url,
                 "pr_url": pr_url,
                 "stage": card.stage,
-                "self_action": is_self(author),
+                "self_action": self_action,
             }),
         )?;
         emitted = true;
@@ -1750,6 +1752,8 @@ fn record_pr_activity_updates(
             continue;
         }
         let author = c["user"]["login"].as_str().unwrap_or("github");
+        let self_action = is_self(author)
+            || crate::events::github::has_written_receipt(db, repository, "comment", cid);
         let url = c["html_url"].as_str().unwrap_or(pr_url);
         let path = c["path"].as_str().unwrap_or("");
         let line = c["line"].as_u64().or_else(|| c["original_line"].as_u64());
@@ -1772,7 +1776,7 @@ fn record_pr_activity_updates(
                 "url": url,
                 "pr_url": pr_url,
                 "stage": card.stage,
-                "self_action": is_self(author),
+                "self_action": self_action,
             }),
         )?;
         emitted = true;
@@ -1791,7 +1795,8 @@ fn record_pr_activity_updates(
             continue;
         }
         let author = r["user"]["login"].as_str().unwrap_or("github");
-        let self_action = is_self(author);
+        let self_action = is_self(author)
+            || crate::events::github::has_written_receipt(db, repository, "review", rid);
         let url = r["html_url"].as_str().unwrap_or(pr_url);
         let msg = match state {
             "APPROVED" => format!("{author} approved PR #{pr_number}"),

@@ -4507,7 +4507,7 @@ fn manual_and_agent_card_resolve_reopen_and_next_day_auto_archive() {
         active_snap
             .workflow_runs
             .iter()
-            .any(|r| r.card_id == card.id && r.active())
+            .any(|r| r.card_id.as_deref() == Some(card.id.as_str()) && r.active())
     );
     let req = active_snap
         .terminals
@@ -4556,7 +4556,7 @@ fn manual_and_agent_card_resolve_reopen_and_next_day_auto_archive() {
         post_snap
             .workflow_runs
             .iter()
-            .filter(|r| r.card_id == card.id)
+            .filter(|r| r.card_id.as_deref() == Some(card.id.as_str()))
             .all(|r| !r.active())
     );
     let post_term = post_snap

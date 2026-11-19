@@ -507,10 +507,10 @@ impl AppServer {
                         if a.terminal.is_some()
                             && a.connection_state == "connected"
                             && !a.agent_stopped()
-                            && let Some(run) = s
-                                .workflow_runs
-                                .iter()
-                                .find(|r| r.card_id == a.card_id && r.state == "waiting_delivery")
+                            && let Some(run) = s.workflow_runs.iter().find(|r| {
+                                r.card_id.as_deref() == Some(a.card_id.as_str())
+                                    && r.state == "waiting_delivery"
+                            })
                         {
                             let anchor = a
                                 .completed_at
@@ -643,10 +643,10 @@ impl AppServer {
                     if a.terminal.is_some()
                         && a.connection_state == "connected"
                         && !a.agent_stopped()
-                        && let Some(run) = s
-                            .workflow_runs
-                            .iter()
-                            .find(|r| r.card_id == a.card_id && r.state == "waiting_delivery")
+                        && let Some(run) = s.workflow_runs.iter().find(|r| {
+                            r.card_id.as_deref() == Some(a.card_id.as_str())
+                                && r.state == "waiting_delivery"
+                        })
                     {
                         let anchor = a
                             .completed_at

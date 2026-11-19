@@ -109,6 +109,15 @@ impl AppServer {
             "app.state" => self.state_response(&p, true),
             "app.watch" => self.state_response(&p, false),
             "host.probe" => Ok(self.host_probe_payload()),
+            "host.env.refresh" => {
+                let snapshot = canban_exec::shell_env::refresh_local_shell_env();
+                Ok(json!({
+                    "ok": true,
+                    "shell": snapshot.shell,
+                    "var_count": snapshot.vars.len(),
+                    "full_env_captured": snapshot.full_env_captured,
+                }))
+            }
             "host.discover" => Ok(serde_json::to_value(network::discover_all())?),
             "machine.list" => self.machines(),
             "machine.default" => {
@@ -603,7 +612,7 @@ impl AppServer {
                     db.save(&c)?;
                     if is_agent {
                         for mut wf_run in db.list::<WorkflowRun>()?.into_iter().filter(|r| {
-                            r.card_id == c.id
+                            r.card_id.as_deref() == Some(c.id.as_str())
                                 && r.active()
                                 && (r.state == "waiting_agent"
                                     || active_entry
@@ -704,7 +713,11 @@ impl AppServer {
                         if let Some(mut existing) = db
                             .list::<WorkflowRun>()?
                             .into_iter()
-                            .find(|r| r.card_id == c.id && r.active() && r.state == "waiting_agent")
+                            .find(|r| {
+                                r.card_id.as_deref() == Some(c.id.as_str())
+                                    && r.active()
+                                    && r.state == "waiting_agent"
+                            })
                         {
                             if existing.terminal_id.is_none()
                                 && let Some(entry) = &mut live_entry
@@ -729,7 +742,7 @@ impl AppServer {
                         if db
                             .list::<WorkflowRun>()?
                             .iter()
-                            .any(|r| r.card_id == c.id && r.active())
+                            .any(|r| r.card_id.as_deref() == Some(c.id.as_str()) && r.active())
                         {
                             workflow::stop_card(db, &config, &c.id, "superseded")?;
                         }
@@ -912,7 +925,7 @@ impl AppServer {
                     )?;
                     if !hold
                         && let Some(mut run) = db.list::<WorkflowRun>()?.into_iter().find(|r| {
-                            r.card_id == c.id
+                            r.card_id.as_deref() == Some(c.id.as_str())
                                 && r.active()
                                 && r.step_is_deliver()
                                 && matches!(r.state.as_str(), "waiting_approval" | "waiting_delivery")
@@ -1425,7 +1438,7 @@ impl AppServer {
                     .context("Terminal has no Agent assignment")?;
                 let mut c: Card = db.get(&prev.card_id)?;
                 let deliver_run = db.list::<WorkflowRun>()?.into_iter().find(|r| {
-                    r.card_id == c.id
+                    r.card_id.as_deref() == Some(c.id.as_str())
                         && r.active()
                         && r.step_is_deliver()
                         && (r.terminal_id.as_deref() == Some(entry.id.as_str())

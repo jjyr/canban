@@ -116,45 +116,74 @@ pub(super) fn pump(db: Db<'_>, config: &Config) -> Result<()> {
         }
         db.conn.execute_batch("SAVEPOINT event_delivery;")?;
         let result = (|| -> Result<String> {
-            let id = card_id
-                .as_deref()
-                .or_else(|| (!event.card_id.is_empty()).then_some(event.card_id.as_str()))
-                .context("Workflow target requires a Card")?;
-            let mut card: Card = db.get(id)?;
             let mut w = super::workflow::published(db, workflow_id)?;
             if let Some(revision) = d.definition_revision {
                 w = db.get(&format!("{workflow_id}:{revision}"))?;
             }
-            ensure!(
-                w.project_id == card.project_id,
-                "Workflow target belongs to another Project"
-            );
-            let run = super::workflow::start_event(
-                db,
-                config,
-                &mut card,
-                w,
-                &entry.clone(),
-                &d.event_id,
-            )?;
-            if event.kind == "github.pr.ci_failed"
-                && card
-                    .attention
+            let rule_cardless = db
+                .list::<WorkflowSource>()?
+                .iter()
+                .find(|s| s.workflow_id == *workflow_id)
+                .and_then(|s| s.rules.get(entry))
+                .is_some_and(|r| r.cardless);
+            let resolved_card_id = if rule_cardless {
+                None
+            } else {
+                card_id
                     .as_deref()
-                    .is_some_and(crate::github::delivery::is_ci_attention_message)
-            {
-                let mut latest_card: Card = db.get(&card.id)?;
-                if latest_card
-                    .attention
-                    .as_deref()
-                    .is_some_and(crate::github::delivery::is_ci_attention_message)
+                    .or_else(|| (!event.card_id.is_empty()).then_some(event.card_id.as_str()))
+                    .or_else(|| {
+                        event.data["related_cards"]
+                            .as_array()?
+                            .iter()
+                            .find(|rc| rc["project_id"].as_str() == Some(w.project_id.as_str()))
+                            .and_then(|rc| rc["card_id"].as_str())
+                            .filter(|s| !s.is_empty())
+                    })
+            };
+            if let Some(id) = resolved_card_id {
+                let mut card: Card = db.get(id)?;
+                ensure!(
+                    w.project_id == card.project_id,
+                    "Workflow target belongs to another Project"
+                );
+                let run = super::workflow::start_event(
+                    db,
+                    config,
+                    &mut card,
+                    w,
+                    &entry.clone(),
+                    &d.event_id,
+                )?;
+                if event.kind == "github.pr.ci_failed"
+                    && card
+                        .attention
+                        .as_deref()
+                        .is_some_and(crate::github::delivery::is_ci_attention_message)
                 {
-                    latest_card.attention = None;
-                    latest_card.revision += 1;
-                    db.save(&latest_card)?;
+                    let mut latest_card: Card = db.get(&card.id)?;
+                    if latest_card
+                        .attention
+                        .as_deref()
+                        .is_some_and(crate::github::delivery::is_ci_attention_message)
+                    {
+                        latest_card.attention = None;
+                        latest_card.revision += 1;
+                        db.save(&latest_card)?;
+                    }
                 }
+                Ok(run.id)
+            } else {
+                let run = canban_workflow_engine::runtime::start_cardless(
+                    db,
+                    &w.project_id,
+                    w.definition,
+                    w.revision,
+                    entry,
+                    Some(d.event_id.clone()),
+                )?;
+                Ok(run.id)
             }
-            Ok(run.id)
         })();
         match result {
             Ok(id) => {

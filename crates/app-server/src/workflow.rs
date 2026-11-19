@@ -182,7 +182,10 @@ impl AppServer {
                 if run.state != "waiting_capacity" {
                     continue;
                 }
-                let mut card: Card = db.get(&run.card_id)?;
+                let Some(card_id) = run.card_id.as_deref() else {
+                    continue;
+                };
+                let mut card: Card = db.get(card_id)?;
                 engine::admit(db, &config, &mut card, &mut run, enqueue)?;
                 cards.push(card.id);
             }
@@ -308,7 +311,11 @@ impl AppServer {
                     .db()
                     .list::<WorkflowRun>()?
                     .into_iter()
-                    .filter(|r| p["card_id"].as_str().is_none_or(|v| v == r.card_id))
+                    .filter(|r| {
+                        p["card_id"]
+                            .as_str()
+                            .is_none_or(|v| r.card_id.as_deref() == Some(v))
+                    })
                     .collect::<Vec<_>>()
             )),
             "workflow.run" => Ok(json!(
@@ -354,12 +361,17 @@ impl AppServer {
                     "Stopping a workflow requires a user invocation"
                 );
                 ensure!(run.active(), "Workflow already ended");
-                stop_card(db, &self.config(), &run.card_id, "cancelled")?;
-                let mut card: Card = db.get(&run.card_id)?;
-                card.human_gate = None;
-                card.attention = None;
-                card.revision += 1;
-                db.save(&card)?;
+                if let Some(card_id) = run.card_id.as_deref() {
+                    stop_card(db, &self.config(), card_id, "cancelled")?;
+                    let mut card: Card = db.get(card_id)?;
+                    card.human_gate = None;
+                    card.attention = None;
+                    card.revision += 1;
+                    db.save(&card)?;
+                } else {
+                    crate::scripts::kill_run_scripts_db(db, &self.config(), &run.id);
+                    engine::stop_run(db, &run.id, "cancelled")?;
+                }
                 Ok(json!({"stopped":true,"live_agents_terminated":false}))
             }),
             "workflow.decide" => {
@@ -373,7 +385,11 @@ impl AppServer {
                         p["visit"].as_u64() == Some(run.visit as u64),
                         "Decision version changed"
                     );
-                    let mut card: Card = db.get(&run.card_id)?;
+                    let card_id = run
+                        .card_id
+                        .as_deref()
+                        .context("Cardless workflow run does not support card approval")?;
+                    let mut card: Card = db.get(card_id)?;
                     revise(&card, &p)?;
                     let decision = strp(&p, "decision")?;
                     ensure!(matches!(decision, "approve" | "rework"), "Invalid decision");
@@ -415,7 +431,7 @@ impl AppServer {
                     if let Some(mut run) = db
                         .list::<WorkflowRun>()?
                         .into_iter()
-                        .find(|r| r.card_id == card.id && r.active())
+                        .find(|r| r.card_id.as_deref() == Some(card.id.as_str()) && r.active())
                     {
                         let is_deliver = run.step.as_ref().is_some_and(|k| {
                             matches!(
@@ -534,10 +550,11 @@ impl AppServer {
             let mut card: Card = db.get(strp(&p, "card_id")?)?;
             revise(&card, &p)?;
             ensure!(card.active(), "Restore the Card before continuing");
-            let approval_step = db
-                .list::<WorkflowRun>()?
-                .iter()
-                .any(|r| r.card_id == card.id && r.active() && r.state == "waiting_approval");
+            let approval_step = db.list::<WorkflowRun>()?.iter().any(|r| {
+                r.card_id.as_deref() == Some(card.id.as_str())
+                    && r.active()
+                    && r.state == "waiting_approval"
+            });
             let gate = card
                 .human_gate
                 .clone()
@@ -545,7 +562,7 @@ impl AppServer {
             if let Some(run) = db
                 .list::<WorkflowRun>()?
                 .into_iter()
-                .find(|r| r.card_id == card.id && r.active())
+                .find(|r| r.card_id.as_deref() == Some(card.id.as_str()) && r.active())
             {
                 let mut run = run;
                 if run.state == "waiting_approval" {
