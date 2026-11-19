@@ -76,6 +76,7 @@ Settings pairs a section jump column (208 points wide on desktop viewports, coll
 | App | Diagnostics | Per-host connectivity, API compatibility, Herdr Core, toolchains, and live daemon logs |
 | App | Updates | Current build version, channel check and install/restart |
 | Host | Agent scheduling | Execution summary, global concurrency, idle timeout and Save scheduling settings; validation stays inside the group |
+| Host | Terminal Environment | **Inherit User Terminal Environment** toggle (`Inherit` default vs. `Minimal` fallback) plus **Refresh** snapshot control; applies to automated `Agent`/`Script` steps on `local` / `collaborator` trust while `external_pr` and untrusted external cardless events remain scoped to minimal/`PATH`-only env unless explicitly overridden in workflow/step `env:` (interactive Card Terminals and code-controlled AppServer actions remain unrestricted) |
 | Host | Agents & Identities | Enabled Herdr CLI Agents, `@identities`, default interactive Agent, Setup wizard and configuration reload |
 | Host | Herdr | Runtime executable/session and explicit Check connection |
 | Host | Storage | Application-home location and path copy |

@@ -20,7 +20,7 @@ Existing `github.auth.*`, `project.github`, `github.source.disconnect`, Issue se
 | `github.item.add` | Add or restore an Issue/PR source Card in a connected Project |
 | `github.reference.add` / `.remove` | Edit local typed GitHub references |
 | `github.context` | Read the source context of a bound Card |
-| `github.remote.comment` / `.reply` / `.review` | Explicit receipt-backed publication |
+| `github.remote.comment` / `.reply` / `.review` | Explicit receipt-backed publication (also invoked by step-authorized workflow `canban review publish` through `github_action_gate`, recording remote `comment_id`/`review_id` receipts in `source_observations` for loop suppression) |
 | `github.notification.read` / `.done` | Explicit notification handling |
 | `github.cache.status` / `.clear` | Inspect or clear disposable responses |
 

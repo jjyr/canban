@@ -48,6 +48,12 @@ Comment and Review forms expand on demand so the diff retains its reading area. 
 
 Writes retain an intent/receipt keyed by request key. Replaying a receipt never republishes the action. Publication outcome unknown retains the draft and requires checking GitHub before enabling a new submission; navigation never retries a write.
 
+### Automated PR review publishing and repository-level event polling
+
+- **Decoupled `@reviewer` draft + optional `canban review publish`:** Automated PR review workflows keep `@reviewer` writing a local draft (`review_draft.json`) without direct remote write privileges. An optional, toggleable (`enabled: true/false`) post-review `script` step invokes `canban review publish` (with optional `--event-override COMMENT`), which calls the step-authorized `github.remote.review` path queued through `github_action_gate` and clears `review-draft:{cid}` on success.
+- **Repository-level event polling independent of `intake: off`:** When a linked Project has active `github.*` workflow subscriptions, background polling scans repository-level endpoints (`/issues?since=...` filtering out PRs, and `/issues/comments?since=...`) even while Card `intake` is `off`. Durable repository baseline watermarks live in `source_observations` (separate from disposable response caches) so `opened` is emitted only when `created_at >= baseline` while pre-existing objects emit `discovered`.
+- **Canonical payloads and cross-GitHub loop suppression:** GitHub events remain body-free (preserving the disposable-cache boundary), use canonical PR/Issue event names and `actor = "github:<login>"`, match cardless Project subscriptions via `selector.repository` without stamping `event.project_id`, and suppress cross-GitHub feedback loops via `exclude_self` plus receipt-tracked remote IDs (`comment_id` / `review_id`) persisted in `source_observations`. See [Events and subscriptions](product/events-and-notifications.md) and [Unified workflow engine](product/workflow-engine.md).
+
 ## Cache implementation
 
 AppServer owns the service lifetime and update events. Provider-side response caching uses ordinary files and bounded in-memory maps; no cache database, Redis or separate cache framework is introduced.
