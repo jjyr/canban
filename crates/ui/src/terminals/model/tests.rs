@@ -3001,14 +3001,14 @@ fn sidebar_rows_render_single_line_compact_layout_with_dedup_and_remote_host_onl
     };
 
     // Initial state: `@developer` sits under `#86` CardWorktree (deduplicated!), `Local` omitted,
-    // and each terminal row height is compact 32pt (30pt inner row).
+    // and each terminal row height is 34pt (32pt pill + 2pt vertical rhythm).
     check_invariants(&tree.mounted_texts(), "initial", false);
     let dev_tid = format!("terminal:{}", Conversation::key("c1", "developer"));
     let dev_row_node = *tree.test_ids.get(&dev_tid).expect("terminal row test_id");
     let dev_frame = tree.frames.get(&dev_row_node).expect("terminal row frame");
     assert!(
-        (dev_frame.size.height.0 - 32.0).abs() < 0.5,
-        "expected compact 32pt terminal row wrapper (30pt pill), got {dev_frame:?}"
+        (dev_frame.size.height.0 - 34.0).abs() < 0.5,
+        "expected 34pt terminal row wrapper (32pt pill), got {dev_frame:?}"
     );
     // Tooltip / accessibility label still retains full Card title & Permission required wait reason!
     assert!(

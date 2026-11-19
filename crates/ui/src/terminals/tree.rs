@@ -46,18 +46,23 @@ fn tree_icon_button(
 }
 
 fn git_status_chips(git: &super::worktrees::ScopeGitSummary) -> View {
-    let mut row = view().flex_row().items_center().gap_1().flex_shrink_0();
+    let mut row = view()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .flex_shrink_0()
+        .opacity(0.85);
     if git.dirty {
         row = row
             .child(
                 label(format!("+{}", git.additions))
-                    .text_size(px(11.))
+                    .text_size(px(10.5))
                     .font_family(MONO_FONT)
                     .text_color(SUCCESS),
             )
             .child(
                 label(format!("−{}", git.deletions))
-                    .text_size(px(11.))
+                    .text_size(px(10.5))
                     .font_family(MONO_FONT)
                     .text_color(DANGER),
             );
@@ -70,7 +75,7 @@ fn git_status_chips(git: &super::worktrees::ScopeGitSummary) -> View {
         if git.behind > 0 {
             ab.push(format!("↓{}", git.behind));
         }
-        row = row.child(muted(ab.join(" ")).text_size(px(11.)));
+        row = row.child(muted(ab.join(" ")).text_size(px(10.5)));
     }
     row
 }
@@ -232,15 +237,16 @@ fn scope_header(
             .gap_1()
             .child(
                 icon_tinted(lead_icon, if active { ACCENT } else { MUTED })
-                    .w(px(13.))
-                    .h(px(13.))
+                    .w(px(12.))
+                    .h(px(12.))
                     .flex_shrink_0(),
             )
             .child(
                 label(display_label.clone())
                     .flex_1()
                     .min_w(px(0.))
-                    .text_size(px(12.5))
+                    .text_size(px(11.5))
+                    .text_color(MUTED)
                     .font_weight(if active {
                         FontWeight::SEMIBOLD
                     } else {
@@ -249,7 +255,7 @@ fn scope_header(
                     .truncate(),
             );
         if let Some(b) = badge {
-            title_row = title_row.child(muted(b).text_size(px(11.)).flex_shrink_0());
+            title_row = title_row.child(muted(b).text_size(px(10.5)).flex_shrink_0());
         }
         if resolution_label.is_some() {
             title_row = title_row.child(
@@ -267,8 +273,8 @@ fn scope_header(
         }
 
         let chevron_btn = canban_ui_kit::press_target()
-            .w(px(18.))
-            .h(px(28.))
+            .w(px(16.))
+            .h(px(26.))
             .flex_shrink_0()
             .items_center()
             .justify_center()
@@ -295,8 +301,8 @@ fn scope_header(
                     },
                     MUTED,
                 )
-                .w(px(11.))
-                .h(px(11.)),
+                .w(px(10.))
+                .h(px(10.)),
             )
             .on_press(move |_: &()| {
                 ui.terminal_folds.update(|folds| {
@@ -309,17 +315,17 @@ fn scope_header(
         let mut btn_row = canban_ui_kit::press_target()
             .w_full()
             .min_w(px(0.))
-            .min_h(px(28.))
-            .px_1p5()
+            .min_h(px(26.))
+            .px_1()
             .rounded(px(5.))
             .bg(CLEAR)
             .focus(|st| st.border_1().border_color(ACCENT))
             .flex_col()
             .justify_center()
-            .py(px(if stacked_git { 3. } else { 0. }))
+            .py(px(if stacked_git { 2. } else { 0. }))
             .child(title_row);
         if stacked_git {
-            btn_row = btn_row.child(view().pl(px(17.)).child(git_status_chips(&git_now)));
+            btn_row = btn_row.child(view().pl(px(16.)).child(git_status_chips(&git_now)));
         }
         btn_row = btn_row
             .accessibility_label({
@@ -348,16 +354,18 @@ fn scope_header(
             scope,
             WorktreeScope::Directory { project: None, .. } | WorktreeScope::Unassigned(_)
         );
-        let mut outer = view().relative();
-        if !is_external {
-            outer = outer.ml_1p5();
+        let mut outer = view().relative().mt(px(2.));
+        if is_external {
+            outer = outer.ml(px(4.));
+        } else {
+            outer = outer.ml(px(12.));
         }
         outer = outer
             .flex_row()
             .items_center()
             .min_w(px(0.))
             .rounded(px(5.))
-            .bg(if active { INSET } else { CLEAR })
+            .bg(CLEAR)
             .hover(|st| st.bg(INSET))
             .on_mouse_enter(move |_: &MouseEvent| hovered.set(true))
             .on_mouse_leave(move |_: &MouseEvent| hovered.set(false))
@@ -491,14 +499,15 @@ fn row(
             .flex_row()
             .items_center()
             .gap_1p5()
-            .child(icon(lead_icon).w(px(13.)).h(px(13.)).flex_shrink_0())
+            .child(icon(lead_icon).w(px(14.)).h(px(14.)).flex_shrink_0())
             .child(
                 label(row_title)
-                    .text_size(px(12.5))
+                    .text_size(px(13.))
+                    .text_color(TEXT)
                     .font_weight(if selected {
-                        FontWeight::MEDIUM
+                        FontWeight::SEMIBOLD
                     } else {
-                        FontWeight::NORMAL
+                        FontWeight::MEDIUM
                     })
                     .flex_1()
                     .min_w(px(0.))
@@ -520,11 +529,13 @@ fn row(
         }
 
         view()
+            .relative()
             .flex_row()
             .items_center()
             .min_w(px(0.))
-            .h(px(30.))
-            .rounded(px(5.))
+            .h(px(32.))
+            .my(px(1.))
+            .rounded(px(6.))
             .bg(if selected { SELECTED } else { CLEAR })
             .hover(move |s| s.bg(if selected { SELECTED } else { INSET }))
             .on_mouse_enter(move |_: &MouseEvent| hovered.set(true))
@@ -537,15 +548,28 @@ fn row(
                 ));
             })
             .tooltip(hint_tooltip(hint.clone()).placement(Placement::Right))
+            .child(when(
+                move || selected,
+                || {
+                    view()
+                        .absolute()
+                        .left(px(0.))
+                        .top(px(7.))
+                        .bottom(px(7.))
+                        .w(px(2.5))
+                        .rounded(px(2.))
+                        .bg(ACCENT)
+                },
+            ))
             .child(
                 canban_ui_kit::press_target()
                     .flex_1()
                     .min_w(px(0.))
-                    .h(px(30.))
-                    .px_1p5()
+                    .h(px(32.))
+                    .px_2()
                     .flex_row()
                     .items_center()
-                    .rounded(px(5.))
+                    .rounded(px(6.))
                     .bg(CLEAR)
                     .focus(|s| s.border_1().border_color(ACCENT))
                     .selected(move || selected)
@@ -586,10 +610,16 @@ impl TreeNode {
             Self::Empty => "empty".into(),
         }
     }
-    fn height(&self, ui: Ui) -> f32 {
+    fn height(&self, ui: Ui, is_first: bool) -> f32 {
         match self {
-            Self::Project(_) => 34.,
-            Self::OtherHeader => 30.,
+            Self::Project(_) => {
+                if is_first {
+                    28.
+                } else {
+                    38.
+                }
+            }
+            Self::OtherHeader => 34.,
             Self::Scope(key, scope) => {
                 let stacked = ui.terminal_width.get() < 340.
                     && ui
@@ -604,9 +634,9 @@ impl TreeNode {
                                     .is_some_and(|l| l.dirty || l.ahead > 0 || l.behind > 0)
                         })
                     });
-                if stacked { 44. } else { 32. }
+                if stacked { 42. } else { 28. }
             }
-            Self::Terminal(_) => 32.,
+            Self::Terminal(_) => 34.,
             Self::Empty => 40.,
         }
     }
@@ -741,10 +771,10 @@ fn other_heading() -> impl IntoElement {
         .flex_row()
         .items_center()
         .gap_2()
-        .h(px(30.))
+        .h(px(34.))
         .min_w(px(0.))
-        .px_2()
-        .pt_1p5()
+        .px_1()
+        .pt_2()
         .child(
             label("OTHER DIRECTORIES")
                 .text_size(px(10.5))
@@ -755,8 +785,9 @@ fn other_heading() -> impl IntoElement {
         .child(view().flex_1().h(px(1.)).bg(BORDER))
 }
 
-fn project_heading(ui: Ui, id: String) -> impl IntoElement {
+fn project_heading(ui: Ui, id: String, is_first: Memo<bool>) -> impl IntoElement {
     let fold_key = project_fold_key(&id);
+    let hovered = signal(false);
     let info = computed({
         let id = id.clone();
         let fold_key = fold_key.clone();
@@ -788,6 +819,7 @@ fn project_heading(ui: Ui, id: String) -> impl IntoElement {
 
     dynamic(move || {
         let (folded, proj_name, summary) = info.get();
+        let first = is_first.get();
         let pid_wt = id.clone();
         let pid_new = id.clone();
         let pid_ctx_new = id.clone();
@@ -799,8 +831,8 @@ fn project_heading(ui: Ui, id: String) -> impl IntoElement {
         let mut header_btn = canban_ui_kit::press_target()
             .flex_1()
             .min_w(px(0.))
-            .h(px(30.))
-            .px_1p5()
+            .h(px(26.))
+            .px_1()
             .flex_row()
             .items_center()
             .gap_1()
@@ -829,20 +861,15 @@ fn project_heading(ui: Ui, id: String) -> impl IntoElement {
                     },
                     MUTED,
                 )
-                .w(px(11.))
-                .h(px(11.))
+                .w(px(10.))
+                .h(px(10.))
                 .flex_shrink_0(),
             )
             .child(
-                icon_tinted(Icon::Folder, MUTED)
-                    .w(px(13.))
-                    .h(px(13.))
-                    .flex_shrink_0(),
-            )
-            .child(
-                label(proj_name)
+                label(proj_name.to_uppercase())
                     .flex_1()
                     .min_w(px(0.))
+                    .text_size(px(11.))
                     .text_color(MUTED)
                     .font_weight(FontWeight::SEMIBOLD)
                     .truncate(),
@@ -860,13 +887,14 @@ fn project_heading(ui: Ui, id: String) -> impl IntoElement {
             });
         });
 
-        view()
+        let row = view()
+            .relative()
             .flex_row()
             .items_center()
-            .gap_0p5()
-            .h(px(34.))
+            .h(px(28.))
             .min_w(px(0.))
-            .px_1()
+            .on_mouse_enter(move |_: &MouseEvent| hovered.set(true))
+            .on_mouse_leave(move |_: &MouseEvent| hovered.set(false))
             .on_context_menu(move |ev: &nsh_core::ContextMenuEvent| {
                 use nsh_core::element::desktop::{MenuItem, popup_menu_at};
                 let pid_new = pid_ctx_new.clone();
@@ -898,18 +926,48 @@ fn project_heading(ui: Ui, id: String) -> impl IntoElement {
                 });
             })
             .child(header_btn)
-            .child(tree_icon_button(
-                Icon::Branch,
-                "New branch worktree",
-                move || ui.pending.get(),
-                move |_| ui.worktree_modal.set(Some(pid_wt.clone())),
-            ))
-            .child(tree_icon_button(
-                Icon::Plus,
-                "New terminal",
-                move || ui.pending.get(),
-                move |_| create(ui, pid_new.clone(), None),
-            ))
+            .child(when(
+                move || hovered.get(),
+                move || {
+                    let pid_wt = pid_wt.clone();
+                    let pid_new = pid_new.clone();
+                    view()
+                        .absolute()
+                        .right(px(4.))
+                        .top(px(2.))
+                        .bottom(px(2.))
+                        .flex_row()
+                        .items_center()
+                        .gap_0p5()
+                        .pl_1()
+                        .rounded(px(5.))
+                        .bg(INSET)
+                        .child(tree_icon_button(
+                            Icon::Branch,
+                            "New branch worktree",
+                            move || ui.pending.get(),
+                            move |_| ui.worktree_modal.set(Some(pid_wt.clone())),
+                        ))
+                        .child(tree_icon_button(
+                            Icon::Plus,
+                            "New terminal",
+                            move || ui.pending.get(),
+                            move |_| create(ui, pid_new.clone(), None),
+                        ))
+                },
+            ));
+
+        let mut container = view().flex_col().min_w(px(0.));
+        if !first {
+            container = container.child(
+                view()
+                    .h(px(10.))
+                    .px_1()
+                    .justify_center()
+                    .child(view().h(px(1.)).bg(BORDER)),
+            );
+        }
+        container.child(row)
     })
 }
 
@@ -917,9 +975,10 @@ fn node_content(
     ui: Ui,
     node: ReadSignal<TreeNode>,
     indices: Memo<std::collections::BTreeMap<String, usize>>,
+    is_first: Memo<bool>,
 ) -> AnyElement {
     match node.get_untracked() {
-        TreeNode::Project(id) => project_heading(ui, id).into_element(),
+        TreeNode::Project(id) => project_heading(ui, id, is_first).into_element(),
         TreeNode::OtherHeader => other_heading().into_element(),
         TreeNode::Terminal(id) => {
             let id_ext = id.clone();
@@ -972,9 +1031,9 @@ fn node_content(
                     if entry.get().is_some() {
                         last_ext.replace(is_external.get());
                     }
-                    px(if last_ext.get() { 8. } else { 14. })
+                    px(if last_ext.get() { 12. } else { 20. })
                 })
-                .pl_1p5()
+                .pl_2()
                 .border_l_1()
                 .border_color(BORDER)
                 .child(dynamic(move || {
@@ -1119,17 +1178,18 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
         let offset = scroll_position(ui, "terminals:tree");
         if offset.y.0 > 0. && before != next {
             let mut top = 0.;
-            let anchor = before.iter().find_map(|row| {
+            let anchor = before.iter().enumerate().find_map(|(i, row)| {
                 let start = top;
-                top += row.height(ui);
+                top += row.height(ui, i == 0);
                 (top > offset.y.0 && next.iter().any(|n| n.key() == row.key()))
                     .then(|| (row.key(), start))
             });
             if let Some((key, start)) = anchor {
                 let new_top: f32 = next
                     .iter()
-                    .take_while(|n| n.key() != key)
-                    .map(|row| row.height(ui))
+                    .enumerate()
+                    .take_while(|(_, n)| n.key() != key)
+                    .map(|(i, row)| row.height(ui, i == 0))
                     .sum();
                 let target = point(offset.x, px((new_top + offset.y.0 - start).max(0.)));
                 let ticket = scroll_generation.get();
@@ -1205,6 +1265,15 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                             let key = key.clone();
                             move || desired_keys.with(|keys| keys.contains(&key))
                         });
+                        let is_first = computed({
+                            let key = key.clone();
+                            move || {
+                                structure.with(|nodes| {
+                                    nodes.first().map(TreeNode::key).as_deref()
+                                        == Some(key.as_str())
+                                })
+                            }
+                        });
                         let row_ref = element_ref();
                         let initial = present.get_untracked();
                         let opacity = animated_value(if initial { 1. } else { 0. });
@@ -1235,13 +1304,13 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                             .overflow_hidden()
                             .h(move || {
                                 px(if present.get() {
-                                    node.get().height(ui)
+                                    node.get().height(ui, is_first.get())
                                 } else {
                                     0.
                                 })
                             })
                             .bind_opacity(&opacity)
-                            .child(node_content(ui, node, indices))
+                            .child(node_content(ui, node, indices, is_first))
                     },
                 ))),
         )
