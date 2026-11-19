@@ -37,11 +37,26 @@ pub fn apply_pending_move(cards: &mut [Card], pending: &PendingMove) -> bool {
         .map(|(i, _)| i)
         .collect();
     peer_indices.sort_by(|&a, &b| cards[a].board_cmp(&cards[b]));
+    if let Some(before_id) = pending.before_card_id.as_deref()
+        && !peer_indices.iter().any(|&i| cards[i].id == before_id)
+    {
+        return false;
+    }
+    if cards[card_idx].resolved() {
+        if !same_stage {
+            cards[card_idx].stage = pending.target_stage.clone();
+            cards[card_idx].board_order = None;
+            cards[card_idx].attention = None;
+            cards[card_idx].human_gate = None;
+        }
+        return true;
+    }
+    peer_indices.retain(|&i| !cards[i].resolved());
     let insert_at = if let Some(before_id) = pending.before_card_id.as_deref() {
-        let Some(pos) = peer_indices.iter().position(|&i| cards[i].id == before_id) else {
-            return false;
-        };
-        pos
+        peer_indices
+            .iter()
+            .position(|&i| cards[i].id == before_id)
+            .unwrap_or(peer_indices.len())
     } else {
         peer_indices.len()
     };
@@ -415,5 +430,66 @@ mod tests {
             .map(|c| c.id.as_str())
             .collect();
         assert_eq!(ordered2, vec!["d", "c", "a"]);
+    }
+    #[test]
+    fn apply_pending_move_respects_resolved_descending_order_and_unresolved_tail() {
+        let mut cards = vec![
+            card("u1", "review", 1),
+            card("u2", "review", 2),
+            card("r_old", "review", 3),
+            card("r_new", "review", 4),
+        ];
+        cards[0].board_order = Some(2048);
+        cards[1].board_order = Some(3072);
+        cards[2].board_order = Some(0);
+        cards[2].resolution = Some(canban_types::CardResolution {
+            resolved_at: 100,
+            kind: "manual".into(),
+            reason: None,
+            actor: "user".into(),
+        });
+        cards[3].board_order = Some(512);
+        cards[3].resolution = Some(canban_types::CardResolution {
+            resolved_at: 200,
+            kind: "manual".into(),
+            reason: None,
+            actor: "user".into(),
+        });
+
+        let initial: Vec<_> = super::cards(&cards, "review", "")
+            .into_iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(initial, vec!["u1", "u2", "r_new", "r_old"]);
+
+        // Drag `u1` to before `r_new` (end of unresolved section): must land after `u2`.
+        let move_to_end = PendingMove {
+            card_id: "u1".into(),
+            base_revision: 1,
+            target_stage: "review".into(),
+            before_card_id: Some("r_new".into()),
+        };
+        assert!(apply_pending_move(&mut cards, &move_to_end));
+        assert_eq!(cards[0].board_order, Some(4096));
+        let after_move: Vec<_> = super::cards(&cards, "review", "")
+            .into_iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(after_move, vec!["u2", "u1", "r_new", "r_old"]);
+
+        // Dragging a resolved card within the same stage keeps its resolved_at order and board_order.
+        let noop_resolved = PendingMove {
+            card_id: "r_old".into(),
+            base_revision: 1,
+            target_stage: "review".into(),
+            before_card_id: Some("r_new".into()),
+        };
+        assert!(apply_pending_move(&mut cards, &noop_resolved));
+        assert_eq!(cards[2].board_order, Some(0));
+        let after_resolved_drag: Vec<_> = super::cards(&cards, "review", "")
+            .into_iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(after_resolved_drag, vec!["u2", "u1", "r_new", "r_old"]);
     }
 }

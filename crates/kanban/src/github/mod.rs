@@ -180,6 +180,7 @@ impl Intake {
             let c: Card = serde_json::from_str(&row?)?;
             if c.active()
                 && c.stage == stage
+                && !c.resolved()
                 && result
                     .tail
                     .as_ref()

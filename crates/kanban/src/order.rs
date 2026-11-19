@@ -17,12 +17,20 @@ pub fn place(db: Db<'_>, card: &mut Card, before: Option<&str>) -> Result<bool> 
         .filter(|c| c.active() && c.project_id == card.project_id && c.stage == card.stage)
         .collect();
     peers.sort_by(Card::board_cmp);
+    if let Some(id) = before {
+        ensure!(
+            peers.iter().any(|c| c.id == id),
+            "Drop target changed; refresh the Board and try again"
+        );
+    }
+    if card.resolved() {
+        return Ok(false);
+    }
+    peers.retain(|c| !c.resolved());
     let old: Vec<_> = peers.iter().map(|c| c.id.clone()).collect();
     peers.retain(|c| c.id != card.id);
     let index = if let Some(id) = before {
-        peers.iter().position(|c| c.id == id).ok_or_else(|| {
-            anyhow::anyhow!("Drop target changed; refresh the Board and try again")
-        })?
+        peers.iter().position(|c| c.id == id).unwrap_or(peers.len())
     } else {
         peers.len()
     };

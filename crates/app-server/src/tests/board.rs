@@ -168,3 +168,83 @@ fn a_new_card_appends_after_existing_custom_order() {
     let b = peer(&app, &p, "New Card");
     assert_eq!(order(&app, "backlog"), vec![a.id, b.id]);
 }
+
+#[test]
+fn resolved_cards_sort_most_recent_first_and_reopen_restores_rank() {
+    let (_dir, app, p, a) = setup();
+    let b = peer(&app, &p, "B");
+    let c = peer(&app, &p, "C");
+    assert_eq!(
+        order(&app, "backlog"),
+        vec![a.id.clone(), b.id.clone(), c.id.clone()]
+    );
+
+    // Resolve A first, then C later: C should appear at the top of resolved cards (above A),
+    // while unresolved B stays above all resolved cards.
+    let mut a_resolved: Card = serde_json::from_value(
+        app.call(
+            "card.resolve",
+            json!({"view":"full","card_id":a.id,"revision":a.revision}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    // Ensure distinct timestamps even on fast clocks.
+    a_resolved.resolution.as_mut().unwrap().resolved_at = 1_000;
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| db.save(&a_resolved))
+        .unwrap();
+
+    let mut c_resolved: Card = serde_json::from_value(
+        app.call(
+            "card.resolve",
+            json!({"view":"full","card_id":c.id,"revision":c.revision}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    c_resolved.resolution.as_mut().unwrap().resolved_at = 2_000;
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| db.save(&c_resolved))
+        .unwrap();
+
+    assert_eq!(
+        order(&app, "backlog"),
+        vec![b.id.clone(), c.id.clone(), a.id.clone()]
+    );
+
+    // Creating a new card appends at the end of unresolved cards (after B), even though A has a lower board_order.
+    let d = peer(&app, &p, "D");
+    assert_eq!(
+        order(&app, "backlog"),
+        vec![b.id.clone(), d.id.clone(), c.id.clone(), a.id.clone()]
+    );
+
+    // Reordering a resolved card within the same stage is a no-op and does not bump revision.
+    let before_rev = a_resolved.revision;
+    let moved_a: Card = serde_json::from_value(
+        app.call(
+            "card.move",
+            json!({"view":"full","card_id":a.id,"revision":before_rev,"stage":"backlog","before_card_id":c.id}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(moved_a.revision, before_rev);
+    assert_eq!(
+        order(&app, "backlog"),
+        vec![b.id.clone(), d.id.clone(), c.id.clone(), a.id.clone()]
+    );
+
+    // Reopening A restores its original board_order (before B and D).
+    app.call(
+        "card.reopen",
+        json!({"view":"full","card_id":a.id,"revision":before_rev}),
+    )
+    .unwrap();
+    assert_eq!(order(&app, "backlog"), vec![a.id, b.id, d.id, c.id]);
+}

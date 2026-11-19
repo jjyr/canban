@@ -1705,6 +1705,13 @@ impl Card {
     pub fn board_cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.resolved()
             .cmp(&other.resolved())
+            .then_with(|| {
+                if self.resolved() {
+                    other.resolved_at().cmp(&self.resolved_at())
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
             .then_with(|| self.board_rank().cmp(&other.board_rank()))
             .then_with(|| self.number.cmp(&other.number))
             .then_with(|| self.id.cmp(&other.id))
@@ -1956,6 +1963,82 @@ mod tests {
         assert!(merged.resolved());
         assert_eq!(merged.resolved_at(), Some(200));
         assert_eq!(open.board_cmp(&merged), std::cmp::Ordering::Less);
+    }
+
+    #[test]
+    fn resolved_cards_sort_by_resolved_at_descending_with_fallback_to_board_rank() {
+        let make = |id: &str, number: u64, board_order: i64| -> Card {
+            serde_json::from_value(json!({
+                "id": id,
+                "project_id": "proj",
+                "number": number,
+                "board_order": board_order,
+                "title": id,
+                "body": "",
+                "stage": "review",
+                "revision": 1,
+                "created_at": number
+            }))
+            .unwrap()
+        };
+        let open_high_rank = make("open-high", 10, 10_000);
+        let mut resolved_older = make("resolved-older", 1, 0);
+        resolved_older.resolution = Some(CardResolution {
+            resolved_at: 100,
+            kind: "manual".into(),
+            reason: None,
+            actor: "user".into(),
+        });
+        let mut resolved_newer = make("resolved-newer", 5, 5_000);
+        resolved_newer.resolution = Some(CardResolution {
+            resolved_at: 300,
+            kind: "manual".into(),
+            reason: None,
+            actor: "user".into(),
+        });
+        let mut merged_mid = make("merged-mid", 3, 2_000);
+        merged_mid.delivery = Some(Delivery {
+            target_branch: "main".into(),
+            commit: "abc123".into(),
+            request_key: "k1".into(),
+            merged_at: 200,
+        });
+        let mut resolved_tie_a = make("resolved-tie-a", 2, 100);
+        resolved_tie_a.resolution = Some(CardResolution {
+            resolved_at: 100,
+            kind: "manual".into(),
+            reason: None,
+            actor: "user".into(),
+        });
+        let mut merged_no_ts = make("merged-no-ts", 4, -500);
+        merged_no_ts.resolution = Some(CardResolution {
+            resolved_at: 0,
+            kind: "manual".into(),
+            reason: None,
+            actor: "user".into(),
+        });
+
+        let mut cards = [
+            merged_no_ts,
+            resolved_tie_a,
+            resolved_older,
+            merged_mid,
+            resolved_newer,
+            open_high_rank,
+        ];
+        cards.sort_by(Card::board_cmp);
+        let ids: Vec<_> = cards.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "open-high",
+                "resolved-newer",
+                "merged-mid",
+                "resolved-older",
+                "resolved-tie-a",
+                "merged-no-ts",
+            ]
+        );
     }
 
     #[test]
