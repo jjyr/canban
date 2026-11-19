@@ -130,7 +130,7 @@ pub fn render(ui: Ui) -> impl IntoElement {
             let card_runs: Vec<_> = s
                 .workflow_runs
                 .iter()
-                .filter(|r| r.card_id == card_id)
+                .filter(|r| r.card_id.as_deref() == Some(card_id.as_str()))
                 .collect();
             let active_visible = card_runs
                 .iter()
@@ -178,11 +178,9 @@ pub fn render(ui: Ui) -> impl IntoElement {
                 None
             };
             let queue_info = s.merge_queue_status(&card_id).map(|(pos, total, head)| {
-                let head_card_num = s
-                    .cards
-                    .iter()
-                    .find(|c| c.id == head.card_id)
-                    .map(|c| c.number);
+                let head_card_num = head.card_id.as_deref().and_then(|head_cid| {
+                    s.cards.iter().find(|c| c.id == head_cid).map(|c| c.number)
+                });
                 let head_pause = head.queue_pause_reason().map(str::to_owned);
                 let head_resolving = matches!(
                     head.state.as_str(),

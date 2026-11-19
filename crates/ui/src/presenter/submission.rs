@@ -13,6 +13,7 @@ pub(super) fn config_only(method: &str) -> bool {
         "config.agents.save"
             | "agent.setup"
             | "scheduler.configure"
+            | "host.env.refresh"
             | "utilities.configure"
             | "utilities.awake"
             | "github.notification.read"
@@ -701,6 +702,7 @@ mod tests {
         assert!(config_only("utilities.configure"));
         assert!(config_only("utilities.awake"));
         assert!(config_only("scheduler.configure"));
+        assert!(config_only("host.env.refresh"));
         assert!(immediate("card.move"));
         assert!(immediate("card.hold_auto_merge"));
         assert!(immediate("comment.update"));

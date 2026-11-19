@@ -1643,10 +1643,11 @@ pub fn execute(ui: Ui, id: &str) {
                                     matches!(st, canban_types::WorkflowStep::Deliver { .. })
                                 })
                         });
-                        let non_deliver = s
-                            .workflow_runs
-                            .iter()
-                            .any(|r| r.card_id == c.id && r.active() && !r.step_is_deliver());
+                        let non_deliver = s.workflow_runs.iter().any(|r| {
+                            r.card_id.as_deref() == Some(c.id.as_str())
+                                && r.active()
+                                && !r.step_is_deliver()
+                        });
                         (has_deliver, non_deliver)
                     });
                 if !c.active() || c.resolved() || c.worktree.is_none() || !has_deliver_in_project {

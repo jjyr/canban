@@ -135,9 +135,11 @@ impl SnapshotIndex {
             let queue = snapshot.merge_queue(pid);
             if let Some(&head) = queue.first() {
                 for (i, run) in queue.iter().enumerate() {
-                    queue_status
-                        .entry(run.card_id.as_str())
-                        .or_insert((i + 1, queue.len(), head));
+                    if let Some(cid) = run.card_id.as_deref() {
+                        queue_status
+                            .entry(cid)
+                            .or_insert((i + 1, queue.len(), head));
+                    }
                 }
             }
         }
@@ -472,6 +474,11 @@ mod tests {
         duplicate.id = "duplicate-run".into();
         duplicate.inputs["queued_at"] = json!(99);
         s.workflow_runs.push(duplicate);
+        let mut cardless = s.workflow_runs[0].clone();
+        cardless.id = "cardless-run".into();
+        cardless.card_id = None;
+        cardless.state = "waiting_script".into();
+        s.workflow_runs.push(cardless);
         for paused in [false, true] {
             s.workflow_runs[2].inputs["queue_pause_reason"] = if paused {
                 json!("Checkout busy")

@@ -174,7 +174,7 @@ pub(crate) fn start(ui: Ui, card: Card) {
             let mut warnings = Vec::new();
             if s.workflow_runs
                 .iter()
-                .any(|r| r.card_id == card.id && r.active())
+                .any(|r| r.card_id.as_deref() == Some(card.id.as_str()) && r.active())
             {
                 warnings.push("Active workflow run will be stopped".into());
             }

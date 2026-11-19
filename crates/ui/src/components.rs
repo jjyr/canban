@@ -30,7 +30,7 @@ pub fn run_panel(ui: Ui, entry: TerminalEntry) -> impl IntoElement {
         ui.snapshot.with_untracked(|s| {
             let active = s.cards.iter().any(|c| c.id == run.card_id && c.active());
             let deliver_run = s.workflow_runs.iter().find(|r| {
-                r.card_id == run.card_id
+                r.card_id.as_deref() == Some(run.card_id.as_str())
                     && r.active()
                     && r.step_is_deliver()
                     && (r.terminal_id.as_deref() == Some(id.as_str())

@@ -258,7 +258,9 @@ pub(crate) fn is_merging_indexed(
         return pos == 1 && head.state == "waiting_delivery" && head.queue_pause_reason().is_none();
     }
     snapshot.workflow_runs.iter().any(|r| {
-        r.card_id == card.id && r.state == "waiting_delivery" && r.queue_pause_reason().is_none()
+        r.card_id.as_deref() == Some(card.id.as_str())
+            && r.state == "waiting_delivery"
+            && r.queue_pause_reason().is_none()
     })
 }
 
@@ -300,10 +302,11 @@ pub(crate) fn card_status_specs_indexed(
     } else if merging {
         specs.push(("Merging".into(), Tone::Info, true));
     } else if card.active()
-        && snapshot
-            .workflow_runs
-            .iter()
-            .any(|r| r.card_id == card.id && r.active() && r.state == "waiting_script")
+        && snapshot.workflow_runs.iter().any(|r| {
+            r.card_id.as_deref() == Some(card.id.as_str())
+                && r.active()
+                && r.state == "waiting_script"
+        })
     {
         specs.push(("Running script".into(), Tone::Info, true));
     } else if card.active()
@@ -575,7 +578,7 @@ mod tests {
         .unwrap();
         let mut run2 = snapshot.workflow_runs[0].clone();
         run2.id = "run-2".into();
-        run2.card_id = "c2".into();
+        run2.card_id = Some("c2".into());
         run2.inputs = serde_json::json!({"queued_at": 20});
         snapshot.cards.push(card2.clone());
         snapshot.workflow_runs.push(run2.clone());
@@ -815,7 +818,7 @@ mod tests {
         let b_run = run_template.clone();
         let mut q_run = run_template;
         q_run.id = "run-behind".into();
-        q_run.card_id = behind_card.id.clone();
+        q_run.card_id = Some(behind_card.id.clone());
         q_run.state = "waiting_delivery".into();
         q_run.inputs = serde_json::json!({"queued_at": t0 + 100});
         let b_run_id = b_run.id.clone();

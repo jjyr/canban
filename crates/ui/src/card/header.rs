@@ -239,7 +239,7 @@ fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
         let active = ui.snapshot.with_untracked(|s| {
             s.workflow_runs
                 .iter()
-                .any(|r| r.card_id == card.id && r.active())
+                .any(|r| r.card_id.as_deref() == Some(card.id.as_str()) && r.active())
         });
         for workflow in workflows {
             for entry in workflow.definition.entries.keys() {
@@ -274,7 +274,7 @@ fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
         for run in ui.snapshot.with_untracked(|s| {
             s.workflow_runs
                 .iter()
-                .filter(|r| r.card_id == card.id && r.active())
+                .filter(|r| r.card_id.as_deref() == Some(card.id.as_str()) && r.active())
                 .cloned()
                 .collect::<Vec<_>>()
         }) {
@@ -292,7 +292,7 @@ fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
                         .any(|st| matches!(st, canban_types::WorkflowStep::Deliver { .. }))
             });
             let non_deliver = s.workflow_runs.iter().any(|r| {
-                r.card_id == card.id
+                r.card_id.as_deref() == Some(card.id.as_str())
                     && r.active()
                     && !r.step.as_ref().is_some_and(|k| {
                         matches!(
@@ -640,7 +640,9 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 ui.snapshot.with(|s| {
                     let d = ui.index.with(|idx| idx.review_draft(&c.id).cloned());
                     let r = crate::review::active_review_run(s, &c.id);
-                    let active_wf = s.workflow_runs.iter().any(|run| run.card_id == c.id && run.active());
+                    let active_wf = s.workflow_runs.iter().any(|run| {
+                        run.card_id.as_deref() == Some(c.id.as_str()) && run.active()
+                    });
                     let auto = next_stage.as_ref().and_then(|next| {
                         let files: Vec<_> = s
                             .workflow_sources

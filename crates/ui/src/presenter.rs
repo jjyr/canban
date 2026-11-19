@@ -127,6 +127,7 @@ pub struct Ui {
     pub(crate) pending_catalog_ops: Stored<Vec<(u64, Value)>>,
     pub max_agents: Signal<usize>,
     pub idle_minutes: Signal<u64>,
+    pub terminal_env_mode: Signal<HostTerminalEnvMode>,
     pub overview_selection: Signal<String>,
     pub overview_closed: Signal<bool>,
     pub overview_idle: Signal<bool>,
@@ -251,6 +252,7 @@ impl Ui {
                 .set(ordered_enabled_profiles(&cfg.profiles, &cfg.default_agent));
             self.max_agents.set(cfg.scheduler.max_agents);
             self.idle_minutes.set(cfg.scheduler.idle_minutes);
+            self.terminal_env_mode.set(cfg.terminal_env_mode);
         });
     }
 
@@ -510,6 +512,12 @@ impl Ui {
                     .get()
                     .map(|a| a.config().scheduler.max_agents)
                     .unwrap_or(8),
+            ),
+            terminal_env_mode: signal(
+                crate::APP
+                    .get()
+                    .map(|a| a.config().terminal_env_mode)
+                    .unwrap_or_default(),
             ),
             profiles: signal({
                 let cfg = crate::APP.get().map(|app| app.config()).unwrap_or_default();
@@ -1114,12 +1122,15 @@ pub fn dispatch_complete(
                 | "config.reload"
                 | "agent.setup"
                 | "scheduler.configure"
+                | "host.env.refresh"
                 | "herdr.status"
                 | "herdr.check"
         )
     {
         params["host_id"] = json!(ui.effective_config_host());
     }
+    let is_terminal_env_save =
+        method == "config.agents.save" && params["op"].as_str() == Some("set_terminal_env_mode");
     let source = ui.location();
     let active_project = ui.project.get_untracked();
     let target_host = crate::HOSTS
@@ -1238,7 +1249,25 @@ pub fn dispatch_complete(
                         )),
                         "config.reload" => ui.notify("Configuration reloaded"),
                         "agent.setup" => ui.notify("Agent setup saved"),
-                        "config.agents.save" => ui.notify("Agent settings saved"),
+                        "config.agents.save" => ui.notify(if is_terminal_env_save {
+                            "Terminal environment settings saved"
+                        } else {
+                            "Agent settings saved"
+                        }),
+                        "host.env.refresh" => {
+                            let shell = value["shell"].as_str().unwrap_or("shell");
+                            let var_count = value["var_count"].as_u64().unwrap_or(0);
+                            let full = value["full_env_captured"].as_bool().unwrap_or(false);
+                            if full {
+                                ui.notify(format!(
+                                    "Refreshed terminal environment ({var_count} vars from {shell})"
+                                ));
+                            } else {
+                                ui.notify(format!(
+                                    "Refreshed terminal PATH from {shell} (full environment unavailable)"
+                                ));
+                            }
+                        }
                         "project.agents" => ui.notify("Project Agent overrides saved"),
                         "scheduler.configure" => ui.notify("Scheduling settings saved"),
                         "project.location" => ui.notify("Work location updated"),

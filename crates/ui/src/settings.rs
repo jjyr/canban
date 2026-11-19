@@ -5,7 +5,7 @@ use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
 use serde_json::json;
 
-pub const SECTION_COUNT: usize = 10;
+pub const SECTION_COUNT: usize = 11;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SectionId {
@@ -15,6 +15,7 @@ pub enum SectionId {
     Diagnostics,
     Updates,
     Scheduling,
+    TerminalEnv,
     Agents,
     Herdr,
     Storage,
@@ -29,6 +30,7 @@ impl SectionId {
         Self::Diagnostics,
         Self::Updates,
         Self::Scheduling,
+        Self::TerminalEnv,
         Self::Agents,
         Self::Herdr,
         Self::Storage,
@@ -43,10 +45,11 @@ impl SectionId {
             Self::Diagnostics => 3,
             Self::Updates => 4,
             Self::Scheduling => 5,
-            Self::Agents => 6,
-            Self::Herdr => 7,
-            Self::Storage => 8,
-            Self::Acknowledgements => 9,
+            Self::TerminalEnv => 6,
+            Self::Agents => 7,
+            Self::Herdr => 8,
+            Self::Storage => 9,
+            Self::Acknowledgements => 10,
         }
     }
 
@@ -58,6 +61,7 @@ impl SectionId {
             Self::Diagnostics => "diagnostics",
             Self::Updates => "updates",
             Self::Scheduling => "scheduling",
+            Self::TerminalEnv => "terminal-env",
             Self::Agents => "agents",
             Self::Herdr => "herdr",
             Self::Storage => "storage",
@@ -80,6 +84,7 @@ impl SectionId {
             Self::Diagnostics => "Diagnostics",
             Self::Updates => "Updates",
             Self::Scheduling => "Agent scheduling",
+            Self::TerminalEnv => "Terminal Environment",
             Self::Agents => "Agents & Identities",
             Self::Herdr => "Herdr",
             Self::Storage => "Storage",
@@ -469,6 +474,132 @@ pub fn acknowledgements_section(ui: Ui) -> impl IntoElement {
             body,
         )
         .into_element()
+    }))
+}
+
+pub(crate) fn terminal_env_section(ui: Ui) -> impl IntoElement {
+    use canban_types::HostTerminalEnvMode;
+
+    let save_error = signal(String::new());
+    let refresh_note = signal(Option::<(String, Tone)>::None);
+    let tracked_host = signal(ui.settings_host.get_untracked());
+    effect(move || {
+        let cur_host = ui.settings_host.get();
+        if tracked_host.get_untracked() != cur_host {
+            tracked_host.set(cur_host);
+            save_error.set(String::new());
+            refresh_note.set(None);
+        }
+    });
+
+    let save_mode = move |mode: HostTerminalEnvMode| {
+        if ui.is_method_pending("config.agents.save")
+            || ui.terminal_env_mode.get_untracked() == mode
+        {
+            return;
+        }
+        dispatch_complete(
+            ui,
+            "config.agents.save",
+            json!({
+                "op": "set_terminal_env_mode",
+                "terminal_env_mode": mode.as_str(),
+            }),
+            move |res| match res {
+                Ok(_) => {
+                    ui.terminal_env_mode.set(mode);
+                    save_error.try_set(String::new());
+                }
+                Err(e) => {
+                    save_error.try_set(e);
+                }
+            },
+        );
+    };
+
+    settings_section(
+        "Terminal Environment",
+        "Host login-shell environment inherited by automated Agent and Script workflow steps.",
+    )
+    .trailing(
+        compact_action(
+            move || {
+                if ui.is_method_pending("host.env.refresh") {
+                    "Refreshing…"
+                } else {
+                    "Refresh"
+                }
+            },
+            Variant::Secondary,
+            move |_| {
+                if ui.is_method_pending("host.env.refresh") {
+                    return;
+                }
+                dispatch_complete(ui, "host.env.refresh", json!({}), move |res| match res {
+                    Ok(v) => {
+                        let shell = v["shell"].as_str().unwrap_or("shell");
+                        let var_count = v["var_count"].as_u64().unwrap_or(0);
+                        let full = v["full_env_captured"].as_bool().unwrap_or(false);
+                        let (msg, tone) = if full {
+                            (
+                                format!(
+                                    "Captured {var_count} environment variables from {shell}."
+                                ),
+                                Tone::Success,
+                            )
+                        } else {
+                            (
+                                format!(
+                                    "Captured PATH from {shell}; full environment snapshot was unavailable."
+                                ),
+                                Tone::Attention,
+                            )
+                        };
+                        refresh_note.try_set(Some((msg, tone)));
+                    }
+                    Err(e) => {
+                        refresh_note.try_set(Some((e, Tone::Danger)));
+                    }
+                });
+            },
+        )
+        .disabled(move || ui.is_method_pending("host.env.refresh")),
+    )
+    .child(settings_field(
+        "Environment mode",
+        "Trusted automated runs inherit your login-shell environment by default, or can be restricted to minimal PATH-only env.",
+        segmented()
+            .child(
+                segment(
+                    "Inherit User Terminal Environment",
+                    None,
+                    move || ui.terminal_env_mode.get() == HostTerminalEnvMode::Inherit,
+                    move |_| save_mode(HostTerminalEnvMode::Inherit),
+                )
+                .disabled(move || ui.is_method_pending("config.agents.save")),
+            )
+            .child(
+                segment(
+                    "Minimal (PATH only)",
+                    None,
+                    move || ui.terminal_env_mode.get() == HostTerminalEnvMode::Minimal,
+                    move |_| save_mode(HostTerminalEnvMode::Minimal),
+                )
+                .disabled(move || ui.is_method_pending("config.agents.save")),
+            ),
+    ))
+    .child(muted(
+        "External fork PRs (external_pr) and untrusted external cardless runs default to minimal env unless overridden in workflow/step env:. Interactive Card Terminals remain unrestricted.",
+    ))
+    .child(dynamic(move || {
+        let err = save_error.get();
+        if !err.is_empty() {
+            return notice(err, Tone::Danger).into_element();
+        }
+        if let Some((msg, tone)) = refresh_note.get() {
+            return notice(msg, tone).into_element();
+        }
+        view().into_element()
     }))
 }
 
@@ -954,6 +1085,10 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                                 .into_element(),
                                         ))
                                         .child(wrap_section(
+                                            SectionId::TerminalEnv,
+                                            terminal_env_section(ui).into_element(),
+                                        ))
+                                        .child(wrap_section(
                                             SectionId::Agents,
                                             crate::agents_setup::global_settings_section(
                                                 ui,
@@ -984,7 +1119,7 @@ mod tests {
     use super::*;
 
     const SAMPLE_OFFSETS: [f32; SECTION_COUNT] = [
-        32.0, 220.0, 340.0, 480.0, 600.0, 720.0, 1380.0, 1820.0, 2060.0, 2280.0,
+        32.0, 220.0, 340.0, 480.0, 600.0, 720.0, 1060.0, 1380.0, 1820.0, 2060.0, 2280.0,
     ];
 
     #[test]
@@ -1005,6 +1140,15 @@ mod tests {
             scroll_spy_section(680.0, &SAMPLE_OFFSETS, 2800.0, 800.0),
             SectionId::Scheduling
         );
+        assert_eq!(
+            scroll_spy_section(1020.0, &SAMPLE_OFFSETS, 2800.0, 800.0),
+            SectionId::TerminalEnv
+        );
+        assert_eq!(
+            SectionId::from_id("terminal-env"),
+            Some(SectionId::TerminalEnv)
+        );
+        assert_eq!(SectionId::TerminalEnv.nav_label(), "Terminal Environment");
         assert_eq!(
             scroll_spy_section(1760.0, &SAMPLE_OFFSETS, 2800.0, 800.0),
             SectionId::Herdr
