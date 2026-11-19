@@ -271,10 +271,17 @@ fn is_workspace_page(page: &str) -> bool {
 pub fn screen(ui: Ui) -> impl IntoElement {
     let in_terminals = computed(move || matches!(ui.page.get().as_str(), "terminals" | "terminal"));
     let is_workspace = computed(move || is_workspace_page(&ui.page.get()));
+    let is_settings = computed(move || ui.page.get() == "settings");
     let shell_mounted = signal(!in_terminals.get_untracked());
     effect(move || {
         if !in_terminals.get() && !shell_mounted.get_untracked() {
             shell_mounted.set(true);
+        }
+    });
+    let settings_mounted = signal(is_settings.get_untracked());
+    effect(move || {
+        if is_settings.get() && !settings_mounted.get_untracked() {
+            settings_mounted.set(true);
         }
     });
     let workspace_project = signal::<Option<String>>(if is_workspace.get_untracked() {
@@ -290,8 +297,15 @@ pub fn screen(ui: Ui) -> impl IntoElement {
     });
     let subpage_route = computed(move || {
         let page = ui.page.get();
-        if matches!(page.as_str(), "terminals" | "terminal") || is_workspace_page(&page) {
+        if matches!(page.as_str(), "terminals" | "terminal" | "settings")
+            || is_workspace_page(&page)
+        {
             None
+        } else if matches!(
+            page.as_str(),
+            "agent-setup" | "new-project" | "github-account"
+        ) {
+            Some((page, String::new(), String::new()))
         } else {
             Some((page, ui.card.get(), ui.project.get()))
         }
@@ -381,6 +395,30 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                                         .into_element()
                                                 })
                                             }))
+                                            .child(when(
+                                                move || settings_mounted.get(),
+                                                move || {
+                                                    view()
+                                                        .flex_1()
+                                                        .min_h(px(0.))
+                                                        .min_w(px(0.))
+                                                        .style_when(
+                                                            move || !is_settings.get(),
+                                                            |s| s.hidden(),
+                                                        )
+                                                        .accessibility_elements_hidden(move || {
+                                                            !is_settings.get()
+                                                        })
+                                                        .pointer_events(move || {
+                                                            if is_settings.get() {
+                                                                PointerEvents::Auto
+                                                            } else {
+                                                                PointerEvents::None
+                                                            }
+                                                        })
+                                                        .child(crate::settings::screen(ui))
+                                                },
+                                            ))
                                             .child(dynamic(move || {
                                                 let Some((page, _, _)) = subpage_route.get() else {
                                                     return view().into_element();
@@ -804,6 +842,105 @@ mod tests {
         assert!(
             !tree.is_mounted(initial_tile_node),
             "switching Projects must replace the previous Project's workspace"
+        );
+    }
+
+    #[test]
+    fn frame_shows_settings_loading_then_hydrates_and_retains_settings_across_navigation() {
+        #[component]
+        fn SettingsFrameHarness() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let mut snapshot = Snapshot::default();
+            snapshot.projects.push(Project {
+                id: "proj-1".into(),
+                name: "Canban".into(),
+                directory: "/tmp/canban".into(),
+                location: None,
+                github: None,
+                detected_github: None,
+                github_disconnected: false,
+                delivery_mode: Default::default(),
+                agent_overrides: BTreeMap::new(),
+                tags: Vec::new(),
+                workflow: Workflow::default(),
+                target_branch: Some("main".into()),
+                created_at: 1,
+            });
+            ui.snapshot.set(snapshot);
+            ui.project.set("proj-1".into());
+            ui.board_width.set(1050.);
+
+            view()
+                .w(px(1400.))
+                .h(px(800.))
+                .child(
+                    view()
+                        .h(px(1.))
+                        .child(
+                            canban_ui_kit::press_target()
+                                .accessibility_label(|| Some("harness-go-settings".into()))
+                                .on_press(move |_: &()| ui.navigate("settings")),
+                        )
+                        .child(
+                            canban_ui_kit::press_target()
+                                .accessibility_label(|| Some("harness-go-board".into()))
+                                .on_press(move |_: &()| ui.navigate("board")),
+                        ),
+                )
+                .child(super::screen(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1400.), px(800.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<SettingsFrameHarness>());
+        let mut tree = TreeTracker::new();
+        pump(&mut core, &mut tree);
+
+        // Settings is lazily mounted only once visited.
+        assert!(
+            tree.mounted_node_for_text("Loading Settings…").is_none()
+                && tree.mounted_node_for_text("Theme and support").is_none(),
+            "Settings must not mount eagerly on initial Board startup"
+        );
+
+        // Navigate to Settings: immediate loading frame appears, then hydrates to full Settings.
+        let go_settings = *tree.labels.get("harness-go-settings").unwrap();
+        assert!(core.component_event(go_settings, EventKind::Press, &EventPayload::None));
+        let first_batch = core.commit().expect("settings first frame");
+        tree.apply(&first_batch);
+        assert!(
+            tree.mounted_node_for_text("Loading Settings…").is_some(),
+            "expected Settings loading panel on first frame before hydration"
+        );
+
+        core.run_component_tasks();
+        assert!(
+            core.wants_frame(),
+            "Settings hydration should request next frame"
+        );
+        core.run_frame(nsh_core::time::now());
+        core.run_component_tasks();
+        pump(&mut core, &mut tree);
+        let theme_node = tree
+            .mounted_node_for_text("Theme and support")
+            .expect("hydrated Settings sections should mount after next_frame");
+
+        // Navigate back to Board and then return to Settings: the retained subtree stays mounted.
+        let go_board = *tree.labels.get("harness-go-board").unwrap();
+        assert!(core.component_event(go_board, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert!(
+            tree.is_mounted(theme_node),
+            "leaving Settings must retain the mounted Settings subtree hidden"
+        );
+
+        assert!(core.component_event(go_settings, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert_eq!(
+            tree.mounted_node_for_text("Theme and support"),
+            Some(theme_node),
+            "re-entering Settings must reuse the retained subtree without rebuilding"
         );
     }
 

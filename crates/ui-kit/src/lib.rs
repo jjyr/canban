@@ -21,8 +21,8 @@ pub mod status;
 pub use navigation::{navigation, subpage_header};
 pub use split::split;
 pub use status::{
-    Tone, attention_count, live_dot, live_status, notice, reminder_count, status, tone_colors,
-    tone_icon_badge,
+    Tone, attention_count, live_dot, live_status, loading_indicator, loading_panel,
+    loading_spinner, notice, reminder_count, status, tone_colors, tone_icon_badge,
 };
 
 pub mod icons;

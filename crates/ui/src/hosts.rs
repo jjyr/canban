@@ -1919,7 +1919,21 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
     let reload_saved = move || {
         if let Some(reg) = crate::HOSTS.get() {
             saved_map.set(reg.saved_hosts());
-            ui.hosts.set(reg.summaries());
+            let mut sums = reg.summaries();
+            if let Some(local) = sums
+                .iter_mut()
+                .find(|h| h.is_local && h.last_synced_at.is_none())
+                && let Some(existing) = ui.hosts.with_untracked(|cur| {
+                    cur.iter()
+                        .find(|h| h.is_local && h.last_synced_at.is_some())
+                        .cloned()
+                })
+            {
+                local.active_agents = existing.active_agents;
+                local.project_count = existing.project_count;
+                local.last_synced_at = existing.last_synced_at;
+            }
+            ui.hosts.set(sums);
         }
     };
     reload_saved();

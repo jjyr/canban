@@ -248,16 +248,27 @@ fn diag_card(title: &'static str, badge_el: AnyElement, body: View) -> View {
 }
 
 pub fn section_view(ui: Ui) -> impl IntoElement {
-    if ui.diagnostics.with_untracked(Value::is_null) {
-        refresh_diagnostics(ui);
-    }
+    section_view_with_activation(ui, signal(true))
+}
+
+pub fn section_view_with_activation(ui: Ui, activated: Signal<bool>) -> impl IntoElement {
+    effect(move || {
+        if activated.get() && ui.diagnostics.with_untracked(Value::is_null) {
+            refresh_diagnostics(ui);
+        }
+    });
 
     let last_inspected = signal(ui.settings_host.get_untracked());
     effect(move || {
         let cur = ui.settings_host.get();
         if last_inspected.get_untracked() != cur {
             last_inspected.set(cur);
-            refresh_diagnostics(ui);
+            if activated.get_untracked() {
+                refresh_diagnostics(ui);
+            } else {
+                ui.diagnostics.set(Value::Null);
+                ui.diagnostics_logs.set(Value::Null);
+            }
         }
     });
 
@@ -280,7 +291,10 @@ pub fn section_view(ui: Ui) -> impl IntoElement {
                     }
                 },
                 Variant::Primary,
-                move |_| refresh_diagnostics(ui),
+                move |_| {
+                    activated.set(true);
+                    refresh_diagnostics(ui);
+                },
             ))
             .child(compact_action(
                 "Open Host Terminal",
@@ -459,6 +473,36 @@ pub fn section_view(ui: Ui) -> impl IntoElement {
                         ),
                     ),
             );
+            return stack;
+        }
+
+        if diag.is_null() {
+            if ui.diagnostics_loading.get() {
+                stack = stack.child(loading_panel(
+                    "Running host diagnostics…",
+                    "Inspecting AppServer & SQLite WAL, Herdr Core supervision, toolchain binaries, and daemon logs.",
+                ));
+            } else {
+                stack = stack.child(
+                    panel()
+                        .p_3p5()
+                        .gap_2()
+                        .bg(INSET)
+                        .border_1()
+                        .border_color(BORDER)
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .child(muted(
+                            "Diagnostics run automatically when scrolled into view, or click Run Checks.",
+                        ))
+                        .child(compact_action("Run Checks", Variant::Secondary, move |_| {
+                            activated.set(true);
+                            refresh_diagnostics(ui);
+                        })),
+                );
+            }
             return stack;
         }
 
@@ -929,6 +973,80 @@ mod tests {
         assert!(
             !texts.iter().any(|t| t == "Reconnect Host"),
             "did not expect `Reconnect Host` button while daemon update is in flight, got {texts:?}"
+        );
+    }
+
+    #[test]
+    fn diagnostics_shows_loading_panel_while_pending_and_deferred_prompt_before_activation() {
+        #[component]
+        fn ProbeLoadingDiagnostics() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            ui.diagnostics.set(Value::Null);
+            ui.diagnostics_loading.set(true);
+            // Keep `activated` false so offline fixture auto-fill doesn't overwrite the in-flight loading state.
+            let activated = signal(false);
+            view()
+                .w(px(1080.))
+                .h(px(1000.))
+                .child(section_view_with_activation(ui, activated))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1080.), px(1000.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<ProbeLoadingDiagnostics>());
+        let batch = core.commit().expect("mount batch");
+        let texts: Vec<String> = batch
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                MountItem::Text { text, .. } => Some(text.text.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t == "Running host diagnostics…"),
+            "expected loading panel title while diagnostics are pending, got {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t == "Check DB" || t == "Unavailable"),
+            "must not flash false error badges while diagnostics are loading, got {texts:?}"
+        );
+
+        #[component]
+        fn ProbeDeferredDiagnostics() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            ui.diagnostics.set(Value::Null);
+            ui.diagnostics_loading.set(false);
+            let activated = signal(false);
+            view()
+                .w(px(1080.))
+                .h(px(1000.))
+                .child(section_view_with_activation(ui, activated))
+        }
+
+        let mut core2 = Core::new(ApproxTextEngine, size(px(1080.), px(1000.)));
+        core2.set_components(nsh_base::registry());
+        core2.mount_root(&nsh_core::element::Root::of::<ProbeDeferredDiagnostics>());
+        let batch2 = core2.commit().expect("deferred mount batch");
+        let texts2: Vec<String> = batch2
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                MountItem::Text { text, .. } => Some(text.text.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts2
+                .iter()
+                .any(|t| t.contains("Diagnostics run automatically")),
+            "expected deferred activation card before scroll/click, got {texts2:?}"
+        );
+        assert!(
+            !texts2.iter().any(|t| t == "Check DB"),
+            "deferred diagnostics must not render false error cards, got {texts2:?}"
         );
     }
 }

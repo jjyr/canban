@@ -33,6 +33,7 @@ pub fn host(ui: Ui) -> String {
     ui.active_project_host()
 }
 pub fn init(ui: Ui) {
+    ensure_fonts_loaded(ui);
     refresh(ui);
     set_interval(std::time::Duration::from_secs(5), move || refresh(ui));
     let target = computed(move || host(ui));
@@ -141,9 +142,30 @@ pub fn terminal_font(ui: Ui) -> Value {
     })
 }
 
+/// Pre-warms the installed terminal font catalog on a background thread without blocking UI frames.
+pub fn ensure_fonts_loaded(ui: Ui) {
+    if ui.installed_fonts.with_untracked(Option::is_some) {
+        return;
+    }
+    if let Some(cached) = canban_terminal::try_installed_fonts() {
+        ui.installed_fonts.set(Some(cached));
+        return;
+    }
+    if ui.installed_fonts_loading.get_untracked() {
+        return;
+    }
+    ui.installed_fonts_loading.set(true);
+    ui.spawn(async move {
+        let res = blocking(canban_terminal::installed_fonts).await;
+        let _ = ui.installed_fonts_loading.try_set(false);
+        if let Ok(catalog) = res {
+            let _ = ui.installed_fonts.try_set(Some(catalog));
+        }
+    });
+}
+
 pub fn terminal_settings(ui: Ui) -> impl IntoElement {
-    let catalog = canban_terminal::installed_fonts();
-    let mono_count = catalog.monospaced.len();
+    ensure_fonts_loaded(ui);
     let adjust_size = move |delta: i32| {
         let current = ui.utility.with_untracked(|v| {
             v["preferences"]["terminal_font_size"]
@@ -182,52 +204,65 @@ pub fn terminal_settings(ui: Ui) -> impl IntoElement {
     }))
     .child(settings_field(
         "Font family",
-        &format!(
-            "Choose from {mono_count} installed monospaced font families {} (or System Mono).",
-            crate::platform::ON_THIS_MACHINE
-        ),
+        "",
         view()
-            .flex_row()
-            .items_center()
-            .flex_wrap()
-            .gap_2()
+            .gap_1p5()
             .child(
-                action(
-                    move || {
-                        let current = ui.utility.with(|v| {
-                            v["preferences"]["terminal_font_family"]
-                                .as_str()
-                                .unwrap_or("")
-                                .trim()
-                                .to_owned()
-                        });
-                        if current.is_empty() {
-                            "System Mono ▾".into()
-                        } else {
-                            format!("{current} ▾")
-                        }
-                    },
-                    Variant::Secondary,
-                    move |_| open(ui, "terminal-font"),
-                )
-                .accessibility_label("Choose terminal font family")
-                .disabled(move || ui.is_method_pending("utilities.configure")),
+                view()
+                    .flex_row()
+                    .items_center()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        action(
+                            move || {
+                                let current = ui.utility.with(|v| {
+                                    v["preferences"]["terminal_font_family"]
+                                        .as_str()
+                                        .unwrap_or("")
+                                        .trim()
+                                        .to_owned()
+                                });
+                                if current.is_empty() {
+                                    "System Mono ▾".into()
+                                } else {
+                                    format!("{current} ▾")
+                                }
+                            },
+                            Variant::Secondary,
+                            move |_| open(ui, "terminal-font"),
+                        )
+                        .accessibility_label("Choose terminal font family")
+                        .disabled(move || ui.is_method_pending("utilities.configure")),
+                    )
+                    .child(when(
+                        move || {
+                            ui.utility.with(|v| {
+                                v["preferences"]["terminal_font_family"]
+                                    .as_str()
+                                    .is_some_and(|s| !s.trim().is_empty())
+                            })
+                        },
+                        move || {
+                            compact_action("Use System Mono", Variant::Quiet, move |_| {
+                                configure_preferences(ui, json!({"terminal_font_family":null}));
+                            })
+                            .disabled(move || ui.is_method_pending("utilities.configure"))
+                        },
+                    )),
             )
-            .child(when(
-                move || {
-                    ui.utility.with(|v| {
-                        v["preferences"]["terminal_font_family"]
-                            .as_str()
-                            .is_some_and(|s| !s.trim().is_empty())
-                    })
-                },
-                move || {
-                    compact_action("Use System Mono", Variant::Quiet, move |_| {
-                        configure_preferences(ui, json!({"terminal_font_family":null}));
-                    })
-                    .disabled(move || ui.is_method_pending("utilities.configure"))
-                },
-            )),
+            .child(dynamic(move || {
+                if let Some(catalog) = ui.installed_fonts.get() {
+                    muted(format!(
+                        "Choose from {} installed monospaced font families {} (or System Mono).",
+                        catalog.monospaced.len(),
+                        crate::platform::ON_THIS_MACHINE
+                    ))
+                    .into_element()
+                } else {
+                    loading_indicator("Scanning installed monospaced font families…").into_element()
+                }
+            })),
     ))
     .child(settings_field(
         "Font size",
@@ -650,5 +685,78 @@ mod tests {
         assert_eq!(state["preferences"]["theme"], json!("dracula"));
         assert_eq!(state["preferences"]["notification_sound"], json!(false));
         assert!(state["preferences"].get("terminal_font_size").is_none());
+    }
+
+    #[test]
+    fn terminal_settings_shows_loading_indicator_until_fonts_arrive() {
+        use nsh_core::{
+            ApproxTextEngine, Core, EventKind, EventPayload, MountItem, geometry::size,
+        };
+
+        #[component]
+        fn ProbeTerminalSettings() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            // Simulate uncached font scan in progress so the loading indicator stays visible.
+            ui.installed_fonts.set(None);
+            ui.installed_fonts_loading.set(true);
+            view()
+                .w(px(800.))
+                .h(px(600.))
+                .child(
+                    press_target()
+                        .accessibility_label("populate-fonts")
+                        .on_press(move |_: &()| {
+                            ui.installed_fonts
+                                .set(Some(canban_terminal::InstalledFonts {
+                                    monospaced: vec!["JetBrains Mono".into(), "Menlo".into()],
+                                    others: vec!["Helvetica".into()],
+                                }));
+                        }),
+                )
+                .child(terminal_settings(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(800.), px(600.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<ProbeTerminalSettings>());
+        let batch = core.commit().expect("initial mount batch");
+        let mut populate_id = None;
+        let mut texts = Vec::new();
+        for item in batch.items {
+            match item {
+                MountItem::Text { text, .. } => texts.push(text.text.to_string()),
+                MountItem::ViewProps { id, props }
+                    if props.accessibility.label.as_deref() == Some("populate-fonts") =>
+                {
+                    populate_id = Some(id);
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Scanning installed monospaced font families")),
+            "expected font loading indicator while fonts are None, got {texts:?}"
+        );
+
+        let btn = populate_id.expect("populate-fonts button mounted");
+        assert!(core.component_event(btn, EventKind::Press, &EventPayload::None));
+        let update_batch = core.commit().expect("font update batch");
+        let update_texts: Vec<String> = update_batch
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                MountItem::Text { text, .. } => Some(text.text.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            update_texts
+                .iter()
+                .any(|t| t.contains("2 installed monospaced font families")),
+            "expected reactive font count after load, got {update_texts:?}"
+        );
     }
 }

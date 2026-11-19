@@ -3916,27 +3916,50 @@ void cb_terminal_sync_rebind(void *view) {
 char *cb_terminal_list_fonts_json(void) {
   @autoreleasepool {
     cb_register_user_font_subdirs_once();
-    NSFontManager *fm = [NSFontManager sharedFontManager];
+    CFArrayRef families = CTFontManagerCopyAvailableFontFamilyNames();
     NSMutableSet<NSString *> *seen = [NSMutableSet set];
     NSMutableArray<NSString *> *monospaced = [NSMutableArray array];
     NSMutableArray<NSString *> *others = [NSMutableArray array];
 
-    for (NSString *family in fm.availableFontFamilies) {
-      if (!family || family.length == 0 || [family hasPrefix:@"."])
-        continue;
-      if ([seen containsObject:family])
-        continue;
-      NSFont *font = [fm fontWithFamily:family traits:0 weight:5 size:13.0];
-      if (!font)
-        font = [NSFont fontWithName:family size:13.0];
-      if (!font)
-        continue;
-      [seen addObject:family];
-      if (cb_is_ascii_monospaced((__bridge CTFontRef)font)) {
-        [monospaced addObject:family];
-      } else {
-        [others addObject:family];
+    if (families) {
+      CFIndex count = CFArrayGetCount(families);
+      for (CFIndex i = 0; i < count; i++) {
+        NSString *family =
+            (__bridge NSString *)CFArrayGetValueAtIndex(families, i);
+        if (!family || family.length == 0 || [family hasPrefix:@"."])
+          continue;
+        if ([seen containsObject:family])
+          continue;
+
+        NSDictionary *attrs =
+            @{(__bridge id)kCTFontFamilyNameAttribute : family};
+        CTFontDescriptorRef rawDesc =
+            CTFontDescriptorCreateWithAttributes((__bridge CFDictionaryRef)attrs);
+        CTFontRef font = NULL;
+        if (rawDesc) {
+          CTFontDescriptorRef matched =
+              CTFontDescriptorCreateMatchingFontDescriptor(rawDesc, NULL);
+          if (matched) {
+            font = CTFontCreateWithFontDescriptor(matched, 13.0, NULL);
+            CFRelease(matched);
+          }
+          CFRelease(rawDesc);
+        }
+        if (!font) {
+          font = CTFontCreateWithName((__bridge CFStringRef)family, 13.0, NULL);
+        }
+        if (!font)
+          continue;
+
+        [seen addObject:family];
+        if (cb_is_ascii_monospaced(font)) {
+          [monospaced addObject:family];
+        } else {
+          [others addObject:family];
+        }
+        CFRelease(font);
       }
+      CFRelease(families);
     }
 
     [monospaced sortUsingSelector:@selector(localizedCaseInsensitiveCompare:)];

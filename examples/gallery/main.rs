@@ -297,6 +297,13 @@ fn controls() -> impl IntoElement {
                                 .child(status("Needs review", Tone::Attention))
                                 .child(status("Merge held", Tone::Neutral)),
                         )
+                        .child(loading_indicator(
+                            "Scanning installed monospaced font families…",
+                        ))
+                        .child(loading_panel(
+                            "Loading Settings…",
+                            "Preparing preferences, connected hosts, and agent configuration.",
+                        ))
                         .child(
                             action("Disabled action", Variant::Secondary, |_| {}).disabled(true),
                         ),

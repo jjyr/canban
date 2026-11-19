@@ -214,6 +214,7 @@ impl Drop for UpdatingGuard<'_> {
 pub struct HostRegistry {
     local_home: PathBuf,
     local: Arc<AppClient>,
+    local_summary_counts: Mutex<Option<(usize, usize, u64)>>,
     remotes: Mutex<BTreeMap<String, RemoteSlot>>,
     entity_hosts: RwLock<BTreeMap<String, String>>,
     acknowledged_owners: Mutex<BTreeMap<String, String>>,
@@ -276,6 +277,7 @@ impl HostRegistry {
         let registry = Arc::new(Self {
             local_home,
             local: local.clone(),
+            local_summary_counts: Mutex::new(None),
             remotes: Mutex::new(map),
             entity_hosts: RwLock::new(BTreeMap::new()),
             acknowledged_owners: Mutex::new(BTreeMap::new()),
@@ -1174,13 +1176,16 @@ impl HostRegistry {
         }
     }
 
+    /// Return lightweight host summaries from cached local counts and in-memory remote state
+    /// without issuing a blocking `app.state` RPC.
     pub fn summaries(&self) -> Vec<HostSummary> {
         let local_cfg = self.local.config();
-        let (local_active, local_projects) = self
-            .local
-            .snapshot()
-            .map(|s| (count_active_agents(&s), s.projects.len()))
-            .unwrap_or((0, 0));
+        let (local_active, local_projects, last_synced_at) = self
+            .local_summary_counts
+            .lock()
+            .unwrap()
+            .map(|(active, projects, synced_at)| (active, projects, Some(synced_at)))
+            .unwrap_or((0, 0, None));
         let mut out = vec![HostSummary {
             id: "local".into(),
             name: "This Mac".into(),
@@ -1204,7 +1209,7 @@ impl HostRegistry {
             max_agents: local_cfg.scheduler.max_agents,
             project_count: local_projects,
             reconnect_count: 0,
-            last_synced_at: Some(now()),
+            last_synced_at,
         }];
         let guard = self.remotes.lock().unwrap();
         for slot in guard.values() {
@@ -1218,6 +1223,11 @@ impl HostRegistry {
     pub fn merged_snapshot(&self) -> Result<Snapshot> {
         let mut combined = self.local.snapshot()?;
         let local_cfg = self.local.config();
+        let local_active = count_active_agents(&combined);
+        let local_projects = combined.projects.len();
+        let synced_at = now();
+        *self.local_summary_counts.lock().unwrap() =
+            Some((local_active, local_projects, synced_at));
         combined.register_host_entities("local");
         combined.host_summaries.insert(
             "local".into(),
@@ -1240,11 +1250,11 @@ impl HostRegistry {
                     version: env!("CARGO_PKG_VERSION").into(),
                     platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
                 },
-                active_agents: count_active_agents(&combined),
+                active_agents: local_active,
                 max_agents: local_cfg.scheduler.max_agents,
-                project_count: combined.projects.len(),
+                project_count: local_projects,
                 reconnect_count: 0,
-                last_synced_at: Some(now()),
+                last_synced_at: Some(synced_at),
             },
         );
 
@@ -1925,5 +1935,42 @@ mod tests {
         stop_mock.store(true, Ordering::SeqCst);
         let _ = std::net::TcpStream::connect(format!("127.0.0.1:{port}"));
         let _ = mock_thread.join();
+    }
+
+    #[test]
+    fn summaries_reads_cached_local_counts_without_issuing_app_state_rpc() {
+        let dir = tempfile::tempdir().unwrap();
+        let local_home = dir.path().join("local-home");
+        let local_app = AppServer::open(local_home.clone(), PathBuf::from("/bin/echo")).unwrap();
+        let running = local_app.start_with_listen(None).unwrap();
+        let local_client =
+            AppClient::connect_home(local_home.clone(), Path::new("/bin/echo")).unwrap();
+        let registry = HostRegistry::new(local_client);
+
+        // Before merged_snapshot(), summaries() returns immediately with zeroed local counts.
+        let initial = registry.summaries();
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].id, "local");
+        assert_eq!(initial[0].project_count, 0);
+        assert!(initial[0].last_synced_at.is_none());
+
+        // Create a project, run merged_snapshot() to populate cached counts, then stop the server.
+        let proj_dir = dir.path().join("demo-proj");
+        std::fs::create_dir_all(&proj_dir).unwrap();
+        let _ = registry.local().call(
+            "project.create",
+            json!({
+                "name": "Demo",
+                "directory": proj_dir.to_string_lossy(),
+            }),
+        );
+        let snap = registry.merged_snapshot().unwrap();
+        assert_eq!(snap.projects.len(), 1);
+        drop(running);
+
+        // Even with local AppServer shut down, summaries() succeeds without RPC and keeps counts.
+        let cached = registry.summaries();
+        assert_eq!(cached[0].project_count, 1);
+        assert!(cached[0].last_synced_at.is_some());
     }
 }

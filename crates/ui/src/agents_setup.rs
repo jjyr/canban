@@ -1864,9 +1864,16 @@ pub fn onboarding_screen(ui: Ui) -> impl IntoElement {
 
                             let missing_count = missing.len();
                             let show_missing = show_uninstalled.get();
+                            let loading_catalog = rows.is_empty() && ui.agent_catalog_loading.get();
                             view()
                                 .gap_2p5()
-                                .child(if installed.is_empty() {
+                                .child(if loading_catalog {
+                                    loading_panel(
+                                        "Scanning installed CLI Agents…",
+                                        "Detecting local agent binaries and presets.",
+                                    )
+                                    .into_element()
+                                } else if installed.is_empty() {
                                     muted("No CLI binaries detected on PATH — expand below to pick manually.").into_element()
                                 } else {
                                     view()
@@ -2802,15 +2809,23 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
 
                 let count = extra_rows.len();
                 let show_extra = show_all_catalog.get();
+                let loading_catalog = rows.is_empty() && ui.agent_catalog_loading.get();
                 view()
                     .gap_3()
-                    .child(
+                    .child(if loading_catalog {
+                        loading_panel(
+                            "Scanning installed CLI Agents…",
+                            "Detecting local agent binaries, templates, and supported models.",
+                        )
+                        .into_element()
+                    } else {
                         view()
                             .flex_row()
                             .flex_wrap()
                             .gap_2()
-                            .children(primary_rows.into_iter().map(render_agent)),
-                    )
+                            .children(primary_rows.into_iter().map(render_agent))
+                            .into_element()
+                    })
                     .child(if count > 0 {
                         view()
                             .gap_2()

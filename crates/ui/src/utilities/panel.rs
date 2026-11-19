@@ -8,13 +8,12 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                 let popup = ui.utility_popup.get();
                 if popup == "shortcuts" || popup == "card-project" || popup == "terminal-font" {
                     if popup == "terminal-font" {
+                        ensure_fonts_loaded(ui);
                         let show_all = signal(false);
-                        let catalog = canban_terminal::installed_fonts();
-                        let mono_count = catalog.monospaced.len();
-                        let other_count = catalog.others.len();
                         let choices = computed(move || {
                             let query = ui.utility_query.get().to_lowercase();
                             let all = show_all.get();
+                            let catalog = ui.installed_fonts.get();
                             let current = ui.utility.with(|v| {
                                 v["preferences"]["terminal_font_family"]
                                     .as_str()
@@ -37,29 +36,31 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                                     selected: current.is_empty(),
                                 });
                             }
-                            for fam in &catalog.monospaced {
-                                if query.is_empty() || fam.to_lowercase().contains(&query) {
-                                    rows.push(SearchChoice {
-                                        attention: 0,
-                                        id: fam.clone(),
-                                        title: fam.clone(),
-                                        detail: "Monospaced · Installed".into(),
-                                        icon: Icon::Terminal,
-                                        selected: current == *fam,
-                                    });
-                                }
-                            }
-                            if all {
-                                for fam in &catalog.others {
+                            if let Some(catalog) = catalog {
+                                for fam in &catalog.monospaced {
                                     if query.is_empty() || fam.to_lowercase().contains(&query) {
                                         rows.push(SearchChoice {
                                             attention: 0,
                                             id: fam.clone(),
                                             title: fam.clone(),
-                                            detail: "Proportional · Installed".into(),
-                                            icon: Icon::Note,
+                                            detail: "Monospaced · Installed".into(),
+                                            icon: Icon::Terminal,
                                             selected: current == *fam,
                                         });
+                                    }
+                                }
+                                if all {
+                                    for fam in &catalog.others {
+                                        if query.is_empty() || fam.to_lowercase().contains(&query) {
+                                            rows.push(SearchChoice {
+                                                attention: 0,
+                                                id: fam.clone(),
+                                                title: fam.clone(),
+                                                detail: "Proportional · Installed".into(),
+                                                icon: Icon::Note,
+                                                selected: current == *fam,
+                                            });
+                                        }
                                     }
                                 }
                             }
@@ -79,33 +80,53 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                                 close(ui);
                             },
                             move || close(ui),
-                            move || format!("Search {} installed monospaced fonts…", mono_count),
-                            view()
-                                .flex_row()
-                                .justify_between()
-                                .items_center()
-                                .gap_2()
-                                .child(muted(move || {
-                                    if show_all.get() {
-                                        format!(
-                                            "{} monospaced + {} other installed families",
-                                            mono_count, other_count
-                                        )
-                                    } else {
-                                        format!("{} monospaced families installed", mono_count)
-                                    }
-                                }))
-                                .child(compact_action(
-                                    move || {
+                            move || {
+                                if let Some(catalog) = ui.installed_fonts.get() {
+                                    format!(
+                                        "Search {} installed monospaced fonts…",
+                                        catalog.monospaced.len()
+                                    )
+                                } else {
+                                    "Scanning installed monospaced fonts…".into()
+                                }
+                            },
+                            dynamic(move || {
+                                let Some(catalog) = ui.installed_fonts.get() else {
+                                    return loading_indicator(
+                                        "Scanning installed system font families…",
+                                    )
+                                    .into_element();
+                                };
+                                let mono_count = catalog.monospaced.len();
+                                let other_count = catalog.others.len();
+                                view()
+                                    .flex_row()
+                                    .justify_between()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(muted(move || {
                                         if show_all.get() {
-                                            "Monospaced only".into()
+                                            format!(
+                                                "{} monospaced + {} other installed families",
+                                                mono_count, other_count
+                                            )
                                         } else {
-                                            format!("Include all fonts ({other_count})")
+                                            format!("{} monospaced families installed", mono_count)
                                         }
-                                    },
-                                    Variant::Quiet,
-                                    move |_| show_all.update(|v| *v = !*v),
-                                )),
+                                    }))
+                                    .child(compact_action(
+                                        move || {
+                                            if show_all.get() {
+                                                "Monospaced only".into()
+                                            } else {
+                                                format!("Include all fonts ({other_count})")
+                                            }
+                                        },
+                                        Variant::Quiet,
+                                        move |_| show_all.update(|v| *v = !*v),
+                                    ))
+                                    .into_element()
+                            }),
                         )
                         .into_element();
                     }

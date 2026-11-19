@@ -152,10 +152,15 @@ unsafe extern "C" {
     fn cb_terminal_test_occluded_cursor_guard(view: *mut c_void) -> bool;
 }
 
+static CACHED_FONTS: std::sync::OnceLock<crate::InstalledFonts> = std::sync::OnceLock::new();
+
+pub fn try_installed_fonts() -> Option<crate::InstalledFonts> {
+    CACHED_FONTS.get().cloned()
+}
+
 pub fn installed_fonts() -> crate::InstalledFonts {
-    use std::{ffi::CStr, sync::OnceLock};
-    static CACHED: OnceLock<crate::InstalledFonts> = OnceLock::new();
-    CACHED
+    use std::ffi::CStr;
+    CACHED_FONTS
         .get_or_init(|| {
             let ptr = unsafe { cb_terminal_list_fonts_json() };
             if ptr.is_null() {

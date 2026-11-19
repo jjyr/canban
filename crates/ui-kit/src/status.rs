@@ -170,3 +170,85 @@ pub fn live_dot(color: ThemeColor) -> View {
         mark.child(dot().opacity(0.6).animate_ping()).child(dot())
     }
 }
+
+/// Continuously rotating spinner icon using native NSH timing animation.
+/// Respects reduced motion by rendering a static icon while keeping the loading state clear.
+pub fn loading_spinner(size: f32, color: ThemeColor) -> View {
+    use nsh_core::element::Animation;
+    let angle = animated_value(0.);
+    if !crate::motion::reduced() {
+        let animation =
+            Animation::timing(&angle, 360., Timing::new(900., Easing::Linear)).looped(None);
+        let _ = animation.start();
+        cleanup(move || animation.stop());
+    }
+    view()
+        .w(px(size))
+        .h(px(size))
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .pointer_events(PointerEvents::None)
+        .bind_rotate(&angle)
+        .child(icon_tinted(Icon::Refresh, color).w(px(size)).h(px(size)))
+}
+
+/// Compact inline loading indicator with spinner animation and muted status message.
+pub fn loading_indicator(message: impl IntoReactive<SharedString>) -> View {
+    view()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .min_w(px(0.))
+        .child(loading_spinner(13., ACCENT))
+        .child(super::muted(message).min_w(px(0.)).flex_1())
+}
+
+/// Elevated placeholder card shown while an async section or settings panel is loading.
+pub fn loading_panel(
+    title: impl IntoReactive<SharedString>,
+    detail: impl IntoReactive<SharedString>,
+) -> View {
+    let skeleton_bar = |width: f32| {
+        let bar = view()
+            .h(px(8.))
+            .w(Percentage(width))
+            .rounded_full()
+            .bg(BORDER);
+        if crate::motion::reduced() {
+            bar.opacity(0.55)
+        } else {
+            bar.opacity(0.45)
+        }
+    };
+    super::panel()
+        .p_4()
+        .gap_2p5()
+        .bg(INSET)
+        .border_1()
+        .border_color(BORDER)
+        .min_w(px(0.))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .min_w(px(0.))
+                .child(loading_spinner(15., ACCENT))
+                .child(
+                    super::label(title)
+                        .font_weight(FontWeight::MEDIUM)
+                        .min_w(px(0.))
+                        .flex_1(),
+                )
+                .child(live_dot(ACCENT)),
+        )
+        .child(super::muted(detail).min_w(px(0.)))
+        .child(
+            view()
+                .pt_1()
+                .gap_1p5()
+                .child(skeleton_bar(0.72))
+                .child(skeleton_bar(0.48)),
+        )
+}

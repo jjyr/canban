@@ -298,10 +298,16 @@ pub(crate) fn parse_fc_list_output(all_output: &str, ascii_mono_output: &str) ->
     InstalledFonts { monospaced, others }
 }
 
+static CACHED_FONTS: OnceLock<InstalledFonts> = OnceLock::new();
+
+/// Returns cached installed font families on Linux without blocking `fc-list`.
+pub fn try_installed_fonts() -> Option<InstalledFonts> {
+    CACHED_FONTS.get().cloned()
+}
+
 /// Discovers installed monospaced and proportional font families on Linux via `fc-list`.
 pub fn installed_fonts() -> InstalledFonts {
-    static CACHED: OnceLock<InstalledFonts> = OnceLock::new();
-    CACHED
+    CACHED_FONTS
         .get_or_init(|| {
             let run_fc = |args: &[&str]| -> Option<String> {
                 let out = Command::new("fc-list").args(args).output().ok()?;

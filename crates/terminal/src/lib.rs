@@ -117,6 +117,22 @@ fn shell_escape_into(out: &mut String, path: &str) {
     }
 }
 
+/// Returns cached installed font families without blocking, or `None` if not yet scanned.
+pub fn try_installed_fonts() -> Option<InstalledFonts> {
+    #[cfg(target_os = "macos")]
+    {
+        native::try_installed_fonts()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::try_installed_fonts()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
 /// Returns the installed font families on the current host OS, separated into
 /// verified ASCII-monospaced families and other families.
 pub fn installed_fonts() -> InstalledFonts {
