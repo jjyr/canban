@@ -122,25 +122,6 @@ pub fn items(ui: Ui, card: Card) -> Vec<MenuItem> {
                 .disabled(ui.pending.get_untracked())
                 .on_select(move || crate::review::start_agent_review(ui, &review_cid, None, None)),
         );
-        insert_at += 1;
-        let profiles = ui.profiles.get_untracked();
-        if !profiles.is_empty() {
-            let sub_items: Vec<MenuItem> = profiles
-                .into_iter()
-                .map(|p| {
-                    let cid = card.id.clone();
-                    let pid = p.id.clone();
-                    MenuItem::new(format!("@{}", p.id)).on_select(move || {
-                        crate::review::start_agent_review(ui, &cid, Some(pid.clone()), None);
-                    })
-                })
-                .collect();
-            items.insert(
-                insert_at,
-                MenuItem::submenu("Agent Review PR with…", sub_items)
-                    .disabled(ui.pending.get_untracked()),
-            );
-        }
     }
     // GitHub removal excludes a source from intake; local Cards only archive.
     if card.removed_at.is_none() && card.github_issue().is_some() {

@@ -186,6 +186,23 @@ impl Ops {
     /// `preferred_remote` (default `"origin"`) first when present. Returns empty
     /// when `directory` does not exist or is not inside a Git repository.
     pub fn remote_urls(&self, directory: &str, preferred_remote: &str) -> Vec<(String, String)> {
+        self.collect_remote_urls(directory, preferred_remote, true)
+    }
+    /// Lists Git remote `(name, fetch_url)` pairs configured on `directory`, placing
+    /// `preferred_remote` (default `"origin"`) first when present.
+    pub fn fetch_remote_urls(
+        &self,
+        directory: &str,
+        preferred_remote: &str,
+    ) -> Vec<(String, String)> {
+        self.collect_remote_urls(directory, preferred_remote, false)
+    }
+    fn collect_remote_urls(
+        &self,
+        directory: &str,
+        preferred_remote: &str,
+        include_push: bool,
+    ) -> Vec<(String, String)> {
         let dir = Path::new(directory.trim());
         if directory.trim().is_empty() || !dir.is_absolute() || !self.host.is_dir(dir) {
             return Vec::new();
@@ -215,11 +232,16 @@ impl Ops {
         }
         let mut pairs = Vec::new();
         for remote in names {
-            for args in [
-                vec!["remote", "get-url", remote.as_str()],
-                vec!["remote", "get-url", "--push", remote.as_str()],
-            ] {
-                if let Ok(url) = self.checked(dir, &args) {
+            let queries: &[&[&str]] = if include_push {
+                &[
+                    &["remote", "get-url", remote.as_str()],
+                    &["remote", "get-url", "--push", remote.as_str()],
+                ]
+            } else {
+                &[&["remote", "get-url", remote.as_str()]]
+            };
+            for args in queries {
+                if let Ok(url) = self.checked(dir, args) {
                     let trimmed = url.trim();
                     if !trimmed.is_empty()
                         && !pairs.iter().any(|(r, u)| r == &remote && u == trimmed)

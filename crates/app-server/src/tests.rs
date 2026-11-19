@@ -4671,3 +4671,76 @@ fn agent_catalog_and_diagnostics_detect_custom_prefix_pi_via_hc_env_path() {
     assert_eq!(prof_check["available"], true);
     assert_eq!(prof_check["resolved_path"], pi_bin.display().to_string());
 }
+
+#[test]
+fn resolve_pr_remote_matches_upstream_and_falls_back_to_github_urls() {
+    use canban_workspaces::compare::PrRemoteSource;
+
+    let (_dir, app, project, _card) = setup();
+    let repo_dir = PathBuf::from(&project.directory);
+    let ops = app.ops("local");
+    let run_git = |args: &[&str]| {
+        let out = canban_exec::raw_command("git")
+            .args(args)
+            .current_dir(&repo_dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    // 1. Fork + upstream layout: `origin` is personal fork, `upstream` is target repo.
+    run_git(&["init", "-b", "main"]);
+    run_git(&["remote", "add", "origin", "git@github.com:jjyr/fiber.git"]);
+    run_git(&[
+        "remote",
+        "add",
+        "upstream",
+        "git@github.com:nervosnetwork/fiber.git",
+    ]);
+    assert_eq!(
+        app.resolve_pr_remote(&ops, &project, "nervosnetwork/fiber"),
+        Some(PrRemoteSource::Named("upstream".into()))
+    );
+    // Preferred remote still wins when it matches the PR repository.
+    assert_eq!(
+        app.resolve_pr_remote(&ops, &project, "jjyr/fiber"),
+        Some(PrRemoteSource::Named("origin".into()))
+    );
+
+    // 2. Fork without upstream: falls back to direct GitHub URLs (SSH first to match origin).
+    run_git(&["remote", "remove", "upstream"]);
+    assert_eq!(
+        app.resolve_pr_remote(&ops, &project, "nervosnetwork/fiber"),
+        Some(PrRemoteSource::Urls(vec![
+            "git@github.com:nervosnetwork/fiber.git".into(),
+            "https://github.com/nervosnetwork/fiber.git".into(),
+        ]))
+    );
+
+    // 3. HTTPS fork without upstream: prefers HTTPS URL first.
+    run_git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "https://github.com/jjyr/fiber.git",
+    ]);
+    assert_eq!(
+        app.resolve_pr_remote(&ops, &project, "nervosnetwork/fiber"),
+        Some(PrRemoteSource::Urls(vec![
+            "https://github.com/nervosnetwork/fiber.git".into(),
+            "git@github.com:nervosnetwork/fiber.git".into(),
+        ]))
+    );
+
+    // 4. Non-GitHub local/custom remote: returns None so `seed_pr_for_card` uses configured remote.
+    run_git(&["remote", "set-url", "origin", "/tmp/local-bare.git"]);
+    assert_eq!(
+        app.resolve_pr_remote(&ops, &project, "nervosnetwork/fiber"),
+        None
+    );
+}

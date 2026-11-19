@@ -562,7 +562,6 @@ pub fn open_card_pr(ui: Ui, card_id: &str) {
             ));
             st.selected_file.set(String::new());
             st.compare_open.set(false);
-            st.agent_review_open.set(false);
         });
         hydrate_card_review_draft(ui, &card.id, !same_pr);
         prepare_context(ui);

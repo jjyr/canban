@@ -122,6 +122,51 @@ impl AppServer {
         let r = item.runtime.as_ref()?;
         Some((r.core_id.clone()?, r.terminal.clone()?))
     }
+    /// Resolves the Git remote (or fallback GitHub URLs) for a PR repository.
+    /// Prefers `project.workflow.workspace.remote` when it points to `repo`,
+    /// otherwise selects another local remote matching `repo` (e.g. `upstream`
+    /// in a fork workflow). When the preferred remote points to a different
+    /// GitHub repository and no local remote matches `repo`, falls back to
+    /// direct GitHub repository URLs instead of fetching from the wrong fork.
+    pub(super) fn resolve_pr_remote(
+        &self,
+        ops: &canban_workspaces::Ops,
+        project: &Project,
+        repo: &str,
+    ) -> Option<canban_workspaces::compare::PrRemoteSource> {
+        let repo = canban_github::repository(repo).ok()?;
+        let preferred = if project.workflow.workspace.remote.trim().is_empty() {
+            "origin"
+        } else {
+            project.workflow.workspace.remote.trim()
+        };
+        let remotes = ops.fetch_remote_urls(&project.directory, preferred);
+        if let Some((remote, _)) = remotes.iter().find(|(_, url)| {
+            canban_github::remote_repository(url).is_ok_and(|r| r.eq_ignore_ascii_case(&repo))
+        }) {
+            return Some(canban_workspaces::compare::PrRemoteSource::Named(
+                remote.clone(),
+            ));
+        }
+        let preferred_github_url = remotes
+            .iter()
+            .find(|(name, _)| name == preferred)
+            .filter(|(_, url)| canban_github::remote_repository(url).is_ok())
+            .map(|(_, url)| url.as_str());
+        if let Some(url) = preferred_github_url {
+            let prefer_ssh = url.starts_with("git@") || url.starts_with("ssh://");
+            let ssh_url = format!("git@github.com:{repo}.git");
+            let https_url = format!("https://github.com/{repo}.git");
+            let urls = if prefer_ssh {
+                vec![ssh_url, https_url]
+            } else {
+                vec![https_url, ssh_url]
+            };
+            return Some(canban_workspaces::compare::PrRemoteSource::Urls(urls));
+        }
+        None
+    }
+
     pub(super) fn prepare_pr_card_source(
         &self,
         card: &Card,
@@ -190,6 +235,7 @@ impl AppServer {
         if card.worktree.is_some() || card.branch.is_some() {
             return Ok(None);
         }
+        let remote = self.resolve_pr_remote(ops, project, &repo);
         ops.seed_pr_for_card(
             project,
             &card.id,
@@ -197,6 +243,7 @@ impl AppServer {
                 pr_number,
                 head_ref,
                 same_repo,
+                remote,
             },
         )
     }

@@ -176,10 +176,20 @@ fn zero_separated_names(bytes: &[u8]) -> Vec<String> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrRemoteSource {
+    /// Fetch from a configured local Git remote (e.g. `origin` or `upstream`).
+    Named(String),
+    /// Fetch directly from candidate repository URLs when no local remote points
+    /// to the PR's repository (e.g. `origin` is a fork without an `upstream` remote).
+    Urls(Vec<String>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrCheckoutSpec {
     pub pr_number: u64,
     pub head_ref: Option<String>,
     pub same_repo: bool,
+    pub remote: Option<PrRemoteSource>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -901,10 +911,19 @@ impl Ops {
         ensure!(spec.pr_number > 0, "Invalid PR number");
         validate_ref_arg(card_id)?;
         let source = Path::new(&project.directory);
-        let remote = if project.workflow.workspace.remote.trim().is_empty() {
+        let keep = format!("refs/canban/cards/{card_id}");
+        if let Some(PrRemoteSource::Urls(urls)) = &spec.remote {
+            self.fetch_pr_from_urls(source, urls, spec.pr_number, &keep)?;
+            return Ok(None);
+        }
+        let default_remote = if project.workflow.workspace.remote.trim().is_empty() {
             "origin"
         } else {
             project.workflow.workspace.remote.trim()
+        };
+        let remote = match &spec.remote {
+            Some(PrRemoteSource::Named(name)) if !name.trim().is_empty() => name.trim(),
+            _ => default_remote,
         };
         validate_ref_arg(remote)?;
         if !self
@@ -914,7 +933,6 @@ impl Ops {
         {
             return Ok(None);
         }
-        let keep = format!("refs/canban/cards/{card_id}");
         if spec.same_repo
             && let Some(head_ref) = spec
                 .head_ref
@@ -964,6 +982,33 @@ impl Ops {
         }))
     }
 
+    fn fetch_pr_from_urls(
+        &self,
+        source: &Path,
+        urls: &[String],
+        pr_number: u64,
+        keep: &str,
+    ) -> Result<String> {
+        ensure!(
+            !urls.is_empty(),
+            "No Git remote URLs available for PR fetch"
+        );
+        let refspec = format!("+refs/pull/{pr_number}/head:{keep}");
+        let mut last_err = None;
+        for raw_url in urls {
+            let url = raw_url.trim();
+            if url.is_empty() {
+                continue;
+            }
+            validate_ref_arg(url)?;
+            match self.checked(source, &["fetch", "--", url, &refspec]) {
+                Ok(_) => return self.checked(source, &["rev-parse", "--verify", keep]),
+                Err(err) => last_err = Some(err),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("No valid Git remote URLs for PR fetch")))
+    }
+
     /// Configures Git upstream tracking on a Card branch for its PR source when not already set.
     pub fn configure_pr_tracking(
         &self,
@@ -1003,24 +1048,33 @@ impl Ops {
         Ok(())
     }
 
-    /// Seeds `refs/canban/cards/<card_id>` from `refs/pull/<pr_number>/head` on the configured remote
-    /// so `Ops::prepare` checks out the exact PR branch head when creating a local Card worktree.
+    /// Seeds `refs/canban/cards/<card_id>` from `refs/pull/<pr_number>/head` on the configured
+    /// or resolved PR remote so `Ops::prepare` checks out the exact PR branch head when creating
+    /// a local Card worktree.
     pub fn fetch_pr_for_card(
         &self,
         project: &Project,
         pr_number: u64,
         card_id: &str,
+        remote_override: Option<&PrRemoteSource>,
     ) -> Result<String> {
         ensure!(pr_number > 0, "Invalid PR number");
         validate_ref_arg(card_id)?;
         let source = Path::new(&project.directory);
-        let remote = if project.workflow.workspace.remote.trim().is_empty() {
+        let keep = format!("refs/canban/cards/{card_id}");
+        if let Some(PrRemoteSource::Urls(urls)) = remote_override {
+            return self.fetch_pr_from_urls(source, urls, pr_number, &keep);
+        }
+        let default_remote = if project.workflow.workspace.remote.trim().is_empty() {
             "origin"
         } else {
             project.workflow.workspace.remote.trim()
         };
+        let remote = match remote_override {
+            Some(PrRemoteSource::Named(name)) if !name.trim().is_empty() => name.trim(),
+            _ => default_remote,
+        };
         validate_ref_arg(remote)?;
-        let keep = format!("refs/canban/cards/{card_id}");
         let refspec = format!("+refs/pull/{pr_number}/head:{keep}");
         self.checked(source, &["fetch", "--", remote, &refspec])?;
         self.checked(source, &["rev-parse", "--verify", &keep])
@@ -1545,6 +1599,7 @@ mod tests {
                     pr_number: 11,
                     head_ref: Some("feat/pr-branch".into()),
                     same_repo: true,
+                    remote: None,
                 },
             )
             .unwrap()
@@ -1586,6 +1641,7 @@ mod tests {
                     pr_number: 42,
                     head_ref: Some("fork/patch".into()),
                     same_repo: false,
+                    remote: None,
                 },
             )
             .unwrap()
@@ -1687,5 +1743,180 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn seed_and_fetch_pr_uses_explicit_upstream_remote_or_url_fallback() {
+        let (dir, mut project) = make_repo();
+        let repo = PathBuf::from(&project.directory);
+        let fork_remote = dir.path().join("fork.git");
+        let upstream_remote = dir.path().join("upstream.git");
+        let peer = dir.path().join("peer");
+        let home = dir.path().join("home");
+        fs::create_dir_all(&fork_remote).unwrap();
+        fs::create_dir_all(&upstream_remote).unwrap();
+        git(&fork_remote, &["init", "--bare", "-b", "main"]);
+        git(&upstream_remote, &["init", "--bare", "-b", "main"]);
+
+        git(
+            &repo,
+            &["remote", "add", "origin", fork_remote.to_str().unwrap()],
+        );
+        git(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                upstream_remote.to_str().unwrap(),
+            ],
+        );
+        git(&repo, &["push", "-u", "origin", "main"]);
+        git(&repo, &["push", "upstream", "main"]);
+
+        // Publish PR #1758 only on `upstream`, NOT on `origin` (fork).
+        git(
+            dir.path(),
+            &[
+                "clone",
+                upstream_remote.to_str().unwrap(),
+                peer.to_str().unwrap(),
+            ],
+        );
+        for (k, v) in [
+            ("user.name", "Peer"),
+            ("user.email", "peer@example.invalid"),
+            ("core.hooksPath", "/dev/null"),
+            ("commit.gpgsign", "false"),
+        ] {
+            git(&peer, &["config", k, v]);
+        }
+        git(&peer, &["switch", "-c", "pr-1758"]);
+        fs::write(peer.join("pr1758.txt"), "upstream pr 1758\n").unwrap();
+        git(&peer, &["add", "."]);
+        git(&peer, &["commit", "-m", "feat: pr 1758"]);
+        git(&peer, &["push", "origin", "HEAD:refs/pull/1758/head"]);
+
+        project.workflow.workspace.remote = "origin".into();
+        let ops = Ops::local();
+
+        // Fetching from `origin` (default) fails because the fork does not have PR #1758.
+        assert!(
+            ops.seed_pr_for_card(
+                &project,
+                "card-fail",
+                &PrCheckoutSpec {
+                    pr_number: 1758,
+                    head_ref: None,
+                    same_repo: false,
+                    remote: None,
+                },
+            )
+            .is_err()
+        );
+
+        // Specifying `Named("upstream")` fetches from upstream and tracks `upstream/pr/1758`.
+        let mut card = canban_types::Card {
+            schedule_source: None,
+            source_trust: None,
+            hold_auto_merge: false,
+            github_links: Vec::new(),
+            created_by: String::new(),
+            content: Default::default(),
+            removed_at: None,
+            pull_request: None,
+            pull_request_history: Vec::new(),
+            delivery_mode: None,
+            workspace: None,
+            workspace_history: Vec::new(),
+            id: "card-upstream".into(),
+            project_id: project.id.clone(),
+            number: 102,
+            board_order: None,
+            title: "Upstream PR 1758".into(),
+            body: String::new(),
+            context_notes: None,
+            stage: "develop".into(),
+            revision: 1,
+            attention: None,
+            archived_at: None,
+            archive: None,
+            archive_error: None,
+            worktree: None,
+            branch: None,
+            base_commit: None,
+            human_gate: None,
+            delivery: None,
+            resolution: None,
+            created_at: 0,
+        };
+        let target = ops
+            .seed_pr_for_card(
+                &project,
+                &card.id,
+                &PrCheckoutSpec {
+                    pr_number: 1758,
+                    head_ref: None,
+                    same_repo: false,
+                    remote: Some(PrRemoteSource::Named("upstream".into())),
+                },
+            )
+            .unwrap()
+            .expect("upstream tracking target");
+        assert_eq!(target.remote, "upstream");
+        let wt = ops.prepare(&home, &project, &card).unwrap();
+        assert_eq!(
+            fs::read_to_string(wt.join("pr1758.txt")).unwrap(),
+            "upstream pr 1758\n"
+        );
+        card.worktree = Some(wt.to_string_lossy().into_owned());
+        let info = ops.info(&project, &card).unwrap();
+        let br = info.branch.clone().unwrap();
+        ops.configure_pr_tracking(&wt, &br, &target).unwrap();
+        let info = ops.info(&project, &card).unwrap();
+        assert_eq!(info.upstream.as_deref(), Some("upstream/pr/1758"));
+
+        // `fetch_pr_for_card` with `Named("upstream")` also succeeds.
+        let sha = ops
+            .fetch_pr_for_card(
+                &project,
+                1758,
+                "card-fetch-upstream",
+                Some(&PrRemoteSource::Named("upstream".into())),
+            )
+            .unwrap();
+        assert!(!sha.is_empty());
+
+        // Direct URL fallback (`PrRemoteSource::Urls`) skips broken URL and succeeds on valid URL.
+        let url_target = ops
+            .seed_pr_for_card(
+                &project,
+                "card-url-fallback",
+                &PrCheckoutSpec {
+                    pr_number: 1758,
+                    head_ref: None,
+                    same_repo: false,
+                    remote: Some(PrRemoteSource::Urls(vec![
+                        dir.path()
+                            .join("missing.git")
+                            .to_string_lossy()
+                            .into_owned(),
+                        upstream_remote.to_string_lossy().into_owned(),
+                    ])),
+                },
+            )
+            .unwrap();
+        assert!(url_target.is_none());
+        let url_sha = ops
+            .fetch_pr_for_card(
+                &project,
+                1758,
+                "card-fetch-url",
+                Some(&PrRemoteSource::Urls(vec![
+                    upstream_remote.to_string_lossy().into_owned(),
+                ])),
+            )
+            .unwrap();
+        assert_eq!(url_sha, sha);
     }
 }

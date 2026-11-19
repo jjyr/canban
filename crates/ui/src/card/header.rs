@@ -658,7 +658,6 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     (d, r, active_wf, auto)
                 });
             if !review_mode && c.active() && !c.resolved() && is_pr {
-                let st = ui.review_state;
                 if let Some((prof, started_at)) = active_review {
                     let now_ms = ui.runtime_clock.get();
                     let elapsed = started_at
@@ -707,42 +706,20 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     };
                     row = row
                         .child(
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .gap_0p5()
-                                .child(
-                                    compact_action(
-                                        move || {
-                                            if ui.is_method_pending("review.run_agent") {
-                                                "Starting…"
-                                            } else {
-                                                "↻ Re-run"
-                                            }
-                                        },
-                                        Variant::Quiet,
-                                        move |_| {
-                                        crate::review::start_agent_review(
-                                            ui,
-                                            &cid_rerun,
-                                            None,
-                                            None,
-                                        );
-                                    })
-                                    .disabled(move || ui.is_method_pending("review.run_agent")),
-                                )
-                                .child(chrome_button(
-                                    Icon::ChevronDown,
-                                    "Configure Agent PR Review",
-                                    move |_| {
-                                        if st.agent_review_profile.get_untracked().is_empty() {
-                                            st.agent_review_profile.set(
-                                                crate::sessions::default_review_profile(ui),
-                                            );
-                                        }
-                                        st.agent_review_open.update(|v| *v = !*v);
-                                    },
-                                )),
+                            compact_action(
+                                move || {
+                                    if ui.is_method_pending("review.run_agent") {
+                                        "Starting…"
+                                    } else {
+                                        "↻ Re-run"
+                                    }
+                                },
+                                Variant::Quiet,
+                                move |_| {
+                                    crate::review::start_agent_review(ui, &cid_rerun, None, None);
+                                },
+                            )
+                            .disabled(move || ui.is_method_pending("review.run_agent")),
                         )
                         .child(compact_action(
                             btn_label,
@@ -753,37 +730,20 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     let cid_run = c.id.clone();
                     let default_prof = crate::sessions::default_review_profile(ui);
                     row = row.child(
-                        view()
-                            .flex_row()
-                            .items_center()
-                            .gap_0p5()
-                            .child(
-                                compact_action(
-                                    move || {
-                                        if ui.is_method_pending("review.run_agent") {
-                                            format!("Starting @{default_prof}…")
-                                        } else {
-                                            format!("Agent Review (@{default_prof})")
-                                        }
-                                    },
-                                    Variant::Secondary,
-                                    move |_| {
-                                        crate::review::start_agent_review(ui, &cid_run, None, None)
-                                    },
-                                )
-                                .disabled(move || ui.is_method_pending("review.run_agent")),
-                            )
-                            .child(chrome_button(
-                                Icon::ChevronDown,
-                                "Configure Agent PR Review",
-                                move |_| {
-                                    if st.agent_review_profile.get_untracked().is_empty() {
-                                        st.agent_review_profile
-                                            .set(crate::sessions::default_review_profile(ui));
-                                    }
-                                    st.agent_review_open.update(|v| *v = !*v);
-                                },
-                            )),
+                        compact_action(
+                            move || {
+                                if ui.is_method_pending("review.run_agent") {
+                                    format!("Starting @{default_prof}…")
+                                } else {
+                                    format!("Agent Review (@{default_prof})")
+                                }
+                            },
+                            Variant::Secondary,
+                            move |_| {
+                                crate::review::start_agent_review(ui, &cid_run, None, None)
+                            },
+                        )
+                        .disabled(move || ui.is_method_pending("review.run_agent")),
                     );
                 }
                 if review_draft.is_none() {
@@ -958,89 +918,6 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             }
             row
         }))
-        .child(when(
-            move || !is_review.get() && ui.review_state.agent_review_open.get(),
-            move || {
-                let st = ui.review_state;
-                let Some(card) = ui.current_card() else {
-                    return view();
-                };
-                let cid = card.id;
-                view()
-                    .pt_1()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_2()
-                    .child(muted("Agent:"))
-                    .child(dynamic(move || {
-                        let profiles = ui.profiles.get();
-                        let cur = st.agent_review_profile.get();
-                        let display = if cur.is_empty() {
-                            crate::sessions::default_review_profile(ui)
-                        } else {
-                            cur
-                        };
-                        action_with_icon(
-                            Icon::Agent,
-                            format!("@{display} ▾"),
-                            Variant::Secondary,
-                            move |_| {
-                                let list = profiles.clone();
-                                ui.spawn(async move {
-                                    let items: Vec<MenuItem> = list
-                                        .into_iter()
-                                        .map(|p| {
-                                            let pid = p.id.clone();
-                                            MenuItem::new(format!("@{}", p.id)).on_select(
-                                                move || {
-                                                    st.agent_review_profile
-                                                        .try_set(pid.clone());
-                                                },
-                                            )
-                                        })
-                                        .collect();
-                                    popup_menu(items).await;
-                                });
-                            },
-                        )
-                    }))
-                    .child(
-                        field(
-                            st.agent_review_focus,
-                            "Optional review focus (e.g. lock ordering, edge cases)…",
-                        )
-                        .flex_1()
-                        .min_w(px(200.)),
-                    )
-                    .child(compact_action("Cancel", Variant::Quiet, move |_| {
-                        st.agent_review_open.set(false);
-                    }))
-                    .child(
-                        compact_action(
-                            move || {
-                                if ui.is_method_pending("review.run_agent") {
-                                    "Starting…"
-                                } else {
-                                    "Start Agent Review"
-                                }
-                            },
-                            Variant::Primary,
-                            move |_| {
-                            let prof = st.agent_review_profile.get_untracked();
-                            let focus = st.agent_review_focus.get_untracked();
-                            st.agent_review_open.set(false);
-                            crate::review::start_agent_review(
-                                ui,
-                                &cid,
-                                (!prof.is_empty()).then_some(prof),
-                                (!focus.trim().is_empty()).then_some(focus),
-                            );
-                        })
-                        .disabled(move || ui.is_method_pending("review.run_agent")),
-                    )
-            },
-        ))
         .child(quick_merge::confirm_dialog(ui))
         .child(resolve::confirm_dialog(ui))
 }
