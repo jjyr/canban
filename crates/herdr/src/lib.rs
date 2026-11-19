@@ -117,6 +117,9 @@ impl Client {
     ) -> Result<Value> {
         ensure!(!argv.is_empty(), "Agent profile has no launch command");
         merge_default_terminal_env(&mut env, &self.config.hc_env);
+        if machine == "local" {
+            merge_local_path_env(&mut env, &self.config.hc_env);
+        }
         let mut p = json!({"argv":argv,"cwd":cwd,"env":env,"labels":labels,"no_parent":true,"no_notify":true,"outlive_parent":true,"wait":false});
         if machine != "local" {
             p["on"] = json!(machine);
@@ -168,8 +171,14 @@ pub mod events;
 pub mod host;
 mod pool;
 pub mod refine;
+pub mod shell_env;
 pub mod stream;
 pub mod transport;
+
+pub use shell_env::{
+    apply_local_path_env_to_command, invalidate_local_shell_path_cache, local_merged_path_string,
+    local_search_paths, merge_local_path_env, refresh_local_shell_path_if_stale,
+};
 
 #[cfg(test)]
 mod tests {

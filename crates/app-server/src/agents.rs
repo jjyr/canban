@@ -111,12 +111,13 @@ fn probe_agy_models(agy_path: &str, defaults: &[ModelOption]) -> Vec<ModelOption
     let path_owned = agy_path.to_owned();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let res = std::process::Command::new(&path_owned)
-            .arg("models")
+        let mut cmd = std::process::Command::new(&path_owned);
+        cmd.arg("models")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output();
+            .stderr(std::process::Stdio::null());
+        canban_herdr::apply_local_path_env_to_command(&mut cmd, &BTreeMap::new());
+        let res = cmd.output();
         let _ = tx.send(res);
     });
 
@@ -214,6 +215,9 @@ impl AppServer {
             {
                 bins.push(cmd.as_str());
             }
+        }
+        if machine == "local" {
+            canban_herdr::refresh_local_shell_path_if_stale(Duration::from_secs(2));
         }
         let host = canban_herdr::host::Host::new(config.clone(), &machine);
         let (probed, probe_error) = match host.probe_binaries(&bins) {

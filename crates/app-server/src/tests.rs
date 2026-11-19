@@ -4459,3 +4459,50 @@ fn manual_and_agent_card_resolve_reopen_and_next_day_auto_archive() {
         "{reopen_merged_err:#}"
     );
 }
+
+#[test]
+fn agent_catalog_and_diagnostics_detect_custom_prefix_pi_via_hc_env_path() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_dir, app, _project, _card) = setup();
+    let custom_dir = _dir.path().join("custom-npm-prefix/bin");
+    std::fs::create_dir_all(&custom_dir).unwrap();
+    let pi_bin = custom_dir.join("pi");
+    std::fs::write(&pi_bin, "#!/bin/sh\necho pi\n").unwrap();
+    std::fs::set_permissions(&pi_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Persist custom npm prefix in `hc_env["PATH"]` (simulating a user shell PATH not in GUI PATH).
+    let cfg_path = app.home.join("config/agents.json");
+    let mut cfg_val: Value = serde_json::from_slice(&std::fs::read(&cfg_path).unwrap()).unwrap();
+    cfg_val["hc_env"]["PATH"] = json!(format!("{}:/usr/bin:/bin", custom_dir.display()));
+    canban_context::atomic(&cfg_path, &serde_json::to_vec_pretty(&cfg_val).unwrap()).unwrap();
+    app.call("config.reload", json!({})).unwrap();
+
+    let catalog = app
+        .call("agent.catalog", json!({"machine": "local"}))
+        .unwrap();
+    let pi_entry = catalog["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == "pi")
+        .unwrap();
+    assert_eq!(pi_entry["installed"], true);
+    assert_eq!(pi_entry["path"], pi_bin.display().to_string());
+
+    // Enable `pi` and verify diagnostics also resolves it cleanly.
+    app.call(
+        "config.agents.save",
+        json!({"op": "toggle_agent", "id": "pi", "enabled": true}),
+    )
+    .unwrap();
+    let diag = app.call("diagnostics.status", json!({})).unwrap();
+    let prof_check = diag["toolchain"]["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "pi")
+        .unwrap();
+    assert_eq!(prof_check["available"], true);
+    assert_eq!(prof_check["resolved_path"], pi_bin.display().to_string());
+}

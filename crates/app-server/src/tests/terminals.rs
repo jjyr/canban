@@ -1032,4 +1032,39 @@ fn terminal_launches_inject_default_ghostty_identity_and_respect_hc_env_override
     assert_eq!(overridden["env"]["TERM"], "xterm-256color");
     assert_eq!(overridden["env"]["TERM_PROGRAM"], "custom-term");
     assert_eq!(overridden["env"]["COLORTERM"], "truecolor");
+
+    // 3. Local terminal launches inject merged `PATH` and respect `hc_env["PATH"]` overrides.
+    if std::env::var_os("CANBAN_HERDR_SEARCH_PATHS").is_none() {
+        app.call(
+            "terminal.create",
+            json!({"project_id": p.id, "request_key": "local-path-default"}),
+        )
+        .unwrap();
+        let path_raw = std::fs::read_to_string(dir.path().join("launches")).unwrap();
+        let default_launch: Value = serde_json::from_str(path_raw.lines().last().unwrap()).unwrap();
+        let injected_path = default_launch["env"]["PATH"]
+            .as_str()
+            .expect("local terminal launch must include PATH");
+        assert!(
+            injected_path.contains("/usr/bin") && injected_path.contains("/bin"),
+            "injected PATH should retain system binaries: {injected_path}"
+        );
+    }
+
+    app.config.write().unwrap().hc_env.insert(
+        "PATH".into(),
+        "/custom/npm/bin:/custom/node/bin:/usr/bin:/bin".into(),
+    );
+    app.call(
+        "terminal.create",
+        json!({"project_id": p.id, "request_key": "local-path-override"}),
+    )
+    .unwrap();
+    let after_override = std::fs::read_to_string(dir.path().join("launches")).unwrap();
+    let path_overridden: Value =
+        serde_json::from_str(after_override.lines().last().unwrap()).unwrap();
+    assert_eq!(
+        path_overridden["env"]["PATH"],
+        "/custom/npm/bin:/custom/node/bin:/usr/bin:/bin"
+    );
 }

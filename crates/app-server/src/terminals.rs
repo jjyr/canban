@@ -658,7 +658,8 @@ impl AppServer {
                     .is_some_and(|s| s.starts_with("herdr:"));
                 if !argv.is_empty() && !is_herdr_template {
                     if runtime.machine == "local" {
-                        argv[0] = canban_profiles::executable(&argv[0]);
+                        argv[0] =
+                            canban_profiles::executable_with_env(&argv[0], &client.config.hc_env);
                     } else if Path::new(&argv[0]).components().count() == 1 {
                         let program = host.python("import os,shutil,json,sys;h=os.path.expanduser('~');p=os.environ.get('PATH','')+os.pathsep+os.path.join(h,'.local/bin')+os.pathsep+os.path.join(h,'.cargo/bin');print(json.dumps(shutil.which(sys.argv[1],path=p) or sys.argv[1]))", &[&argv[0]])?;
                         argv[0] = program.as_str().context("No remote executable")?.into();

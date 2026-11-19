@@ -74,8 +74,11 @@ impl Host {
             .current_dir(dir)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .envs(envs.iter().copied());
+            .env_remove("GIT_INDEX_FILE");
+        if !envs.iter().any(|(k, _)| *k == "PATH") {
+            crate::apply_local_path_env_to_command(&mut cmd, &self.client.config.hc_env);
+        }
+        cmd.envs(envs.iter().copied());
         if let Some(input) = input {
             let mut child = cmd
                 .stdin(Stdio::piped())
@@ -185,16 +188,7 @@ impl Host {
     pub fn probe_binaries(&self, binaries: &[&str]) -> Result<BTreeMap<String, String>> {
         if !self.remote() {
             let mut found = BTreeMap::new();
-            let mut dirs = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-                .collect::<Vec<_>>();
-            if let Some(home) = std::env::var_os("HOME") {
-                let home = PathBuf::from(home);
-                dirs.push(home.join(".local/bin"));
-                dirs.push(home.join(".cargo/bin"));
-                dirs.push(home.join(".bun/bin"));
-                dirs.push(home.join("bin"));
-            }
-            dirs.extend(["/opt/homebrew/bin".into(), "/usr/local/bin".into()]);
+            let dirs = crate::local_search_paths(&self.client.config.hc_env);
             for &bin in binaries {
                 if Path::new(bin).components().count() != 1 {
                     let p = Path::new(bin);

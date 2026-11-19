@@ -56,6 +56,7 @@ pub fn command(config: &Config) -> Command {
         .env("HC_SESSION", &config.hc_session)
         .env_remove("HC_TERMINAL_ID");
     super::apply_default_terminal_env_to_command(&mut cmd, &config.hc_env);
+    super::apply_local_path_env_to_command(&mut cmd, &config.hc_env);
     cmd
 }
 pub fn child(config: &Config) -> Result<(Child, ChildStdin, ChildStdout)> {

@@ -257,6 +257,7 @@ impl AppServer {
             }
 
             "config.reload" => {
+                canban_herdr::invalidate_local_shell_path_cache();
                 let (c, migration) = Self::read_config(&self.home)?;
                 self.validate_references(&c)?;
                 Self::publish_migration(&self.home, migration)?;

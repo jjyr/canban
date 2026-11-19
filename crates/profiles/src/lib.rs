@@ -483,41 +483,7 @@ pub fn find_local_executable_with_env(
         let p = PathBuf::from(program);
         return p.is_file().then_some(p);
     }
-    let search_override = env
-        .get("CANBAN_HERDR_SEARCH_PATHS")
-        .map(std::ffi::OsString::from)
-        .or_else(|| std::env::var_os("CANBAN_HERDR_SEARCH_PATHS"));
-    let paths: Vec<PathBuf> = if let Some(override_paths) = search_override {
-        std::env::split_paths(&override_paths).collect()
-    } else {
-        let mut paths = Vec::new();
-        if let Some(install_dir) = env
-            .get("HC_INSTALL_DIR")
-            .map(std::ffi::OsString::from)
-            .or_else(|| std::env::var_os("HC_INSTALL_DIR"))
-        {
-            let dir = PathBuf::from(install_dir);
-            if !dir.as_os_str().is_empty() {
-                paths.push(dir);
-            }
-        }
-        paths.extend(std::env::split_paths(
-            &std::env::var_os("PATH").unwrap_or_default(),
-        ));
-        if let Some(home) = env
-            .get("HOME")
-            .map(std::ffi::OsString::from)
-            .or_else(|| std::env::var_os("HOME"))
-        {
-            let home = PathBuf::from(home);
-            paths.push(home.join(".local/bin"));
-            paths.push(home.join(".cargo/bin"));
-            paths.push(home.join(".bun/bin"));
-            paths.push(home.join("bin"));
-        }
-        paths.extend(["/opt/homebrew/bin".into(), "/usr/local/bin".into()]);
-        paths
-    };
+    let paths = canban_herdr::local_search_paths(env);
     let candidates: &[&str] = if program == "hc" {
         &["hc", "herdr-core"]
     } else {

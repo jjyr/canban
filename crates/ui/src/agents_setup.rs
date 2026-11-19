@@ -1543,6 +1543,7 @@ fn agent_tile(
     id: String,
     display: String,
     installed: bool,
+    probing: bool,
     checked: bool,
     on_toggle: impl Fn() + 'static,
 ) -> AnyElement {
@@ -1568,7 +1569,13 @@ fn agent_tile(
                 "{} @{}{} · {}",
                 display,
                 id,
-                if installed { "" } else { " (not installed)" },
+                if installed {
+                    ""
+                } else if probing {
+                    " (checking)"
+                } else {
+                    " (not installed)"
+                },
                 if checked { "enabled" } else { "disabled" }
             )
             .into(),
@@ -1601,6 +1608,8 @@ fn agent_tile(
                         .child(
                             muted(if installed {
                                 format!("@{id}")
+                            } else if probing {
+                                format!("@{id} · checking…")
                             } else {
                                 format!("@{id} · missing")
                             })
@@ -1676,7 +1685,8 @@ pub fn onboarding_banner(ui: Ui) -> impl IntoElement {
 
 /// Dedicated Onboarding & Re-runnable Agent Setup screen (`page == "agent-setup"`).
 pub fn onboarding_screen(ui: Ui) -> impl IntoElement {
-    if ui.agent_catalog.with_untracked(Value::is_null) {
+    if ui.agent_catalog.with_untracked(Value::is_null) || !ui.agent_catalog_loading.get_untracked()
+    {
         refresh_catalog(ui);
     }
 
@@ -1806,6 +1816,8 @@ pub fn onboarding_screen(ui: Ui) -> impl IntoElement {
                         ))
                         .child(dynamic(move || {
                             let rows = catalog_agents(ui);
+                            let probing = ui.agent_catalog.with(Value::is_null)
+                                && ui.agent_catalog_loading.get();
                             let installed: Vec<Value> = rows
                                 .iter()
                                 .filter(|r| r["installed"] == true)
@@ -1825,7 +1837,7 @@ pub fn onboarding_screen(ui: Ui) -> impl IntoElement {
                                 let is_inst = row["installed"] == true;
                                 let checked = current_enabled.contains(&id);
                                 let toggle_id = id.clone();
-                                agent_tile(id, display, is_inst, checked, move || {
+                                agent_tile(id, display, is_inst, probing, checked, move || {
                                     let mut next = enabled_set.get_untracked();
                                     if next.contains(&toggle_id) {
                                         if next.len() > 1 {
@@ -2097,7 +2109,8 @@ pub fn onboarding_screen(ui: Ui) -> impl IntoElement {
 
 /// Global Settings section for Agents, Custom CLI Agents, Default `@identity`, and Role Identities.
 pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement {
-    if ui.agent_catalog.with_untracked(Value::is_null) {
+    if ui.agent_catalog.with_untracked(Value::is_null) || !ui.agent_catalog_loading.get_untracked()
+    {
         refresh_catalog(ui);
     }
 
@@ -2167,12 +2180,22 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                 Variant::Secondary,
                 move |_| ui.navigate("agent-setup"),
             ))
-            .child(compact_action("Reload", Variant::Quiet, move |_| {
-                dispatch_then(ui, "config.reload", json!({}), move |_| {
-                    ui.agent_config_epoch.update(|v| *v += 1);
-                    refresh_catalog(ui);
-                });
-            })),
+            .child(compact_action(
+                move || {
+                    if ui.agent_catalog_loading.get() {
+                        "Scanning…"
+                    } else {
+                        "Reload"
+                    }
+                },
+                Variant::Quiet,
+                move |_| {
+                    dispatch_then(ui, "config.reload", json!({}), move |_| {
+                        ui.agent_config_epoch.update(|v| *v += 1);
+                        refresh_catalog(ui);
+                    });
+                },
+            )),
     )
     .child(
         view()
@@ -2739,6 +2762,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                 let rows = catalog_agents(ui);
                 let all_profs = ui.all_profiles.get();
                 let cat_val = ui.agent_catalog.get();
+                let probing = cat_val.is_null() && ui.agent_catalog_loading.get();
                 let active_custom_model = custom_model_target.get();
                 let active_command = command_target.get();
                 let enabled_direct: Vec<Profile> = all_profs
@@ -2763,7 +2787,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                     let enabled = row["enabled"] == true;
                     let installed = row["installed"] == true;
                     let toggle_id = id.clone();
-                    agent_tile(id, display, installed, enabled, move || {
+                    agent_tile(id, display, installed, probing, enabled, move || {
                         dispatch_agents_save(
                             ui,
                             json!({

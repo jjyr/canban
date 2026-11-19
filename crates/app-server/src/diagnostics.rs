@@ -15,24 +15,23 @@ fn probe_tool(
             "error": format!("{name} not found in ~/.local/bin, /opt/homebrew/bin, /usr/local/bin, or PATH"),
         });
     };
-    let version = Command::new(&resolved)
-        .arg(version_arg)
+    let mut cmd = Command::new(&resolved);
+    cmd.arg(version_arg)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .ok()
-        .and_then(|out| {
-            let text = if out.stdout.is_empty() {
-                String::from_utf8_lossy(&out.stderr).into_owned()
-            } else {
-                String::from_utf8_lossy(&out.stdout).into_owned()
-            };
-            text.lines()
-                .map(str::trim)
-                .find(|l| !l.is_empty())
-                .map(str::to_owned)
-        });
+        .stderr(Stdio::piped());
+    canban_herdr::apply_local_path_env_to_command(&mut cmd, env_map);
+    let version = cmd.output().ok().and_then(|out| {
+        let text = if out.stdout.is_empty() {
+            String::from_utf8_lossy(&out.stderr).into_owned()
+        } else {
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        text.lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .map(str::to_owned)
+    });
     json!({
         "available": true,
         "path": resolved.to_string_lossy(),
@@ -101,6 +100,7 @@ impl AppServer {
     }
 
     pub(super) fn diagnostics_status(&self) -> Result<Value> {
+        canban_herdr::refresh_local_shell_path_if_stale(std::time::Duration::from_secs(2));
         let config = self.config();
         let build = canban_updater::Build::current();
         let uptime_ms = now().saturating_sub(self.started_at);
