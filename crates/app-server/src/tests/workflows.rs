@@ -6757,7 +6757,7 @@ fn delivery_gates_isolate_unrelated_repos_and_serialize_same_canonical_checkout(
         let local = dir.path().join(name);
         std::fs::create_dir_all(&remote).unwrap();
         std::fs::create_dir_all(&local).unwrap();
-        git_in(&remote, &["init", "--bare"]);
+        git_in(&remote, &["init", "--bare", "-b", "main"]);
         git_in(&local, &["init", "-b", "main"]);
         git_identity(&local);
         git_in(&local, &["config", "core.hooksPath", "/dev/null"]);
