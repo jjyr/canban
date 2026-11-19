@@ -557,21 +557,8 @@ impl AppServer {
         }
         if card.worktree.is_some() && !card.merged() {
             let ops = self.ops(&project.work_location().machine);
-            if let Ok(info) = ops.info(&project, &card) {
-                if info.dirty || info.state == "conflict" {
-                    warnings.push("Worktree has uncommitted changes".into());
-                } else if info.state == "available" {
-                    let target = info.target_branch.as_deref().unwrap_or("");
-                    let branch = info.branch.as_deref().unwrap_or("");
-                    if !target.is_empty()
-                        && !branch.is_empty()
-                        && !ops.branch_merged(Path::new(&project.directory), branch, target)
-                    {
-                        warnings.push(format!(
-                            "Branch {branch} has unmerged changes against {target}"
-                        ));
-                    }
-                }
+            if let Some(warning) = ops.resolve_worktree_warning(&project, &card) {
+                warnings.push(warning);
             }
         }
         Ok(json!({
@@ -669,7 +656,7 @@ impl AppServer {
             }
 
             crate::workflow::stop_card(db, &config, &c.id, "cancelled")?;
-            for mut entry in db.list::<TerminalEntry>()? {
+            for mut entry in terminals {
                 if let Some(a) = &mut entry.agent
                     && a.card_id == c.id
                 {
@@ -719,9 +706,6 @@ impl AppServer {
             )?;
             Ok(serde_json::to_value(c)?)
         })?;
-        if let Some(cid) = emit_card.as_deref() {
-            let _ = self.try_auto_archive_resolved(cid);
-        }
         if p["card_id"].is_null()
             && let Some(id) = emit_card
         {

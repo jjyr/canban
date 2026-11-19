@@ -55,6 +55,8 @@ pub(crate) fn with_ui_projection(method: &str, mut params: serde_json::Value) ->
             "card.create"
                 | "card.update"
                 | "card.move"
+                | "card.resolve"
+                | "card.reopen"
                 | "card.hold_auto_merge"
                 | "card.restore"
                 | "card.context.update"

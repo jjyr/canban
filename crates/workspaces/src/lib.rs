@@ -30,8 +30,23 @@ impl Ops {
         );
         Ok(String::from_utf8(out.stdout)?.trim_end_matches('\n').into())
     }
+    fn git_ro(&self, dir: &Path, args: &[&str]) -> Result<std::process::Output> {
+        let mut argv = vec![
+            "git",
+            "--no-optional-locks",
+            "-C",
+            dir.to_str().context("Invalid path")?,
+        ];
+        argv.extend(args);
+        self.host.run_env(
+            Path::new("/"),
+            &[("GIT_EDITOR", "true"), ("GIT_SEQUENCE_EDITOR", "true")],
+            &argv,
+            None,
+        )
+    }
     pub fn branch_merged(&self, dir: &Path, branch: &str, base: &str) -> bool {
-        self.git(dir, &["merge-base", "--is-ancestor", branch, base])
+        self.git_ro(dir, &["merge-base", "--is-ancestor", branch, base])
             .is_ok_and(|out| out.status.success())
     }
     /// Best-effort commit SHA of a Card's worktree `HEAD` or local branch.
@@ -52,6 +67,37 @@ impl Ops {
     }
 }
 mod names;
+
+fn local_git_dir(cwd: &Path) -> Option<PathBuf> {
+    let dot_git = cwd.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+    let raw = std::fs::read_to_string(&dot_git).ok()?;
+    let rel = raw.lines().next()?.strip_prefix("gitdir:")?.trim();
+    if rel.is_empty() {
+        return None;
+    }
+    let path = Path::new(rel);
+    Some(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    })
+}
+
+fn parse_porcelain_branch(header: &str) -> Option<&str> {
+    let rest = header.strip_prefix("## ")?;
+    let rest = rest
+        .strip_prefix("No commits yet on ")
+        .or_else(|| rest.strip_prefix("Initial commit on "))
+        .unwrap_or(rest);
+    if rest.starts_with("HEAD (") {
+        return None;
+    }
+    let branch = rest.split("...").next().unwrap_or("").trim();
+    (!branch.is_empty()).then_some(branch)
+}
 
 pub fn card_branch(project: &Project, card: &Card) -> String {
     card.branch
@@ -542,6 +588,119 @@ impl Ops {
             }
         }
         Ok(value)
+    }
+
+    /// Lightweight worktree check for `card.resolve.preview`.
+    /// Avoids the full `info()` probe chain and uses `--no-optional-locks` / `--untracked-files=normal`
+    /// (plus a single batched remote probe when targeting a remote host).
+    pub fn resolve_worktree_warning(&self, project: &Project, card: &Card) -> Option<String> {
+        let path = card.worktree.as_deref()?;
+        let target = card
+            .workspace
+            .as_ref()
+            .and_then(|w| w.target_branch.as_deref())
+            .or(project.target_branch.as_deref())
+            .or(project.workflow.workspace.base_branch.as_deref())
+            .unwrap_or("");
+        let fallback_branch = card.branch.as_deref().unwrap_or("");
+        if self.host.remote() {
+            let probe = self
+                .host
+                .python(
+                    r#"import os,sys,json,subprocess
+wt,proj,target,fallback=sys.argv[1:5]
+if not os.path.isdir(wt):
+ print(json.dumps({'kind':'missing'}))
+ sys.exit(0)
+r=subprocess.run(['git','--no-optional-locks','-C',wt,'status','--porcelain=v1','--branch','--untracked-files=normal'],capture_output=True,text=True)
+if r.returncode!=0:
+ print(json.dumps({'kind':'not_repo'}))
+ sys.exit(0)
+lines=r.stdout.splitlines()
+header=lines[0] if lines else ''
+if any(ln.strip() for ln in lines[1:]):
+ print(json.dumps({'kind':'dirty'}))
+ sys.exit(0)
+gd=subprocess.run(['git','--no-optional-locks','-C',wt,'rev-parse','--path-format=absolute','--git-dir'],capture_output=True,text=True)
+if gd.returncode==0:
+ d=gd.stdout.strip()
+ if any(os.path.exists(os.path.join(d,f)) for f in ('MERGE_HEAD','rebase-merge','rebase-apply')):
+  print(json.dumps({'kind':'dirty'}))
+  sys.exit(0)
+branch=''
+if header.startswith('## '):
+ h=header[3:]
+ for pref in ('No commits yet on ','Initial commit on '):
+  if h.startswith(pref):
+   h=h[len(pref):]
+   break
+ if not h.startswith('HEAD ('):
+  branch=h.split('...',1)[0].strip()
+branch=branch or fallback
+if target and branch and branch!=target:
+ m=subprocess.run(['git','--no-optional-locks','-C',proj,'merge-base','--is-ancestor',branch,target],capture_output=True,text=True)
+ if m.returncode!=0:
+  print(json.dumps({'kind':'unmerged','branch':branch}))
+  sys.exit(0)
+print(json.dumps({'kind':'clean'}))"#,
+                    &[path, &project.directory, target, fallback_branch],
+                )
+                .ok()?;
+            return match probe["kind"].as_str() {
+                Some("dirty") => Some("Worktree has uncommitted changes".into()),
+                Some("unmerged") => {
+                    let branch = probe["branch"].as_str().unwrap_or(fallback_branch);
+                    Some(format!(
+                        "Branch {branch} has unmerged changes against {target}"
+                    ))
+                }
+                _ => None,
+            };
+        }
+        let cwd = Path::new(path);
+        if !cwd.is_dir() {
+            return None;
+        }
+        let out = self
+            .git_ro(
+                cwd,
+                &[
+                    "status",
+                    "--porcelain=v1",
+                    "--branch",
+                    "--untracked-files=normal",
+                ],
+            )
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let mut lines = stdout.lines();
+        let header = lines.next().unwrap_or("");
+        if lines.any(|ln| !ln.trim().is_empty()) {
+            return Some("Worktree has uncommitted changes".into());
+        }
+        if local_git_dir(cwd).is_some_and(|gd| {
+            gd.join("MERGE_HEAD").exists()
+                || gd.join("rebase-merge").exists()
+                || gd.join("rebase-apply").exists()
+        }) {
+            return Some("Worktree has uncommitted changes".into());
+        }
+        let branch = parse_porcelain_branch(header)
+            .or_else(|| (!fallback_branch.is_empty()).then_some(fallback_branch))
+            .unwrap_or("");
+        if !target.is_empty()
+            && !branch.is_empty()
+            && branch != target
+            && !self.branch_merged(Path::new(&project.directory), branch, target)
+        {
+            return Some(format!(
+                "Branch {branch} has unmerged changes against {target}"
+            ));
+        }
+        None
     }
     pub fn archive(&self, home: &Path, project: &Project, card: &Card) -> Result<Option<String>> {
         let Some(path) = &card.worktree else {
@@ -1368,6 +1527,44 @@ mod sync_tests {
         assert_eq!(
             ops.worktree_status(&cwd).unwrap().2.as_deref(),
             Some(branch.as_str())
+        );
+    }
+
+    #[test]
+    fn resolve_worktree_warning_detects_clean_dirty_and_unmerged() {
+        assert_eq!(
+            parse_porcelain_branch("## main...origin/main [ahead 1]"),
+            Some("main")
+        );
+        assert_eq!(
+            parse_porcelain_branch("## No commits yet on feat/x"),
+            Some("feat/x")
+        );
+        assert_eq!(parse_porcelain_branch("## HEAD (no branch)"), None);
+
+        let mut f = Fixture::new();
+        f.project.workflow.workspace.sync_base = false;
+        let cwd = f.prepare().unwrap();
+        let ops = Ops::local();
+        f.card.worktree = Some(cwd.to_string_lossy().into());
+        f.card.branch = Some("source-p/42".into());
+
+        // Clean branch at main -> no warning.
+        assert_eq!(ops.resolve_worktree_warning(&f.project, &f.card), None);
+
+        // Uncommitted file -> dirty warning.
+        fs::write(cwd.join("draft.txt"), "hello\n").unwrap();
+        assert_eq!(
+            ops.resolve_worktree_warning(&f.project, &f.card).as_deref(),
+            Some("Worktree has uncommitted changes")
+        );
+
+        // Committed but unmerged -> unmerged branch warning.
+        checked(&cwd, &["add", "draft.txt"]).unwrap();
+        checked(&cwd, &["commit", "-m", "draft"]).unwrap();
+        assert_eq!(
+            ops.resolve_worktree_warning(&f.project, &f.card).as_deref(),
+            Some("Branch source-p/42 has unmerged changes against main")
         );
     }
 }

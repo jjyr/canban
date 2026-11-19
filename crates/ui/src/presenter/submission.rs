@@ -26,6 +26,8 @@ pub(super) fn immediate(method: &str) -> bool {
         method,
         "card.create"
             | "card.move"
+            | "card.resolve"
+            | "card.reopen"
             | "card.hold_auto_merge"
             | "comment.add"
             | "comment.update"
@@ -1060,5 +1062,55 @@ mod tests {
         writes.reconcile(&mut cfg_snap);
         assert_eq!(cfg_snap.configuration_sessions.len(), 1);
         assert_eq!(cfg_snap.terminals.len(), 1);
+    }
+
+    #[test]
+    fn resolve_and_reopen_overlay_immediately_and_reconcile() {
+        assert!(immediate("card.resolve"));
+        assert!(immediate("card.reopen"));
+
+        let mut writes = CommittedWrites::default();
+        let initial = card(1);
+        let mut resolved = card(2);
+        resolved.resolution = Some(canban_types::CardResolution {
+            resolved_at: 123,
+            kind: "manual".into(),
+            reason: None,
+            actor: "user".into(),
+        });
+
+        writes.record(
+            "card.resolve",
+            &serde_json::to_value(&resolved).unwrap(),
+            "local",
+        );
+        let mut stale = Snapshot {
+            cards: vec![initial.clone()],
+            ..Snapshot::default()
+        };
+        writes.overlay(&mut stale);
+        assert!(stale.cards[0].resolved());
+        assert_eq!(stale.cards[0].revision, 2);
+
+        let mut fresh_resolved = Snapshot {
+            cards: vec![resolved.clone()],
+            ..Snapshot::default()
+        };
+        writes.reconcile(&mut fresh_resolved);
+        assert!(writes.cards.is_empty());
+
+        let reopened = card(3);
+        writes.record(
+            "card.reopen",
+            &serde_json::to_value(&reopened).unwrap(),
+            "local",
+        );
+        let mut stale_resolved = Snapshot {
+            cards: vec![resolved],
+            ..Snapshot::default()
+        };
+        writes.overlay(&mut stale_resolved);
+        assert!(!stale_resolved.cards[0].resolved());
+        assert_eq!(stale_resolved.cards[0].revision, 3);
     }
 }

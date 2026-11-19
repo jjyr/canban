@@ -1484,6 +1484,7 @@ impl HostRegistry {
                     | "project.detect_github"
                     | "git.file_lines"
                     | "review.preview"
+                    | "card.resolve.preview"
                     | "execution.output"
                     | "resource.read"
                     | "timeline.list"
@@ -1522,6 +1523,8 @@ impl HostRegistry {
                 method,
                 "card.create"
                     | "card.move"
+                    | "card.resolve"
+                    | "card.reopen"
                     | "card.hold_auto_merge"
                     | "comment.add"
                     | "comment.update"

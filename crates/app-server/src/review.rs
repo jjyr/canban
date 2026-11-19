@@ -268,8 +268,22 @@ impl AppServer {
                 || !card.resolved()
                 || card.attention.is_some()
                 || card.human_gate.is_some()
-                || activity_warning(db, &card)?.is_some()
             {
+                return Ok(false);
+            }
+            // Fast path: keep Cards resolved today visible on the Board until the next local calendar day
+            // before scanning terminals and events.
+            if let Some(ts) = card.resolved_at() {
+                let same_local_day: bool = db.conn.query_row(
+                    "SELECT date(?1 / 1000, 'unixepoch', 'localtime') >= date(?2 / 1000, 'unixepoch', 'localtime')",
+                    params![ts as i64, now_ms as i64],
+                    |r| r.get(0),
+                )?;
+                if same_local_day {
+                    return Ok(false);
+                }
+            }
+            if activity_warning(db, &card)?.is_some() {
                 return Ok(false);
             }
             let last_lifecycle = db
