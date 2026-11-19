@@ -1255,11 +1255,7 @@ pub fn Gallery() -> impl IntoElement {
     }
     if matches!(
         std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
-        Ok("insights"
-            | "insights-weekly"
-            | "insights-empty"
-            | "insights-efficiency"
-            | "insights-short-history")
+        Ok("insights" | "insights-weekly" | "insights-empty" | "insights-short-history")
     ) {
         canban_ui::frame::configure_window_chrome();
         if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("insights-empty") {
@@ -1277,9 +1273,6 @@ pub fn Gallery() -> impl IntoElement {
                 .cadence
                 .set(canban_ui::insights::model::TrendCadence::Weekly);
         }
-        ui.insights
-            .efficiency_open
-            .set(std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("insights-efficiency"));
         ui.all_profiles.set(vec![
             canban_types::Profile {
                 id: "developer".into(),

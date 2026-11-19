@@ -2747,12 +2747,87 @@ pub fn insights() -> canban_types::Snapshot {
                 kind: "card.stage_changed".into(),
                 actor: "user".into(),
                 message: "backlog → develop".into(),
-                data: json!({}),
+                data: json!({"from": "backlog", "to": "develop"}),
                 created_at: work_start,
             });
 
             if unmerged_archived {
                 continue;
+            }
+
+            if !still_active {
+                let merged_at = s
+                    .cards
+                    .last()
+                    .and_then(|c| c.delivery.as_ref().map(|d| d.merged_at))
+                    .unwrap_or(work_start + 2 * hour_ms);
+                let review_at = (work_start + (35 + (card_num % 4) * 12) * min_ms)
+                    .min(merged_at.saturating_sub(15 * min_ms));
+                let mq_queued_at = merged_at.saturating_sub(((card_num % 5) + 2) * min_ms);
+
+                seq += 1;
+                s.events.push(Event {
+                    id: format!("ins-ev-{seq}"),
+                    project_id: pid.into(),
+                    card_id: cid.clone(),
+                    sequence: seq,
+                    kind: "card.stage_changed".into(),
+                    actor: "system".into(),
+                    message: "develop → review".into(),
+                    data: json!({"from": "develop", "to": "review"}),
+                    created_at: review_at,
+                });
+
+                if !is_pr {
+                    seq += 1;
+                    s.events.push(Event {
+                        id: format!("ins-ev-{seq}"),
+                        project_id: pid.into(),
+                        card_id: cid.clone(),
+                        sequence: seq,
+                        kind: "review.merged".into(),
+                        actor: "system".into(),
+                        message: "Merged batch into main".into(),
+                        data: json!({
+                            "commit": format!("{:07x}", card_num * 9973),
+                            "target_branch": "main",
+                            "batch_id": format!("batch-{days_ago}-{}", slot / 2),
+                            "batch_size": if slot.is_multiple_of(2) { 2 } else { 1 },
+                            "queued_at": mq_queued_at,
+                        }),
+                        created_at: merged_at,
+                    });
+                }
+
+                if card_num.is_multiple_of(3) {
+                    let comment_ts = review_at + 3 * min_ms;
+                    let reply_ts = (comment_ts + ((card_num % 4) + 1) * 90_000).min(merged_at);
+                    let comment_ev_id = format!("ins-ev-{}", seq + 1);
+                    seq += 1;
+                    s.events.push(Event {
+                        id: comment_ev_id.clone(),
+                        project_id: pid.into(),
+                        card_id: cid.clone(),
+                        sequence: seq,
+                        kind: "comment.created".into(),
+                        actor: "user".into(),
+                        message: "@reviewer please double-check edge cases".into(),
+                        data: json!({"body": "@reviewer please double-check edge cases"}),
+                        created_at: comment_ts,
+                    });
+                    seq += 1;
+                    s.events.push(Event {
+                        id: format!("ins-ev-{seq}"),
+                        project_id: pid.into(),
+                        card_id: cid.clone(),
+                        sequence: seq,
+                        kind: "comment.replied".into(),
+                        actor: "agent:reviewer".into(),
+                        message: "Checked and verified.".into(),
+                        data: json!({"reply_to": comment_ev_id}),
+                        created_at: reply_ts,
+                    });
+                }
             }
 
             // Schedule 1-2 Agent runs on this card

@@ -945,6 +945,13 @@ impl AppServer {
                             "{verb} batch ({batch_size} card(s)) into {target_branch} (local only, upstream sync disabled)"
                         ),
                     };
+                    let queued_at = run.inputs["queued_at"].as_u64();
+                    let mut merged_data = json!({"commit":head_sha,"target_branch":target_branch,"synced_upstream":synced,"batch_id":batch_id,"batch_size":batch_size,"workflow_run_id":run.id});
+                    let mut delivery_out = json!({"state":"merged","commit":head_sha,"target_branch":target_branch,"synced_upstream":synced,"batch_id":batch_id,"batch_size":batch_size});
+                    if let Some(q) = queued_at {
+                        merged_data["queued_at"] = json!(q);
+                        delivery_out["queued_at"] = json!(q);
+                    }
                     log(
                         db,
                         &card,
@@ -956,14 +963,14 @@ impl AppServer {
                         } else {
                             Some(batch_id.clone())
                         },
-                        json!({"commit":head_sha,"target_branch":target_branch,"synced_upstream":synced,"batch_id":batch_id,"batch_size":batch_size,"workflow_run_id":run.id}),
+                        merged_data,
                     )?;
                     canban_workflow_engine::runtime::complete_delivery(
                         db,
                         &config,
                         &mut card,
                         &mut run,
-                        json!({"state":"merged","commit":head_sha,"target_branch":target_branch,"synced_upstream":synced,"batch_id":batch_id,"batch_size":batch_size}),
+                        delivery_out,
                         enqueue,
                     )?;
                     merged_cards.push(card.id.clone());

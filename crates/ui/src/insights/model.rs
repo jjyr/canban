@@ -252,6 +252,37 @@ pub struct HeatmapWeek {
     pub cells: [HeatmapCell; 7],
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TimingStat {
+    pub avg_ms: Option<u64>,
+    pub p50_ms: Option<u64>,
+    pub samples: usize,
+    pub prev_avg_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StageQueueTimings {
+    pub develop_stage: TimingStat,
+    pub develop_exec: TimingStat,
+    pub review_stage: TimingStat,
+    pub merge_queue: TimingStat,
+    pub mention_reply: TimingStat,
+    pub merge_queue_batches: usize,
+    pub merge_queue_clean_batches: usize,
+    pub merge_queue_conflict_batches: usize,
+    pub merge_queue_avg_batch_size: Option<f64>,
+    pub merge_queue_conflict_avg_ms: Option<u64>,
+}
+
+impl StageQueueTimings {
+    pub fn clean_merge_rate_pct(&self) -> Option<usize> {
+        (self.merge_queue_batches > 0).then(|| {
+            (self.merge_queue_clean_batches * 100 + self.merge_queue_batches / 2)
+                / self.merge_queue_batches
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileStat {
     pub card_ids: BTreeSet<String>,
@@ -259,6 +290,8 @@ pub struct ProfileStat {
     pub provider: String,
     pub cards_touched: usize,
     pub median_queue_wait_ms: Option<u64>,
+    pub avg_exec_ms: Option<u64>,
+    pub avg_mention_reply_ms: Option<u64>,
     pub total_runs: usize,
     pub overlapping_runs: usize,
     pub completed_runs: usize,
@@ -305,6 +338,7 @@ pub struct Dashboard {
     pub unknown_merge_dates: usize,
     pub hours: Vec<HourBucket>,
     pub efficiency: Efficiency,
+    pub timings: StageQueueTimings,
     pub moving_average: Vec<Option<f64>>,
     pub weeks: Vec<WeekBucket>,
     pub weekly_moving_average: Vec<Option<f64>>,
@@ -531,6 +565,96 @@ fn median_u64(mut values: Vec<u64>) -> Option<u64> {
     } else {
         Some(values[mid - 1] / 2 + values[mid] / 2 + (values[mid - 1] % 2 + values[mid] % 2) / 2)
     }
+}
+
+fn mean_u64(values: &[u64]) -> Option<u64> {
+    if values.is_empty() {
+        return None;
+    }
+    let sum: u128 = values.iter().map(|&v| u128::from(v)).sum();
+    Some((sum / values.len() as u128) as u64)
+}
+
+fn build_timing_stat(current: Vec<u64>, previous: Vec<u64>) -> TimingStat {
+    let samples = current.len();
+    let avg_ms = mean_u64(&current);
+    let p50_ms = median_u64(current);
+    let prev_avg_ms = mean_u64(&previous);
+    TimingStat {
+        avg_ms,
+        p50_ms,
+        samples,
+        prev_avg_ms,
+    }
+}
+
+fn parse_stage_transition(ev: &Event) -> Option<(String, String)> {
+    let from = ev.data["from"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let to = ev.data["to"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let (Some(f), Some(t)) = (from, to) {
+        return Some((f.to_ascii_lowercase(), t.to_ascii_lowercase()));
+    }
+    if let Some((lhs, rhs)) = ev
+        .message
+        .split_once('→')
+        .or_else(|| ev.message.split_once("->"))
+    {
+        let f = lhs.trim();
+        let t = rhs.trim();
+        if !f.is_empty() && !t.is_empty() {
+            return Some((f.to_ascii_lowercase(), t.to_ascii_lowercase()));
+        }
+    }
+    if let Some(t) = to {
+        return Some((String::new(), t.to_ascii_lowercase()));
+    }
+    None
+}
+
+/// Computes total dwell time (accumulating rework visits) and the last exit timestamp
+/// for `target_stage` on a single card. `terminal_at` closes an open interval when the
+/// card resolves or enters delivery without emitting an explicit stage exit.
+fn compute_stage_dwell(
+    events: &[&Event],
+    target_stage: &str,
+    terminal_at: Option<u64>,
+) -> Option<(u64, u64)> {
+    let mut entered_at: Option<u64> = None;
+    let mut total_ms: u64 = 0;
+    let mut last_exit_at: Option<u64> = None;
+
+    for ev in events {
+        if ev.kind != "card.stage_changed" || ev.created_at == 0 {
+            continue;
+        }
+        let Some((from, to)) = parse_stage_transition(ev) else {
+            continue;
+        };
+        if let Some(start) = entered_at {
+            if to != target_stage && ev.created_at >= start {
+                total_ms = total_ms.saturating_add(ev.created_at - start);
+                last_exit_at = Some(ev.created_at);
+                entered_at = None;
+            }
+        } else if to == target_stage && from != target_stage {
+            entered_at = Some(ev.created_at);
+        }
+    }
+
+    if let (Some(start), Some(end)) = (entered_at, terminal_at)
+        && end >= start
+    {
+        total_ms = total_ms.saturating_add(end - start);
+        last_exit_at = Some(end);
+    }
+
+    last_exit_at.map(|exit_ts| (total_ms, exit_ts))
 }
 
 pub fn format_duration_compact(ms: u64) -> String {
@@ -1445,8 +1569,44 @@ pub fn compute_full<Tz: TimeZone>(
 
     let mut project_merges: BTreeMap<String, BTreeMap<NaiveDate, usize>> = BTreeMap::new();
 
+    let workflow_runs_by_id: BTreeMap<&str, &canban_types::WorkflowRun> = snapshot
+        .workflow_runs
+        .iter()
+        .filter(|w| in_scope(&w.project_id))
+        .map(|w| (w.id.as_str(), w))
+        .collect();
+    let merge_batches_by_id: BTreeMap<&str, &canban_types::MergeBatch> = snapshot
+        .merge_batches
+        .iter()
+        .filter(|b| in_scope(&b.project_id))
+        .map(|b| (b.id.as_str(), b))
+        .collect();
+    let questions_by_id: BTreeMap<&str, &canban_types::Question> = snapshot
+        .questions
+        .iter()
+        .filter(|q| in_scope(&q.project_id))
+        .map(|q| (q.id.as_str(), q))
+        .collect();
+    let mut comment_created_by_id: BTreeMap<&str, u64> = BTreeMap::new();
+
+    let mut develop_stage_cur = Vec::new();
+    let mut develop_stage_prev = Vec::new();
+    let mut review_stage_cur = Vec::new();
+    let mut review_stage_prev = Vec::new();
+    let mut merge_queue_cur = Vec::new();
+    let mut merge_queue_prev = Vec::new();
+    let mut mention_cur = Vec::new();
+    let mut mention_prev = Vec::new();
+    let mut mention_by_profile_period: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    // batch_id -> (batch_size, had_conflict)
+    let mut mq_batches_period: BTreeMap<String, (usize, bool)> = BTreeMap::new();
+    let mut mq_conflict_durations: Vec<u64> = Vec::new();
+
     for (&cid, evs) in &events_by_card {
         for ev in evs {
+            if ev.kind == "comment.created" && ev.created_at > 0 {
+                comment_created_by_id.insert(ev.id.as_str(), ev.created_at);
+            }
             if matches!(
                 ev.kind.as_str(),
                 "execution.input_required" | "review.merge_conflict"
@@ -1465,6 +1625,55 @@ pub fn compute_full<Tz: TimeZone>(
                 }
                 if previous(ev.created_at) {
                     prev_human_asks_period += 1;
+                }
+            }
+        }
+    }
+
+    for evs in events_by_card.values() {
+        for ev in evs {
+            if ev.kind != "comment.replied" || ev.created_at == 0 || ev.created_at > now_ms {
+                continue;
+            }
+            let question = ev
+                .data
+                .get("question_id")
+                .and_then(|v| v.as_str())
+                .and_then(|qid| questions_by_id.get(qid).copied());
+            let start_ts = question
+                .map(|q| q.created_at)
+                .filter(|&t| t > 0)
+                .or_else(|| {
+                    ev.data
+                        .get("reply_to")
+                        .and_then(|v| v.as_str())
+                        .and_then(|cid| comment_created_by_id.get(cid).copied())
+                });
+            if let Some(s) = start_ts
+                && s > 0
+                && s <= ev.created_at
+            {
+                let dur = ev.created_at - s;
+                if current(ev.created_at) {
+                    mention_cur.push(dur);
+                    let prof = ev
+                        .actor
+                        .strip_prefix("agent:")
+                        .filter(|p| !p.is_empty())
+                        .or_else(|| {
+                            question
+                                .map(|q| q.profile_id.as_str())
+                                .filter(|p| !p.is_empty())
+                        });
+                    if let Some(p) = prof {
+                        mention_by_profile_period
+                            .entry(p.to_owned())
+                            .or_default()
+                            .push(dur);
+                    }
+                }
+                if previous(ev.created_at) {
+                    mention_prev.push(dur);
                 }
             }
         }
@@ -1549,6 +1758,111 @@ pub fn compute_full<Tz: TimeZone>(
                 previous_created += 1;
             }
         }
+        let resolved_ts = if card.resolved() {
+            resolve_merged_at(card, card_evs).filter(|&t| t <= now_ms)
+        } else {
+            None
+        };
+
+        let mut card_mq_queued_at: Option<u64> = None;
+        if let Some(evs) = card_evs {
+            for ev in evs {
+                if ev.kind != "review.merged" || ev.created_at == 0 || ev.created_at > now_ms {
+                    continue;
+                }
+                let batch_id = ev
+                    .data
+                    .get("batch_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty());
+                let explicit_q = ev
+                    .data
+                    .get("queued_at")
+                    .and_then(|v| v.as_u64())
+                    .filter(|&t| t > 0);
+                if batch_id.is_none() && explicit_q.is_none() {
+                    continue;
+                }
+                let wf_run = ev
+                    .data
+                    .get("workflow_run_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|wid| workflow_runs_by_id.get(wid).copied());
+                let batch_opt = batch_id.and_then(|bid| merge_batches_by_id.get(bid).copied());
+                let queued_at = explicit_q
+                    .or_else(|| {
+                        wf_run.and_then(|w| {
+                            w.outputs
+                                .values()
+                                .find_map(|v| v.get("queued_at").and_then(|q| q.as_u64()))
+                                .filter(|&t| t > 0)
+                        })
+                    })
+                    .or_else(|| batch_opt.map(|b| b.created_at).filter(|&t| t > 0))
+                    .or_else(|| {
+                        wf_run.and_then(|w| {
+                            w.history
+                                .iter()
+                                .filter_map(|h| h["at"].as_u64())
+                                .filter(|&t| t > 0 && t <= ev.created_at)
+                                .max()
+                        })
+                    });
+                if let Some(q) = queued_at
+                    && q <= ev.created_at
+                {
+                    card_mq_queued_at = Some(q);
+                    let dur = ev.created_at - q;
+                    if current(ev.created_at) {
+                        merge_queue_cur.push(dur);
+                    }
+                    if previous(ev.created_at) {
+                        merge_queue_prev.push(dur);
+                    }
+                }
+                if let Some(bid) = batch_id
+                    && current(ev.created_at)
+                {
+                    let bsize = ev
+                        .data
+                        .get("batch_size")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n as usize)
+                        .filter(|&n| n > 0)
+                        .or_else(|| batch_opt.map(|b| b.items.len().max(1)))
+                        .unwrap_or(1);
+                    let had_conflict = batch_opt.is_some_and(|b| {
+                        b.failure_kind.is_some()
+                            || !b.conflict_files.is_empty()
+                            || !b.prompt.trim().is_empty()
+                    });
+                    let entry = mq_batches_period
+                        .entry(bid.to_owned())
+                        .or_insert((bsize, had_conflict));
+                    entry.0 = entry.0.max(bsize);
+                    entry.1 |= had_conflict;
+                }
+            }
+
+            if let Some((dur, exit_ts)) = compute_stage_dwell(evs, "develop", resolved_ts) {
+                if current(exit_ts) {
+                    develop_stage_cur.push(dur);
+                }
+                if previous(exit_ts) {
+                    develop_stage_prev.push(dur);
+                }
+            }
+            let review_terminal = card_mq_queued_at.or(resolved_ts);
+            if let Some((dur, exit_ts)) = compute_stage_dwell(evs, "review", review_terminal) {
+                if current(exit_ts) {
+                    review_stage_cur.push(dur);
+                }
+                if previous(exit_ts) {
+                    review_stage_prev.push(dur);
+                }
+            }
+        }
+
         if !card.resolved() {
             continue;
         }
@@ -1622,12 +1936,22 @@ pub fn compute_full<Tz: TimeZone>(
         let ts = batch.started_at.unwrap_or(batch.created_at);
         if current(ts) {
             pipeline.merge_batches_period += 1;
-            if batch.failure_kind.as_deref() == Some("conflict")
+            let had_conflict = batch.failure_kind.as_deref() == Some("conflict")
+                || batch.failure_kind.is_some()
                 || !batch.conflict_files.is_empty()
-                || !batch.prompt.trim().is_empty()
-            {
+                || !batch.prompt.trim().is_empty();
+            if had_conflict {
                 pipeline.conflict_batches_period += 1;
+                if !batch.active() && batch.updated_at >= batch.created_at {
+                    mq_conflict_durations.push(batch.updated_at - batch.created_at);
+                }
             }
+            let bsize = batch.items.len().max(1);
+            let entry = mq_batches_period
+                .entry(batch.id.clone())
+                .or_insert((bsize, had_conflict));
+            entry.0 = entry.0.max(bsize);
+            entry.1 |= had_conflict;
         }
     }
 
@@ -1669,6 +1993,9 @@ pub fn compute_full<Tz: TimeZone>(
     let mut prev_outcomes = [0usize; 4];
     let mut profile_map: BTreeMap<String, ProfileStat> = BTreeMap::new();
     let mut profile_waits: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let mut profile_execs: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let mut develop_exec_cur: Vec<u64> = Vec::new();
+    let mut develop_exec_prev: Vec<u64> = Vec::new();
     let mut trigger_counts: BTreeMap<TriggerKind, usize> = BTreeMap::new();
     let mut used_runs = 0;
 
@@ -1727,6 +2054,8 @@ pub fn compute_full<Tz: TimeZone>(
                     provider: provider.clone(),
                     cards_touched: 0,
                     median_queue_wait_ms: None,
+                    avg_exec_ms: None,
+                    avg_mention_reply_ms: None,
                     total_runs: 0,
                     overlapping_runs: 0,
                     completed_runs: 0,
@@ -1751,6 +2080,23 @@ pub fn compute_full<Tz: TimeZone>(
                     p.cards.insert(id.clone());
                     p.profiles.insert(run.profile_id.clone());
                 }
+            }
+        }
+        if run.outcome != OutcomeKind::Active
+            && let Some(ended) = run.ended_at.filter(|&e| e >= began && e <= now_ms)
+        {
+            let exec_dur = ended - began;
+            if current(ended) {
+                profile_execs
+                    .entry(group_key.clone())
+                    .or_default()
+                    .push(exec_dur);
+                if run.profile_id == "developer" {
+                    develop_exec_cur.push(exec_dur);
+                }
+            }
+            if previous(ended) && run.profile_id == "developer" {
+                develop_exec_prev.push(exec_dur);
             }
         }
         if let Some(queued) = run.queued_at.filter(|q| *q > 0 && *q <= began) {
@@ -1792,11 +2138,15 @@ pub fn compute_full<Tz: TimeZone>(
         .map(|(gkey, mut p)| {
             p.cards_touched = p.card_ids.len();
             p.median_queue_wait_ms = profile_waits.remove(&gkey).and_then(median_u64);
+            p.avg_exec_ms = profile_execs.remove(&gkey).and_then(|vals| mean_u64(&vals));
             if assigned_ask_profiles.insert(p.profile_id.clone()) {
                 p.human_asks = human_asks_by_profile_period
                     .get(&p.profile_id)
                     .copied()
                     .unwrap_or(0);
+                p.avg_mention_reply_ms = mention_by_profile_period
+                    .get(&p.profile_id)
+                    .and_then(|vals| mean_u64(vals));
             }
             p
         })
@@ -2228,6 +2578,27 @@ pub fn compute_full<Tz: TimeZone>(
     let median_queue_wait_ms = percentile(&efficiency.queue, 50);
     let prev_median_queue_wait_ms = percentile(&efficiency.previous_queue, 50);
 
+    let merge_queue_batches = mq_batches_period.len();
+    let merge_queue_conflict_batches = mq_batches_period.values().filter(|(_, c)| *c).count();
+    let merge_queue_clean_batches =
+        merge_queue_batches.saturating_sub(merge_queue_conflict_batches);
+    let merge_queue_avg_batch_size = (merge_queue_batches > 0).then(|| {
+        mq_batches_period.values().map(|(sz, _)| *sz).sum::<usize>() as f64
+            / merge_queue_batches as f64
+    });
+    let timings = StageQueueTimings {
+        develop_stage: build_timing_stat(develop_stage_cur, develop_stage_prev),
+        develop_exec: build_timing_stat(develop_exec_cur, develop_exec_prev),
+        review_stage: build_timing_stat(review_stage_cur, review_stage_prev),
+        merge_queue: build_timing_stat(merge_queue_cur, merge_queue_prev),
+        mention_reply: build_timing_stat(mention_cur, mention_prev),
+        merge_queue_batches,
+        merge_queue_clean_batches,
+        merge_queue_conflict_batches,
+        merge_queue_avg_batch_size,
+        merge_queue_conflict_avg_ms: mean_u64(&mq_conflict_durations),
+    };
+
     Dashboard {
         exclude_initial_sync,
         baseline_known: history_start.is_some_and(|h| h <= previous_start),
@@ -2345,6 +2716,7 @@ pub fn compute_full<Tz: TimeZone>(
         median_queue_wait_ms,
         prev_median_queue_wait_ms,
         efficiency,
+        timings,
         max_daily_kanban: days
             .iter()
             .map(|d| d.created_cards.max(d.merged_cards))
@@ -3287,5 +3659,207 @@ mod tests {
         };
         assert_eq!(span(spring), 23 * 3_600_000);
         assert_eq!(span(fall), 25 * 3_600_000);
+    }
+
+    #[test]
+    fn stage_queue_and_mention_timings_aggregate_cleanly() {
+        let now = ts_utc8(2026, 11, 17, 18, 0);
+        let min = 60_000u64;
+        let mut s = Snapshot::default();
+        s.projects.push(sample_project("p1", "Canban"));
+
+        // Card 1: backlog -> develop (20m) -> review (10m) -> develop rework (10m) -> review (15m) -> merge queue (5m)
+        // Total develop dwell = 30m, review dwell = 25m (excludes 5m merge queue), merge queue = 5m.
+        let c1_merged = ts_utc8(2026, 11, 17, 15, 0);
+        merged(&mut s, "c1", c1_merged);
+        let mut seq = 1u64;
+        let mut push_ev = |card_id: &str,
+                           kind: &str,
+                           actor: &str,
+                           msg: &str,
+                           data: serde_json::Value,
+                           at: u64| {
+            let id = format!("ev-{seq}");
+            s.events.push(Event {
+                id: id.clone(),
+                project_id: "p1".into(),
+                card_id: card_id.into(),
+                sequence: seq,
+                kind: kind.into(),
+                actor: actor.into(),
+                message: msg.into(),
+                data,
+                created_at: at,
+            });
+            seq += 1;
+            id
+        };
+
+        push_ev(
+            "c1",
+            "card.stage_changed",
+            "user",
+            "backlog → develop",
+            json!({"from": "backlog", "to": "develop"}),
+            c1_merged - 60 * min,
+        );
+        push_ev(
+            "c1",
+            "card.stage_changed",
+            "system",
+            "develop → review",
+            json!({"from": "develop", "to": "review"}),
+            c1_merged - 40 * min,
+        );
+        push_ev(
+            "c1",
+            "card.stage_changed",
+            "user",
+            "review → develop",
+            json!({"from": "review", "to": "develop"}),
+            c1_merged - 30 * min,
+        );
+        push_ev(
+            "c1",
+            "card.stage_changed",
+            "system",
+            "develop → review",
+            json!({"from": "develop", "to": "review"}),
+            c1_merged - 20 * min,
+        );
+        push_ev(
+            "c1",
+            "review.merged",
+            "system",
+            "Merged batch into main",
+            json!({
+                "batch_id": "b-clean",
+                "batch_size": 2,
+                "queued_at": c1_merged - 5 * min,
+            }),
+            c1_merged,
+        );
+
+        // Mention question + reply (2m) for @reviewer
+        let comment_id = push_ev(
+            "c1",
+            "comment.created",
+            "user",
+            "@reviewer check this",
+            json!({"body": "@reviewer check this"}),
+            c1_merged - 12 * min,
+        );
+        s.questions.push(canban_types::Question {
+            id: "q1".into(),
+            project_id: "p1".into(),
+            card_id: "c1".into(),
+            profile_id: "reviewer".into(),
+            comment_id: comment_id.clone(),
+            body: "@reviewer check this".into(),
+            terminal_id: Some("c1:reviewer".into()),
+            state: "replied".into(),
+            error: None,
+            reply_path: None,
+            created_at: c1_merged - 12 * min,
+        });
+        push_ev(
+            "c1",
+            "comment.replied",
+            "agent:reviewer",
+            "Looks good",
+            json!({"question_id": "q1", "reply_to": comment_id}),
+            c1_merged - 10 * min,
+        );
+
+        // Developer execution (8m) + Reviewer execution (2m)
+        push_ev(
+            "c1",
+            "execution.started",
+            "system",
+            "Started @developer",
+            json!({"terminal_id": "c1:developer", "run_number": 1, "trigger": "workflow"}),
+            c1_merged - 58 * min,
+        );
+        push_ev(
+            "c1",
+            "execution.reported",
+            "agent:developer",
+            "Done",
+            json!({"terminal_id": "c1:developer", "run_number": 1, "state": "completed"}),
+            c1_merged - 50 * min,
+        );
+        push_ev(
+            "c1",
+            "execution.started",
+            "system",
+            "Started @reviewer",
+            json!({"terminal_id": "c1:reviewer", "run_number": 1, "trigger": "comment:rev"}),
+            c1_merged - 12 * min,
+        );
+        push_ev(
+            "c1",
+            "execution.reported",
+            "agent:reviewer",
+            "Done",
+            json!({"terminal_id": "c1:reviewer", "run_number": 1, "state": "completed"}),
+            c1_merged - 10 * min,
+        );
+
+        // Also add a conflict merge batch in period (6m resolve)
+        s.merge_batches.push(MergeBatch {
+            id: "b-conflict".into(),
+            project_id: "p1".into(),
+            profile_id: "merger".into(),
+            provider_session_id: None,
+            target_branch: "main".into(),
+            target_head: "abc".into(),
+            strategy: Default::default(),
+            sync_upstream: true,
+            test_command: None,
+            worktree: "/tmp/wt".into(),
+            state: "completed".into(),
+            failure_kind: Some("conflict".into()),
+            conflict_card_number: Some(1),
+            conflict_files: vec!["src/lib.rs".into()],
+            test_output: None,
+            items: vec![MergeBatchItem {
+                card_id: "c1".into(),
+                card_number: 1,
+                workflow_run_id: "wf1".into(),
+                branch: "b1".into(),
+                worktree: "/tmp/wt1".into(),
+                base_head: "def".into(),
+                integrated_commit: None,
+                evicted: false,
+            }],
+            prompt: "Resolve conflict".into(),
+            error: None,
+            queued_at: Some(c1_merged - 10 * min),
+            started_at: Some(c1_merged - 9 * min),
+            created_at: c1_merged - 10 * min,
+            updated_at: c1_merged - 4 * min,
+        });
+
+        let d = compute(&s, None, RangeWindow::Today, now, &tz_plus_8());
+        assert_eq!(d.timings.develop_stage.avg_ms, Some(30 * min));
+        assert_eq!(d.timings.develop_stage.samples, 1);
+        assert_eq!(d.timings.develop_exec.avg_ms, Some(8 * min));
+        assert_eq!(d.timings.review_stage.avg_ms, Some(25 * min));
+        assert_eq!(d.timings.merge_queue.avg_ms, Some(5 * min));
+        assert_eq!(d.timings.mention_reply.avg_ms, Some(2 * min));
+        assert_eq!(d.timings.merge_queue_batches, 2);
+        assert_eq!(d.timings.merge_queue_clean_batches, 1);
+        assert_eq!(d.timings.merge_queue_conflict_batches, 1);
+        assert_eq!(d.timings.clean_merge_rate_pct(), Some(50));
+        assert_eq!(d.timings.merge_queue_avg_batch_size, Some(1.5));
+        assert_eq!(d.timings.merge_queue_conflict_avg_ms, Some(6 * min));
+
+        let rev = d
+            .profile_stats
+            .iter()
+            .find(|p| p.profile_id == "reviewer")
+            .expect("reviewer profile");
+        assert_eq!(rev.avg_exec_ms, Some(2 * min));
+        assert_eq!(rev.avg_mention_reply_ms, Some(2 * min));
     }
 }

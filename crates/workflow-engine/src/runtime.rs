@@ -1156,13 +1156,19 @@ pub fn complete_delivery(
     config: &Config,
     card: &mut Card,
     run: &mut WorkflowRun,
-    output: Value,
+    mut output: Value,
     queue: Queue,
 ) -> Result<()> {
     let key = run.step.clone().context("Missing Deliver step")?;
+    let queued_at = run.inputs["queued_at"].as_u64();
     if let Some(obj) = run.inputs.as_object_mut() {
         obj.remove("queued_at");
         obj.remove("queue_pause_reason");
+    }
+    if let Some(q) = queued_at
+        && let Some(out_obj) = output.as_object_mut()
+    {
+        out_obj.entry("queued_at".to_owned()).or_insert(json!(q));
     }
     run.outputs.insert(key.clone(), output);
     let to = run.inputs["pending_next"].as_str().map(str::to_owned);

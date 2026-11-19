@@ -453,46 +453,6 @@ pub const CATALOG: &[Command] = &[
         keywords: "statistics daily date comparison trend agents samples efficiency",
     },
     Command {
-        id: "insights-efficiency",
-        title: "Insights: Toggle Efficiency Details",
-        key: "",
-        display: "Insights",
-        context: "Insights",
-        keywords: "statistics daily date comparison trend agents samples efficiency",
-    },
-    Command {
-        id: "insights-samples-cycle",
-        title: "Insights: Inspect Merge Timing Samples",
-        key: "",
-        display: "Insights",
-        context: "Insights",
-        keywords: "statistics daily date comparison trend agents samples efficiency",
-    },
-    Command {
-        id: "insights-samples-queue",
-        title: "Insights: Inspect Queue Timing Samples",
-        key: "",
-        display: "Insights",
-        context: "Insights",
-        keywords: "statistics daily date comparison trend agents samples efficiency",
-    },
-    Command {
-        id: "insights-samples-next",
-        title: "Insights: Next Sample Page",
-        key: "",
-        display: "Insights",
-        context: "Insights",
-        keywords: "statistics daily date comparison trend agents samples efficiency",
-    },
-    Command {
-        id: "insights-samples-previous",
-        title: "Insights: Previous Sample Page",
-        key: "",
-        display: "Insights",
-        context: "Insights",
-        keywords: "statistics daily date comparison trend agents samples efficiency",
-    },
-    Command {
         id: "insights-group-provider",
         title: "Insights: Group Agents by Provider",
         key: "",
@@ -1410,26 +1370,6 @@ pub fn execute(ui: Ui, id: &str) {
         }
         "insights-metric-runs" => {
             crate::insights::intent(ui, "metric-runs");
-            ui.navigate("insights");
-        }
-        "insights-efficiency" => {
-            crate::insights::intent(ui, "efficiency");
-            ui.navigate("insights");
-        }
-        "insights-samples-cycle" => {
-            crate::insights::intent(ui, "samples-cycle");
-            ui.navigate("insights");
-        }
-        "insights-samples-queue" => {
-            crate::insights::intent(ui, "samples-queue");
-            ui.navigate("insights");
-        }
-        "insights-samples-next" => {
-            crate::insights::intent(ui, "samples-next");
-            ui.navigate("insights");
-        }
-        "insights-samples-previous" => {
-            crate::insights::intent(ui, "samples-previous");
             ui.navigate("insights");
         }
         "insights-group-provider" => {

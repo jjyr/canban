@@ -34,9 +34,6 @@ pub struct State {
     pub exclude_initial_sync: Signal<bool>,
     pub scroll: Signal<Option<ElementRef>>,
     pub annual_width: Signal<f32>,
-    pub efficiency_open: Signal<bool>,
-    pub queue_samples: Signal<bool>,
-    pub sample_page: Signal<usize>,
     pub provider_group: Signal<bool>,
     pub project_sort: Signal<ProjectSort>,
     pub drilldown: Signal<String>,
@@ -66,9 +63,6 @@ impl State {
             exclude_initial_sync: signal(true),
             scroll: signal(None),
             annual_width: signal(0.),
-            efficiency_open: signal(false),
-            queue_samples: signal(false),
-            sample_page: signal(0),
             provider_group: signal(false),
             project_sort: signal(ProjectSort::Merged),
             drilldown: signal(String::new()),
@@ -82,7 +76,6 @@ pub fn set_range(ui: Ui, next: RangeWindow) {
     if next != RangeWindow::Today {
         ui.insights.comparison.set(Comparison::Previous);
     }
-    ui.insights.sample_page.set(0);
     ui.insights.drilldown.set(String::new());
 }
 
@@ -142,7 +135,6 @@ pub fn select_date(ui: Ui, date: Option<chrono::NaiveDate>) {
     ui.insights
         .date_text
         .set(date.map(|d| d.to_string()).unwrap_or_default());
-    ui.insights.sample_page.set(0);
     ui.insights.drilldown.set(String::new());
 }
 
@@ -201,24 +193,6 @@ pub fn intent(ui: Ui, operation: &str) {
             ui.insights.trend_weeks.set(12);
         }
         "toggle-initial-sync" => ui.insights.exclude_initial_sync.update(|v| *v = !*v),
-        "efficiency" => ui.insights.efficiency_open.update(|v| *v = !*v),
-        "samples-cycle" | "samples-queue" => {
-            ui.insights.queue_samples.set(operation == "samples-queue");
-            ui.insights.sample_page.set(0);
-            ui.insights.efficiency_open.set(true);
-        }
-        "samples-next" => {
-            let d = dashboard(ui);
-            let count = if ui.insights.queue_samples.get() {
-                d.efficiency.queue.len()
-            } else {
-                d.efficiency.cycle.len()
-            };
-            ui.insights
-                .sample_page
-                .update(|p| *p = (*p + 1).min(count.div_ceil(20).saturating_sub(1)));
-        }
-        "samples-previous" => ui.insights.sample_page.update(|p| *p = p.saturating_sub(1)),
         "group-provider" => ui.insights.provider_group.set(true),
         "group-profile" => ui.insights.provider_group.set(false),
         "sort-created" => ui.insights.project_sort.set(ProjectSort::Created),
@@ -1869,6 +1843,191 @@ fn render_hourly(ui: Ui, dash: &Dashboard) -> View {
         )
 }
 
+fn render_stage_and_queue_timings(dash: &Dashboard) -> View {
+    let t = &dash.timings;
+    let max_avg = [
+        t.develop_stage.avg_ms,
+        t.review_stage.avg_ms,
+        t.merge_queue.avg_ms,
+        t.mention_reply.avg_ms,
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .unwrap_or(1)
+    .max(1);
+
+    let timing_row = |title: &'static str,
+                      stat: &model::TimingStat,
+                      color: AdaptiveColor,
+                      extra_detail: Option<String>| {
+        let ratio = stat
+            .avg_ms
+            .map(|ms| (ms as f32 / max_avg as f32).clamp(0.05, 1.0))
+            .unwrap_or(0.0);
+        let avg_txt = stat
+            .avg_ms
+            .map(format_duration_compact)
+            .unwrap_or_else(|| "—".into());
+        let p50_txt = stat
+            .p50_ms
+            .map(format_duration_compact)
+            .unwrap_or_else(|| "—".into());
+        let delta = format_duration_delta(stat.avg_ms, stat.prev_avg_ms);
+        let mut detail = format!("p50 {p50_txt} · n={}", stat.samples);
+        if let Some(extra) = extra_detail {
+            detail.push_str(" · ");
+            detail.push_str(&extra);
+        }
+
+        let mut header =
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .child(view().w(px(7.)).h(px(7.)).rounded(px(2.)).bg(color))
+                        .child(
+                            label(title)
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::MEDIUM),
+                        ),
+                )
+                .child(view().flex_row().items_center().gap_1p5().child(
+                    mono_val(format!("avg {avg_txt}"), 11.5).font_weight(FontWeight::SEMIBOLD),
+                ));
+        if let Some((delta_txt, faster)) = delta {
+            header = header.child(status(
+                delta_txt,
+                if faster { Tone::Success } else { Tone::Neutral },
+            ));
+        }
+
+        view()
+            .gap_1()
+            .child(header)
+            .child(
+                view()
+                    .w_full()
+                    .h(px(7.))
+                    .rounded(px(3.5))
+                    .bg(INSET)
+                    .overflow_hidden()
+                    .flex_row()
+                    .child(
+                        view()
+                            .flex_grow(ratio.max(0.0))
+                            .h_full()
+                            .rounded(px(3.5))
+                            .bg(color),
+                    )
+                    .child(view().flex_grow((1.0 - ratio).max(0.0)).h_full()),
+            )
+            .child(note(detail))
+    };
+
+    let dev_exec_detail = t.develop_exec.avg_ms.map(|ms| {
+        format!(
+            "Agent exec avg {} (n={})",
+            format_duration_compact(ms),
+            t.develop_exec.samples
+        )
+    });
+
+    let clean_pill = t
+        .clean_merge_rate_pct()
+        .map(|pct| {
+            let tone = if pct >= 85 {
+                Tone::Success
+            } else if pct < 60 {
+                Tone::Attention
+            } else {
+                Tone::Neutral
+            };
+            status(format!("{pct}% clean"), tone)
+        })
+        .unwrap_or_else(|| status("No batches", Tone::Neutral));
+
+    let batch_size_str = t
+        .merge_queue_avg_batch_size
+        .map(|sz| format!("{sz:.1} cards/batch"))
+        .unwrap_or_else(|| "— cards/batch".into());
+    let conflict_str = t
+        .merge_queue_conflict_avg_ms
+        .map(|ms| format!(" · Conflict resolve avg {}", format_duration_compact(ms)))
+        .unwrap_or_default();
+
+    card_surface()
+        .flex_1()
+        .min_w(px(320.))
+        .child(
+            view()
+                .gap_0p5()
+                .child(heading("Stage & queue timings"))
+                .child(note(
+                    "Average Develop, Review, Merge Queue & @mention reply durations (with p50 median)",
+                )),
+        )
+        .child(
+            view()
+                .gap_2p5()
+                .child(timing_row(
+                    "Develop",
+                    &t.develop_stage,
+                    ACCENT.resolve(),
+                    dev_exec_detail,
+                ))
+                .child(timing_row(
+                    "Review",
+                    &t.review_stage,
+                    SUCCESS.resolve(),
+                    None,
+                ))
+                .child(timing_row(
+                    "Merge Queue",
+                    &t.merge_queue,
+                    ATTENTION.resolve(),
+                    None,
+                ))
+                .child(timing_row(
+                    "@mention Reply",
+                    &t.mention_reply,
+                    alpha_tint(ACCENT, 0.7),
+                    None,
+                )),
+        )
+        .child(view().w_full().h(px(1.)).bg(BORDER))
+        .child(
+            view()
+                .gap_1()
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            label("Merge queue efficiency")
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::MEDIUM),
+                        )
+                        .child(clean_pill),
+                )
+                .child(note(format!(
+                    "{} batches ({} clean · {} conflicts) · Avg {batch_size_str}{conflict_str}",
+                    t.merge_queue_batches,
+                    t.merge_queue_clean_batches,
+                    t.merge_queue_conflict_batches
+                ))),
+        )
+}
+
 fn render_intake_and_funnel(dash: &Dashboard) -> View {
     let intake = &dash.intake;
     let denom = intake.total_raw.max(1);
@@ -2018,6 +2177,18 @@ fn render_projects(ui: Ui, dash: &Dashboard) -> View {
         }
     }
 
+    let max_metric = projects
+        .iter()
+        .map(|p| match sort_mode {
+            ProjectSort::Merged => p.merged,
+            ProjectSort::Created => p.created,
+            ProjectSort::Wip => p.total_wip(),
+            ProjectSort::Runs => p.agent_runs,
+        })
+        .max()
+        .unwrap_or(1)
+        .max(1);
+
     let rows = projects
         .into_iter()
         .map(|p| {
@@ -2028,78 +2199,180 @@ fn render_projects(ui: Ui, dash: &Dashboard) -> View {
             } else {
                 "—".into()
             };
-            let spark = p
-                .recent_merges
-                .iter()
-                .map(|v| match v {
-                    0 => '·',
-                    1 => '▁',
-                    2..=3 => '▃',
-                    4..=6 => '▅',
-                    _ => '█',
-                })
-                .collect::<String>();
             let sync_tag = if p.initial_sync > 0 && dash.exclude_initial_sync {
                 format!(" (+{}s)", p.initial_sync)
             } else {
                 String::new()
             };
-            press_target()
-                .w_full()
-                .p_2()
-                .rounded(px(6.))
-                .bg(if is_scoped {
-                    SELECTED.resolve()
-                } else {
-                    AdaptiveColor::TRANSPARENT
-                })
-                .hover(|s| s.bg(CARD_HOVER))
-                .accessibility_label(format!("Insights Project: {}", p.name))
-                .on_press(move |_: &()| {
-                    let cur = ui.insights.scope_project.get_untracked();
-                    if cur == pid {
-                        ui.insights.scope_project.set(String::new());
+            let total_wip = p.total_wip();
+
+            let bar_track = match sort_mode {
+                ProjectSort::Wip => {
+                    let ratio = if total_wip == 0 {
+                        0.0
                     } else {
-                        ui.insights.scope_project.set(pid.clone());
-                    }
-                    ui.insights.sample_page.set(0);
-                })
-                .child(
-                    view()
+                        (total_wip as f32 / max_metric as f32).clamp(0.05, 1.0)
+                    };
+                    let wip_segs: Vec<(usize, AdaptiveColor)> = vec![
+                        (p.wip_backlog, alpha_tint(MUTED, 0.55)),
+                        (p.wip_develop, ACCENT.resolve()),
+                        (p.wip_review, SUCCESS.resolve()),
+                    ];
+                    let filled = view()
+                        .flex_grow(ratio)
+                        .h_full()
+                        .rounded(px(3.5))
+                        .overflow_hidden()
                         .flex_row()
-                        .flex_wrap()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
+                        .gap(px(1.))
+                        .children(
+                            wip_segs
+                                .into_iter()
+                                .filter(|(v, _)| *v > 0)
+                                .map(|(v, col)| {
+                                    view().flex_grow(v as f32).h_full().bg(col).into_element()
+                                })
+                                .collect::<Vec<_>>(),
+                        );
+                    view()
+                        .flex_1()
+                        .min_w(px(64.))
+                        .h(px(7.))
+                        .rounded(px(3.5))
+                        .bg(INSET)
+                        .overflow_hidden()
+                        .flex_row()
+                        .child(filled)
+                        .child(view().flex_grow((1.0 - ratio).max(0.0)).h_full())
+                }
+                _ => {
+                    let (val, fill_color) = match sort_mode {
+                        ProjectSort::Merged => (p.merged, SUCCESS.resolve()),
+                        ProjectSort::Created => (p.created, ACCENT.resolve()),
+                        ProjectSort::Runs => (p.agent_runs, alpha_tint(ACCENT, 0.8)),
+                        ProjectSort::Wip => unreachable!(),
+                    };
+                    let ratio = if val == 0 {
+                        0.0
+                    } else {
+                        (val as f32 / max_metric as f32).clamp(0.04, 1.0)
+                    };
+                    view()
+                        .flex_1()
+                        .min_w(px(64.))
+                        .h(px(7.))
+                        .rounded(px(3.5))
+                        .bg(INSET)
+                        .overflow_hidden()
+                        .flex_row()
                         .child(
-                            label(p.name)
-                                .font_weight(FontWeight::MEDIUM)
-                                .w(px(120.))
-                                .truncate(),
+                            view()
+                                .flex_grow(ratio.max(0.0))
+                                .h_full()
+                                .rounded(px(3.5))
+                                .bg(fill_color),
                         )
+                        .child(view().flex_grow((1.0 - ratio).max(0.0)).h_full())
+                }
+            };
+
+            let tip = format!(
+                "{} · +{} created{} · {} resolved ({share}) · WIP {total_wip} (Backlog {} / Develop {} / Review {}) · {} agent runs",
+                p.name,
+                p.created,
+                sync_tag,
+                p.merged,
+                p.wip_backlog,
+                p.wip_develop,
+                p.wip_review,
+                p.agent_runs
+            );
+
+            view()
+                .w_full()
+                .tooltip(tooltip_box().child(note(tip)))
+                .child(
+                    press_target()
+                        .w_full()
+                        .p_2()
+                        .rounded(px(6.))
+                        .bg(if is_scoped {
+                            SELECTED.resolve()
+                        } else {
+                            AdaptiveColor::TRANSPARENT
+                        })
+                        .hover(|s| s.bg(CARD_HOVER))
+                        .accessibility_label(format!("Insights Project: {}", p.name))
+                        .on_press(move |_: &()| {
+                            let cur = ui.insights.scope_project.get_untracked();
+                            if cur == pid {
+                                ui.insights.scope_project.set(String::new());
+                            } else {
+                                ui.insights.scope_project.set(pid.clone());
+                            }
+                        })
                         .child(
-                            mono_val(
-                                format!("+{}{} / {} ({share})", p.created, sync_tag, p.merged),
-                                11.5,
-                            )
-                            .w(px(124.)),
-                        )
-                        .child(
-                            note(format!(
-                                "WIP {}/{}/{}",
-                                p.wip_backlog, p.wip_develop, p.wip_review
-                            ))
-                            .w(px(94.)),
-                        )
-                        .child(note(format!("{} runs", p.agent_runs)).w(px(58.)))
-                        .child(
-                            text(spark)
-                                .font_family(MONO_FONT)
-                                .text_size(px(12.))
-                                .text_color(SUCCESS)
-                                .tooltip(
-                                    tooltip_box()
-                                        .child(note("Daily resolutions in the last 7 days")),
+                            view()
+                                .w_full()
+                                .gap_1p5()
+                                .child(
+                                    view()
+                                        .flex_row()
+                                        .flex_wrap()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_2()
+                                        .child(
+                                            label(p.name)
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .max_w(px(170.))
+                                                .truncate(),
+                                        )
+                                        .child(
+                                            view()
+                                                .flex_row()
+                                                .flex_wrap()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(mono_val(
+                                                    format!(
+                                                        "+{}{} / {} ({share})",
+                                                        p.created, sync_tag, p.merged
+                                                    ),
+                                                    11.5,
+                                                ))
+                                                .child(note(format!(
+                                                    "WIP {}/{}/{} · {} runs",
+                                                    p.wip_backlog,
+                                                    p.wip_develop,
+                                                    p.wip_review,
+                                                    p.agent_runs
+                                                ))),
+                                        ),
+                                )
+                                .child(
+                                    view()
+                                        .w_full()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(bar_track)
+                                        .child(
+                                            mono_val(
+                                                match sort_mode {
+                                                    ProjectSort::Merged => share,
+                                                    ProjectSort::Created => {
+                                                        format!("+{}", p.created)
+                                                    }
+                                                    ProjectSort::Wip => format!("{total_wip} wip"),
+                                                    ProjectSort::Runs => {
+                                                        format!("{} runs", p.agent_runs)
+                                                    }
+                                                },
+                                                11.,
+                                            )
+                                            .w(px(52.)),
+                                        ),
                                 ),
                         ),
                 )
@@ -2138,39 +2411,117 @@ fn render_projects(ui: Ui, dash: &Dashboard) -> View {
                     )),
             ),
     );
+    if sort_mode == ProjectSort::Wip {
+        panel = panel.child(
+            row()
+                .child(legend_swatch(move || alpha_tint(MUTED, 0.55), "Backlog"))
+                .child(legend_swatch(ACCENT, "Develop"))
+                .child(legend_swatch(SUCCESS, "Review")),
+        );
+    }
     if rows.is_empty() {
         panel = panel.child(note("No Project activity or active WIP in this period."));
     }
     panel.children(rows).child(note(
-        "Columns: +Created / Resolved (share) · WIP (Backlog/Develop/Review) · Agent starts · 7D resolutions. Click row to scope/unscope.",
+        "Bar reflects active sort metric (+Created / Resolved share · WIP Backlog/Develop/Review · Agent runs). Click row to scope/unscope.",
     ))
+}
+
+fn render_agent_stacked_bar(
+    starts: usize,
+    max_starts: usize,
+    completed: usize,
+    active: usize,
+    blocked: usize,
+    failed: usize,
+) -> View {
+    let ratio = if starts == 0 || max_starts == 0 {
+        0.0
+    } else {
+        (starts as f32 / max_starts as f32).clamp(0.05, 1.0)
+    };
+    let segs: [(usize, AdaptiveColor); 4] = [
+        (completed, SUCCESS.resolve()),
+        (active, ACCENT.resolve()),
+        (blocked, ATTENTION.resolve()),
+        (failed, DANGER.resolve()),
+    ];
+    let filled_total = completed + active + blocked + failed;
+    let filled = if filled_total == 0 {
+        view()
+            .flex_grow(ratio)
+            .h_full()
+            .rounded(px(3.5))
+            .bg(alpha_tint(MUTED, 0.45))
+    } else {
+        view()
+            .flex_grow(ratio)
+            .h_full()
+            .rounded(px(3.5))
+            .overflow_hidden()
+            .flex_row()
+            .gap(px(1.))
+            .children(
+                segs.into_iter()
+                    .filter(|(v, _)| *v > 0)
+                    .map(|(v, col)| view().flex_grow(v as f32).h_full().bg(col).into_element())
+                    .collect::<Vec<_>>(),
+            )
+    };
+
+    view()
+        .w_full()
+        .h(px(8.))
+        .rounded(px(4.))
+        .bg(BACKGROUND)
+        .overflow_hidden()
+        .flex_row()
+        .tooltip(tooltip_box().child(note(format!(
+            "{completed} completed · {active} active · {blocked} blocked · {failed} failed"
+        ))))
+        .child(filled)
+        .child(view().flex_grow((1.0 - ratio).max(0.0)).h_full())
 }
 
 fn render_agents(ui: Ui, dash: &Dashboard) -> View {
     let provider_group = ui.insights.provider_group.get();
-    let mut panel = card_surface().flex_1().min_w(px(320.)).child(
-        view()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .child(heading("Agents used"))
-            .child(
-                row()
-                    .child(choice(ui, "Profile", "group-profile", !provider_group))
-                    .child(choice(ui, "Provider", "group-provider", provider_group)),
-            ),
-    );
+    let mut panel = card_surface()
+        .flex_1()
+        .min_w(px(320.))
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(heading("Agents used"))
+                .child(
+                    row()
+                        .child(choice(ui, "Profile", "group-profile", !provider_group))
+                        .child(choice(ui, "Provider", "group-provider", provider_group)),
+                ),
+        )
+        .child(
+            row()
+                .child(legend_swatch(SUCCESS, "Completed"))
+                .child(legend_swatch(ACCENT, "Active"))
+                .child(legend_swatch(ATTENTION, "Blocked"))
+                .child(legend_swatch(DANGER, "Failed")),
+        );
 
     if provider_group {
         struct ProvAgg {
             profiles: usize,
             starts: usize,
             completed: usize,
-            resolved: usize,
+            active: usize,
+            blocked: usize,
+            failed: usize,
             asks: usize,
             cards: std::collections::BTreeSet<String>,
+            exec_sum: u128,
+            exec_cnt: usize,
         }
         let mut grouped = std::collections::BTreeMap::<String, ProvAgg>::new();
         for p in &dash.profile_stats {
@@ -2178,89 +2529,175 @@ fn render_agents(ui: Ui, dash: &Dashboard) -> View {
                 profiles: 0,
                 starts: 0,
                 completed: 0,
-                resolved: 0,
+                active: 0,
+                blocked: 0,
+                failed: 0,
                 asks: 0,
                 cards: std::collections::BTreeSet::new(),
+                exec_sum: 0,
+                exec_cnt: 0,
             });
             g.profiles += 1;
             g.starts += p.total_runs;
             g.completed += p.completed_runs;
-            g.resolved += p.completed_runs + p.blocked_runs + p.failed_runs;
+            g.active += p.active_runs;
+            g.blocked += p.blocked_runs;
+            g.failed += p.failed_runs;
             g.asks += p.human_asks;
             g.cards.extend(p.card_ids.iter().cloned());
+            if let Some(ms) = p.avg_exec_ms {
+                let w = (p.completed_runs + p.blocked_runs + p.failed_runs).max(1);
+                g.exec_sum += u128::from(ms) * w as u128;
+                g.exec_cnt += w;
+            }
         }
-        for (name, g) in grouped {
-            let pass = (g.completed * 100 + g.resolved / 2)
-                .checked_div(g.resolved)
+        let mut entries: Vec<(String, ProvAgg)> = grouped.into_iter().collect();
+        entries.sort_by(|a, b| b.1.starts.cmp(&a.1.starts).then_with(|| a.0.cmp(&b.0)));
+        let max_starts = entries
+            .iter()
+            .map(|(_, g)| g.starts)
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        for (name, g) in entries {
+            let resolved = g.completed + g.blocked + g.failed;
+            let pass_pct = (resolved > 0).then(|| (g.completed * 100 + resolved / 2) / resolved);
+            let pass_tone = match pass_pct {
+                Some(pct) if pct >= 85 => Tone::Success,
+                Some(pct) if pct < 60 => Tone::Attention,
+                _ => Tone::Neutral,
+            };
+            let pass_txt = pass_pct
                 .map(|pct| format!("{pct}% pass"))
-                .unwrap_or_else(|| "— pass".into());
+                .unwrap_or_else(|| "active".into());
+            let avg_exec = if g.exec_cnt > 0 {
+                format_duration_compact((g.exec_sum / g.exec_cnt as u128) as u64)
+            } else {
+                "—".into()
+            };
             panel = panel.child(
                 view()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .justify_between()
-                    .p_1p5()
-                    .rounded(px(5.))
+                    .w_full()
+                    .p_2()
+                    .gap_1p5()
+                    .rounded(px(6.))
                     .bg(INSET)
-                    .gap_2()
                     .child(
-                        label(name)
-                            .font_weight(FontWeight::MEDIUM)
-                            .w(px(110.))
-                            .truncate(),
+                        view()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(label(name).font_weight(FontWeight::MEDIUM).truncate())
+                                    .child(note(format!("({} roles)", g.profiles))),
+                            )
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(mono_val(format!("{} starts", g.starts), 11.5))
+                                    .child(status(pass_txt, pass_tone)),
+                            ),
                     )
-                    .child(mono_val(format!("{} starts · {pass}", g.starts), 11.5))
+                    .child(render_agent_stacked_bar(
+                        g.starts,
+                        max_starts,
+                        g.completed,
+                        g.active,
+                        g.blocked,
+                        g.failed,
+                    ))
                     .child(note(format!(
-                        "{} roles · {} Cards · {} asks",
-                        g.profiles,
+                        "{} Cards · exec avg {avg_exec} · {} asks",
                         g.cards.len(),
                         g.asks
                     ))),
             );
         }
     } else {
+        let max_starts = dash
+            .profile_stats
+            .iter()
+            .map(|p| p.total_runs)
+            .max()
+            .unwrap_or(1)
+            .max(1);
         for p in &dash.profile_stats {
-            let pass_txt = p
-                .pass_rate_pct()
+            let pass_pct = p.pass_rate_pct();
+            let pass_tone = match pass_pct {
+                Some(pct) if pct >= 85 => Tone::Success,
+                Some(pct) if pct < 60 => Tone::Attention,
+                _ => Tone::Neutral,
+            };
+            let pass_txt = pass_pct
                 .map(|pct| format!("{pct}% pass"))
                 .unwrap_or_else(|| "active".into());
+            let exec_str = p
+                .avg_exec_ms
+                .map(format_duration_compact)
+                .unwrap_or_else(|| "—".into());
+            let q_str = p
+                .median_queue_wait_ms
+                .map(format_duration_compact)
+                .unwrap_or_else(|| "—".into());
+            let reply_suffix = p
+                .avg_mention_reply_ms
+                .map(|ms| format!(" · reply avg {}", format_duration_compact(ms)))
+                .unwrap_or_default();
+
             panel = panel.child(
                 view()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .justify_between()
-                    .p_1p5()
-                    .rounded(px(5.))
+                    .w_full()
+                    .p_2()
+                    .gap_1p5()
+                    .rounded(px(6.))
                     .bg(INSET)
-                    .gap_2()
                     .child(
                         view()
                             .flex_row()
+                            .flex_wrap()
                             .items_center()
-                            .gap_1p5()
-                            .w(px(148.))
+                            .justify_between()
+                            .gap_2()
                             .child(
-                                label(format!("@{}", p.profile_id))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .truncate(),
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(
+                                        label(format!("@{}", p.profile_id))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .truncate(),
+                                    )
+                                    .child(note(format!("({})", p.provider))),
                             )
-                            .child(note(format!("({})", p.provider))),
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(mono_val(format!("{} starts", p.total_runs), 11.5))
+                                    .child(status(pass_txt, pass_tone)),
+                            ),
                     )
-                    .child(
-                        mono_val(
-                            format!("{} starts · {} Cards", p.total_runs, p.cards_touched),
-                            11.5,
-                        )
-                        .w(px(124.)),
-                    )
+                    .child(render_agent_stacked_bar(
+                        p.total_runs,
+                        max_starts,
+                        p.completed_runs,
+                        p.active_runs,
+                        p.blocked_runs,
+                        p.failed_runs,
+                    ))
                     .child(note(format!(
-                        "{pass_txt} · {} asks · Q {}",
-                        p.human_asks,
-                        p.median_queue_wait_ms
-                            .map(format_duration_compact)
-                            .unwrap_or_else(|| "—".into())
+                        "{} Cards · exec avg {exec_str} · Q p50 {q_str} · {} asks{reply_suffix}",
+                        p.cards_touched, p.human_asks
                     ))),
             );
         }
@@ -2268,16 +2705,49 @@ fn render_agents(ui: Ui, dash: &Dashboard) -> View {
     if dash.profile_stats.is_empty() {
         panel = panel.child(note("No Agent execution observed in this period."));
     }
-    let triggers = dash
+
+    let trigger_color = |kind: model::TriggerKind| match kind {
+        model::TriggerKind::Workflow => ACCENT.resolve(),
+        model::TriggerKind::Mention => SUCCESS.resolve(),
+        model::TriggerKind::Interactive => ATTENTION.resolve(),
+    };
+    let trigger_segments: Vec<(usize, AdaptiveColor)> = dash
         .trigger_stats
         .iter()
-        .map(|s| format!("{}: {} ({}%)", s.kind.label(), s.count, s.share_pct))
-        .collect::<Vec<_>>()
-        .join(" · ");
+        .map(|s| (s.count, trigger_color(s.kind)))
+        .collect();
+    let trigger_legend = row().children(
+        dash.trigger_stats
+            .iter()
+            .map(|s| {
+                let col = trigger_color(s.kind);
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(view().w(px(7.)).h(px(7.)).rounded(px(2.)).bg(col))
+                    .child(note(format!(
+                        "{}: {} ({}%)",
+                        s.kind.label(),
+                        s.count,
+                        s.share_pct
+                    )))
+                    .into_element()
+            })
+            .collect::<Vec<_>>(),
+    );
+
     panel
-        .child(note(triggers))
+        .child(view().w_full().h(px(1.)).bg(BORDER))
+        .child(
+            view()
+                .gap_1p5()
+                .child(note("Trigger sources"))
+                .child(segmented_bar(&trigger_segments))
+                .child(trigger_legend),
+        )
         .child(note(
-            "Includes cross-day executions; starts count launches in the period. Queue p50 is computed per Role + Provider.",
+            "Bar length reflects starts in period; segments show outcome mix. Queue p50 is computed per Role + Provider.",
         ))
 }
 
@@ -2459,198 +2929,6 @@ fn render_heatmap_panel(ui: Ui, dash: &Dashboard) -> View {
         ))
 }
 
-fn duration_text(value: Option<u64>) -> String {
-    value
-        .map(format_duration_compact)
-        .unwrap_or_else(|| "—".into())
-}
-
-fn render_efficiency(ui: Ui, dash: &Dashboard) -> View {
-    let open = ui.insights.efficiency_open.get();
-    let mut panel = card_surface().child(
-        press_target()
-            .w_full()
-            .on_press(move |_: &()| intent(ui, "efficiency"))
-            .accessibility_label("Toggle efficiency details")
-            .child(
-                view()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .child(heading(if open {
-                        "▾ Efficiency & timing percentiles"
-                    } else {
-                        "▸ Efficiency & timing percentiles"
-                    }))
-                    .child(note(format!(
-                        "Cycle p50: {} (p90: {}) · Queue p50: {} · Click to {}",
-                        duration_text(dash.median_lead_time_ms),
-                        duration_text(model::percentile(&dash.efficiency.cycle, 90)),
-                        duration_text(dash.median_queue_wait_ms),
-                        if open { "collapse" } else { "inspect samples" }
-                    ))),
-            ),
-    );
-    if !open {
-        return panel;
-    }
-    panel = panel
-        .child(note(format!("Baseline: {}", dash.comparison_label)))
-        .child(
-            row()
-                .child(label("Metric").w(px(205.)))
-                .child(note("Current / Baseline / Change / Samples")),
-        );
-    for (title, current, previous, p) in [
-        (
-            "Execution → resolution, p50",
-            &dash.efficiency.cycle,
-            &dash.efficiency.previous_cycle,
-            50,
-        ),
-        (
-            "Execution → resolution, p90",
-            &dash.efficiency.cycle,
-            &dash.efficiency.previous_cycle,
-            90,
-        ),
-        (
-            "Queue → start, p50",
-            &dash.efficiency.queue,
-            &dash.efficiency.previous_queue,
-            50,
-        ),
-        (
-            "Queue → start, p90",
-            &dash.efficiency.queue,
-            &dash.efficiency.previous_queue,
-            90,
-        ),
-    ] {
-        let value = model::percentile(current, p);
-        let baseline = model::percentile(previous, p);
-        let delta = match (value, baseline) {
-            (Some(a), Some(b)) => format!(
-                "{}{}",
-                if a >= b { "+" } else { "−" },
-                format_duration_compact(a.abs_diff(b))
-            ),
-            _ => "—".into(),
-        };
-        let op = if title.starts_with("Queue") {
-            "samples-queue"
-        } else {
-            "samples-cycle"
-        };
-        panel = panel.child(
-            press_target()
-                .w_full()
-                .p_2()
-                .rounded(px(5.))
-                .hover(|s| s.bg(CARD_HOVER))
-                .on_press(move |_: &()| intent(ui, op))
-                .accessibility_label(format!("Inspect {title}"))
-                .child(row().child(label(title).w(px(205.))).child(note(format!(
-                    "{} / {} / {} / n={} vs {}",
-                    duration_text(value),
-                    duration_text(baseline),
-                    delta,
-                    current.len(),
-                    previous.len()
-                )))),
-        );
-    }
-    panel = panel.child(note(
-        "Cycle includes elapsed waiting between first execution and resolution. Queue samples belong to runs started in the selected period.",
-    ));
-    let queue = ui.insights.queue_samples.get();
-    let samples = if queue {
-        &dash.efficiency.queue
-    } else {
-        &dash.efficiency.cycle
-    };
-    let pages = samples.len().div_ceil(20).max(1);
-    let page = ui.insights.sample_page.get().min(pages - 1);
-    panel = panel
-        .child(
-            row()
-                .child(choice(ui, "Resolved Card samples", "samples-cycle", !queue))
-                .child(choice(ui, "Queue samples", "samples-queue", queue)),
-        )
-        .child(note(format!(
-            "{} valid samples · longest duration first",
-            samples.len()
-        )));
-    for sample in samples.iter().skip(page * 20).take(20) {
-        let id = sample.card_id.clone();
-        let begin = chrono::DateTime::from_timestamp_millis(sample.start as i64)
-            .unwrap()
-            .with_timezone(&chrono::Local)
-            .format("%m-%d %H:%M")
-            .to_string();
-        let end = chrono::DateTime::from_timestamp_millis(sample.end as i64)
-            .unwrap()
-            .with_timezone(&chrono::Local)
-            .format("%m-%d %H:%M")
-            .to_string();
-        panel = panel.child(
-            press_target()
-                .w_full()
-                .p_2()
-                .rounded(px(5.))
-                .hover(|s| s.bg(CARD_HOVER))
-                .disabled(id.is_empty())
-                .accessibility_label(format!("Open timing sample #{}", sample.number))
-                .on_press(move |_: &()| ui.open_card(id.clone()))
-                .child(
-                    view()
-                        .gap_1()
-                        .child(
-                            label(format!(
-                                "#{} {} · {}",
-                                sample.number, sample.title, sample.project
-                            ))
-                            .truncate(),
-                        )
-                        .child(note(format!(
-                            "{} → {} · {}{}",
-                            begin,
-                            end,
-                            format_duration_compact(sample.duration),
-                            sample
-                                .profile
-                                .as_ref()
-                                .map(|p| format!(" · @{p}"))
-                                .unwrap_or_default()
-                        ))),
-                ),
-        );
-    }
-    if samples.is_empty() {
-        panel = panel.child(note(
-            "No samples with reliable start and end timestamps in this period.",
-        ));
-    }
-    panel.child(
-        row()
-            .child(
-                compact_action("Previous samples", Variant::Quiet, move |_| {
-                    intent(ui, "samples-previous")
-                })
-                .disabled(page == 0),
-            )
-            .child(note(format!("Page {} / {pages}", page + 1)))
-            .child(
-                compact_action("Next samples", Variant::Quiet, move |_| {
-                    intent(ui, "samples-next")
-                })
-                .disabled(page + 1 >= pages),
-            ),
-    )
-}
-
 fn render_card_drilldown(ui: Ui, dash: &Dashboard) -> View {
     let filter = ui.insights.drilldown.get();
     if filter.is_empty() {
@@ -2801,16 +3079,17 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                 render_efficiency_trajectory_panel(ui, &dash),
                             ));
 
-                            // Row 3: For 1D -> Hourly cumulative pace + Intake/Pipeline; otherwise Intake/Pipeline full width
+                            // Row 2.5: For 1D -> full-width Hourly cumulative pace
                             if dash.range == RangeWindow::Today {
-                                content = content.child(two_col_or_stack(
-                                    narrow,
-                                    render_hourly(ui, &dash),
-                                    render_intake_and_funnel(&dash),
-                                ));
-                            } else {
-                                content = content.child(render_intake_and_funnel(&dash));
+                                content = content.child(render_hourly(ui, &dash));
                             }
+
+                            // Row 3: Stage & Queue Timings + Intake sources & pipeline gates
+                            content = content.child(two_col_or_stack(
+                                narrow,
+                                render_stage_and_queue_timings(&dash),
+                                render_intake_and_funnel(&dash),
+                            ));
 
                             // Row 4: Project multi-dimensional matrix + Agent Role/Provider matrix
                             content = content.child(two_col_or_stack(
@@ -2819,10 +3098,8 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                 render_agents(ui, &dash),
                             ));
 
-                            // Row 5: Full-width 365-day cadence heatmap & Timing diagnostics
-                            content = content
-                                .child(render_heatmap_panel(ui, &dash))
-                                .child(render_efficiency(ui, &dash));
+                            // Row 5: Full-width 365-day cadence heatmap
+                            content = content.child(render_heatmap_panel(ui, &dash));
 
                             let offline = ui.snapshot.with(|s| {
                                 s.host_summaries
@@ -3076,9 +3353,14 @@ mod tests {
         assert!(tree.has_mounted_text("Recent daily flow"));
         assert!(tree.has_mounted_text("Personal & Agent efficiency trajectory"));
         assert!(tree.has_mounted_text("Hourly comparison"));
+        assert!(tree.has_mounted_text("Stage & queue timings"));
+        assert!(tree.has_mounted_text("Merge queue efficiency"));
         assert!(tree.has_mounted_text("Intake sources & pipeline gates"));
         assert!(tree.has_mounted_text("Yearly activity"));
         assert!(tree.has_mounted_text("Agents used"));
+        assert!(tree.has_mounted_text("Trigger sources"));
+        assert!(!tree.has_mounted_text("▸ Efficiency & timing percentiles"));
+        assert!(!tree.has_mounted_text("▾ Efficiency & timing percentiles"));
 
         // Switch cadence to Weekly
         let btn_weekly = *tree.labels.get("Weekly").expect("Weekly cadence button");
@@ -3086,26 +3368,18 @@ mod tests {
         pump(&mut core, &mut tree);
         assert!(tree.has_mounted_text("Weekly velocity comparison (WoW)"));
 
-        // Expand timing percentiles
-        let toggle = *tree.labels.get("Toggle efficiency details").unwrap();
-        assert!(core.component_event(toggle, EventKind::Press, &EventPayload::None));
+        // Switch Agents grouping to Provider
+        let btn_provider = *tree.labels.get("Provider").expect("Provider group button");
+        assert!(core.component_event(btn_provider, EventKind::Press, &EventPayload::None));
         pump(&mut core, &mut tree);
-        assert!(tree.has_mounted_text("Execution → resolution, p90"));
-        assert!(tree.has_mounted_text("Queue → start, p90"));
-        let sample_tab = *tree.labels.get("Queue samples").unwrap();
-        assert!(core.component_event(sample_tab, EventKind::Press, &EventPayload::None));
-        pump(&mut core, &mut tree);
-        assert!(
-            tree.has_mounted_text(
-                "No samples with reliable start and end timestamps in this period."
-            )
-        );
+        assert!(tree.has_mounted_text("Agents used"));
 
         // Switch range to 7D via segmented button
         let btn_7d = *tree.labels.get("7D").expect("7D segment button");
         assert!(core.component_event(btn_7d, EventKind::Press, &EventPayload::None));
         pump(&mut core, &mut tree);
         assert!(tree.has_mounted_text("Yearly activity"));
+        assert!(tree.has_mounted_text("Stage & queue timings"));
         assert!(!tree.has_mounted_text("Hourly comparison"));
     }
 }
