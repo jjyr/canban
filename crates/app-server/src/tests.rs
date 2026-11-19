@@ -3629,6 +3629,82 @@ fn comment_delete_tombstones_own_comment_cancels_pending_questions_and_preserves
 }
 
 #[test]
+fn commenting_editing_deleting_and_clearing_notices_do_not_conflict_with_card_move_or_update() {
+    let (_d, app, _p, card) = setup();
+    let initial_rev = card.revision;
+
+    // 1. Add a comment (including an @mention) and immediately move using the pre-comment revision.
+    let added = app
+        .call(
+            "comment.add",
+            json!({
+                "view": "full",
+                "card_id": card.id,
+                "body": "Notes before starting @codex",
+                "mentions": ["codex"],
+            }),
+        )
+        .unwrap();
+    assert_eq!(added["card_revision"], initial_rev);
+    let comment_id = added["id"].as_str().unwrap().to_owned();
+
+    let moved = app
+        .call(
+            "card.move",
+            json!({
+                "card_id": card.id,
+                "revision": initial_rev,
+                "stage": "develop",
+            }),
+        )
+        .unwrap();
+    let develop_rev = moved["revision"].as_u64().unwrap();
+    assert_eq!(develop_rev, initial_rev + 1);
+
+    // 2. Edit and delete comments, and clear notices without card-level attention,
+    // then update Card title/body using `develop_rev` without revision_conflict.
+    let updated_comment = app
+        .call(
+            "comment.update",
+            json!({
+                "card_id": card.id,
+                "comment_id": comment_id,
+                "body": "Refined notes for @codex",
+                "mentions": ["codex"],
+            }),
+        )
+        .unwrap();
+    assert_eq!(updated_comment["card_revision"], develop_rev);
+
+    let deleted_comment = app
+        .call(
+            "comment.delete",
+            json!({
+                "card_id": card.id,
+                "comment_id": comment_id,
+            }),
+        )
+        .unwrap();
+    assert_eq!(deleted_comment["revision"], develop_rev);
+
+    app.call("card.attention.clear", json!({"card_id": card.id}))
+        .unwrap();
+
+    let updated_card = app
+        .call(
+            "card.update",
+            json!({
+                "card_id": card.id,
+                "revision": develop_rev,
+                "title": "Updated without conflict",
+                "body": "Updated body",
+            }),
+        )
+        .unwrap();
+    assert_eq!(updated_card["revision"], develop_rev + 1);
+}
+
+#[test]
 fn git_client_rpcs_enforce_checkout_containment_user_guard_and_remote_sync() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("home");

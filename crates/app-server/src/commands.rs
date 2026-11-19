@@ -994,6 +994,7 @@ impl AppServer {
             "comment.add" => self.mutate(method, &p, |db| {
                 let mut c = super::resolve_card(db, &p)?;
                 ensure!(c.active(), "Restore the Card before commenting");
+                let before = c.clone();
                 let body = strp(&p, "body")?;
                 ensure!(!body.trim().is_empty(), "Comment is empty");
                 let event = db.append(canban_timeline::event(
@@ -1084,8 +1085,10 @@ impl AppServer {
                     };
                     db.save(&question)?;
                 }
-                c.revision += 1;
-                db.save(&c)?;
+                if c != before {
+                    c.revision += 1;
+                    db.save(&c)?;
+                }
                 let mut result = serde_json::to_value(event)?;
                 result["card_revision"] = json!(c.revision);
                 Ok(result)
@@ -1093,6 +1096,7 @@ impl AppServer {
             "comment.update" => self.mutate(method, &p, |db| {
                 let mut c = super::resolve_card(db, &p)?;
                 ensure!(c.active(), "Restore the Card before editing comments");
+                let before = c.clone();
                 let comment_id = strp(&p, "comment_id")?;
                 let body = strp(&p, "body")?;
                 ensure!(!body.trim().is_empty(), "Comment is empty");
@@ -1239,8 +1243,10 @@ impl AppServer {
                     }
                 }
 
-                c.revision += 1;
-                db.save(&c)?;
+                if c != before {
+                    c.revision += 1;
+                    db.save(&c)?;
+                }
                 db.append(canban_timeline::event(
                     &c.project_id,
                     &c.id,
@@ -1260,7 +1266,7 @@ impl AppServer {
                 Ok(result)
             }),
             "comment.delete" => self.mutate(method, &p, |db| {
-                let mut c = super::resolve_card(db, &p)?;
+                let c = super::resolve_card(db, &p)?;
                 ensure!(c.active(), "Restore the Card before deleting comments");
                 let comment_id = strp(&p, "comment_id")?;
                 let mut event: Event = db
@@ -1343,8 +1349,6 @@ impl AppServer {
                     }
                 }
 
-                c.revision += 1;
-                db.save(&c)?;
                 db.append(canban_timeline::event(
                     &c.project_id,
                     &c.id,
@@ -1367,11 +1371,10 @@ impl AppServer {
             }),
             "card.attention.clear" => self.mutate(method, &p, |db| {
                 let mut c: Card = db.get(strp(&p, "card_id")?)?;
-                if c.human_gate.is_none() {
-                    c.attention = None;
+                if c.human_gate.is_none() && c.attention.take().is_some() {
+                    c.revision += 1;
+                    db.save(&c)?;
                 }
-                c.revision += 1;
-                db.save(&c)?;
                 log(
                     db,
                     &c,

@@ -1160,10 +1160,16 @@ pub fn pr_panel(ui: Ui) -> impl IntoElement {
         if pr.number > 0 && pr.state == "open" && !pr.merged {
             area = area.child(
                 action("Merge PR", Variant::Primary, move |_| {
+                    let cur_rev = ui
+                        .snapshot
+                        .with_untracked(|s| {
+                            s.cards.iter().find(|c| c.id == merge).map(|c| c.revision)
+                        })
+                        .unwrap_or(rev);
                     dispatch(
                         ui,
                         "github.pr.merge",
-                        json!({"card_id":merge,"revision":rev,"head":head}),
+                        json!({"card_id":merge,"revision":cur_rev,"head":head}),
                     )
                 })
                 .disabled(move || ui.pending.get()),

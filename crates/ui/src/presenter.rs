@@ -1420,10 +1420,14 @@ pub fn move_card(ui: Ui, card_id: &str, target: &str) {
         );
     }
 }
-pub fn hold_auto_merge(ui: Ui, card_id: &str, revision: u64, hold: bool) {
+pub fn hold_auto_merge(ui: Ui, card_id: &str, fallback_revision: u64, hold: bool) {
     let prev = ui
         .snapshot
         .with_untracked(|s| s.cards.iter().find(|c| c.id == card_id).cloned());
+    let revision = prev
+        .as_ref()
+        .map(|c| c.revision)
+        .unwrap_or(fallback_revision);
     if crate::APP.get().is_none() {
         ui.snapshot.update(|s| {
             if let Some(cur) = s.cards.iter_mut().find(|x| x.id == card_id) {

@@ -1130,12 +1130,16 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
 
     if card_for_return.stage != "develop" {
         let cid_outer = c.id.clone();
-        let rev = c.revision;
+        let fallback_rev = c.revision;
         right_controls = right_controls.child(compact_action(
             "Return to Develop",
             Variant::Secondary,
             move |_| {
                 let cid = cid_outer.clone();
+                let rev = ui
+                    .snapshot
+                    .with_untracked(|s| s.cards.iter().find(|c| c.id == cid).map(|c| c.revision))
+                    .unwrap_or(fallback_rev);
                 dispatch_then(
                     ui,
                     "card.move",
@@ -1157,10 +1161,19 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
         && (is_remote || !has_worktree)
     {
         let merge_cid = c.id.clone();
-        let rev = c.revision;
+        let fallback_rev = c.revision;
         let head = pr.head.clone();
         right_controls = right_controls.child(
             compact_action("Merge PR", Variant::Primary, move |_| {
+                let rev = ui
+                    .snapshot
+                    .with_untracked(|s| {
+                        s.cards
+                            .iter()
+                            .find(|c| c.id == merge_cid)
+                            .map(|c| c.revision)
+                    })
+                    .unwrap_or(fallback_rev);
                 dispatch(
                     ui,
                     "github.pr.merge",

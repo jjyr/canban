@@ -115,7 +115,7 @@ fn comment_views_filter_before_paging_and_do_not_rewrite_stored_events() {
         let receipt = app.call("comment.add", p.clone()).unwrap();
         assert!(receipt.get("body").is_none());
         assert!(receipt.get("message").is_none());
-        assert_eq!(receipt["card_revision"], n + 2);
+        assert_eq!(receipt["card_revision"], card.revision);
         let mut full = p;
         full["view"] = json!("full");
         let response = app.call("comment.add", full).unwrap();

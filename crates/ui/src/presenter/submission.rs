@@ -40,6 +40,7 @@ pub(super) fn immediate(method: &str) -> bool {
 #[derive(Default)]
 pub(crate) struct CommittedWrites {
     cards: BTreeMap<String, Card>,
+    card_revisions: BTreeMap<String, u64>,
     comments: BTreeMap<String, Event>,
     deleted_comments: BTreeSet<String>,
     card_reads: BTreeMap<String, CardRead>,
@@ -70,6 +71,7 @@ impl CommittedWrites {
         if method == "card.remove" && reply["removed"] == true {
             if let Some(id) = reply["card_id"].as_str() {
                 self.cards.remove(id);
+                self.card_revisions.remove(id);
                 self.comments.retain(|_, event| event.card_id != id);
                 self.card_reads.remove(id);
             }
@@ -86,17 +88,27 @@ impl CommittedWrites {
                 }
             }
             "comment.add" | "comment.update" => {
+                if let (Some(card_id), Some(rev)) =
+                    (reply["card_id"].as_str(), reply["card_revision"].as_u64())
+                {
+                    self.record_card_revision(card_id, rev);
+                }
                 if let Ok(event) = serde_json::from_value::<Event>(reply.clone()) {
                     self.deleted_comments.remove(&event.id);
                     self.comments.insert(event.id.clone(), event);
                 }
             }
             "comment.delete" => {
-                if reply["deleted"] == true
-                    && let Some(cid) = reply["comment_id"].as_str()
-                {
-                    self.comments.remove(cid);
-                    self.deleted_comments.insert(cid.to_owned());
+                if reply["deleted"] == true {
+                    if let (Some(card_id), Some(rev)) =
+                        (reply["card_id"].as_str(), reply["revision"].as_u64())
+                    {
+                        self.record_card_revision(card_id, rev);
+                    }
+                    if let Some(cid) = reply["comment_id"].as_str() {
+                        self.comments.remove(cid);
+                        self.deleted_comments.insert(cid.to_owned());
+                    }
                 }
             }
             "notifications.read" => {
@@ -112,9 +124,25 @@ impl CommittedWrites {
             "notifications.read_all" => {}
             _ => {
                 if let Ok(card) = serde_json::from_value::<Card>(reply.clone()) {
+                    self.card_revisions
+                        .entry(card.id.clone())
+                        .and_modify(|cur| *cur = (*cur).max(card.revision))
+                        .or_insert(card.revision);
                     self.cards.insert(card.id.clone(), card);
                 }
             }
+        }
+    }
+
+    fn record_card_revision(&mut self, card_id: &str, rev: u64) {
+        self.card_revisions
+            .entry(card_id.to_owned())
+            .and_modify(|cur| *cur = (*cur).max(rev))
+            .or_insert(rev);
+        if let Some(saved) = self.cards.get_mut(card_id)
+            && saved.revision < rev
+        {
+            saved.revision = rev;
         }
     }
 
@@ -156,6 +184,13 @@ impl CommittedWrites {
             }
             let host = snapshot.project_host(&card.project_id).to_owned();
             snapshot.entity_hosts.insert(card.id.clone(), host);
+        }
+        for (card_id, &rev) in &self.card_revisions {
+            if let Some(saved) = snapshot.cards.iter_mut().find(|c| &c.id == card_id)
+                && saved.revision < rev
+            {
+                saved.revision = rev;
+            }
         }
         for event in self.comments.values() {
             if let Some(saved) = snapshot.events.iter_mut().find(|e| e.id == event.id) {
@@ -215,6 +250,13 @@ impl CommittedWrites {
                 .cards
                 .iter()
                 .any(|c| &c.id == id && c.revision >= card.revision)
+        });
+        self.card_revisions.retain(|id, rev| {
+            snapshot
+                .cards
+                .iter()
+                .any(|c| &c.id == id && c.revision < *rev)
+                || self.cards.contains_key(id)
         });
         self.comments.retain(|id, ev| {
             !snapshot.events.iter().any(|e| {
@@ -550,14 +592,38 @@ mod tests {
         );
         writes.overlay(&mut stale);
         assert_eq!(stale.events[0].kind, "comment.deleted");
+        assert_eq!(stale.cards[0].revision, 3);
 
         let mut fresh = stale.clone();
         fresh.schedule_states[0].updated_at = 200;
         writes.reconcile(&mut fresh);
         assert!(writes.cards.is_empty());
+        assert!(writes.card_revisions.is_empty());
         assert!(writes.comments.is_empty());
         assert!(writes.deleted_comments.is_empty());
         assert!(writes.card_reads.is_empty());
         assert!(writes.schedule_states.is_empty());
+
+        // A comment receipt carrying a newer `card_revision` advances a stale snapshot's Card revision.
+        let mut stale_comment = Snapshot {
+            cards: vec![card(1)],
+            ..Default::default()
+        };
+        let mut comment_reply = serde_json::to_value(Event {
+            id: "ev2".into(),
+            project_id: "p1".into(),
+            card_id: "c1".into(),
+            sequence: 3,
+            kind: "comment.created".into(),
+            actor: "user".into(),
+            message: "Bumped".into(),
+            data: json!({"body":"Bumped"}),
+            created_at: 3,
+        })
+        .unwrap();
+        comment_reply["card_revision"] = json!(4);
+        writes.record("comment.add", &comment_reply, "local");
+        writes.reconcile(&mut stale_comment);
+        assert_eq!(stale_comment.cards[0].revision, 4);
     }
 }

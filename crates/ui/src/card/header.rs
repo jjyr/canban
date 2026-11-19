@@ -306,11 +306,17 @@ fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
         if has_deliver_in_project && card.active() && !card.resolved() {
             if card.worktree.is_some() {
                 let cid = card.id.clone();
-                let rev = card.revision;
+                let fallback_rev = card.revision;
                 items.push(
                     MenuItem::new("Retry auto-merge")
                         .disabled(active_non_deliver)
                         .on_select(move || {
+                            let rev = ui
+                                .snapshot
+                                .with_untracked(|s| {
+                                    s.cards.iter().find(|c| c.id == cid).map(|c| c.revision)
+                                })
+                                .unwrap_or(fallback_rev);
                             dispatch(
                                 ui,
                                 "workflow.deliver",
