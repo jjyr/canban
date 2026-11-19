@@ -1,3 +1,0 @@
-Answer this comment in the context of the Card and submit your response via the single `report` CLI command under Reporting:
-
-{{body}}

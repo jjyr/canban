@@ -10,9 +10,9 @@ const REPORTING_TASK_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../prompts/context/reporting_task.txt"
 ));
-const REPORTING_COMMENT_TEMPLATE: &str = include_str!(concat!(
+const REPORTING_MENTION_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../prompts/context/reporting_comment.txt"
+    "/../../prompts/context/reporting_mention.txt"
 ));
 const REPORTING_INTERACTIVE_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -318,7 +318,7 @@ pub fn capture_for(
     }
 
     let reporting_template = match &run.trigger {
-        ExecutionTrigger::Comment { .. } => REPORTING_COMMENT_TEMPLATE,
+        ExecutionTrigger::Comment { .. } => REPORTING_MENTION_TEMPLATE,
         ExecutionTrigger::Interactive => REPORTING_INTERACTIVE_TEMPLATE,
         ExecutionTrigger::Workflow | ExecutionTrigger::StageEntry | ExecutionTrigger::Custom(_) => {
             REPORTING_TASK_TEMPLATE
@@ -594,7 +594,7 @@ mod tests {
     fn context_prompt_templates_use_injected_canban_cli_without_inline_env_overrides() {
         for (name, tpl) in [
             ("reporting_task.txt", REPORTING_TASK_TEMPLATE),
-            ("reporting_comment.txt", REPORTING_COMMENT_TEMPLATE),
+            ("reporting_mention.txt", REPORTING_MENTION_TEMPLATE),
             ("reporting_interactive.txt", REPORTING_INTERACTIVE_TEMPLATE),
             ("pending_question_item.txt", PENDING_QUESTION_ITEM_TEMPLATE),
             ("github_source.txt", GITHUB_SOURCE_TEMPLATE),

@@ -418,7 +418,7 @@ fn github_issue_upsert_triggers_only_from_local_instructions_not_remote_issue_bo
                 true,
                 instructions,
             )?;
-            crate::sessions::queue_interactive_mentions(
+            crate::sessions::queue_card_mentions(
                 db,
                 &config,
                 &mut card,
@@ -438,7 +438,19 @@ fn github_issue_upsert_triggers_only_from_local_instructions_not_remote_issue_bo
         .collect();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].profile.id, "developer");
-    assert_eq!(runs[0].trigger, ExecutionTrigger::Interactive);
+    assert!(runs[0].trigger.is_comment());
+    assert!(
+        runs[0]
+            .instruction
+            .contains("You were mentioned (@developer) on this Card.")
+    );
+    assert_eq!(
+        snap.questions
+            .iter()
+            .filter(|q| q.card_id == card_id && q.profile_id == "developer")
+            .count(),
+        1
+    );
 }
 
 #[test]

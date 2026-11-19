@@ -522,7 +522,7 @@ impl AppServer {
                 }
                 let title_text = c.title.clone();
                 let body_text = c.body.clone();
-                crate::sessions::queue_interactive_mentions(
+                crate::sessions::queue_card_mentions(
                     db,
                     &config,
                     &mut c,
@@ -1048,13 +1048,9 @@ impl AppServer {
                     let entry = if let Some(entry) = active {
                         entry
                     } else {
-                        let instruction = canban_context::render_template(
-                            include_str!(concat!(
-                                env!("CARGO_MANIFEST_DIR"),
-                                "/../../prompts/runtime/comment_task.txt"
-                            ))
-                            .trim_end(),
-                            &[("body", body)],
+                        let instruction = crate::sessions::render_card_mention_instruction(
+                            &profile.id,
+                            Some(body),
                         );
                         enqueue(
                             db,
@@ -1065,16 +1061,16 @@ impl AppServer {
                             ExecutionTrigger::Comment {
                                 comment_id: event.id.clone(),
                             },
-                            Some(&agent),
+                            Some(&profile.id),
                             Some(instruction),
                         )?
                         .context("Question not queued")?
                     };
                     let question = Question {
-                        id: format!("{}:{}", event.id, agent),
+                        id: format!("{}:{}", event.id, profile.id),
                         project_id: c.project_id.clone(),
                         card_id: c.id.clone(),
-                        profile_id: agent,
+                        profile_id: profile.id,
                         comment_id: event.id.clone(),
                         body: body.into(),
                         terminal_id: Some(entry.id.clone()),
@@ -1127,17 +1123,13 @@ impl AppServer {
                 event.data["edited_at"] = json!(edited_at);
                 db.save(&event)?;
 
-                let instruction = canban_context::render_template(
-                    include_str!(concat!(
-                        env!("CARGO_MANIFEST_DIR"),
-                        "/../../prompts/runtime/comment_task.txt"
-                    ))
-                    .trim_end(),
-                    &[("body", body)],
-                );
                 for mut question in db.list::<Question>()?.into_iter().filter(|q| {
                     q.card_id == c.id && q.comment_id == event.id && q.state == "pending"
                 }) {
+                    let instruction = crate::sessions::render_card_mention_instruction(
+                        &question.profile_id,
+                        Some(body),
+                    );
                     question.body = body.into();
                     db.save(&question)?;
                     if let Some(tid) = question.terminal_id.as_deref()
@@ -1178,20 +1170,20 @@ impl AppServer {
                     mentions.sort();
                     mentions.dedup();
                     for agent in mentions {
-                        let qid = format!("{}:{}", event.id, agent);
-                        if db.get::<Question>(&qid).is_ok() {
-                            continue;
-                        }
                         let profile = canban_scheduler::select_in_project(
                             &config,
                             Some(&project),
                             Some(&agent),
                         )?;
+                        let qid = format!("{}:{}", event.id, profile.id);
+                        if db.get::<Question>(&qid).is_ok() {
+                            continue;
+                        }
                         let context = crate::sessions::conversation(db, &c, &profile)?;
                         let active = db.get::<TerminalEntry>(&context.id).ok().filter(|t| {
                             t.agent.as_ref().is_some_and(|a| {
                                 a.card_id == c.id
-                                    && a.profile.id == agent
+                                    && a.profile.id == profile.id
                                     && (!(c.human_gate.is_some()
                                         && a.state == "queued"
                                         && canban_scheduler::automatic(a))
@@ -1212,6 +1204,10 @@ impl AppServer {
                         let entry = if let Some(entry) = active {
                             entry
                         } else {
+                            let instruction = crate::sessions::render_card_mention_instruction(
+                                &profile.id,
+                                Some(body),
+                            );
                             enqueue(
                                 db,
                                 &config,
@@ -1221,8 +1217,8 @@ impl AppServer {
                                 ExecutionTrigger::Comment {
                                     comment_id: event.id.clone(),
                                 },
-                                Some(&agent),
-                                Some(instruction.clone()),
+                                Some(&profile.id),
+                                Some(instruction),
                             )?
                             .context("Question not queued")?
                         };
@@ -1230,7 +1226,7 @@ impl AppServer {
                             id: qid,
                             project_id: c.project_id.clone(),
                             card_id: c.id.clone(),
-                            profile_id: agent,
+                            profile_id: profile.id,
                             comment_id: event.id.clone(),
                             body: body.into(),
                             terminal_id: Some(entry.id.clone()),

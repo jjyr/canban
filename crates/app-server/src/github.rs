@@ -442,7 +442,7 @@ impl AppServer {
                         db.save(&card)?;
                         crate::notes::relate_card(db, &note.id, &card, true)?;
                     }
-                    crate::sessions::queue_interactive_mentions(
+                    crate::sessions::queue_card_mentions(
                         db,
                         &self.config(),
                         &mut card,

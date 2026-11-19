@@ -46,7 +46,33 @@ pub(super) fn enqueue_interactive(
     .context("Agent was not queued")
 }
 
-pub(super) fn queue_interactive_mentions(
+pub(super) const CARD_MENTION_TASK_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../prompts/runtime/card_mention_task.txt"
+));
+
+pub(super) fn render_card_mention_instruction(
+    profile_id: &str,
+    message_body: Option<&str>,
+) -> String {
+    let (target, message_block) = match message_body.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(body) => ("the user's message below", format!("\n\n{body}")),
+        None => (
+            "the user's message in the Card title and description",
+            String::new(),
+        ),
+    };
+    canban_context::render_template(
+        CARD_MENTION_TASK_TEMPLATE.trim_end(),
+        &[
+            ("profile_id", profile_id),
+            ("target", target),
+            ("message_block", &message_block),
+        ],
+    )
+}
+
+pub(super) fn queue_card_mentions(
     db: Db<'_>,
     config: &Config,
     card: &mut Card,
@@ -67,27 +93,80 @@ pub(super) fn queue_interactive_mentions(
     }
     mentions.sort();
     mentions.dedup();
+    if mentions.is_empty() {
+        return Ok(());
+    }
+    let stage = canban_workflow_engine::stage(&project.workflow, &card.stage)?;
+    let anchor_event_id: String = db
+        .conn
+        .query_row(
+            "SELECT id FROM events WHERE project_id=?1 AND card_id=?2 ORDER BY number DESC LIMIT 1",
+            params![&card.project_id, &card.id],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|_| format!("card:{}", card.id));
+    let question_body = if card.body.trim().is_empty() {
+        card.title.clone()
+    } else {
+        format!("{}\n\n{}", card.title, card.body.trim())
+    };
+    let created_at = now();
     for agent in mentions {
+        let qid = format!("{anchor_event_id}:{agent}");
+        if db.get::<Question>(&qid).is_ok() {
+            continue;
+        }
         let profile = canban_scheduler::select_in_project(config, Some(project), Some(&agent))?;
         let context = conversation(db, card, &profile)?;
-        if let Ok(existing) = db.get::<TerminalEntry>(&context.id)
-            && let Some(att) = &existing.agent
-        {
-            let live = att.terminal.is_some()
-                && att
-                    .observed
-                    .as_ref()
-                    .is_none_or(|v| v["state"] != "finished");
-            if (matches!(att.state.as_str(), "queued" | "starting" | "unknown")
-                && !(card.human_gate.is_some()
-                    && att.state == "queued"
-                    && canban_scheduler::automatic(att)))
-                || live
-            {
-                continue;
-            }
-        }
-        enqueue_interactive(db, config, card, project, &profile.id)?;
+        let active = db.get::<TerminalEntry>(&context.id).ok().filter(|t| {
+            t.agent.as_ref().is_some_and(|a| {
+                a.card_id == card.id
+                    && a.profile.id == profile.id
+                    && (!(card.human_gate.is_some()
+                        && a.state == "queued"
+                        && canban_scheduler::automatic(a))
+                        && matches!(
+                            a.state.as_str(),
+                            "queued" | "starting" | "running" | "working" | "blocked"
+                        )
+                        || matches!(a.state.as_str(), "completed" | "backlog")
+                            && a.profile == profile
+                            && a.terminal.is_some()
+                            && !a.finished())
+            })
+        });
+        let entry = if let Some(entry) = active {
+            entry
+        } else {
+            let instruction = render_card_mention_instruction(&profile.id, None);
+            enqueue(
+                db,
+                config,
+                card,
+                project,
+                stage,
+                ExecutionTrigger::Comment {
+                    comment_id: anchor_event_id.clone(),
+                },
+                Some(&profile.id),
+                Some(instruction),
+            )?
+            .context("Card mention was not queued")?
+        };
+        let question = Question {
+            id: qid,
+            project_id: card.project_id.clone(),
+            card_id: card.id.clone(),
+            profile_id: profile.id,
+            comment_id: anchor_event_id.clone(),
+            body: question_body.clone(),
+            terminal_id: Some(entry.id),
+            state: "pending".into(),
+            error: None,
+            reply_path: None,
+            created_at,
+        };
+        db.save(&question)?;
     }
     Ok(())
 }

@@ -975,13 +975,13 @@ impl AppServer {
                     }
                     let project: Project = db.get(&card.project_id)?;
                     let stage = canban_workflow_engine::stage(&project.workflow, &card.stage)?;
-                    let instruction = canban_context::render_template(
-                        include_str!(concat!(
-                            env!("CARGO_MANIFEST_DIR"),
-                            "/../../prompts/runtime/comment_task.txt"
-                        ))
-                        .trim_end(),
-                        &[("body", &q.body)],
+                    let is_card_created = db
+                        .get::<Event>(&q.comment_id)
+                        .ok()
+                        .is_some_and(|e| e.kind == "card.created");
+                    let instruction = crate::sessions::render_card_mention_instruction(
+                        &q.profile_id,
+                        if is_card_created { None } else { Some(&q.body) },
                     );
                     let follow_up = enqueue(
                         db,

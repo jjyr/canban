@@ -2955,7 +2955,7 @@ steps:
 fn request_trigger_prompts_omit_duplicate_reply_for_comments_and_dedupe_completion_after_reply() {
     let (_dir, app, project, card) = setup();
 
-    // 1. Comment-triggered attempt uses `ExecutionTrigger::Comment` and `reporting_comment.txt`
+    // 1. Comment-triggered attempt uses `ExecutionTrigger::Comment` and `reporting_mention.txt`
     // without rendering a separate `## Pending questions` / `reply --to` instruction.
     let comment_ev: Event = serde_json::from_value(
         app.call(
@@ -2998,14 +2998,16 @@ fn request_trigger_prompts_omit_duplicate_reply_for_comments_and_dedupe_completi
     let comment_prompt = capture_prompt(&card, &comment_attempt);
     assert!(
         comment_prompt.contains(
-            "Publish your answer and complete this comment assignment in a single CLI call"
+            "You were mentioned (@developer) on this Card. Read the Card context, respond to the user's message below"
+        ) && comment_prompt.contains(
+            "Publish your response and complete this `@mention` assignment in a single CLI call"
         ) && comment_prompt.contains("\"$CANBAN_CLI\" card update")
             && comment_prompt.contains("\"$CANBAN_CLI\" card adopt")
             && comment_prompt.contains("\"$CANBAN_CLI\" report --state")
             && !comment_prompt.contains("CANBAN_ENDPOINT=")
             && !comment_prompt.contains("CANBAN_PROJECT=")
             && !comment_prompt.contains("CANBAN_CARD="),
-        "comment prompt should use reporting_comment.txt via $CANBAN_CLI without inline env vars"
+        "comment prompt should use reporting_mention.txt via $CANBAN_CLI without inline env vars"
     );
     assert!(
         !comment_prompt.contains("## Pending questions") && !comment_prompt.contains("reply --to"),
@@ -4218,10 +4220,11 @@ fn pr_card_worktree_tracks_pr_branch_and_review_drafts_roundtrip_with_fallback()
 }
 
 #[test]
-fn card_create_mentions_launch_interactive_sessions_while_card_update_never_triggers() {
+fn card_create_mentions_launch_mention_reply_tasks_while_card_update_never_triggers() {
     let (_d, app, project, existing) = setup();
 
-    // 1. Implicit prose mentions across title and body launch interactive sessions even in backlog.
+    // 1. Implicit prose mentions across title and body launch mention reply assignments even in backlog,
+    // and reporting `completed` publishes a `comment.replied` message to the Card discussion without duplicating the body in `## Task`.
     let created: Card = serde_json::from_value(
         app.call(
             "card.create",
@@ -4237,26 +4240,105 @@ fn card_create_mentions_launch_interactive_sessions_while_card_update_never_trig
     .unwrap();
     assert_eq!(created.stage, "backlog");
     let snap = app.snapshot().unwrap();
+    let created_ev = snap
+        .events
+        .iter()
+        .find(|e| e.card_id == created.id && e.kind == "card.created")
+        .expect("card.created event");
     let created_terminals: Vec<_> = snap
         .terminals
         .iter()
-        .filter_map(|t| t.agent.as_ref().filter(|a| a.card_id == created.id))
+        .filter(|t| t.agent.as_ref().is_some_and(|a| a.card_id == created.id))
+        .cloned()
         .collect();
     assert_eq!(created_terminals.len(), 2);
-    for run in &created_terminals {
-        assert_eq!(run.trigger, ExecutionTrigger::Interactive);
+    for entry in &created_terminals {
+        let run = entry.agent.as_ref().unwrap();
+        assert_eq!(
+            run.trigger,
+            ExecutionTrigger::Comment {
+                comment_id: created_ev.id.clone()
+            }
+        );
         assert_eq!(run.state, "queued");
         assert!(
-            run.instruction
-                .contains("sent this Card to you for discussion")
+            run.instruction.contains(&format!(
+                "You were mentioned (@{}) on this Card. Read the Card context, respond to the user's message in the Card title and description, and publish your reply to the Card discussion via the single `report` CLI command under Reporting.",
+                run.profile.id
+            ))
+        );
+        assert!(
+            !run.instruction
+                .contains("Please coordinate with @reviewer before coding."),
+            "card mention instruction should reference Card title/description without duplicating body"
         );
     }
     assert!(
         created_terminals
             .iter()
-            .any(|r| r.profile.id == "developer")
+            .any(|t| t.agent.as_ref().unwrap().profile.id == "developer")
     );
-    assert!(created_terminals.iter().any(|r| r.profile.id == "reviewer"));
+    assert!(
+        created_terminals
+            .iter()
+            .any(|t| t.agent.as_ref().unwrap().profile.id == "reviewer")
+    );
+    assert_eq!(
+        snap.questions
+            .iter()
+            .filter(|q| q.card_id == created.id && q.state == "pending")
+            .count(),
+        2
+    );
+
+    // Admitting and completing one of the Card-create mentions posts `comment.replied` directly to the Card discussion.
+    let dev_req = created_terminals
+        .iter()
+        .find(|t| t.agent.as_ref().unwrap().profile.id == "developer")
+        .unwrap();
+    let dev_admitted = admit(&app, dev_req);
+    let snap_for_prompt = app.snapshot().unwrap();
+    let rel_prompt = canban_context::capture(
+        &app.home,
+        &project,
+        &created,
+        &dev_admitted,
+        &snap_for_prompt,
+    )
+    .unwrap();
+    let rendered_prompt = std::fs::read_to_string(app.home.join(rel_prompt)).unwrap();
+    assert!(
+        rendered_prompt.contains(
+            "Publish your response and complete this `@mention` assignment in a single CLI call"
+        ) && !rendered_prompt.contains("## Pending questions"),
+        "card mention prompt must use reporting_mention.txt and omit separate `reply --to` section"
+    );
+    app.call(
+        "execution.report",
+        json!({
+            "request_key": "card-create-dev-reply",
+            "project_id": project.id,
+            "card": created.number,
+            "terminal_id": dev_admitted.id,
+            "profile_id": "developer",
+            "state": "completed",
+            "message": "Here is my analysis of the title mention."
+        }),
+    )
+    .unwrap();
+    let snap_after = app.snapshot().unwrap();
+    let reply_events: Vec<_> = snap_after
+        .events
+        .iter()
+        .filter(|e| e.card_id == created.id && e.kind == "comment.replied")
+        .collect();
+    assert_eq!(reply_events.len(), 1);
+    assert_eq!(reply_events[0].actor, "agent:developer");
+    assert_eq!(
+        reply_events[0].message,
+        "Here is my analysis of the title mention."
+    );
+    assert_eq!(reply_events[0].data["reply_to"], json!(created_ev.id));
 
     // 2. Explicit `mentions` overrides prose scanning on `card.create`.
     let explicit_card: Card = serde_json::from_value(
@@ -4281,7 +4363,7 @@ fn card_create_mentions_launch_interactive_sessions_while_card_update_never_trig
         .collect();
     assert_eq!(explicit_terminals.len(), 1);
     assert_eq!(explicit_terminals[0].profile.id, "reviewer");
-    assert_eq!(explicit_terminals[0].trigger, ExecutionTrigger::Interactive);
+    assert!(explicit_terminals[0].trigger.is_comment());
 
     // 3. Explicit empty `mentions: []` suppresses prose scanning on `card.create`.
     let suppressed_card: Card = serde_json::from_value(
