@@ -1,7 +1,8 @@
 //! Read-your-writes while a background (possibly cached remote) snapshot catches up.
 //! Only server-confirmed replies enter this overlay; failed submissions never do.
 use canban_types::{
-    Card, CardRead, Event, ScheduleState, Snapshot, TerminalContext, TerminalEntry,
+    Card, CardRead, ConfigurationSession, Event, ManagedWorktree, ReviewDraft, ScheduleState,
+    Snapshot, TerminalContext, TerminalEntry,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -34,6 +35,15 @@ pub(super) fn immediate(method: &str) -> bool {
             | "github.issue.add"
             | "github.item.add"
             | "terminal.create"
+            | "review.run_agent"
+            | "review.send_agent"
+            | "review.draft.set"
+            | "review.draft.clear"
+            | "agent.open"
+            | "execution.retry"
+            | "configuration.open"
+            | "worktree.create"
+            | "worktree.promote"
     )
 }
 
@@ -47,10 +57,26 @@ pub(crate) struct CommittedWrites {
     schedule_states: BTreeMap<String, ScheduleState>,
     terminals: BTreeMap<String, (TerminalEntry, String)>,
     terminal_hints: BTreeMap<String, TerminalContext>,
+    review_drafts: BTreeMap<String, (Option<ReviewDraft>, u64)>,
+    worktrees: BTreeMap<String, (ManagedWorktree, String)>,
+    removed_worktrees: BTreeSet<String>,
+    configuration_sessions: BTreeMap<String, ConfigurationSession>,
 }
 
 fn event_revision(event: &Event) -> u64 {
     event.data["revision"].as_u64().unwrap_or(1)
+}
+
+fn terminal_is_newer(receipt: &TerminalEntry, snap: &TerminalEntry) -> bool {
+    match (&receipt.agent, &snap.agent) {
+        (Some(ra), Some(sa)) => {
+            ra.number > sa.number
+                || (ra.number == sa.number && ra.pending.is_some() && sa.pending.is_none())
+        }
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        (None, None) => receipt.created_at > snap.created_at,
+    }
 }
 
 impl CommittedWrites {
@@ -64,6 +90,43 @@ impl CommittedWrites {
                 .entry(read.card_id.clone())
                 .and_modify(|cur| cur.sequence = cur.sequence.max(read.sequence))
                 .or_insert_with(|| read.clone());
+        }
+    }
+
+    fn record_card(&mut self, card: Card) {
+        self.card_revisions
+            .entry(card.id.clone())
+            .and_modify(|cur| *cur = (*cur).max(card.revision))
+            .or_insert(card.revision);
+        let replace = self
+            .cards
+            .get(&card.id)
+            .is_none_or(|prev| prev.revision <= card.revision);
+        if replace {
+            self.cards.insert(card.id.clone(), card);
+        }
+    }
+
+    fn record_terminal(&mut self, terminal: TerminalEntry, host: &str) {
+        let replace = self
+            .terminals
+            .get(&terminal.id)
+            .is_none_or(|(prev, _)| terminal_is_newer(&terminal, prev));
+        if replace {
+            self.terminals
+                .insert(terminal.id.clone(), (terminal, host.into()));
+        }
+    }
+
+    fn record_comment(&mut self, reply: &Value) {
+        if let (Some(card_id), Some(rev)) =
+            (reply["card_id"].as_str(), reply["card_revision"].as_u64())
+        {
+            self.record_card_revision(card_id, rev);
+        }
+        if let Ok(event) = serde_json::from_value::<Event>(reply.clone()) {
+            self.deleted_comments.remove(&event.id);
+            self.comments.insert(event.id.clone(), event);
         }
     }
 
@@ -81,22 +144,104 @@ impl CommittedWrites {
             return;
         }
         match method {
-            "terminal.create" => {
+            "terminal.create" | "execution.retry" => {
                 if let Ok(terminal) = serde_json::from_value::<TerminalEntry>(reply.clone()) {
-                    self.terminals
-                        .insert(terminal.id.clone(), (terminal, host.into()));
+                    self.record_terminal(terminal, host);
+                }
+            }
+            "agent.open" => {
+                if let Ok(terminal) =
+                    serde_json::from_value::<TerminalEntry>(reply["terminal"].clone())
+                {
+                    self.record_terminal(terminal, host);
+                }
+            }
+            "review.run_agent" => {
+                if let Ok(card) = serde_json::from_value::<Card>(reply["card_record"].clone()) {
+                    self.record_card(card);
+                }
+                if let Ok(terminal) =
+                    serde_json::from_value::<TerminalEntry>(reply["terminal"].clone())
+                {
+                    self.record_terminal(terminal, host);
+                }
+            }
+            "review.send_agent" => {
+                if let Ok(card) = serde_json::from_value::<Card>(reply["card_record"].clone()) {
+                    self.record_card(card);
+                }
+                if !reply["event"].is_null() {
+                    self.record_comment(&reply["event"]);
+                }
+                if let Ok(terminal) =
+                    serde_json::from_value::<TerminalEntry>(reply["terminal"].clone())
+                {
+                    self.record_terminal(terminal, host);
+                }
+                if let Ok(hint) =
+                    serde_json::from_value::<TerminalContext>(reply["terminal_context"].clone())
+                {
+                    self.record_terminal_hint(hint);
+                }
+            }
+            "review.draft.set" => {
+                if let Ok(draft) = serde_json::from_value::<ReviewDraft>(reply["draft"].clone()) {
+                    let ts = draft.updated_at;
+                    self.review_drafts
+                        .insert(draft.card_id.clone(), (Some(draft), ts));
+                }
+            }
+            "review.draft.clear" => {
+                if reply["cleared"] == true
+                    && let Some(card_id) = reply["card_id"].as_str()
+                {
+                    let cleared_at = reply["cleared_at"].as_u64().unwrap_or(u64::MAX);
+                    self.review_drafts
+                        .insert(card_id.to_owned(), (None, cleared_at));
+                }
+            }
+            "configuration.open" => {
+                if let Ok(terminal) =
+                    serde_json::from_value::<TerminalEntry>(reply["terminal"].clone())
+                {
+                    self.record_terminal(terminal, host);
+                }
+                if let Ok(session) =
+                    serde_json::from_value::<ConfigurationSession>(reply["session"].clone())
+                {
+                    let replace = self
+                        .configuration_sessions
+                        .get(&session.id)
+                        .is_none_or(|prev| prev.generation <= session.generation);
+                    if replace {
+                        self.configuration_sessions
+                            .insert(session.id.clone(), session);
+                    }
+                }
+            }
+            "worktree.create" => {
+                if let Ok(wt) = serde_json::from_value::<ManagedWorktree>(reply["worktree"].clone())
+                {
+                    self.removed_worktrees.remove(&wt.id);
+                    self.worktrees.insert(wt.id.clone(), (wt, host.into()));
+                }
+                if let Ok(terminal) =
+                    serde_json::from_value::<TerminalEntry>(reply["terminal"].clone())
+                {
+                    self.record_terminal(terminal, host);
+                }
+            }
+            "worktree.promote" => {
+                if let Ok(card) = serde_json::from_value::<Card>(reply.clone()) {
+                    self.record_card(card);
+                }
+                if let Some(wt_id) = reply["promoted_from_worktree_id"].as_str() {
+                    self.worktrees.remove(wt_id);
+                    self.removed_worktrees.insert(wt_id.to_owned());
                 }
             }
             "comment.add" | "comment.update" => {
-                if let (Some(card_id), Some(rev)) =
-                    (reply["card_id"].as_str(), reply["card_revision"].as_u64())
-                {
-                    self.record_card_revision(card_id, rev);
-                }
-                if let Ok(event) = serde_json::from_value::<Event>(reply.clone()) {
-                    self.deleted_comments.remove(&event.id);
-                    self.comments.insert(event.id.clone(), event);
-                }
+                self.record_comment(reply);
             }
             "comment.delete" => {
                 if reply["deleted"] == true {
@@ -124,11 +269,7 @@ impl CommittedWrites {
             "notifications.read_all" => {}
             _ => {
                 if let Ok(card) = serde_json::from_value::<Card>(reply.clone()) {
-                    self.card_revisions
-                        .entry(card.id.clone())
-                        .and_modify(|cur| *cur = (*cur).max(card.revision))
-                        .or_insert(card.revision);
-                    self.cards.insert(card.id.clone(), card);
+                    self.record_card(card);
                 }
             }
         }
@@ -149,7 +290,11 @@ impl CommittedWrites {
     pub(super) fn overlay(&self, snapshot: &mut Snapshot) {
         for (terminal, host) in self.terminals.values() {
             // Never overwrite a newer runtime observation (exit, close or rename).
-            if !snapshot.terminals.iter().any(|t| t.id == terminal.id) {
+            if let Some(existing) = snapshot.terminals.iter_mut().find(|t| t.id == terminal.id) {
+                if terminal_is_newer(terminal, existing) {
+                    *existing = terminal.clone();
+                }
+            } else {
                 snapshot.terminals.push(terminal.clone());
             }
             snapshot
@@ -231,6 +376,52 @@ impl CommittedWrites {
                 snapshot.schedule_states.push(st.clone());
             }
         }
+        for (card_id, (draft_opt, ts)) in &self.review_drafts {
+            match draft_opt {
+                Some(draft) => {
+                    if let Some(existing) = snapshot
+                        .review_drafts
+                        .iter_mut()
+                        .find(|d| d.card_id == draft.card_id)
+                    {
+                        if existing.updated_at < draft.updated_at {
+                            *existing = draft.clone();
+                        }
+                    } else {
+                        snapshot.review_drafts.push(draft.clone());
+                    }
+                }
+                None => {
+                    snapshot
+                        .review_drafts
+                        .retain(|d| !(d.card_id == *card_id && d.updated_at <= *ts));
+                }
+            }
+        }
+        if !self.removed_worktrees.is_empty() {
+            snapshot
+                .worktrees
+                .retain(|w| !self.removed_worktrees.contains(&w.id));
+        }
+        for (wt, host) in self.worktrees.values() {
+            if !snapshot.worktrees.iter().any(|w| w.id == wt.id) {
+                snapshot.worktrees.push(wt.clone());
+            }
+            snapshot.entity_hosts.insert(wt.id.clone(), host.clone());
+        }
+        for session in self.configuration_sessions.values() {
+            if let Some(existing) = snapshot
+                .configuration_sessions
+                .iter_mut()
+                .find(|s| s.id == session.id)
+            {
+                if existing.generation < session.generation {
+                    *existing = session.clone();
+                }
+            } else {
+                snapshot.configuration_sessions.push(session.clone());
+            }
+        }
     }
 
     /// Drop a receipt only after the authoritative snapshot includes it. A
@@ -243,8 +434,12 @@ impl CommittedWrites {
                     .iter()
                     .any(|c| c.terminal_id == *id && c.cwd.is_some())
         });
-        self.terminals
-            .retain(|id, _| !snapshot.terminals.iter().any(|t| &t.id == id));
+        self.terminals.retain(|id, (terminal, _)| {
+            match snapshot.terminals.iter().find(|t| &t.id == id) {
+                None => true,
+                Some(snap) => terminal_is_newer(terminal, snap),
+            }
+        });
         self.cards.retain(|id, card| {
             !snapshot
                 .cards
@@ -281,6 +476,27 @@ impl CommittedWrites {
                 .schedule_states
                 .iter()
                 .any(|s| &s.id == id && s.updated_at >= st.updated_at)
+        });
+        self.review_drafts
+            .retain(|card_id, (draft_opt, ts)| match draft_opt {
+                Some(draft) => !snapshot
+                    .review_drafts
+                    .iter()
+                    .any(|d| d.card_id == *card_id && d.updated_at >= draft.updated_at),
+                None => snapshot
+                    .review_drafts
+                    .iter()
+                    .any(|d| d.card_id == *card_id && d.updated_at <= *ts),
+            });
+        self.worktrees
+            .retain(|id, _| !snapshot.worktrees.iter().any(|w| &w.id == id));
+        self.removed_worktrees
+            .retain(|id| snapshot.worktrees.iter().any(|w| &w.id == id));
+        self.configuration_sessions.retain(|id, session| {
+            !snapshot
+                .configuration_sessions
+                .iter()
+                .any(|s| &s.id == id && s.generation >= session.generation)
         });
         self.overlay(snapshot);
     }
@@ -625,5 +841,197 @@ mod tests {
         writes.record("comment.add", &comment_reply, "local");
         writes.reconcile(&mut stale_comment);
         assert_eq!(stale_comment.cards[0].revision, 4);
+    }
+
+    #[test]
+    fn review_agent_draft_worktree_and_configuration_receipts_overlay_and_reconcile() {
+        for method in [
+            "review.run_agent",
+            "review.send_agent",
+            "review.draft.set",
+            "review.draft.clear",
+            "agent.open",
+            "execution.retry",
+            "configuration.open",
+            "worktree.create",
+            "worktree.promote",
+        ] {
+            assert!(immediate(method), "{method} should be immediate");
+        }
+
+        let mut writes = CommittedWrites::default();
+
+        // 1. review.run_agent updates an existing TerminalEntry when agent.number increases.
+        let stale_term: TerminalEntry = serde_json::from_value(json!({
+            "id":"conv:c1:reviewer", "number":1, "created_at":1,
+            "agent":{
+                "project_id":"p1", "card_id":"c1", "card_number":1, "number":1,
+                "stage":"review", "trigger":"diff_review",
+                "profile":{"id":"reviewer","name":"Reviewer","command":["echo"]},
+                "instruction":"", "state":"completed"
+            }
+        }))
+        .unwrap();
+        let mut next_term = stale_term.clone();
+        next_term.agent.as_mut().unwrap().number = 2;
+        next_term.agent.as_mut().unwrap().state = "queued".into();
+        writes.record(
+            "review.run_agent",
+            &json!({
+                "state":"queued",
+                "card_id":"c1",
+                "card_record": card(2),
+                "terminal": next_term,
+            }),
+            "local",
+        );
+
+        // 2. review.send_agent (terminal) overlays terminal + terminal_context.
+        let review_term: TerminalEntry = serde_json::from_value(json!({
+            "id":"review-agent-1", "number":2, "origin_project_id":"p1", "created_at":10,
+            "runtime":{"machine":"local", "core_id":"core-1", "terminal":"pty-9",
+                "state":"running", "connection":"connected"}
+        }))
+        .unwrap();
+        let review_ctx = TerminalContext {
+            terminal_id: "review-agent-1".into(),
+            machine: "local".into(),
+            core_id: "core-1".into(),
+            terminal: "pty-9".into(),
+            cwd: Some("/repo".into()),
+            directory_root: Some("/repo".into()),
+            project_id: Some("p1".into()),
+            ..Default::default()
+        };
+        writes.record(
+            "review.send_agent",
+            &json!({
+                "state":"running",
+                "mode":"terminal",
+                "terminal_id":"review-agent-1",
+                "terminal": review_term,
+                "terminal_context": review_ctx,
+            }),
+            "local",
+        );
+
+        // 3. review.draft.set overlays draft, then review.draft.clear hides it.
+        writes.record(
+            "review.draft.set",
+            &json!({
+                "saved": true,
+                "draft": {
+                    "card_id":"c1",
+                    "summary":"Check lock",
+                    "verdict":"comment",
+                    "comments":[],
+                    "updated_at": 100
+                }
+            }),
+            "local",
+        );
+        let mut stale = Snapshot {
+            cards: vec![card(1)],
+            terminals: vec![stale_term],
+            ..Default::default()
+        };
+        writes.reconcile(&mut stale);
+        assert_eq!(stale.cards[0].revision, 2);
+        assert_eq!(
+            stale
+                .terminals
+                .iter()
+                .find(|t| t.id == "conv:c1:reviewer")
+                .unwrap()
+                .agent
+                .as_ref()
+                .unwrap()
+                .state,
+            "queued"
+        );
+        assert!(stale.terminals.iter().any(|t| t.id == "review-agent-1"));
+        assert!(stale
+            .terminal_contexts
+            .iter()
+            .any(|c| c.terminal_id == "review-agent-1" && c.project_id.as_deref() == Some("p1")));
+        assert_eq!(stale.review_drafts.len(), 1);
+        assert_eq!(stale.review_drafts[0].summary, "Check lock");
+
+        writes.record(
+            "review.draft.clear",
+            &json!({"cleared": true, "card_id": "c1", "cleared_at": 150}),
+            "local",
+        );
+        writes.overlay(&mut stale);
+        assert!(stale.review_drafts.is_empty());
+
+        // Reconcile drops cleared marker once snapshot no longer has the draft.
+        let mut fresh = stale.clone();
+        writes.reconcile(&mut fresh);
+        assert!(writes.review_drafts.is_empty());
+        assert!(writes.cards.is_empty());
+        assert!(writes.terminals.is_empty());
+
+        // 4. worktree.create adds ManagedWorktree, then worktree.promote replaces it with Card.
+        writes.record(
+            "worktree.create",
+            &json!({
+                "worktree": {
+                    "id": "wt1",
+                    "project_id": "p1",
+                    "branch": "feat/wt",
+                    "base_branch": "main",
+                    "path": "/tmp/wt1",
+                    "location": {"machine": "local", "directory": "/repo"},
+                    "created_at": 10
+                },
+                "terminal": null
+            }),
+            "local",
+        );
+        let mut wt_snap = Snapshot::default();
+        writes.reconcile(&mut wt_snap);
+        assert_eq!(wt_snap.worktrees.len(), 1);
+        assert_eq!(wt_snap.worktrees[0].id, "wt1");
+
+        let mut promoted = card(1);
+        promoted.id = "c2".into();
+        let mut promoted_reply = serde_json::to_value(&promoted).unwrap();
+        promoted_reply["promoted_from_worktree_id"] = json!("wt1");
+        writes.record("worktree.promote", &promoted_reply, "local");
+        writes.overlay(&mut wt_snap);
+        assert!(wt_snap.worktrees.is_empty());
+        assert!(wt_snap.cards.iter().any(|c| c.id == "c2"));
+
+        // 5. configuration.open overlays ConfigurationSession and TerminalEntry.
+        writes.record(
+            "configuration.open",
+            &json!({
+                "terminal_id": "configuration:p1:workflows:developer",
+                "reused": false,
+                "state": "queued",
+                "terminal": {
+                    "id": "configuration:p1:workflows:developer",
+                    "number": 5,
+                    "origin_project_id": "p1",
+                    "created_at": 50
+                },
+                "session": {
+                    "id": "configuration:p1:workflows:developer",
+                    "project_id": "p1",
+                    "profile_id": "developer",
+                    "provider_session_id": null,
+                    "generation": 1,
+                    "state": "queued",
+                    "prompt": "p",
+                    "error": null
+                }
+            }),
+            "local",
+        );
+        let mut cfg_snap = Snapshot::default();
+        writes.reconcile(&mut cfg_snap);
+        assert_eq!(cfg_snap.configuration_sessions.len(), 1);
+        assert_eq!(cfg_snap.terminals.len(), 1);
     }
 }

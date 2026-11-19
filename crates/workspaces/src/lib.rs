@@ -416,6 +416,29 @@ impl Ops {
         }
         Ok(format!("refs/heads/{base}"))
     }
+    /// Resolve `HEAD` commit SHA in `dir` without enumerating refs or status.
+    pub fn head_sha(&self, dir: &Path) -> Option<String> {
+        self.host
+            .is_dir(dir)
+            .then(|| self.checked(dir, &["rev-parse", "HEAD"]).ok())
+            .flatten()
+            .filter(|s| !s.is_empty())
+    }
+    /// Lightweight `(branch, base_commit)` lookup for worktree binding without running `git status`.
+    pub fn workspace_head_meta(&self, cwd: &Path, card: &Card) -> (Option<String>, Option<String>) {
+        if !self.host.is_dir(cwd) {
+            return (card.branch.clone(), card.base_commit.clone());
+        }
+        let cwd_str = cwd.to_string_lossy();
+        let branch = self
+            .current_branch(&cwd_str)
+            .or_else(|| self.rebase_branch(cwd));
+        let base_commit = card.base_commit.clone().or_else(|| self.head_sha(cwd));
+        if branch.is_none() && base_commit.is_none() {
+            return (card.branch.clone(), None);
+        }
+        (branch, base_commit)
+    }
     /// Read-only projection for the Card's workspace panel.
     pub fn info(&self, project: &Project, card: &Card) -> Result<WorkspaceInfo> {
         let mut value = WorkspaceInfo {

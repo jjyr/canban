@@ -468,10 +468,13 @@ impl AppServer {
         let client = canban_herdr::Client {
             config: self.config(),
         };
-        let snapshot = self.snapshot()?;
-        let bound: Vec<_> = snapshot
-            .terminals
-            .iter()
+        let bound: Vec<_> = self
+            .store
+            .lock()
+            .unwrap()
+            .db()
+            .list::<TerminalEntry>()?
+            .into_iter()
             .filter(|t| {
                 t.agent.as_ref().is_some_and(|a| {
                     a.terminal.is_some()
@@ -482,7 +485,6 @@ impl AppServer {
                                 && a.output_path.is_none())
                 })
             })
-            .cloned()
             .collect();
         if !bound.is_empty() {
             let (core_id, values) = match self.runtime_inventory() {
@@ -640,7 +642,7 @@ impl AppServer {
                     let Some(terminal) = run.terminal.as_deref() else {
                         return Ok(false);
                     };
-                    if client.status()?["core"]["id"].as_str() != run.core_id.as_deref() {
+                    if self.verified_core_id().ok().as_deref() != run.core_id.as_deref() {
                         return Ok(false);
                     }
                     let actual = client.get(terminal)?;
@@ -1051,7 +1053,7 @@ impl AppServer {
             );
             let result = (|| -> Result<Value> {
                 ensure!(
-                    client.status()?["core"]["id"].as_str() == att.core_id.as_deref(),
+                    Some(self.verified_core_id()?) == att.core_id,
                     "Original core identity changed"
                 );
                 client.call("terminal.send", json!({"terminal":terminal,"text":text}))
@@ -1146,20 +1148,23 @@ impl AppServer {
             pr_tracking = self.prepare_pr_card_source(&prepared, &mut project, &ops)?;
             ops.prepare(&home, &project, &prepared)?
         };
-        self.git_changed(&location.machine);
-        prepared.worktree = Some(cwd.to_string_lossy().into_owned());
-        let info = ops.info(&project, &prepared)?;
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        if !resuming && card.worktree.as_deref() != Some(cwd_str.as_str()) {
+            self.git_changed(&location.machine);
+        }
+        prepared.worktree = Some(cwd_str.clone());
+        let (branch, base_commit) = ops.workspace_head_meta(&cwd, &prepared);
         if let Some(target) = &pr_tracking
             && cwd != Path::new(&location.directory)
-            && let Some(branch) = info.branch.as_deref().filter(|b| !b.is_empty())
+            && let Some(branch) = branch.as_deref().filter(|b| !b.is_empty())
         {
             ops.configure_pr_tracking(&cwd, branch, target)?;
         }
         let workspace = WorkspaceBinding {
             location: location.clone(),
-            path: cwd.to_string_lossy().into_owned(),
-            branch: info.branch.clone(),
-            base_commit: info.base_commit.clone(),
+            path: cwd_str,
+            branch,
+            base_commit,
             target_branch: project.target_branch.clone(),
         };
         if !resuming
@@ -1302,7 +1307,7 @@ impl AppServer {
         let client = canban_herdr::Client {
             config: self.config(),
         };
-        let core = client.status()?;
+        let core_id = self.verified_core_id()?;
         let labels = std::collections::BTreeMap::from([
             ("canban.project".into(), att.project_id.clone()),
             ("canban.card".into(), card.number.to_string()),
@@ -1343,7 +1348,6 @@ impl AppServer {
         })?;
         let terminal =
             client.launch_on(&location.machine, spec.argv, &spec.cwd, spec.env, labels)?;
-        let core_id = strp(&core["core"], "id")?.to_owned();
         let terminal_address = strp(&terminal, "address")?.to_owned();
         run.owner_core_id = if remote {
             Some(location.machine.clone())

@@ -702,7 +702,16 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                                 .items_center()
                                 .gap_0p5()
                                 .child(
-                                    compact_action("↻ Re-run", Variant::Quiet, move |_| {
+                                    compact_action(
+                                        move || {
+                                            if ui.is_method_pending("review.run_agent") {
+                                                "Starting…"
+                                            } else {
+                                                "↻ Re-run"
+                                            }
+                                        },
+                                        Variant::Quiet,
+                                        move |_| {
                                         crate::review::start_agent_review(
                                             ui,
                                             &cid_rerun,
@@ -740,7 +749,13 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                             .gap_0p5()
                             .child(
                                 compact_action(
-                                    format!("Agent Review (@{default_prof})"),
+                                    move || {
+                                        if ui.is_method_pending("review.run_agent") {
+                                            format!("Starting @{default_prof}…")
+                                        } else {
+                                            format!("Agent Review (@{default_prof})")
+                                        }
+                                    },
                                     Variant::Secondary,
                                     move |_| {
                                         crate::review::start_agent_review(ui, &cid_run, None, None)
@@ -992,7 +1007,16 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         st.agent_review_open.set(false);
                     }))
                     .child(
-                        compact_action("Start Agent Review", Variant::Primary, move |_| {
+                        compact_action(
+                            move || {
+                                if ui.is_method_pending("review.run_agent") {
+                                    "Starting…"
+                                } else {
+                                    "Start Agent Review"
+                                }
+                            },
+                            Variant::Primary,
+                            move |_| {
                             let prof = st.agent_review_profile.get_untracked();
                             let focus = st.agent_review_focus.get_untracked();
                             st.agent_review_open.set(false);

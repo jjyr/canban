@@ -2197,6 +2197,7 @@ fn git_refs_compare_and_review_send_agent_work_with_and_without_cards() {
         )
         .unwrap();
     assert_eq!(sent["state"], "sent");
+    assert_eq!(sent["card_record"]["stage"], "develop");
     let snap = app.snapshot().unwrap();
     let updated_card = snap.cards.iter().find(|x| x.id == c.id).unwrap();
     assert_eq!(updated_card.stage, "develop");
@@ -2224,6 +2225,7 @@ fn git_refs_compare_and_review_send_agent_work_with_and_without_cards() {
         .unwrap();
     assert_eq!(created["state"], "created");
     let new_cid = created["card_id"].as_str().unwrap();
+    assert_eq!(created["card_record"]["id"], new_cid);
     let snap2 = app.snapshot().unwrap();
     assert!(
         snap2
@@ -4169,6 +4171,8 @@ fn pr_card_worktree_tracks_pr_branch_and_review_drafts_roundtrip_with_fallback()
         .unwrap();
     assert_eq!(queued["state"], "queued");
     assert_eq!(queued["profile_id"], "developer");
+    assert_eq!(queued["card_record"]["id"], c.id);
+    assert_eq!(queued["terminal"]["id"], queued["terminal_id"]);
 
     let snap = app.snapshot().unwrap();
     let card_after = snap.cards.iter().find(|x| x.id == c.id).unwrap();
@@ -4199,6 +4203,8 @@ fn pr_card_worktree_tracks_pr_branch_and_review_drafts_roundtrip_with_fallback()
         .unwrap();
     assert_eq!(draft_res["saved"], true);
     assert_eq!(draft_res["comment_count"], 1);
+    assert_eq!(draft_res["draft"]["card_id"], c.id);
+    assert_eq!(draft_res["draft"]["compare_sha"], "deadbeef");
     assert!(
         app.call("draft.list", json!({}))
             .unwrap()

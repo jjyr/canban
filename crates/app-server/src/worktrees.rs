@@ -158,7 +158,9 @@ impl AppServer {
             )?;
             db.conn
                 .execute("DELETE FROM managed_worktrees WHERE id=?1", params![wt.id])?;
-            Ok(serde_json::to_value(card)?)
+            let mut val = serde_json::to_value(card)?;
+            val["promoted_from_worktree_id"] = json!(wt.id);
+            Ok(val)
         })?;
         self.invalidate_contexts();
         Ok(card_val)
@@ -169,7 +171,7 @@ impl AppServer {
         let force = p["force"].as_bool().unwrap_or(false);
         let (wt, snapshot) = {
             let wt: ManagedWorktree = self.store.lock().unwrap().db().get(wt_id)?;
-            let snap = self.snapshot()?;
+            let snap = self.terminal_snapshot()?;
             (wt, snap)
         };
 

@@ -559,13 +559,27 @@ fn profile_picker(ui: Ui, selected: Signal<String>) -> impl IntoElement {
 
 fn submit_primary_button(ui: Ui, pr_info: Option<Value>) -> impl IntoElement {
     let st = ui.review_state;
-    let act = st.submit_action.get();
-    let btn_label = match act.as_str() {
-        "github_review" => "Submit to GitHub PR",
-        "card_comment" => "Post to Card Timeline",
-        "new_card" => "Create Card & Dispatch",
-        "terminal" => "Launch @Agent Terminal",
-        _ => "Send to Card @Agent",
+    let btn_label = move || {
+        let act = st.submit_action.get();
+        let pending = ui.is_method_pending("review.send_agent")
+            || ui.is_method_pending("github.remote.review");
+        if pending {
+            match act.as_str() {
+                "github_review" => "Submitting…",
+                "card_comment" => "Posting…",
+                "new_card" => "Creating Card…",
+                "terminal" => "Launching @Agent…",
+                _ => "Sending…",
+            }
+        } else {
+            match act.as_str() {
+                "github_review" => "Submit to GitHub PR",
+                "card_comment" => "Post to Card Timeline",
+                "new_card" => "Create Card & Dispatch",
+                "terminal" => "Launch @Agent Terminal",
+                _ => "Send to Card @Agent",
+            }
+        }
     };
 
     action(btn_label, Variant::Primary, move |_| {
@@ -714,14 +728,7 @@ fn submit_primary_button(ui: Ui, pr_info: Option<Value>) -> impl IntoElement {
             match res["mode"].as_str().unwrap_or("") {
                 "terminal" => {
                     if let Some(tid) = res["terminal_id"].as_str() {
-                        let tid_owned = tid.to_owned();
-                        ui.terminal_tabs.update(|tabs| {
-                            if !tabs.contains(&tid_owned) {
-                                tabs.push(tid_owned.clone());
-                            }
-                        });
-                        ui.terminal_selection.set(tid_owned);
-                        ui.navigate("terminals");
+                        ui.open_terminal(tid.to_owned());
                     }
                 }
                 "new_card" => {

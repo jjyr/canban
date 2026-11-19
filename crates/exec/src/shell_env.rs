@@ -5,7 +5,10 @@ use std::{
     io::{BufReader, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Mutex, OnceLock, RwLock},
+    sync::{
+        Mutex, OnceLock, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -13,7 +16,7 @@ const PATH_BEGIN: &str = "__CANBAN_PATH_BEGIN__";
 const PATH_END: &str = "__CANBAN_PATH_END__";
 const INTERACTIVE_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const LOGIN_PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
-const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(60);
+const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 const FAILED_PROBE_RETRY_TTL: Duration = Duration::from_secs(15);
 
 #[derive(Clone)]
@@ -26,6 +29,7 @@ struct CachedShellPath {
 
 static SHELL_PATH_CACHE: OnceLock<RwLock<Option<CachedShellPath>>> = OnceLock::new();
 static SHELL_PROBE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static BACKGROUND_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 fn cache_lock() -> &'static RwLock<Option<CachedShellPath>> {
     SHELL_PATH_CACHE.get_or_init(|| RwLock::new(None))
@@ -33,6 +37,44 @@ fn cache_lock() -> &'static RwLock<Option<CachedShellPath>> {
 
 fn probe_lock() -> &'static Mutex<()> {
     SHELL_PROBE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+struct RefreshFlightGuard;
+impl Drop for RefreshFlightGuard {
+    fn drop(&mut self) {
+        BACKGROUND_REFRESH_IN_FLIGHT.store(false, Ordering::Release);
+    }
+}
+
+fn spawn_background_shell_refresh(shell: String) {
+    if BACKGROUND_REFRESH_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("shell-path-refresh".into())
+        .spawn(move || {
+            let _flight_guard = RefreshFlightGuard;
+            let _probe_guard = probe_lock().lock().unwrap_or_else(|e| e.into_inner());
+            let probed = probe_shell_path_with(&shell);
+            let Some(entries) = probed else {
+                // Keep the last known good PATH entries when a background refresh fails.
+                return;
+            };
+            if let Ok(mut guard) = cache_lock().write() {
+                *guard = Some(CachedShellPath {
+                    shell,
+                    fetched_at: Instant::now(),
+                    succeeded: true,
+                    entries,
+                });
+            }
+        });
+    if spawned.is_err() {
+        BACKGROUND_REFRESH_IN_FLIGHT.store(false, Ordering::Release);
+    }
 }
 
 fn preferred_shell() -> String {
@@ -169,21 +211,41 @@ fn is_cache_fresh(entry: &CachedShellPath, shell: &str, max_age: Duration) -> bo
     entry.fetched_at.elapsed() < effective_ttl
 }
 
-fn cached_shell_path_entries(max_age: Duration) -> Vec<PathBuf> {
+fn lookup_cached_or_trigger_refresh(
+    shell: &str,
+    max_age: Duration,
+    allow_stale_while_revalidate: bool,
+) -> Option<Vec<PathBuf>> {
+    let guard = cache_lock().read().ok()?;
+    let cached = guard.as_ref()?;
+    if is_cache_fresh(cached, shell, max_age) {
+        return Some(cached.entries.clone());
+    }
+    if allow_stale_while_revalidate && cached.shell == shell && cached.succeeded {
+        let entries = cached.entries.clone();
+        drop(guard);
+        spawn_background_shell_refresh(shell.to_owned());
+        return Some(entries);
+    }
+    None
+}
+
+fn cached_shell_path_entries(
+    max_age: Duration,
+    allow_stale_while_revalidate: bool,
+) -> Vec<PathBuf> {
     let shell = preferred_shell();
-    if let Ok(guard) = cache_lock().read()
-        && let Some(cached) = guard.as_ref()
-        && is_cache_fresh(cached, &shell, max_age)
+    if let Some(entries) =
+        lookup_cached_or_trigger_refresh(&shell, max_age, allow_stale_while_revalidate)
     {
-        return cached.entries.clone();
+        return entries;
     }
 
     let _probe_guard = probe_lock().lock().unwrap_or_else(|e| e.into_inner());
-    if let Ok(guard) = cache_lock().read()
-        && let Some(cached) = guard.as_ref()
-        && is_cache_fresh(cached, &shell, max_age)
+    if let Some(entries) =
+        lookup_cached_or_trigger_refresh(&shell, max_age, allow_stale_while_revalidate)
     {
-        return cached.entries.clone();
+        return entries;
     }
 
     let probed = probe_shell_path_with(&shell);
@@ -205,7 +267,7 @@ pub fn refresh_local_shell_path_if_stale(max_age: Duration) {
     if std::env::var_os("CANBAN_HERDR_SEARCH_PATHS").is_some() {
         return;
     }
-    let _ = cached_shell_path_entries(max_age);
+    let _ = cached_shell_path_entries(max_age, false);
 }
 
 /// Drop the cached local Shell `PATH` so the next lookup or launch probes freshly.
@@ -267,7 +329,7 @@ pub fn local_search_paths(env: &BTreeMap<String, String>) -> Vec<PathBuf> {
     if let Some(explicit_path) = env.get("PATH").filter(|s| !s.is_empty()) {
         push_split_paths(&mut out, OsString::from(explicit_path).as_os_str());
     }
-    for dir in cached_shell_path_entries(DEFAULT_CACHE_TTL) {
+    for dir in cached_shell_path_entries(DEFAULT_CACHE_TTL, true) {
         push_unique_dir(&mut out, dir);
     }
     if let Some(proc_path) = std::env::var_os("PATH") {
@@ -294,7 +356,7 @@ pub fn local_merged_path_string(hc_env: &BTreeMap<String, String>) -> Option<Str
     }
 
     let mut out = Vec::new();
-    for dir in cached_shell_path_entries(DEFAULT_CACHE_TTL) {
+    for dir in cached_shell_path_entries(DEFAULT_CACHE_TTL, true) {
         push_unique_dir(&mut out, dir);
     }
     if let Some(proc_path) = std::env::var_os("PATH") {
@@ -461,5 +523,30 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ok-from-node");
+    }
+
+    #[test]
+    fn stale_successful_cache_returns_immediately_via_stale_while_revalidate() {
+        let shell = preferred_shell();
+        if let Ok(mut guard) = cache_lock().write() {
+            *guard = Some(CachedShellPath {
+                shell: shell.clone(),
+                fetched_at: Instant::now() - Duration::from_secs(3600),
+                succeeded: true,
+                entries: vec![PathBuf::from("/stale/cached/bin")],
+            });
+        }
+        let started = Instant::now();
+        let hit = lookup_cached_or_trigger_refresh(&shell, DEFAULT_CACHE_TTL, true);
+        assert_eq!(hit, Some(vec![PathBuf::from("/stale/cached/bin")]));
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "stale-while-revalidate must return immediately without blocking on shell probe"
+        );
+        // Synchronous callers (diagnostics/onboarding) still treat expired cache as stale.
+        assert_eq!(
+            lookup_cached_or_trigger_refresh(&shell, DEFAULT_CACHE_TTL, false),
+            None
+        );
     }
 }

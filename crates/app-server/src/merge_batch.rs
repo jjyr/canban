@@ -1031,10 +1031,7 @@ impl AppServer {
             config: self.config(),
         };
         // Leave the batch queued if Herdr Core is not reachable yet (e.g. startup or non-runtime tests).
-        let Ok(status) = client.status() else {
-            return Ok(());
-        };
-        let Some(core) = status["core"]["id"].as_str().map(str::to_owned) else {
+        let Ok(core) = self.verified_core_id() else {
             return Ok(());
         };
         let profile =

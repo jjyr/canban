@@ -1175,7 +1175,13 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
                     .gap_0p5()
                     .child(
                         compact_action(
-                            format!("Ask @{default_prof}"),
+                            move || {
+                                if ui.is_method_pending("review.run_agent") {
+                                    format!("Starting @{default_prof}…")
+                                } else {
+                                    format!("Ask @{default_prof}")
+                                }
+                            },
                             Variant::Secondary,
                             move |_| super::start_agent_review(ui, &cid_quick, None, None),
                         )
@@ -1450,17 +1456,27 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
                         st.agent_review_open.set(false);
                     }))
                     .child(
-                        compact_action("Start Diff Review", Variant::Primary, move |_| {
-                            let prof = st.agent_review_profile.get_untracked();
-                            let focus = st.agent_review_focus.get_untracked();
-                            st.agent_review_open.set(false);
-                            super::start_agent_review(
-                                ui,
-                                &cid_start,
-                                (!prof.is_empty()).then_some(prof),
-                                (!focus.trim().is_empty()).then_some(focus),
-                            );
-                        })
+                        compact_action(
+                            move || {
+                                if ui.is_method_pending("review.run_agent") {
+                                    "Starting…"
+                                } else {
+                                    "Start Diff Review"
+                                }
+                            },
+                            Variant::Primary,
+                            move |_| {
+                                let prof = st.agent_review_profile.get_untracked();
+                                let focus = st.agent_review_focus.get_untracked();
+                                st.agent_review_open.set(false);
+                                super::start_agent_review(
+                                    ui,
+                                    &cid_start,
+                                    (!prof.is_empty()).then_some(prof),
+                                    (!focus.trim().is_empty()).then_some(focus),
+                                );
+                            },
+                        )
                         .disabled(move || ui.is_method_pending("review.run_agent")),
                     )
             },

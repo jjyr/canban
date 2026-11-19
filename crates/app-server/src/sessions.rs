@@ -346,12 +346,9 @@ impl AppServer {
             )?;
             let mut context = conversation(db, &card, &profile)?;
             if let Some(expected) = p["expected_terminal_id"].as_str() {
-                let snapshot = db.snapshot()?;
-                let row = canban_notifications::overview(&snapshot)
-                    .into_iter()
-                    .find(|r| r.id == context.id)
+                let entry: TerminalEntry = db
+                    .get(&context.id)
                     .context("Conversation no longer exists")?;
-                let entry = row.terminal.context("Conversation has no terminal")?;
                 let run = entry.agent.context("Conversation has no invocation")?;
                 ensure!(
                     entry.id == expected && run.finished(),
@@ -429,7 +426,7 @@ impl AppServer {
             config: self.config(),
         };
         ensure!(
-            client.status()?["core"]["id"].as_str() == old.core_id.as_deref(),
+            Some(self.verified_core_id()?) == old.core_id,
             "Original Core changed"
         );
         let terminal = old.terminal.as_ref().context("Terminal missing")?;
@@ -539,7 +536,7 @@ impl AppServer {
             config: self.config(),
         };
         ensure!(
-            client.status()?["core"]["id"].as_str() == run.core_id.as_deref(),
+            Some(self.verified_core_id()?) == run.core_id,
             "Original Herdr core is unavailable"
         );
         let terminal = run.terminal.as_deref().context("Agent has no terminal")?;

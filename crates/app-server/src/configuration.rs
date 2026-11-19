@@ -74,7 +74,8 @@ impl AppServer {
                     let terminal=db.get::<TerminalEntry>(&key)?;
                     if terminal.runtime.as_ref().is_some_and(|r|r.state!="finished") || old.state=="queued" {
                         ensure!(p["fresh"]!=true,"End the existing configuration Agent before starting a new conversation");
-                        return Ok(json!({"terminal_id":key,"reused":true,"state":terminal.runtime.as_ref().map(|r|r.state.as_str()).unwrap_or("queued")}));
+                        let state = terminal.runtime.as_ref().map(|r|r.state.as_str()).unwrap_or("queued").to_owned();
+                        return Ok(json!({"terminal_id":key,"reused":true,"state":state,"terminal":terminal,"session":old}));
                     }
                     if p["auto_fresh"]==true && (old.provider_session_id.is_none() || profile.resume_command().is_empty()) {
                         fresh=true;
@@ -97,13 +98,13 @@ impl AppServer {
                 let mut terminal=db.get::<TerminalEntry>(&key).unwrap_or(TerminalEntry {id:key.clone(),conversation_id:None,number:db.counter("terminal-number")?,name:Some(term_name),origin_project_id,origin_card_id:None,agent_engine:None,runtime:None,agent:None,created_at:now()});
                 terminal.created_at=now();
                 terminal.runtime=None;db.save(&terminal)?;db.save(&session)?;
-                Ok(json!({"terminal_id":key,"reused":false,"state":"queued"}))
+                Ok(json!({"terminal_id":key,"reused":false,"state":"queued","terminal":terminal,"session":session}))
             }),
             _=>bail!("Unknown configuration operation {method}"),
         }
     }
     pub(super) fn pump_configuration(&self) -> Result<()> {
-        let snapshot = self.snapshot()?;
+        let snapshot = self.terminal_snapshot()?;
         for session in snapshot.configuration_sessions.clone() {
             if session.state != "queued" {
                 if let Some(t) = snapshot
@@ -149,14 +150,15 @@ impl AppServer {
                 }
                 continue;
             }
-            if canban_scheduler::active_count(&self.snapshot()?)
-                >= self.config().scheduler.max_agents
+            if canban_scheduler::active_count(
+                &self.store.lock().unwrap().db().admission_snapshot()?,
+            ) >= self.config().scheduler.max_agents
             {
                 continue;
             }
             let _gate = self.terminal_gate.lock().unwrap();
             let admitted = self.store.lock().unwrap().write(|db| {
-                let current_snap = db.snapshot()?;
+                let current_snap = db.admission_snapshot()?;
                 if canban_scheduler::active_count(&current_snap)
                     >= self.config().scheduler.max_agents
                 {
@@ -166,11 +168,11 @@ impl AppServer {
                 if current.state != "queued" || current.generation != session.generation {
                     return Ok(None);
                 }
-                let project = current_snap
-                    .projects
-                    .iter()
-                    .find(|p| p.id == current.project_id)
-                    .cloned();
+                let project = if is_global_project_id(&current.project_id) {
+                    None
+                } else {
+                    db.get::<Project>(&current.project_id).ok()
+                };
                 let profile = canban_scheduler::select_in_project(
                     &self.config(),
                     project.as_ref(),
@@ -206,10 +208,7 @@ impl AppServer {
                 let client = canban_herdr::Client {
                     config: self.config(),
                 };
-                let core = client.status()?["core"]["id"]
-                    .as_str()
-                    .context("Core ID missing")?
-                    .to_owned();
+                let core = self.verified_core_id()?;
                 let prompt = if fresh {
                     session.prompt.clone()
                 } else {

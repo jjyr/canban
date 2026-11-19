@@ -849,6 +849,30 @@ impl AppServer {
             card_ids: card_ids.to_vec(),
         }
     }
+    fn populate_terminal_contexts(&self, snapshot: &mut Snapshot) {
+        snapshot.terminal_contexts = self
+            .terminal_contexts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| {
+                snapshot.terminals.iter().any(|t| {
+                    t.id == c.terminal_id
+                        && Self::terminal_binding(snapshot, t).is_some_and(|(core, terminal)| {
+                            core == c.core_id && terminal == c.terminal
+                        })
+                })
+            })
+            .cloned()
+            .collect();
+    }
+
+    fn terminal_snapshot(&self) -> Result<Snapshot> {
+        let mut snapshot = self.store.lock().unwrap().db().terminal_snapshot()?;
+        self.populate_terminal_contexts(&mut snapshot);
+        Ok(snapshot)
+    }
+
     pub fn snapshot(&self) -> Result<Snapshot> {
         let mut snapshot = self.store.lock().unwrap().snapshot()?;
         snapshot.github_sync = self.github_jobs.lock().unwrap().status.clone();
@@ -867,21 +891,7 @@ impl AppServer {
             })
             .cloned()
             .collect();
-        snapshot.terminal_contexts = self
-            .terminal_contexts
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|c| {
-                snapshot.terminals.iter().any(|t| {
-                    t.id == c.terminal_id
-                        && Self::terminal_binding(&snapshot, t).is_some_and(|(core, terminal)| {
-                            core == c.core_id && terminal == c.terminal
-                        })
-                })
-            })
-            .cloned()
-            .collect();
+        self.populate_terminal_contexts(&mut snapshot);
         self.project_observation_freshness(&mut snapshot);
         Ok(snapshot)
     }
@@ -903,6 +913,34 @@ impl AppServer {
     pub fn config(&self) -> Config {
         self.config.read().unwrap().clone()
     }
+    fn lookup_cached_operation(db: Db<'_>, key: &str, fingerprint: &str) -> Result<Option<Value>> {
+        let Some((old, result)) = db
+            .conn
+            .query_row(
+                "SELECT fingerprint,result FROM operations WHERE id=?1",
+                [key],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        ensure!(
+            old == fingerprint,
+            "request_key_conflict: same key, different payload"
+        );
+        Ok(Some(serde_json::from_str(&result)?))
+    }
+
+    fn cached_operation(&self, method: &str, p: &Value) -> Result<Option<Value>> {
+        let Some(key) = p["request_key"].as_str() else {
+            return Ok(None);
+        };
+        let fingerprint = canban_context::digest(&serde_json::to_vec(&json!([method, p]))?);
+        let store = self.store.lock().unwrap();
+        Self::lookup_cached_operation(store.db(), key, &fingerprint)
+    }
+
     fn mutate(
         &self,
         method: &str,
@@ -913,20 +951,9 @@ impl AppServer {
         let key = p["request_key"].as_str();
         let result = self.store.lock().unwrap().write(|db| {
             if let Some(key) = key
-                && let Some((old, result)) = db
-                    .conn
-                    .query_row(
-                        "SELECT fingerprint,result FROM operations WHERE id=?1",
-                        [key],
-                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-                    )
-                    .optional()?
+                && let Some(cached) = Self::lookup_cached_operation(db, key, &fingerprint)?
             {
-                ensure!(
-                    old == fingerprint,
-                    "request_key_conflict: same key, different payload"
-                );
-                return Ok(serde_json::from_str(&result)?);
+                return Ok(cached);
             }
             events::pump(db, &self.config())?;
             let result = f(db)?;

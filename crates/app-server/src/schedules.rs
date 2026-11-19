@@ -1665,8 +1665,7 @@ impl AppServer {
         }
 
         let client = canban_herdr::Client { config };
-        let core = client.status()?;
-        let core_id = strp(&core["core"], "id")?.to_owned();
+        let core_id = self.verified_core_id()?;
         let mut labels = BTreeMap::from([
             ("canban.schedule_run".into(), run.id.clone()),
             ("canban.terminal".into(), run.id.clone()),

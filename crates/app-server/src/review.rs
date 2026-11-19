@@ -1195,41 +1195,19 @@ impl AppServer {
                     .map(str::trim)
                     .filter(|s| !s.is_empty());
 
-                // When reviewing a GitHub PR Card that has no local worktree yet and dispatching
-                // to a local Agent, seed `refs/canban/cards/<card_id>` from `refs/pull/<n>/head`
-                // so `canban_workspaces::Ops::prepare` checks out the exact PR head commit!
-                if profile_opt.is_some() {
-                    let seed_target = {
+                if p["move_to_develop"].as_bool().unwrap_or(false) {
+                    let (current_stage, current_revision, has_develop) = {
                         let store = self.store.lock().unwrap();
                         let db = store.db();
-                        let c: Card = db.get(card_id)?;
-                        if c.worktree.is_none()
-                            && c.branch.is_none()
-                            && let Some(pr_num) = c
-                                .github_issue()
-                                .filter(|_| c.is_github_pr())
-                                .map(|s| s.number)
-                                .or_else(|| c.pull_request.as_ref().map(|pr| pr.number))
-                        {
-                            let proj: Project = db.get(&c.project_id)?;
-                            Some((self.bound_project(&proj, &c), pr_num, c.id.clone()))
-                        } else {
-                            None
-                        }
+                        let current: Card = db.get(card_id)?;
+                        let proj: Project = db.get(&current.project_id)?;
+                        (
+                            current.stage,
+                            current.revision,
+                            proj.workflow.stages.iter().any(|s| s.id == "develop"),
+                        )
                     };
-                    if let Some((proj, pr_num, cid)) = seed_target {
-                        let _ = self
-                            .ops(&proj.work_location().machine)
-                            .fetch_pr_for_card(&proj, pr_num, &cid);
-                    }
-                }
-
-                if p["move_to_develop"].as_bool().unwrap_or(false) {
-                    let current: Card = self.store.lock().unwrap().db().get(card_id)?;
-                    let proj: Project = self.store.lock().unwrap().db().get(&current.project_id)?;
-                    if current.stage != "develop"
-                        && proj.workflow.stages.iter().any(|s| s.id == "develop")
-                    {
+                    if current_stage != "develop" && has_develop {
                         let move_key = p["request_key"]
                             .as_str()
                             .map(|k| format!("{k}:move"))
@@ -1238,7 +1216,7 @@ impl AppServer {
                             "card.move",
                             json!({
                                 "card_id": card_id,
-                                "revision": current.revision,
+                                "revision": current_revision,
                                 "stage": "develop",
                                 "request_key": move_key,
                             }),
@@ -1260,11 +1238,13 @@ impl AppServer {
                         "request_key": comment_key,
                     }),
                 )?;
+                let card_record: Option<Card> = self.store.lock().unwrap().db().get(card_id).ok();
                 Ok(json!({
                     "state": "sent",
                     "mode": "card",
                     "card_id": card_id,
                     "event": event,
+                    "card_record": card_record,
                 }))
             }
             "new_card" => {
@@ -1309,10 +1289,12 @@ impl AppServer {
                         }),
                     )?;
                 }
+                let card_record: Option<Card> = self.store.lock().unwrap().db().get(&card_id).ok();
                 Ok(json!({
                     "state": "created",
                     "mode": "new_card",
                     "card_id": card_id,
+                    "card_record": card_record,
                 }))
             }
             "terminal" => self.launch_review_terminal(&p, &formatted),
@@ -1322,6 +1304,9 @@ impl AppServer {
 
     fn launch_review_terminal(&self, p: &Value, formatted_review: &str) -> Result<Value> {
         let _gate = self.terminal_gate.lock().unwrap();
+        if let Some(cached) = self.cached_operation("review.send_agent", p)? {
+            return Ok(cached);
+        }
         let config = self.config();
         let project: Project = self
             .store
@@ -1340,27 +1325,34 @@ impl AppServer {
         let machine = project.work_location().machine;
         let compare_ref = p["compare_ref"].as_str().unwrap_or("WORKDIR");
         let isolate = p["create_worktree"].as_bool().unwrap_or(false);
+        let run_slug = &id()[..8];
+        let cwd = if isolate {
+            self.ops(&machine)
+                .prepare_review_worktree(&self.home, &project, compare_ref, run_slug)?
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            p["cwd"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&project.directory)
+                .to_owned()
+        };
+        let host = canban_herdr::host::Host::new(self.config(), &machine);
+        ensure!(
+            Path::new(&cwd).is_absolute() && host.is_dir(Path::new(&cwd)),
+            "Working directory is unavailable on machine '{machine}': {cwd}"
+        );
+        let agent_engine = {
+            let cmd = profile.command_name();
+            match cmd.as_str() {
+                "codex" | "claude" => cmd,
+                _ => profile.preset.clone().unwrap_or(cmd),
+            }
+        };
 
-        let mut launch: Option<(TerminalEntry, String, Option<String>)> = None;
+        let mut launch: Option<(TerminalEntry, Option<String>)> = None;
         let saved = self.mutate("review.send_agent", p, |db| {
-            let run_slug = &id()[..8];
-            let cwd = if isolate {
-                self.ops(&machine)
-                    .prepare_review_worktree(&self.home, &project, compare_ref, run_slug)?
-                    .to_string_lossy()
-                    .into_owned()
-            } else {
-                p["cwd"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(&project.directory)
-                    .to_owned()
-            };
-            let host = canban_herdr::host::Host::new(self.config(), &machine);
-            ensure!(
-                Path::new(&cwd).is_absolute() && host.is_dir(Path::new(&cwd)),
-                "Working directory is unavailable on machine '{machine}': {cwd}"
-            );
             let session_id = profile
                 .command()
                 .iter()
@@ -1376,7 +1368,7 @@ impl AppServer {
                 name: Some(title_trimmed),
                 origin_project_id: Some(project.id.clone()),
                 origin_card_id: None,
-                agent_engine: None,
+                agent_engine: Some(agent_engine),
                 created_at: now(),
                 runtime: Some(TerminalRuntime {
                     machine: machine.clone(),
@@ -1394,14 +1386,14 @@ impl AppServer {
                 agent: None,
             };
             db.save(&item)?;
-            launch = Some((item.clone(), cwd, session_id));
+            launch = Some((item.clone(), session_id));
             Ok(json!({
                 "state": "starting",
                 "mode": "terminal",
                 "terminal_id": item.id,
             }))
         })?;
-        let Some((mut item, cwd, session_id)) = launch else {
+        let Some((mut item, session_id)) = launch else {
             return Ok(saved);
         };
 
@@ -1422,10 +1414,7 @@ impl AppServer {
         };
         let runtime = item.runtime.as_mut().unwrap();
         let result = (|| -> Result<()> {
-            let core = client.status()?["core"]["id"]
-                .as_str()
-                .context("Herdr Core has no identity")?
-                .to_owned();
+            let core = self.verified_core_id()?;
             runtime.core_id = Some(core.clone());
             let mut argv = canban_profiles::command(
                 &profile,
@@ -1511,17 +1500,60 @@ impl AppServer {
                 runtime.error = Some(format!("{e:#}"));
             }
         }
-        let outcome = json!({
-            "state": runtime.state,
-            "mode": "terminal",
-            "terminal_id": item.id,
-            "cwd": cwd,
-            "error": runtime.error,
-        });
+        let terminal_context = if runtime.state == "running"
+            && let (Some(core_id), Some(terminal)) =
+                (runtime.core_id.clone(), runtime.terminal.clone())
+        {
+            let ctx = TerminalContext {
+                machine: machine.clone(),
+                terminal_id: item.id.clone(),
+                core_id,
+                terminal,
+                cwd: Some(cwd.clone()),
+                directory_root: Some(if isolate {
+                    cwd.clone()
+                } else {
+                    project.directory.clone()
+                }),
+                project_id: Some(project.id.clone()),
+                card_id: None,
+                worktree_id: None,
+                branch: (!isolate)
+                    .then(|| p["compare_ref"].as_str())
+                    .flatten()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty() && !matches!(*s, "WORKDIR" | "STAGED" | "UNSTAGED"))
+                    .map(str::to_owned),
+                dirty: false,
+                additions: 0,
+                deletions: 0,
+                ahead: 0,
+                behind: 0,
+            };
+            let mut contexts = self.terminal_contexts.lock().unwrap();
+            contexts.retain(|c| c.terminal_id != item.id);
+            contexts.push(ctx.clone());
+            Some(ctx)
+        } else {
+            None
+        };
+        let final_state = runtime.state.clone();
+        let final_error = runtime.error.clone();
+        let final_runtime = item.runtime.clone();
+        let mut outcome = Value::Null;
         self.store.lock().unwrap().write(|db| {
             let mut current: TerminalEntry = db.get(&item.id)?;
-            current.runtime = item.runtime.clone();
+            current.runtime = final_runtime.clone();
             db.save(&current)?;
+            outcome = json!({
+                "state": final_state,
+                "mode": "terminal",
+                "terminal_id": current.id,
+                "cwd": cwd,
+                "error": final_error,
+                "terminal": current,
+                "terminal_context": terminal_context,
+            });
             if let Some(key) = p["request_key"].as_str() {
                 db.conn.execute(
                     "UPDATE operations SET result=?2 WHERE id=?1",
@@ -1530,13 +1562,6 @@ impl AppServer {
             }
             Ok(())
         })?;
-        if let Ok(value) = self.terminal_context(json!({"terminal_id": item.id}))
-            && let Ok(context) = serde_json::from_value::<TerminalContext>(value)
-        {
-            let mut contexts = self.terminal_contexts.lock().unwrap();
-            contexts.retain(|c| c.terminal_id != item.id);
-            contexts.push(context);
-        }
         self.emit("terminals", None);
         ensure!(
             outcome["error"].is_null(),
@@ -1583,11 +1608,13 @@ impl AppServer {
                 .execute("DELETE FROM editor_drafts WHERE id=?1", [&key])?;
             Ok(())
         })?;
+        let cleared_at = now();
         self.emit("review", Some(card.id.clone()));
         Ok(json!({
             "cleared": true,
             "card_id": card.id,
             "card": card.number,
+            "cleared_at": cleared_at,
         }))
     }
 
@@ -1775,10 +1802,7 @@ impl AppServer {
             .or_else(|| {
                 card.worktree.as_deref().and_then(|wt| {
                     self.ops(&project.work_location().machine)
-                        .git_refs_in(&project, Some(wt))
-                        .ok()
-                        .and_then(|v| v["head_sha"].as_str().map(str::to_owned))
-                        .filter(|s| !s.is_empty())
+                        .head_sha(Path::new(wt))
                 })
             });
 
@@ -1816,12 +1840,14 @@ impl AppServer {
             Ok(())
         })?;
         self.emit("review", Some(card.id.clone()));
+        let comment_count = draft.comments.len();
         Ok(json!({
             "saved": true,
             "card_id": card.id,
             "card": card.number,
-            "comment_count": draft.comments.len(),
+            "comment_count": comment_count,
             "verdict": verdict,
+            "draft": draft,
         }))
     }
 
@@ -1831,7 +1857,7 @@ impl AppServer {
             "Starting an Agent review requires an explicit user action"
         );
         let config = self.config();
-        let (card, profile) = {
+        let (card, bound_project, profile) = {
             let store = self.store.lock().unwrap();
             let db = store.db();
             let c = super::resolve_card(db, &p)?;
@@ -1859,10 +1885,26 @@ impl AppServer {
                 !already_active,
                 "An Agent review is already running for this Card"
             );
-            (c, profile)
+            (c, bound, profile)
         };
 
-        let (prepared_card, prepared_project) = {
+        let location = card
+            .workspace
+            .as_ref()
+            .map(|w| w.location.clone())
+            .unwrap_or_else(|| bound_project.work_location());
+        let has_ready_worktree = card.worktree.as_deref().is_some_and(|wt| {
+            !wt.is_empty()
+                && card.branch.as_deref().is_some_and(|b| !b.is_empty())
+                && card
+                    .workspace
+                    .as_ref()
+                    .is_some_and(|w| w.location == location && w.path == wt)
+                && self.ops(&location.machine).host.is_dir(Path::new(wt))
+        });
+        let (prepared_card, prepared_project) = if has_ready_worktree {
+            (card, bound_project)
+        } else {
             let _gate = self.terminal_gate.lock().unwrap();
             self.ensure_card_worktree(&card.id, None)?
         };
@@ -1903,10 +1945,7 @@ impl AppServer {
         let compare_sha = pr_head_sha
             .or_else(|| {
                 self.ops(&prepared_project.work_location().machine)
-                    .git_refs_in(&prepared_project, Some(&cwd))
-                    .ok()
-                    .and_then(|v| v["head_sha"].as_str().map(str::to_owned))
-                    .filter(|s| !s.is_empty())
+                    .head_sha(Path::new(&cwd))
             })
             .unwrap_or_else(|| "HEAD".into());
 
@@ -1968,6 +2007,8 @@ impl AppServer {
                 "card": current.number,
                 "profile_id": profile_id,
                 "terminal_id": entry.id,
+                "card_record": current,
+                "terminal": entry,
             }))
         })
     }

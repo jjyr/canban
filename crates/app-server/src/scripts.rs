@@ -467,23 +467,23 @@ impl AppServer {
         } else {
             let pr_tracking = self.prepare_pr_card_source(&prepared, &mut bound, &ops)?;
             let path = ops.prepare(&exec_home, &bound, &prepared)?;
-            self.git_changed(&location.machine);
-            prepared.worktree = Some(path.to_string_lossy().into_owned());
-            let info = ops.info(&bound, &prepared).ok();
+            let path_str = path.to_string_lossy().into_owned();
+            if card.worktree.as_deref() != Some(path_str.as_str()) {
+                self.git_changed(&location.machine);
+            }
+            prepared.worktree = Some(path_str.clone());
+            let (branch, base_commit) = ops.workspace_head_meta(&path, &prepared);
             if let Some(target) = &pr_tracking
                 && path != Path::new(&location.directory)
-                && let Some(branch) = info
-                    .as_ref()
-                    .and_then(|i| i.branch.as_deref())
-                    .filter(|b| !b.is_empty())
+                && let Some(branch) = branch.as_deref().filter(|b| !b.is_empty())
             {
                 ops.configure_pr_tracking(&path, branch, target)?;
             }
             let binding = WorkspaceBinding {
                 location: location.clone(),
-                path: path.to_string_lossy().into_owned(),
-                branch: info.as_ref().and_then(|i| i.branch.clone()),
-                base_commit: info.as_ref().and_then(|i| i.base_commit.clone()),
+                path: path_str,
+                branch,
+                base_commit,
                 target_branch: bound.target_branch.clone(),
             };
             self.store.lock().unwrap().write(|db| {
@@ -814,9 +814,9 @@ impl AppServer {
                         });
                     };
 
-                if let Ok(status) = client.status()
+                if let Ok(actual_core) = self.verified_core_id()
                     && let Some(cid) = expected_core
-                    && status["core"]["id"].as_str() != Some(cid)
+                    && actual_core != cid
                 {
                     finalize_meta(
                         "Herdr Core identity changed before the script completed",
@@ -873,10 +873,7 @@ impl AppServer {
                     continue;
                 }
             };
-            let core_id = client
-                .status()
-                .ok()
-                .and_then(|s| s["core"]["id"].as_str().map(str::to_owned));
+            let core_id = self.verified_core_id().ok();
             let labels = BTreeMap::from([
                 ("canban.project".into(), run.project_id.clone()),
                 ("canban.card_id".into(), run.card_id.clone()),

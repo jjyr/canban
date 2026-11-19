@@ -239,6 +239,16 @@ impl AppServer {
             .unwrap_or_else(|| project.work_location());
         self.resolve_machine(&location.machine, true)?;
         let ops = self.ops(&location.machine);
+        if let Some(wt) = card.worktree.as_deref().filter(|s| !s.is_empty())
+            && card.branch.as_deref().is_some_and(|b| !b.is_empty())
+            && card
+                .workspace
+                .as_ref()
+                .is_some_and(|w| w.location == location && w.path == wt)
+            && ops.host.is_dir(Path::new(wt))
+        {
+            return Ok((card, project));
+        }
         let exec_home = self.execution_home(&location.machine)?;
         project.directory = location.directory.clone();
         project.location = Some(location.clone());
@@ -250,23 +260,30 @@ impl AppServer {
             project.workflow.workspace.sync_base = false;
         }
         let mut prepared = card.clone();
-        let pr_tracking = self.prepare_pr_card_source(&prepared, &mut project, &ops)?;
+        let pr_tracking = if prepared.worktree.is_none() && prepared.branch.is_none() {
+            self.prepare_pr_card_source(&prepared, &mut project, &ops)?
+        } else {
+            None
+        };
         let cwd = ops.prepare(&exec_home, &project, &prepared)?;
         let _ = source_dir;
-        self.git_changed(&location.machine);
-        prepared.worktree = Some(cwd.to_string_lossy().into_owned());
-        let info = ops.info(&project, &prepared)?;
+        let cwd_str = cwd.to_string_lossy().into_owned();
+        if card.worktree.as_deref() != Some(cwd_str.as_str()) {
+            self.git_changed(&location.machine);
+        }
+        prepared.worktree = Some(cwd_str.clone());
+        let (branch, base_commit) = ops.workspace_head_meta(&cwd, &prepared);
         if let Some(target) = &pr_tracking
             && cwd != Path::new(&location.directory)
-            && let Some(branch) = info.branch.as_deref().filter(|b| !b.is_empty())
+            && let Some(branch) = branch.as_deref().filter(|b| !b.is_empty())
         {
             ops.configure_pr_tracking(&cwd, branch, target)?;
         }
         let workspace = WorkspaceBinding {
             location: location.clone(),
-            path: cwd.to_string_lossy().into_owned(),
-            branch: info.branch.clone(),
-            base_commit: info.base_commit.clone(),
+            path: cwd_str,
+            branch,
+            base_commit,
             target_branch: project.target_branch.clone(),
         };
         let created_worktree = cwd != Path::new(&location.directory);
@@ -944,7 +961,7 @@ impl AppServer {
         }
     }
     pub(super) fn observe_terminals(&self) -> Result<()> {
-        let snapshot = self.snapshot()?;
+        let snapshot = self.terminal_snapshot()?;
         if snapshot.terminals.is_empty() {
             return Ok(());
         }
