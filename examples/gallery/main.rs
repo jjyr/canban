@@ -2132,13 +2132,28 @@ pub fn Gallery() -> impl IntoElement {
         ui.select_project("gallery-project".into());
         ui.card.set(String::new());
         ui.review.set(None);
-        let refs = fixtures::git_refs();
+        let mut refs = fixtures::git_refs();
+        refs["commits"] = json!(
+            (0..95)
+                .map(|i| json!({
+                    "sha": format!("c207c08a91fe{:028x}", i + 1),
+                    "short_sha": format!("c207{:03x}", i + 1),
+                    "subject": format!("feat(git): commit history pagination item #{}", i + 1),
+                    "author": "JJy",
+                    "relative_time": format!("{}h ago", i + 1),
+                }))
+                .collect::<Vec<_>>()
+        );
         ui.review_state.mode.set("git".into());
         ui.review_state.refs_data.set(refs.clone());
         ui.review_state.log_branch.set("feat/diff-workbench".into());
-        ui.review_state
-            .log_commits
-            .set(refs["commits"].as_array().cloned().unwrap_or_default());
+        ui.review_state.log_commits.set(
+            refs["commits"]
+                .as_array()
+                .map(|arr| arr.iter().take(40).cloned().collect())
+                .unwrap_or_default(),
+        );
+        ui.review_state.log_has_more.set(true);
         ui.review_state
             .compare_data
             .set(fixtures::git_commit_compare());
@@ -2168,13 +2183,28 @@ pub fn Gallery() -> impl IntoElement {
         ui.select_project("gallery-project".into());
         ui.card.set(String::new());
         ui.review.set(None);
-        let refs = fixtures::git_refs();
+        let mut refs = fixtures::git_refs();
+        refs["commits"] = json!(
+            (0..95)
+                .map(|i| json!({
+                    "sha": format!("c207c08a91fe{:028x}", i + 1),
+                    "short_sha": format!("c207{:03x}", i + 1),
+                    "subject": format!("feat(git): commit history pagination item #{}", i + 1),
+                    "author": "JJy",
+                    "relative_time": format!("{}h ago", i + 1),
+                }))
+                .collect::<Vec<_>>()
+        );
         ui.review_state.mode.set("git".into());
         ui.review_state.refs_data.set(refs.clone());
         ui.review_state.log_branch.set("feat/diff-workbench".into());
-        ui.review_state
-            .log_commits
-            .set(refs["commits"].as_array().cloned().unwrap_or_default());
+        ui.review_state.log_commits.set(
+            refs["commits"]
+                .as_array()
+                .map(|arr| arr.iter().take(40).cloned().collect())
+                .unwrap_or_default(),
+        );
+        ui.review_state.log_has_more.set(true);
         ui.review_state
             .compare_data
             .set(fixtures::git_workdir_compare());
@@ -2204,6 +2234,7 @@ pub fn Gallery() -> impl IntoElement {
             });
             let prepared = review::cache::ReadValue::new(data.clone());
             st.prepared_lines.set(prepared.lines);
+            st.prepared_hunks.set(prepared.hunks);
             st.compare_data.set(data);
         }
         if scene == "review-async" {
@@ -2243,10 +2274,36 @@ pub fn Gallery() -> impl IntoElement {
         if scene == "review-large-diff" {
             let mut data = fixtures::git_workdir_compare();
             let patch = "@@ -1,200 +1,200 @@\n".to_owned() + &"-old line\n+new line\n".repeat(200);
-            data["files"] = json!((0..60).map(|i| json!({"filename":format!("src/module-{i}.rs"), "status":"modified", "additions":200, "deletions":200, "patch":patch})).collect::<Vec<_>>());
+            let long_patch =
+                "@@ -1,1200 +1,1200 @@\n".to_owned() + &"+new line in large file\n".repeat(1200);
+            let mut files: Vec<serde_json::Value> = vec![
+                json!({
+                    "filename": "src/new_feature.rs",
+                    "status": "added",
+                    "additions": 1200,
+                    "deletions": 0,
+                    "patch": long_patch,
+                }),
+                json!({
+                    "filename": "Cargo.lock",
+                    "status": "modified",
+                    "additions": 120,
+                    "deletions": 80,
+                    "patch": patch,
+                }),
+            ];
+            files.extend((2..60).map(|i| {
+                json!({
+                    "filename": format!("src/module-{i}.rs"),
+                    "status": "modified",
+                    "additions": 200,
+                    "deletions": 200,
+                    "patch": patch,
+                })
+            }));
+            data["files"] = json!(files);
             let prepared = review::cache::ReadValue::new(data.clone());
-            ui.review_state.prepared_lines.set(prepared.lines);
-            ui.review_state.compare_data.set(data);
+            review::apply_compare(ui, &prepared);
             ui.review_state
                 .compare_ref
                 .set("feat/diff-workbench".into());
@@ -2255,6 +2312,7 @@ pub fn Gallery() -> impl IntoElement {
             let data = fixtures::git_context_expand_compare();
             let prepared = review::cache::ReadValue::new(data.clone());
             ui.review_state.prepared_lines.set(prepared.lines);
+            ui.review_state.prepared_hunks.set(prepared.hunks);
             ui.review_state.compare_data.set(data);
             ui.review_state.base_ref.set("main".into());
             ui.review_state
@@ -2439,6 +2497,7 @@ pub fn Gallery() -> impl IntoElement {
                         refs["commits"].as_array().cloned().unwrap_or_default(),
                     );
                     ui.review_state.prepared_lines.set(prepared.lines);
+                    ui.review_state.prepared_hunks.set(prepared.hunks);
                     ui.review_state.compare_data.set(data);
                     ui.review_state.base_ref.set("main".into());
                     ui.review_state.compare_ref.set("feat/diff-context-expand".into());

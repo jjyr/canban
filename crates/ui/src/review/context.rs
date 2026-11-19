@@ -1,5 +1,5 @@
 //! Hunk context expansion: progressive gap expansion, bounded file line loading, and scroll anchoring.
-use super::model::{AnchorEdge, DiffLine, parse_unified_hunks};
+use super::model::{AnchorEdge, DiffHunk, DiffLine};
 use crate::presenter::*;
 use canban_ui_kit::tokens::*;
 use canban_ui_kit::*;
@@ -32,6 +32,7 @@ pub struct FileRenderContext {
     pub section: String,
     pub status: String,
     pub patch: String,
+    pub hunks: Arc<Vec<DiffHunk>>,
     pub mode: String,
     pub compare_ref: String,
     pub compare_sha: String,
@@ -527,7 +528,7 @@ async fn apply_expanded_with_scroll_anchor(
         ),
     };
 
-    let hunks = parse_unified_hunks(&ctx.patch);
+    let hunks = &ctx.hunks;
     let total_lines = st
         .file_lines_cache
         .with(|c| c.get(&ctx.cache_key()).map(|e| e.total_lines as u64));

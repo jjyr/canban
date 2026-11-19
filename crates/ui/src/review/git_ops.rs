@@ -55,6 +55,8 @@ pub fn select_checkout(ui: Ui, cwd: String) {
         st.three_dot.set(false);
         st.compare_open.set(false);
         st.collapsed_files.set(Default::default());
+        st.auto_collapsed_seen
+            .with(std::collections::BTreeSet::clear);
         st.log_branch.set(String::new());
         st.log_commits.set(Vec::new());
         st.range_backup.set(None);
@@ -107,9 +109,9 @@ pub fn load_branch_log(ui: Ui, branch: String, append: bool) {
     };
 
     if crate::APP.get().is_none() {
-        // Gallery fallback: filter static fixture commits in memory.
+        // Gallery fallback: filter static fixture commits in memory (with 40-item pagination).
         let q = query.trim().to_lowercase();
-        let commits: Vec<Value> = st.refs_data.with_untracked(|v| {
+        let all: Vec<Value> = st.refs_data.with_untracked(|v| {
             v["commits"]
                 .as_array()
                 .cloned()
@@ -135,8 +137,15 @@ pub fn load_branch_log(ui: Ui, branch: String, append: bool) {
                 })
                 .collect()
         });
-        st.log_commits.set(commits);
-        st.log_has_more.set(false);
+        let page: Vec<Value> = all.iter().skip(skip).take(40).cloned().collect();
+        let has_more = skip + page.len() < all.len();
+        if append {
+            st.log_commits.update(|list| list.extend(page));
+        } else {
+            st.log_commits.set(page);
+        }
+        st.log_has_more.set(has_more);
+        st.log_refreshing.set(false);
         return;
     }
 
@@ -149,6 +158,7 @@ pub fn load_branch_log(ui: Ui, branch: String, append: bool) {
             "query": query,
         }),
     ) else {
+        st.log_refreshing.set(false);
         return;
     };
 
@@ -169,6 +179,7 @@ pub fn load_branch_log(ui: Ui, branch: String, append: bool) {
         }
         batch(|| {
             st.log_loading.set(false);
+            st.log_refreshing.set(false);
             if let Ok(value) = &res {
                 let val = &value.data;
                 let page = val["commits"].as_array().cloned().unwrap_or_default();
@@ -184,6 +195,45 @@ pub fn load_branch_log(ui: Ui, branch: String, append: bool) {
             }
         });
     });
+}
+
+/// Pull-to-refresh action on the Commits sidebar: bypasses the UI read cache to query local Git
+/// for newly created commits and updated branch refs.
+pub fn refresh_commits_from_git(ui: Ui) {
+    super::prepare_context(ui);
+    let st = ui.review_state;
+    if untracked(|| ui.is_active_project_offline()) {
+        st.log_refreshing.set(false);
+        return;
+    }
+    st.log_refreshing.set(true);
+    if crate::APP.get().is_none() {
+        let branch = st.log_branch.get_untracked();
+        load_branch_log(ui, branch, false);
+        ui.notify("Checked local Git commits (Gallery preview)");
+        return;
+    }
+    let Some(project) = ui.current_project() else {
+        st.log_refreshing.set(false);
+        return;
+    };
+    st.read_cache.with(|c| {
+        c.invalidate_checkout(
+            &ui.active_project_host(),
+            &project.id,
+            &st.checkout_cwd.get_untracked(),
+            Some(&ui.card.get_untracked()),
+        )
+    });
+    st.refs_ticket.update(|n| *n += 1);
+    st.log_ticket.update(|n| *n += 1);
+    st.refs_request.replace(String::new());
+    st.log_request.replace(String::new());
+    st.refs_loading.set(false);
+    st.log_loading.set(false);
+    load_refs(ui);
+    let branch = st.log_branch.get_untracked();
+    load_branch_log(ui, branch, false);
 }
 
 /// Inspects a single commit's diff against `parent_idx` (`0` = first parent, `1` = second merge parent).

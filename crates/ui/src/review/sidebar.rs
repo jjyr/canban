@@ -31,6 +31,8 @@ pub fn render_refresh(ui: Ui) -> impl IntoElement {
     })
 }
 
+const COMMITS_AUTO_LOAD_THRESHOLD: f32 = 160.;
+
 pub fn render_left_sidebar(ui: Ui) -> impl IntoElement {
     view()
         .w(px(244.))
@@ -39,12 +41,7 @@ pub fn render_left_sidebar(ui: Ui) -> impl IntoElement {
         .border_r_1()
         .border_color(BORDER)
         .bg(SURFACE)
-        .child(
-            scroll()
-                .flex_1()
-                .min_h(px(0.))
-                .child(view().p_2p5().child(render_commits(ui))),
-        )
+        .child(render_commits(ui))
 }
 
 fn log_branch(st: State) -> String {
@@ -62,10 +59,62 @@ fn log_branch(st: State) -> String {
     })
 }
 
+fn log_branch_untracked(st: State) -> String {
+    let branch = st.log_branch.get_untracked();
+    if !branch.is_empty() {
+        return branch;
+    }
+    st.refs_data.with_untracked(|r| {
+        r["current_branch"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .or_else(|| r["default_branch"].as_str())
+            .unwrap_or("HEAD")
+            .to_owned()
+    })
+}
+
+fn maybe_auto_load_more_commits(ui: Ui, e: &ScrollEvent) {
+    let st = ui.review_state;
+    if !st.log_has_more.get_untracked() || st.log_loading.get_untracked() {
+        return;
+    }
+    let viewport_h = e.size.height.0;
+    let content_h = e.content_size.height.0;
+    if viewport_h <= 0. || e.offset.y.0 <= 0. || content_h <= viewport_h {
+        return;
+    }
+    let remaining = content_h - e.offset.y.0 - viewport_h;
+    if remaining <= COMMITS_AUTO_LOAD_THRESHOLD {
+        git_ops::load_branch_log(ui, log_branch_untracked(st), true);
+    }
+}
+
 /// Mounted outside the changing sidebar rows: asynchronous reads never replace
 /// the branch picker or either search field.
 fn render_commits(ui: Ui) -> impl IntoElement {
     let st = ui.review_state;
+    let commits_scroll = element_ref();
+    let last_commits_metrics = stored(Option::<ScrollEvent>::None);
+    let wheel_overscroll = stored((0.0_f32, std::time::Instant::now()));
+    watch_scroll(
+        move || commits_scroll.node(),
+        move |e: &ScrollEvent| {
+            last_commits_metrics.replace(Some(*e));
+            maybe_auto_load_more_commits(ui, e);
+        },
+    );
+    effect(move || {
+        let has_more = st.log_has_more.get();
+        let loading = st.log_loading.get();
+        let _len = st.log_commits.with(Vec::len);
+        if has_more
+            && !loading
+            && let Some(m) = last_commits_metrics.get()
+        {
+            untracked(|| maybe_auto_load_more_commits(ui, &m));
+        }
+    });
     let trigger = canban_ui_kit::press_target()
         .px_1p5()
         .py_0p5()
@@ -123,51 +172,112 @@ fn render_commits(ui: Ui) -> impl IntoElement {
         }
     });
     view()
-        .gap_1p5()
+        .flex_1()
+        .min_h(px(0.))
         .child(
             view()
-                .px_1p5()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap_1()
+                .pt_2p5()
+                .px_2p5()
+                .pb_1p5()
+                .gap_1p5()
+                .border_b_1()
+                .border_color(BORDER)
                 .child(
-                    muted("Commits")
-                        .text_size(px(11.))
-                        .font_weight(FontWeight::SEMIBOLD),
+                    view()
+                        .px_1p5()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap_1()
+                        .child(
+                            muted("Commits")
+                                .text_size(px(11.))
+                                .font_weight(FontWeight::SEMIBOLD),
+                        )
+                        .child(picker),
                 )
-                .child(picker),
+                .child(
+                    view().px_1().child(
+                        field(st.log_query, "Filter commits or SHA…")
+                            .min_h(px(28.))
+                            .px_2()
+                            .py_1()
+                            .text_size(px(11.5))
+                            .on_submit(move |_: &str| {
+                                git_ops::load_branch_log(ui, log_branch_untracked(st), false)
+                            }),
+                    ),
+                )
+                .child(dynamic(move || {
+                    let count = st
+                        .refs_data
+                        .with(|v| v["dirty_count"].as_u64().unwrap_or(0));
+                    sidebar_row(
+                        "Uncommitted",
+                        count.to_string(),
+                        st.mode.get() == "git"
+                            && matches!(
+                                st.compare_ref.get().as_str(),
+                                "UNCOMMITTED" | "WORKDIR" | "STAGED" | "UNSTAGED"
+                            ),
+                        move || {
+                            st.compare_open.set(false);
+                            select_git_pair(ui, "HEAD", "UNCOMMITTED");
+                        },
+                    )
+                })),
         )
         .child(
-            view().px_1().child(
-                field(st.log_query, "Filter commits or SHA…")
-                    .min_h(px(28.))
-                    .px_2()
-                    .py_1()
-                    .text_size(px(11.5))
-                    .on_submit(move |_: &str| git_ops::load_branch_log(ui, log_branch(st), false)),
-            ),
+            scroll()
+                .label("Git commits list")
+                .element_ref(&commits_scroll)
+                .flex_1()
+                .min_h(px(0.))
+                .refreshing(move || st.log_refreshing.get())
+                .on_refresh(move |_: &()| git_ops::refresh_commits_from_git(ui))
+                .on_wheel(move |ev: &nsh_core::WheelEvent| {
+                    // Support non-precise discrete mouse wheels overscrolling past top (offset == 0)
+                    // in addition to native trackpad pull-to-refresh (`on_refresh`).
+                    if ev.delta.precise()
+                        || st.log_refreshing.get_untracked()
+                        || st.log_loading.get_untracked()
+                        || st.refs_loading.get_untracked()
+                    {
+                        return;
+                    }
+                    let dy = ev.delta.points(px(20.)).y.0;
+                    let at_top = last_commits_metrics
+                        .get()
+                        .is_none_or(|m| m.offset.y.0 <= 1.0);
+                    if dy < 0.0 && at_top {
+                        let now = std::time::Instant::now();
+                        let (prev, ts) = wheel_overscroll.get();
+                        let accum = if now.duration_since(ts).as_millis() <= 600 {
+                            prev + (-dy)
+                        } else {
+                            -dy
+                        };
+                        if accum >= 80.0 {
+                            wheel_overscroll.replace((0.0, now));
+                            git_ops::refresh_commits_from_git(ui);
+                        } else {
+                            wheel_overscroll.replace((accum, now));
+                        }
+                    } else if dy > 0.0 {
+                        wheel_overscroll.replace((0.0, std::time::Instant::now()));
+                    }
+                })
+                .on_scroll(move |e: &ScrollEvent| {
+                    last_commits_metrics.replace(Some(*e));
+                    maybe_auto_load_more_commits(ui, e);
+                })
+                .child(
+                    view()
+                        .px_2p5()
+                        .py_1p5()
+                        .child(dynamic(move || render_commit_rows(ui))),
+                ),
         )
-        .child(dynamic(move || {
-            let count = st
-                .refs_data
-                .with(|v| v["dirty_count"].as_u64().unwrap_or(0));
-            sidebar_row(
-                "Uncommitted",
-                count.to_string(),
-                st.mode.get() == "git"
-                    && matches!(
-                        st.compare_ref.get().as_str(),
-                        "UNCOMMITTED" | "WORKDIR" | "STAGED" | "UNSTAGED"
-                    ),
-                move || {
-                    st.compare_open.set(false);
-                    select_git_pair(ui, "HEAD", "UNCOMMITTED");
-                },
-            )
-        }))
-        .child(view().h(px(1.)).bg(BORDER))
-        .child(dynamic(move || render_commit_rows(ui)))
 }
 
 fn render_commit_rows(ui: Ui) -> AnyElement {

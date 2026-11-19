@@ -1,6 +1,6 @@
 # Git workbench
 
-Current contract, updated 2026-11-17 (Cards #100, #106 and #108).
+Current contract, updated 2026-11-19 (Cards #100, #106, #108 and #138).
 
 Git is a checkout-oriented workbench with **Commits / Files / Changes** columns.
 The top Worktree picker selects the Project checkout, a managed worktree, or a
@@ -47,12 +47,18 @@ old branches, comparison range, checkout and results before loading the new
 refs, fencing late reads. History retains its own Project without entry-point
 inference; foreign Git selections are cleared when that page mounts.
 
-The commit-history branch selector and search input are retained independently
-of the changing Uncommitted count and commit results. Receiving refs, a new
-commit page or loading state must not dismiss an open branch popover, clear its
-query or remove keyboard focus. Commit search is debounced by 150 ms; Enter
-requests it immediately. The refs response supplies the initial commit page,
-avoiding an identical initial `git.log` query.
+The commit-history branch selector, search input and Uncommitted row remain
+pinned above the scrollable commit list so asynchronous reads never replace an
+open branch popover, clear its query or remove keyboard focus. Commit search is
+debounced by 150 ms; Enter requests it immediately. The refs response supplies
+the initial commit page and updates the active branch's head commits whenever
+fresh refs arrive without a search filter, while preserving already-appended
+pagination when HEAD is unchanged. Pulling down at the top of the Commits scroll
+view (native trackpad pull-to-refresh or discrete mouse-wheel overscroll at the
+top edge) invalidates cached reads for the active checkout and fetches fresh
+refs and commits from local Git. Scrolling near the bottom of the Commits list
+automatically appends the next 40-commit page when more history exists, with
+`Load more commits…` retained as an explicit fallback.
 
 ## Direct change navigation
 
@@ -123,13 +129,18 @@ navigation updates are confined to the commit header. Switching queries clears
 mismatched content. An offline remote view retains known content, shows the host
 notice, and waits for recovery rather than repeatedly issuing Git reads.
 
-Prepared patch lines are shared with rendering and keyed by source group plus
-path. Changes initially mounts four patches; Show more files adds four. Selecting
-a later file reveals intervening headers with their unseen bodies folded, then
-expands and scrolls to the target. Already mounted patches retain their state.
-The existing per-file 500-line display bound remains in place.
-This bounds initial view construction without fetching or parsing on the UI
-thread. Refresh and Show more files also appear in the Command Palette.
+Prepared patch lines and parsed unified hunks are shared with rendering and keyed
+by source group plus path so file expansion never re-parses patches on the UI
+thread. Changes initially mounts four patches and automatically expands subsequent
+batches as the user scrolls near the bottom of the Changes viewport (`Show more
+files` remains available as an explicit button and Command Palette action).
+Selecting a later file reveals intervening headers with their unseen bodies
+folded, then expands and scrolls to the target. Already mounted patches retain
+their state. Expanded files render their complete diff hunks without mid-file
+line truncation; generated/lockfiles (such as `Cargo.lock`, `package-lock.json`,
+`pnpm-lock.yaml`, `*.min.js`) and extreme single-file diffs (> 5,000 diff lines)
+start collapsed by default with a `Load diff` prompt, rendering in full once
+expanded.
 
 ## Sync feedback
 
@@ -323,3 +334,30 @@ Uncommitted. The navigation regression covers both retention and Project changes
 - Changed-file formatting and `git diff --check` passed. A workspace-wide format
   check also found existing differences outside this change; those files were
   left untouched. No prompts or workflow YAML were changed.
+
+## Progressive auto-expand, full diff & Commits refresh acceptance (2026-11-19, Card #138)
+
+Validated on macOS from the Card #138 worktree:
+
+- `mise run test -- --no-fail-fast`: 690 passed, 2 configured skips. New unit and
+  mounted-Core UI regressions cover full >800-line file rendering without mid-file
+  truncation, default auto-collapse of lockfiles/generated assets and >5,000-line
+  extreme diffs, automatic file expansion when scrolling near the bottom of Changes,
+  automatic commit pagination when scrolling near the bottom of Commits, pull-to-refresh
+  (`EventKind::Refresh`) on the Commits scroll view, and fresh `git.refs` synchronization
+  of `log_commits` without discarding appended pages when HEAD is unchanged.
+- `mise run build-gallery`, `mise run build` and `mise run acceptance` passed with
+  disposable home `/private/tmp/cb-q2ldggbh/home` and isolated Herdr Core (`0.1.18`).
+  No RPC/Snapshot/YAML schema changed, so `DESKTOP_API` needed no increment.
+- Production `CanbanGallery.app` (`review-large-diff`) verified 1,200-line added file
+  rendering without truncation, default-collapsed `Cargo.lock` with one-click expand/collapse
+  and `Load diff` prompt, automatic loading of commit history item `#60` when scrolling
+  the Commits column, and automatic expansion past the initial 4-file limit when scrolling
+  the Changes column.
+- Packaged native `Canban.app` acceptance used an isolated home, Core and disposable
+  55-commit repository under `/private/tmp/cb-git138-8blpj198`. Verified `Cargo.lock`
+  auto-collapsed by default, 1,050-line `big_new.rs` rendered without an 800-line cap,
+  scrolling Commits revealed commit `#1` automatically, scrolling Changes auto-mounted
+  remaining files through `mod_6.rs`, and creating an external CLI commit `#56` updated
+  the Commits list on refresh. All temporary UI/daemon/Core processes and scratch directories
+  were stopped and removed afterwards.

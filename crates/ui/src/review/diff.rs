@@ -3,7 +3,10 @@ use super::context::{
     render_expander_bar, render_static_hunk_bar,
 };
 use super::git_ops;
-use super::model::{AnchorEdge, DiffLine, LineTarget, PendingInlineComment, parse_unified_hunks};
+use super::model::{
+    AnchorEdge, AutoFoldReason, DiffLine, LineTarget, PendingInlineComment, auto_fold_reason,
+    parse_unified_hunks,
+};
 use crate::presenter::*;
 use canban_ui_kit::tokens::*;
 use canban_ui_kit::*;
@@ -59,6 +62,24 @@ fn working_tree_mode(ui: Ui) -> bool {
         )
 }
 
+const FILES_AUTO_EXPAND_THRESHOLD: f32 = 320.;
+
+fn maybe_auto_expand_files(ui: Ui, total_files: usize, e: &ScrollEvent) {
+    let st = ui.review_state;
+    if total_files == 0 || st.visible_file_limit.get_untracked() >= total_files {
+        return;
+    }
+    let viewport_h = e.size.height.0;
+    let content_h = e.content_size.height.0;
+    if viewport_h <= 0. || e.offset.y.0 <= 0. || content_h <= viewport_h {
+        return;
+    }
+    let remaining = content_h - e.offset.y.0 - viewport_h;
+    if remaining <= FILES_AUTO_EXPAND_THRESHOLD {
+        super::show_more_files(ui);
+    }
+}
+
 /// Scroll hosts stay mounted across loading, Snapshot and equal-result updates.
 /// Only the initial unresolved query uses the full-size loading placeholder.
 pub fn workbench(ui: Ui) -> impl IntoElement {
@@ -89,6 +110,24 @@ pub fn workbench(ui: Ui) -> impl IntoElement {
             }
         }
         value
+    });
+    let last_diff_scroll = stored(Option::<ScrollEvent>::None);
+    watch_scroll(
+        move || viewport.scroll.node(),
+        move |e: &ScrollEvent| {
+            last_diff_scroll.replace(Some(*e));
+            let total = data.with_untracked(|v| v["files"].as_array().map_or(0, Vec::len));
+            maybe_auto_expand_files(ui, total, e);
+        },
+    );
+    effect(move || {
+        let total = data.with(|v| v["files"].as_array().map_or(0, Vec::len));
+        let limit = st.visible_file_limit.get();
+        if limit < total
+            && let Some(m) = last_diff_scroll.get()
+        {
+            untracked(|| maybe_auto_expand_files(ui, total, &m));
+        }
     });
     let login = computed(move || {
         ui.snapshot.with(|s| {
@@ -144,6 +183,13 @@ pub fn workbench(ui: Ui) -> impl IntoElement {
                                 .flex_1()
                                 .min_h(px(0.))
                                 .min_w(px(0.))
+                                .on_scroll(move |e: &ScrollEvent| {
+                                    last_diff_scroll.replace(Some(*e));
+                                    let total = data.with_untracked(|v| {
+                                        v["files"].as_array().map_or(0, Vec::len)
+                                    });
+                                    maybe_auto_expand_files(ui, total, e);
+                                })
                                 .child(
                                     view()
                                         .element_ref(&viewport.content)
@@ -548,14 +594,38 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
 
     let total_files = files.len();
     let limit = st.visible_file_limit.get();
+    let prepared_hunks = st.prepared_hunks.get();
     let file_keys: BTreeSet<_> = files.iter().map(super::model::file_key).collect();
     let mut expanded_file_keys = BTreeSet::new();
+
+    // Seed GitHub-style default-fold protection for generated/lockfiles and extreme patches
+    // even when fixture data was set directly without `apply_compare`.
+    let mut deferred_auto_fold = Vec::new();
+    st.auto_collapsed_seen.with(|seen| {
+        for file in &files {
+            let key = super::model::file_key(file);
+            if seen.insert(key.clone()) {
+                let hunks = prepared_hunks.get(&key).map(|h| h.as_slice());
+                if auto_fold_reason(file, hunks).is_some() {
+                    deferred_auto_fold.push(key);
+                }
+            }
+        }
+    });
+    if !deferred_auto_fold.is_empty() {
+        let to_fold = deferred_auto_fold.clone();
+        ui.spawn(async move {
+            st.collapsed_files.update(|set| {
+                set.extend(to_fold);
+            });
+        });
+    }
 
     for file in files.into_iter().take(limit) {
         let path = file["filename"].as_str().unwrap_or("").to_owned();
         let section = file["section"].as_str().unwrap_or("").to_owned();
         let key = super::model::file_key(&file);
-        let collapsed = collapsed_files.contains(&key);
+        let collapsed = collapsed_files.contains(&key) || deferred_auto_fold.contains(&key);
         let target = element_ref();
         st.file_targets.with(|targets| {
             targets.insert(key.clone(), target);
@@ -681,17 +751,47 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
             },
         ));
 
+        let file_hunks = prepared_hunks
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(parse_unified_hunks(&patch)));
+        let fold_reason = auto_fold_reason(&file, Some(file_hunks.as_slice()));
+
         if collapsed {
-            diff_column = diff_column.child(
-                view()
-                    .element_ref(&target)
-                    .rounded(px(RADIUS))
-                    .border_1()
-                    .border_color(BORDER)
-                    .bg(SURFACE)
-                    .overflow_hidden()
-                    .child(header),
-            );
+            let mut card = view()
+                .element_ref(&target)
+                .rounded(px(RADIUS))
+                .border_1()
+                .border_color(BORDER)
+                .bg(SURFACE)
+                .overflow_hidden()
+                .child(header);
+            if let Some(reason) = fold_reason {
+                let expand_key = key.clone();
+                let prompt = match reason {
+                    AutoFoldReason::Generated => {
+                        "Generated or lockfile diff is collapsed by default."
+                    }
+                    AutoFoldReason::LargeDiff(_) => {
+                        "Large file diff is collapsed by default for responsiveness."
+                    }
+                };
+                card = card.child(
+                    view()
+                        .px_3()
+                        .py_2()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(muted(prompt).text_size(px(11.5)))
+                        .child(compact_action("Load diff", Variant::Secondary, move |_| {
+                            super::toggle_file(ui, expand_key.clone());
+                        })),
+                );
+            }
+            diff_column = diff_column.child(card);
             continue;
         }
         expanded_file_keys.insert(key.clone());
@@ -702,6 +802,7 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
             section,
             status: f_status,
             patch,
+            hunks: file_hunks,
             mode: mode.clone(),
             compare_ref: compare_ref.clone(),
             compare_sha: live_sha.clone(),
@@ -797,8 +898,6 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
     diff_column.into_element()
 }
 
-const RAW_DIFF_LINE_CAP: usize = 800;
-
 fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
     let st = ui.review_state;
     let mut active_line = st
@@ -815,7 +914,6 @@ fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
     let _rev = st.file_lines_revision.get();
     let cache_key = ctx.cache_key();
     let cached_file = st.file_lines_cache.with(|c| c.get(&cache_key));
-    let cap_expanded = st.expanded_line_caps.with(|s| s.contains(&ctx.key));
 
     let mut rendered_comment_ids = BTreeSet::new();
 
@@ -827,7 +925,7 @@ fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
             ))
             .into_element()
     } else {
-        let hunks = parse_unified_hunks(&ctx.patch);
+        let hunks = &ctx.hunks;
         if hunks.is_empty() {
             view()
                 .p_3()
@@ -839,14 +937,6 @@ fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
             let mut rows = view();
             let hunk_count = hunks.len();
             let is_added_or_removed = ctx.status == "added" || ctx.status == "removed";
-            let has_file_expansion = expanded_gaps
-                .iter()
-                .any(|((k, _), exp)| k == &ctx.key && (exp.from_top > 0 || exp.from_bottom > 0));
-            let total_raw_lines: usize = hunks.iter().map(|h| h.lines.len() + 1).sum();
-            let apply_cap =
-                !cap_expanded && !has_file_expansion && total_raw_lines > RAW_DIFF_LINE_CAP;
-            let mut rendered_raw = 0usize;
-            let mut truncated_file = false;
 
             // Gap 0: before Hunk 0
             let first_entry_new = hunks[0].entry_new();
@@ -905,18 +995,9 @@ fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
             }
 
             for (i, hunk) in hunks.iter().enumerate() {
-                if apply_cap && rendered_raw >= RAW_DIFF_LINE_CAP {
-                    truncated_file = true;
-                    break;
-                }
                 let start_ref = anchor_ref_for(st, &ctx.key, i, AnchorEdge::HunkStart);
                 let end_ref = anchor_ref_for(st, &ctx.key, i, AnchorEdge::HunkEnd);
-                let mut lines_len = hunk.lines.len();
-                if apply_cap && rendered_raw + lines_len > RAW_DIFF_LINE_CAP {
-                    lines_len = RAW_DIFF_LINE_CAP - rendered_raw;
-                    truncated_file = true;
-                }
-                for (li, dl) in hunk.lines.iter().take(lines_len).enumerate() {
+                for (li, dl) in hunk.lines.iter().enumerate() {
                     if dl.kind == '\\' {
                         rows = rows.child(render_static_hunk_bar(&dl.text));
                         continue;
@@ -946,10 +1027,6 @@ fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
                         &mut rendered_comment_ids,
                         rows,
                     );
-                }
-                rendered_raw += lines_len + 1;
-                if truncated_file {
-                    break;
                 }
 
                 // Gap i + 1: between Hunk i and Hunk i + 1
@@ -1052,18 +1129,7 @@ fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
                 }
             }
 
-            if truncated_file {
-                let key_cap = ctx.key.clone();
-                rows = rows.child(view().px_3().py_2().bg(INSET).child(compact_action(
-                    format!("Show all remaining diff lines ({total_raw_lines} total)"),
-                    Variant::Quiet,
-                    move |_| {
-                        st.expanded_line_caps.update(|s| {
-                            s.insert(key_cap.clone());
-                        });
-                    },
-                )));
-            } else if !is_added_or_removed
+            if !is_added_or_removed
                 && let Some(last_hunk) = hunks.last()
                 && !last_hunk.ends_with_no_newline()
             {
@@ -2200,6 +2266,223 @@ mod tests {
         assert!(
             (line107_after_y - line107_before_y).abs() < 1.0,
             "expanding bottom EOF gap must keep line 107 pinned (before={line107_before_y}, after={line107_after_y})"
+        );
+    }
+
+    #[component]
+    fn DiffAutoExpandAndProtectionProbe() -> impl IntoElement {
+        canban_ui_kit::tokens::install_theme();
+        let ui = Ui::new();
+        let long_new_file =
+            "@@ -0,0 +1,1100 @@\n".to_owned() + &"+pub const LINE: usize = 1;\n".repeat(1100);
+        let medium_patch = "@@ -1,35 +1,35 @@\n".to_owned() + &"-old\n+new\n".repeat(35);
+        let files: Vec<Value> = vec![
+            json!({
+                "filename": "src/big_new_module.rs",
+                "status": "added",
+                "additions": 1100,
+                "deletions": 0,
+                "patch": long_new_file,
+            }),
+            json!({
+                "filename": "Cargo.lock",
+                "status": "modified",
+                "additions": 40,
+                "deletions": 20,
+                "patch": medium_patch,
+            }),
+            json!({
+                "filename": "src/file_2.rs",
+                "status": "modified",
+                "additions": 35,
+                "deletions": 35,
+                "patch": medium_patch,
+            }),
+            json!({
+                "filename": "src/file_3.rs",
+                "status": "modified",
+                "additions": 35,
+                "deletions": 35,
+                "patch": medium_patch,
+            }),
+            json!({
+                "filename": "src/file_4.rs",
+                "status": "modified",
+                "additions": 35,
+                "deletions": 35,
+                "patch": medium_patch,
+            }),
+            json!({
+                "filename": "src/file_5.rs",
+                "status": "modified",
+                "additions": 35,
+                "deletions": 35,
+                "patch": medium_patch,
+            }),
+        ];
+        let data = json!({
+            "base_ref": "main",
+            "compare_ref": "feat/auto-expand",
+            "compare_sha": "def5678",
+            "files": files,
+        });
+        let prepared = super::super::cache::ReadValue::new(data);
+        ui.review_state.mode.set("git".into());
+        ui.review_state.compare_ref.set("feat/auto-expand".into());
+        super::super::apply_compare(ui, &prepared);
+
+        let commits: Vec<Value> = (0..65)
+            .map(|i| {
+                json!({
+                    "sha": format!("abc{:037x}", i + 1),
+                    "short_sha": format!("abc{:04x}", i + 1),
+                    "subject": format!("commit #{i}"),
+                    "author": "Dev",
+                    "relative_time": "1h ago",
+                })
+            })
+            .collect();
+        ui.review_state.refs_data.set(json!({
+            "current_branch": "feat/auto-expand",
+            "default_branch": "main",
+            "commits": commits,
+        }));
+        ui.review_state.log_branch.set("feat/auto-expand".into());
+        ui.review_state
+            .log_commits
+            .set(commits.iter().take(40).cloned().collect());
+        ui.review_state.log_has_more.set(true);
+
+        view()
+            .w(px(1200.))
+            .h(px(700.))
+            .flex_row()
+            .child(super::super::sidebar::render_left_sidebar(ui))
+            .child(workbench(ui))
+    }
+
+    #[test]
+    fn renders_files_over_800_lines_fully_auto_folds_lockfiles_and_auto_expands_on_scroll() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let mut core = Core::new(ApproxTextEngine, size(px(1200.), px(700.)));
+        core.set_content_culling(false);
+        core.set_components(nsh_base::registry());
+        core.set_task_runtime(runtime.handle().clone());
+        core.mount_root(&nsh_core::element::Root::of::<
+            DiffAutoExpandAndProtectionProbe,
+        >());
+        let mut tree = ProbeTree::new();
+        pump(&mut core, &mut tree);
+
+        // 1. No 800-line mid-file truncation: line 1100 of `src/big_new_module.rs` is mounted
+        //    and there is no "Show all remaining diff lines" truncation button.
+        assert!(
+            !tree
+                .texts
+                .values()
+                .any(|t| t.contains("Show all remaining diff lines")),
+            "800-line mid-file truncation cap must be removed"
+        );
+        let diff_code_node = tree.labels["Git diff code"];
+        let diff_scroll_id = *tree
+            .scroll_nodes
+            .iter()
+            .find(|id| tree.parents.get(id) == Some(&diff_code_node))
+            .expect("diff scroll view mounted");
+
+        // 2. Cargo.lock starts collapsed by default with GitHub-style prompt, while still
+        //    allowing explicit expansion via "Expand diff for Cargo.lock".
+        assert!(
+            tree.labels.contains_key("Expand diff for Cargo.lock"),
+            "Cargo.lock should be auto-collapsed by default"
+        );
+        assert!(
+            !tree
+                .labels
+                .contains_key("Add review comment on Cargo.lock line 1"),
+            "Collapsed Cargo.lock must not mount diff lines until expanded"
+        );
+
+        // 3. Initially only the first 4 files are mounted in Changes (`Show more files (2 remaining)` is shown,
+        //    and `src/file_4.rs` line 1 is not yet mounted).
+        assert!(
+            tree.texts
+                .values()
+                .any(|t| t == "Show more files (2 remaining)")
+        );
+        assert!(
+            !tree
+                .labels
+                .contains_key("Add review comment on src/file_4.rs line 1")
+        );
+
+        // Scroll diff to bottom: `file_4.rs` and `file_5.rs` auto-expand without clicking!
+        for _ in 0..3 {
+            let max_y = tree.scroll_content_heights[&diff_scroll_id];
+            core.set_scroll_offset(diff_scroll_id, point(px(0.), px(max_y)), u32::MAX);
+            pump(&mut core, &mut tree);
+        }
+        assert!(
+            !tree
+                .texts
+                .values()
+                .any(|t| t.starts_with("Show more files")),
+            "Show more files button disappears once all files have auto-expanded"
+        );
+        assert!(
+            tree.labels
+                .contains_key("Add review comment on src/file_5.rs line 1"),
+            "all 6 files should be expanded once scrolled to bottom"
+        );
+        // Also verify line 1100 of `src/big_new_module.rs` was rendered when scrolled into view!
+        for y in [18_000., 22_000., 26_000.] {
+            core.set_scroll_offset(diff_scroll_id, point(px(0.), px(y)), u32::MAX);
+            pump(&mut core, &mut tree);
+            if tree
+                .labels
+                .contains_key("Add review comment on src/big_new_module.rs line 1100")
+            {
+                break;
+            }
+        }
+        assert!(
+            tree.labels
+                .contains_key("Add review comment on src/big_new_module.rs line 1100"),
+            "1100-line added file must render all 1100 lines without truncation"
+        );
+
+        // 4. Commits sidebar: initially shows 40 commits (`commit #0`..`commit #39`), not `commit #64`.
+        assert!(!tree.texts.values().any(|t| t == "commit #64"));
+        let commits_scroll_id = tree.labels["Git commits list"];
+        let commits_max_y = tree.scroll_content_heights[&commits_scroll_id];
+        core.set_scroll_offset(
+            commits_scroll_id,
+            point(px(0.), px(commits_max_y)),
+            u32::MAX,
+        );
+        pump(&mut core, &mut tree);
+        let commits_new_max_y = tree.scroll_content_heights[&commits_scroll_id];
+        core.set_scroll_offset(
+            commits_scroll_id,
+            point(px(0.), px(commits_new_max_y)),
+            u32::MAX,
+        );
+        pump(&mut core, &mut tree);
+        assert!(
+            tree.texts.values().any(|t| t == "commit #64"),
+            "scrolling near bottom of Commits list must auto-load remaining commits"
+        );
+
+        // 5. Pull-to-refresh (`EventKind::Refresh`) on `Git commits list` reloads fresh commits!
+        assert!(core.component_event(commits_scroll_id, EventKind::Refresh, &EventPayload::None,));
+        pump(&mut core, &mut tree);
+        assert!(
+            tree.texts.values().any(|t| t == "commit #0"),
+            "pull-to-refresh on Commits list must reload from head"
         );
     }
 }

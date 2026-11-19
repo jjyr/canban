@@ -499,6 +499,10 @@ fn reset_git_selection(st: State) {
     st.refs_data.set(json!({}));
     st.compare_data.set(json!({}));
     st.prepared_lines.set(Default::default());
+    st.prepared_hunks.set(Default::default());
+    st.collapsed_files.set(Default::default());
+    st.auto_collapsed_seen
+        .with(std::collections::BTreeSet::clear);
     st.log_commits.set(Vec::new());
     st.log_has_more.set(false);
     clear_context_expansion(st);
@@ -761,9 +765,6 @@ fn clear_context_expansion(st: State) {
     if st.file_lines_errors.with_untracked(|m| !m.is_empty()) {
         st.file_lines_errors.set(Default::default());
     }
-    if st.expanded_line_caps.with_untracked(|s| !s.is_empty()) {
-        st.expanded_line_caps.set(Default::default());
-    }
 }
 
 fn cancel_reads(st: State) {
@@ -775,6 +776,7 @@ fn cancel_reads(st: State) {
     st.log_request.replace(String::new());
     st.refs_loading.set(false);
     st.log_loading.set(false);
+    st.log_refreshing.set(false);
     st.compare_loading.set(false);
 }
 
@@ -801,8 +803,11 @@ fn prepare_context(ui: Ui) {
         st.log_has_more.set(false);
         st.compare_data.set(json!({}));
         st.prepared_lines.set(Default::default());
+        st.prepared_hunks.set(Default::default());
         st.visible_file_limit.set(4);
         st.collapsed_files.set(Default::default());
+        st.auto_collapsed_seen
+            .with(std::collections::BTreeSet::clear);
         clear_context_expansion(st);
         st.anchor_targets.with(std::collections::BTreeMap::clear);
     });
@@ -828,19 +833,46 @@ pub(crate) async fn cached_read(
     .map_err(|e| e.to_string())?
 }
 
-pub(crate) fn apply_compare(ui: Ui, value: &cache::ReadValue) {
-    batch(|| {
-        ui.review_state.prepared_lines.set(value.lines.clone());
-        ui.review_state.compare_data.set(value.data.clone());
+pub fn apply_compare(ui: Ui, value: &cache::ReadValue) {
+    let st = ui.review_state;
+    let mut newly_auto_folded = Vec::new();
+    st.auto_collapsed_seen.with(|seen| {
+        for file in value.data["files"].as_array().into_iter().flatten() {
+            let key = model::file_key(file);
+            if seen.insert(key.clone()) {
+                let hunks = value.hunks.get(&key).map(|h| h.as_slice());
+                if model::auto_fold_reason(file, hunks).is_some() {
+                    newly_auto_folded.push(key);
+                }
+            }
+        }
     });
-    let pending = ui.review_state.pending_file.replace(String::new());
+    batch(|| {
+        if !newly_auto_folded.is_empty() {
+            st.collapsed_files.update(|files| {
+                files.extend(newly_auto_folded);
+            });
+        }
+        st.prepared_lines.set(value.lines.clone());
+        st.prepared_hunks.set(value.hunks.clone());
+        st.compare_data.set(value.data.clone());
+    });
+    let pending = st.pending_file.replace(String::new());
     if !pending.is_empty() {
         focus_file(ui, pending);
     }
 }
 
 pub fn show_more_files(ui: Ui) {
-    ui.review_state.visible_file_limit.update(|n| *n += 4);
+    let st = ui.review_state;
+    let total = st
+        .compare_data
+        .with_untracked(|v| v["files"].as_array().map_or(0, Vec::len));
+    if total == 0 {
+        st.visible_file_limit.update(|n| *n += 4);
+    } else if st.visible_file_limit.get_untracked() < total {
+        st.visible_file_limit.update(|n| *n = (*n + 4).min(total));
+    }
 }
 
 pub fn refresh(ui: Ui) {
@@ -935,6 +967,32 @@ pub fn load_refs_and_compare(ui: Ui, choose_smart_default: bool) {
     }
 }
 
+pub(crate) fn sync_log_commits_from_refs(st: State, val: &Value, current: &str) {
+    let log = st.log_branch.get_untracked();
+    if (log.is_empty() || log == current)
+        && st.log_query.get_untracked().trim().is_empty()
+        && !st.log_loading.get_untracked()
+    {
+        let fresh = val["commits"].as_array().cloned().unwrap_or_default();
+        let existing_head = st.log_commits.with_untracked(|list| {
+            list.first()
+                .and_then(|c| c["sha"].as_str())
+                .map(str::to_owned)
+        });
+        let fresh_head = fresh
+            .first()
+            .and_then(|c| c["sha"].as_str())
+            .map(str::to_owned);
+        let existing_len = st.log_commits.with_untracked(Vec::len);
+        st.log_branch.set(current.to_owned());
+        if existing_len == 0 || existing_head != fresh_head || existing_len <= fresh.len() {
+            let has_more = fresh.len() >= 40;
+            st.log_commits.set(fresh);
+            st.log_has_more.set(has_more);
+        }
+    }
+}
+
 fn load_refs_impl(ui: Ui, compare: Option<bool>) {
     let st = ui.review_state;
     let Some(project) = ui.current_project() else {
@@ -992,19 +1050,8 @@ fn load_refs_impl(ui: Ui, compare: Option<bool>) {
                             st.compare_ref.set("UNCOMMITTED".into());
                         }
                         st.refs_data.set(val.clone());
-                        // The refs response already contains the first commit page.
-                        let log = st.log_branch.get_untracked();
-                        if (log.is_empty() || log == current)
-                            && st.log_query.get_untracked().trim().is_empty()
-                            && st.log_commits.with_untracked(Vec::is_empty)
-                            && !st.log_loading.get_untracked()
-                        {
-                            st.log_branch.set(current.clone());
-                            st.log_commits
-                                .set(val["commits"].as_array().cloned().unwrap_or_default());
-                            st.log_has_more
-                                .set(st.log_commits.with_untracked(Vec::len) >= 40);
-                        }
+                        sync_log_commits_from_refs(st, val, &current);
+                        st.log_refreshing.set(false);
                     });
                     if st.log_commits.with_untracked(Vec::is_empty)
                         && !st.log_loading.get_untracked()
@@ -1017,7 +1064,10 @@ fn load_refs_impl(ui: Ui, compare: Option<bool>) {
                         refresh_active_diff(ui, false);
                     }
                 }
-                Err(e) => st.error.set(e),
+                Err(e) => {
+                    st.log_refreshing.set(false);
+                    st.error.set(e);
+                }
             }
         });
     });
@@ -1088,9 +1138,12 @@ fn load_active_diff(ui: Ui, force_remote_refresh: bool) {
         batch(|| {
             st.compare_data.set(json!({}));
             st.prepared_lines.set(Default::default());
+            st.prepared_hunks.set(Default::default());
             st.selected_file.set(String::new());
             st.visible_file_limit.set(4);
             st.collapsed_files.set(Default::default());
+            st.auto_collapsed_seen
+                .with(std::collections::BTreeSet::clear);
             clear_context_expansion(st);
             st.anchor_targets.with(std::collections::BTreeMap::clear);
         });
@@ -1506,6 +1559,62 @@ mod tests {
             assert_eq!(st.base_ref.get_untracked(), "abc1234~1");
             assert_eq!(st.compare_ref.get_untracked(), "abc1234");
             assert_eq!(st.pending_comments.with_untracked(Vec::len), 1);
+        });
+    }
+
+    #[test]
+    fn sync_log_commits_from_refs_updates_stale_head_while_preserving_appended_pages_when_unchanged()
+     {
+        let runtime = nsh_core::element::Runtime::default();
+        let _entered = runtime.enter();
+        let (_owner, ()) = nsh_core::element::create_root(|| {
+            let st = State::new();
+            let initial = json!({
+                "current_branch": "main",
+                "commits": [
+                    {"sha": "1111111", "short_sha": "1111111", "subject": "old head"}
+                ]
+            });
+            sync_log_commits_from_refs(st, &initial, "main");
+            assert_eq!(st.log_commits.with_untracked(Vec::len), 1);
+            assert_eq!(st.log_commits.get_untracked()[0]["sha"], "1111111");
+
+            // Fresh refs with a new commit on main updates non-empty `log_commits`.
+            let updated = json!({
+                "current_branch": "main",
+                "commits": [
+                    {"sha": "2222222", "short_sha": "2222222", "subject": "new head"},
+                    {"sha": "1111111", "short_sha": "1111111", "subject": "old head"}
+                ]
+            });
+            sync_log_commits_from_refs(st, &updated, "main");
+            assert_eq!(st.log_commits.with_untracked(Vec::len), 2);
+            assert_eq!(st.log_commits.get_untracked()[0]["sha"], "2222222");
+
+            // If the user has scrolled to load 80 commits and HEAD did not change,
+            // a routine `git.refs` check (which only returns 40 commits) keeps the 80 commits.
+            let eighty: Vec<Value> = (0..80)
+                .map(|i| {
+                    if i == 0 {
+                        json!({"sha": "2222222", "short_sha": "2222222", "subject": "new head"})
+                    } else {
+                        json!({"sha": format!("old-{i}"), "short_sha": "old", "subject": "older"})
+                    }
+                })
+                .collect();
+            st.log_commits.set(eighty);
+            let forty_same_head = json!({
+                "current_branch": "main",
+                "commits": (0..40).map(|i| {
+                    if i == 0 {
+                        json!({"sha": "2222222", "short_sha": "2222222", "subject": "new head"})
+                    } else {
+                        json!({"sha": format!("old-{i}"), "short_sha": "old", "subject": "older"})
+                    }
+                }).collect::<Vec<_>>()
+            });
+            sync_log_commits_from_refs(st, &forty_same_head, "main");
+            assert_eq!(st.log_commits.with_untracked(Vec::len), 80);
         });
     }
 }

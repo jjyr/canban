@@ -49,6 +49,7 @@ pub struct State {
     pub sidebar_open: Signal<bool>,
     pub compare_open: Signal<bool>,
     pub collapsed_files: Signal<std::collections::BTreeSet<String>>,
+    pub auto_collapsed_seen: Stored<std::collections::BTreeSet<String>>,
     pub viewport: Stored<Option<DiffViewport>>,
     pub file_targets: Stored<std::collections::BTreeMap<String, ElementRef>>,
     pub card_drawer_open: Signal<bool>,
@@ -70,6 +71,7 @@ pub struct State {
     pub log_request: Stored<String>,
     pub compare_request: Stored<String>,
     pub prepared_lines: Signal<Arc<super::cache::PreparedLines>>,
+    pub prepared_hunks: Signal<Arc<super::cache::PreparedHunks>>,
     pub visible_file_limit: Signal<usize>,
     pub refs_data: Signal<Value>,
     pub compare_data: Signal<Value>,
@@ -107,6 +109,7 @@ pub struct State {
     pub log_commits: Signal<Vec<Value>>,
     pub log_has_more: Signal<bool>,
     pub log_loading: Signal<bool>,
+    pub log_refreshing: Signal<bool>,
     pub log_ticket: Signal<u64>,
     /// Saved `(mode, base_ref, compare_ref)` when drilling into a commit from `Commits in range`.
     pub range_backup: Signal<Option<(String, String, String)>>,
@@ -126,7 +129,6 @@ pub struct State {
     pub file_lines_loading: Signal<std::collections::BTreeSet<String>>,
     pub file_lines_errors: Signal<std::collections::BTreeMap<String, String>>,
     pub file_lines_revision: Signal<u64>,
-    pub expanded_line_caps: Signal<std::collections::BTreeSet<String>>,
     pub anchor_targets: Stored<std::collections::BTreeMap<(String, usize, AnchorEdge), ElementRef>>,
 }
 
@@ -142,6 +144,7 @@ impl State {
             sidebar_open: signal(true),
             compare_open: signal(false),
             collapsed_files: signal(Default::default()),
+            auto_collapsed_seen: stored(Default::default()),
             viewport: stored(None),
             file_targets: stored(Default::default()),
             card_drawer_open: signal(false),
@@ -161,6 +164,7 @@ impl State {
             log_request: stored(String::new()),
             compare_request: stored(String::new()),
             prepared_lines: signal(Arc::default()),
+            prepared_hunks: signal(Arc::default()),
             visible_file_limit: signal(4),
             refs_data: signal(json!({})),
             compare_data: signal(json!({})),
@@ -196,6 +200,7 @@ impl State {
             log_commits: signal(Vec::new()),
             log_has_more: signal(false),
             log_loading: signal(false),
+            log_refreshing: signal(false),
             log_ticket: signal(0),
             range_backup: signal(None),
             commit_parent_idx: signal(0),
@@ -214,7 +219,6 @@ impl State {
             file_lines_loading: signal(Default::default()),
             file_lines_errors: signal(Default::default()),
             file_lines_revision: signal(0),
-            expanded_line_caps: signal(Default::default()),
             anchor_targets: stored(Default::default()),
         }
     }
@@ -483,6 +487,75 @@ pub fn diff_key(section: &str, path: &str) -> String {
     }
 }
 
+/// Extreme diffs above this line count start collapsed by default (GitHub-style),
+/// while expanding renders the complete patch without mid-file truncation.
+pub const LARGE_DIFF_AUTO_FOLD_LINES: usize = 5_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoFoldReason {
+    Generated,
+    LargeDiff(usize),
+}
+
+pub fn is_generated_or_lock_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let base = lower.rsplit('/').next().unwrap_or(&lower);
+    if matches!(
+        base,
+        "cargo.lock"
+            | "package-lock.json"
+            | "npm-shrinkwrap.json"
+            | "pnpm-lock.yaml"
+            | "yarn.lock"
+            | "bun.lock"
+            | "bun.lockb"
+            | "gemfile.lock"
+            | "poetry.lock"
+            | "uv.lock"
+            | "pipfile.lock"
+            | "composer.lock"
+            | "go.sum"
+            | "podfile.lock"
+            | "packages.lock.json"
+            | "flake.lock"
+            | "mix.lock"
+            | "pubspec.lock"
+            | "gradle.lockfile"
+    ) {
+        return true;
+    }
+    lower.ends_with(".min.js")
+        || lower.ends_with(".min.mjs")
+        || lower.ends_with(".min.css")
+        || lower.ends_with(".js.map")
+        || lower.ends_with(".css.map")
+        || lower.ends_with(".pb.go")
+        || lower.ends_with(".pb.rs")
+        || lower.ends_with(".g.dart")
+        || lower.ends_with(".freezed.dart")
+        || lower.ends_with(".snap")
+}
+
+pub fn auto_fold_reason(file: &Value, hunks: Option<&[DiffHunk]>) -> Option<AutoFoldReason> {
+    let path = file["filename"].as_str().unwrap_or("");
+    if is_generated_or_lock_path(path) {
+        return Some(AutoFoldReason::Generated);
+    }
+    let line_count = if let Some(hs) = hunks {
+        hs.iter().map(|h| h.lines.len() + 1).sum()
+    } else {
+        let patch = file["patch"].as_str().unwrap_or("");
+        let stat_sum = (file["additions"].as_u64().unwrap_or(0)
+            + file["deletions"].as_u64().unwrap_or(0)) as usize;
+        if stat_sum > LARGE_DIFF_AUTO_FOLD_LINES {
+            stat_sum
+        } else {
+            patch.bytes().filter(|&b| b == b'\n').count() + usize::from(!patch.is_empty())
+        }
+    };
+    (line_count > LARGE_DIFF_AUTO_FOLD_LINES).then_some(AutoFoldReason::LargeDiff(line_count))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,5 +602,37 @@ mod tests {
         assert_eq!(single_line[0].new_count, 1);
         assert_eq!(single_line[0].exit_old(), 2);
         assert_eq!(single_line[0].exit_new(), 2);
+    }
+
+    #[test]
+    fn auto_fold_detects_lockfiles_generated_assets_and_extreme_diffs() {
+        assert_eq!(
+            auto_fold_reason(
+                &json!({"filename": "Cargo.lock", "patch": "@@ -1 +1 @@\n+a"}),
+                None
+            ),
+            Some(AutoFoldReason::Generated)
+        );
+        assert_eq!(
+            auto_fold_reason(
+                &json!({"filename": "web/dist/app.min.js", "patch": "@@ -1 +1 @@\n+a"}),
+                None
+            ),
+            Some(AutoFoldReason::Generated)
+        );
+        assert_eq!(
+            auto_fold_reason(
+                &json!({"filename": "src/feature.rs", "additions": 1200, "deletions": 0, "patch": "@@ -0,0 +1,2 @@\n+a\n+b"}),
+                None
+            ),
+            None
+        );
+        assert!(matches!(
+            auto_fold_reason(
+                &json!({"filename": "src/huge.rs", "additions": 5001, "deletions": 0, "patch": "@@ -0,0 +1,2 @@\n+a\n+b"}),
+                None
+            ),
+            Some(AutoFoldReason::LargeDiff(_))
+        ));
     }
 }
