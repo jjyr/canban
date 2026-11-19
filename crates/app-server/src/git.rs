@@ -389,9 +389,15 @@ impl AppServer {
         }
         let ctx = self.resolve_project_checkout(&p)?;
         let _gate = if ctx.is_project_root {
-            Some(self.review_gate.try_lock().map_err(|_| {
-                anyhow::anyhow!("Another code delivery is in progress; retry after it completes")
-            })?)
+            let holder = self.checkout_holder_label(
+                "Git commit",
+                &ctx.project,
+                ctx.project.target_branch.as_deref(),
+            );
+            Some(
+                self.try_lock_checkout(&ctx.project, holder)
+                    .map_err(anyhow::Error::msg)?,
+            )
         } else {
             None
         };
@@ -475,9 +481,14 @@ impl AppServer {
         }
         let ctx = self.resolve_project_checkout(&p)?;
         let _gate = if ctx.is_project_root {
-            Some(self.review_gate.try_lock().map_err(|_| {
-                anyhow::anyhow!("Another code delivery is in progress; retry after it completes")
-            })?)
+            let branch = p["branch"]
+                .as_str()
+                .or(ctx.project.target_branch.as_deref());
+            let holder = self.checkout_holder_label("Git pull", &ctx.project, branch);
+            Some(
+                self.try_lock_checkout(&ctx.project, holder)
+                    .map_err(anyhow::Error::msg)?,
+            )
         } else {
             None
         };

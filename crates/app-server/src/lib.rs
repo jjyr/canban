@@ -46,7 +46,10 @@ pub struct AppServer {
     cli: PathBuf,
     listeners: Mutex<Vec<mpsc::Sender<AppEvent>>>,
     stop: AtomicBool,
-    review_gate: Mutex<()>,
+    checkout_gates: delivery_gates::KeyedGateTable<delivery_gates::CheckoutGateKey>,
+    queue_gates: delivery_gates::KeyedGateTable<String>,
+    card_delivery_gates: delivery_gates::KeyedGateTable<String>,
+    remote_canonical_dirs: Mutex<std::collections::HashMap<(String, String), PathBuf>>,
     github_action_gate: Mutex<()>,
     merging_cards: Mutex<std::collections::BTreeSet<String>>,
     terminal_gate: Mutex<()>,
@@ -670,7 +673,10 @@ impl AppServer {
             cli,
             listeners: Mutex::new(Vec::new()),
             stop: AtomicBool::new(false),
-            review_gate: Mutex::new(()),
+            checkout_gates: Default::default(),
+            queue_gates: Default::default(),
+            card_delivery_gates: Default::default(),
+            remote_canonical_dirs: Mutex::new(Default::default()),
             github_action_gate: Mutex::new(()),
             merging_cards: Mutex::new(Default::default()),
             terminal_gate: Mutex::new(()),
@@ -943,6 +949,7 @@ impl AppServer {
 
 mod client;
 mod commands;
+mod delivery_gates;
 mod diagnostics;
 mod drafts;
 mod github;

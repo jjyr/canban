@@ -330,9 +330,9 @@ fn project_auto_detects_github_remote_links_with_intake_off_and_respects_manual_
 fn delivery_review_gate_does_not_block_github_remote_actions() {
     let (_dir, app, _p) = github_setup();
 
-    // Holding `review_gate` (as `pump_deliveries` or `git.commit` does) must never reject
+    // Holding the main checkout gate (as `pump_deliveries` or `git.commit` does) must never reject
     // `github.remote.*` or `github.notification.*` with "Another GitHub action is pending".
-    let _delivery_guard = app.review_gate.lock().unwrap();
+    let _delivery_guard = app.lock_checkout(&_p, "test delivery");
     let err = app
         .call(
             "github.remote.comment",
@@ -536,4 +536,74 @@ fn review_github_pr_file_decodes_contents_and_blob_fallback() {
         .unwrap();
     assert_eq!(blob_resp["total_lines"], 2);
     assert_eq!(blob_resp["lines"], json!(["row1", "row2"]));
+}
+
+#[test]
+fn github_pr_delivery_is_isolated_from_main_checkout_and_other_cards() {
+    let (_dir, app, p) = github_setup();
+    let c1: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"view":"full","project_id": p.id, "title": "PR Card 1"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let c2: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"view":"full","project_id": p.id, "title": "PR Card 2"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    // 1. Holding the main checkout gate must not reject `github.pr.publish` or `github.pr.merge`
+    // with a delivery lock error.
+    let _checkout_guard = app.lock_checkout(&p, "Code delivery for GitHub (main)");
+    let pub_err = app
+        .call(
+            "github.pr.publish",
+            json!({"card_id": c1.id, "revision": c1.revision, "request_key": "pub-while-checkout-locked"}),
+        )
+        .unwrap_err()
+        .to_string();
+    assert_eq!(pub_err, "Connect this Project to GitHub first");
+
+    let merge_err = app
+        .call(
+            "github.pr.merge",
+            json!({"card_id": c1.id, "revision": c1.revision, "head": "abc", "request_key": "merge-while-checkout-locked"}),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        !merge_err.contains("Another delivery"),
+        "main checkout lock must not reject github.pr.merge: {merge_err}"
+    );
+
+    // 2. Per-card delivery gate rejects concurrent publish on `c1` while leaving `c2` unblocked.
+    let _c1_guard = app
+        .try_lock_card_delivery(&c1.id, "GitHub PR publish")
+        .unwrap();
+    let c1_busy = app
+        .call(
+            "github.pr.publish",
+            json!({"card_id": c1.id, "revision": c1.revision, "request_key": "pub-c1-concurrent"}),
+        )
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        c1_busy,
+        "Another delivery for this Card is in progress; retry after it completes"
+    );
+
+    let c2_err = app
+        .call(
+            "github.pr.publish",
+            json!({"card_id": c2.id, "revision": c2.revision, "request_key": "pub-c2-unblocked"}),
+        )
+        .unwrap_err()
+        .to_string();
+    assert_eq!(c2_err, "Connect this Project to GitHub first");
 }

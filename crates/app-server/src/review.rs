@@ -124,9 +124,6 @@ impl AppServer {
             p["execution"].is_null(),
             "Code acceptance requires explicit human review"
         );
-        let _gate = self.review_gate.try_lock().map_err(|_| {
-            anyhow::anyhow!("Another code delivery is in progress; retry after it completes")
-        })?;
         let key = strp(&p, "request_key")?.to_owned();
         let requested_strategy = match p["strategy"].as_str() {
             Some(raw) if !raw.trim().is_empty() => Some(
@@ -135,6 +132,23 @@ impl AppServer {
             ),
             _ => None,
         };
+        let target_project = {
+            let store = self.store.lock().unwrap();
+            let db = store.db();
+            let card: Card = db.get(strp(&p, "card_id")?)?;
+            let project: Project = db.get(&card.project_id)?;
+            self.bound_project(&project, &card)
+        };
+        let holder = self.checkout_holder_label(
+            "Review merge",
+            &target_project,
+            p["target_branch"]
+                .as_str()
+                .or(target_project.target_branch.as_deref()),
+        );
+        let _gate = self
+            .try_lock_checkout(&target_project, holder)
+            .map_err(anyhow::Error::msg)?;
         // A stored intent must win before any Git effects. Duplicate/unknown
         // delivery requests are never blindly replayed after a lost reply.
         let mut execute = false;
@@ -355,20 +369,6 @@ impl AppServer {
     }
 
     pub(crate) fn pump_deliveries(&self) -> Result<()> {
-        let has_active_deliveries = {
-            let store = self.store.lock().unwrap();
-            store
-                .db()
-                .list::<WorkflowRun>()?
-                .iter()
-                .any(|run| run.step_is_deliver() && run.active())
-        };
-        if !has_active_deliveries {
-            return Ok(());
-        }
-        let Ok(_gate) = self.review_gate.try_lock() else {
-            return Ok(());
-        };
         let project_ids: Vec<String> = {
             let store = self.store.lock().unwrap();
             let db = store.db();
@@ -388,6 +388,9 @@ impl AppServer {
     }
 
     fn pump_project_delivery_queue(&self, project_id: &str) -> Result<()> {
+        let Some(_queue_gate) = self.try_lock_delivery_queue(project_id) else {
+            return Ok(());
+        };
         // Bound iterations per pump pass to guard against pathological retry loops.
         for _ in 0..64 {
             // Reconcile any newly-held cards in `waiting_delivery` so they leave the active queue
@@ -620,10 +623,24 @@ impl AppServer {
         let mut workspace_project = project.clone();
         workspace_project.workflow.workspace = run.definition.workspace.clone();
         let ops = self.ops(&project.work_location().machine);
+        let holder = self.checkout_holder_label(
+            &format!("Code delivery (Card #{})", card.number),
+            &workspace_project,
+            target_branch.or(workspace_project.target_branch.as_deref()),
+        );
+        let mut checkout_gate = match self.try_lock_checkout(&workspace_project, holder) {
+            Ok(guard) => Some(guard),
+            Err(reason) => {
+                let pause_msg = format!("Merge queue waiting: {reason}");
+                self.set_queue_pause_reason(&card.id, &run.id, Some(&pause_msg))?;
+                return Ok(false);
+            }
+        };
         if sync_upstream
             && ops.has_push_remote(&workspace_project)
             && let Err(e) = ops.sync_target(&workspace_project, target_branch)
         {
+            checkout_gate.take();
             if let Some(canban_workspaces::review::DeliveryError::MainCheckoutBusy {
                 reason: busy,
             }) = e.downcast_ref::<canban_workspaces::review::DeliveryError>()
@@ -652,6 +669,7 @@ impl AppServer {
         let plan = match ops.review_preview(&workspace_project, &card, target_branch) {
             Ok(plan) => plan,
             Err(e) => {
+                checkout_gate.take();
                 let reason = format!("Auto-merge paused: {e:#}");
                 self.store.lock().unwrap().write(|db| {
                     let mut current_card: Card = db.get(&card.id)?;
@@ -671,6 +689,7 @@ impl AppServer {
             }
         };
         if !plan.merge_allowed {
+            checkout_gate.take();
             let pending_conflict = ops
                 .pending_merge_conflict(&workspace_project, &card, target_branch)
                 .ok()
@@ -740,6 +759,7 @@ impl AppServer {
         } else {
             None
         };
+        checkout_gate.take();
         let mut merged_and_completed = false;
         let mut advance_queue = true;
         self.store.lock().unwrap().write(|db| {

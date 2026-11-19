@@ -405,42 +405,60 @@ impl AppServer {
             self.git_changed("local");
         }
 
-        if cfg.sync_upstream
-            && ops.has_push_remote(&project)
-            && let Err(e) = ops.sync_target(&project, cfg.target_branch.as_deref())
-        {
-            if let Some(DeliveryError::MainCheckoutBusy { reason }) =
-                e.downcast_ref::<DeliveryError>()
-            {
-                self.set_queue_pause_reason(
-                    &head_card_id,
-                    &head_run_id,
-                    Some(&format!("Merge queue waiting: {reason}")),
-                )?;
-                return Ok(false);
-            }
-            let reason = format!("Auto-merge paused (upstream sync): {e:#}");
-            self.store.lock().unwrap().write(|db| {
-                let mut current_card: Card = db.get(&head_card_id)?;
-                let mut current_run: WorkflowRun = db.get(&head_run_id)?;
-                if current_run.state == "waiting_delivery" {
-                    canban_workflow_engine::runtime::hold_delivery(
-                        db,
-                        &mut current_card,
-                        &mut current_run,
-                        &reason,
+        let (resolved_branch, target_head) = {
+            let sync_holder = self.checkout_holder_label(
+                "Batch code delivery sync",
+                &project,
+                cfg.target_branch.as_deref(),
+            );
+            let _checkout_gate = match self.try_lock_checkout(&project, sync_holder) {
+                Ok(guard) => guard,
+                Err(reason) => {
+                    self.set_queue_pause_reason(
+                        &head_card_id,
+                        &head_run_id,
+                        Some(&format!("Merge queue waiting: {reason}")),
                     )?;
+                    return Ok(false);
                 }
-                Ok(())
-            })?;
-            self.emit("review", Some(head_card_id));
-            return Ok(true);
-        }
+            };
+            if cfg.sync_upstream
+                && ops.has_push_remote(&project)
+                && let Err(e) = ops.sync_target(&project, cfg.target_branch.as_deref())
+            {
+                drop(_checkout_gate);
+                if let Some(DeliveryError::MainCheckoutBusy { reason }) =
+                    e.downcast_ref::<DeliveryError>()
+                {
+                    self.set_queue_pause_reason(
+                        &head_card_id,
+                        &head_run_id,
+                        Some(&format!("Merge queue waiting: {reason}")),
+                    )?;
+                    return Ok(false);
+                }
+                let reason = format!("Auto-merge paused (upstream sync): {e:#}");
+                self.store.lock().unwrap().write(|db| {
+                    let mut current_card: Card = db.get(&head_card_id)?;
+                    let mut current_run: WorkflowRun = db.get(&head_run_id)?;
+                    if current_run.state == "waiting_delivery" {
+                        canban_workflow_engine::runtime::hold_delivery(
+                            db,
+                            &mut current_card,
+                            &mut current_run,
+                            &reason,
+                        )?;
+                    }
+                    Ok(())
+                })?;
+                self.emit("review", Some(head_card_id));
+                return Ok(true);
+            }
 
-        let (resolved_branch, target_head) =
             match ops.check_main_checkout_ready(&project, cfg.target_branch.as_deref()) {
                 Ok(v) => v,
                 Err(e) => {
+                    drop(_checkout_gate);
                     if let Some(DeliveryError::MainCheckoutBusy { reason }) =
                         e.downcast_ref::<DeliveryError>()
                     {
@@ -453,7 +471,8 @@ impl AppServer {
                     }
                     return Err(e);
                 }
-            };
+            }
+        };
         for (card, run) in &candidates {
             self.set_queue_pause_reason(&card.id, &run.id, None)?;
         }
@@ -556,53 +575,63 @@ impl AppServer {
                     }
                 }
 
-                match ops.fast_forward_target(&project, &target_branch, &target_head, &head_sha) {
-                    Ok(()) => {}
-                    Err(err) => {
-                        let _ = self
-                            .store
-                            .lock()
-                            .unwrap()
-                            .write(|db| delete_batch_row(db, &batch_id));
-                        match err.downcast_ref::<DeliveryError>() {
-                            Some(DeliveryError::TargetAdvanced) => {
-                                self.store.lock().unwrap().write(|db| {
-                                    for (card, run) in &candidates {
-                                        if let Ok(c) = db.get::<Card>(&card.id) {
-                                            log(
-                                                db,
-                                                &c,
-                                                "review.merge_retry",
-                                                "system",
-                                                "Target branch advanced during batch delivery; retrying",
-                                                None,
-                                                json!({"target_branch":target_branch,"batch_id":batch_id,"workflow_run_id":run.id}),
-                                            )?;
+                let push_result = {
+                    let ff_holder = self.checkout_holder_label(
+                        &format!("Batch code delivery ({})", batch.short_id()),
+                        &project,
+                        Some(&target_branch),
+                    );
+                    let _checkout_gate = self.lock_checkout(&project, ff_holder);
+                    match ops.fast_forward_target(&project, &target_branch, &target_head, &head_sha)
+                    {
+                        Ok(()) => {}
+                        Err(err) => {
+                            drop(_checkout_gate);
+                            let _ = self
+                                .store
+                                .lock()
+                                .unwrap()
+                                .write(|db| delete_batch_row(db, &batch_id));
+                            match err.downcast_ref::<DeliveryError>() {
+                                Some(DeliveryError::TargetAdvanced) => {
+                                    self.store.lock().unwrap().write(|db| {
+                                        for (card, run) in &candidates {
+                                            if let Ok(c) = db.get::<Card>(&card.id) {
+                                                log(
+                                                    db,
+                                                    &c,
+                                                    "review.merge_retry",
+                                                    "system",
+                                                    "Target branch advanced during batch delivery; retrying",
+                                                    None,
+                                                    json!({"target_branch":target_branch,"batch_id":batch_id,"workflow_run_id":run.id}),
+                                                )?;
+                                            }
                                         }
-                                    }
-                                    Ok(())
-                                })?;
-                                self.emit("review", None);
-                                return Ok(true);
+                                        Ok(())
+                                    })?;
+                                    self.emit("review", None);
+                                    return Ok(true);
+                                }
+                                Some(DeliveryError::MainCheckoutBusy { reason }) => {
+                                    self.set_queue_pause_reason(
+                                        &head_card_id,
+                                        &head_run_id,
+                                        Some(&format!("Merge queue waiting: {reason}")),
+                                    )?;
+                                    self.emit("review", None);
+                                    return Ok(false);
+                                }
+                                _ => return Err(err),
                             }
-                            Some(DeliveryError::MainCheckoutBusy { reason }) => {
-                                self.set_queue_pause_reason(
-                                    &head_card_id,
-                                    &head_run_id,
-                                    Some(&format!("Merge queue waiting: {reason}")),
-                                )?;
-                                self.emit("review", None);
-                                return Ok(false);
-                            }
-                            _ => return Err(err),
                         }
                     }
-                }
 
-                let push_result = if cfg.sync_upstream {
-                    Some(ops.push_target_branch(&project, &target_branch))
-                } else {
-                    None
+                    if cfg.sync_upstream {
+                        Some(ops.push_target_branch(&project, &target_branch))
+                    } else {
+                        None
+                    }
                 };
                 self.finalize_clean_batch(
                     &project,
@@ -1634,16 +1663,24 @@ impl AppServer {
                     );
                 }
             }
-            ops.fast_forward_target(
-                &project,
-                &updated_batch.target_branch,
-                &updated_batch.target_head,
-                &resolved_head,
-            )?;
-            let push_result = if updated_batch.sync_upstream {
-                Some(ops.push_target_branch(&project, &updated_batch.target_branch))
-            } else {
-                None
+            let push_result = {
+                let holder = self.checkout_holder_label(
+                    &format!("Batch code delivery ({})", updated_batch.short_id()),
+                    &project,
+                    Some(&updated_batch.target_branch),
+                );
+                let _checkout_gate = self.lock_checkout(&project, holder);
+                ops.fast_forward_target(
+                    &project,
+                    &updated_batch.target_branch,
+                    &updated_batch.target_head,
+                    &resolved_head,
+                )?;
+                if updated_batch.sync_upstream {
+                    Some(ops.push_target_branch(&project, &updated_batch.target_branch))
+                } else {
+                    None
+                }
             };
             ops.cleanup_batch_refs(&project, updated_batch.short_id());
 

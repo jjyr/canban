@@ -6745,3 +6745,335 @@ steps:
     assert!(app.snapshot().unwrap().workflow_templates.is_empty());
     assert!(app.call("workflow.default.get", json!({})).unwrap()["template"].is_null());
 }
+
+#[test]
+fn delivery_gates_isolate_unrelated_repos_and_serialize_same_canonical_checkout() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let app = AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
+
+    let init_repo_with_remote = |name: &str| -> (PathBuf, PathBuf) {
+        let remote = dir.path().join(format!("{name}-remote.git"));
+        let local = dir.path().join(name);
+        std::fs::create_dir_all(&remote).unwrap();
+        std::fs::create_dir_all(&local).unwrap();
+        git_in(&remote, &["init", "--bare"]);
+        git_in(&local, &["init", "-b", "main"]);
+        git_identity(&local);
+        git_in(&local, &["config", "core.hooksPath", "/dev/null"]);
+        git_in(
+            &local,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        std::fs::write(local.join("README.md"), format!("{name} base\n")).unwrap();
+        git_in(&local, &["add", "."]);
+        git_in(&local, &["commit", "-m", "initial"]);
+        git_in(&local, &["push", "-u", "origin", "main"]);
+        (local, remote)
+    };
+
+    let (repo_a, remote_a) = init_repo_with_remote("repo-a");
+    let (repo_b, remote_b) = init_repo_with_remote("repo-b");
+
+    // Advance both remotes from separate helper clones so `git.pull` performs a real pull.
+    let push_upstream_commit = |remote: &Path, name: &str, filename: &str| {
+        let pusher = dir.path().join(format!("{name}-pusher"));
+        git_in(
+            dir.path(),
+            &["clone", remote.to_str().unwrap(), pusher.to_str().unwrap()],
+        );
+        git_identity(&pusher);
+        git_in(&pusher, &["config", "core.hooksPath", "/dev/null"]);
+        std::fs::write(pusher.join(filename), "from upstream\n").unwrap();
+        git_in(&pusher, &["add", "."]);
+        git_in(&pusher, &["commit", "-m", "upstream update"]);
+        git_in(&pusher, &["push", "origin", "main"]);
+    };
+    push_upstream_commit(&remote_a, "repo-a", "upstream-a.txt");
+    push_upstream_commit(&remote_b, "repo-b", "upstream-b.txt");
+
+    // Create a symlink pointing to `repo_a` and register a second Project on that symlink.
+    let repo_a_link = dir.path().join("repo-a-symlink");
+    std::os::unix::fs::symlink(&repo_a, &repo_a_link).unwrap();
+
+    let proj_a: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Repo A", "directory": repo_a, "target_branch": "main"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let proj_b: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Repo B", "directory": repo_b, "target_branch": "main"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let proj_a_alias: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Repo A Alias", "directory": repo_a_link, "target_branch": "main"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    // Create a standalone worktree inside Repo A to verify Card/worktree `git.commit` stays unlocked.
+    let wt_res = app
+        .call(
+            "worktree.create",
+            json!({"project_id": proj_a.id, "branch": "feat/wt", "launch": "none"}),
+        )
+        .unwrap();
+    let wt_path = wt_res["worktree"]["path"].as_str().unwrap().to_owned();
+    git_identity(Path::new(&wt_path));
+    git_in(
+        Path::new(&wt_path),
+        &["config", "core.hooksPath", "/dev/null"],
+    );
+
+    // Hold Repo A's main checkout gate (simulating active delivery on Repo A).
+    let guard_a = app
+        .try_lock_checkout(&proj_a, "Code delivery for Repo A (main)")
+        .expect("Repo A checkout gate should be free");
+
+    // 1. Completely different repo (`proj_b`) can `git.pull` and `git.commit` freely.
+    app.call(
+        "git.pull",
+        json!({"project_id": proj_b.id, "request_key": "pull-b-while-a-locked"}),
+    )
+    .expect("git.pull on unrelated Repo B must not be blocked by Repo A delivery");
+    assert_eq!(
+        std::fs::read_to_string(repo_b.join("upstream-b.txt")).unwrap(),
+        "from upstream\n"
+    );
+
+    std::fs::write(repo_b.join("local-b.txt"), "local commit on b\n").unwrap();
+    app.call(
+        "git.stage",
+        json!({"project_id": proj_b.id, "paths": ["local-b.txt"]}),
+    )
+    .unwrap();
+    app.call(
+        "git.commit",
+        json!({"project_id": proj_b.id, "message": "commit on B", "request_key": "commit-b-1"}),
+    )
+    .expect("git.commit on unrelated Repo B must not be blocked by Repo A delivery");
+
+    // 2. Repo A's own main checkout `git.pull` and `git.commit` fail with clear contextual error.
+    let err_a = app
+        .call(
+            "git.pull",
+            json!({"project_id": proj_a.id, "request_key": "pull-a-while-locked"}),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err_a.contains("Code delivery for Repo A (main) is updating this checkout"),
+        "unexpected error: {err_a}"
+    );
+
+    // 3. Another Project pointing to the same physical repo via symlink is ALSO serialized.
+    let err_alias = app
+        .call(
+            "git.pull",
+            json!({"project_id": proj_a_alias.id, "request_key": "pull-alias-while-locked"}),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err_alias.contains("Code delivery for Repo A (main) is updating this checkout"),
+        "symlinked checkout must share the same canonical gate, got: {err_alias}"
+    );
+
+    // 4. Non-root worktree under Repo A is NOT blocked by Repo A's main checkout gate.
+    std::fs::write(Path::new(&wt_path).join("wt.txt"), "worktree change\n").unwrap();
+    app.call(
+        "git.stage",
+        json!({"project_id": proj_a.id, "cwd": wt_path, "paths": ["wt.txt"]}),
+    )
+    .unwrap();
+    app.call(
+        "git.commit",
+        json!({
+            "project_id": proj_a.id,
+            "cwd": wt_path,
+            "message": "commit in worktree",
+            "request_key": "commit-wt-while-main-locked"
+        }),
+    )
+    .expect("git.commit in a Card/managed worktree must not wait on main checkout gate");
+
+    // 5. Releasing Repo A's gate allows `git.pull` on Repo A to proceed immediately.
+    drop(guard_a);
+    app.call(
+        "git.pull",
+        json!({"project_id": proj_a.id, "request_key": "pull-a-after-release"}),
+    )
+    .expect("git.pull on Repo A should succeed once delivery gate is released");
+    assert_eq!(
+        std::fs::read_to_string(repo_a.join("upstream-a.txt")).unwrap(),
+        "from upstream\n"
+    );
+}
+
+#[test]
+fn batch_delivery_releases_main_checkout_gate_during_test_command_and_retries_target_advanced() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    git_in(&source, &["init", "-b", "main"]);
+    git_identity(&source);
+    git_in(&source, &["config", "core.hooksPath", "/dev/null"]);
+    std::fs::write(source.join("README.md"), "base\n").unwrap();
+    git_in(&source, &["add", "."]);
+    git_in(&source, &["commit", "-m", "initial"]);
+
+    let app = AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
+    let proj: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({
+                "name": "Batch Concurrent Checkout",
+                "directory": source,
+                "target_branch": "main",
+                "workspace": {"create_worktree": true, "sync_base": false}
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let started_flag = dir.path().join("batch-test-started.flag");
+    let continue_flag = dir.path().join("main-commit-done.flag");
+    let test_cmd = format!(
+        "touch '{}' && i=0; while [ ! -f '{}' ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; test -f '{}'",
+        started_flag.display(),
+        continue_flag.display(),
+        continue_flag.display(),
+    );
+    edit_development(&app, &proj, |doc| {
+        canban_workflow_engine::source::set_review_manual(doc, false);
+        canban_workflow_engine::source::set_sync_upstream(doc, false);
+        canban_workflow_engine::stages::set_step_with(
+            doc,
+            "deliver:review",
+            "batch_size",
+            Some(json!(2)),
+        )
+        .unwrap();
+        canban_workflow_engine::stages::set_step_with(
+            doc,
+            "deliver:review",
+            "test_command",
+            Some(json!(test_cmd)),
+        )
+        .unwrap();
+    });
+
+    let card: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"view":"full","project_id": proj.id, "title": "Feature under test"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "card.move",
+        json!({"view":"full","card_id": card.id, "revision": card.revision, "stage": "develop"}),
+    )
+    .unwrap();
+    let dev = admit(&app, &snap_latest_card_terminal(&app, &card.id));
+    let ops = canban_workspaces::Ops::local();
+    let wt = ops.prepare(&app.home, &proj, &card).unwrap();
+    let br = ops.current_branch(wt.to_str().unwrap()).unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut stored: Card = db.get(&card.id)?;
+            stored.worktree = Some(wt.to_str().unwrap().into());
+            stored.branch = Some(br);
+            db.save(&stored)
+        })
+        .unwrap();
+    git_identity(&wt);
+    git_in(&wt, &["config", "core.hooksPath", "/dev/null"]);
+    std::fs::write(wt.join("feature.txt"), "from card\n").unwrap();
+    git_in(&wt, &["add", "."]);
+    git_in(&wt, &["commit", "-m", "feat: card work"]);
+    finish_closed(&app, &dev, "dev-done-batch-concurrency");
+
+    let app_bg = Arc::clone(&app);
+    let pump_thread = std::thread::spawn(move || {
+        app_bg.pump_deliveries().unwrap();
+    });
+
+    // Wait until `run_batch_tests` has actually started inside `_merge_queue`.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !started_flag.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for batch test_command to start"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    // While `run_batch_tests` is executing in `_merge_queue`, the main checkout gate MUST be
+    // released so user `git.commit` on the SAME project's main checkout succeeds immediately.
+    std::fs::write(
+        source.join("main-concurrent.txt"),
+        "committed during batch tests\n",
+    )
+    .unwrap();
+    app.call(
+        "git.stage",
+        json!({"project_id": proj.id, "paths": ["main-concurrent.txt"]}),
+    )
+    .unwrap();
+    app.call(
+        "git.commit",
+        json!({
+            "project_id": proj.id,
+            "message": "concurrent main commit",
+            "request_key": "commit-during-batch-tests"
+        }),
+    )
+    .expect("main checkout git.commit must succeed while batch test_command runs in _merge_queue");
+
+    // Allow `run_batch_tests` to finish; `execute_batch_delivery` will see `TargetAdvanced`
+    // and cleanly retry without overwriting the main checkout commit.
+    std::fs::write(&continue_flag, "ok").unwrap();
+    pump_thread.join().unwrap();
+
+    let mid_snap = app.snapshot().unwrap();
+    assert!(
+        mid_snap
+            .events
+            .iter()
+            .any(|e| e.card_id == card.id && e.kind == "review.merge_retry"),
+        "expected TargetAdvanced retry log after concurrent main commit"
+    );
+
+    // Second pump re-integrates on top of the new main HEAD and delivers cleanly.
+    app.pump_deliveries().unwrap();
+    let final_snap = app.snapshot().unwrap();
+    let final_card = final_snap.cards.iter().find(|c| c.id == card.id).unwrap();
+    assert!(
+        final_card.delivery.is_some(),
+        "Card should deliver cleanly after TargetAdvanced retry"
+    );
+    assert_eq!(
+        std::fs::read_to_string(source.join("main-concurrent.txt")).unwrap(),
+        "committed during batch tests\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(source.join("feature.txt")).unwrap(),
+        "from card\n"
+    );
+}

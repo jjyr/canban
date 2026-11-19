@@ -12,10 +12,8 @@ impl AppServer {
     }
 
     pub(super) fn github_publish(&self, p: Value) -> Result<Value> {
-        let _guard = self
-            .review_gate
-            .try_lock()
-            .map_err(|_| anyhow::anyhow!("Another delivery is in progress"))?;
+        let card_id = strp(&p, "card_id")?.to_owned();
+        let _guard = self.try_lock_card_delivery(&card_id, "GitHub PR publish")?;
         let key = strp(&p, "request_key")?.to_owned();
         if let Some(receipt) = self.github_receipt("github.pr.publish", &p)? {
             return Ok(receipt);
@@ -400,6 +398,11 @@ impl AppServer {
         };
         if let Some(project) = project {
             let project = self.bound_project(&project, card);
+            let holder =
+                self.checkout_holder_label("GitHub PR target sync", &project, target_branch);
+            let Ok(_gate) = self.try_lock_checkout(&project, holder) else {
+                return;
+            };
             let _ = self
                 .ops(&project.work_location().machine)
                 .sync_target(&project, target_branch);
@@ -517,10 +520,8 @@ impl AppServer {
         Ok(())
     }
     pub(super) fn github_pr_merge(&self, p: Value) -> Result<Value> {
-        let _guard = self
-            .review_gate
-            .try_lock()
-            .map_err(|_| anyhow::anyhow!("Another delivery is in progress"))?;
+        let card_id = strp(&p, "card_id")?.to_owned();
+        let _guard = self.try_lock_card_delivery(&card_id, "GitHub PR merge")?;
         let key = strp(&p, "request_key")?.to_owned();
         if let Some(receipt) = self.github_receipt("github.pr.merge", &p)? {
             return Ok(receipt);
