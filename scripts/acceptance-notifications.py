@@ -123,8 +123,17 @@ try:
     saved = call('app.snapshot')['card_reads']
     call('app.shutdown');server.wait(timeout=15)
     server = subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log)
-    wait(lambda s:s['card_reads']==saved, 'durable read positions')
-    assert len(items(cards['gate'])) == 1 and not items(cards['gate'])[0]['unread']
+    wait(
+        lambda s: s['card_reads'] == saved
+        and any(
+            t['id'] == gate_run['id']
+            and (t.get('agent') or {}).get('connection_state') == 'connected'
+            for t in s['terminals']
+        ),
+        'durable read positions and reconnected gate terminal',
+    )
+    gate_items = items(cards['gate'])
+    assert len(gate_items) == 1 and not gate_items[0]['unread'], gate_items
     metadata={'base':str(base),'home':str(home),'core_env':core,'projects':[project,other],'cards':cards,'short_run':short_run}
     (base/'metadata.json').write_text(json.dumps(metadata,indent=2))
     (repo/'.local/notifications-native.json').write_text(json.dumps(metadata,indent=2))
