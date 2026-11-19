@@ -47,7 +47,7 @@ def items(card):
     return [i for i in call('notifications.list') if i['card_id'] == card['id']]
 
 def read(card):
-    sequence = max(e['sequence'] for e in call('app.snapshot')['events'] if e['card_id'] == card['id'])
+    sequence = max(e['sequence'] for e in call('timeline.list', {'card_id': card['id'], 'limit': 200})['events'])
     return call('notifications.read', {'card_id':card['id'], 'sequence':sequence})
 
 def run(card):

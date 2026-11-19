@@ -35,7 +35,8 @@ def bound_agents(snapshot): return [a for a in agents(snapshot) if a.get('provid
 def run_for(snapshot,id,stage='develop'):
     return next(a for a in agents(snapshot) if a['card_id']==id and a['stage']==stage and a.get('provider_session_id'))
 def started_seq(snapshot,tid):
-    return next(e['created_at'] for e in snapshot['events'] if e['kind']=='execution.started' and e['data'].get('terminal_id')==tid)
+    cid=next(a['card_id'] for a in agents(snapshot) if a['id']==tid)
+    return next(e['created_at'] for e in call('timeline.list',{'card_id':cid,'limit':200})['events'] if e['kind']=='execution.started' and e['data'].get('terminal_id')==tid)
 try:
     wait(lambda _:True,'startup')
     config=json.loads((home/'config/agents.json').read_text());config.update(hc_env=core_env,hc_session=core_env['HC_SESSION'])

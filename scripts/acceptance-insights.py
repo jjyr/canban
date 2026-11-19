@@ -80,7 +80,7 @@ try:
     call('card.move', {'card_id': card['id'], 'revision': card['revision'], 'stage': 'develop'})
     snapshot = wait_for(lambda s: any(c['id'] == card['id'] and (c.get('delivery') or {}).get('merged_at', 0)
                                     for c in s['cards']), 'Fixture Card was not merged')
-    facts = [e for e in snapshot['events'] if e['card_id'] == card['id']]
+    facts = call('timeline.list', {'card_id': card['id'], 'view': 'full', 'limit': 200})['events']
     assert any(e['kind'] == 'execution.started' for e in facts)
     assert any(e['kind'] == 'review.merged' for e in facts)
     for i in range(4):

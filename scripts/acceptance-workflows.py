@@ -385,7 +385,7 @@ workspace:
  assert [(a['profile']['id'],a['number']) for a in agents(s,developed['id'])]==before_agents,'manual Review restarted an Agent'
  transition_runs=[r for r in s['workflow_runs'] if r['card_id']==developed['id']]
  assert len(transition_runs)==2 and all(r['state']=='completed' for r in transition_runs)
- move_event=next(e for e in s['events'] if e['card_id']==developed['id'] and e['kind']=='card.stage_changed' and e['data']['to']=='review')
+ move_event=next(e for e in call('timeline.list',{'card_id':developed['id'],'limit':200})['events'] if e['kind']=='card.stage_changed' and e['data']['to']=='review')
  assert move_event['data']['stage']=='review' and move_event['data']['card_revision']==developed['revision']+1
  assert (transition_source/'canban-acceptance.txt').read_text()=='Herdr executed the Canban Card task.\n'
  evidence['column_transition']={'project_id':transition_project['id'],'card_id':developed['id'],'event_id':move_event['id'],'agents':before_agents}

@@ -99,7 +99,7 @@ steps:
  send(terminal,'finish')
  s=wait(lambda s:len(s['reports'])==2 and agent(s)['number']==2 and agent(s)['state']=='completed','same-profile Review in retained PTY')
  current=agent(s);assert current['terminal']==terminal and current['provider_session_id']==sid
- assert any(e['kind']=='execution.continued' for e in s['events']) and current['state']=='completed'
+ assert any(e['kind']=='execution.continued' for e in call('timeline.list',{'card_id':card['id'],'limit':200})['events']) and current['state']=='completed'
  call('comment.add',{'card_id':card['id'],'body':'Followup after completion','mentions':['developer']})
  s=wait(lambda s:s['questions'] and all(q['state']=='replied' for q in s['questions']),'completed-session reply')
  assert len(s['reports'])==2 and agent(s)['number']==2 and s['cards'][0]['stage']=='review'

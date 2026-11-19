@@ -164,8 +164,8 @@ try:
     restored = wait(lambda s: agent(s)['connection_state'] == 'connected', 'restored binding')
     assert agent(restored)['observed']['pid'] == before['pid']
     assert agent(restored)['provider_session_id'] == before['session']
-    send(terminal, 'finish')
     completed_at = time.monotonic()
+    send(terminal, 'finish')
     ended = wait(lambda s: agent(s)['state'] == 'idle_closed'
                  and (agent(s).get('observed') or {}).get('state') == 'finished',
                  'completed idle exit', timeout=50)

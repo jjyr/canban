@@ -89,7 +89,8 @@ steps:
  s=wait(lambda s:any(n['id']==note['id'] and n['body']=='Agent-written database Note' for n in s['notes']),'Agent Note CLI write')
  event=next(e for e in s['note_events'] if e['note_id']==note['id'] and e['kind']=='note.updated')
  assert event['actor']=='@developer' and event['card_id']==card['id'] and event['revision']==2
- assert any(e['kind']=='note.updated' and e['data'].get('terminal_id')==first['id'] for e in s['events'])
+ card_events=lambda cid:call('timeline.list',{'card_id':cid,'limit':200})['events']
+ assert any(e['kind']=='note.updated' and e['data'].get('terminal_id')==first['id'] for e in card_events(card['id']))
  raw=subprocess.run([str(cli),'note','read',note['id']],env=env,capture_output=True,text=True,check=True);assert raw.stdout=='Agent-written database Note'
  stale=subprocess.run([str(cli),'note','write',note['id'],'--revision','1'],input='Stale human overwrite',env=env,capture_output=True,text=True);assert stale.returncode!=0
  renamed=subprocess.run([str(cli),'note','rename',note['id'],'Renamed.md','--revision','2'],env=env,capture_output=True,text=True,check=True);assert json.loads(renamed.stdout)['id']==note['id']
@@ -103,8 +104,8 @@ steps:
  # Temporary transport loss is visible, deduplicated, and never relaunches.
  config['hc']='/usr/bin/false';(home/'config/agents.json').write_text(json.dumps(config));call('config.reload')
  s=wait(lambda s:agents(s)[0].get('connection_state')=='unavailable','offline attention')
- disc_events=len([e for e in s['events'] if e['kind']=='execution.disconnected']);time.sleep(1.2)
- assert len([e for e in call('app.snapshot')['events'] if e['kind']=='execution.disconnected'])==disc_events
+ disc_events=len([e for e in card_events(card['id']) if e['kind']=='execution.disconnected']);time.sleep(1.2)
+ assert len([e for e in card_events(card['id']) if e['kind']=='execution.disconnected'])==disc_events
  assert any(r['source']=='recovery' for r in call('overview.list')[0]['reasons'])
  config['hc']='hc';(home/'config/agents.json').write_text(json.dumps(config));call('config.reload')
  s=wait(lambda s:agents(s)[0].get('connection_state')=='connected','original core reconnect')
@@ -116,10 +117,10 @@ steps:
  call('comment.add',{'card_id':card['id'],'body':'@developer explain the current context'})
  s=wait(lambda s:len(s['questions'])==1 and s['questions'][0]['state']=='replied','immediate reply')
  assert len(agents(s))==1 and agents(s)[0]['state']=='running' and s['cards'][0]['stage']=='develop'
- assert not s['reports'];assert any(e['kind']=='comment.replied' for e in s['events'])
+ assert not s['reports'];assert any(e['kind']=='comment.replied' for e in card_events(card['id']))
  control={'terminal_id':first['id'],'request_key':'interrupt-once'}
  receipt=call('agent.interrupt',control);assert call('agent.interrupt',control)==receipt
- assert len([e for e in call('app.snapshot')['events'] if e['kind']=='execution.control_requested'])==1
+ assert len([e for e in card_events(card['id']) if e['kind']=='execution.control_requested'])==1
  wait(lambda s:((agent_for(s,'developer').get('observed') or {}).get('status') or {}).get('state')=='idle','interrupt observation')
  send(terminal,'continue');send(terminal,'finish')
  s=wait(lambda s:len(s['reports'])==2 and len(agents(s))==2 and all(((a.get('observed') or {}).get('status') or {}).get('state')=='done' for a in agents(s)),'Develop/Review retained terminals')
