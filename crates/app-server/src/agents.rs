@@ -50,12 +50,11 @@ pub(super) fn parse_codex_cached_models_json(
             }
         }
     }
-    for def in defaults {
-        if !out.iter().any(|x| x.id == def.id) {
-            out.push(def.clone());
-        }
+    if out.is_empty() {
+        defaults.to_vec()
+    } else {
+        out
     }
-    out
 }
 
 fn probe_codex_cached_models(defaults: &[ModelOption]) -> Vec<ModelOption> {
@@ -96,45 +95,77 @@ pub(super) fn parse_agy_models_output(text: &str) -> Vec<ModelOption> {
     canban_profiles::collapse_agy_models(parsed)
 }
 
-fn probe_agy_models(agy_path: &str, defaults: &[ModelOption]) -> Vec<ModelOption> {
-    type CacheMap = BTreeMap<String, (Instant, Vec<ModelOption>)>;
-    static CACHE: OnceLock<Mutex<CacheMap>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+pub(super) const AGENT_MODEL_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+const AGENT_MODEL_CACHE_TTL: Duration = Duration::from_secs(300);
+
+type ModelCacheMap = BTreeMap<String, (Instant, Vec<ModelOption>)>;
+
+fn model_probe_cache() -> &'static Mutex<ModelCacheMap> {
+    static CACHE: OnceLock<Mutex<ModelCacheMap>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+pub(super) fn probe_cli_models_with_timeout(
+    cache_key: &str,
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+    defaults: &[ModelOption],
+    parser: fn(&str) -> Vec<ModelOption>,
+) -> Vec<ModelOption> {
+    let cache = model_probe_cache();
     if let Ok(guard) = cache.lock()
-        && let Some((ts, cached)) = guard.get(agy_path)
-        && ts.elapsed() < Duration::from_secs(300)
+        && let Some((ts, cached)) = guard.get(cache_key)
+        && ts.elapsed() < AGENT_MODEL_CACHE_TTL
         && !cached.is_empty()
     {
         return cached.clone();
     }
 
-    let path_owned = agy_path.to_owned();
+    let key_owned = cache_key.to_owned();
+    let program_owned = program.to_owned();
+    let args_owned: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let mut cmd = canban_exec::command(&path_owned);
-        cmd.arg("models")
+        let mut cmd = canban_exec::command(&program_owned);
+        cmd.args(&args_owned)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
-        let res = cmd.output();
-        let _ = tx.send(res);
+        let parsed = match cmd.output() {
+            Ok(output) if output.status.success() => {
+                let text = String::from_utf8_lossy(&output.stdout);
+                parser(&text)
+            }
+            _ => Vec::new(),
+        };
+        if !parsed.is_empty()
+            && let Ok(mut guard) = model_probe_cache().lock()
+        {
+            guard.insert(key_owned, (Instant::now(), parsed.clone()));
+        }
+        let _ = tx.send(parsed);
     });
 
-    let mut parsed = Vec::new();
-    if let Ok(Ok(output)) = rx.recv_timeout(Duration::from_millis(2500))
-        && output.status.success()
+    if let Ok(parsed) = rx.recv_timeout(timeout)
+        && !parsed.is_empty()
     {
-        let text = String::from_utf8_lossy(&output.stdout);
-        parsed = parse_agy_models_output(&text);
+        return parsed;
     }
 
-    if parsed.is_empty() {
-        return defaults.to_vec();
-    }
-    if let Ok(mut guard) = cache.lock() {
-        guard.insert(agy_path.to_owned(), (Instant::now(), parsed.clone()));
-    }
-    parsed
+    defaults.to_vec()
+}
+
+fn probe_agy_models(agy_path: &str, defaults: &[ModelOption]) -> Vec<ModelOption> {
+    let cache_key = format!("agy:{agy_path}");
+    probe_cli_models_with_timeout(
+        &cache_key,
+        agy_path,
+        &["models"],
+        AGENT_MODEL_PROBE_TIMEOUT,
+        defaults,
+        parse_agy_models_output,
+    )
 }
 
 fn models_for_entry(
@@ -1042,5 +1073,145 @@ impl AppServer {
             db.save(&project)?;
             Ok(serde_json::to_value(project)?)
         })
+    }
+}
+
+#[cfg(test)]
+mod model_probe_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn cli_model_probe_uses_15s_timeout_and_backfills_cache_after_late_completion() {
+        assert_eq!(AGENT_MODEL_PROBE_TIMEOUT, Duration::from_secs(15));
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("mock-agy");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nsleep 0.15\nprintf 'gemini-4-neon-high\\tGemini 4 Neon (High)\\ngemini-4-neon-xhigh\\tGemini 4 Neon (XHigh)\\ngemini-4-neon-medium\\tGemini 4 Neon (Medium)\\ngemini-4-neon-low\\tGemini 4 Neon (Low)\\ngemini-pro-orchestrator-neon\\tOrchestrator (Neon)\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let defaults = vec![ModelOption {
+            id: "fallback-model".into(),
+            label: "Fallback".into(),
+            supported_efforts: None,
+        }];
+        let cache_key = format!("test-agy-late-{}", script.display());
+
+        // 1. Short timeout returns defaults without blocking, while the worker finishes in background.
+        let first = probe_cli_models_with_timeout(
+            &cache_key,
+            script.to_str().unwrap(),
+            &["models"],
+            Duration::from_millis(30),
+            &defaults,
+            parse_agy_models_output,
+        );
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].id, "fallback-model");
+
+        // 2. Wait for the first background probe to populate the cache, then verify the next call hits cache immediately.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if model_probe_cache()
+                .lock()
+                .ok()
+                .is_some_and(|g| g.contains_key(&cache_key))
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let second = probe_cli_models_with_timeout(
+            &cache_key,
+            script.to_str().unwrap(),
+            &["models"],
+            Duration::from_millis(10),
+            &defaults,
+            parse_agy_models_output,
+        );
+        let neon = second
+            .iter()
+            .find(|m| m.id == "gemini-4-neon")
+            .expect("backfilled cache should include collapsed gemini-4-neon");
+        assert_eq!(neon.label, "Gemini 4 Neon");
+        assert_eq!(
+            neon.supported_efforts,
+            Some(vec![
+                "low".into(),
+                "medium".into(),
+                "high".into(),
+                "xhigh".into()
+            ])
+        );
+        let orch = second
+            .iter()
+            .find(|m| m.id == "gemini-pro-orchestrator-neon")
+            .expect("backfilled cache should include neon orchestrator");
+        assert_eq!(orch.supported_efforts, Some(Vec::new()));
+        // Live agent probe overrides defaults completely; removed/fallback models must not linger.
+        assert!(
+            !second.iter().any(|m| m.id == "fallback-model"),
+            "probed agent models must replace defaults instead of merging stale entries"
+        );
+    }
+
+    #[test]
+    fn static_agy_defaults_include_neon_and_codex_cache_overrides_removed_defaults() {
+        let agy_defaults = canban_profiles::builtin_catalog()
+            .into_iter()
+            .find(|e| e.id == "agy")
+            .unwrap()
+            .default_models;
+        let neon = agy_defaults
+            .iter()
+            .find(|m| m.id == "gemini-4-neon")
+            .expect("static agy defaults should include gemini-4-neon");
+        assert_eq!(neon.label, "Gemini 4 Neon");
+        assert_eq!(
+            neon.supported_efforts,
+            Some(vec![
+                "low".into(),
+                "medium".into(),
+                "high".into(),
+                "xhigh".into()
+            ])
+        );
+        let orch = agy_defaults
+            .iter()
+            .find(|m| m.id == "gemini-pro-orchestrator-neon")
+            .expect("static agy defaults should include gemini-pro-orchestrator-neon");
+        assert_eq!(orch.supported_efforts, Some(Vec::new()));
+
+        let codex_defaults = vec![
+            ModelOption {
+                id: "retired-old-model".into(),
+                label: "Retired".into(),
+                supported_efforts: None,
+            },
+            ModelOption {
+                id: "still-here".into(),
+                label: "Still Here".into(),
+                supported_efforts: None,
+            },
+        ];
+        let parsed = parse_codex_cached_models_json(
+            &json!({
+                "models": [
+                    { "slug": "still-here", "display_name": "Still Here" },
+                    { "slug": "brand-new-model", "display_name": "Brand New" }
+                ]
+            }),
+            &codex_defaults,
+        );
+        let ids: Vec<&str> = parsed.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["still-here", "brand-new-model"]);
+
+        // Empty live cache still falls back to defaults.
+        let fallback = parse_codex_cached_models_json(&json!({ "models": [] }), &codex_defaults);
+        assert_eq!(fallback, codex_defaults);
     }
 }
