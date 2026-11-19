@@ -7,7 +7,7 @@ use crate::source::Document;
 use anyhow::{Result, ensure};
 
 pub const BASELINE: u32 = 1;
-pub const CURRENT: u32 = 10;
+pub const CURRENT: u32 = 11;
 
 pub struct Migration {
     pub version: u32,
@@ -50,6 +50,10 @@ const STEPS: &[Migration] = &[
     Migration {
         version: 10,
         up: v10_diff_review_prompt,
+    },
+    Migration {
+        version: 11,
+        up: v11_cardless_and_event_selectors,
     },
 ];
 
@@ -315,6 +319,23 @@ fn v10_diff_review_prompt(doc: &mut Document) -> Result<()> {
     Ok(())
 }
 
+/// Schema 11: Cardless event-driven workflow rules (`on.<rule>.cardless`) and self-action
+/// filtering (`match.exclude_self`). Normalizes whitespace in `match.repository` and drops
+/// blank repository selectors so canonical YAML stays clean.
+fn v11_cardless_and_event_selectors(doc: &mut Document) -> Result<()> {
+    for rule in doc.on.values_mut() {
+        if let Some(repo) = rule.selector.repository.as_deref() {
+            let trimmed = repo.trim();
+            if trimmed.is_empty() {
+                rule.selector.repository = None;
+            } else if trimmed != repo {
+                rule.selector.repository = Some(trimmed.to_owned());
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,5 +542,42 @@ steps:
             );
             assert!(upgrade_yaml(&upgraded).unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn v11_normalizes_repository_selectors_and_preserves_cardless_and_exclude_self() {
+        let v10 = r#"schema: 10
+id: github:triage
+name: Issue Triage
+on:
+  comment:
+    event: github.issue.comment_created
+    start_at: filter
+    cardless: true
+    match:
+      repository: "  org/repo  "
+      exclude_self: true
+  blank_repo:
+    event: github.issue.opened
+    start_at: filter
+    match:
+      repository: "   "
+steps:
+  - id: filter
+    run: echo ok
+"#;
+        let upgraded = upgrade_yaml(v10)
+            .unwrap()
+            .expect("v10 should upgrade to v11");
+        let doc = crate::source::parse(&upgraded).unwrap();
+        assert_eq!(doc.schema, CURRENT);
+        assert!(doc.on["comment"].cardless);
+        assert!(doc.on["comment"].selector.exclude_self);
+        assert_eq!(
+            doc.on["comment"].selector.repository.as_deref(),
+            Some("org/repo")
+        );
+        assert_eq!(doc.on["blank_repo"].selector.repository, None);
+        assert!(upgrade_yaml(&upgraded).unwrap().is_none());
     }
 }

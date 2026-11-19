@@ -69,7 +69,7 @@ pub fn stage<'a>(flow: &'a Workflow, id: &str) -> Result<&'a Stage> {
 }
 
 pub mod definition;
-pub use definition::{matches, validate_definition};
+pub use definition::{compile_rule_selector, matches, validate_definition};
 
 pub mod migrations;
 pub mod runtime;

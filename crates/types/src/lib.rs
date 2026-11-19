@@ -219,6 +219,49 @@ impl Default for SchedulerSettings {
     }
 }
 
+/// How unattended Agent and Script steps inherit the host user's login-shell environment.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostTerminalEnvMode {
+    /// Inherit the host user's login-shell environment snapshot (default for trusted runs).
+    #[default]
+    Inherit,
+    /// Only inject a minimal `PATH`-based environment (plus explicit `hc_env` / workflow `env`).
+    Minimal,
+}
+
+impl HostTerminalEnvMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inherit => "inherit",
+            Self::Minimal => "minimal",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Inherit => "Inherit user terminal environment",
+            Self::Minimal => "Minimal (PATH only)",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "inherit" => Some(Self::Inherit),
+            "minimal" => Some(Self::Minimal),
+            _ => None,
+        }
+    }
+
+    pub fn is_inherit(self) -> bool {
+        self == Self::Inherit
+    }
+}
+
+pub fn is_default_host_terminal_env_mode(v: &HostTerminalEnvMode) -> bool {
+    *v == HostTerminalEnvMode::Inherit
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     #[serde(default = "local_machine")]
@@ -235,6 +278,10 @@ pub struct Config {
     pub hc_session: String,
     #[serde(default)]
     pub hc_env: BTreeMap<String, String>,
+    /// Controls whether automated Agent/Script steps inherit the host user's login-shell
+    /// environment (`inherit`, default) or use a minimal `PATH`-only environment (`minimal`).
+    #[serde(default, skip_serializing_if = "is_default_host_terminal_env_mode")]
+    pub terminal_env_mode: HostTerminalEnvMode,
     #[serde(default, skip_serializing_if = "is_false")]
     pub onboarded: bool,
     pub default_agent: String,
@@ -257,6 +304,7 @@ impl Default for Config {
             hc: "hc".into(),
             hc_session: "default".into(),
             hc_env: BTreeMap::new(),
+            terminal_env_mode: HostTerminalEnvMode::default(),
             onboarded: false,
             default_agent: "developer".into(),
             profiles: vec![

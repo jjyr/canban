@@ -84,7 +84,21 @@ impl Record for ScheduledRun {
     }
 }
 record!(WorkflowRevision, "workflow_revisions", project);
-record!(WorkflowRun, "workflow_runs", card);
+impl Record for WorkflowRun {
+    const TABLE: &'static str = "workflow_runs";
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn project(&self) -> Option<&str> {
+        Some(&self.project_id)
+    }
+    fn card(&self) -> Option<&str> {
+        self.card_id.as_deref().filter(|s| !s.is_empty())
+    }
+    fn state(&self) -> &str {
+        &self.state
+    }
+}
 record!(EventSubscription, "event_subscriptions");
 record!(EventDelivery, "event_deliveries");
 record!(GitHubIssueSnapshot, "github_issues", project);
@@ -92,7 +106,19 @@ record!(ManagedWorktree, "managed_worktrees", project);
 record!(Note, "notes", project);
 record!(NoteRevision, "note_revisions", project);
 record!(NoteEvent, "note_events", project);
-record!(Notice, "notifications", card);
+impl Record for Notice {
+    const TABLE: &'static str = "notifications";
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn project(&self) -> Option<&str> {
+        (!self.project_id.is_empty() && !is_global_project_id(&self.project_id))
+            .then_some(self.project_id.as_str())
+    }
+    fn card(&self) -> Option<&str> {
+        (!self.card_id.is_empty()).then_some(self.card_id.as_str())
+    }
+}
 record!(CardRead, "card_reads", card);
 record!(Artifact, "artifacts", card);
 impl Record for Report {

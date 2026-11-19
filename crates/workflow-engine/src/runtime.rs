@@ -122,20 +122,38 @@ pub fn card_digest(db: Db<'_>, card: &Card) -> String {
     )
 }
 fn record(db: Db<'_>, run: &WorkflowRun, kind: &str, message: &str) -> Result<()> {
-    let card: Card = db.get(&run.card_id)?;
-    log(
-        db,
-        &card,
-        kind,
-        if kind == "workflow.approved" {
-            "user"
-        } else {
-            "system"
-        },
-        message,
-        run.terminal_id.as_deref(),
-        json!({"workflow_run_id":run.id,"step":run.step,"visit":run.visit,"state":run.state}),
-    )
+    let actor = if kind == "workflow.approved" {
+        "user"
+    } else {
+        "system"
+    };
+    let mut data =
+        json!({"workflow_run_id":run.id,"step":run.step,"visit":run.visit,"state":run.state});
+    if let Some(card_id) = &run.card_id {
+        let card: Card = db.get(card_id)?;
+        log(
+            db,
+            &card,
+            kind,
+            actor,
+            message,
+            run.terminal_id.as_deref(),
+            data,
+        )
+    } else {
+        if let Some(tid) = run.terminal_id.as_deref() {
+            data["terminal_id"] = json!(tid);
+        }
+        db.append(canban_timeline::event(
+            &run.project_id,
+            "",
+            kind,
+            actor,
+            message,
+            data,
+        ))?;
+        Ok(())
+    }
 }
 fn next(run: &mut WorkflowRun, to: Option<String>) {
     if let Some(step) = &run.step {
@@ -154,32 +172,46 @@ pub fn stop_card(db: Db<'_>, card: &str, state: &str) -> Result<()> {
     for mut run in db
         .list::<WorkflowRun>()?
         .into_iter()
-        .filter(|r| r.card_id == card && r.active())
+        .filter(|r| r.card_id.as_deref() == Some(card) && r.active())
     {
-        run.state = state.into();
-        run.updated_at = now();
-        for mut entry in db.list::<TerminalEntry>()? {
-            let mut changed = false;
-            if let Some(a) = &mut entry.agent {
-                if a.workflow_run_id.as_deref() == Some(&run.id) && a.state == "queued" {
-                    a.state = "cancelled".into();
-                    changed = true;
-                }
-                if a.pending
-                    .as_ref()
-                    .is_some_and(|p| p.workflow_run_id.as_deref() == Some(&run.id))
-                {
-                    a.pending = None;
-                    changed = true;
-                }
+        stop_active_run(db, &mut run, state)?;
+    }
+    Ok(())
+}
+
+/// Stops a single active `WorkflowRun` (card-bound or cardless) by ID.
+pub fn stop_run(db: Db<'_>, run_id: &str, state: &str) -> Result<()> {
+    let mut run: WorkflowRun = db.get(run_id)?;
+    if !run.active() {
+        return Ok(());
+    }
+    stop_active_run(db, &mut run, state)
+}
+
+fn stop_active_run(db: Db<'_>, run: &mut WorkflowRun, state: &str) -> Result<()> {
+    run.state = state.into();
+    run.updated_at = now();
+    for mut entry in db.list::<TerminalEntry>()? {
+        let mut changed = false;
+        if let Some(a) = &mut entry.agent {
+            if a.workflow_run_id.as_deref() == Some(&run.id) && a.state == "queued" {
+                a.state = "cancelled".into();
+                changed = true;
             }
-            if changed {
-                db.save(&entry)?;
+            if a.pending
+                .as_ref()
+                .is_some_and(|p| p.workflow_run_id.as_deref() == Some(&run.id))
+            {
+                a.pending = None;
+                changed = true;
             }
         }
-        db.save(&run)?;
-        record(db, &run, "workflow.stopped", state)?;
+        if changed {
+            db.save(&entry)?;
+        }
     }
+    db.save(run)?;
+    record(db, run, "workflow.stopped", state)?;
     Ok(())
 }
 
@@ -280,7 +312,7 @@ pub fn start(
     ensure!(
         !db.list::<WorkflowRun>()?
             .iter()
-            .any(|r| r.card_id == card.id && r.active()),
+            .any(|r| r.card_id.as_deref() == Some(card.id.as_str()) && r.active()),
         "Card already has an active workflow"
     );
     let step = if let Some(s) = flow.entries.get(entry) {
@@ -294,7 +326,7 @@ pub fn start(
     let mut run = WorkflowRun {
         id: id(),
         project_id: card.project_id.clone(),
-        card_id: card.id.clone(),
+        card_id: Some(card.id.clone()),
         workflow_id: flow.id.clone(),
         definition_revision: revision,
         definition: flow,
@@ -349,7 +381,7 @@ pub fn start_adopted(
     ensure!(
         !db.list::<WorkflowRun>()?
             .iter()
-            .any(|r| r.card_id == card.id && r.active()),
+            .any(|r| r.card_id.as_deref() == Some(card.id.as_str()) && r.active()),
         "Card already has an active workflow"
     );
     let step = if let Some(s) = flow.entries.get(entry) {
@@ -363,7 +395,7 @@ pub fn start_adopted(
     let mut run = WorkflowRun {
         id: id(),
         project_id: card.project_id.clone(),
-        card_id: card.id.clone(),
+        card_id: Some(card.id.clone()),
         workflow_id: flow.id.clone(),
         definition_revision: revision,
         definition: flow,
@@ -802,7 +834,7 @@ pub fn reported(
         Some(db.get(id)?)
     } else {
         db.list::<WorkflowRun>()?.into_iter().find(|r| {
-            r.card_id == card.id
+            r.card_id.as_deref() == Some(card.id.as_str())
                 && r.active()
                 && matches!(r.state.as_str(), "waiting_agent" | "blocked")
         })
@@ -939,7 +971,7 @@ pub fn advance(
     } else {
         db.list::<WorkflowRun>()?
             .into_iter()
-            .find(|r| r.card_id == card.id && r.active())
+            .find(|r| r.card_id.as_deref() == Some(card.id.as_str()) && r.active())
     };
     if let Some(mut run) = run_opt {
         if !run.active() {
@@ -1675,6 +1707,387 @@ pub fn requeue_delivery(db: Db<'_>, card: &mut Card, run: &mut WorkflowRun) -> R
     Ok(())
 }
 
+fn build_cardless_inputs(db: Db<'_>, event_id: Option<&str>) -> Value {
+    let mut inputs = json!({
+        "cardless": true,
+    });
+    if let Some(eid) = event_id
+        && let Ok(ev) = db.get::<Event>(eid)
+    {
+        inputs["trigger_event"] = json!({
+            "id": ev.id,
+            "kind": ev.kind,
+            "actor": ev.actor,
+            "message": ev.message,
+            "data": ev.data,
+        });
+    }
+    inputs
+}
+
+/// Starts a cardless `WorkflowRun` (`card_id: None`) for a repo-level event or schedule trigger,
+/// advancing through synchronous steps (`Condition`, `Notify`, `Complete`) until it pauses at
+/// `Script` (`waiting_script`) or `Agent` (`waiting_agent`), completes, or fails.
+pub fn start_cardless(
+    db: Db<'_>,
+    project_id: &str,
+    flow: WorkflowDefinition,
+    revision: u64,
+    entry: &str,
+    event: Option<String>,
+) -> Result<WorkflowRun> {
+    let step = if let Some(s) = flow.entries.get(entry) {
+        s.clone()
+    } else if flow.steps.contains_key(entry) {
+        entry.to_owned()
+    } else {
+        bail!("Unknown workflow entry")
+    };
+    let inputs = build_cardless_inputs(db, event.as_deref());
+    let input_digest = canban_context::digest(&serde_json::to_vec(&inputs).unwrap_or_default());
+    let mut run = WorkflowRun {
+        id: id(),
+        project_id: project_id.to_owned(),
+        card_id: None,
+        workflow_id: flow.id.clone(),
+        definition_revision: revision,
+        definition: flow,
+        state: "running".into(),
+        step: Some(step),
+        visit: 1,
+        terminal_id: None,
+        trigger_event_id: event,
+        input_digest,
+        inputs,
+        outputs: BTreeMap::new(),
+        history: Vec::new(),
+        error: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.save(&run)?;
+    record(db, &run, "workflow.started", entry)?;
+    drive_cardless(db, &mut run)?;
+    Ok(run)
+}
+
+/// Advances a cardless `WorkflowRun` through `Script`, `Condition`, `Agent`, `Notify`, and
+/// `Complete` steps. Card-only steps (`Move`, `Approval`, `Deliver`, `Admit`) fail with a clear
+/// error.
+pub fn drive_cardless(db: Db<'_>, run: &mut WorkflowRun) -> Result<()> {
+    ensure!(
+        run.card_id.is_none(),
+        "drive_cardless requires a cardless WorkflowRun"
+    );
+    while run.state == "running" {
+        if let Some(removed) = run.inputs["stop_after_step"].as_str()
+            && run.step.as_deref() != Some(removed)
+        {
+            run.step = None;
+            run.state = "cancelled".into();
+            record(db, run, "workflow.stopped", "Step removed from workflow")?;
+            break;
+        }
+        if run.visit > run.definition.max_steps {
+            run.state = "failed".into();
+            run.error = Some("Workflow execution limit reached".into());
+            break;
+        }
+        let Some(key) = run.step.clone() else {
+            run.state = "completed".into();
+            break;
+        };
+        let step = run
+            .definition
+            .steps
+            .get(&key)
+            .context("Workflow step not found")?
+            .clone();
+        run.history
+            .push(json!({"step":key,"visit":run.visit,"at":now(),"event":"entered"}));
+        match step {
+            WorkflowStep::Script { next: to, .. } => {
+                run.error = None;
+                if let Some(obj) = run.inputs.as_object_mut() {
+                    obj.remove("script_terminal");
+                }
+                run.inputs["pending_next"] = json!(to);
+                run.inputs["script_started_at"] = json!(now());
+                run.state = "waiting_script".into();
+                record(
+                    db,
+                    run,
+                    "workflow.script_started",
+                    &format!("Running script {key}"),
+                )?;
+            }
+            WorkflowStep::Condition {
+                pointer,
+                equals,
+                then,
+                otherwise,
+            } => {
+                let context = json!({"inputs":run.inputs,"outputs":run.outputs,"card":Value::Null});
+                next(
+                    run,
+                    Some(if condition_matches(context.pointer(&pointer), &equals) {
+                        then
+                    } else {
+                        otherwise
+                    }),
+                );
+            }
+            WorkflowStep::Agent {
+                profile,
+                instruction,
+                next: continuation,
+                ..
+            } => {
+                let rework_label = match run.inputs["rework_origin"].as_str() {
+                    Some("script_failure") => "Workflow script failure to fix",
+                    _ => "Feedback for this visit",
+                };
+                let rework_note = run.inputs["rework_feedback"]
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| format!("\n\n{rework_label}:\n{}", s.trim()))
+                    .unwrap_or_default();
+                if run.inputs.get("rework_feedback").is_some() {
+                    run.inputs["rework_feedback"] = Value::Null;
+                    run.inputs["rework_origin"] = Value::Null;
+                }
+                let prior_steps = if run.outputs.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "\n\nEarlier workflow step outputs:\n{}",
+                        serde_json::to_string(&run.outputs)?
+                    )
+                };
+                let trigger_note = trigger_event_note(&run.inputs);
+                let full_instruction =
+                    format!("{instruction}{rework_note}{trigger_note}{prior_steps}");
+                run.inputs["pending_next"] = json!(continuation);
+                run.inputs["pending_agent"] = json!({
+                    "profile": profile,
+                    "instruction": full_instruction,
+                });
+                run.state = "waiting_agent".into();
+                record(
+                    db,
+                    run,
+                    "workflow.agent_queued",
+                    &format!("Queued cardless agent step {key}"),
+                )?;
+            }
+            WorkflowStep::Notify { message, next: to } => {
+                db.save(&canban_notifications::attention(
+                    &run.project_id,
+                    "",
+                    &message,
+                ))?;
+                record(db, run, "workflow.notified", &message)?;
+                next(run, to);
+            }
+            WorkflowStep::Complete => {
+                run.history
+                    .push(json!({"step":key,"visit":run.visit,"event":"completed","at":now()}));
+                run.step = None;
+                run.state = "completed".into();
+            }
+            other => {
+                let kind = match other {
+                    WorkflowStep::Move { .. } => "card.move",
+                    WorkflowStep::Approval { .. } => "approval",
+                    WorkflowStep::Deliver { .. } => "deliver",
+                    WorkflowStep::Admit { .. } => "admit",
+                    _ => "step",
+                };
+                let err = format!(
+                    "Step `{key}` ({kind}) requires a Card and cannot run in a cardless workflow"
+                );
+                run.state = "failed".into();
+                run.error = Some(err.clone());
+                run.updated_at = now();
+                db.save(run)?;
+                record(db, run, "workflow.failed", &err)?;
+                bail!("{err}");
+            }
+        }
+    }
+    run.updated_at = now();
+    db.save(run)?;
+    if run.state == "completed" {
+        record(db, run, "workflow.completed", "Workflow completed")?;
+    }
+    Ok(())
+}
+
+/// Records successful (or `continue_on_error`) completion of the active `Script` step in a
+/// cardless `WorkflowRun`, merges `$CANBAN_ENV` and `$CANBAN_OUTPUT`, and drives forward.
+pub fn complete_cardless_script(
+    db: Db<'_>,
+    run: &mut WorkflowRun,
+    output: Value,
+    exported_env: &BTreeMap<String, String>,
+) -> Result<()> {
+    ensure!(
+        run.card_id.is_none(),
+        "complete_cardless_script requires a cardless WorkflowRun"
+    );
+    ensure!(
+        run.state == "waiting_script",
+        "Workflow is not running a script"
+    );
+    let key = run.step.clone().context("Missing Script step")?;
+    ensure!(
+        matches!(
+            run.definition.steps.get(&key),
+            Some(WorkflowStep::Script { .. })
+        ),
+        "Current step is not a Script step"
+    );
+    merge_env_into_run(run, exported_env);
+    if let Some(obj) = run.inputs.as_object_mut() {
+        obj.remove("script_started_at");
+        obj.remove("script_terminal");
+    }
+    run.outputs.insert(key, output);
+    let to = run.inputs["pending_next"].as_str().map(str::to_owned);
+    next(run, to);
+    drive_cardless(db, run)
+}
+
+/// Records failure of the active `Script` step in a cardless `WorkflowRun`: jumps to `on_failure`
+/// at most once per run when configured, or marks the run `failed` otherwise.
+pub fn fail_cardless_script(
+    db: Db<'_>,
+    run: &mut WorkflowRun,
+    output: Value,
+    exported_env: &BTreeMap<String, String>,
+    summary: &str,
+    detail_feedback: &str,
+) -> Result<()> {
+    ensure!(
+        run.card_id.is_none(),
+        "fail_cardless_script requires a cardless WorkflowRun"
+    );
+    ensure!(
+        run.state == "waiting_script",
+        "Workflow is not running a script"
+    );
+    let key = run.step.clone().context("Missing Script step")?;
+    let on_failure = match run.definition.steps.get(&key) {
+        Some(WorkflowStep::Script { on_failure, .. }) => on_failure.clone(),
+        _ => bail!("Current step is not a Script step"),
+    };
+    merge_env_into_run(run, exported_env);
+    if let Some(obj) = run.inputs.as_object_mut() {
+        obj.remove("script_started_at");
+        obj.remove("script_terminal");
+    }
+    run.history
+        .push(json!({"step":key,"visit":run.visit,"event":"failed","outputs":output,"at":now()}));
+    run.outputs.insert(key.clone(), output.clone());
+    db.append(canban_timeline::event(
+        &run.project_id,
+        "",
+        "workflow.script_failed",
+        "system",
+        summary,
+        json!({
+            "workflow_run_id": run.id,
+            "step": key,
+            "path": output["path"],
+            "exit_code": output["exit_code"],
+            "timed_out": output["timed_out"],
+        }),
+    ))?;
+
+    let mut failures = run
+        .inputs
+        .get("script_failures")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let prior = failures.get(&key).and_then(|v| v.as_u64()).unwrap_or(0);
+    failures.insert(key.clone(), json!(prior + 1));
+    run.inputs["script_failures"] = Value::Object(failures);
+
+    if let Some(target) = on_failure
+        && prior == 0
+    {
+        run.inputs["rework_origin"] = json!("script_failure");
+        run.inputs["rework_feedback"] = json!(detail_feedback);
+        run.step = Some(target);
+        run.terminal_id = None;
+        run.error = None;
+        run.state = "running".into();
+        run.visit += 1;
+        run.updated_at = now();
+        return drive_cardless(db, run);
+    }
+
+    run.state = "failed".into();
+    run.error = Some(summary.into());
+    run.inputs["rework_feedback"] = json!(detail_feedback);
+    run.updated_at = now();
+    db.save(run)?;
+    record(db, run, "workflow.failed", summary)?;
+    Ok(())
+}
+
+/// Records completion (or non-completed termination) of the active `Agent` step in a cardless
+/// `WorkflowRun` and drives forward when `report_state == "completed"`.
+pub fn complete_cardless_agent(
+    db: Db<'_>,
+    run: &mut WorkflowRun,
+    output: Value,
+    report_state: &str,
+) -> Result<()> {
+    ensure!(
+        run.card_id.is_none(),
+        "complete_cardless_agent requires a cardless WorkflowRun"
+    );
+    ensure!(
+        matches!(run.state.as_str(), "waiting_agent" | "running"),
+        "Workflow is not awaiting an Agent step"
+    );
+    let key = run.step.clone().context("Missing Agent step")?;
+    ensure!(
+        matches!(
+            run.definition.steps.get(&key),
+            Some(WorkflowStep::Agent { .. })
+        ),
+        "Current step is not an Agent step"
+    );
+    if let Some(obj) = run.inputs.as_object_mut() {
+        obj.remove("pending_agent");
+    }
+    run.outputs.insert(key.clone(), output.clone());
+    if report_state != "completed" {
+        run.history.push(json!({
+            "step": key,
+            "visit": run.visit,
+            "event": report_state,
+            "outputs": output,
+            "at": now()
+        }));
+        run.state = if report_state == "backlog" {
+            "cancelled".into()
+        } else {
+            report_state.into()
+        };
+        run.error = output["message"].as_str().map(str::to_owned);
+        run.updated_at = now();
+        db.save(run)?;
+        return Ok(());
+    }
+    let to = run.inputs["pending_next"].as_str().map(str::to_owned);
+    next(run, to);
+    drive_cardless(db, run)
+}
+
 pub fn initialize(db: Db<'_>, config: &Config) -> Result<()> {
     let _ = (db, config);
     Ok(())
@@ -1682,10 +2095,12 @@ pub fn initialize(db: Db<'_>, config: &Config) -> Result<()> {
 
 pub fn reconcile(db: Db<'_>) -> Result<()> {
     for mut run in db.list::<WorkflowRun>()?.into_iter().filter(|r| r.active()) {
-        let card: Card = db.get(&run.card_id)?;
-        if !card.active() {
-            stop_card(db, &card.id, "cancelled")?;
-            continue;
+        if let Some(card_id) = &run.card_id {
+            let card: Card = db.get(card_id)?;
+            if !card.active() {
+                stop_card(db, &card.id, "cancelled")?;
+                continue;
+            }
         }
         if let Some(id) = &run.terminal_id
             && let Ok(entry) = db.get::<TerminalEntry>(id)
@@ -1722,4 +2137,228 @@ pub fn reconcile(db: Db<'_>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod cardless_runtime_tests {
+    use super::*;
+    use canban_storage::Store;
+
+    fn temp_store() -> (Store, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("canban-wf-cardless-{}", id()));
+        let store = Store::open(&dir).unwrap();
+        (store, dir)
+    }
+
+    fn seed_project(store: &mut Store) -> Project {
+        let project = Project {
+            id: "proj-1".into(),
+            name: "Demo".into(),
+            directory: "/tmp/demo".into(),
+            location: None,
+            github: None,
+            detected_github: None,
+            github_disconnected: false,
+            delivery_mode: DeliveryMode::default(),
+            agent_overrides: BTreeMap::new(),
+            tags: Vec::new(),
+            workflow: Workflow::default(),
+            target_branch: None,
+            created_at: now(),
+        };
+        store.write(|db| db.save(&project)).unwrap();
+        project
+    }
+
+    #[test]
+    fn cardless_script_condition_agent_notify_complete_pipeline_works() {
+        let (mut store, dir) = temp_store();
+        let project = seed_project(&mut store);
+        let yaml = r#"schema: 11
+id: issue:reply
+name: Issue Auto-Reply
+on:
+  comment:
+    event: github.issue.comment_created
+    start_at: filter
+    cardless: true
+    match:
+      exclude_self: true
+steps:
+  - id: filter
+    run: echo ok
+    next: check
+  - id: check
+    uses: condition
+    with:
+      pointer: /outputs/filter/matched
+      equals: true
+      then: reply
+      otherwise: skip_notify
+  - id: reply
+    uses: agent
+    with:
+      profile: developer
+      instruction: Reply to issue comment
+    next: done
+  - id: skip_notify
+    uses: notify
+    with:
+      message: Skipped non-matching comment
+    next: done
+  - id: done
+    uses: complete
+"#;
+        let flow = crate::source::parse(yaml).unwrap().compile().unwrap();
+
+        // Trigger event saved in DB
+        let ev = store
+            .write(|db| {
+                db.append(canban_timeline::event(
+                    "",
+                    "",
+                    "github.issue.comment_created",
+                    "github:alice",
+                    "help!",
+                    json!({"repository": "org/repo", "number": 42}),
+                ))
+            })
+            .unwrap();
+
+        // 1. Matched branch: script -> condition(true) -> agent -> complete
+        let mut run = store
+            .write(|db| {
+                start_cardless(
+                    db,
+                    &project.id,
+                    flow.clone(),
+                    1,
+                    "comment",
+                    Some(ev.id.clone()),
+                )
+            })
+            .unwrap();
+        assert!(run.is_cardless());
+        assert_eq!(run.state, "waiting_script");
+        assert_eq!(run.step.as_deref(), Some("filter"));
+        assert_eq!(run.trigger_event_id.as_deref(), Some(ev.id.as_str()));
+        assert_eq!(run.inputs["trigger_event"]["data"]["number"], 42);
+
+        // Reload from SQLite to verify NULL card_id roundtrip
+        let reloaded: WorkflowRun = store.db().get(&run.id).unwrap();
+        assert_eq!(reloaded.card_id, None);
+        assert_eq!(reloaded.state, "waiting_script");
+
+        // Reconcile must not fail on cardless run
+        store.write(reconcile).unwrap();
+
+        // Complete script with matched=true -> Condition routes to `reply` (Agent)
+        let mut exported_env = BTreeMap::new();
+        exported_env.insert("ISSUE_NUM".into(), "42".into());
+        store
+            .write(|db| {
+                complete_cardless_script(db, &mut run, json!({"matched": true}), &exported_env)
+            })
+            .unwrap();
+        assert_eq!(run.state, "waiting_agent");
+        assert_eq!(run.step.as_deref(), Some("reply"));
+        assert_eq!(run.inputs["env"]["ISSUE_NUM"], "42");
+        assert_eq!(run.inputs["pending_agent"]["profile"], "developer");
+
+        // Complete agent -> Complete
+        store
+            .write(|db| complete_cardless_agent(db, &mut run, json!({"ok": true}), "completed"))
+            .unwrap();
+        assert_eq!(run.state, "completed");
+        assert!(!run.active());
+
+        // 2. Non-matched branch: script -> condition(false) -> notify -> complete
+        let mut run2 = store
+            .write(|db| start_cardless(db, &project.id, flow.clone(), 1, "comment", None))
+            .unwrap();
+        store
+            .write(|db| {
+                complete_cardless_script(db, &mut run2, json!({"matched": false}), &BTreeMap::new())
+            })
+            .unwrap();
+        assert_eq!(run2.state, "completed");
+        let notices: Vec<Notice> = store.db().list().unwrap();
+        assert!(
+            notices
+                .iter()
+                .any(|n| n.card_id.is_empty() && n.message == "Skipped non-matching comment")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cardless_run_rejects_card_only_steps_with_clear_error() {
+        let (mut store, dir) = temp_store();
+        let project = seed_project(&mut store);
+        for (name, step) in [
+            (
+                "card.move",
+                WorkflowStep::Move {
+                    column: "develop".into(),
+                    next: None,
+                },
+            ),
+            (
+                "approval",
+                WorkflowStep::Approval {
+                    title: "Approve".into(),
+                    next: None,
+                    rework: None,
+                },
+            ),
+            (
+                "deliver",
+                WorkflowStep::Deliver {
+                    profile: None,
+                    target_branch: None,
+                    strategy: MergeStrategy::Rebase,
+                    sync_upstream: true,
+                    batch_size: DEFAULT_MERGE_BATCH_SIZE,
+                    test_command: None,
+                    next: None,
+                    rework: None,
+                    max_conflict_attempts: DEFAULT_MAX_CONFLICT_ATTEMPTS,
+                },
+            ),
+            (
+                "admit",
+                WorkflowStep::Admit {
+                    agent_slot: true,
+                    max_ready: None,
+                    next: None,
+                },
+            ),
+        ] {
+            let mut entries = BTreeMap::new();
+            entries.insert("main".into(), "s1".into());
+            let mut steps = BTreeMap::new();
+            steps.insert("s1".into(), step);
+            let flow = WorkflowDefinition {
+                id: format!("wf-{name}"),
+                name: "Test".into(),
+                scope: WorkflowScope::Project,
+                columns: Vec::new(),
+                entries,
+                steps,
+                env: BTreeMap::new(),
+                workspace: WorkspaceSettings::default(),
+                max_steps: 20,
+            };
+            let err = store
+                .write(|db| start_cardless(db, &project.id, flow, 1, "main", None))
+                .unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains(name) && msg.contains("requires a Card"),
+                "unexpected error for {name}: {msg}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

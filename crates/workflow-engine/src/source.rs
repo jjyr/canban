@@ -2566,6 +2566,60 @@ pub fn column_summary(
     column_automation(column, files, revisions, &[]).map(|a| a.label)
 }
 
+fn validate_cardless_event_steps(
+    flow: &WorkflowDefinition,
+    rule_id: &str,
+    start_id: &str,
+) -> Result<()> {
+    let mut stack = vec![start_id];
+    let mut seen = BTreeSet::new();
+    while let Some(step_id) = stack.pop() {
+        if !seen.insert(step_id) {
+            continue;
+        }
+        let Some(step) = flow.steps.get(step_id) else {
+            continue;
+        };
+        match step {
+            WorkflowStep::Complete => {}
+            WorkflowStep::Script {
+                next, on_failure, ..
+            } => {
+                if let Some(to) = next {
+                    stack.push(to.as_str());
+                }
+                if let Some(fail_to) = on_failure {
+                    stack.push(fail_to.as_str());
+                }
+            }
+            WorkflowStep::Condition {
+                then, otherwise, ..
+            } => {
+                stack.push(then.as_str());
+                stack.push(otherwise.as_str());
+            }
+            WorkflowStep::Agent { next, .. } | WorkflowStep::Notify { next, .. } => {
+                if let Some(to) = next {
+                    stack.push(to.as_str());
+                }
+            }
+            WorkflowStep::Move { .. } => {
+                bail!("Cardless rule `{rule_id}` cannot execute `card.move` step `{step_id}`");
+            }
+            WorkflowStep::Approval { .. } => {
+                bail!("Cardless rule `{rule_id}` cannot execute `approval` step `{step_id}`");
+            }
+            WorkflowStep::Deliver { .. } => {
+                bail!("Cardless rule `{rule_id}` cannot execute `deliver` step `{step_id}`");
+            }
+            WorkflowStep::Admit { .. } => {
+                bail!("Cardless rule `{rule_id}` cannot execute `admit` step `{step_id}`");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validates scheduled `on:` rules against the compiled `WorkflowDefinition` and Board columns.
 pub fn validate_schedules(
     doc: &Document,
@@ -2598,6 +2652,12 @@ pub fn validate_schedules(
                 "Rule `{rule_id}` ({}) cannot define schedule-only fields (`cron`, `timezone`, `overlap`, `card`)",
                 rule.event
             );
+            if rule.cardless {
+                let start_id = flow.entries.get(rule_id).with_context(|| {
+                    format!("Cardless rule `{rule_id}` is missing an entry step")
+                })?;
+                validate_cardless_event_steps(flow, rule_id, start_id)?;
+            }
             continue;
         }
         let cron = rule
@@ -3527,5 +3587,71 @@ steps:
         let ok_doc = parse(valid_card).unwrap();
         let ok_flow = ok_doc.compile().unwrap();
         validate_schedules(&ok_doc, &ok_flow, &["backlog".into(), "develop".into()]).unwrap();
+    }
+
+    #[test]
+    fn cardless_event_rule_allows_script_condition_agent_and_rejects_card_move() {
+        let valid = r#"schema: 11
+id: issue:reply
+name: Issue Auto-Reply
+on:
+  comment:
+    event: github.issue.comment_created
+    start_at: filter
+    cardless: true
+    match:
+      exclude_self: true
+steps:
+  - id: filter
+    run: echo "matched=true" >> "$CANBAN_OUTPUT"
+    next: check
+  - id: check
+    uses: condition
+    with:
+      pointer: /outputs/filter/matched
+      equals: true
+      then: reply
+      otherwise: done
+  - id: reply
+    uses: agent
+    with:
+      profile: developer
+      instruction: Draft reply
+    next: publish
+  - id: publish
+    run: echo publish
+    enabled: false
+    next: done
+  - id: done
+    uses: complete
+"#;
+        let doc = parse(valid).unwrap();
+        assert!(doc.on["comment"].cardless);
+        assert!(doc.on["comment"].selector.exclude_self);
+        let flow = doc.compile().unwrap();
+        // Disabled `publish` script step is skipped at compile time; `reply` points directly to `done`.
+        assert!(!flow.steps.contains_key("publish"));
+        assert_eq!(flow.steps["reply"].next(), Some("done"));
+        validate_schedules(&doc, &flow, &["backlog".into(), "develop".into()]).unwrap();
+
+        let invalid = r#"schema: 11
+id: issue:bad
+name: Invalid Cardless
+on:
+  comment:
+    event: github.issue.comment_created
+    start_at: move_card
+    cardless: true
+steps:
+  - id: move_card
+    uses: card.move
+    with:
+      column: develop
+"#;
+        let bad_doc = parse(invalid).unwrap();
+        let bad_flow = bad_doc.compile().unwrap();
+        let err = validate_schedules(&bad_doc, &bad_flow, &["backlog".into(), "develop".into()])
+            .unwrap_err();
+        assert!(err.to_string().contains("card.move"));
     }
 }

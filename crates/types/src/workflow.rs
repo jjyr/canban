@@ -222,11 +222,20 @@ pub struct WorkflowRevision {
     pub definition: WorkflowDefinition,
     pub created_at: u64,
 }
+fn deserialize_optional_nonempty_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    Ok(raw.filter(|s| !s.trim().is_empty()))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct WorkflowRun {
     pub id: String,
     pub project_id: String,
-    pub card_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_nonempty_string")]
+    pub card_id: Option<String>,
     pub workflow_id: String,
     pub definition_revision: u64,
     pub definition: WorkflowDefinition,
@@ -235,6 +244,7 @@ pub struct WorkflowRun {
     pub visit: u32,
     #[serde(default)]
     pub terminal_id: Option<String>,
+    #[serde(default)]
     pub trigger_event_id: Option<String>,
     pub input_digest: String,
     pub inputs: Value,
@@ -250,6 +260,11 @@ impl WorkflowRun {
             self.state.as_str(),
             "completed" | "cancelled" | "superseded"
         )
+    }
+
+    /// True when this run executes without a bound Board Card (`card_id` is `None`).
+    pub fn is_cardless(&self) -> bool {
+        self.card_id.is_none()
     }
 
     /// True when the run's current step is a `Script` step.
@@ -355,8 +370,9 @@ pub fn project_merge_queue<'a>(
         .enumerate()
         .filter(|(_, r)| {
             r.project_id == project_id
-                && cards_by_id
-                    .get(r.card_id.as_str())
+                && r.card_id
+                    .as_deref()
+                    .and_then(|cid| cards_by_id.get(cid))
                     .is_some_and(|c| r.in_merge_queue(c))
         })
         .collect();
@@ -375,7 +391,9 @@ impl Snapshot {
         let card = self.cards.iter().find(|c| c.id == card_id)?;
         let queue = self.merge_queue(&card.project_id);
         let head = *queue.first()?;
-        let pos = queue.iter().position(|r| r.card_id == card_id)?;
+        let pos = queue
+            .iter()
+            .position(|r| r.card_id.as_deref() == Some(card_id))?;
         Some((pos + 1, queue.len(), head))
     }
 
@@ -434,6 +452,9 @@ pub struct EventSelector {
     pub reply_to: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub include_initial: bool,
+    /// When `true`, ignore events marked `data.self_action == true`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub exclude_self: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -725,6 +746,9 @@ pub struct WorkflowRule {
     pub overlap: ScheduleOverlap,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub card: Option<ScheduleCardConfig>,
+    /// When `true`, matching non-schedule events start a cardless `WorkflowRun` (`card_id: None`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cardless: bool,
     #[serde(default = "enabled_rule")]
     pub enabled: bool,
 }
@@ -738,6 +762,7 @@ impl Default for WorkflowRule {
             timezone: None,
             overlap: ScheduleOverlap::default(),
             card: None,
+            cardless: false,
             enabled: true,
         }
     }
@@ -745,6 +770,10 @@ impl Default for WorkflowRule {
 impl WorkflowRule {
     pub fn is_schedule(&self) -> bool {
         self.event == "schedule" || self.cron.is_some()
+    }
+
+    pub fn is_github_event(&self) -> bool {
+        self.event.starts_with("github.")
     }
 }
 fn enabled_rule() -> bool {
@@ -860,4 +889,80 @@ fn is_true(v: &bool) -> bool {
 
 fn is_false(v: &bool) -> bool {
     !*v
+}
+
+#[cfg(test)]
+mod cardless_and_settings_tests {
+    use super::*;
+    use crate::{Config, HostTerminalEnvMode};
+    use serde_json::json;
+
+    #[test]
+    fn workflow_run_card_id_deserializes_empty_and_null_as_none() {
+        let base = json!({
+            "id": "run-1",
+            "project_id": "proj-1",
+            "workflow_id": "wf-1",
+            "definition_revision": 1,
+            "definition": {
+                "id": "wf-1",
+                "name": "Test",
+                "entries": {"main": "done"},
+                "steps": {"done": {"type": "complete"}}
+            },
+            "state": "running",
+            "step": "done",
+            "visit": 1,
+            "input_digest": "abc",
+            "inputs": {},
+            "outputs": {},
+            "history": [],
+            "error": null,
+            "created_at": 1,
+            "updated_at": 1
+        });
+        for (card_val, expected) in [
+            (Some(json!("")), None),
+            (Some(json!("   ")), None),
+            (Some(json!(null)), None),
+            (None, None),
+            (Some(json!("card-42")), Some("card-42")),
+        ] {
+            let mut obj = base.clone();
+            if let Some(v) = card_val {
+                obj["card_id"] = v;
+            }
+            let run: WorkflowRun = serde_json::from_value(obj).unwrap();
+            assert_eq!(run.card_id.as_deref(), expected);
+            assert_eq!(run.is_cardless(), expected.is_none());
+        }
+    }
+
+    #[test]
+    fn host_terminal_env_mode_defaults_to_inherit_and_roundtrips() {
+        let cfg = Config::default();
+        assert_eq!(cfg.terminal_env_mode, HostTerminalEnvMode::Inherit);
+        let serialized = serde_json::to_value(&cfg).unwrap();
+        assert!(
+            serialized.get("terminal_env_mode").is_none(),
+            "default inherit mode is omitted in JSON"
+        );
+        let restored: Config = serde_json::from_value(serialized).unwrap();
+        assert_eq!(restored.terminal_env_mode, HostTerminalEnvMode::Inherit);
+
+        let mut minimal = cfg;
+        minimal.terminal_env_mode = HostTerminalEnvMode::Minimal;
+        let v = serde_json::to_value(&minimal).unwrap();
+        assert_eq!(v["terminal_env_mode"], "minimal");
+        let restored: Config = serde_json::from_value(v).unwrap();
+        assert_eq!(restored.terminal_env_mode, HostTerminalEnvMode::Minimal);
+        assert_eq!(
+            HostTerminalEnvMode::parse("minimal"),
+            Some(HostTerminalEnvMode::Minimal)
+        );
+        assert_eq!(
+            HostTerminalEnvMode::parse("INHERIT"),
+            Some(HostTerminalEnvMode::Inherit)
+        );
+    }
 }

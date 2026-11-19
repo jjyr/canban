@@ -261,18 +261,63 @@ pub fn validate_definition(
     Ok(())
 }
 
-pub fn matches(selector: &EventSelector, event: &Event) -> bool {
-    let data = &event.data;
-    if selector.project_id.as_deref().is_some_and(|v| {
-        v != event.project_id
-            && !data["related_cards"]
-                .as_array()
-                .is_some_and(|a| a.iter().any(|r| r["project_id"] == v))
-    }) || selector.actor.as_deref().is_some_and(|v| v != event.actor)
-        || selector
+/// Compiles a `WorkflowRule` into its runtime `EventSelector` for `scope_id`.
+/// For `github.*` or `cardless` rules without an explicit `match.repository`, binds
+/// `project_repository` (when present) so unbound repo-level GitHub events match without
+/// requiring `event.project_id` to be stamped on canonical remote facts.
+pub fn compile_rule_selector(
+    scope_id: &str,
+    rule: &WorkflowRule,
+    project_repository: Option<&str>,
+) -> EventSelector {
+    let mut selector = rule.selector.clone();
+    selector.project_id = Some(scope_id.to_owned());
+    selector.types = vec![rule.event.clone()];
+    if matches!(
+        rule.event.as_str(),
+        "card.column_entered" | "card.column_left"
+    ) && selector.origin.is_none()
+    {
+        selector.origin = Some("local".into());
+    }
+    if (rule.is_github_event() || rule.cardless)
+        && selector
             .repository
             .as_deref()
-            .is_some_and(|v| data["repository"].as_str() != Some(v))
+            .is_none_or(|r| r.trim().is_empty())
+    {
+        selector.repository = project_repository
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .map(str::to_owned);
+    }
+    selector
+}
+
+pub fn matches(selector: &EventSelector, event: &Event) -> bool {
+    let data = &event.data;
+    if selector.exclude_self && data["self_action"].as_bool() == Some(true) {
+        return false;
+    }
+    let has_related_cards = data["related_cards"]
+        .as_array()
+        .is_some_and(|a| !a.is_empty());
+    let repo_matches = selector.repository.as_deref().is_some_and(|v| {
+        data["repository"]
+            .as_str()
+            .is_some_and(|r| r.eq_ignore_ascii_case(v))
+    });
+    let project_mismatch = selector.project_id.as_deref().is_some_and(|v| {
+        let direct_or_related = v == event.project_id
+            || data["related_cards"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|r| r["project_id"] == v));
+        let unbound_repo_match = event.project_id.is_empty() && !has_related_cards && repo_matches;
+        !direct_or_related && !unbound_repo_match
+    });
+    if project_mismatch
+        || selector.actor.as_deref().is_some_and(|v| v != event.actor)
+        || (selector.repository.is_some() && !repo_matches)
         || selector
             .subject
             .as_deref()
@@ -437,5 +482,100 @@ mod column_selector_tests {
                 assert_eq!(matches(&selector, &event), column == "develop");
             }
         }
+    }
+
+    #[test]
+    fn unbound_repo_events_match_project_subscription_and_respect_exclude_self() {
+        let rule = WorkflowRule {
+            event: "github.issue.comment_created".into(),
+            start_at: "script:filter".into(),
+            cardless: true,
+            selector: EventSelector {
+                exclude_self: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let selector = compile_rule_selector("proj-1", &rule, Some("Org/Repo"));
+        assert_eq!(selector.project_id.as_deref(), Some("proj-1"));
+        assert_eq!(selector.repository.as_deref(), Some("Org/Repo"));
+        assert!(selector.exclude_self);
+
+        let external_comment = canban_timeline::event(
+            "",
+            "",
+            "github.issue.comment_created",
+            "github:alice",
+            "new comment",
+            json!({
+                "repository": "org/repo",
+                "related_cards": [],
+                "self_action": false
+            }),
+        );
+        assert!(matches(&selector, &external_comment));
+
+        let self_comment = canban_timeline::event(
+            "",
+            "",
+            "github.issue.comment_created",
+            "github:me",
+            "my comment",
+            json!({
+                "repository": "org/repo",
+                "related_cards": [],
+                "self_action": true
+            }),
+        );
+        assert!(!matches(&selector, &self_comment));
+
+        let other_repo = canban_timeline::event(
+            "",
+            "",
+            "github.issue.comment_created",
+            "github:alice",
+            "other repo",
+            json!({
+                "repository": "org/other",
+                "related_cards": [],
+                "self_action": false
+            }),
+        );
+        assert!(!matches(&selector, &other_repo));
+
+        let other_project_bound = canban_timeline::event(
+            "proj-2",
+            "card-9",
+            "github.issue.comment_created",
+            "github:alice",
+            "bound elsewhere",
+            json!({
+                "repository": "org/repo",
+                "self_action": false
+            }),
+        );
+        assert!(!matches(&selector, &other_project_bound));
+
+        let other_project_related = canban_timeline::event(
+            "",
+            "",
+            "github.issue.comment_created",
+            "github:alice",
+            "related elsewhere",
+            json!({
+                "repository": "org/repo",
+                "related_cards": [{"project_id": "proj-2", "card_id": "card-9"}],
+                "self_action": false
+            }),
+        );
+        assert!(!matches(&selector, &other_project_related));
+
+        // Without repository bound on the selector, unbound events do NOT match a project selector.
+        let no_repo_selector = EventSelector {
+            project_id: Some("proj-1".into()),
+            types: vec!["github.issue.comment_created".into()],
+            ..Default::default()
+        };
+        assert!(!matches(&no_repo_selector, &external_comment));
     }
 }
