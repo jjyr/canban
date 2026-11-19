@@ -2,13 +2,16 @@
 """Atomically install the packaged Canban desktop bundle (/Applications/Canban.app on macOS, ~/.local/opt/canban on Linux)."""
 from pathlib import Path
 import argparse
+import fcntl
 import json
 import os
 import plistlib
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import time
 
 
 def format_desktop_exec(executable: Path) -> str:
@@ -41,6 +44,172 @@ def atomic_write_bytes(path: Path, data: bytes, mode: int = 0o644):
         staged = Path(stream.name)
     os.chmod(staged, mode)
     os.replace(staged, path)
+
+
+def rpc_unix(sock_path: Path, method: str, params: dict, timeout: float = 3.0) -> dict:
+    payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}) + "\n"
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+        conn.settimeout(timeout)
+        conn.connect(str(sock_path))
+        conn.sendall(payload.encode("utf-8"))
+        chunks = []
+        while True:
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if b"\n" in chunk:
+                break
+    raw = b"".join(chunks).split(b"\n", 1)[0].decode("utf-8")
+    resp = json.loads(raw)
+    if "error" in resp:
+        raise RuntimeError(f"RPC {method}: {resp['error']}")
+    return resp.get("result") or {}
+
+
+def service_lock_free(home: Path) -> bool:
+    lock_path = home / "server.lock"
+    if not lock_path.exists():
+        return True
+    try:
+        with open(lock_path, "r+b") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            return True
+    except OSError:
+        return False
+
+
+def service_file_matches_home(unit_path: Path, home: Path) -> bool:
+    if not unit_path.is_file():
+        return False
+    try:
+        body = unit_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    resolved = home.resolve()
+    return str(home) in body or str(resolved) in body
+
+
+def restart_running_daemon(installed_cli: Path, home: Path, platform_kind: str) -> None:
+    home = home.expanduser()
+    if platform_kind == "darwin":
+        plist_path = Path.home() / "Library/LaunchAgents/com.canban.daemon.plist"
+        if service_file_matches_home(plist_path, home):
+            listed = subprocess.run(
+                ["launchctl", "list", "com.canban.daemon"],
+                check=False,
+                capture_output=True,
+            )
+            if listed.returncode == 0:
+                uid = str(os.getuid())
+                res = subprocess.run(
+                    ["launchctl", "kickstart", "-k", f"gui/{uid}/com.canban.daemon"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                if res.returncode == 0:
+                    print(
+                        f"Restarted launchd service com.canban.daemon for {home}",
+                        file=sys.stderr,
+                    )
+                    return
+    elif platform_kind == "linux":
+        xdg_config = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
+        unit_path = xdg_config / "systemd/user/canban.service"
+        if service_file_matches_home(unit_path, home):
+            active = subprocess.run(
+                ["systemctl", "--user", "is-active", "--quiet", "canban.service"],
+                check=False,
+                capture_output=True,
+            )
+            if active.returncode == 0:
+                res = subprocess.run(
+                    ["systemctl", "--user", "restart", "canban.service"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                if res.returncode == 0:
+                    print(
+                        f"Restarted systemd user service canban.service for {home}",
+                        file=sys.stderr,
+                    )
+                    return
+
+    sock_path = home / "app.sock"
+    if not sock_path.exists():
+        return
+    try:
+        ping = rpc_unix(sock_path, "app.ping", {}, timeout=3.0)
+    except (OSError, ValueError, RuntimeError):
+        return
+
+    old_pid = ping.get("pid") if isinstance(ping.get("pid"), int) else None
+    shutdown_params = {"expected_pid": old_pid} if old_pid is not None else {}
+    try:
+        rpc_unix(sock_path, "app.shutdown", shutdown_params, timeout=5.0)
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(
+            f"Warning: could not gracefully shut down Canban AppServer at {home}: {exc}",
+            file=sys.stderr,
+        )
+        return
+
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        sock_down = False
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                probe.settimeout(0.2)
+                probe.connect(str(sock_path))
+        except OSError:
+            sock_down = True
+        if sock_down and service_lock_free(home):
+            break
+        time.sleep(0.05)
+    else:
+        print(
+            f"Warning: timed out waiting for old Canban AppServer (pid {old_pid}) at {home} to stop",
+            file=sys.stderr,
+        )
+        return
+
+    log_path = home / "server.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "ab") as log_file:
+        subprocess.Popen(
+            [str(installed_cli), "--home", str(home), "serve"],
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=log_file,
+            start_new_session=True,
+        )
+
+    ready_deadline = time.monotonic() + 10.0
+    new_pid = None
+    while time.monotonic() < ready_deadline:
+        try:
+            ready = rpc_unix(sock_path, "app.ping", {}, timeout=1.0)
+            cand_pid = ready.get("pid") if isinstance(ready.get("pid"), int) else None
+            if old_pid is None or cand_pid != old_pid:
+                new_pid = cand_pid
+                break
+        except (OSError, ValueError, RuntimeError):
+            pass
+        time.sleep(0.05)
+
+    if new_pid is not None:
+        print(
+            f"Restarted Canban AppServer at {home} (pid {old_pid} -> {new_pid})",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"Started replacement Canban AppServer at {home} (still initializing)",
+            file=sys.stderr,
+        )
 
 
 platform_override = os.environ.get("CANBAN_PACKAGE_PLATFORM", "").strip()
@@ -87,10 +256,26 @@ parser.add_argument(
     default=None,
     help="XDG data directory for .desktop and icons on Linux (defaults to ~/.local/share or <prefix>/share when --dest is customized)",
 )
+parser.add_argument(
+    "--home",
+    type=Path,
+    default=None,
+    help="Canban home directory whose running AppServer should be restarted (defaults to ~/.canban when installing to the default destination)",
+)
+parser.add_argument(
+    "--no-restart",
+    action="store_true",
+    help="Do not restart an already-running Canban AppServer after installing",
+)
 args = parser.parse_args()
 
 custom_dest = args.dest is not None or bool(env_dest)
 dest_arg = args.dest if args.dest is not None else default_dest
+restart_home = (
+    None
+    if args.no_restart
+    else (args.home if args.home is not None else (None if custom_dest else Path.home() / ".canban"))
+)
 
 if platform_kind == "darwin":
     source = args.source.resolve()
@@ -156,6 +341,9 @@ if platform_kind == "darwin":
             raise
     finally:
         shutil.rmtree(staging_root, ignore_errors=True)
+
+    if restart_home is not None:
+        restart_running_daemon(dest / "Contents/MacOS/canban", restart_home, platform_kind)
 
     print(dest)
 elif platform_kind == "linux":
@@ -265,6 +453,9 @@ elif platform_kind == "linux":
         update_icons = shutil.which("gtk-update-icon-cache")
         if update_icons:
             subprocess.run([update_icons, "-f", "-t", str(xdg_data_home / "icons/hicolor")], check=False, capture_output=True)
+
+    if restart_home is not None:
+        restart_running_daemon(dest / "bin/canban", restart_home, platform_kind)
 
     print(dest)
 else:

@@ -5,9 +5,11 @@ import json
 import os
 import plistlib
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 REPO = Path(__file__).resolve().parents[1]
@@ -371,6 +373,146 @@ class LinuxPackaging(unittest.TestCase):
         )
         self.assertNotEqual(bad.returncode, 0)
         self.assertFalse(bad_dest.exists())
+
+    def test_install_app_restarts_running_standalone_daemon_and_respects_no_restart(self):
+        fake_cli_body = f"""#!{sys.executable}
+import json, os, socket, sys
+from pathlib import Path
+
+args = sys.argv[1:]
+if "--home" in args and "serve" in args:
+    home = Path(args[args.index("--home") + 1])
+    home.mkdir(parents=True, exist_ok=True)
+    sock_path = home / "app.sock"
+    sock_path.unlink(missing_ok=True)
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(str(sock_path))
+    srv.listen(8)
+    try:
+        while True:
+            conn, _ = srv.accept()
+            with conn:
+                raw = conn.recv(65536).split(b"\\n", 1)[0].decode("utf-8")
+                req = json.loads(raw)
+                method = req.get("method")
+                if method == "app.ping":
+                    resp = {{"jsonrpc": "2.0", "id": req.get("id", 1), "result": {{"pid": os.getpid()}}}}
+                    conn.sendall((json.dumps(resp) + "\\n").encode("utf-8"))
+                elif method == "app.shutdown":
+                    expected = (req.get("params") or {{}}).get("expected_pid")
+                    if expected is not None and expected != os.getpid():
+                        resp = {{"jsonrpc": "2.0", "id": req.get("id", 1), "error": {{"message": "pid mismatch"}}}}
+                        conn.sendall((json.dumps(resp) + "\\n").encode("utf-8"))
+                        continue
+                    resp = {{"jsonrpc": "2.0", "id": req.get("id", 1), "result": {{"stopping": True}}}}
+                    conn.sendall((json.dumps(resp) + "\\n").encode("utf-8"))
+                    break
+    finally:
+        srv.close()
+        sock_path.unlink(missing_ok=True)
+"""
+        cli_src = self.root / "target/release/canban"
+        cli_src.write_text(fake_cli_body)
+        cli_src.chmod(0o755)
+        self.package("--release")
+
+        short_home_dir = tempfile.TemporaryDirectory(prefix="cb-inst-", dir="/tmp")
+        self.addCleanup(short_home_dir.cleanup)
+        home = Path(short_home_dir.name)
+        sock_path = home / "app.sock"
+
+        def ping_pid():
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+                conn.settimeout(2.0)
+                conn.connect(str(sock_path))
+                conn.sendall(b'{"jsonrpc":"2.0","id":1,"method":"app.ping","params":{}}\n')
+                raw = conn.recv(65536).split(b"\n", 1)[0].decode("utf-8")
+                return json.loads(raw)["result"]["pid"]
+
+        def shutdown_if_running():
+            if not sock_path.exists():
+                return
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+                    conn.settimeout(2.0)
+                    conn.connect(str(sock_path))
+                    conn.sendall(b'{"jsonrpc":"2.0","id":1,"method":"app.shutdown","params":{}}\n')
+                    conn.recv(65536)
+            except OSError:
+                pass
+
+        self.addCleanup(shutdown_if_running)
+
+        prefix = self.root / "isolated-restart"
+        dest = prefix / "opt/canban"
+
+        # 1. No daemon running: install must not spawn one.
+        subprocess.run(
+            [
+                sys.executable,
+                str(self.root / "scripts/install-app.py"),
+                "--dest",
+                str(dest),
+                "--home",
+                str(home),
+            ],
+            env=self.linux_env(),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertFalse(sock_path.exists())
+
+        # 2. Start a standalone daemon; install with --home must restart it to a new PID.
+        old_proc = subprocess.Popen(
+            [str(dest / "bin/canban"), "--home", str(home), "serve"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(lambda: old_proc.poll() is None and old_proc.terminate())
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not sock_path.exists():
+            time.sleep(0.05)
+        old_pid = ping_pid()
+        self.assertEqual(old_pid, old_proc.pid)
+
+        restarted = subprocess.run(
+            [
+                sys.executable,
+                str(self.root / "scripts/install-app.py"),
+                "--dest",
+                str(dest),
+                "--home",
+                str(home),
+            ],
+            env=self.linux_env(),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        old_proc.wait(timeout=5)
+        new_pid = ping_pid()
+        self.assertNotEqual(new_pid, old_pid)
+        self.assertIn(f"pid {old_pid} -> {new_pid}", restarted.stderr)
+
+        # 3. --no-restart must leave the running daemon untouched.
+        subprocess.run(
+            [
+                sys.executable,
+                str(self.root / "scripts/install-app.py"),
+                "--dest",
+                str(dest),
+                "--home",
+                str(home),
+                "--no-restart",
+            ],
+            env=self.linux_env(),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(ping_pid(), new_pid)
 
 
 if __name__ == "__main__":
