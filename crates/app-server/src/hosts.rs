@@ -3,7 +3,7 @@
 use super::*;
 use std::{
     collections::BTreeMap,
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
 };
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -48,7 +48,7 @@ impl SshTunnel {
                 format!("{}/app.sock", h.trim_end_matches('/'))
             }
             _ => {
-                let probe = Command::new("ssh")
+                let probe = canban_exec::command("ssh")
                     .args([
                         "-o",
                         "BatchMode=yes",
@@ -79,7 +79,7 @@ impl SshTunnel {
         };
 
         let forward_spec = format!("{}:{remote_sock}", socket_path.display());
-        let mut child = Command::new("ssh")
+        let mut child = canban_exec::command("ssh")
             .args([
                 "-o",
                 "BatchMode=yes",

@@ -16,5 +16,6 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true
+canban-exec.workspace = true
 canban-types.workspace = true
 tempfile.workspace = true

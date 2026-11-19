@@ -197,6 +197,13 @@ binary identity, capture status and workload. Gallery interaction checks and
 native integration checks keep their existing roles. Documentation-only updates
 add no runtime acceptance and do not require repeating an unrelated test suite.
 
+## Interaction responsiveness, scroll anchoring and NSH notes
+
+- **Non-blocking screens and mutations:** Heavy reads (such as Settings probes) and slow operations (such as Review deliveries or new Terminal launches) run asynchronously with explicit loading/pending feedback rather than blocking the UI thread or waiting on full workspace refreshes. Interactive mutations apply optimistic projections and hydrate the complete write receipt on completion.
+- **Scroll anchoring and dynamic expansion:** Surfaces whose content height changes above or inside the viewport — including foldable Terminals trees, progressive Diff context expansion, and expandable Card comment reports — must preserve scroll anchors (including in short scroll views) or pause tail-follow while expanding.
+- **Drag and motion consistency:** Keep dragged Board cards mounted/visible until the drag ghost mounts, and route both drag drops and non-drag Card moves/exits through one unified flight-motion path. All clickable targets use pointer cursors consistently.
+- **Version-scoped NSH workarounds:** Track NSH-specific runtime quirks (reactive theme tracking, macOS `Editor`/`CanvasFont` font cascade, IME buffers, uncomposited X11 GTK4 popups, scroll culling, hover cursor stability, and custom scrollbars) in [NSH integration notes](nsh-notes.md) pinned to the current NSH version/revision so upgrades can audit and retire obsolete workarounds.
+
 ## Native component gallery
 
 Create a Rust/NSH gallery using the exact components imported by production screens. NSH's [Rust gallery](https://github.com/longbridge/nsh/blob/b7a69186d3c20a59690f2ac834dc527bee7f8438/examples/gallery-rs/README.md) demonstrates a Rust-only native entry. Canban's Gallery is a standalone Cargo example at `examples/gallery`, importing production components from the `canban-ui` library with local fixtures. Run it with `mise run gallery`; it opens `.local/CanbanGallery.app` without an AppServer, database or Agent. The production desktop has no Gallery route or startup mode. This allows both UI Kit and product scenarios without making UI Kit depend on product types. It is not a new production service or a parallel implementation of the controls.

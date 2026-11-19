@@ -2,7 +2,7 @@
 use super::*;
 use std::{
     io::{BufRead, BufReader},
-    process::{Command, Stdio},
+    process::Stdio,
 };
 
 pub const DEFAULT_INSTALL_URL: &str = "https://releases.herdr.dev/core/install.sh";
@@ -215,7 +215,7 @@ fn run_herdr_installer(home: &Path, install_state: &Arc<Mutex<HerdrInstallState>
 
     push_install_log(install_state, format!("Downloading installer from {url}"));
 
-    let mut cmd = Command::new("/bin/sh");
+    let mut cmd = canban_exec::command("/bin/sh");
     cmd.arg("-c")
         .arg(
             "set -eu; curl -fsSL --connect-timeout 15 --max-time 300 \"$CANBAN_HERDR_INSTALL_SCRIPT_URL\" | sh",

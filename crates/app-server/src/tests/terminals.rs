@@ -712,7 +712,7 @@ fn managed_worktree_create_status_promote_remove_and_read_all() {
     std::fs::create_dir_all(&src).unwrap();
     std::fs::write(src.join("README.md"), "# Seed\n").unwrap();
     let git = |cwd: &Path, args: &[&str]| {
-        let out = std::process::Command::new("git")
+        let out = canban_exec::raw_command("git")
             .args(args)
             .current_dir(cwd)
             .output()
@@ -845,7 +845,7 @@ fn opening_card_shell_and_agent_terminals_immediately_creates_card_worktree_and_
     std::fs::create_dir_all(&src).unwrap();
     std::fs::write(src.join("README.md"), "# Seed\n").unwrap();
     let git = |cwd: &Path, args: &[&str]| {
-        let out = std::process::Command::new("git")
+        let out = canban_exec::raw_command("git")
             .args(args)
             .current_dir(cwd)
             .output()

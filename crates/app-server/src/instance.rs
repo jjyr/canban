@@ -56,7 +56,7 @@ pub fn register(instance: &Development, role: &str) -> Result<Registration> {
         None
     };
     let ps = |field: &str| -> Result<String> {
-        let out = std::process::Command::new("ps")
+        let out = canban_exec::raw_command("ps")
             .args([
                 "-ww",
                 "-p",

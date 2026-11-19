@@ -111,12 +111,11 @@ fn probe_agy_models(agy_path: &str, defaults: &[ModelOption]) -> Vec<ModelOption
     let path_owned = agy_path.to_owned();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let mut cmd = std::process::Command::new(&path_owned);
+        let mut cmd = canban_exec::command(&path_owned);
         cmd.arg("models")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
-        canban_herdr::apply_local_path_env_to_command(&mut cmd, &BTreeMap::new());
         let res = cmd.output();
         let _ = tx.send(res);
     });

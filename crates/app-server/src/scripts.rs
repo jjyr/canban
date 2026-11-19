@@ -2,7 +2,7 @@
 use super::*;
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 const DEFAULT_SCRIPT_TIMEOUT_SECS: u64 = 3600;
@@ -1077,7 +1077,7 @@ pub(crate) fn run_local_process(
         .open(log_path)?;
     let stderr_file = stdout_file.try_clone()?;
 
-    let mut cmd = Command::new(&argv[0]);
+    let mut cmd = canban_exec::command(&argv[0]);
     cmd.args(&argv[1..])
         .current_dir(cwd)
         .env_remove("GIT_DIR")

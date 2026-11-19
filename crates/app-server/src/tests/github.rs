@@ -192,7 +192,7 @@ fn project_auto_detects_github_remote_links_with_intake_off_and_respects_manual_
         &["init", "-b", "main"][..],
         &["remote", "add", "origin", "git@github.com:jjyr/canban.git"][..],
     ] {
-        let ok = std::process::Command::new("git")
+        let ok = canban_exec::raw_command("git")
             .arg("-C")
             .arg(&source)
             .args(args)
@@ -281,7 +281,7 @@ fn project_auto_detects_github_remote_links_with_intake_off_and_respects_manual_
         ][..],
     ] {
         assert!(
-            std::process::Command::new("git")
+            canban_exec::raw_command("git")
                 .arg("-C")
                 .arg(&legacy_source)
                 .args(args)

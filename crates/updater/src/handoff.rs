@@ -212,7 +212,7 @@ fn spawn_recover(
         .open(home.join("updates/updater.log"))?;
     drop(guard);
     use std::os::unix::process::CommandExt;
-    std::process::Command::new(helper)
+    canban_exec::raw_command(helper)
         .arg("--home")
         .arg(home)
         .arg("--recover")

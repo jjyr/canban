@@ -14,7 +14,7 @@ pub struct Process {
     pub identity: String,
 }
 pub fn process(pid: u32) -> Result<Process> {
-    let output = Command::new("ps")
+    let output = canban_exec::raw_command("ps")
         .args(["-ww", "-p", &pid.to_string(), "-o", "lstart=,command="])
         .output()?;
     ensure!(output.status.success(), "Process {pid} is unavailable");
@@ -35,7 +35,7 @@ pub fn process(pid: u32) -> Result<Process> {
 fn stop_process(p: &Process) -> Result<()> {
     if process(p.pid).is_ok_and(|v| v.identity == p.identity) {
         ensure!(
-            Command::new("kill")
+            canban_exec::raw_command("kill")
                 .args(["-TERM", &p.pid.to_string()])
                 .status()?
                 .success(),
@@ -201,7 +201,7 @@ pub fn prepare_locked(
         .append(true)
         .open(home.join("updates/updater.log"))?;
     use std::os::unix::process::CommandExt;
-    Command::new(helper)
+    canban_exec::raw_command(helper)
         .arg("--home")
         .arg(home)
         .stdout(log.try_clone()?)
@@ -406,7 +406,7 @@ pub(super) fn prune_update_artifacts(j: &Journal) {
     }
 }
 fn database(j: &Journal, binary: &Path, target: u32) -> Result<()> {
-    let out = Command::new(binary)
+    let out = canban_exec::raw_command(binary)
         .arg("--home")
         .arg(&j.home)
         .args(["database", "--target", &target.to_string()])
@@ -452,7 +452,7 @@ fn spawn_server(j: &Journal) -> Result<Child> {
         .create(true)
         .append(true)
         .open(j.home.join("server.log"))?;
-    let mut cmd = Command::new(cli(j));
+    let mut cmd = canban_exec::raw_command(cli(j));
     cmd.arg("--home")
         .arg(&j.home)
         .arg("serve")
@@ -472,7 +472,7 @@ fn spawn_ui(j: &Journal) -> Result<Child> {
         .create(true)
         .append(true)
         .open(j.home.join("updates/ui.log"))?;
-    let mut cmd = Command::new(crate::bundle_ui(&j.target));
+    let mut cmd = canban_exec::raw_command(crate::bundle_ui(&j.target));
     cmd.stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log);
@@ -585,7 +585,7 @@ pub fn systemd_manages_home(home: &Path) -> bool {
         if !unit_manages_home(&unit_body, &user_home, home) {
             return false;
         }
-        Command::new("systemctl")
+        canban_exec::raw_command("systemctl")
             .args(["--user", "is-active", "--quiet", "canban.service"])
             .status()
             .is_ok_and(|s| s.success())
@@ -598,7 +598,7 @@ pub fn systemd_manages_home(home: &Path) -> bool {
 }
 
 pub(super) fn stop_systemd_service() -> Result<()> {
-    let status = Command::new("systemctl")
+    let status = canban_exec::raw_command("systemctl")
         .args(["--user", "stop", "canban.service"])
         .status()
         .context("Failed to execute systemctl --user stop canban.service")?;
@@ -612,7 +612,7 @@ pub(super) fn stop_systemd_service() -> Result<()> {
 struct SystemdTokenGuard;
 impl SystemdTokenGuard {
     fn acquire(token: &str) -> Result<Self> {
-        let status = Command::new("systemctl")
+        let status = canban_exec::raw_command("systemctl")
             .args([
                 "--user",
                 "set-environment",
@@ -629,7 +629,7 @@ impl SystemdTokenGuard {
 }
 impl Drop for SystemdTokenGuard {
     fn drop(&mut self) {
-        let _ = Command::new("systemctl")
+        let _ = canban_exec::raw_command("systemctl")
             .args(["--user", "unset-environment", "CANBAN_UPGRADE_TOKEN"])
             .status();
     }
@@ -845,7 +845,7 @@ fn install(j: &mut Journal) -> Result<()> {
 fn boot(j: &mut Journal, expected: &Build) -> Result<()> {
     let mut direct_server = if j.systemd_managed {
         let _token_guard = SystemdTokenGuard::acquire(&j.token)?;
-        let status = Command::new("systemctl")
+        let status = canban_exec::raw_command("systemctl")
             .args(["--user", "start", "canban.service"])
             .status()
             .context("Failed to execute systemctl --user start canban.service")?;
@@ -977,7 +977,9 @@ fn rollback(j: &mut Journal) -> Result<()> {
     let before = if let Some(build) = j.before.clone() {
         build
     } else {
-        let output = Command::new(cli(j)).arg("build-info").output()?;
+        let output = canban_exec::raw_command(cli(j))
+            .arg("build-info")
+            .output()?;
         ensure!(
             output.status.success(),
             "Restored CLI identity is unavailable"
@@ -1005,7 +1007,10 @@ fn refresh_bundle_registration(bundle: &Path) {
         "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
     );
     if lsregister.is_file() {
-        let _ = Command::new(lsregister).arg("-f").arg(bundle).output();
+        let _ = canban_exec::raw_command(lsregister)
+            .arg("-f")
+            .arg(bundle)
+            .output();
     }
 }
 
@@ -1036,7 +1041,7 @@ fn show_recovery(j: &mut Journal) {
         .append(true)
         .open(j.home.join("updates/ui.log"));
     if let Ok(log) = log {
-        let mut command = Command::new(crate::bundle_ui(source));
+        let mut command = canban_exec::raw_command(crate::bundle_ui(source));
         environment(&mut command, j);
         command
             .stdin(Stdio::null())

@@ -478,7 +478,7 @@ pub(crate) fn validate_candidate(bundle: &Path, manifest: &Manifest) -> Result<(
             }
         }
     }
-    let output = std::process::Command::new(crate::bundle_cli(bundle))
+    let output = canban_exec::raw_command(crate::bundle_cli(bundle))
         .arg("build-info")
         .output()?;
     ensure!(
@@ -748,7 +748,7 @@ pub fn stage_cli(
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&staged_bin, std::fs::Permissions::from_mode(0o755))?;
         }
-        let out = std::process::Command::new(&staged_bin)
+        let out = canban_exec::raw_command(&staged_bin)
             .arg("build-info")
             .output()
             .context("Failed to execute staged CLI `build-info`")?;

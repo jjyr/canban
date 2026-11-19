@@ -144,7 +144,7 @@ mod tests {
 mod acceptance {
     use super::*;
     use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     /// No model calls: real Codex parses our argv, then executes shell commands
     /// in concurrent threads of one isolated app-server and a resumed thread.
@@ -191,7 +191,7 @@ mod acceptance {
         }
         let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../scripts/acceptance-agent-launch.py");
-        let mut child = Command::new("python3")
+        let mut child = canban_exec::command("python3")
             .arg(script)
             .stdin(Stdio::piped())
             .spawn()

@@ -418,7 +418,7 @@ impl AppClient {
             .open(home.join("server.log"))?;
         use std::os::unix::process::CommandExt;
         // Separate process group, lifetime owned by the service, not its UI.
-        std::process::Command::new(cli)
+        canban_exec::raw_command(cli)
             .arg("--home")
             .arg(home)
             .arg("serve")

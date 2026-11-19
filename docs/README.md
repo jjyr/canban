@@ -112,6 +112,7 @@ Start with [MVP interface contracts](interfaces/mvp-contract.md) for the propose
    [Internal architecture comparison](architecture-internal-options.md) compares module/call organizations; [crates and timers](architecture-crates-and-timers.md) records the user-requested crate split, AppServer/Workflow Engine/Scheduler names, and card timer placement.
    [Data architecture](data-architecture.md) records ~/.canban/, SQLite with WAL, file-backed execution context/reports, and zstd/lz4-compressed Card archives; detailed schema and archive mechanisms remain proposals.
    [UI architecture and design system](ui-architecture.md) records the approved NSH reuse, separate UI Kit, component contracts, native gallery, and regression workflow.
+   [NSH integration notes](nsh-notes.md) tracks version-scoped NSH runtime quirks and Canban workarounds to audit on each NSH upgrade.
    [App UI review and design directions](ui-direction-review.md) audits the current native UI and proposes visual styles, workspace layouts and component priorities for discussion.
 2. [herdr-core integration](research/herdr-core-integration.md): installed service versus app-managed service, embedding, and Herdr app linkage.
 3. [Herdr product concepts](research/herdr-core-concepts.md): existing Space/Tab/Pane versus core Terminal/Session, separate from Canban's Project model.

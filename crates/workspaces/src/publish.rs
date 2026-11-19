@@ -90,9 +90,8 @@ impl Ops {
 mod tests {
     use super::*;
     use canban_types::*;
-    use std::process::Command;
     fn git(dir: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
+        let output = canban_exec::command("git")
             .arg("-C")
             .arg(dir)
             .args(args)

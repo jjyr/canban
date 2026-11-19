@@ -20,7 +20,6 @@ use std::{
     collections::BTreeSet,
     future::Future,
     pin::Pin,
-    process::Command,
     rc::Rc,
     sync::{Arc, Condvar, Mutex, OnceLock, mpsc},
     task::{Context, Poll, Waker},
@@ -310,7 +309,7 @@ pub fn installed_fonts() -> InstalledFonts {
     CACHED_FONTS
         .get_or_init(|| {
             let run_fc = |args: &[&str]| -> Option<String> {
-                let out = Command::new("fc-list").args(args).output().ok()?;
+                let out = canban_exec::command("fc-list").args(args).output().ok()?;
                 if !out.status.success() {
                     return None;
                 }
@@ -1378,7 +1377,7 @@ Adwaita Mono\t100\tFalse
     #[test]
     fn linux_installed_fonts_discovers_host_families_gracefully() {
         let catalog = crate::installed_fonts();
-        if std::process::Command::new("fc-list")
+        if canban_exec::command("fc-list")
             .arg("--version")
             .output()
             .is_ok_and(|o| o.status.success())

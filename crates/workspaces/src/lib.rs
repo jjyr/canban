@@ -636,14 +636,13 @@ fn git(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
     #[test]
     fn worktree_reuses_retains_changes_and_preserves_commits_on_cleanup() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("source");
         std::fs::create_dir_all(&source).unwrap();
         let run = |args: &[&str]| {
-            let out = Command::new("git")
+            let out = canban_exec::command("git")
                 .arg("-C")
                 .arg(&source)
                 .args(args)
@@ -731,14 +730,14 @@ mod tests {
         std::fs::write(path.join("change.txt"), "keep me").unwrap();
         assert!(archive(&home, &project, &card).unwrap().is_some());
         assert!(path.exists());
-        let commit = Command::new("git")
+        let commit = canban_exec::command("git")
             .arg("-C")
             .arg(&path)
             .args(["add", "change.txt"])
             .status()
             .unwrap();
         assert!(commit.success());
-        let commit = Command::new("git")
+        let commit = canban_exec::command("git")
             .arg("-C")
             .arg(&path)
             .args([

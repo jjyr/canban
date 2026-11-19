@@ -18,6 +18,7 @@ sha2.workspace = true
 flate2.workspace = true
 tar.workspace = true
 zstd.workspace = true
+canban-exec.workspace = true
 canban-types.workspace = true
 canban-github.workspace = true
 canban-storage.workspace = true

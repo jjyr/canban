@@ -1409,7 +1409,7 @@ fn default_workflow_queue_merge_syncs_upstream_and_respects_local_only_option() 
     std::fs::create_dir_all(&source).unwrap();
 
     let git = |cwd: &std::path::Path, args: &[&str]| -> String {
-        let out = std::process::Command::new("git")
+        let out = canban_exec::raw_command("git")
             .arg("-C")
             .arg(cwd)
             .args(args)
@@ -1772,7 +1772,7 @@ fn backlog_and_review_options_drive_card_lifecycle_and_preserve_custom_stages() 
 }
 
 fn git_in(cwd: &std::path::Path, args: &[&str]) -> String {
-    let out = std::process::Command::new("git")
+    let out = canban_exec::raw_command("git")
         .arg("-C")
         .arg(cwd)
         .args(args)
@@ -4174,7 +4174,7 @@ fn live_card_move_from_backlog_to_review_returns_immediately_while_delivery_merg
     std::fs::create_dir_all(&source).unwrap();
 
     let git = |cwd: &std::path::Path, args: &[&str]| -> String {
-        let out = std::process::Command::new("git")
+        let out = canban_exec::raw_command("git")
             .arg("-C")
             .arg(cwd)
             .args(args)

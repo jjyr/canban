@@ -69,15 +69,16 @@ impl Host {
                 stderr: STANDARD.decode(value["stderr"].as_str().unwrap_or(""))?,
             });
         }
-        let mut cmd = Command::new(args[0]);
+        let mut cmd = if envs.iter().any(|(k, _)| *k == "PATH") {
+            canban_exec::raw_command(args[0])
+        } else {
+            canban_exec::command_with_env(args[0], &self.client.config.hc_env)
+        };
         cmd.args(&args[1..])
             .current_dir(dir)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_INDEX_FILE");
-        if !envs.iter().any(|(k, _)| *k == "PATH") {
-            crate::apply_local_path_env_to_command(&mut cmd, &self.client.config.hc_env);
-        }
         cmd.envs(envs.iter().copied());
         if let Some(input) = input {
             let mut child = cmd

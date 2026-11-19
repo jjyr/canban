@@ -138,7 +138,7 @@ impl AppServer {
                 std::thread::spawn(move || {
                     std::thread::sleep(Duration::from_millis(120));
                     if canban_updater::worker::systemd_manages_home(&stop_flag_home)
-                        && std::process::Command::new("systemctl")
+                        && canban_exec::raw_command("systemctl")
                             .args(["--user", "restart", "canban.service"])
                             .status()
                             .is_ok_and(|s| s.success())
@@ -157,14 +157,14 @@ impl AppServer {
                         });
                     if svc["kind"] == "launchd" && svc["installed"] == true && launchd_matches_home
                     {
-                        let uid = std::process::Command::new("id")
+                        let uid = canban_exec::raw_command("id")
                             .arg("-u")
                             .output()
                             .ok()
                             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
                             .unwrap_or_default();
                         if !uid.is_empty()
-                            && std::process::Command::new("launchctl")
+                            && canban_exec::raw_command("launchctl")
                                 .args(["kickstart", "-k", &format!("gui/{uid}/com.canban.daemon")])
                                 .status()
                                 .is_ok_and(|s| s.success())
@@ -185,7 +185,7 @@ impl AppServer {
                         }
                         std::thread::sleep(Duration::from_millis(50));
                     }
-                    let mut cmd = std::process::Command::new(&cli_for_restart);
+                    let mut cmd = canban_exec::raw_command(&cli_for_restart);
                     cmd.arg("--home").arg(&stop_flag_home).arg("serve");
                     if listen_cfg.tailscale {
                         cmd.arg("--tailscale");
@@ -343,7 +343,7 @@ fn is_local_ui_running(bundle: &Path, home: &Path) -> bool {
         let _ = home_canon;
         let ui_str = ui_bin.to_string_lossy();
         let ui_canon_str = ui_canon.to_string_lossy();
-        let Ok(out) = std::process::Command::new("ps")
+        let Ok(out) = canban_exec::raw_command("ps")
             .args(["-ww", "-x", "-o", "state=,command="])
             .output()
         else {
@@ -756,7 +756,7 @@ mod tests {
         symlink(opt.join("canban/bin/canban"), bin_links.join("canban")).unwrap();
 
         // 1. While a local `canban-ui` from this bundle is running for `home`, remote daemon update is refused.
-        let mut live_ui = std::process::Command::new(opt.join("canban/bin/canban-ui"))
+        let mut live_ui = canban_exec::raw_command(opt.join("canban/bin/canban-ui"))
             .env("CANBAN_HOME", &home)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())

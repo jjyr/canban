@@ -3,7 +3,7 @@
 use super::*;
 use std::{
     net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs},
-    process::{Command, Stdio},
+    process::Stdio,
 };
 
 pub fn listen_config_path(home: &Path) -> PathBuf {
@@ -89,7 +89,7 @@ fn tailscale_candidates() -> Vec<PathBuf> {
 pub fn run_tailscale(args: &[&str]) -> Result<String> {
     let mut last_err = None;
     for bin in tailscale_candidates() {
-        match Command::new(&bin)
+        match canban_exec::command(&bin)
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -130,7 +130,7 @@ pub fn detect_tailscale_ipv4() -> Result<String> {
     }
     // Fallback on Linux when tailscale0 interface is up even if CLI path differs.
     if cfg!(target_os = "linux")
-        && let Ok(out) = Command::new("ip")
+        && let Ok(out) = canban_exec::command("ip")
             .args(["-4", "-o", "addr", "show", "dev", "tailscale0"])
             .output()
         && out.status.success()
@@ -488,7 +488,7 @@ fi
 canban service install {mode_flag} --port {port} >/dev/null 2>&1 || true
 canban pair {mode_flag} --port {port} --json"#
     );
-    let out = Command::new("ssh")
+    let out = canban_exec::command("ssh")
         .args([
             "-o",
             "BatchMode=yes",
@@ -615,7 +615,7 @@ fn shell_single_quote(s: &str) -> String {
 }
 
 pub fn hostname_string() -> String {
-    Command::new("hostname")
+    canban_exec::command("hostname")
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -631,7 +631,7 @@ pub fn service_status(home: &Path) -> Value {
             .unwrap_or_else(|| home.to_path_buf())
             .join(".config/systemd/user/canban.service");
         let installed = unit.is_file();
-        let active = Command::new("systemctl")
+        let active = canban_exec::command("systemctl")
             .args(["--user", "is-active", "canban.service"])
             .output()
             .ok()
@@ -655,7 +655,7 @@ pub fn service_status(home: &Path) -> Value {
             .unwrap_or_else(|| home.to_path_buf())
             .join("Library/LaunchAgents/com.canban.daemon.plist");
         let installed = plist.is_file();
-        let active = Command::new("launchctl")
+        let active = canban_exec::command("launchctl")
             .args(["list", "com.canban.daemon"])
             .output()
             .ok()
@@ -725,15 +725,15 @@ WantedBy=default.target\n",
             home_abs.display()
         );
         canban_context::atomic(&unit_path, unit_body.as_bytes())?;
-        let _ = Command::new("systemctl")
+        let _ = canban_exec::command("systemctl")
             .args(["--user", "daemon-reload"])
             .status();
-        let enabled = Command::new("systemctl")
+        let enabled = canban_exec::command("systemctl")
             .args(["--user", "enable", "--now", "canban.service"])
             .status()
             .is_ok_and(|s| s.success());
         if let Ok(user) = std::env::var("USER") {
-            let _ = Command::new("loginctl")
+            let _ = canban_exec::command("loginctl")
                 .args(["enable-linger", &user])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -790,12 +790,12 @@ WantedBy=default.target\n",
             log_path.display()
         );
         canban_context::atomic(&plist_path, plist_body.as_bytes())?;
-        let _ = Command::new("launchctl")
+        let _ = canban_exec::command("launchctl")
             .args(["unload", &plist_path.to_string_lossy()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
-        let loaded = Command::new("launchctl")
+        let loaded = canban_exec::command("launchctl")
             .args(["load", "-w", &plist_path.to_string_lossy()])
             .status()
             .is_ok_and(|s| s.success());
@@ -913,7 +913,7 @@ mod tests {
         );
         for shell in ["/bin/sh", "/bin/zsh"] {
             if Path::new(shell).is_file() {
-                let status = Command::new(shell)
+                let status = canban_exec::command(shell)
                     .args(["-n", "-c", &cmd])
                     .status()
                     .expect("spawn shell syntax check");
@@ -935,7 +935,7 @@ mod tests {
                 .next()
                 .unwrap()
         );
-        let inner_status = Command::new("/bin/sh")
+        let inner_status = canban_exec::command("/bin/sh")
             .args(["-c", &verify_inner])
             .status()
             .expect("verify inner remote script syntax");

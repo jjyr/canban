@@ -27,7 +27,7 @@ pub fn prepare(
         !crate::bundle_dev_instance(&target).exists(),
         "Use mise run dev to restart a development instance"
     );
-    let output = Command::new(&cli)
+    let output = canban_exec::raw_command(&cli)
         .arg("build-info")
         .env_remove("CANBAN_ENDPOINT")
         .output()?;
@@ -109,7 +109,7 @@ pub fn prepare(
         .append(true)
         .open(home.join("updates/updater.log"))?;
     use std::os::unix::process::CommandExt;
-    Command::new(helper)
+    canban_exec::raw_command(helper)
         .arg("--home")
         .arg(home)
         .stdin(Stdio::null())
@@ -211,7 +211,7 @@ pub(super) fn run(j: &mut Journal, recover: bool) -> Result<()> {
         restore_data(j)?;
         // Refresh expected Build from the current installed target bundle so recovering
         // after installing a newer Canban.app adopts its schema and API version.
-        if let Ok(output) = Command::new(cli(j))
+        if let Ok(output) = canban_exec::raw_command(cli(j))
             .arg("build-info")
             .env_remove("CANBAN_ENDPOINT")
             .output()

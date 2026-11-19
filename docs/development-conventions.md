@@ -10,7 +10,9 @@ Status: user-selected conventions, updated 2026-11-10. Applied by the Rust works
 - Navigation, list selection and Back/Forward restore context without replaying launch, Resume, retry, merge or approval. An explicitly labelled Start/Resume action may invoke execution; merely inspecting history does not.
 - Follow the accepted next [unified workflow](product/workflow-engine.md) and [durable event/subscription](product/events-and-notifications.md) contracts when implementing this extension. Separate column from run/step progress, use one engine, preserve active work during migration, and share Agent/manual definition validation with generic display. These contracts are not current runtime acceptance.
 - Keep workflow stage, assignment outcome, runtime status, connection health and human decision state distinct. A process exit or Herdr `done` cannot substitute for an Agent report, and a reply/read acknowledgement cannot approve a human gate. See the [state model](product/sessions.md#independent-state-dimensions).
-- Use existing events and shared projections/caches before adding background polling or per-row queries. Define cache invalidation, disconnect recovery and query bounds. The [runtime observation contract](runtime-observation.md) specifies the current subscription, deadlines and on-demand Git checks; it does not prohibit unrelated mechanisms such as GitHub synchronization.
+- Use existing events and shared projections/caches before adding background polling or per-row queries. Define cache invalidation, disconnect recovery and query bounds. When coalescing concurrent cache or external-source refreshes (such as GitHub sync), judge freshness by **request start time** rather than completion time so a slow in-flight fetch cannot swallow newer invalidations. Bound sync transactions on large Boards and cap high-frequency UI/parser caches (report bodies, Markdown ASTs, link previews) with deterministic LRU limits rather than unbounded growth. The [runtime observation contract](runtime-observation.md) specifies the current subscription, deadlines and on-demand Git checks; it does not prohibit unrelated mechanisms such as GitHub synchronization.
+- Keep user-facing mutation RPCs non-blocking: return a trustworthy, hydratable write receipt (and apply optimistic UI projection where appropriate) without waiting for a full workspace refresh. Hydrate the full returned receipt on the UI side — including updated Card `revision` values — and keep ancillary updates (such as comments or notices) from creating spurious revision conflicts for concurrent Card edits.
+- Isolate updater-spawned `AppServer` and candidate UI processes into their own process group (`process_group(0)`) so parent teardown cannot terminate handed-off services. Guard TCP stream FD lifetimes, handle deleted-executable paths after atomic upgrades, and treat EOF/broken-pipe/reset RPC failures as reconnect/handoff-recovery triggers.
 
 ## Agent RPC and CLI design
 
@@ -38,6 +40,7 @@ crates/
   timeline/          package: canban-timeline
   notifications/    package: canban-notifications
   herdr/             package: canban-herdr
+  exec/              package: canban-exec
   workspaces/        package: canban-workspaces
   storage/           package: canban-storage
   types/             package: canban-types

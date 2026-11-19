@@ -25,6 +25,7 @@ signal-hook = { version = "0.3", default-features = false }
 base64.workspace = true
 nsh-core.workspace = true
 nsh-base.workspace = true
+canban-exec.workspace = true
 canban-types.workspace = true
 canban-profiles.workspace = true
 canban-context.workspace = true

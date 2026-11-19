@@ -483,7 +483,7 @@ pub fn find_local_executable_with_env(
         let p = PathBuf::from(program);
         return p.is_file().then_some(p);
     }
-    let paths = canban_herdr::local_search_paths(env);
+    let paths = canban_exec::local_search_paths(env);
     let candidates: &[&str] = if program == "hc" {
         &["hc", "herdr-core"]
     } else {

@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::{
     io::{Read, Seek},
     path::PathBuf,
-    process::{Command, Stdio},
+    process::Stdio,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -145,7 +145,7 @@ impl Service {
         binary()
     }
     pub fn installed() -> bool {
-        Command::new(binary())
+        canban_exec::command(binary())
             .arg("--version")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -158,10 +158,7 @@ fn binary() -> PathBuf {
     std::env::var_os("CANBAN_GH_BIN")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"]
-                .into_iter()
-                .map(PathBuf::from)
-                .find(|p| p.is_file())
+            canban_exec::find_executable("gh", &std::collections::BTreeMap::new())
                 .unwrap_or_else(|| PathBuf::from("gh"))
         })
 }
@@ -191,7 +188,7 @@ fn request_with_body(
     );
     let fetched_at = now();
     let mut output = tempfile::tempfile()?;
-    let mut command = Command::new(binary());
+    let mut command = canban_exec::command(binary());
     command.args([
         "api",
         "--hostname",

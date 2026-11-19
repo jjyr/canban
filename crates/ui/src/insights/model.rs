@@ -3259,7 +3259,7 @@ mod tests {
     #[test]
     fn local_dst_boundaries_follow_civil_days() {
         if std::env::var_os("CANBAN_INSIGHTS_DST_CHILD").is_none() {
-            let child = std::process::Command::new(std::env::current_exe().unwrap())
+            let child = canban_exec::raw_command(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "insights::model::tests::local_dst_boundaries_follow_civil_days",

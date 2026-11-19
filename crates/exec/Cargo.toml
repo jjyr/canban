@@ -1,0 +1,16 @@
+[package]
+name = "canban-exec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Unified local process execution and user shell PATH resolution for Canban."
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -171,7 +171,7 @@ pub mod events;
 pub mod host;
 mod pool;
 pub mod refine;
-pub mod shell_env;
+pub use canban_exec::shell_env;
 pub mod stream;
 pub mod transport;
 

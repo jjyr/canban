@@ -1,5 +1,6 @@
 // Adapted from herdr-app e77f112ac2ea136b84fe510efa42d41163bfd776 (Apache-2.0).
 //! Builds libghostty-vt from the checksum-pinned .local/deps/ghostty with Zig and generates bindings from its headers.
+#![allow(clippy::disallowed_methods)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

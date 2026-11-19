@@ -1,6 +1,6 @@
 //! End-to-end server, runtime, toolchain, storage, and log diagnostics RPCs.
 use super::*;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 fn probe_tool(
     name: &str,
@@ -15,12 +15,11 @@ fn probe_tool(
             "error": format!("{name} not found in ~/.local/bin, /opt/homebrew/bin, /usr/local/bin, or PATH"),
         });
     };
-    let mut cmd = Command::new(&resolved);
+    let mut cmd = canban_exec::command_with_env(&resolved, env_map);
     cmd.arg(version_arg)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    canban_herdr::apply_local_path_env_to_command(&mut cmd, env_map);
     let version = cmd.output().ok().and_then(|out| {
         let text = if out.stdout.is_empty() {
             String::from_utf8_lossy(&out.stderr).into_owned()

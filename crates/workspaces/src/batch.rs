@@ -615,7 +615,6 @@ impl Ops {
 mod tests {
     use super::*;
     use std::fs;
-    use std::process::Command;
 
     struct BatchFixture {
         _dir: tempfile::TempDir,
@@ -702,7 +701,7 @@ mod tests {
     }
 
     fn git_run(dir: &Path, args: &[&str]) -> String {
-        let out = Command::new("git")
+        let out = canban_exec::command("git")
             .current_dir(dir)
             .args(args)
             .output()
@@ -810,7 +809,7 @@ mod tests {
         // Resolve conflict and cherry-pick continue cleanly.
         fs::write(worktree.join("shared.txt"), "resolved\n").unwrap();
         git_run(&worktree, &["add", "shared.txt"]);
-        let st = Command::new("git")
+        let st = canban_exec::command("git")
             .current_dir(&worktree)
             .env("GIT_EDITOR", "true")
             .args(["cherry-pick", "--continue"])

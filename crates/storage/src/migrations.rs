@@ -2473,7 +2473,7 @@ fn sync_git_card_refs(conn: &Connection, mappings: &[(String, String)]) -> Resul
         if !repo.is_dir() {
             continue;
         }
-        let Ok(out) = std::process::Command::new("git")
+        let Ok(out) = canban_exec::command("git")
             .args([
                 "-C",
                 &dir,
@@ -2500,16 +2500,16 @@ fn sync_git_card_refs(conn: &Connection, mappings: &[(String, String)]) -> Resul
                 continue;
             };
             let dst_ref = format!("refs/canban/cards/{dst_cid}");
-            let already = std::process::Command::new("git")
+            let already = canban_exec::command("git")
                 .args(["-C", &dir, "rev-parse", "--verify", "--quiet", &dst_ref])
                 .output()
                 .is_ok_and(|o| o.status.success());
             if !already {
-                let _ = std::process::Command::new("git")
+                let _ = canban_exec::command("git")
                     .args(["-C", &dir, "update-ref", &dst_ref, oid])
                     .output();
             }
-            let _ = std::process::Command::new("git")
+            let _ = canban_exec::command("git")
                 .args(["-C", &dir, "update-ref", "-d", refname])
                 .output();
         }

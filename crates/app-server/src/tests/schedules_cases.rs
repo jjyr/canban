@@ -717,7 +717,7 @@ fn worktree_gc_removes_clean_old_merged_and_preserves_dirty() {
     let repo_dir = dir.path().join("gc_repo");
     std::fs::create_dir_all(&repo_dir).unwrap();
     let git = |args: &[&str]| {
-        let out = std::process::Command::new("git")
+        let out = canban_exec::raw_command("git")
             .arg("-C")
             .arg(&repo_dir)
             .args(args)

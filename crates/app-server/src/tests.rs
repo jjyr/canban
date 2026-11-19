@@ -794,7 +794,7 @@ fn review_delivery_receipt_survives_retry_restart_and_archive_is_separate() {
     let (dir, app, mut project, mut card) = setup();
     let source = Path::new(&project.directory);
     let git = |args: &[&str]| {
-        let out = std::process::Command::new("git")
+        let out = canban_exec::raw_command("git")
             .arg("-C")
             .arg(source)
             .args(args)
@@ -1094,7 +1094,7 @@ fn review_clears_warning_when_herdr_reports_agent_stopped_and_never_blocks_merge
     let source = dir.path().join("source");
     std::fs::create_dir_all(&source).unwrap();
     let git = |args: &[&str]| {
-        let out = std::process::Command::new("git")
+        let out = canban_exec::raw_command("git")
             .args(args)
             .current_dir(&source)
             .env_remove("GIT_DIR")
@@ -2110,7 +2110,7 @@ fn git_refs_compare_and_review_send_agent_work_with_and_without_cards() {
     let repo = dir.path().join("source");
     std::fs::create_dir_all(&repo).unwrap();
     let run_git = |args: &[&str]| {
-        let status = std::process::Command::new("git")
+        let status = canban_exec::raw_command("git")
             .arg("-C")
             .arg(&repo)
             .args(args)
@@ -3718,7 +3718,7 @@ fn git_client_rpcs_enforce_checkout_containment_user_guard_and_remote_sync() {
     std::fs::create_dir_all(&outside).unwrap();
 
     let git = |cwd: &Path, args: &[&str]| {
-        let st = std::process::Command::new("git")
+        let st = canban_exec::raw_command("git")
             .current_dir(cwd)
             .args(args)
             .status()
@@ -3944,7 +3944,7 @@ fn git_related_card_requires_a_unique_canonical_worktree_match() {
     std::fs::create_dir_all(repo).unwrap();
     let git = |args: &[&str]| {
         assert!(
-            std::process::Command::new("git")
+            canban_exec::raw_command("git")
                 .arg("-C")
                 .arg(repo)
                 .args(args)
@@ -4028,7 +4028,7 @@ fn pr_card_worktree_tracks_pr_branch_and_review_drafts_roundtrip_with_fallback()
     std::fs::create_dir_all(&remote).unwrap();
     std::fs::create_dir_all(&source).unwrap();
     let git = |cwd: &Path, args: &[&str]| {
-        let out = std::process::Command::new("git")
+        let out = canban_exec::raw_command("git")
             .arg("-C")
             .arg(cwd)
             .args(args)

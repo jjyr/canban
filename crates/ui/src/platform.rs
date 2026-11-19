@@ -89,7 +89,7 @@ pub fn open_external(target: &str) -> Result<()> {
     ensure!(!target.trim().is_empty(), "External target is empty");
     #[cfg(target_os = "macos")]
     {
-        let status = std::process::Command::new("/usr/bin/open")
+        let status = canban_exec::raw_command("/usr/bin/open")
             .arg(target)
             .status()
             .context("Could not run /usr/bin/open")?;
@@ -98,8 +98,8 @@ pub fn open_external(target: &str) -> Result<()> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        use std::process::{Command, Stdio};
-        let xdg = Command::new("xdg-open")
+        use std::process::Stdio;
+        let xdg = canban_exec::command("xdg-open")
             .arg(target)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -108,7 +108,7 @@ pub fn open_external(target: &str) -> Result<()> {
         if matches!(xdg, Ok(status) if status.success()) {
             return Ok(());
         }
-        let gio = Command::new("gio")
+        let gio = canban_exec::command("gio")
             .args(["open", target])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
