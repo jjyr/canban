@@ -30,26 +30,11 @@ fn actor_label(actor: &str) -> String {
 }
 
 pub(crate) fn tooltip(card: &Card) -> Option<String> {
-    if card.merged() {
-        let target = card
-            .delivery
-            .as_ref()
-            .map(|d| d.target_branch.as_str())
-            .filter(|b| !b.is_empty())
-            .or_else(|| {
-                card.pull_request
-                    .as_ref()
-                    .filter(|p| p.merged && !p.base_branch.is_empty())
-                    .map(|p| p.base_branch.as_str())
-            });
-        return Some(match target {
-            Some(t) => format!("Merged into {t}"),
-            None => "Merged".into(),
-        });
+    if !card.resolved() {
+        return None;
     }
-    let res = card.resolution.as_ref()?;
-    let who = actor_label(&res.actor);
-    Some(
+    let summary = card.resolution.as_ref().map(|res| {
+        let who = actor_label(&res.actor);
         match res
             .reason
             .as_deref()
@@ -58,8 +43,14 @@ pub(crate) fn tooltip(card: &Card) -> Option<String> {
         {
             Some(reason) => format!("Resolved by {who} · {reason}"),
             None => format!("Resolved by {who}"),
-        },
-    )
+        }
+    });
+    match (summary, card.active()) {
+        (Some(summary), true) => Some(format!("{summary}\nAuto-archives the next day")),
+        (Some(summary), false) => Some(summary),
+        (None, true) => Some("Auto-archives the next day".into()),
+        (None, false) => None,
+    }
 }
 
 fn resolve_now(ui: Ui, card_id: &str, revision: u64) {
@@ -368,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn tooltip_formats_merged_and_manual_resolutions() {
+    fn tooltip_formats_resolutions_and_next_day_auto_archive() {
         let mut c = card();
         assert_eq!(tooltip(&c), None);
 
@@ -380,15 +371,36 @@ mod tests {
         });
         assert_eq!(
             tooltip(&c).as_deref(),
-            Some("Resolved by @developer · Already fixed in #130")
+            Some("Resolved by @developer · Already fixed in #130\nAuto-archives the next day")
         );
 
+        // Merged Cards still use the "Resolved by ..." wording rather than "Merged into ...".
+        c.resolution = Some(CardResolution {
+            resolved_at: 20,
+            kind: "merged".into(),
+            reason: None,
+            actor: "user".into(),
+        });
         c.delivery = Some(canban_types::Delivery {
             target_branch: "main".into(),
             commit: "abc1234".into(),
             request_key: "k1".into(),
             merged_at: 20,
         });
-        assert_eq!(tooltip(&c).as_deref(), Some("Merged into main"));
+        assert_eq!(
+            tooltip(&c).as_deref(),
+            Some("Resolved by user\nAuto-archives the next day")
+        );
+
+        // Already archived Cards omit the next-day auto-archive hint.
+        let mut archived = c.clone();
+        archived.archived_at = Some(30);
+        assert_eq!(tooltip(&archived).as_deref(), Some("Resolved by user"));
+
+        // Legacy merged Cards without `resolution` still hint next-day auto-archive while active.
+        c.resolution = None;
+        assert_eq!(tooltip(&c).as_deref(), Some("Auto-archives the next day"));
+        c.archived_at = Some(30);
+        assert_eq!(tooltip(&c), None);
     }
 }

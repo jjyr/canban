@@ -5,7 +5,7 @@ mod composer;
 mod details;
 mod header;
 mod quick_merge;
-mod resolve;
+pub(crate) mod resolve;
 mod task;
 pub mod terminal;
 pub(crate) mod timeline;

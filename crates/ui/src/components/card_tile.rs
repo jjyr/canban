@@ -397,12 +397,22 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
         }
         tile = tile.child(tag_row);
     }
+    let resolved_tip = crate::card::resolve::tooltip(&card);
     let chips: Vec<AnyElement> = status_specs
         .into_iter()
         .map(|(text, tone, live)| {
             let key = format!("status:{live}:{text}");
             if live {
                 live_status(text, tone).key(key).into_element()
+            } else if text == "Resolved"
+                && let Some(tip) = resolved_tip.clone()
+            {
+                view()
+                    .key(key)
+                    .flex_shrink_0()
+                    .tooltip(hint_tooltip(tip))
+                    .child(status(text, tone))
+                    .into_element()
             } else {
                 status(text, tone).key(key).into_element()
             }
