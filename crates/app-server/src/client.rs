@@ -220,19 +220,35 @@ impl std::fmt::Display for BackendOlder {
 }
 impl std::error::Error for BackendOlder {}
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectProgress {
+    pub phase: String,
+    pub tag: String,
+    pub detail: String,
+}
+
 impl AppClient {
     pub fn connect_or_start(home: PathBuf, cli: &Path) -> Result<Arc<Self>> {
-        Self::connect_or_start_inner(home, cli, None, true)
+        Self::connect_or_start_inner(home, cli, None, true, |_| {})
     }
 
     pub fn connect_or_start_ui(home: PathBuf, cli: &Path, ui_pid: u32) -> Result<Arc<Self>> {
-        Self::connect_or_start_inner(home, cli, Some(ui_pid), true)
+        Self::connect_or_start_inner(home, cli, Some(ui_pid), true, |_| {})
+    }
+
+    pub fn connect_or_start_ui_with_progress(
+        home: PathBuf,
+        cli: &Path,
+        ui_pid: u32,
+        on_progress: impl FnMut(ConnectProgress),
+    ) -> Result<Arc<Self>> {
+        Self::connect_or_start_inner(home, cli, Some(ui_pid), true, on_progress)
     }
 
     /// Connect directly to an explicit `home`'s Unix socket (`home/app.sock`) without
     /// consulting `CANBAN_ENDPOINT` in the process environment.
     pub fn connect_home(home: PathBuf, cli: &Path) -> Result<Arc<Self>> {
-        Self::connect_or_start_inner(home, cli, None, false)
+        Self::connect_or_start_inner(home, cli, None, false, |_| {})
     }
 
     /// Connect to a remote authenticated TCP `canband` daemon without spawning a local daemon.
@@ -292,16 +308,26 @@ impl AppClient {
         cli: &Path,
         ui_pid: Option<u32>,
         honor_env_endpoint: bool,
+        mut on_progress: impl FnMut(ConnectProgress),
     ) -> Result<Arc<Self>> {
+        let mut emit = |phase: &str, tag: &str, detail: String| {
+            on_progress(ConnectProgress {
+                phase: phase.to_owned(),
+                tag: tag.to_owned(),
+                detail,
+            });
+        };
         let explicit = honor_env_endpoint
             .then(|| std::env::var_os("CANBAN_ENDPOINT"))
             .flatten();
         if let Some(raw_os) = &explicit {
             let raw_str = raw_os.to_string_lossy();
             if let Some((addr, token)) = canban_types::parse_pairing_uri(&raw_str) {
+                emit("connect", "REMOTE", format!("Connecting to {addr}…"));
                 return Self::connect_tcp(addr, token);
             }
             if let Some(addr) = raw_str.strip_prefix("tcp://") {
+                emit("connect", "REMOTE", format!("Connecting to tcp://{addr}…"));
                 let token = std::env::var("CANBAN_TOKEN").unwrap_or_default();
                 return Self::connect_tcp(addr.to_owned(), token);
             }
@@ -314,6 +340,11 @@ impl AppClient {
             && !canban_updater::handoff::authorized(&home)
             && canban_updater::handoff::active(&home)
         {
+            emit(
+                "handoff",
+                "HANDOFF",
+                "Resuming pending backend upgrade handoff…".into(),
+            );
             let updater = cli.with_file_name("canban-updater");
             let replaces_ui = canban_updater::handoff::resume_with(
                 &home,
@@ -321,11 +352,21 @@ impl AppClient {
                 ui_pid,
             )?;
             let until = std::time::Instant::now() + Duration::from_secs(100);
+            let mut last_handoff_phase = String::new();
             while canban_updater::handoff::active(&home) {
+                let journal = canban_updater::handoff::journal(&home)?;
                 ensure!(
-                    canban_updater::handoff::journal(&home)?.phase != "manual_recovery",
+                    journal.phase != "manual_recovery",
                     "Upgrade recovery failed; inspect updates/updater.log"
                 );
+                if journal.phase != last_handoff_phase && !journal.phase.is_empty() {
+                    last_handoff_phase = journal.phase.clone();
+                    emit(
+                        "handoff",
+                        "HANDOFF",
+                        format!("Upgrade handoff phase: {}", journal.phase),
+                    );
+                }
                 ensure!(
                     std::time::Instant::now() < until,
                     "Upgrade/recovery is still in progress"
@@ -337,15 +378,29 @@ impl AppClient {
             }
         }
         if rpc(&sock_path, "app.ping", json!({})).is_err() && explicit.is_none() {
+            emit(
+                "spawn",
+                "DAEMON",
+                "app.sock offline → spawning `canban serve`".into(),
+            );
             Self::spawn_daemon(&home, cli)?;
         }
         let mut state = None;
         let mut server_notice = None;
         let mut last_error: Option<anyhow::Error> = None;
         let mut server_id = None;
+        let mut last_daemon_progress: Option<(String, String)> = None;
         for _ in 0..100 {
+            let ping_started = std::time::Instant::now();
             match rpc(&sock_path, "app.ping", json!({})) {
                 Ok(ping) => {
+                    let ping_ms = ping_started.elapsed().as_millis();
+                    let api_ver = ping["api_version"].as_u64().unwrap_or(API_VERSION as u64);
+                    emit(
+                        "rpc",
+                        "RPC",
+                        format!("app.ping OK (API v{api_ver}, {ping_ms}ms)"),
+                    );
                     server_id = ping["server_id"].as_str().map(str::to_owned);
                     match canban_updater::backend_order(&ping, &canban_updater::Build::current()) {
                         std::cmp::Ordering::Less => {
@@ -383,6 +438,15 @@ impl AppClient {
                 }
                 Err(err) => {
                     last_error = Some(err);
+                    if explicit.is_none()
+                        && let Some(prog) = crate::startup_progress::read_startup_progress(&home)
+                    {
+                        let key = (prog.phase.clone(), prog.detail.clone());
+                        if last_daemon_progress.as_ref() != Some(&key) {
+                            emit(&prog.phase, &prog.tag, prog.detail);
+                            last_daemon_progress = Some(key);
+                        }
+                    }
                 }
             }
             if explicit.is_some() {

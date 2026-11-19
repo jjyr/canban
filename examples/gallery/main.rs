@@ -5,6 +5,149 @@ use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
 use serde_json::json;
 
+fn gallery_startup_post_fixture(mode: &str) -> impl IntoElement {
+    let make_migrating = || {
+        let mut p = canban_ui::startup::BootProgress::initial("/Users/preview/.canban".into());
+        p.apply_connect_progress(
+            &canban_app_server::ConnectProgress {
+                phase: "spawn".into(),
+                tag: "DAEMON".into(),
+                detail: "app.sock offline → spawning `canban serve`".into(),
+            },
+            80,
+        );
+        p.apply_connect_progress(
+            &canban_app_server::ConnectProgress {
+                phase: "lock".into(),
+                tag: "LOCK".into(),
+                detail: "service.lock acquired (pid 48291)".into(),
+            },
+            210,
+        );
+        p.apply_connect_progress(
+            &canban_app_server::ConnectProgress {
+                phase: "storage".into(),
+                tag: "STORAGE".into(),
+                detail: "Opening canban.sqlite (WAL mode)…".into(),
+            },
+            350,
+        );
+        p.apply_connect_progress(
+            &canban_app_server::ConnectProgress {
+                phase: "migrate".into(),
+                tag: "MIGRATE".into(),
+                detail: "Migrating SQLite schema (v18 → v20)…".into(),
+            },
+            420,
+        );
+        p
+    };
+
+    let static_mode = mode == "startup-migrating";
+    let boot = signal(if static_mode {
+        make_migrating()
+    } else {
+        canban_ui::startup::BootProgress::initial("/Users/preview/.canban".into())
+    });
+    let elapsed_ms = signal(if static_mode { 1400_u64 } else { 0_u64 });
+    let tick = stored(0_u64);
+
+    set_interval(std::time::Duration::from_millis(100), move || {
+        if static_mode {
+            elapsed_ms.update(|ms| *ms += 100);
+            return;
+        }
+        let step = tick.get() + 1;
+        tick.replace(step);
+        let cycle = step % 52;
+        let ms = cycle * 100;
+        if cycle == 0 {
+            elapsed_ms.set(0);
+            boot.set(canban_ui::startup::BootProgress::initial(
+                "/Users/preview/.canban".into(),
+            ));
+        } else if cycle <= 34 {
+            elapsed_ms.set(ms);
+        }
+        match cycle {
+            2 => boot.update(|b| {
+                b.apply_connect_progress(
+                    &canban_app_server::ConnectProgress {
+                        phase: "spawn".into(),
+                        tag: "DAEMON".into(),
+                        detail: "app.sock offline → spawning `canban serve`".into(),
+                    },
+                    ms,
+                );
+            }),
+            5 => boot.update(|b| {
+                b.apply_connect_progress(
+                    &canban_app_server::ConnectProgress {
+                        phase: "lock".into(),
+                        tag: "LOCK".into(),
+                        detail: "service.lock acquired (pid 48291)".into(),
+                    },
+                    ms,
+                );
+            }),
+            8 => boot.update(|b| {
+                b.apply_connect_progress(
+                    &canban_app_server::ConnectProgress {
+                        phase: "storage".into(),
+                        tag: "STORAGE".into(),
+                        detail: "Opening canban.sqlite (WAL mode)…".into(),
+                    },
+                    ms,
+                );
+            }),
+            11 => boot.update(|b| {
+                b.apply_connect_progress(
+                    &canban_app_server::ConnectProgress {
+                        phase: "migrate".into(),
+                        tag: "MIGRATE".into(),
+                        detail: "Migrating SQLite schema (v18 → v20)…".into(),
+                    },
+                    ms,
+                );
+            }),
+            18 => boot.update(|b| {
+                b.apply_connect_progress(
+                    &canban_app_server::ConnectProgress {
+                        phase: "workflow".into(),
+                        tag: "WORKFLOW".into(),
+                        detail: "Validated 14 project workflows & schedules".into(),
+                    },
+                    ms,
+                );
+            }),
+            22 => boot.update(|b| {
+                b.apply_connect_progress(
+                    &canban_app_server::ConnectProgress {
+                        phase: "rpc".into(),
+                        tag: "RPC".into(),
+                        detail: format!(
+                            "app.ping OK (API v{}, 2ms)",
+                            canban_app_server::API_VERSION
+                        ),
+                    },
+                    ms,
+                );
+                b.mark_app_ready(canban_app_server::API_VERSION, Some("9f3a1c02abcd"), ms);
+            }),
+            30 => boot.update(|b| {
+                b.mark_herdr_ready(Some("0.4.2"), Some("/Users/preview/.local/bin/hc"), ms);
+                b.mark_snapshot_loading(ms);
+            }),
+            34 => boot.update(|b| {
+                b.mark_boot_complete(Some(14), Some(128), ms);
+            }),
+            _ => {}
+        }
+    });
+
+    canban_ui::startup::checking_screen(boot, elapsed_ms)
+}
+
 fn gallery_herdr_setup_fixture(ui: Ui, mode: &str) -> impl IntoElement {
     let detected_platform = format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH);
     #[cfg(target_os = "macos")]
@@ -1009,6 +1152,12 @@ pub fn Gallery() -> impl IntoElement {
             ui.update.set(json!({"state":{"phase":"available","available":{"manifest":{"version":"20261111-99"}}}}));
         }
         return canban_ui::frame::screen(ui).into_element();
+    }
+    if let Ok(scene @ ("startup-checking" | "startup-migrating")) =
+        std::env::var("CANBAN_GALLERY_SCENE").as_deref()
+    {
+        canban_ui::frame::configure_window_chrome();
+        return gallery_startup_post_fixture(scene).into_element();
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("startup-error") {
         canban_ui::frame::configure_window_chrome();
@@ -3082,6 +3231,9 @@ pub fn Gallery() -> impl IntoElement {
                 .child(action("Controls", Variant::Quiet, move |_| {
                     scene.set("controls".into())
                 }))
+                .child(action("Startup POST", Variant::Quiet, move |_| {
+                    scene.set("startup-checking".into())
+                }))
                 .child(action("Herdr setup", Variant::Quiet, move |_| {
                     scene.set("herdr-missing".into())
                 }))
@@ -3102,6 +3254,9 @@ pub fn Gallery() -> impl IntoElement {
             }
             if scene.get() == "controls" {
                 return controls().into_element();
+            }
+            if scene.get() == "startup-checking" {
+                return gallery_startup_post_fixture("startup-checking").into_element();
             }
             if scene.get() == "herdr-missing" {
                 return gallery_herdr_setup_fixture(ui, "herdr-missing").into_element();

@@ -238,6 +238,38 @@ pub fn loading_spinner(size: f32, color: ThemeColor) -> View {
         .child(icon_tinted(Icon::Refresh, color).w(px(size)).h(px(size)))
 }
 
+/// 28x28 rounded semantic badge containing a continuously rotating spinner.
+pub fn loading_icon_badge(tone: Tone) -> View {
+    let (bg, fg) = tone_colors(tone);
+    view()
+        .relative()
+        .flex_shrink_0()
+        .w(px(28.))
+        .h(px(28.))
+        .rounded(px(7.))
+        .bg(bg)
+        .items_center()
+        .justify_center()
+        .pointer_events(PointerEvents::None)
+        .child(loading_spinner(15., fg))
+}
+
+/// Horizontal progress bar with rounded track and semantic fill.
+pub fn progress_bar(fraction: f32, tone: Tone) -> View {
+    let (_, fg) = tone_colors(tone);
+    let clamped = fraction.clamp(0.0, 1.0);
+    view()
+        .flex_1()
+        .min_w(px(0.))
+        .h(px(6.))
+        .rounded_full()
+        .bg(INSET)
+        .border_1()
+        .border_color(BORDER)
+        .overflow_hidden()
+        .child(view().h_full().w(Percentage(clamped)).rounded_full().bg(fg))
+}
+
 /// Compact inline loading indicator with spinner animation and muted status message.
 pub fn loading_indicator(message: impl IntoReactive<SharedString>) -> View {
     view()

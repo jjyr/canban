@@ -218,12 +218,19 @@ pub struct Db<'a> {
 }
 impl Store {
     pub fn open(home: &Path) -> Result<Self> {
+        Self::open_with_progress(home, |_, _| {})
+    }
+    pub fn open_with_progress(
+        home: &Path,
+        mut on_progress: impl FnMut(&str, &str),
+    ) -> Result<Self> {
         std::fs::create_dir_all(home)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700))?;
         }
+        on_progress("storage", "Opening canban.sqlite (WAL mode)…");
         let mut conn = Connection::open(home.join("canban.sqlite"))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(
@@ -236,6 +243,15 @@ impl Store {
             version <= migrations::CURRENT as i64,
             "Database schema is newer than this application"
         );
+        if version < migrations::CURRENT as i64 {
+            on_progress(
+                "migrate",
+                &format!(
+                    "Migrating SQLite schema (v{version} → v{})…",
+                    migrations::CURRENT
+                ),
+            );
+        }
         if version == 0 {
             conn.execute_batch("BEGIN IMMEDIATE; CREATE TABLE counters (id TEXT PRIMARY KEY, value INTEGER NOT NULL); CREATE TABLE operations (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL);")?;
             for table in [
@@ -334,8 +350,17 @@ impl Store {
             conn.execute_batch("COMMIT;")?;
         }
         migrations::prepare(home, &conn, migrations::CURRENT)?;
-        migrations::apply(&mut conn, migrations::CURRENT)?;
+        migrations::apply_with_progress(&mut conn, migrations::CURRENT, |step, target| {
+            on_progress(
+                "migrate",
+                &format!("Applying schema migration v{step} / v{target}…"),
+            );
+        })?;
         migrations::sync_paths(home, &conn)?;
+        on_progress(
+            "storage_ready",
+            &format!("SQLite WAL ready (schema v{})", migrations::CURRENT),
+        );
         Ok(Self {
             conn,
             home: home.to_owned(),

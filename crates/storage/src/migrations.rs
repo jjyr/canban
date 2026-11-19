@@ -328,13 +328,29 @@ pub fn version(conn: &Connection) -> Result<u32> {
     Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
 }
 pub fn apply(conn: &mut Connection, target: u32) -> Result<()> {
+    apply_with_progress(conn, target, |_, _| {})
+}
+pub fn apply_with_progress(
+    conn: &mut Connection,
+    target: u32,
+    on_step: impl FnMut(u32, u32),
+) -> Result<()> {
     ensure!(
         CURRENT == STEPS.last().map_or(BASELINE, |s| s.version),
         "Migration registry and CURRENT schema disagree"
     );
-    batch(conn, STEPS, target)
+    batch_with_progress(conn, STEPS, target, on_step)
 }
+#[cfg(test)]
 fn batch(conn: &mut Connection, steps: &[Migration], target: u32) -> Result<()> {
+    batch_with_progress(conn, steps, target, |_, _| {})
+}
+fn batch_with_progress(
+    conn: &mut Connection,
+    steps: &[Migration],
+    target: u32,
+    mut on_step: impl FnMut(u32, u32),
+) -> Result<()> {
     let before = version(conn)?;
     let ceiling = steps.last().map_or(BASELINE, |s| s.version);
     ensure!(
@@ -360,6 +376,7 @@ fn batch(conn: &mut Connection, steps: &[Migration], target: u32) -> Result<()> 
             .iter()
             .filter(|s| s.version > before && s.version <= target)
         {
+            on_step(step.version, target);
             (step.up)(&tx)?;
             tx.pragma_update(None, "user_version", step.version)?;
         }
@@ -369,6 +386,7 @@ fn batch(conn: &mut Connection, steps: &[Migration], target: u32) -> Result<()> 
             .rev()
             .filter(|s| s.version > target && s.version <= before)
         {
+            on_step(step.version - 1, target);
             (step.down)(&tx)?;
             tx.pragma_update(None, "user_version", step.version - 1)?;
         }

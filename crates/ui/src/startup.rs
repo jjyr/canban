@@ -10,8 +10,9 @@ use std::{
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const DISPLAY_INSTALL_COMMAND: &str = "curl -fsSL https://releases.herdr.dev/core/install.sh | sh";
@@ -123,6 +124,352 @@ pub enum StepState {
     Error,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubStepState {
+    Pending,
+    Active,
+    Ok,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BootSubStep {
+    pub id: String,
+    pub label: String,
+    pub state: SubStepState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BootLogEntry {
+    pub elapsed_ms: u64,
+    pub tag: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BootProgress {
+    pub home: String,
+    pub app_state: StepState,
+    pub app_detail: String,
+    pub app_badge_suffix: Option<String>,
+    pub app_elapsed_ms: Option<u64>,
+    pub app_started_ms: u64,
+    pub app_substeps: Vec<BootSubStep>,
+    pub herdr_state: StepState,
+    pub herdr_detail: String,
+    pub herdr_badge_suffix: Option<String>,
+    pub herdr_elapsed_ms: Option<u64>,
+    pub herdr_started_ms: Option<u64>,
+    pub herdr_substeps: Vec<BootSubStep>,
+    pub logs: Vec<BootLogEntry>,
+    pub percent: u8,
+    pub status_line: String,
+    pub boot_complete: bool,
+}
+
+const MAX_BOOT_LOGS: usize = 24;
+
+fn compact_user_path(path: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    compact_home(path, &home)
+}
+
+impl BootProgress {
+    pub fn initial(home: String) -> Self {
+        let compact = compact_user_path(&home);
+        Self {
+            home,
+            app_state: StepState::Active,
+            app_detail: "Connecting to local AppServer…".into(),
+            app_badge_suffix: None,
+            app_elapsed_ms: None,
+            app_started_ms: 0,
+            app_substeps: vec![
+                BootSubStep {
+                    id: "connect".into(),
+                    label: "Connect to local AppServer (app.sock)".into(),
+                    state: SubStepState::Active,
+                },
+                BootSubStep {
+                    id: "storage".into(),
+                    label: "Open SQLite WAL store & check schema".into(),
+                    state: SubStepState::Pending,
+                },
+                BootSubStep {
+                    id: "workflow".into(),
+                    label: "Initialize workflows & verify durable snapshot".into(),
+                    state: SubStepState::Pending,
+                },
+            ],
+            herdr_state: StepState::Pending,
+            herdr_detail: "Waiting for AppServer…".into(),
+            herdr_badge_suffix: None,
+            herdr_elapsed_ms: None,
+            herdr_started_ms: None,
+            herdr_substeps: Vec::new(),
+            logs: vec![BootLogEntry {
+                elapsed_ms: 0,
+                tag: "HOME".into(),
+                message: compact,
+            }],
+            percent: 10,
+            status_line: "Connecting to local AppServer…".into(),
+            boot_complete: false,
+        }
+    }
+
+    fn push_log(&mut self, elapsed_ms: u64, tag: &str, message: impl Into<String>) {
+        let message = message.into();
+        if self
+            .logs
+            .last()
+            .is_some_and(|last| last.tag == tag && last.message == message)
+        {
+            return;
+        }
+        self.logs.push(BootLogEntry {
+            elapsed_ms,
+            tag: tag.to_owned(),
+            message,
+        });
+        if self.logs.len() > MAX_BOOT_LOGS {
+            let drain = self.logs.len() - MAX_BOOT_LOGS;
+            self.logs.drain(0..drain);
+        }
+    }
+
+    fn set_app_substep(&mut self, id: &str, state: SubStepState, label: Option<&str>) {
+        if let Some(step) = self.app_substeps.iter_mut().find(|s| s.id == id) {
+            step.state = state;
+            if let Some(text) = label {
+                step.label = text.to_owned();
+            }
+        }
+    }
+
+    pub fn apply_connect_progress(
+        &mut self,
+        progress: &canban_app_server::ConnectProgress,
+        elapsed_ms: u64,
+    ) {
+        self.push_log(elapsed_ms, &progress.tag, progress.detail.clone());
+        match progress.phase.as_str() {
+            "handoff" => {
+                self.app_detail = progress.detail.clone();
+                self.set_app_substep("connect", SubStepState::Active, Some(&progress.detail));
+                self.percent = self.percent.max(20);
+                self.status_line = "Resuming backend upgrade…".into();
+            }
+            "spawn" => {
+                self.app_detail = "Starting local AppServer daemon…".into();
+                self.set_app_substep(
+                    "connect",
+                    SubStepState::Active,
+                    Some("Spawn local AppServer daemon (`canban serve`)"),
+                );
+                self.percent = self.percent.max(24);
+                self.status_line = "Starting local AppServer daemon…".into();
+            }
+            "lock" => {
+                self.set_app_substep(
+                    "connect",
+                    SubStepState::Ok,
+                    Some("Acquire service lock & verify server identity"),
+                );
+                self.set_app_substep("storage", SubStepState::Active, None);
+                self.percent = self.percent.max(32);
+                self.status_line = "Acquiring service lock…".into();
+            }
+            "storage" => {
+                self.set_app_substep(
+                    "connect",
+                    SubStepState::Ok,
+                    Some("Acquire service lock & verify server identity"),
+                );
+                self.set_app_substep("storage", SubStepState::Active, Some(&progress.detail));
+                self.percent = self.percent.max(40);
+                self.status_line = "Opening SQLite database…".into();
+            }
+            "migrate" => {
+                self.set_app_substep(
+                    "connect",
+                    SubStepState::Ok,
+                    Some("Acquire service lock & verify server identity"),
+                );
+                self.set_app_substep("storage", SubStepState::Active, Some(&progress.detail));
+                self.percent = self.percent.max(48);
+                self.status_line = "Migrating database…".into();
+            }
+            "storage_ready" => {
+                self.set_app_substep(
+                    "connect",
+                    SubStepState::Ok,
+                    Some("Acquire service lock & verify server identity"),
+                );
+                self.set_app_substep("storage", SubStepState::Ok, Some(&progress.detail));
+                self.set_app_substep("workflow", SubStepState::Active, None);
+                self.percent = self.percent.max(56);
+                self.status_line = "Loading configuration…".into();
+            }
+            "config" => {
+                self.set_app_substep("connect", SubStepState::Ok, None);
+                self.set_app_substep("storage", SubStepState::Ok, None);
+                self.set_app_substep("workflow", SubStepState::Active, Some(&progress.detail));
+                self.percent = self.percent.max(60);
+                self.status_line = "Loading agent profiles…".into();
+            }
+            "workflow" => {
+                self.set_app_substep("connect", SubStepState::Ok, None);
+                self.set_app_substep("storage", SubStepState::Ok, None);
+                self.set_app_substep("workflow", SubStepState::Active, Some(&progress.detail));
+                self.percent = self.percent.max(66);
+                self.status_line = "Validating project workflows…".into();
+            }
+            "snapshot" => {
+                self.set_app_substep("connect", SubStepState::Ok, None);
+                self.set_app_substep("storage", SubStepState::Ok, None);
+                self.set_app_substep("workflow", SubStepState::Active, Some(&progress.detail));
+                self.percent = self.percent.max(72);
+                self.status_line = "Verifying durable snapshot…".into();
+            }
+            "ready" => {
+                self.set_app_substep("connect", SubStepState::Ok, None);
+                self.set_app_substep("storage", SubStepState::Ok, None);
+                self.set_app_substep("workflow", SubStepState::Ok, Some(&progress.detail));
+                self.percent = self.percent.max(74);
+                self.status_line = "Connecting to AppServer RPC…".into();
+            }
+            "rpc" => {
+                for step in &mut self.app_substeps {
+                    step.state = SubStepState::Ok;
+                }
+                self.percent = self.percent.max(76);
+                self.status_line = "AppServer online…".into();
+            }
+            _ => {
+                self.app_detail = progress.detail.clone();
+            }
+        }
+    }
+
+    pub fn mark_app_ready(&mut self, api_version: u32, server_id: Option<&str>, elapsed_ms: u64) {
+        self.app_state = StepState::Ready;
+        self.app_elapsed_ms = Some(elapsed_ms.saturating_sub(self.app_started_ms));
+        self.app_badge_suffix = Some(format!("API v{api_version}"));
+        self.app_detail = match server_id {
+            Some(id) if !id.is_empty() => {
+                let short = &id[..id.len().min(8)];
+                format!("Local daemon online (server {short})")
+            }
+            _ => "Local daemon online".into(),
+        };
+        self.app_substeps.clear();
+
+        self.herdr_state = StepState::Active;
+        self.herdr_started_ms = Some(elapsed_ms);
+        self.herdr_detail = "Probing Herdr Core (`hc`) runtime…".into();
+        self.herdr_substeps = vec![
+            BootSubStep {
+                id: "locate".into(),
+                label: "Locate `hc` binary & resolve runtime".into(),
+                state: SubStepState::Active,
+            },
+            BootSubStep {
+                id: "handshake".into(),
+                label: "Handshake with persistent PTY supervisor".into(),
+                state: SubStepState::Pending,
+            },
+        ];
+        self.push_log(elapsed_ms, "HERDR", "probing `hc` runtime daemon…");
+        self.percent = self.percent.max(82);
+        self.status_line = "Verifying Herdr Core…".into();
+    }
+
+    pub fn mark_herdr_ready(
+        &mut self,
+        version: Option<&str>,
+        resolved_hc: Option<&str>,
+        elapsed_ms: u64,
+    ) {
+        self.herdr_state = StepState::Ready;
+        self.herdr_elapsed_ms =
+            Some(elapsed_ms.saturating_sub(self.herdr_started_ms.unwrap_or(elapsed_ms)));
+        self.herdr_badge_suffix = version.filter(|v| !v.is_empty()).map(|v| format!("hc {v}"));
+        self.herdr_detail = match resolved_hc.filter(|p| !p.is_empty()) {
+            Some(path) => format!(
+                "Persistent PTY supervisor online ({})",
+                compact_user_path(path)
+            ),
+            None => "Persistent PTY supervisor online".into(),
+        };
+        self.herdr_substeps.clear();
+        let msg = match (
+            version.filter(|v| !v.is_empty()),
+            resolved_hc.filter(|p| !p.is_empty()),
+        ) {
+            (Some(v), Some(p)) => format!("hc {v} online ({})", compact_user_path(p)),
+            (Some(v), None) => format!("hc {v} online"),
+            (None, Some(p)) => format!("hc runtime online ({})", compact_user_path(p)),
+            (None, None) => "hc runtime online".into(),
+        };
+        self.push_log(elapsed_ms, "HERDR", msg);
+        self.percent = self.percent.max(90);
+        self.status_line = "Loading workspace snapshot…".into();
+    }
+
+    pub fn mark_snapshot_loading(&mut self, elapsed_ms: u64) {
+        self.push_log(
+            elapsed_ms,
+            "SNAPSHOT",
+            "hydrating projects and workspace state…",
+        );
+        self.percent = self.percent.max(94);
+        self.status_line = "Loading workspace snapshot…".into();
+    }
+
+    pub fn mark_boot_complete(
+        &mut self,
+        projects: Option<usize>,
+        cards: Option<usize>,
+        elapsed_ms: u64,
+    ) {
+        if let (Some(p), Some(c)) = (projects, cards) {
+            self.push_log(
+                elapsed_ms,
+                "SNAPSHOT",
+                format!("loaded {p} projects, {c} cards"),
+            );
+            if !self.app_detail.contains("projects") {
+                self.app_detail = format!("{} · {p} projects", self.app_detail);
+            }
+        }
+        self.percent = 100;
+        self.boot_complete = true;
+        self.status_line = "Boot complete. Mounting workspace…".into();
+    }
+}
+
+enum BootEvent {
+    Connect(canban_app_server::ConnectProgress, u64),
+    AppReady {
+        api_version: u32,
+        server_id: Option<String>,
+        elapsed_ms: u64,
+    },
+    HerdrReady {
+        version: Option<String>,
+        resolved_hc: Option<String>,
+        elapsed_ms: u64,
+    },
+    SnapshotLoading {
+        elapsed_ms: u64,
+    },
+    BootComplete {
+        projects: Option<usize>,
+        cards: Option<usize>,
+        elapsed_ms: u64,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct HerdrSetupView {
     pub home: String,
@@ -197,13 +544,7 @@ impl HerdrSetupView {
 
 #[derive(Clone)]
 enum Stage {
-    Checking {
-        home: String,
-        step_app: StepState,
-        app_detail: String,
-        step_herdr: StepState,
-        herdr_detail: String,
-    },
+    Checking,
     BackendOlder {
         home: String,
         detail: String,
@@ -224,22 +565,7 @@ impl PartialEq for Stage {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Workspace, Self::Workspace) => true,
-            (
-                Self::Checking {
-                    home: h1,
-                    step_app: a1,
-                    app_detail: ad1,
-                    step_herdr: r1,
-                    herdr_detail: rd1,
-                },
-                Self::Checking {
-                    home: h2,
-                    step_app: a2,
-                    app_detail: ad2,
-                    step_herdr: r2,
-                    herdr_detail: rd2,
-                },
-            ) => h1 == h2 && a1 == a2 && ad1 == ad2 && r1 == r2 && rd1 == rd2,
+            (Self::Checking, Self::Checking) => true,
             (
                 Self::BackendOlder {
                     home: h1,
@@ -271,20 +597,49 @@ impl PartialEq for Stage {
 }
 
 enum BootOutcome {
-    Workspace,
+    Workspace {
+        projects: Option<usize>,
+        cards: Option<usize>,
+        elapsed_ms: u64,
+    },
     HerdrSetup(Arc<canban_app_server::AppClient>, HerdrSetupView),
     BackendOlder(canban_app_server::BackendOlder, String),
     AppServerError(String),
 }
 
-fn finalize_workspace(app: Arc<canban_app_server::AppClient>) -> Result<()> {
-    let _ = app.snapshot();
+fn finalize_workspace(app: Arc<canban_app_server::AppClient>) -> Result<Option<(usize, usize)>> {
+    let counts = app
+        .snapshot()
+        .ok()
+        .map(|s| (s.projects.len(), s.cards.len()));
     crate::drafts::persistence::start(app.clone())?;
     let registry = canban_app_server::hosts::HostRegistry::new(app.clone());
     let _ = crate::HOSTS.set(registry);
     let _ = crate::APP.set(app);
     clear_fatal_exit();
-    Ok(())
+    Ok(counts)
+}
+
+fn apply_boot_event(progress: &mut BootProgress, event: BootEvent) {
+    match event {
+        BootEvent::Connect(p, elapsed_ms) => progress.apply_connect_progress(&p, elapsed_ms),
+        BootEvent::AppReady {
+            api_version,
+            server_id,
+            elapsed_ms,
+        } => progress.mark_app_ready(api_version, server_id.as_deref(), elapsed_ms),
+        BootEvent::HerdrReady {
+            version,
+            resolved_hc,
+            elapsed_ms,
+        } => progress.mark_herdr_ready(version.as_deref(), resolved_hc.as_deref(), elapsed_ms),
+        BootEvent::SnapshotLoading { elapsed_ms } => progress.mark_snapshot_loading(elapsed_ms),
+        BootEvent::BootComplete {
+            projects,
+            cards,
+            elapsed_ms,
+        } => progress.mark_boot_complete(projects, cards, elapsed_ms),
+    }
 }
 
 /// Primary desktop bootstrap root: verifies `AppServer` and `herdr-core` (`hc`),
@@ -304,13 +659,11 @@ pub fn Bootstrap() -> impl IntoElement {
     };
 
     let root_owner = Owner::current();
-    let stage = signal(Stage::Checking {
-        home: home_display.clone(),
-        step_app: StepState::Active,
-        app_detail: "Connecting to local service…".into(),
-        step_herdr: StepState::Pending,
-        herdr_detail: "Pending".into(),
-    });
+    let stage = signal(Stage::Checking);
+    let boot = signal(BootProgress::initial(home_display.clone()));
+    let elapsed_ms = signal(0_u64);
+    let boot_started = stored(Instant::now());
+    let boot_rx = stored(None::<mpsc::Receiver<BootEvent>>);
     let show_checking_panel = signal(false);
     let copy_status = signal(String::new());
     let poll_active = stored(false);
@@ -320,18 +673,44 @@ pub fn Bootstrap() -> impl IntoElement {
         show_checking_panel.set(true);
     });
 
+    // Live POST clock + real-time progress event drain while checking.
+    set_interval(Duration::from_millis(80), move || {
+        if !matches!(stage.get_untracked(), Stage::Checking) {
+            return;
+        }
+        let drained = boot_rx.with(|slot| {
+            let mut events = Vec::new();
+            if let Some(rx) = slot.as_ref() {
+                while let Ok(ev) = rx.try_recv() {
+                    events.push(ev);
+                }
+            }
+            events
+        });
+        if !drained.is_empty() {
+            boot.update(|b| {
+                for ev in drained {
+                    apply_boot_event(b, ev);
+                }
+            });
+        }
+        if !boot.get_untracked().boot_complete {
+            elapsed_ms.set(boot_started.get().elapsed().as_millis() as u64);
+        }
+    });
+
     let run_boot: Rc<dyn Fn()> = Rc::new({
         let home_path = home_path.clone();
         let home_display = home_display.clone();
         move || {
             clear_fatal_exit();
-            stage.set(Stage::Checking {
-                home: home_display.clone(),
-                step_app: StepState::Active,
-                app_detail: "Connecting to local service…".into(),
-                step_herdr: StepState::Pending,
-                herdr_detail: "Pending".into(),
-            });
+            let started = Instant::now();
+            boot_started.replace(started);
+            elapsed_ms.set(0);
+            boot.set(BootProgress::initial(home_display.clone()));
+            let (tx, rx) = mpsc::channel::<BootEvent>();
+            boot_rx.replace(Some(rx));
+            stage.set(Stage::Checking);
             let hp = home_path.clone();
             let hd = home_display.clone();
             let hd_after = home_display.clone();
@@ -342,29 +721,66 @@ pub fn Bootstrap() -> impl IntoElement {
                             Ok(exe) => exe.with_file_name("canban"),
                             Err(e) => return BootOutcome::AppServerError(format!("{e:#}")),
                         };
-                        let app = match canban_app_server::AppClient::connect_or_start_ui(
-                            hp.clone(),
-                            &cli,
-                            std::process::id(),
-                        ) {
-                            Ok(app) => app,
-                            Err(err) => {
-                                let detail = format!("{err:#}");
-                                if let Some(old) =
-                                    err.downcast_ref::<canban_app_server::BackendOlder>()
-                                    && !old.explicit_endpoint
-                                    && instance::bundled().ok().flatten().is_none()
-                                {
-                                    return BootOutcome::BackendOlder(old.clone(), detail);
+                        let tx_connect = tx.clone();
+                        let app =
+                            match canban_app_server::AppClient::connect_or_start_ui_with_progress(
+                                hp.clone(),
+                                &cli,
+                                std::process::id(),
+                                move |progress| {
+                                    let _ = tx_connect.send(BootEvent::Connect(
+                                        progress,
+                                        started.elapsed().as_millis() as u64,
+                                    ));
+                                },
+                            ) {
+                                Ok(app) => app,
+                                Err(err) => {
+                                    let detail = format!("{err:#}");
+                                    if let Some(old) =
+                                        err.downcast_ref::<canban_app_server::BackendOlder>()
+                                        && !old.explicit_endpoint
+                                        && instance::bundled().ok().flatten().is_none()
+                                    {
+                                        return BootOutcome::BackendOlder(old.clone(), detail);
+                                    }
+                                    return BootOutcome::AppServerError(detail);
                                 }
-                                return BootOutcome::AppServerError(detail);
-                            }
-                        };
+                            };
+                        let _ = tx.send(BootEvent::AppReady {
+                            api_version: canban_app_server::API_VERSION,
+                            server_id: app.server_id().map(str::to_owned),
+                            elapsed_ms: started.elapsed().as_millis() as u64,
+                        });
                         match app.call("herdr.check", json!({})) {
-                            Ok(check) if check["ready"] == true => match finalize_workspace(app) {
-                                Ok(()) => BootOutcome::Workspace,
-                                Err(err) => BootOutcome::AppServerError(format!("{err:#}")),
-                            },
+                            Ok(check) if check["ready"] == true => {
+                                let _ = tx.send(BootEvent::HerdrReady {
+                                    version: check["version"].as_str().map(str::to_owned),
+                                    resolved_hc: check["resolved_hc"].as_str().map(str::to_owned),
+                                    elapsed_ms: started.elapsed().as_millis() as u64,
+                                });
+                                let _ = tx.send(BootEvent::SnapshotLoading {
+                                    elapsed_ms: started.elapsed().as_millis() as u64,
+                                });
+                                match finalize_workspace(app) {
+                                    Ok(counts) => {
+                                        let done_ms = started.elapsed().as_millis() as u64;
+                                        let projects = counts.map(|(p, _)| p);
+                                        let cards = counts.map(|(_, c)| c);
+                                        let _ = tx.send(BootEvent::BootComplete {
+                                            projects,
+                                            cards,
+                                            elapsed_ms: done_ms,
+                                        });
+                                        BootOutcome::Workspace {
+                                            projects,
+                                            cards,
+                                            elapsed_ms: done_ms,
+                                        }
+                                    }
+                                    Err(err) => BootOutcome::AppServerError(format!("{err:#}")),
+                                }
+                            }
                             Ok(check) => {
                                 write_upgrade_ready(&hp);
                                 let view = HerdrSetupView::from_check(hd, &check);
@@ -387,8 +803,45 @@ pub fn Bootstrap() -> impl IntoElement {
                     })
                     .await;
 
+                    // Drain any final progress events before transitioning.
+                    let remaining = boot_rx.with(|slot| {
+                        let mut events = Vec::new();
+                        if let Some(rx) = slot.as_ref() {
+                            while let Ok(ev) = rx.try_recv() {
+                                events.push(ev);
+                            }
+                        }
+                        events
+                    });
+                    boot_rx.replace(None);
+                    if !remaining.is_empty() {
+                        boot.update(|b| {
+                            for ev in remaining {
+                                apply_boot_event(b, ev);
+                            }
+                        });
+                    }
+
                     match outcome {
-                        Ok(BootOutcome::Workspace) => stage.set(Stage::Workspace),
+                        Ok(BootOutcome::Workspace {
+                            projects,
+                            cards,
+                            elapsed_ms: done_ms,
+                        }) => {
+                            elapsed_ms.set(done_ms);
+                            boot.update(|b| {
+                                if !b.boot_complete {
+                                    b.mark_boot_complete(projects, cards, done_ms);
+                                }
+                            });
+                            if show_checking_panel.get_untracked() {
+                                set_timeout(Duration::from_millis(120), move || {
+                                    stage.set(Stage::Workspace);
+                                });
+                            } else {
+                                stage.set(Stage::Workspace);
+                            }
+                        }
                         Ok(BootOutcome::HerdrSetup(app, view)) => {
                             let resume_poll = view.installing;
                             ready();
@@ -537,22 +990,14 @@ pub fn Bootstrap() -> impl IntoElement {
         .bg(BACKGROUND)
         .child(dynamic(move || {
             let current = stage.get();
-            let show_checking =
-                matches!(current, Stage::Checking { .. }) && show_checking_panel.get();
+            let show_checking = matches!(current, Stage::Checking) && show_checking_panel.get();
             untracked(|| match current {
                 Stage::Workspace => crate::workspace_root().into_element(),
-                Stage::Checking {
-                    home,
-                    step_app,
-                    app_detail,
-                    step_herdr,
-                    herdr_detail,
-                } => {
+                Stage::Checking => {
                     if !show_checking {
                         return startup_frame(view()).into_element();
                     }
-                    checking_screen(home, step_app, app_detail, step_herdr, herdr_detail)
-                        .into_element()
+                    checking_screen(boot, elapsed_ms).into_element()
                 }
         Stage::BackendOlder { home, detail, old } => {
             let auto_start = std::env::var_os("CANBAN_UPGRADE_TOKEN").is_none();
@@ -733,18 +1178,21 @@ fn startup_frame(content: impl IntoElement) -> View {
         )
 }
 
+fn step_icon_badge(state: StepState) -> View {
+    match state {
+        StepState::Active => loading_icon_badge(Tone::Info),
+        StepState::Ready => tone_icon_badge(Icon::Check, Tone::Success, false),
+        StepState::Attention => tone_icon_badge(Icon::TriangleAlert, Tone::Attention, false),
+        StepState::Error => tone_icon_badge(Icon::Close, Tone::Danger, false),
+        StepState::Pending => tone_icon_badge(Icon::Terminal, Tone::Neutral, false),
+    }
+}
+
 fn step_row(
     title: &'static str,
     detail: impl IntoReactive<SharedString>,
     state: StepState,
 ) -> View {
-    let (tone, kind, live) = match state {
-        StepState::Ready => (Tone::Success, Icon::Check, false),
-        StepState::Active => (Tone::Info, Icon::Refresh, true),
-        StepState::Attention => (Tone::Attention, Icon::TriangleAlert, false),
-        StepState::Error => (Tone::Danger, Icon::Close, false),
-        StepState::Pending => (Tone::Neutral, Icon::Terminal, false),
-    };
     let status_badge = match state {
         StepState::Ready => status("Ready", Tone::Success).into_element(),
         StepState::Active => live_status("Checking", Tone::Info).into_element(),
@@ -758,7 +1206,7 @@ fn step_row(
         .gap_3()
         .px_3()
         .py_2p5()
-        .child(tone_icon_badge(kind, tone, live))
+        .child(step_icon_badge(state))
         .child(
             view()
                 .flex_1()
@@ -786,27 +1234,429 @@ fn startup_checklist(
         .child(step_row("Herdr Core", herdr_detail, herdr_state))
 }
 
-pub fn checking_screen(
-    home: String,
-    app_state: StepState,
-    app_detail: String,
-    herdr_state: StepState,
-    herdr_detail: String,
-) -> impl IntoElement {
+fn format_post_clock(ms: u64) -> String {
+    format!("POST · {:04.1}s", ms as f64 / 1000.0)
+}
+
+fn format_log_ts(ms: u64) -> String {
+    format!("[{:05.2}s]", ms as f64 / 1000.0)
+}
+
+fn format_step_secs(ms: u64) -> String {
+    format!("{:.1}s", ms as f64 / 1000.0)
+}
+
+fn log_tag_color(tag: &str) -> ThemeColor {
+    match tag {
+        "MIGRATE" | "HANDOFF" => ATTENTION,
+        "RPC" | "HERDR" | "DAEMON" | "REMOTE" => ACCENT,
+        "SNAPSHOT" => SUCCESS,
+        _ => MUTED,
+    }
+}
+
+fn boot_substep_row(step: &BootSubStep, is_last: bool) -> View {
+    let branch = if is_last { "└─" } else { "├─" };
+    let status_cell = match step.state {
+        SubStepState::Ok => text("[ OK ]")
+            .font_family(MONO_FONT)
+            .text_size(px(11.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(SUCCESS)
+            .w(px(48.))
+            .into_element(),
+        SubStepState::Active => view()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .w(px(48.))
+            .child(loading_spinner(11., ACCENT))
+            .child(
+                text("RUN")
+                    .font_family(MONO_FONT)
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(ACCENT),
+            )
+            .into_element(),
+        SubStepState::Pending => text("[ .. ]")
+            .font_family(MONO_FONT)
+            .text_size(px(11.5))
+            .text_color(MUTED)
+            .w(px(48.))
+            .into_element(),
+    };
+    let label_color = match step.state {
+        SubStepState::Active => TEXT,
+        SubStepState::Ok | SubStepState::Pending => MUTED,
+    };
+    view()
+        .flex_row()
+        .items_center()
+        .gap_1p5()
+        .min_w(px(0.))
+        .child(
+            text(branch)
+                .font_family(MONO_FONT)
+                .text_size(px(11.5))
+                .text_color(MUTED),
+        )
+        .child(status_cell)
+        .child(
+            text(step.label.clone())
+                .text_size(px(CAPTION_SIZE))
+                .text_color(label_color)
+                .flex_1()
+                .min_w(px(0.))
+                .truncate(),
+        )
+}
+
+fn post_step_row(
+    title: &'static str,
+    boot: Signal<BootProgress>,
+    elapsed_ms: Signal<u64>,
+    is_app: bool,
+) -> View {
+    let get_state = move || {
+        let b = boot.get();
+        if is_app { b.app_state } else { b.herdr_state }
+    };
+
+    // Mount each icon variant via `when` so the Active spinner stays mounted and rotates
+    // continuously without restarting while substeps or elapsed time update.
+    let icon_slot = view()
+        .flex_shrink_0()
+        .mt(px(1.))
+        .child(when(
+            move || get_state() == StepState::Active,
+            || loading_icon_badge(Tone::Info),
+        ))
+        .child(when(
+            move || get_state() == StepState::Ready,
+            || tone_icon_badge(Icon::Check, Tone::Success, false),
+        ))
+        .child(when(
+            move || get_state() == StepState::Pending,
+            || tone_icon_badge(Icon::Terminal, Tone::Neutral, false),
+        ))
+        .child(when(
+            move || get_state() == StepState::Attention,
+            || tone_icon_badge(Icon::TriangleAlert, Tone::Attention, false),
+        ))
+        .child(when(
+            move || get_state() == StepState::Error,
+            || tone_icon_badge(Icon::Close, Tone::Danger, false),
+        ));
+
+    let badge_slot = view()
+        .flex_shrink_0()
+        .child(when(
+            move || get_state() == StepState::Active,
+            move || {
+                live_status(
+                    move || -> SharedString {
+                        let now_ms = elapsed_ms.get();
+                        let b = boot.get();
+                        let started = if is_app {
+                            b.app_started_ms
+                        } else {
+                            b.herdr_started_ms.unwrap_or(now_ms)
+                        };
+                        let dur = now_ms.saturating_sub(started);
+                        format!("Checking · {}", format_step_secs(dur)).into()
+                    },
+                    Tone::Info,
+                )
+            },
+        ))
+        .child(when(
+            move || get_state() == StepState::Ready,
+            move || {
+                status(
+                    move || -> SharedString {
+                        let b = boot.get();
+                        let (suffix, dur) = if is_app {
+                            (&b.app_badge_suffix, b.app_elapsed_ms)
+                        } else {
+                            (&b.herdr_badge_suffix, b.herdr_elapsed_ms)
+                        };
+                        let mut parts = vec!["Ready".to_owned()];
+                        if let Some(s) = suffix {
+                            parts.push(s.clone());
+                        }
+                        if let Some(ms) = dur {
+                            parts.push(format_step_secs(ms));
+                        }
+                        parts.join(" · ").into()
+                    },
+                    Tone::Success,
+                )
+            },
+        ))
+        .child(when(
+            move || get_state() == StepState::Pending,
+            || status("Pending", Tone::Neutral),
+        ))
+        .child(when(
+            move || get_state() == StepState::Attention,
+            || status("Action needed", Tone::Attention),
+        ))
+        .child(when(
+            move || get_state() == StepState::Error,
+            || status("Error", Tone::Danger),
+        ));
+
+    view()
+        .flex_row()
+        .items_start()
+        .gap_3()
+        .px_3()
+        .py_2p5()
+        .child(icon_slot)
+        .child(
+            view()
+                .flex_1()
+                .min_w(px(0.))
+                .gap_1()
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(label(title).font_weight(FontWeight::SEMIBOLD))
+                        .child(badge_slot),
+                )
+                .child(dynamic(move || {
+                    let b = boot.get();
+                    let (substeps, detail) = if is_app {
+                        (b.app_substeps, b.app_detail)
+                    } else {
+                        (b.herdr_substeps, b.herdr_detail)
+                    };
+                    if substeps.is_empty() {
+                        muted(detail).truncate().into_element()
+                    } else {
+                        let total = substeps.len();
+                        let mut tree = view().gap_1().pt_0p5().min_w(px(0.));
+                        for (idx, step) in substeps.iter().enumerate() {
+                            tree = tree.child(boot_substep_row(step, idx + 1 == total));
+                        }
+                        tree.into_element()
+                    }
+                })),
+        )
+}
+
+/// Production POST self-test startup screen (Option A: modern card + self-test tree + boot log),
+/// also exercised in the native Gallery.
+pub fn checking_screen(boot: Signal<BootProgress>, elapsed_ms: Signal<u64>) -> impl IntoElement {
+    let header_status = view()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .px_2p5()
+        .py_1()
+        .rounded(px(6.))
+        .bg(INSET)
+        .border_1()
+        .border_color(BORDER)
+        .child(
+            text(move || -> SharedString { format_post_clock(elapsed_ms.get()).into() })
+                .font_family(MONO_FONT)
+                .text_size(px(CAPTION_SIZE))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(move || {
+                    if boot.get().boot_complete {
+                        SUCCESS.resolve()
+                    } else {
+                        MUTED.resolve()
+                    }
+                }),
+        )
+        .child(when(
+            move || !boot.get().boot_complete,
+            || loading_spinner(13., ACCENT),
+        ))
+        .child(when(
+            move || boot.get().boot_complete,
+            || icon_tinted(Icon::Check, SUCCESS).w(px(13.)).h(px(13.)),
+        ));
+
+    let checklist = view()
+        .bg(INSET)
+        .border_1()
+        .border_color(BORDER)
+        .rounded(px(RADIUS))
+        .child(post_step_row("AppServer", boot, elapsed_ms, true))
+        .child(view().h(px(1.)).w_full().bg(BORDER))
+        .child(post_step_row("Herdr Core", boot, elapsed_ms, false));
+
+    let boot_log_box = view()
+        .gap_1p5()
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(
+                    text("BOOT SEQUENCE")
+                        .font_family(MONO_FONT)
+                        .text_size(px(11.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(MUTED),
+                )
+                .child(
+                    text(move || -> SharedString {
+                        format!("Home: {}", compact_user_path(&boot.get().home)).into()
+                    })
+                    .font_family(MONO_FONT)
+                    .text_size(px(11.))
+                    .text_color(MUTED)
+                    .truncate(),
+                ),
+        )
+        .child(
+            view()
+                .bg(BACKGROUND)
+                .border_1()
+                .border_color(BORDER)
+                .rounded(px(RADIUS))
+                .px_3()
+                .py_2()
+                .gap_1()
+                .min_h(px(112.))
+                .child(dynamic(move || {
+                    let b = boot.get();
+                    let complete = b.boot_complete;
+                    let visible: Vec<_> = b
+                        .logs
+                        .iter()
+                        .rev()
+                        .take(6)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .cloned()
+                        .collect();
+                    let count = visible.len();
+                    let mut list = view().gap_1().min_w(px(0.));
+                    for (idx, entry) in visible.into_iter().enumerate() {
+                        let is_last = idx + 1 == count;
+                        let tag_color = log_tag_color(&entry.tag);
+                        let msg_color = if is_last && !complete { TEXT } else { MUTED };
+                        let message_slot = if is_last && !complete {
+                            let msg = entry.message;
+                            text(move || -> SharedString {
+                                if canban_ui_kit::motion::reduced()
+                                    || (elapsed_ms.get() / 450).is_multiple_of(2)
+                                {
+                                    format!("{msg} █").into()
+                                } else {
+                                    format!("{msg}  ").into()
+                                }
+                            })
+                            .font_family(MONO_FONT)
+                            .text_size(px(11.5))
+                            .text_color(msg_color)
+                            .flex_1()
+                            .min_w(px(0.))
+                            .truncate()
+                            .into_element()
+                        } else {
+                            text(entry.message)
+                                .font_family(MONO_FONT)
+                                .text_size(px(11.5))
+                                .text_color(msg_color)
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate()
+                                .into_element()
+                        };
+                        let row = view()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .min_w(px(0.))
+                            .child(
+                                text(format_log_ts(entry.elapsed_ms))
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(11.5))
+                                    .text_color(MUTED)
+                                    .w(px(62.))
+                                    .flex_shrink_0(),
+                            )
+                            .child(
+                                text(entry.tag)
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(11.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(tag_color)
+                                    .w(px(72.))
+                                    .flex_shrink_0(),
+                            )
+                            .child(message_slot);
+                        list = list.child(row);
+                    }
+                    list.into_element()
+                })),
+        );
+
+    let footer_progress = dynamic(move || {
+        let b = boot.get();
+        let tone = if b.boot_complete {
+            Tone::Success
+        } else {
+            Tone::Info
+        };
+        let pct_color = if b.boot_complete { SUCCESS } else { TEXT };
+        view()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .child(progress_bar(f32::from(b.percent) / 100.0, tone))
+            .child(
+                text(format!("{:>3}%", b.percent))
+                    .font_family(MONO_FONT)
+                    .text_size(px(CAPTION_SIZE))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(pct_color)
+                    .flex_shrink_0(),
+            )
+            .child(
+                muted(b.status_line)
+                    .flex_shrink_0()
+                    .max_w(px(240.))
+                    .truncate(),
+            )
+            .into_element()
+    });
+
     startup_frame(
         panel()
             .w_full()
             .max_w(px(720.))
             .gap_4()
-            .child(heading("Starting Canban…"))
-            .child(muted("Verifying local services and terminal runtime."))
-            .child(startup_checklist(
-                app_state,
-                app_detail,
-                herdr_state,
-                herdr_detail,
-            ))
-            .child(muted(format!("Home: {home}"))),
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        view()
+                            .gap_0p5()
+                            .min_w(px(0.))
+                            .flex_1()
+                            .child(heading("Canban"))
+                            .child(muted("System Self-Test & Workspace Bootstrap")),
+                    )
+                    .child(header_status),
+            )
+            .child(checklist)
+            .child(boot_log_box)
+            .child(footer_progress),
     )
 }
 
@@ -1293,5 +2143,66 @@ mod tests {
         assert!(core.component_event(host, EventKind::Press, &EventPayload::None));
         let _ = core.commit();
         assert_eq!(WORKSPACE_MOUNTS.with(|m| m.get()), 1);
+    }
+
+    #[test]
+    fn boot_progress_advances_monotonically_through_post_sequence() {
+        let mut p = BootProgress::initial("/tmp/.canban".into());
+        assert_eq!(p.app_state, StepState::Active);
+        assert_eq!(p.herdr_state, StepState::Pending);
+        assert_eq!(p.percent, 10);
+        assert_eq!(p.logs.len(), 1);
+        assert_eq!(p.logs[0].tag, "HOME");
+
+        p.apply_connect_progress(
+            &canban_app_server::ConnectProgress {
+                phase: "spawn".into(),
+                tag: "DAEMON".into(),
+                detail: "app.sock offline → spawning `canban serve`".into(),
+            },
+            80,
+        );
+        assert!(p.percent >= 24);
+
+        p.apply_connect_progress(
+            &canban_app_server::ConnectProgress {
+                phase: "migrate".into(),
+                tag: "MIGRATE".into(),
+                detail: "Migrating SQLite schema (v18 → v20)…".into(),
+            },
+            420,
+        );
+        assert_eq!(p.app_substeps[0].state, SubStepState::Ok);
+        assert_eq!(p.app_substeps[1].state, SubStepState::Active);
+        assert_eq!(p.status_line, "Migrating database…");
+
+        // Duplicate log messages should not be appended twice.
+        let before_logs = p.logs.len();
+        p.apply_connect_progress(
+            &canban_app_server::ConnectProgress {
+                phase: "migrate".into(),
+                tag: "MIGRATE".into(),
+                detail: "Migrating SQLite schema (v18 → v20)…".into(),
+            },
+            500,
+        );
+        assert_eq!(p.logs.len(), before_logs);
+
+        p.mark_app_ready(8, Some("9f3a1c02abcd"), 1800);
+        assert_eq!(p.app_state, StepState::Ready);
+        assert_eq!(p.app_badge_suffix.as_deref(), Some("API v8"));
+        assert!(p.app_substeps.is_empty());
+        assert_eq!(p.herdr_state, StepState::Active);
+        assert_eq!(p.herdr_substeps.len(), 2);
+
+        p.mark_herdr_ready(Some("0.4.2"), Some("/Users/test/.local/bin/hc"), 2100);
+        assert_eq!(p.herdr_state, StepState::Ready);
+        assert_eq!(p.herdr_badge_suffix.as_deref(), Some("hc 0.4.2"));
+        assert!(p.herdr_substeps.is_empty());
+
+        p.mark_boot_complete(Some(14), Some(128), 2200);
+        assert!(p.boot_complete);
+        assert_eq!(p.percent, 100);
+        assert!(p.app_detail.contains("14 projects"));
     }
 }

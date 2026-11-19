@@ -502,8 +502,21 @@ impl AppServer {
         }
         let updates_disabled = development.is_some();
         let _startup = canban_updater::handoff::startup_guard(&home)?;
+        let startup_progress = startup_progress::StartupProgressWriter::new(&home);
+        startup_progress.set("lock", "LOCK", "Acquiring local service lock…");
         let service_lock = canban_updater::service_lock(&home)?;
-        let mut store = Store::open(&home)?;
+        startup_progress.set(
+            "lock",
+            "LOCK",
+            format!("service.lock acquired (pid {})", std::process::id()),
+        );
+        let mut store = Store::open_with_progress(&home, |phase, detail| {
+            let tag = match phase {
+                "migrate" => "MIGRATE",
+                _ => "STORAGE",
+            };
+            startup_progress.set(phase, tag, detail);
+        })?;
         let identity_path = home.join("server-id");
         let mut identity_file = std::fs::OpenOptions::new()
             .create(true)
@@ -599,8 +612,18 @@ impl AppServer {
         if !path.exists() {
             canban_context::atomic(&path, &serde_json::to_vec_pretty(&Config::default())?)?;
         }
+        startup_progress.set(
+            "config",
+            "CONFIG",
+            "Loading agent profiles and configuration…",
+        );
         canban_context::materialize_skill(&home)?;
         let (config, migration) = Self::read_config(&home)?;
+        startup_progress.set(
+            "workflow",
+            "WORKFLOW",
+            "Validating project workflows and schedules…",
+        );
         for mut project in store.db().list::<Project>()? {
             let mut cleared = false;
             for stage in &mut project.workflow.stages {
@@ -624,20 +647,37 @@ impl AppServer {
             canban_workflow_engine::validate(&project.workflow)?;
         }
         Self::publish_migration(&home, migration)?;
+        let mut project_count = 0usize;
         store.write(|db| {
             workflow::initialize(db, &config)?;
-            for project in db.list::<Project>()? {
+            let projects = db.list::<Project>()?;
+            project_count = projects.len();
+            for project in projects {
                 authoring::initialize(&home, db, &config, &project)?;
             }
             authoring::initialize_global(&home, db, &config)?;
             schedules::reconcile_startup(db)?;
             Ok(())
         })?;
+        startup_progress.set(
+            "snapshot",
+            "SNAPSHOT",
+            format!("Decoding durable snapshot ({project_count} projects)…"),
+        );
         // Verify that the full durable snapshot decodes cleanly before claiming the home socket,
         // so any incompatible SQL row fails fast at startup rather than after `app.ping`.
-        let _ = store
+        let verified_snapshot = store
             .snapshot()
             .context("Failed to decode durable SQLite snapshot on startup")?;
+        startup_progress.set(
+            "ready",
+            "SNAPSHOT",
+            format!(
+                "Verified {} projects, {} cards",
+                verified_snapshot.projects.len(),
+                verified_snapshot.cards.len()
+            ),
+        );
         Ok(Arc::new(Self {
             _development: development
                 .as_ref()
@@ -985,8 +1025,9 @@ mod github;
 pub mod hosts;
 pub mod network;
 pub mod representation;
+pub mod startup_progress;
 mod state;
-pub use client::{AppClient, BackendOlder, ClientEndpoint};
+pub use client::{AppClient, BackendOlder, ClientEndpoint, ConnectProgress};
 mod adoption;
 mod agents;
 mod authoring;

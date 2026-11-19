@@ -23,8 +23,9 @@ pub use navigation::{navigation, subpage_header};
 pub use pull_refresh::{PULL_REFRESH_HEIGHT, pull_refresh_indicator, pull_refresh_scroll};
 pub use split::split;
 pub use status::{
-    Tone, attention_count, live_dot, live_status, loading_indicator, loading_panel,
-    loading_spinner, notice, reminder_count, status, status_button, tone_colors, tone_icon_badge,
+    Tone, attention_count, live_dot, live_status, loading_icon_badge, loading_indicator,
+    loading_panel, loading_spinner, notice, progress_bar, reminder_count, status, status_button,
+    tone_colors, tone_icon_badge,
 };
 
 pub mod icons;
