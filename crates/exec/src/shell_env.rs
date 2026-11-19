@@ -80,6 +80,27 @@ fn extract_marked_path(bytes: &[u8]) -> Option<Vec<PathBuf>> {
     (!entries.is_empty()).then_some(entries)
 }
 
+fn kill_probe_process(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        unsafe extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        const SIGKILL: i32 = 9;
+        if let Ok(pgid) = i32::try_from(child.id())
+            && pgid > 0
+        {
+            // SAFETY: `child` was spawned in its own process group (`process_group(0)`),
+            // so `-pgid` terminates the shell and any grandchild holding stdout open.
+            unsafe {
+                let _ = kill(-pgid, SIGKILL);
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn run_shell_probe(shell: &str, flags: &str, timeout: Duration) -> Option<Vec<PathBuf>> {
     let script = shell_probe_command(shell);
     let mut cmd = Command::new(shell);
@@ -91,6 +112,11 @@ fn run_shell_probe(shell: &str, flags: &str, timeout: Duration) -> Option<Vec<Pa
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
 
     let mut child = cmd.spawn().ok()?;
     let stdout = child.stdout.take()?;
@@ -112,17 +138,13 @@ fn run_shell_probe(shell: &str, flags: &str, timeout: Duration) -> Option<Vec<Pa
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = out_handle.join();
+                    kill_probe_process(&mut child);
                     return None;
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
             Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = out_handle.join();
+                kill_probe_process(&mut child);
                 return None;
             }
         }
@@ -354,9 +376,9 @@ mod tests {
             ]
         );
 
-        // 2. Mock shell that hangs -> terminated cleanly at timeout without blocking forever.
+        // 2. Mock shell that forks a hanging child -> entire process group is terminated at timeout.
         let slow_shell = dir.path().join("mock-slow-sh");
-        std::fs::write(&slow_shell, "#!/bin/sh\nsleep 10\n").unwrap();
+        std::fs::write(&slow_shell, "#!/bin/sh\nsleep 10 &\nwait\n").unwrap();
         std::fs::set_permissions(&slow_shell, std::fs::Permissions::from_mode(0o755)).unwrap();
         let started = Instant::now();
         let timed_out = run_shell_probe(
