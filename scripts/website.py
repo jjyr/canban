@@ -560,10 +560,10 @@ def document(lang, page, body, strings, labels, docs_spec=None, latest_release=N
 <meta property="og:locale:alternate" content="{'en_US' if lang == 'zh' else 'zh_CN'}">
 <meta property="og:image" content="{ORIGIN}/og-image.png"><meta property="og:image:type" content="image/png">
 <meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="{html.escape(strings['hero_subtitle'], quote=True)}">
+<meta property="og:image:alt" content="{html.escape(strings['hero_title'], quote=True)}">
 <meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="{html.escape(title, quote=True)}">
 <meta name="twitter:description" content="{html.escape(description, quote=True)}"><meta name="twitter:image" content="{ORIGIN}/og-image.png">
-<meta name="twitter:image:alt" content="{html.escape(strings['hero_subtitle'], quote=True)}">
+<meta name="twitter:image:alt" content="{html.escape(strings['hero_title'], quote=True)}">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="icon" type="image/png" sizes="48x48" href="/favicon-48x48.png">
 <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"><link rel="manifest" href="/site.webmanifest">
@@ -586,15 +586,15 @@ def render_home_markdown(lang, strings):
         "",
         "> Canban = Kanban + Workflow + Herdr",
         "",
-        strings["hero_subtitle"],
+        strings["hero_title"],
         "",
         strings["hero_description"],
         "",
         "## Highlights",
         "",
-        f"- **Kanban**: {strings['tab_1_desc']} — {strings['al_1']}",
-        f"- **Workflow**: {strings['tab_2_desc']} — {strings['al_3']}",
-        f"- **Herdr**: {strings['tab_3_desc']} — {strings['al_2']}",
+        f"- **{strings['ch_1']}**: {strings['hero_description']}",
+        f"- **{strings['ch_2']}**: {strings['ch2_title']} — {strings['ch2_sub']}",
+        f"- **{strings['ch_3']}**: {strings['ch3_title']} — {strings['ch3_sub']}",
         "",
         "## Install",
         "",

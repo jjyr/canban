@@ -43,7 +43,7 @@
       ],
       [
         "Which agents can I use?",
-        "Canban uses Herdr to run agents, so agents supported by Herdr are supported in Canban — including Claude Code, Codex, Antigravity, Cursor CLI, and custom terminal agents. Install and authenticate your chosen agent CLI before using it in Canban."
+        "Canban uses Herdr to run agents, so agents supported by Herdr are supported in Canban — including Claude Code, Codex, Antigravity, Cursor CLI, Pi, Gemini CLI, OpenCode, and custom terminal agents. Install and authenticate your chosen agent CLI before using it in Canban."
       ],
       [
         "Which operating systems are supported?",
@@ -115,7 +115,7 @@
       ],
       [
         "支持哪些 Agent？",
-        "Canban 使用 Herdr 运行 Agent，因此支持 Herdr 所支持的 Agent，例如 Claude Code、Codex、Antigravity、Cursor CLI 和自定义终端 Agent。请先安装所需的 Agent CLI，并完成它自己的登录或 API 配置。"
+        "Canban 使用 Herdr 运行 Agent，因此支持 Herdr 所支持的 Agent，例如 Claude Code、Codex、Antigravity、Cursor CLI、Pi、Gemini CLI、OpenCode 和自定义终端 Agent。请先安装所需的 Agent CLI，并完成它自己的登录或 API 配置。"
       ],
       [
         "支持哪些操作系统？",

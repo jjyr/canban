@@ -38,7 +38,7 @@
       "applicationCategory": "DeveloperApplication",
       "applicationSubCategory": "AI Coding Agent Workbench & Kanban Board",
       "operatingSystem": "macOS 13.0+, Linux (x86_64, arm64)",
-      "softwareRequirements": "git, Herdr Core (hc), GTK4 runtime on Linux desktop, and any native Agent CLI (Claude Code, Codex, Antigravity agy, Cursor CLI)",
+      "softwareRequirements": "git, Herdr Core (hc), GTK4 runtime on Linux desktop, and any native Agent CLI (Claude Code, Codex, Antigravity agy, Cursor CLI, Pi, Gemini CLI, OpenCode)",
       "license": "https://www.apache.org/licenses/LICENSE-2.0",
       "isAccessibleForFree": true,
       "offers": {
@@ -51,15 +51,15 @@
         "name": "JJy",
         "url": "https://github.com/jjyr"
       },
-      "description": "Canban is an open-source native macOS and Linux desktop workbench built in Rust that unifies Kanban cards for Human Context, GitHub Actions-style Workflows with isolated Git worktrees and FIFO Queue Merge, and Herdr persistent PTY terminals for native AI coding agent CLIs.",
+      "description": "Canban is an open-source lightweight native macOS and Linux desktop workbench built in Rust that unifies flexible Kanban cards, a global Notification Center, GitHub Actions-like Workflows with isolated Git worktrees and FIFO Queue Merge, built-in Git diff review, and Herdr persistent PTY terminals for 24 native AI coding agent CLIs.",
       "featureList": [
-        "Kanban board for Human Context with Markdown specs, #Card links, screenshots, @Agent discussions, and GitHub Issue/PR sync",
-        "Visual Workflow Studio & YAML workflows with automatic per-Card Git worktree isolation",
-        "Serialized FIFO Queue Merge with automatic @merger conflict resolution",
-        "Herdr persistent PTY terminal powered by Rust, longbridge/nsh (AppKit/Metal on macOS, GTK4 on Linux), and libghostty-vt",
-        "Simultaneous multi-host canband connections over SSH or Tailscale alongside zero-interference Claude Code, Codex, Antigravity (agy), and Cursor CLI support"
+        "Flexible Kanban board with Markdown specs, #Card links, screenshots, @Agent discussions, per-card Git worktrees, and GitHub Issue/PR sync",
+        "GitHub Actions-like YAML workflows & Visual Studio with shell scripts, agent + prompt steps, cron schedules, and serialized FIFO Queue Merge",
+        "Global Notification Center (⌘I) across all projects, terminals, and remote hosts with one-click jump to Card and live TTY",
+        "Native Agent CLI support in persistent Herdr PTY terminals (Claude Code, Codex, Antigravity, Cursor CLI, Pi, Gemini CLI, OpenCode, and 20+ CLIs) powered by Rust, longbridge/nsh, and libghostty-vt",
+        "Built-in Git diff review with inline comments and simultaneous multi-host Linux canband connections over SSH or Tailscale"
       ],
-      "keywords": "Canban, canban.dev, AI Kanban, coding agents, Claude Code, Codex, Herdr, Git worktree workflow, developer workbench, macOS Rust app, Linux GTK4 Rust app"
+      "keywords": "Canban, canban.dev, AI Kanban, coding agents, Claude Code, Codex, Antigravity, Cursor CLI, Pi, Gemini CLI, OpenCode, Herdr, Git worktree workflow, Notification Center, developer workbench, macOS Rust app, Linux GTK4 Rust app"
     }
   ]
 }

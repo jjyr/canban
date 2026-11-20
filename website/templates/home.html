@@ -10,15 +10,15 @@
       <nav class="ch-nav" aria-label="CRT Channels">
         <a href="#ch-0" class="ch-btn is-active" data-goto-ch="0">
           <span class="ch-idx">CH.01</span>
-          <span data-i18n="ch_1">WORKBENCH</span>
+          <span data-i18n="ch_1">KANBAN</span>
         </a>
         <a href="#ch-1" class="ch-btn" data-goto-ch="1">
           <span class="ch-idx">CH.02</span>
-          <span data-i18n="ch_2">CONTEXT</span>
+          <span data-i18n="ch_2">WORKFLOW</span>
         </a>
         <a href="#ch-2" class="ch-btn" data-goto-ch="2">
           <span class="ch-idx">CH.03</span>
-          <span data-i18n="ch_3">TOPOLOGY</span>
+          <span data-i18n="ch_3">NATIVE CLI</span>
         </a>
         <a href="#ch-3" class="ch-btn" data-goto-ch="3">
           <span class="ch-idx">CH.04</span>
@@ -55,29 +55,41 @@
       <div class="crt-noise" aria-hidden="true"></div>
       <div class="crt-glitch-slice" aria-hidden="true"></div>
       <div class="crt-vignette" aria-hidden="true"></div>
-      <div class="crt-osd" id="crt-osd" aria-hidden="true">CH 01 // WORKBENCH</div>
+      <div class="crt-osd" id="crt-osd" aria-hidden="true">CH 01 // KANBAN</div>
 
       <!-- ================================================================ -->
-      <!-- CH 01: FORMULA + 3-PRIMITIVE WORKBENCH                           -->
+      <!-- CH 01: HERO + KANBAN WORKBENCH + INTERACTIVE NOTIFICATION CENTER -->
       <!-- ================================================================ -->
-      <section class="crt-screen is-active" id="ch-0" data-ch="0" aria-label="Channel 01 Workbench">
+      <section class="crt-screen is-active" id="ch-0" data-ch="0" aria-label="Channel 01 Kanban">
         <div class="screen-inner screen-ch1">
           <div class="ch1-head">
-            <h1 class="hero-formula glitch-text" data-text="Canban = Kanban + Workflow + Herdr">
-              <span class="f-brand">Canban</span>
-              <span class="f-op">=</span>
-              <span class="f-k">Kanban</span>
-              <span class="f-op">+</span>
-              <span class="f-w">Workflow</span>
-              <span class="f-op">+</span>
-              <span class="f-h">Herdr</span>
+            <h1 class="hero-title" data-i18n="hero_title">
+              Keep your agent CLI. Automate your workflow.
             </h1>
-            <p class="hero-subtitle" data-i18n="hero_subtitle">
-              Turn Kanban cards into automated coding workflows.
+            <p class="hero-sub-line">
+              <span class="hero-formula hero-formula-sub" data-text="Canban = Kanban + Workflow + Herdr">
+                <span class="f-brand">Canban</span>
+                <span class="f-op">=</span>
+                <span class="f-k">Kanban</span>
+                <span class="f-op">+</span>
+                <span class="f-w">Workflow</span>
+                <span class="f-op">+</span>
+                <span class="f-h">Herdr</span>
+              </span>
+              <span class="hero-sub-sep" aria-hidden="true">—</span>
+              <span data-i18n="hero_description">Organize context on flexible cards, catch waiting agents in one notification center, and automate tasks with GitHub Actions-like workflows.</span>
             </p>
-            <p class="hero-description" data-i18n="hero_description">
-              Keep using your native agent CLIs, including Claude Code and Codex, while Canban handles task context, isolated Git worktrees, and merging.
-            </p>
+            <div class="hero-agents-strip" aria-label="Supported native Agent CLIs">
+              <span class="has-label" data-i18n="hero_agents_label">Native CLI support:</span>
+              <span class="has-chip">Claude Code</span>
+              <span class="has-chip">Codex</span>
+              <span class="has-chip">Antigravity</span>
+              <span class="has-chip">Cursor CLI</span>
+              <span class="has-chip">Pi</span>
+              <span class="has-chip">Gemini CLI</span>
+              <span class="has-chip">OpenCode</span>
+              <span class="has-more" data-i18n="hero_agents_more">+17 more</span>
+            </div>
             <nav class="ch1-links" aria-label="Resources">
               <a class="ch1-link is-primary" href="{{install_url}}" data-i18n="nav_install">Install</a>
               <a class="ch1-link" href="{{docs_url}}" data-i18n="nav_docs">Docs</a>
@@ -87,37 +99,8 @@
             </nav>
           </div>
 
-          <div class="feature-tabs" role="tablist" aria-label="Canban Primitives">
-            <button type="button" role="tab" class="feature-tab is-active" data-scene="kanban" aria-selected="true">
-              <div class="ft-row">
-                <span class="ft-num">01</span>
-                <span class="ft-name is-k">Kanban</span>
-                <span class="ft-desc" data-i18n="tab_1_desc">Maintain Human Context</span>
-              </div>
-              <span class="ft-progress"><i id="prog-kanban"></i></span>
-            </button>
-
-            <button type="button" role="tab" class="feature-tab" data-scene="workflow" aria-selected="false">
-              <div class="ft-row">
-                <span class="ft-num">02</span>
-                <span class="ft-name is-w">Workflow</span>
-                <span class="ft-desc" data-i18n="tab_2_desc">Custom Workflow Scheduling</span>
-              </div>
-              <span class="ft-progress"><i id="prog-workflow"></i></span>
-            </button>
-
-            <button type="button" role="tab" class="feature-tab" data-scene="terminal" aria-selected="false">
-              <div class="ft-row">
-                <span class="ft-num">03</span>
-                <span class="ft-name is-h">Herdr</span>
-                <span class="ft-desc" data-i18n="tab_3_desc">Native Agent CLI Support</span>
-              </div>
-              <span class="ft-progress"><i id="prog-terminal"></i></span>
-            </button>
-          </div>
-
-          <!-- Native Canban Desktop Window -->
-          <div class="app-window" id="app-window" data-active-scene="kanban">
+          <!-- Native Canban Desktop Window: Kanban -->
+          <div class="app-window" id="app-window-kanban" data-active-scene="kanban">
             <div class="app-chrome">
               <div class="chrome-left">
                 <div class="traffic-lights" aria-hidden="true">
@@ -135,16 +118,6 @@
                     <span class="proj-chip">shear</span>
                   </div>
                 </div>
-
-                <div class="chrome-context chrome-ctx-workflow">
-                  <span class="chrome-back">← Board</span>
-                  <span class="chrome-breadcrumb">canban / Workflows</span>
-                </div>
-
-                <div class="chrome-context chrome-ctx-terminal">
-                  <span class="chrome-back">← Board</span>
-                  <span class="chrome-breadcrumb" data-i18n="term_chrome_crumb">canban / Card #65 · CRT &amp; Monokai polish</span>
-                </div>
               </div>
 
               <div class="chrome-right">
@@ -154,14 +127,64 @@
                   <span class="chrome-sec-btn">Drafts</span>
                   <span class="chrome-pri-btn">+ Add Card</span>
                 </div>
-                <div class="chrome-board-actions chrome-ctx-workflow">
-                  <span class="chrome-quiet-btn">Project Agents</span>
-                  <span class="chrome-pri-btn">✦ Edit with agent</span>
-                </div>
-                <div class="chrome-activity-pill">
-                  <span class="act-zap">⚡ 1</span>
-                  <span class="act-sep">·</span>
-                  <span class="act-run"><i class="live-dot"></i> 4/6</span>
+                <div class="notif-anchor">
+                  <button
+                    type="button"
+                    class="chrome-activity-pill is-interactive"
+                    id="notif-pill-btn"
+                    data-notif-toggle
+                    aria-expanded="false"
+                    aria-controls="notif-popover"
+                    title="Open Notification Center (⌘I)"
+                  >
+                    <span class="act-zap">⚡ 1</span>
+                    <span class="act-sep">·</span>
+                    <span class="act-run"><i class="live-dot"></i> 4/6</span>
+                  </button>
+
+                  <!-- Interactive Notification Center Popover -->
+                  <div class="notif-popover" id="notif-popover" role="dialog" aria-label="Activity and Notifications" hidden>
+                    <div class="np-head">
+                      <div class="np-head-left">
+                        <strong data-i18n="notif_title">Activity &amp; Notifications</strong>
+                        <span class="np-run-badge" data-i18n="notif_running_pill">1 running</span>
+                      </div>
+                      <button type="button" class="np-close" data-notif-close aria-label="Close">×</button>
+                    </div>
+
+                    <div class="np-sec-label is-warn">
+                      <span data-i18n="notif_needs_you">Needs you</span> <b>1</b>
+                    </div>
+                    <div class="np-row is-warn">
+                      <div class="np-row-text">
+                        <div class="np-row-title" data-i18n="notif_item_1_title">Needs answer · @reviewer</div>
+                        <div class="np-row-sub" data-i18n="notif_item_1_sub">#63 GitHub App token rotation · canban</div>
+                      </div>
+                      <button type="button" class="np-jump-btn" data-notif-action="card" data-i18n="notif_card_btn">Card →</button>
+                    </div>
+
+                    <div class="np-sec-label">
+                      <span data-i18n="notif_updates">Updates</span> <b>1</b>
+                    </div>
+                    <div class="np-row">
+                      <div class="np-row-text">
+                        <div class="np-row-title is-ok" data-i18n="notif_item_2_title">Stage completed · @developer</div>
+                        <div class="np-row-sub" data-i18n="notif_item_2_sub">#61 Durable event journal cursor · ready for merge</div>
+                      </div>
+                      <button type="button" class="np-jump-btn" data-notif-action="workflow" data-i18n="notif_card_btn">Card →</button>
+                    </div>
+
+                    <div class="np-sec-label">
+                      <span data-i18n="notif_running_sec">Running</span> <b>1</b>
+                    </div>
+                    <div class="np-row">
+                      <div class="np-row-text">
+                        <div class="np-row-title is-live" data-i18n="notif_item_3_title">Working · @developer · Pi</div>
+                        <div class="np-row-sub" data-i18n="notif_item_3_sub">#65 CRT deck &amp; Monokai polish · canban-0afd/65</div>
+                      </div>
+                      <button type="button" class="np-jump-btn" data-notif-action="terminal" data-i18n="notif_term_btn">Terminal →</button>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -242,7 +265,7 @@
                       <div class="c-tile">
                         <div class="c-row-title">
                           <span class="c-num">#64</span>
-                          <span class="c-title" data-i18n="c64_title">Workflow schema v7 migration</span>
+                          <span class="c-title" data-i18n="c64_title">Workflow schema v11 migration</span>
                           <span class="c-term-icon is-live">&gt;_</span>
                         </div>
                         <div class="c-footer">
@@ -322,9 +345,69 @@
                   </div>
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      </section>
 
-              <!-- SCENE 02: WORKFLOW (Full-Width Visual Studio, NO YAML!) -->
-              <div class="scene scene-workflow" id="scene-workflow">
+      <!-- ================================================================ -->
+      <!-- CH 02: WORKFLOW STUDIO                                           -->
+      <!-- ================================================================ -->
+      <section class="crt-screen" id="ch-1" data-ch="1" aria-label="Channel 02 Workflow">
+        <div class="screen-inner screen-ch2">
+          <div class="ch-head">
+            <h2 class="ch-heading" data-i18n="ch2_title">
+              GitHub Actions-like workflows, zero black-box scheduling.
+            </h2>
+            <p class="ch-sub" data-i18n="ch2_sub">
+              Combine shell scripts with agent + prompt steps, isolated Git worktrees, cron schedules, and serialized merge queues.
+            </p>
+          </div>
+
+          <div class="app-window" id="app-window-workflow" data-active-scene="workflow">
+            <div class="app-chrome">
+              <div class="chrome-left">
+                <div class="traffic-lights" aria-hidden="true">
+                  <span class="tl-close"></span><span class="tl-min"></span><span class="tl-max"></span>
+                </div>
+                <div class="chrome-history" aria-hidden="true">
+                  <span>‹</span><span>›</span>
+                </div>
+                <div class="chrome-context chrome-ctx-workflow">
+                  <span class="chrome-back">← Board</span>
+                  <span class="chrome-breadcrumb">canban / Workflows</span>
+                </div>
+              </div>
+
+              <div class="chrome-right">
+                <div class="chrome-board-actions chrome-ctx-workflow">
+                  <span class="chrome-quiet-btn">Project Agents</span>
+                  <span class="chrome-pri-btn">✦ Edit with agent</span>
+                </div>
+                <div class="chrome-activity-pill">
+                  <span class="act-zap">⚡ 1</span>
+                  <span class="act-sep">·</span>
+                  <span class="act-run"><i class="live-dot"></i> 4/6</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="app-body">
+              <aside class="app-rail" aria-hidden="true">
+                <div class="rail-top">
+                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></div>
+                  <div class="rail-icon is-selected"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M8 7v7"/><path d="M12 7v4"/><path d="M16 7v9"/></svg></div>
+                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg></div>
+                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M6 9v6"/><circle cx="18" cy="18" r="3"/><path d="M18 15V9a3 3 0 0 0-3-3h-3"/></svg></div>
+                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></svg></div>
+                </div>
+                <div class="rail-bottom">
+                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.85 1 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></div>
+                </div>
+              </aside>
+
+              <!-- SCENE 02: WORKFLOW STUDIO -->
+              <div class="scene scene-workflow is-active" id="scene-workflow">
                 <div class="wf-full-canvas">
                   <div class="wf-studio-bar">
                     <div class="wfs-left">
@@ -463,9 +546,65 @@
                   </div>
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================================================================ -->
+      <!-- CH 03: NATIVE AGENT CLI (CARD + LIVE HERDR PTY TERMINAL)         -->
+      <!-- ================================================================ -->
+      <section class="crt-screen" id="ch-2" data-ch="2" aria-label="Channel 03 Native CLI">
+        <div class="screen-inner screen-ch3">
+          <div class="ch-head">
+            <h2 class="ch-heading" data-i18n="ch3_title">
+              Native Agent CLI support, paired with everyday tools.
+            </h2>
+            <p class="ch-sub" data-i18n="ch3_sub">
+              Run Claude Code, Codex, Antigravity (agy), Cursor CLI, Pi, Gemini CLI, OpenCode, and 20+ native CLIs in persistent PTYs — with built-in Git diff review, Notification Center (⌘I), and multi-machine Linux hosts.
+            </p>
+          </div>
+
+          <div class="app-window" id="app-window-terminal" data-active-scene="terminal">
+            <div class="app-chrome">
+              <div class="chrome-left">
+                <div class="traffic-lights" aria-hidden="true">
+                  <span class="tl-close"></span><span class="tl-min"></span><span class="tl-max"></span>
+                </div>
+                <div class="chrome-history" aria-hidden="true">
+                  <span>‹</span><span>›</span>
+                </div>
+                <div class="chrome-context chrome-ctx-terminal">
+                  <span class="chrome-back">← Board</span>
+                  <span class="chrome-breadcrumb" data-i18n="term_chrome_crumb">canban / Card #65 · CRT &amp; Monokai polish</span>
+                </div>
+              </div>
+
+              <div class="chrome-right">
+                <div class="chrome-activity-pill">
+                  <span class="act-zap">⚡ 1</span>
+                  <span class="act-sep">·</span>
+                  <span class="act-run"><i class="live-dot"></i> 4/6</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="app-body">
+              <aside class="app-rail" aria-hidden="true">
+                <div class="rail-top">
+                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></div>
+                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M8 7v7"/><path d="M12 7v4"/><path d="M16 7v9"/></svg></div>
+                  <div class="rail-icon is-selected"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg></div>
+                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M6 9v6"/><circle cx="18" cy="18" r="3"/><path d="M18 15V9a3 3 0 0 0-3-3h-3"/></svg></div>
+                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></svg></div>
+                </div>
+                <div class="rail-bottom">
+                  <div class="rail-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.85 1 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></div>
+                </div>
+              </aside>
 
               <!-- SCENE 03: HERDR (Left Card Detail + Right Interactive Agent CLI TUI) -->
-              <div class="scene scene-terminal" id="scene-terminal">
+              <div class="scene scene-terminal is-active" id="scene-terminal">
                 <div class="herdr-split">
                   <div class="hs-card-detail">
                     <div class="cd-header">
@@ -497,7 +636,7 @@
                         <span class="tl-avatar is-user">JJ</span>
                         <div class="tl-card">
                           <div class="tl-meta"><b>jjyr</b> <span>· 4m ago</span></div>
-                          <p data-i18n="hs_comment_1">@developer Add CRT scanlines, channel glitch, and ASCII topology on CH.03.</p>
+                          <p data-i18n="hs_comment_1">@developer Add CRT scanlines, channel glitch, and interactive Notification Center.</p>
                         </div>
                       </div>
 
@@ -534,7 +673,7 @@
                     <div class="tui-session-box">
                       <div class="tui-s-title">
                         <span class="vt-purple">π pi</span>
-                        <span class="vt-dim">· v0.14 · session 019a-65f2 · Herdr persistent TTY</span>
+                        <span class="vt-dim">· v1.4 · session 019a-65f2 · Herdr persistent TTY</span>
                       </div>
                       <div class="tui-s-meta">
                         <span>cwd: <code>~/.canban/worktrees/canban-0afd/65</code></span>
@@ -564,292 +703,6 @@
       </section>
 
       <!-- ================================================================ -->
-      <!-- CH 02: HUMAN CONTEXT (Chaos Tabs vs Clean Single Card Timeline)  -->
-      <!-- ================================================================ -->
-      <section class="crt-screen" id="ch-1" data-ch="1" aria-label="Channel 02 Human Context">
-        <div class="screen-inner screen-ch2">
-          <h2 class="ch-heading" data-i18n="ctx_title">
-            Track all task context and progress with Kanban cards.
-          </h2>
-
-          <div class="contrast-cards">
-            <div class="c-panel is-chaos">
-              <div class="cp-header">
-                <span class="cp-dot is-bad">✕</span>
-                <span class="cp-title" data-i18n="old_tag">Scattered Terminal Tabs</span>
-              </div>
-
-              <div class="chaos-pile" aria-hidden="true">
-                <div class="chaos-win cw-1">
-                  <div class="cw-bar"><span>●●●</span> zsh · session 1 (main??)</div>
-                  <div class="cw-body">
-                    <div class="vt-pink">error: worktree dirty, cannot checkout</div>
-                    <div class="vt-dim">&gt; Wait, which Issue was this session for?</div>
-                  </div>
-                </div>
-
-                <div class="chaos-win cw-2">
-                  <div class="cw-bar"><span>●●●</span> tmux:4 · pi ▲</div>
-                  <div class="cw-body">
-                    <div class="vt-yellow">? Approve schema change in auth.rs? [y/n]</div>
-                    <div class="vt-dim">(scrolling 400 lines back to recall spec…)</div>
-                  </div>
-                </div>
-
-                <div class="chaos-win cw-3">
-                  <div class="cw-bar"><span>●●●</span> zsh · session 2 · feat/auth</div>
-                  <div class="cw-body">
-                    <div class="vt-cyan">$ git status: 14 untracked, 2 conflicts</div>
-                    <div class="vt-dim">&gt; Re-pasting task context for the 3rd time…</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="c-panel is-calm">
-              <div class="cp-header">
-                <span class="cp-dot is-good">✓</span>
-                <span class="cp-title" data-i18n="new_tag">1 Card = Complete Context</span>
-              </div>
-
-              <div class="clean-card-mock">
-                <div class="ccm-head">
-                  <div class="ccm-top">
-                    <span class="ccm-id">#42</span>
-                    <span class="ccm-title" data-i18n="ccm_title">GitHub App device OAuth token refresh</span>
-                    <span class="ccm-stage">Review</span>
-                  </div>
-                  <div class="ccm-meta">
-                    <code>⎇ canban-0afd/42</code>
-                    <span>·</span>
-                    <span>GitHub Issue #38</span>
-                    <span>·</span>
-                    <span class="vt-green">+146 −32</span>
-                  </div>
-                </div>
-
-                <div class="ccm-timeline">
-                  <div class="tl-node">
-                    <span class="tl-avatar is-user">JJ</span>
-                    <div class="tl-card">
-                      <div class="tl-meta"><b>You</b> <span>· 18m ago</span></div>
-                      <p data-i18n="ccm_msg_user">Refresh installation tokens 5m before expiry without storing client secrets. @developer</p>
-                    </div>
-                  </div>
-
-                  <div class="tl-node">
-                    <span class="tl-avatar is-agent">✦</span>
-                    <div class="tl-card is-agent-card">
-                      <div class="tl-meta"><b>@developer</b> <span>· Completed · 6m</span></div>
-                      <p data-i18n="ccm_msg_agent">Implemented secretless Device Flow rotation &amp; passed 14 auth integration tests. Ready to merge.</p>
-                    </div>
-                  </div>
-
-                  <div class="tl-milestone">
-                    <span class="tl-dot is-green-dot"></span>
-                    <span class="vt-green" data-i18n="ccm_mile">✓ Queued for automatic rebase &amp; upstream sync</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- ================================================================ -->
-      <!-- CH 03: RETRO WIREFRAME PIPELINE (Card -> Plan -> Agents -> Merge)-->
-      <!-- ================================================================ -->
-      <section class="crt-screen" id="ch-2" data-ch="2" aria-label="Channel 03 Parallel Pipeline">
-        <div class="screen-inner screen-ch3">
-          <h2 class="ch-heading" data-i18n="ascii_title">
-            Parallel Agents. Isolated Worktrees. Zero Conflict Delivery.
-          </h2>
-
-          <div class="ascii-frame">
-            <div class="ascii-topbar">
-              <span>[ PIPELINE // CARDS ──► PLAN ──► PARALLEL AGENTS ──► MERGE QUEUE ]</span>
-              <span class="vt-green">● LIVE TELEMETRY</span>
-            </div>
-
-            <!-- Pixel-Aligned Retro Terminal Wireframe Flow (No raw text misalignment) -->
-            <div class="retro-flow" aria-label="Cards to Plan to Parallel Agents to Merge Queue">
-              <!-- STAGE 1: STACKED CARDS (Multiple Cards Processed Concurrently) -->
-              <div class="rf-stage" data-rf-step="0">
-                <div class="rf-col-label">[01] CARDS</div>
-                <div class="rf-card-stack">
-                  <!-- Back Card 3 -->
-                  <div class="rf-box is-cyan-box rf-card-layer is-back-2" aria-hidden="true">
-                    <div class="rf-layer-head">
-                      <span class="rf-cid">#67</span>
-                      <span class="sk-line w-60"></span>
-                    </div>
-                  </div>
-                  <!-- Middle Card 2 -->
-                  <div class="rf-box is-cyan-box rf-card-layer is-back-1" aria-hidden="true">
-                    <div class="rf-layer-head">
-                      <span class="rf-cid">#66</span>
-                      <span class="sk-line w-78"></span>
-                    </div>
-                  </div>
-                  <!-- Front Active Card 1 -->
-                  <div class="rf-box is-cyan-box rf-card-node">
-                    <div class="rf-card-head">
-                      <span class="rf-cid">#65</span>
-                      <span class="rf-ctitle" data-i18n="rf_card_title">Token Refresh &amp; Sync</span>
-                    </div>
-                    <div class="rf-skeleton" aria-hidden="true">
-                      <span class="sk-line w-92"></span>
-                      <span class="sk-line w-78"></span>
-                      <span class="sk-line w-60"></span>
-                    </div>
-                    <div class="rf-card-foot">
-                      <span class="sk-chip"></span>
-                      <span class="sk-chip w-short"></span>
-                      <span class="rf-batch-pill">×3</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <!-- Wire 1: Card -> Plan -->
-              <div class="rf-link" data-rf-wire="0" aria-hidden="true">
-                <svg viewBox="0 0 56 120" fill="none">
-                  <path d="M0 60 H48" class="rf-path"/>
-                  <polygon points="45,55 55,60 45,65" class="rf-head"/>
-                </svg>
-              </div>
-
-              <!-- STAGE 2: PLAN -->
-              <div class="rf-stage" data-rf-step="1">
-                <div class="rf-col-label">[02] PLAN</div>
-                <div class="rf-box is-purple-box rf-plan-node">
-                  <div class="rf-plan-icon" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-                      <rect x="4" y="3" width="16" height="18" rx="1"/>
-                      <line x1="8" y1="8" x2="16" y2="8"/>
-                      <line x1="8" y1="12" x2="16" y2="12"/>
-                      <line x1="8" y1="16" x2="13" y2="16"/>
-                    </svg>
-                  </div>
-                  <div class="rf-plan-title" data-i18n="rf_plan_title">Plan &amp; Admit</div>
-                  <div class="rf-skeleton is-compact" aria-hidden="true">
-                    <span class="sk-line w-85"></span>
-                    <span class="sk-line w-65"></span>
-                  </div>
-                  <div class="rf-mini-tag">SLOT READY</div>
-                </div>
-              </div>
-
-              <!-- Fan-out Wire 2: Plan -> 3 Parallel Agent Icons -->
-              <div class="rf-link is-fan" data-rf-wire="1" aria-hidden="true">
-                <svg viewBox="0 0 68 230" fill="none">
-                  <path d="M0 115 H24 V38 H60" class="rf-path"/>
-                  <path d="M0 115 H60" class="rf-path"/>
-                  <path d="M24 115 V192 H60" class="rf-path"/>
-                  <polygon points="57,33 67,38 57,43" class="rf-head"/>
-                  <polygon points="57,110 67,115 57,120" class="rf-head"/>
-                  <polygon points="57,187 67,192 57,197" class="rf-head"/>
-                </svg>
-              </div>
-
-              <!-- STAGE 3: PARALLEL AGENT ICONS (Icon-only, No Brand Names) -->
-              <div class="rf-stage" data-rf-step="2">
-                <div class="rf-col-label">[03] AGENTS</div>
-                <div class="rf-agents-stack">
-                  <!-- Agent Unit 1 -->
-                  <div class="rf-box rf-agent-unit">
-                    <div class="rfa-icon is-pink" aria-hidden="true">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-                        <rect x="4" y="6" width="16" height="13" rx="1"/>
-                        <line x1="12" y1="2" x2="12" y2="6"/>
-                        <circle cx="9" cy="12" r="1.3" fill="currentColor"/>
-                        <circle cx="15" cy="12" r="1.3" fill="currentColor"/>
-                        <line x1="9" y1="16" x2="15" y2="16"/>
-                      </svg>
-                    </div>
-                    <div class="rfa-bars" aria-hidden="true">
-                      <span class="rfa-branch">⎇ wt/01</span>
-                      <span class="rfa-meter"><i class="m-1"></i></span>
-                    </div>
-                    <span class="live-dot"></span>
-                  </div>
-
-                  <!-- Agent Unit 2 -->
-                  <div class="rf-box rf-agent-unit">
-                    <div class="rfa-icon is-cyan" aria-hidden="true">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-                        <rect x="3" y="4" width="18" height="16" rx="1"/>
-                        <polyline points="7 9 10 12 7 15"/>
-                        <line x1="12" y1="15" x2="17" y2="15"/>
-                      </svg>
-                    </div>
-                    <div class="rfa-bars" aria-hidden="true">
-                      <span class="rfa-branch">⎇ wt/02</span>
-                      <span class="rfa-meter"><i class="m-2"></i></span>
-                    </div>
-                    <span class="live-dot"></span>
-                  </div>
-
-                  <!-- Agent Unit 3 -->
-                  <div class="rf-box rf-agent-unit">
-                    <div class="rfa-icon is-yellow" aria-hidden="true">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">
-                        <polygon points="12 3 20 7.5 20 16.5 12 21 4 16.5 4 7.5 12 3"/>
-                        <circle cx="12" cy="12" r="2.5"/>
-                      </svg>
-                    </div>
-                    <div class="rfa-bars" aria-hidden="true">
-                      <span class="rfa-branch">⎇ wt/03</span>
-                      <span class="rfa-meter"><i class="m-3"></i></span>
-                    </div>
-                    <span class="live-dot"></span>
-                  </div>
-                </div>
-              </div>
-
-              <!-- Fan-in Wire 3: 3 Agents -> Merge Queue -->
-              <div class="rf-link is-fan" data-rf-wire="2" aria-hidden="true">
-                <svg viewBox="0 0 68 230" fill="none">
-                  <path d="M0 38 H36 V115 H60" class="rf-path"/>
-                  <path d="M0 115 H60" class="rf-path"/>
-                  <path d="M0 192 H36 V115" class="rf-path"/>
-                  <polygon points="57,110 67,115 57,120" class="rf-head"/>
-                </svg>
-              </div>
-
-              <!-- STAGE 4: MERGE QUEUE -->
-              <div class="rf-stage" data-rf-step="3">
-                <div class="rf-col-label">[04] MERGE QUEUE</div>
-                <div class="rf-box is-green-box rf-merge-node">
-                  <div class="rfm-header">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                      <circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M6 9v6"/><circle cx="18" cy="18" r="3"/><path d="M18 15V9a3 3 0 0 0-3-3h-3"/>
-                    </svg>
-                    <span>FIFO ×5</span>
-                  </div>
-                  <div class="rfm-slots" aria-hidden="true">
-                    <span class="q-slot is-merged">✓ #62</span>
-                    <span class="q-slot is-merged">✓ #64</span>
-                    <span class="q-slot is-rebasing">↻ #65</span>
-                  </div>
-                  <div class="rfm-target">
-                    <span>──► <b>main</b></span>
-                    <span class="vt-green">SYNC ✓</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="ascii-legend">
-              <div><span class="al-dot is-cyan"></span><span data-i18n="al_1">Zero branch collisions: every Card gets its own clean checkout</span></div>
-              <div><span class="al-dot is-purple"></span><span data-i18n="al_2">Bring any native Agent CLI inside persistent Herdr TTYs</span></div>
-              <div><span class="al-dot is-green"></span><span data-i18n="al_3">Automatic FIFO rebase merge, upstream push &amp; worktree cleanup</span></div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- ================================================================ -->
       <!-- CH 04: CLOSING CALLBACK + INSTALL + CORE PLAQUE                  -->
       <!-- ================================================================ -->
       <section class="crt-screen" id="ch-3" data-ch="3" aria-label="Channel 04 Install">
@@ -858,7 +711,7 @@
             <div class="ctc-prompt">CANBAN // READY TO BOOT</div>
 
             <h2 class="closing-title" data-i18n="closing_title">
-              Unburden your mind. Keep your Human Context.
+              Keep your agent CLI. Drop the tab chaos.
             </h2>
 
             <div class="install-tabs" role="tablist" aria-label="Installation mode">
@@ -914,7 +767,7 @@
             </div>
 
             <p class="closing-seo-note" data-i18n="closing_seo_note">
-              Canban = Kanban + Workflow + Herdr — Maintain Human Context with Kanban, schedule with custom Workflows, and power native Agent CLIs with Herdr.
+              Canban = Kanban + Workflow + Herdr — Lightweight native Kanban, Notification Center, and GitHub Actions-like workflows for Claude Code, Codex, Antigravity, Cursor CLI, Pi, and 20+ native Agent CLIs.
             </p>
           </div>
         </div>

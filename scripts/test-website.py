@@ -175,7 +175,7 @@ class WebsiteTest(unittest.TestCase):
                         self.assertIn("Herdr", visible)
                         self.assertIn(website.HEADLESS, visible)
                     if not section:
-                        self.assertIn(locales_json[lang]["hero_subtitle"], visible)
+                        self.assertIn(locales_json[lang]["hero_title"], visible)
                         self.assertEqual(len(page.attrs("title")), 1)
                         self.assertIn("Kanban + Workflow + Herdr", text)
                         expected_ch1 = {

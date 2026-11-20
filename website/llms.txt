@@ -4,7 +4,7 @@
 
 **Disambiguation**: "Canban" (spelled with a **C**, hosted at `https://canban.dev/` and `https://github.com/jjyr/canban`) is a specific open-source Rust desktop application and daemon (`canband`) built on `longbridge/nsh`, `herdr-core`, and `libghostty-vt` — distinct from the generic "Kanban" project management methodology or unrelated Kanban SaaS tools.
 
-Canban organizes human task context on Kanban cards, automates isolated Git worktrees (`<dir>-<proj4>/<card-number>`) and serialized FIFO Queue Merge via declarative `schema: 10` workflows (`development.yaml`), and drives 24 native Agent CLIs (`claude`, `codex`, `agy`, `gemini`, `opencode`, `cursor-agent`, etc.) directly inside persistent Herdr PTY terminals across local and remote `canband` hosts.
+Canban organizes context on flexible Kanban cards, catches waiting agents in one Notification Center (`⌘I`), automates GitHub Actions-like workflows (`development.yaml`) with isolated Git worktrees (`<dir>-<proj4>/<card-number>`) and serialized FIFO Queue Merge, and drives 24 native Agent CLIs (`claude`, `codex`, `agy`, `cursor-agent`, `pi`, `gemini`, `opencode`, etc.) directly inside persistent Herdr PTY terminals across local and remote `canband` hosts.
 
 ## Full LLM Context
 
