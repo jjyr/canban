@@ -15,7 +15,7 @@
 
 <p align="center">
   <strong>同时并行 10+ 个 Coding Agent，告别在十几个终端标签页里迷失。</strong><br/>
-  基于原生 <strong>Rust + <code>libghostty</code></strong> 构建的 <strong>Claude Code、Codex、Cursor CLI</strong> 工作台 —— 内置全局注意力收件箱（<code>⌘I</code>）、单卡片隔离 Git Worktree 行级代码审查，以及类 GitHub Actions 的本地自动化流水线。
+  基于原生 <strong>Rust + <code>libghostty</code></strong> 构建的 <strong>Claude Code、Codex、Cursor CLI</strong> 工作台 - 内置全局注意力收件箱（<code>⌘I</code>）、单卡片隔离 Git Worktree 行级代码审查，以及类 GitHub Actions 的本地自动化流水线。
 </p>
 
 <h3 align="center"><a href="#安装"><ins>快速安装</ins></a> · <a href="https://canban.dev/zh/"><ins>canban.dev</ins></a> · <a href="https://canban.dev/zh/docs/"><ins>文档</ins></a></h3>

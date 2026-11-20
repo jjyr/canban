@@ -1,7 +1,7 @@
 {
   "en": {
-    "meta_title": "Canban — Run 10+ coding agents without drowning in terminal tabs.",
-    "meta_desc": "Native Rust + libghostty workbench for Claude Code, Codex, Antigravity, Cursor CLI, Pi, and 20+ agent CLIs — with Attention Inbox (⌘I), isolated Git worktree diff review, and GitHub Actions-like local workflows.",
+    "meta_title": "Canban - Run 10+ coding agents without drowning in terminal tabs.",
+    "meta_desc": "Native Rust + libghostty workbench for Claude Code, Codex, Antigravity, Cursor CLI, Pi, and 20+ agent CLIs - with Attention Inbox (⌘I), isolated Git worktree diff review, and GitHub Actions-like local workflows.",
     "ch_1": "WORKBENCH",
     "ch_2": "WORKFLOW",
     "ch_3": "NATIVE CLI",
@@ -14,7 +14,7 @@
     "ch2_title": "GitHub Actions-like local workflows, zero black-box scheduling.",
     "ch2_sub": "Combine shell scripts with agent + prompt steps, isolated Git worktrees, cron schedules, and serialized merge queues.",
     "ch3_title": "Zero-wrapper native terminals that survive app restarts.",
-    "ch3_sub": "Run Claude Code, Codex, Antigravity (agy), Cursor CLI, Pi, Gemini CLI, OpenCode, and 20+ native CLIs in persistent PTYs — with inline Git diff review, Attention Inbox (⌘I), and remote Linux hosts over SSH/Tailscale.",
+    "ch3_sub": "Run Claude Code, Codex, Antigravity (agy), Cursor CLI, Pi, Gemini CLI, OpenCode, and 20+ native CLIs in persistent PTYs - with inline Git diff review, Attention Inbox (⌘I), and remote Linux hosts over SSH/Tailscale.",
     "term_chrome_crumb": "canban / Card #65 · CRT & Monokai polish",
     "c68_title": "Wayland fractional scale host",
     "c67_title": "Remote machine SSH multiplexer",
@@ -66,7 +66,7 @@
     "s_herdr": "TTY Agent Support",
     "s_nsh": "Native UI",
     "s_ghostty": "Terminal Rendering Engine",
-    "closing_seo_note": "Canban = Kanban + Workflow + Herdr — Lightweight native Kanban, Notification Center, and GitHub Actions-like workflows for Claude Code, Codex, Antigravity, Cursor CLI, Pi, and 20+ native Agent CLIs.",
+    "closing_seo_note": "Canban = Kanban + Workflow + Herdr - Lightweight native Kanban, Notification Center, and GitHub Actions-like workflows for Claude Code, Codex, Antigravity, Cursor CLI, Pi, and 20+ native Agent CLIs.",
     "footer_meta": "Apache-2.0 · © 2026 JJy",
     "nav_install": "Install",
     "nav_docs": "Docs",
@@ -77,7 +77,7 @@
     "changelog": "Changelog"
   },
   "zh": {
-    "meta_title": "Canban — 同时并行 10+ 个 Coding Agent，告别在十几个终端标签页里迷失",
+    "meta_title": "Canban - 同时并行 10+ 个 Coding Agent，告别在十几个终端标签页里迷失",
     "meta_desc": "基于原生 Rust + libghostty 构建的 Claude Code、Codex、Antigravity、Cursor CLI、Pi 等 20+ 编程 Agent 工作台，内置全局注意力收件箱（⌘I）、单卡隔离 Git Worktree 行级 Diff 审查与类 GitHub Actions 本地自动化工作流。",
     "ch_1": "工作台",
     "ch_2": "工作流",
@@ -143,7 +143,7 @@
     "s_herdr": "提供 TTY Agent 支持",
     "s_nsh": "Native UI",
     "s_ghostty": "终端渲染引擎",
-    "closing_seo_note": "Canban = Kanban + Workflow + Herdr — 面向 Claude Code、Codex、Antigravity、Cursor CLI、Pi 等 20+ 原生 Agent CLI 的轻量级看板、通知中心与类似 GitHub Actions 的工作流工作台。",
+    "closing_seo_note": "Canban = Kanban + Workflow + Herdr - 面向 Claude Code、Codex、Antigravity、Cursor CLI、Pi 等 20+ 原生 Agent CLI 的轻量级看板、通知中心与类似 GitHub Actions 的工作流工作台。",
     "footer_meta": "Apache-2.0 · © 2026 JJy",
     "nav_install": "安装",
     "nav_docs": "文档",

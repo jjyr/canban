@@ -15,7 +15,7 @@
 
 <p align="center">
   <strong>Run 10+ coding agents without drowning in terminal tabs.</strong><br/>
-  A native <strong>Rust + <code>libghostty</code></strong> workbench for <strong>Claude Code, Codex, and Cursor CLI</strong> — with an instant attention inbox (<code>⌘I</code>), per-card Git worktree review, and GitHub Actions-like local workflows.
+  A native <strong>Rust + <code>libghostty</code></strong> workbench for <strong>Claude Code, Codex, and Cursor CLI</strong> - with an instant attention inbox (<code>⌘I</code>), per-card Git worktree review, and GitHub Actions-like local workflows.
 </p>
 
 <h3 align="center"><a href="#installation"><ins>Quick Install</ins></a> · <a href="https://canban.dev"><ins>canban.dev</ins></a> · <a href="https://canban.dev/docs/"><ins>Docs</ins></a></h3>
@@ -38,7 +38,7 @@
 
 ### Attention Inbox (`⌘I`)
 
-Never miss a blocked agent again. One global notification center across all projects, worktrees, and remote hosts shows which agent is waiting for input, tool approval, or review — and jumps straight to its Card and live terminal in one keystroke.
+Never miss a blocked agent again. One global notification center across all projects, worktrees, and remote hosts shows which agent is waiting for input, tool approval, or review - and jumps straight to its Card and live terminal in one keystroke.
 
 </td>
 <td width="50%">
@@ -50,7 +50,7 @@ Never miss a blocked agent again. One global notification center across all proj
 
 ### Native Agent CLI &amp; Persistent Terminals
 
-No dumbed-down chat wrapper. Run Claude Code, Codex, Antigravity (`agy`), Cursor CLI, Pi, or custom CLIs inside persistent, restart-safe PTYs powered by Rust, NSH, and `libghostty-vt` — preserving native TUIs, interactive permissions, MCPs, skills, and session resume.
+No dumbed-down chat wrapper. Run Claude Code, Codex, Antigravity (`agy`), Cursor CLI, Pi, or custom CLIs inside persistent, restart-safe PTYs powered by Rust, NSH, and `libghostty-vt` - preserving native TUIs, interactive permissions, MCPs, skills, and session resume.
 
 [Docs →](https://canban.dev/docs/agents/)
 
