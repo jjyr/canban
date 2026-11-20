@@ -1419,6 +1419,7 @@ impl HostRegistry {
             snap.register_host_entities(host_id);
             {
                 let mut eh = self.entity_hosts.write().unwrap();
+                eh.retain(|k, v| v != host_id || snap.entity_hosts.contains_key(k));
                 for (k, v) in &snap.entity_hosts {
                     eh.insert(k.clone(), v.clone());
                 }

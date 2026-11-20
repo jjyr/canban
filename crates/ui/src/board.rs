@@ -172,6 +172,13 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
                                                 .on_select(move || ui.show_search(true)),
                                             MenuItem::new("New Project…")
                                                 .on_select(move || ui.navigate("new-project")),
+                                            MenuItem::separator(),
+                                            MenuItem::new("Delete Project…").on_select(move || {
+                                                let pid = ui.project.get_untracked();
+                                                if !pid.is_empty() {
+                                                    ui.project_delete_confirm.set(Some(pid));
+                                                }
+                                            }),
                                         ],
                                         point(
                                             bounds.page.x,

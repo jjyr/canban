@@ -813,6 +813,14 @@ pub const CATALOG: &[Command] = &[
         keywords: "choose project",
     },
     Command {
+        id: "delete-project",
+        title: "Delete Current Project…",
+        key: "",
+        display: "Project",
+        context: "Project",
+        keywords: "remove delete project workspace",
+    },
+    Command {
         id: "popout-card-terminal",
         title: "Pop Out Card Terminal to Terminals",
         key: "",
@@ -1507,6 +1515,13 @@ pub fn execute(ui: Ui, id: &str) {
                 ui.navigate("project-location");
             } else {
                 ui.navigate("new-project");
+            }
+        }
+        "delete-project" => {
+            if let Some(p) = ui.current_project() {
+                ui.project_delete_confirm.set(Some(p.id));
+            } else {
+                ui.notify("Select a Project first");
             }
         }
         "go-github-repo" => {
@@ -2204,7 +2219,8 @@ pub fn bindings(ui: Ui) {
                         || ui.terminal_close_confirm.get_untracked().is_some()
                         || ui.worktree_modal.get_untracked().is_some()
                         || ui.worktree_promote.get_untracked().is_some()
-                        || ui.worktree_remove_confirm.get_untracked().is_some())
+                        || ui.worktree_remove_confirm.get_untracked().is_some()
+                        || ui.project_delete_confirm.get_untracked().is_some())
                 {
                     return;
                 }
@@ -2250,6 +2266,7 @@ pub fn bindings(ui: Ui) {
                 && ui.worktree_modal.get_untracked().is_none()
                 && ui.worktree_promote.get_untracked().is_none()
                 && ui.worktree_remove_confirm.get_untracked().is_none()
+                && ui.project_delete_confirm.get_untracked().is_none()
             {
                 ui.project_picker.set(false);
                 ui.search_query.set(">".into());

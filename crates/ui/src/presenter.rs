@@ -195,6 +195,7 @@ pub struct Ui {
     pub worktree_modal: Signal<Option<String>>,
     pub worktree_promote: Signal<Option<String>>,
     pub worktree_remove_confirm: Signal<Option<String>>,
+    pub project_delete_confirm: Signal<Option<String>>,
     pub hosts: Signal<Vec<HostSummary>>,
     pub settings_host: Signal<String>,
     pub installed_fonts: Signal<Option<canban_terminal::InstalledFonts>>,
@@ -394,6 +395,7 @@ impl Ui {
             || self.worktree_modal.get_untracked().is_some()
             || self.worktree_promote.get_untracked().is_some()
             || self.worktree_remove_confirm.get_untracked().is_some()
+            || self.project_delete_confirm.get_untracked().is_some()
             || self.review_state.discard_confirm.get_untracked().is_some()
             || self.schedules.create_modal.get_untracked()
             || self.schedules.yaml_open.get_untracked()
@@ -602,6 +604,7 @@ impl Ui {
             worktree_modal: signal(None),
             worktree_promote: signal(None),
             worktree_remove_confirm: signal(None),
+            project_delete_confirm: signal(None),
             hosts: signal(crate::host_summaries()),
             settings_host: signal("local".into()),
             installed_fonts: signal(canban_terminal::try_installed_fonts()),
@@ -1323,13 +1326,35 @@ pub fn refresh(ui: Ui) {
                         ui.hosts.set(summaries);
                     }
                     ui.apply_config(&config);
-                    if ui.project.get_untracked().is_empty()
-                        && let Some(id) = crate::projects::selection::restore(
+                    let cur_project = ui.project.get_untracked();
+                    if cur_project.is_empty() {
+                        if let Some(id) = crate::projects::selection::restore(
+                            &snapshot.projects,
+                            saved_project.as_deref(),
+                        ) {
+                            ui.project.set(id);
+                        }
+                    } else if !snapshot.projects.iter().any(|p| p.id == cur_project) {
+                        let next = crate::projects::selection::restore(
                             &snapshot.projects,
                             saved_project.as_deref(),
                         )
-                    {
-                        ui.project.set(id);
+                        .unwrap_or_default();
+                        ui.project.set(next);
+                        ui.card.set(String::new());
+                        ui.review.set(None);
+                        ui.card_standalone.set(false);
+                        if matches!(
+                            ui.page.get_untracked().as_str(),
+                            "card"
+                                | "new-card"
+                                | "project-location"
+                                | "project-agents"
+                                | "github-repository"
+                                | "workflows"
+                        ) {
+                            ui.page.set("board".into());
+                        }
                     }
                     if different {
                         ui.runtime_clock.set(now());
@@ -1582,6 +1607,10 @@ pub fn dispatch_complete(
                         "project.agents" => ui.notify("Project Agent overrides saved"),
                         "scheduler.configure" => ui.notify("Scheduling settings saved"),
                         "project.location" => ui.notify("Work location updated"),
+                        "project.delete" => {
+                            let name = value["name"].as_str().unwrap_or("Project");
+                            ui.notify(format!("Deleted project \"{name}\""));
+                        }
                         "project.github" => {
                             if let Some(repo) = value["github"]["repository"].as_str() {
                                 ui.notify(format!("Linked to {repo}"));
@@ -1664,6 +1693,11 @@ pub fn dispatch_complete(
                             ui.project.set(id.into());
                             ui.card.set(String::new());
                             ui.page.set("board".into());
+                        }
+                    }
+                    "project.delete" => {
+                        if let Some(id) = value["project_id"].as_str() {
+                            crate::projects::after_delete(ui, id);
                         }
                     }
                     "card.create" | "github.issue.add" | "github.item.add" if active => {

@@ -455,6 +455,127 @@ impl Db<'_> {
         let rows = q.query_map([], |r| r.get::<_, String>(0))?;
         rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
     }
+    /// Permanently remove a Project and all its Canban-side SQLite records in FK-safe order.
+    /// Does not touch any user repository or Git worktrees on disk.
+    pub fn delete_project(&self, project_id: &str) -> Result<usize> {
+        let _project: Project = self.get(project_id)?;
+        let card_ids: Vec<String> = {
+            let mut q = self
+                .conn
+                .prepare("SELECT id FROM cards WHERE project_id=?1")?;
+            let rows = q.query_map([project_id], |r| r.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let sub_prefix = format!("source:{project_id}:");
+        let sub_ids: Vec<String> = self
+            .list::<EventSubscription>()?
+            .into_iter()
+            .filter(|s| {
+                s.id.starts_with(&sub_prefix)
+                    || s.selector.project_id.as_deref() == Some(project_id)
+            })
+            .map(|s| s.id)
+            .collect();
+
+        // 1. Delete event_journal and event_deliveries referencing project events or subscriptions.
+        self.conn.execute(
+            "DELETE FROM event_journal WHERE event_id IN (\
+                SELECT id FROM events WHERE project_id=?1 \
+                OR card_id IN (SELECT id FROM cards WHERE project_id=?1)\
+             )",
+            [project_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM event_deliveries WHERE json_extract(data,'$.event_id') IN (\
+                SELECT id FROM events WHERE project_id=?1 \
+                OR card_id IN (SELECT id FROM cards WHERE project_id=?1)\
+             )",
+            [project_id],
+        )?;
+        for sub_id in &sub_ids {
+            self.conn.execute(
+                "DELETE FROM event_deliveries WHERE json_extract(data,'$.subscription_id')=?1",
+                [sub_id],
+            )?;
+            self.conn
+                .execute("DELETE FROM event_subscriptions WHERE id=?1", [sub_id])?;
+        }
+
+        // 2. Delete child tables referencing cards(id) and/or projects(id).
+        for table in [
+            "card_reads",
+            "artifacts",
+            "reports",
+            "questions",
+            "terminals",
+            "conversations",
+            "events",
+            "notifications",
+            "workflow_runs",
+            "scheduled_runs",
+            "managed_worktrees",
+        ] {
+            self.conn.execute(
+                &format!(
+                    "DELETE FROM {table} WHERE project_id=?1 \
+                     OR card_id IN (SELECT id FROM cards WHERE project_id=?1)"
+                ),
+                [project_id],
+            )?;
+        }
+
+        // 3. Delete project-scoped tables without card_id FK.
+        for table in [
+            "note_revisions",
+            "note_events",
+            "notes",
+            "github_issues",
+            "workflow_sources",
+            "workflow_revisions",
+            "configuration_sessions",
+            "merge_batches",
+            "schedule_states",
+        ] {
+            self.conn.execute(
+                &format!("DELETE FROM {table} WHERE project_id=?1"),
+                [project_id],
+            )?;
+        }
+
+        // 4. Clean up non-FK auxiliary rows (drafts, counters, observations).
+        self.conn.execute(
+            "DELETE FROM editor_drafts WHERE id=?1",
+            [format!("new-card:{project_id}")],
+        )?;
+        self.conn.execute(
+            "DELETE FROM counters WHERE id=?1",
+            [format!("cards:{project_id}")],
+        )?;
+        for cid in &card_ids {
+            self.conn.execute(
+                "DELETE FROM editor_drafts WHERE id=?1 OR id=?2",
+                params![format!("card:{cid}"), format!("review-draft:{cid}")],
+            )?;
+            self.conn.execute(
+                "DELETE FROM counters WHERE id=?1",
+                [format!("timeline:{cid}")],
+            )?;
+        }
+        self.conn.execute(
+            "DELETE FROM source_observations WHERE id=?1 OR id LIKE ?2",
+            params![
+                format!("github:{project_id}"),
+                format!("github:{project_id}:%")
+            ],
+        )?;
+
+        // 5. Delete cards and finally the project itself.
+        self.conn
+            .execute("DELETE FROM cards WHERE project_id=?1", [project_id])?;
+        self.conn
+            .execute("DELETE FROM projects WHERE id=?1", [project_id])?;
+        Ok(card_ids.len())
+    }
     pub fn counter(&self, key: &str) -> Result<u64> {
         self.conn.execute("INSERT INTO counters(id,value) VALUES(?1,1) ON CONFLICT(id) DO UPDATE SET value=value+1",[key])?;
         Ok(self

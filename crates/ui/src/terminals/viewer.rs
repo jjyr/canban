@@ -151,6 +151,7 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                                 && ui.worktree_modal.get().is_none()
                                 && ui.worktree_promote.get().is_none()
                                 && ui.worktree_remove_confirm.get().is_none()
+                                && ui.project_delete_confirm.get().is_none()
                         })
                     })
                     .prop(
@@ -184,6 +185,7 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                             && ui.worktree_modal.get().is_none()
                             && ui.worktree_promote.get().is_none()
                             && ui.worktree_remove_confirm.get().is_none()
+                            && ui.project_delete_confirm.get().is_none()
                     })
                 })
                 .prop("binding", move || {
@@ -229,7 +231,8 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                     && ui.terminal_close_confirm.get().is_none()
                     && ui.worktree_modal.get().is_none()
                     && ui.worktree_promote.get().is_none()
-                    && ui.worktree_remove_confirm.get().is_none(),
+                    && ui.worktree_remove_confirm.get().is_none()
+                    && ui.project_delete_confirm.get().is_none(),
             };
             if crate::APP.get().is_none() {
                 return canban_terminal::linux::preview_terminal(

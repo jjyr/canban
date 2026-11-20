@@ -153,6 +153,27 @@ impl Utilities {
             usage: Default::default(),
         }
     }
+    pub fn clear_project(&self, home: &Path, project_id: &str) -> Result<bool> {
+        let mut prefs = self.preferences.lock().unwrap();
+        let mut next = prefs.clone();
+        if next.last_project.as_deref() == Some(project_id) {
+            next.last_project = None;
+        }
+        next.board_filters.retain(|_, filters| {
+            filters.remove(project_id);
+            !filters.is_empty()
+        });
+        let changed = next != *prefs;
+        if changed {
+            canban_context::atomic(
+                &home.join("config/desktop.json"),
+                &serde_json::to_vec_pretty(&next)?,
+            )?;
+            *prefs = next;
+        }
+        Ok(changed)
+    }
+
     fn state(&self) -> Value {
         json!({"preferences":self.preferences.lock().unwrap().clone(),"awake":*self.power.active.lock().unwrap(),"awake_machine":"local","awake_scope":"system","version":env!("CARGO_PKG_VERSION"),"platform":std::env::consts::OS,"architecture":std::env::consts::ARCH})
     }

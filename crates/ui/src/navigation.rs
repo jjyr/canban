@@ -47,6 +47,29 @@ impl History {
             self.visit(route);
         }
     }
+    pub fn prune_project(&mut self, project_id: &str) {
+        if project_id.is_empty() {
+            return;
+        }
+        let mut removed_before_or_at = 0usize;
+        let mut idx = 0usize;
+        self.entries.retain(|entry| {
+            let keep = entry.project != project_id;
+            if !keep && idx <= self.index {
+                removed_before_or_at += 1;
+            }
+            idx += 1;
+            keep
+        });
+        if self.entries.is_empty() {
+            self.index = 0;
+        } else {
+            self.index = self
+                .index
+                .saturating_sub(removed_before_or_at)
+                .min(self.entries.len() - 1);
+        }
+    }
     pub fn step(&mut self, forward: bool) -> Option<Location> {
         if forward {
             if self.index + 1 >= self.entries.len() {

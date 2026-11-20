@@ -230,7 +230,13 @@ pub fn project_location(ui: Ui) -> impl IntoElement {
     let host_id = signal(ui.active_project_host());
     let directory = signal(initial.directory.clone());
     let expected = initial.clone();
-    let id = p.map(|p| p.id).unwrap_or_default();
+    let id = p.as_ref().map(|p| p.id.clone()).unwrap_or_default();
+    let delete_id = id.clone();
+    let project_name = p
+        .as_ref()
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| "this Project".into());
+    let project_dir = p.as_ref().map(|p| p.directory.clone()).unwrap_or_default();
     view()
         .flex_1()
         .min_h(px(0.))
@@ -238,50 +244,370 @@ pub fn project_location(ui: Ui) -> impl IntoElement {
         .gap_4()
         .child(
             scroll().flex_1().min_h(px(0.)).child(
-                settings_section(
-                    "Work location",
-                    "Changes affect new executions on this host. Resume, Review and code delivery stay on the original directory.",
-                )
-                .trailing(badge(move || crate::hosts::host_name(ui, &host_id.get())))
-                .max_w(px(760.))
-                .child(settings_field(
-                    "Directory",
-                    "Filter and select subdirectories inline or type an absolute/`~/` path. New directories are created on save.",
-                    directory_picker_for_host(ui, host_id, directory),
-                ))
-                .child(
-                    view()
-                        .flex_row()
-                        .justify_end()
-                        .gap_2()
-                        .child(action("Cancel", Variant::Quiet, move |_| {
-                            ui.navigate("board")
-                        }))
+                view()
+                    .gap_5()
+                    .max_w(px(760.))
+                    .child(
+                        settings_section(
+                            "Work location",
+                            "Changes affect new executions on this host. Resume, Review and code delivery stay on the original directory.",
+                        )
+                        .trailing(badge(move || crate::hosts::host_name(ui, &host_id.get())))
+                        .child(settings_field(
+                            "Directory",
+                            "Filter and select subdirectories inline or type an absolute/`~/` path. New directories are created on save.",
+                            directory_picker_for_host(ui, host_id, directory),
+                        ))
                         .child(
-                            action("Save work location", Variant::Primary, move |_| {
-                                let id = id.clone();
-                                dispatch_then(
-                                    ui,
-                                    "project.location",
-                                    json!({
-                                        "project_id": id,
-                                        "expected_location": expected,
-                                        "location": {
-                                            "machine": "local",
-                                            "directory": directory.get_untracked().trim()
-                                        }
+                            view()
+                                .flex_row()
+                                .justify_end()
+                                .gap_2()
+                                .child(action("Cancel", Variant::Quiet, move |_| {
+                                    ui.navigate("board")
+                                }))
+                                .child(
+                                    action("Save work location", Variant::Primary, move |_| {
+                                        let id = id.clone();
+                                        dispatch_then(
+                                            ui,
+                                            "project.location",
+                                            json!({
+                                                "project_id": id,
+                                                "expected_location": expected,
+                                                "location": {
+                                                    "machine": "local",
+                                                    "directory": directory.get_untracked().trim()
+                                                }
+                                            }),
+                                            move |_| ui.navigate("board"),
+                                        );
+                                    })
+                                    .disabled(move || {
+                                        ui.is_method_pending("project.location")
+                                            || directory.get().trim().is_empty()
                                     }),
-                                    move |_| ui.navigate("board"),
-                                );
-                            })
-                            .disabled(move || {
-                                ui.is_method_pending("project.location")
-                                    || directory.get().trim().is_empty()
-                            }),
+                                ),
                         ),
-                ),
+                    )
+                    .child(when(
+                        {
+                            let has_project = !delete_id.is_empty();
+                            move || has_project
+                        },
+                        move || {
+                            let target_id = delete_id.clone();
+                            let desc = if project_dir.is_empty() {
+                                format!(
+                                    "Remove \"{project_name}\" and its Canban Cards, workflows, schedules, and history. Your source repository and Git worktrees on disk are not deleted."
+                                )
+                            } else {
+                                format!(
+                                    "Remove \"{project_name}\" and its Canban Cards, workflows, schedules, and history. Your source repository ({project_dir}) and Git worktrees on disk are not deleted."
+                                )
+                            };
+                            settings_section("Danger zone", desc).child(
+                                view().flex_row().justify_end().child(action(
+                                    "Delete Project…",
+                                    Variant::Danger,
+                                    move |_| {
+                                        ui.project_delete_confirm.set(Some(target_id.clone()));
+                                    },
+                                )),
+                            )
+                        },
+                    )),
             ),
         )
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProjectDeleteBlockers {
+    pub live_terminals: usize,
+    pub active_merges: usize,
+    pub active_config_sessions: usize,
+    pub active_scheduled_runs: usize,
+}
+
+impl ProjectDeleteBlockers {
+    pub fn total(&self) -> usize {
+        self.live_terminals
+            + self.active_merges
+            + self.active_config_sessions
+            + self.active_scheduled_runs
+    }
+
+    pub fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if self.live_terminals > 0 {
+            parts.push(format!(
+                "{} live terminal{}",
+                self.live_terminals,
+                if self.live_terminals == 1 { "" } else { "s" }
+            ));
+        }
+        if self.active_merges > 0 {
+            parts.push(format!(
+                "{} active merge{}",
+                self.active_merges,
+                if self.active_merges == 1 { "" } else { "s" }
+            ));
+        }
+        if self.active_config_sessions > 0 {
+            parts.push(format!(
+                "{} configuration session{}",
+                self.active_config_sessions,
+                if self.active_config_sessions == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ));
+        }
+        if self.active_scheduled_runs > 0 {
+            parts.push(format!(
+                "{} scheduled run{}",
+                self.active_scheduled_runs,
+                if self.active_scheduled_runs == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ));
+        }
+        parts.join(", ")
+    }
+}
+
+pub fn active_blockers(snapshot: &Snapshot, project_id: &str) -> ProjectDeleteBlockers {
+    let card_ids: std::collections::HashSet<&str> = snapshot
+        .cards
+        .iter()
+        .filter(|c| c.project_id == project_id)
+        .map(|c| c.id.as_str())
+        .collect();
+    let live_terminals = snapshot
+        .terminals
+        .iter()
+        .filter(|t| {
+            t.agent
+                .as_ref()
+                .is_some_and(|a| a.project_id == project_id && !a.finished())
+                || (t.runtime.as_ref().is_some_and(|r| r.state != "finished")
+                    && (t.origin_project_id.as_deref() == Some(project_id)
+                        || t.id.starts_with(&format!("merge-queue:{project_id}:"))
+                        || t.id.starts_with(&format!("configuration:{project_id}:"))
+                        || t.id.starts_with(&format!("scheduled:{project_id}:"))))
+        })
+        .count();
+    let active_merges = snapshot
+        .merge_batches
+        .iter()
+        .filter(|b| b.project_id == project_id && b.active())
+        .count()
+        + snapshot
+            .merging_cards
+            .iter()
+            .filter(|cid| card_ids.contains(cid.as_str()))
+            .count();
+    let active_config_sessions = snapshot
+        .configuration_sessions
+        .iter()
+        .filter(|s| {
+            s.project_id == project_id && !matches!(s.state.as_str(), "finished" | "cancelled")
+        })
+        .count();
+    let active_scheduled_runs = snapshot
+        .scheduled_runs
+        .iter()
+        .filter(|r| r.project_id == project_id && r.active())
+        .count();
+    ProjectDeleteBlockers {
+        live_terminals,
+        active_merges,
+        active_config_sessions,
+        active_scheduled_runs,
+    }
+}
+
+pub fn after_delete(ui: Ui, deleted_project_id: &str) {
+    let (next_project, deleted_card_ids): (String, Vec<String>) = ui.snapshot.with_untracked(|s| {
+        let remaining: Vec<Project> = s
+            .projects
+            .iter()
+            .filter(|p| p.id != deleted_project_id)
+            .cloned()
+            .collect();
+        let next = selection::restore(&remaining, None).unwrap_or_default();
+        let cids = s
+            .cards
+            .iter()
+            .filter(|c| c.project_id == deleted_project_id)
+            .map(|c| c.id.clone())
+            .collect();
+        (next, cids)
+    });
+    let deleted_pid = deleted_project_id.to_owned();
+    batch(move || {
+        ui.project_delete_confirm.set(None);
+        if ui.project.get_untracked() == deleted_pid {
+            ui.project.set(next_project);
+        }
+        ui.editing_comment.set(None);
+        ui.deleting_comment.set(None);
+        ui.review.set(None);
+        ui.card.set(String::new());
+        ui.card_standalone.set(false);
+        ui.card_terminal_open.set(false);
+        ui.card_terminal_focused.set(false);
+        ui.new_draft.set(String::new());
+        ui.clear_output();
+        ui.drafts.with(|map| {
+            map.remove(&format!("new-card:{deleted_pid}"));
+            for cid in &deleted_card_ids {
+                map.remove(&format!("card:{cid}"));
+            }
+        });
+        ui.history.update(|h| h.prune_project(&deleted_pid));
+        ui.page.set("board".into());
+    });
+}
+
+pub fn delete_confirm_modal(ui: Ui) -> impl IntoElement {
+    when(
+        move || ui.project_delete_confirm.get().is_some(),
+        move || {
+            let pid = ui
+                .project_delete_confirm
+                .get_untracked()
+                .unwrap_or_default();
+            let pid_for_info = pid.clone();
+            let pid_for_blockers = pid.clone();
+            let pid_for_delete = pid.clone();
+            let (name, directory, card_count) = ui.snapshot.with_untracked(|s| {
+                let proj = s.projects.iter().find(|p| p.id == pid_for_info);
+                let name = proj
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| "Project".into());
+                let dir = proj.map(|p| p.directory.clone()).unwrap_or_default();
+                let count = s
+                    .cards
+                    .iter()
+                    .filter(|c| c.project_id == pid_for_info)
+                    .count();
+                (name, dir, count)
+            });
+            let blockers = computed(move || {
+                let target = pid_for_blockers.clone();
+                ui.snapshot.with(|s| active_blockers(s, &target))
+            });
+            let close_modal = move || {
+                ui.project_delete_confirm.set(None);
+                ui.terminal_focus.update(|n| *n += 1);
+            };
+            let card_word = if card_count == 1 { "Card" } else { "Cards" };
+            nsh_base::dialog()
+                .animation(canban_ui_kit::motion::modal)
+                .close_on_escape(true)
+                .close_on_backdrop_press(true)
+                .on_cancel(close_modal)
+                .child(
+                    view()
+                        .flex_1()
+                        .items_center()
+                        .justify_center()
+                        .bg(rgba(0x00000055))
+                        .child(
+                            panel()
+                                .w(px(460.))
+                                .max_w(Percentage(0.95))
+                                .border_1()
+                                .border_color(BORDER)
+                                .gap_3()
+                                .child(
+                                    label(format!("Delete Project “{name}”?"))
+                                        .font_weight(FontWeight::SEMIBOLD),
+                                )
+                                .child(
+                                    label(format!(
+                                        "This permanently removes this Project from Canban, including {card_count} {card_word} (including archived), workflow definitions, scheduled tasks, and timeline history."
+                                    ))
+                                    .text_sm()
+                                    .text_color(MUTED),
+                                )
+                                .child(notice(
+                                    if directory.is_empty() {
+                                        "Your source repository and Git worktrees on disk will NOT be deleted.".to_owned()
+                                    } else {
+                                        format!(
+                                            "Your source repository ({directory}) and Git worktrees on disk will NOT be deleted."
+                                        )
+                                    },
+                                    Tone::Info,
+                                ))
+                                .child(dynamic(move || {
+                                    let b = blockers.get();
+                                    if b.total() == 0 {
+                                        return view().into_element();
+                                    }
+                                    let summary = b.summary();
+                                    view()
+                                        .gap_2()
+                                        .child(notice(
+                                            format!(
+                                                "Cannot delete while active runs are still in progress ({summary}). End them before deleting."
+                                            ),
+                                            Tone::Attention,
+                                        ))
+                                        .child(
+                                            view().flex_row().justify_end().child(compact_action(
+                                                "Open Terminals",
+                                                Variant::Secondary,
+                                                move |_| {
+                                                    ui.project_delete_confirm.set(None);
+                                                    ui.navigate("terminals");
+                                                },
+                                            )),
+                                        )
+                                        .into_element()
+                                }))
+                                .child(
+                                    view()
+                                        .flex_row()
+                                        .justify_end()
+                                        .gap_2()
+                                        .child(action("Cancel", Variant::Quiet, move |_| {
+                                            close_modal()
+                                        }))
+                                        .child(
+                                            action(
+                                                move || {
+                                                    if ui.is_method_pending("project.delete") {
+                                                        "Deleting…"
+                                                    } else {
+                                                        "Delete Project"
+                                                    }
+                                                },
+                                                Variant::Danger,
+                                                move |_| {
+                                                    let target = pid_for_delete.clone();
+                                                    dispatch(
+                                                        ui,
+                                                        "project.delete",
+                                                        json!({ "project_id": target }),
+                                                    );
+                                                },
+                                            )
+                                            .disabled(move || {
+                                                blockers.get().total() > 0
+                                                    || ui.is_method_pending("project.delete")
+                                            }),
+                                        ),
+                                ),
+                        ),
+                )
+        },
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -908,5 +1234,192 @@ mod tests {
                 .any(|t| t == "▸ Workflow · Custom default (Canban)"),
             "expected custom default Workflow collapsible summary, got {texts:?}"
         );
+    }
+
+    #[test]
+    fn project_location_renders_danger_zone() {
+        #[component]
+        fn ProjectLocationDangerProbe() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            ui.snapshot.update(|s| {
+                s.projects.push(
+                    serde_json::from_value::<Project>(json!({
+                        "id": "proj-1",
+                        "name": "Demo",
+                        "directory": "/Users/demo/Workspace/demo",
+                        "workflow": canban_types::Workflow::default(),
+                        "created_at": 1
+                    }))
+                    .unwrap(),
+                );
+            });
+            ui.project.set("proj-1".into());
+            project_location(ui)
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(900.), px(700.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<ProjectLocationDangerProbe>());
+        let batch = core.commit().expect("initial mount batch");
+        let texts: Vec<String> = batch
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                MountItem::Text { text, .. } => Some(text.text.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t == "Danger zone"),
+            "expected Danger zone heading, got {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t == "Delete Project…"),
+            "expected Delete Project… button, got {texts:?}"
+        );
+    }
+
+    #[test]
+    fn delete_confirm_modal_shows_safety_notice_and_blocks_active_runs() {
+        #[component]
+        fn DeleteModalProbe() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            ui.snapshot.update(|s| {
+                s.projects.push(
+                    serde_json::from_value::<Project>(json!({
+                        "id": "proj-1",
+                        "name": "Demo",
+                        "directory": "/Users/demo/Workspace/demo",
+                        "workflow": canban_types::Workflow::default(),
+                        "created_at": 1
+                    }))
+                    .unwrap(),
+                );
+                s.terminals.push(canban_types::TerminalEntry {
+                    id: "term-1".into(),
+                    conversation_id: None,
+                    number: 1,
+                    name: Some("Shell".into()),
+                    origin_project_id: Some("proj-1".into()),
+                    origin_card_id: None,
+                    agent_engine: None,
+                    runtime: Some(canban_types::TerminalRuntime {
+                        machine: "local".into(),
+                        owner_core_id: None,
+                        core_id: None,
+                        terminal: Some("h-1".into()),
+                        state: "running".into(),
+                        connection: "connected".into(),
+                        error: None,
+                        agent_status: None,
+                        agent_turn: None,
+                        observed_agent: None,
+                        waiting: None,
+                    }),
+                    agent: None,
+                    created_at: 1,
+                });
+            });
+            ui.project_delete_confirm.set(Some("proj-1".into()));
+            delete_confirm_modal(ui)
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(900.), px(700.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<DeleteModalProbe>());
+        let batch = core.commit().expect("initial mount batch");
+        let texts: Vec<String> = batch
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                MountItem::Text { text, .. } => Some(text.text.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t == "Delete Project “Demo”?"),
+            "expected modal title, got {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("will NOT be deleted")),
+            "expected filesystem safety notice, got {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("1 live terminal")),
+            "expected active blocker notice, got {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t == "Open Terminals"),
+            "expected Open Terminals action, got {texts:?}"
+        );
+    }
+
+    #[test]
+    fn after_delete_switches_to_remaining_project_and_prunes_history() {
+        #[component]
+        fn AfterDeleteProbe() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            ui.snapshot.update(|s| {
+                for (id, name) in [("p1", "One"), ("p2", "Two")] {
+                    s.projects.push(
+                        serde_json::from_value::<Project>(json!({
+                            "id": id,
+                            "name": name,
+                            "directory": format!("/tmp/{id}"),
+                            "workflow": canban_types::Workflow::default(),
+                            "created_at": 1
+                        }))
+                        .unwrap(),
+                    );
+                }
+            });
+            ui.project.set("p1".into());
+            ui.page.set("project-location".into());
+            ui.card.set("c1".into());
+            ui.drafts.with(|d| {
+                d.insert("new-card:p1".into(), Default::default());
+                d.insert("new-card:p2".into(), Default::default());
+            });
+            let mut loc1 = ui.location();
+            loc1.page = "board".into();
+            loc1.project = "p1".into();
+            let mut loc2 = ui.location();
+            loc2.page = "board".into();
+            loc2.project = "p2".into();
+            ui.history.update(|h| {
+                h.visit(loc1);
+                h.visit(loc2);
+            });
+
+            after_delete(ui, "p1");
+
+            assert_eq!(ui.project.get_untracked(), "p2");
+            assert_eq!(ui.page.get_untracked(), "board");
+            assert!(ui.card.get_untracked().is_empty());
+            assert!(ui.project_delete_confirm.get_untracked().is_none());
+            assert!(!ui.drafts.with(|d| d.contains_key("new-card:p1")));
+            assert!(ui.drafts.with(|d| d.contains_key("new-card:p2")));
+            assert!(
+                ui.history
+                    .get_untracked()
+                    .entries
+                    .iter()
+                    .all(|e| e.project != "p1")
+            );
+
+            // Deleting the last remaining project clears ui.project.
+            ui.snapshot.update(|s| s.projects.retain(|p| p.id != "p1"));
+            after_delete(ui, "p2");
+            assert!(ui.project.get_untracked().is_empty());
+            view()
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(900.), px(700.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<AfterDeleteProbe>());
+        core.commit().expect("after_delete probe mount");
     }
 }

@@ -1284,6 +1284,7 @@ pub fn bindings(ui: Ui) {
             || ui.worktree_modal.get().is_some()
             || ui.worktree_promote.get().is_some()
             || ui.worktree_remove_confirm.get().is_some()
+            || ui.project_delete_confirm.get().is_some()
             || !ui.utility_popup.get().is_empty()
         {
             return;

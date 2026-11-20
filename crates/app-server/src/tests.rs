@@ -4761,3 +4761,201 @@ fn resolve_pr_remote_matches_upstream_and_falls_back_to_github_urls() {
         None
     );
 }
+
+#[test]
+fn project_delete_removes_canban_data_and_preserves_user_repo_and_worktrees() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let repo1 = dir.path().join("repo1");
+    let repo2 = dir.path().join("repo2");
+    let worktree1 = home.join("worktrees/repo1-1234/1");
+    std::fs::create_dir_all(&repo1).unwrap();
+    std::fs::create_dir_all(&repo2).unwrap();
+    std::fs::create_dir_all(&worktree1).unwrap();
+    std::fs::write(repo1.join("README.md"), "user repo").unwrap();
+    std::fs::write(worktree1.join("WIP.txt"), "uncommitted worktree file").unwrap();
+
+    let app = AppServer::open(home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let p1: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Alpha", "directory": repo1}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let p2: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Beta", "directory": repo2}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    // Populate Cards, comments, drafts, desktop preferences, managed worktrees, and Canban metadata.
+    let c1: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"view": "full", "project_id": p1.id, "title": "Alpha task"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let _c2: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"view": "full", "project_id": p2.id, "title": "Beta task"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "comment.add",
+        json!({"card_id": c1.id, "revision": c1.revision, "body": "Notes on alpha"}),
+    )
+    .unwrap();
+    app.call(
+        "draft.save",
+        json!({"id": format!("new-card:{}", p1.id), "revision": 0, "data": {"title": "Unsaved"}}),
+    )
+    .unwrap();
+    app.call(
+        "utilities.configure",
+        json!({
+            "last_project": p1.id,
+            "board_filter": {
+                "account": "local",
+                "project_id": p1.id,
+                "value": {"tags": ["alpha"]}
+            }
+        }),
+    )
+    .unwrap();
+    let meta_dir = home.join("projects").join(&p1.id);
+    std::fs::create_dir_all(&meta_dir).unwrap();
+    std::fs::write(meta_dir.join("context.txt"), "canban metadata").unwrap();
+
+    // Attach a managed worktree row and a live terminal to p1.
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            db.save(&ManagedWorktree {
+                id: "wt-1".into(),
+                project_id: p1.id.clone(),
+                branch: "feat/keep-on-disk".into(),
+                base_branch: "main".into(),
+                base_commit: None,
+                path: worktree1.to_string_lossy().into_owned(),
+                location: WorkLocation {
+                    machine: "local".into(),
+                    directory: repo1.to_string_lossy().into_owned(),
+                },
+                created_at: 1,
+            })?;
+            db.save(&TerminalEntry {
+                id: "term-live".into(),
+                conversation_id: None,
+                number: 1,
+                name: Some("Live shell".into()),
+                origin_project_id: Some(p1.id.clone()),
+                origin_card_id: None,
+                agent_engine: None,
+                runtime: Some(TerminalRuntime {
+                    machine: "local".into(),
+                    owner_core_id: None,
+                    core_id: None,
+                    terminal: Some("h-live".into()),
+                    state: "running".into(),
+                    connection: "connected".into(),
+                    error: None,
+                    agent_status: None,
+                    agent_turn: None,
+                    observed_agent: None,
+                    waiting: None,
+                }),
+                agent: None,
+                created_at: 1,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+
+    // 1. Reject execution-scoped (Agent) calls.
+    let err = app
+        .call(
+            "project.delete",
+            json!({"project_id": p1.id, "execution": {"card_id": c1.id}}),
+        )
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("user action"),
+        "expected user action guard, got: {err:#}"
+    );
+
+    // 2. Reject deletion while a live terminal belongs to the project.
+    let err = app
+        .call("project.delete", json!({"project_id": p1.id}))
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("1 live terminal"),
+        "expected live terminal guard, got: {err:#}"
+    );
+
+    // Mark the terminal finished so deletion is allowed.
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut t: TerminalEntry = db.get("term-live")?;
+            t.runtime.as_mut().unwrap().state = "finished".into();
+            db.save(&t)
+        })
+        .unwrap();
+
+    // 3. Delete p1 successfully.
+    let receipt = app
+        .call("project.delete", json!({"project_id": p1.id}))
+        .unwrap();
+    assert_eq!(receipt["deleted"], true);
+    assert_eq!(receipt["project_id"], p1.id);
+    assert_eq!(receipt["name"], "Alpha");
+    assert_eq!(receipt["deleted_cards"], 1);
+
+    // 4. Verify Canban-side data is removed while p2 stays intact.
+    let snap = app.snapshot().unwrap();
+    assert_eq!(snap.projects.len(), 1);
+    assert_eq!(snap.projects[0].id, p2.id);
+    assert_eq!(snap.cards.len(), 1);
+    assert_eq!(snap.cards[0].project_id, p2.id);
+    assert!(snap.terminals.is_empty());
+    assert!(snap.worktrees.is_empty());
+    assert!(snap.workflow_sources.iter().all(|s| s.project_id == p2.id));
+    assert!(
+        !meta_dir.exists(),
+        "Canban project metadata dir should be removed"
+    );
+
+    let drafts = app.call("draft.list", json!({})).unwrap();
+    assert!(
+        drafts.as_array().unwrap().is_empty(),
+        "project drafts should be removed"
+    );
+
+    let util = app.call("utilities.state", json!({})).unwrap();
+    assert!(util["preferences"]["last_project"].is_null());
+    assert!(util["preferences"].get("board_filters").is_none());
+
+    // 5. Verify user repo and Git worktree on disk are completely untouched.
+    assert!(repo1.join("README.md").exists());
+    assert_eq!(
+        std::fs::read_to_string(repo1.join("README.md")).unwrap(),
+        "user repo"
+    );
+    assert!(worktree1.join("WIP.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(worktree1.join("WIP.txt")).unwrap(),
+        "uncommitted worktree file"
+    );
+}
