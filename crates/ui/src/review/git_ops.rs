@@ -42,6 +42,10 @@ fn git_params(ui: Ui, mut extra: Value) -> Option<Value> {
 /// Starts the pull-to-refresh spinner on `target` and holds it for at least
 /// `MIN_PULL_REFRESH_HOLD` (~450ms) until active Git reads finish.
 fn start_pull_refresh_hold(ui: Ui, target: super::PullRefreshTarget) {
+    #[cfg(test)]
+    if tokio::runtime::Handle::try_current().is_err() {
+        return;
+    }
     let st = ui.review_state;
     let (refreshing, hold_ready, ticket_sig) = st.pull_slot(target);
     let ticket = ticket_sig.get_untracked() + 1;
