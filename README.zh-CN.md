@@ -38,21 +38,21 @@
 
 </td>
 <td width="50%">
-  <img src="website/screenshots/workflow-studio.png" alt="Canban 可编程工作流：卡片从 plan 到 develop 再到 merge 自动推进" width="100%" />
+  <img src="website/screenshots/workflow-studio.png" alt="Canban 可编程工作流：Visual Studio 与 Vibe Mode 流水线" width="100%" />
 </td>
 </tr>
 <tr>
 <td width="50%" valign="middle">
 
-### 原生 Agent CLI + 瑞士军刀
+### 原生 Agent CLI 与终端
 
-在持久化、重启不中断的 PTY 中直接运行 Claude Code、Codex、Antigravity（`agy`）、Cursor CLI、Pi 或自定义 CLI 同时配齐通知中心（`⌘I`）、内置 Git Diff 审查，以及 Rust 原生应用的轻量与流畅。
+不做聊天套壳。在基于 Rust、NSH 与 `libghostty-vt` 构建的持久化防中断 PTY 中，直接运行 Claude Code、Codex、Antigravity（`agy`）、Cursor CLI、Pi 或自定义 CLI，完整保留原生 TUI、权限、MCP、Skills 与会话恢复。
 
 [文档 →](https://canban.dev/zh/docs/agents/)
 
 </td>
 <td width="50%">
-  <img src="website/screenshots/review-diff.png" alt="Canban 原生终端、通知中心与内置 Git Diff 审查" width="100%" />
+  <img src="docs/assets/terminals-cli.jpg" alt="Canban 终端工作区与原生 Agent CLI" width="100%" />
 </td>
 </tr>
 <tr>
@@ -67,6 +67,32 @@
 </td>
 <td width="50%">
   <img src="docs/assets/multi-machine.png" alt="Canban Connected Hosts 弹窗：展示本地 macOS Socket 与 Tailscale TCP 远程 Linux 主机" width="100%" />
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### 内置 Git 与 Diff 审查
+
+无需离开 Canban 即可查看提交历史与独立 Worktree 的代码改动。支持在变更行直接添加行内评论，并将评审意见一键发送给 `@Agent`。
+
+[文档 →](https://canban.dev/zh/docs/)
+
+</td>
+<td width="50%">
+  <img src="website/screenshots/review-diff.png" alt="Canban 内置 Git 工作台与行内 Diff 审查" width="100%" />
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### 通知中心
+
+跨项目、跨 Worktree 与跨主机的全局注意力收件箱（`⌘I`）。一眼看清哪个 Agent 正在等待输入、审批或代码审查，点击直达对应卡片与实时终端。
+
+</td>
+<td width="50%">
+  <img src="docs/assets/notification-center.jpg" alt="Canban 通知中心：集中查看等待中的 Agent 并一键跳转到卡片与终端" width="100%" />
 </td>
 </tr>
 </table>

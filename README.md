@@ -38,23 +38,21 @@ Write GitHub Actions-like YAML with shell scripts and `agent` + prompt steps. Tu
 
 </td>
 <td width="50%">
-  <!-- Replace with short GIF/WebP once recorded: docs/assets/feature-vibe-workflow.gif -->
-  <img src="website/screenshots/workflow-studio.png" alt="Canban Programmable Workflows: GitHub card moving from plan to develop to merge" width="100%" />
+  <img src="website/screenshots/workflow-studio.png" alt="Canban Programmable Workflows: Visual Studio and Vibe Mode pipeline" width="100%" />
 </td>
 </tr>
 <tr>
 <td width="50%" valign="middle">
 
-### Native Agent CLI + Swiss Army Knife
+### Native Agent CLI &amp; Terminals
 
-Run Claude Code, Codex, Antigravity (`agy`), Cursor CLI, Pi, or custom CLIs inside persistent, restart-safe PTYs - paired with a Notification Center (`⌘I`), built-in Git diff review, and lightweight native Rust speed.
+No chat UI. Run Claude Code, Codex, Antigravity (`agy`), Cursor CLI, Pi, or custom CLIs directly inside persistent, restart-safe PTYs powered by Rust, NSH, and `libghostty-vt`, keeping native TUIs, permissions, MCPs, skills, and session resume intact.
 
 [Docs →](https://canban.dev/docs/agents/)
 
 </td>
 <td width="50%">
-  <!-- Replace with short GIF/WebP once recorded: docs/assets/feature-terminals-toolkit.gif -->
-  <img src="website/screenshots/review-diff.png" alt="Canban native terminals, Notification Center, and built-in Git diff review" width="100%" />
+  <img src="docs/assets/terminals-cli.jpg" alt="Canban Terminals workspace running native Agent CLIs" width="100%" />
 </td>
 </tr>
 <tr>
@@ -69,6 +67,32 @@ Connect your local desktop app to headless Linux `canband` hosts over SSH or Tai
 </td>
 <td width="50%">
   <img src="docs/assets/multi-machine.png" alt="Canban Connected Hosts popover showing local macOS socket and remote Linux host over Tailscale TCP" width="100%" />
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### Built-in Git &amp; Diff Review
+
+Inspect commits and per-card worktree diffs without leaving Canban. Leave inline review comments on changed lines and send focused feedback straight to `@Agent`.
+
+[Docs →](https://canban.dev/docs/)
+
+</td>
+<td width="50%">
+  <img src="website/screenshots/review-diff.png" alt="Canban built-in Git workbench and inline diff review" width="100%" />
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### Notification Center
+
+One attention inbox across all projects, worktrees, and hosts (`⌘I`). Instantly see which agent is waiting for input, approval, or review, and jump straight to its Card and live terminal.
+
+</td>
+<td width="50%">
+  <img src="docs/assets/notification-center.jpg" alt="Canban Notification Center showing waiting agents and one-click jump to Card and terminal" width="100%" />
 </td>
 </tr>
 </table>
