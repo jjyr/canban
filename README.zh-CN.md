@@ -1,10 +1,6 @@
-<p align="center">
-  <img src="crates/ui/assets/app-icon.svg" width="84" alt="Canban 图标" />
-</p>
-
-# Canban
-
-**把 Kanban 卡片变成自动化编码工作流，同时完整保留你的原生 Agent CLI。**
+<h1 align="center">
+  <a href="https://canban.dev/zh/"><img src="crates/ui/assets/app-icon.svg" alt="Canban" width="56" valign="middle" /></a> Canban
+</h1>
 
 <p align="center">
   <a href="https://github.com/jjyr/canban/releases"><img src="https://img.shields.io/github/v/release/jjyr/canban?label=release" alt="最新版本" /></a>
@@ -14,65 +10,77 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/canban_intro.gif" width="1000" alt="Canban 演示：看板、工作流与 Herdr 终端" />
+  <sub><a href="README.md">English</a> · <strong>简体中文</strong></sub>
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <strong>简体中文</strong>
+  <strong>保留你的原生 Agent CLI，自动化你的工作流。</strong><br/>
+  用灵活的看板沉淀任务上下文，用通知中心掌握等待中的 Agent，用类似 GitHub Actions 的工作流自动化执行任务。
 </p>
+
+<h3 align="center"><a href="#安装"><ins>安装 Canban</ins></a> · <a href="https://canban.dev/zh/"><ins>canban.dev</ins></a></h3>
 
 <p align="center">
-  <a href="https://canban.dev/zh/"><strong>官网 (canban.dev)</strong></a> ·
-  <a href="#设计哲学">设计哲学</a> ·
-  <a href="#核心亮点">核心亮点</a> ·
-  <a href="#安装">安装</a> ·
-  <a href="docs/README.md">架构文档</a> ·
-  <a href="#相关软件与致谢">相关软件与致谢</a> ·
-  <a href="#开源协议">开源协议</a>
+  <img src="docs/assets/canban-hero.gif" alt="Canban 看板、展开卡片与实时原生 Agent CLI 终端演示" width="960" />
 </p>
 
----
+## 核心功能
 
-## 设计哲学
+<table>
+<tr>
+<td width="50%" valign="middle">
 
-1. **用 Kanban 组织人类上下文** — 需求说明、`#Card` 关联、截图、`@Agent` 讨论、结构化报告与审查门禁统一沉淀在每张 Card 上。
-2. **通过 Herdr 调用原生 Agent CLI，尽量减少干涉** — 在持久化 PTY 中直接运行 Claude Code、Codex、Antigravity (`agy`)、Cursor CLI 等原生工具，完整保留原生 TUI、权限交互、MCP、Skills 与会话恢复。
-3. **大部分工作在 Kanban 完成，并通过 Workflow 派发执行** — 人在看板上把控需求范围、答疑与代码审查，Worktree 隔离、Agent 调度与队列合并交由工作流自动完成。
+### 可编程工作流（Vibe Mode）
 
----
+用类似 GitHub Actions 的 YAML 编排 Shell 脚本与 `agent` + prompt 步骤。将任意卡片转化为 `plan → develop → merge` 自动化流水线，内置独立 Git Worktree、定时任务（Cron）与串行合并队列。
 
-## 核心亮点
+[文档 →](https://canban.dev/zh/docs/workflows/)
 
-- **用看板保留任务上下文** — 每张卡片集中记录功能需求、截图、与 Agent 的讨论和评审决定。在看板上就能实时查看 Agent 的进度。
+</td>
+<td width="50%">
+  <img src="website/screenshots/workflow-studio.png" alt="Canban 可编程工作流：卡片从 plan 到 develop 再到 merge 自动推进" width="100%" />
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
 
-- **自动化编码工作流** — 将卡片拖入 `Develop` 列，即可自动派发编码 Agent。像使用 GitHub Actions 一样，用自定义脚本、条件判断和人工审批步骤编排工作流。
+### 原生 Agent CLI + 瑞士军刀
 
-- **独立的 Git 工作树与合并队列** — 每张卡片在独立的 Git 工作树中执行任务。变更通过本地合并队列依次合入，遇到冲突时由 Agent 协助解决。
+在持久化、重启不中断的 PTY 中直接运行 Claude Code、Codex、Antigravity（`agy`）、Cursor CLI、Pi 或自定义 CLI 同时配齐通知中心（`⌘I`）、内置 Git Diff 审查，以及 Rust 原生应用的轻量与流畅。
 
-- **原生 Agent CLI** — 通过 Herdr 运行 Claude Code、Codex、Antigravity、Cursor CLI 和自定义 Agent，保留各自的终端界面、权限机制、MCP 和技能。
+[文档 →](https://canban.dev/zh/docs/agents/)
 
-- **重启无中断执行** — 即使 Canban 重启或升级，编码 Agent 也能继续运行，不中断正在进行的工作。
+</td>
+<td width="50%">
+  <img src="website/screenshots/review-diff.png" alt="Canban 原生终端、通知中心与内置 Git Diff 审查" width="100%" />
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
 
-- **远程机器支持** — 通过 SSH/Tailscale 连接远程 Linux 机器，并在远程执行编码 Agent。
+### 多机器协作
 
-- **GitHub 集成** — 将 GitHub Issues 和 PR 转化为看板卡片，像本地卡片一样在其上运行工作流。
+通过 SSH 或 Tailscale 将本地桌面端连接到无头 Linux `canband` 主机，与本地项目一起无缝管理远程看板、工作流和实时终端。
 
----
+[文档 →](https://canban.dev/zh/docs/remote-hosts/)
+
+</td>
+<td width="50%">
+  <img src="docs/assets/multi-machine.png" alt="Canban Connected Hosts 弹窗：展示本地 macOS Socket 与 Tailscale TCP 远程 Linux 主机" width="100%" />
+</td>
+</tr>
+</table>
 
 ## 安装
 
 **前置要求**：
 - **macOS**：macOS 13.0+（Apple Silicon / `arm64`）
-- **Linux 桌面版**：`x86_64` 或 `aarch64` (`arm64`)，已安装 GTK4 与 GStreamer 运行库（`libgtk-4-1` / `gtk4` + `gstreamer`）
-- **通用**：`git`、至少一个原生 Agent CLI（如 `claude`、`codex`、`agy`、`cursor-agent`），以及 **Herdr Core (`hc`)**（首次启动时若缺失会引导一键安装）。
+- **Linux 桌面版**：`x86_64` 或 `aarch64`（`arm64`），已安装 GTK4 与 GStreamer 运行库（`libgtk-4-1` / `gtk4` + `gstreamer`）
+- **通用**：`git`、至少一个原生 Agent CLI（如 `claude`、`codex`、`agy`、`cursor-agent` 等），以及 **Herdr Core（`hc`）**（首次启动时若缺失会引导一键安装）。
 
 ```bash
 curl -fsSL https://canban.dev/install.sh | bash
 ```
-
-- **macOS**：安装或热升级 `/Applications/Canban.app`，自动清理 Gatekeeper 隔离属性并完成本地签名处理。
-- **Linux 桌面版**：安装或热升级 `~/.local/opt/canban`，自动创建 `~/.local/bin/{canban,canban-ui}` 符号链接并注册 XDG `.desktop` 启动器与图标（`~/.local/share/applications` 与 `icons/hicolor`）。
-- **Linux 无头服务端 (`canband`)**：在无图形环境的远程主机上可传入 `--headless`（`curl -fsSL https://canban.dev/install.sh | bash -s -- --headless`），仅安装独立的 `~/.local/bin/canban` 守护进程，无需 GTK4 依赖；升级时保留运行中的 `herdr-core` 会话并自动协调 `systemd --user` `canban.service`。
 
 ### 从源码构建
 
@@ -87,20 +95,16 @@ curl -fsSL https://canban.dev/install.sh | bash
 git clone https://github.com/jjyr/canban.git && cd canban && mise run install-app
 ```
 
----
-
 ## 相关软件与致谢
 
-Canban 的实现离不开以下优秀开源项目与资源（完整的第三方版权与许可证文本保留在 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)）：
+Canban 基于以下开源项目构建（完整归属与许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)）：
 
-- **[Herdr (`herdr-core`)](https://github.com/herdrdev/herdr-core)** — 负责 PTY 会话托管、生命周期监督与 JSON-RPC 通信的底层引擎（Apache-2.0）
-- **[Sheprd](https://github.com/sheprd-labs/sheprd)** — 在终端 VT/输入封装与订阅工具契约中参考了其工程实践（Apache-2.0）
-- **[NSH (`longbridge/nsh`)](https://github.com/longbridge/nsh)** — 原生 macOS（AppKit / Metal）与 Linux（GTK4）Rust 桌面 UI 框架（Apache-2.0）
-- **[Ghostty (`libghostty-vt`)](https://github.com/ghostty-org/ghostty)** — 按固定提交锁定的高性能 VT 终端解析内核（MIT）
-- **[iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes)** (MIT) — 16 套经典暗色终端配色方案（含 Monokai、Dracula、Nord、Tokyo Night、Catppuccin Mocha 等）
-- **[Lucide](https://lucide.dev)** (ISC)、**[Lobe Icons](https://github.com/lobehub/lobe-icons)** (MIT)、**[Primer Octicons](https://github.com/primer/octicons)** (MIT) — UI 图标与模型/服务商标识
-
----
+- **[Herdr](https://github.com/herdrdev/herdr-core)** - 面向原生 Agent CLI 的持久化 PTY 会话监督引擎
+- **[Sheprd](https://github.com/sheprd-labs/sheprd)** - 终端 VT 与订阅交互实践参考
+- **[NSH](https://github.com/longbridge/nsh)** - 原生 macOS 与 Linux Rust UI 框架
+- **[Ghostty](https://github.com/ghostty-org/ghostty)** - `libghostty-vt` 终端解析与渲染内核
+- **[iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes)** - 内置终端配色方案
+- **[Lucide](https://lucide.dev)**、**[Lobe Icons](https://github.com/lobehub/lobe-icons)**、**[Primer Octicons](https://github.com/primer/octicons)** - UI 与模型/服务商图标
 
 ## 开源协议
 
