@@ -42,9 +42,27 @@ fn sync_nsh_tokens() {
     t.set_color("border", BORDER.resolve());
     t.set_color("input", INSET.resolve());
     t.set_color("ring", ACCENT.resolve());
+    let (thumb, thumb_hover) = scrollbar_thumb_colors();
+    t.set_color("scrollbar-thumb", thumb);
+    t.set_color("scrollbar-thumb-hover", thumb_hover);
     t.set_number("radius", RADIUS);
     t.set_font("font-mono", MONO_FONT);
     nsh_core::element::set_tokens(t);
+}
+pub(crate) fn scrollbar_thumb_colors() -> (AdaptiveColor, AdaptiveColor) {
+    let muted = MUTED.resolve().dark;
+    let thumb = muted.alpha(0.38);
+    let hover = muted.alpha(0.72);
+    (
+        AdaptiveColor {
+            light: thumb,
+            dark: thumb,
+        },
+        AdaptiveColor {
+            light: hover,
+            dark: hover,
+        },
+    )
 }
 pub fn current_theme() -> &'static canban_themes::Theme {
     let name = THEME.with(|p| {

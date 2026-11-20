@@ -552,7 +552,7 @@ impl BoardDrag {
                 .flights
                 .with(|all| all.iter().any(|f| !f.exiting && f.id == id))
     }
-    pub fn visible(self, stage: &str) -> Vec<Card> {
+    pub fn visible_indices(self, stage: &str) -> Vec<usize> {
         let (offset, height) = self
             .viewports
             .with(|v| v.get(stage).copied().unwrap_or((0., 720.)));
@@ -574,10 +574,15 @@ impl BoardDrag {
                     }
                 }
                 indices
-                    .into_iter()
-                    .filter_map(|i| cards.get(i).cloned())
-                    .collect()
             })
+        })
+    }
+    pub fn cards_at(self, indices: &[usize]) -> Vec<Card> {
+        self.cards.with(|cards| {
+            indices
+                .iter()
+                .filter_map(|&i| cards.get(i).cloned())
+                .collect()
         })
     }
     pub fn viewport(self, stage: &str, height: f32) {
@@ -865,8 +870,10 @@ impl BoardDrag {
                 if self.phase.try_get() != Some(2) {
                     break;
                 }
-                let x = self.x.value().await;
-                let y = self.y.value().await;
+                let x_answer = self.x.value();
+                let y_answer = self.y.value();
+                let x = x_answer.await;
+                let y = y_answer.await;
                 if self.phase.try_get() != Some(2) {
                     break;
                 }

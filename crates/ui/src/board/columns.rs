@@ -30,16 +30,20 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage, compact: bool) -> i
     let gap_stage = id.clone();
     let prev_gap = stored(None::<f32>);
     effect(move || {
-        if let Some((s, y, _)) = &state.layout.get().gap
-            && s == &gap_stage
-        {
+        let gap = state.layout.with(|l| {
+            l.gap
+                .as_ref()
+                .filter(|(s, _, _)| s == &gap_stage)
+                .map(|(_, y, _)| *y)
+        });
+        if let Some(y) = gap {
             if prev_gap
-                .replace(Some(*y))
-                .is_some_and(|old| (old - *y).abs() >= 0.5)
+                .replace(Some(y))
+                .is_some_and(|old| (old - y).abs() >= 0.5)
             {
-                let _ = motion::spring(gap_y, *y, motion::settle_spring());
+                let _ = motion::spring(gap_y, y, motion::settle_spring());
             } else {
-                gap_y.set(*y);
+                gap_y.set(y);
             }
         } else {
             prev_gap.replace(None);
@@ -48,6 +52,7 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage, compact: bool) -> i
     let gap_visible_stage = id.clone();
     let gap_height_stage = id.clone();
     let list_stage = id.clone();
+    let visible_indices = computed(move || state.visible_indices(&list_stage));
     let viewport_stage = id.clone();
     let count_stage = id.clone();
     let is_backlog = stage.id == "backlog";
@@ -188,7 +193,7 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage, compact: bool) -> i
                                     }),
                             )
                             .child(each(
-                                move || state.visible(&list_stage),
+                                move || visible_indices.with(|idx| state.cards_at(idx)),
                                 |c| c.id.clone(),
                                 move |card, _| row(ui, state, card),
                             )),
@@ -307,7 +312,7 @@ fn row(ui: Ui, state: BoardDrag, card: ReadSignal<Card>) -> impl IntoElement {
     let prev_epoch = stored(0u64);
     effect(move || {
         let _phase = state.phase.get();
-        let lifted = state.lifted.get();
+        let is_lifted = state.lifted.with(|l| *l == position_id);
         let ghost_active = state.is_ghost_active(&position_id);
         let epoch = state.motion_epoch.get();
         let (rest, target) = state.layout.with(|l| {
@@ -316,7 +321,7 @@ fn row(ui: Ui, state: BoardDrag, card: ReadSignal<Card>) -> impl IntoElement {
             (rest, target)
         });
         let delta = target - rest;
-        if lifted == position_id || ghost_active {
+        if is_lifted || ghost_active {
             y.set(delta);
             was_overlay.replace(true);
             prev_rest.replace(Some(rest));

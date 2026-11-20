@@ -1,418 +1,74 @@
-//! Canban's custom overlay scrollbars.
+//! Canban's overlay scrollbars, powered by `nsh-base`'s `ScrollbarTheme` and
+//! Tailwind theme tokens (`scrollbar-thumb`, `scrollbar-thumb-hover`).
 //!
-//! Replaces the default bright-white macOS platform scroller with a quiet,
-//! theme-reactive pill indicator across all `scroll()` regions, plus an
-//! explicitly placeable [`vertical_scrollbar`] for dense Card lists (such as
-//! Board stage columns) where the rail sits in the outer gutter clear of Card
-//! borders and hover actions.
-//!
-//! Pass-through overlay containers always carry `.accessible(false)` alongside
-//! `.pointer_events(PointerEvents::BoxNone)` / `None` so `nsh-core` emits
-//! `MountItem::ViewProps` on initial view creation rather than leaving newly
-//! mounted full-viewport decoration hosts in `PointerEvents::Auto`.
-use super::{motion, tokens::*};
-use nsh_base::ScrollbarTarget;
-use nsh_core::{
-    element::{AnyValue, BuiltInScrollbar, NodeRef, set_builtin_scrollbars},
-    geometry::{Along, Axis},
-    prelude::*,
-    time::{Instant, now},
+//! [`install`] registers the global built-in scrollbar theme via
+//! [`nsh_base::set_scrollbar_theme`], replacing platform indicators across all
+//! `scroll()`, `list()`, and multiline `input()` views. [`vertical_scrollbar`]
+//! provides an explicitly placeable vertical rail (for example in Board column
+//! outer gutters paired with `scroll().scrollbar(false)`).
+use nsh_base::{
+    ScrollbarElement, ScrollbarEntrance, ScrollbarLook, ScrollbarMode, ScrollbarMotion,
+    ScrollbarTarget, ScrollbarTheme, scrollbar, set_scrollbar_theme,
 };
-use std::time::Duration;
+use nsh_core::{geometry::Axis, prelude::*};
 
 const TRACK_SPAN: f32 = 9.0;
 const RAIL_PAD_ALONG: f32 = 3.0;
+const RAIL_PAD_EDGE: f32 = 1.5;
 const MIN_THUMB: f32 = 32.0;
-const THUMB_IDLE: f32 = 3.5;
-const THUMB_ACTIVE: f32 = 5.0;
-const ENTER_MS: f32 = 120.0;
-const EXIT_MS: f32 = 220.0;
-const IDLE_MS: u64 = 850;
+
+const VERTICAL_TRACK_CLASS: &str =
+    "absolute inset-y-0 right-0 w-[9px] py-[3px] pr-[1.5px] items-end cursor-pointer";
+const VERTICAL_THUMB_CLASS: &str = "w-[3.5px] rounded-full bg-scrollbar-thumb cursor-pointer transition-all duration-150 hover:w-[5px] hover:bg-scrollbar-thumb-hover active:w-[5px] active:bg-scrollbar-thumb-hover motion-reduce:transition-none";
+const HORIZONTAL_TRACK_CLASS: &str =
+    "absolute inset-x-0 bottom-0 h-[9px] px-[3px] pb-[1.5px] items-end cursor-pointer";
+const HORIZONTAL_THUMB_CLASS: &str = "h-[3.5px] rounded-full bg-scrollbar-thumb cursor-pointer transition-all duration-150 hover:h-[5px] hover:bg-scrollbar-thumb-hover active:h-[5px] active:bg-scrollbar-thumb-hover motion-reduce:transition-none";
+
+fn scrollbar_motion() -> ScrollbarMotion {
+    let mut motion = ScrollbarMotion::default();
+    motion.idle = 850.0;
+    motion.enter = 120.0;
+    motion.exit = 220.0;
+    motion.entrance = ScrollbarEntrance::Fade;
+    motion.thumb_hover_entrance = ScrollbarEntrance::Fade;
+    motion
+}
 
 pub(crate) fn install() {
-    set_builtin_scrollbars(built_in, Some(AnyValue::new(())));
+    let mut vertical = ScrollbarLook::default();
+    vertical.class = Some(VERTICAL_TRACK_CLASS.into());
+    vertical.thumb_class = Some(VERTICAL_THUMB_CLASS.into());
+
+    let mut horizontal = ScrollbarLook::default();
+    horizontal.class = Some(HORIZONTAL_TRACK_CLASS.into());
+    horizontal.thumb_class = Some(HORIZONTAL_THUMB_CLASS.into());
+
+    let mut theme = ScrollbarTheme::default();
+    theme.mode = ScrollbarMode::Hover;
+    theme.motion = scrollbar_motion();
+    theme.min_thumb_length = px(MIN_THUMB);
+    theme.vertical = Some(vertical);
+    theme.horizontal = Some(horizontal);
+
+    set_scrollbar_theme(Some(theme));
 }
 
 /// Explicitly placed vertical scrollbar bound to `scroll` (`scroll().scrollbar(false)`).
-/// Callers position the returned component element (for example in a column's
-/// outer gutter via `.absolute().top_0().bottom_0().right(px(-8.))`).
-pub fn vertical_scrollbar(scroll: impl Into<ScrollbarTarget>) -> ScrollbarRailElement {
-    scrollbar_rail()
-        .target(scroll.into())
-        .horizontal(false)
+/// Callers position the returned element (for example in a column's outer gutter
+/// via `.absolute().top_0().bottom_0().right(px(-8.))`).
+pub fn vertical_scrollbar(scroll: impl Into<ScrollbarTarget>) -> ScrollbarElement {
+    scrollbar()
+        .scroll(scroll.into())
+        .axis(Axis::Vertical)
+        .mode(ScrollbarMode::Hover)
+        .motion(scrollbar_motion())
+        .min_thumb_length(px(MIN_THUMB))
+        .thumb_class(VERTICAL_THUMB_CLASS)
         .w(px(TRACK_SPAN))
-}
-
-fn built_in(of: &BuiltInScrollbar) -> Option<AnyElement> {
-    Some(
-        viewport_scrollbar()
-            .target(ScrollbarTarget::Node(NodeRef(of.target)))
-            .horizontal(of.horizontal)
-            .into_element(),
-    )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Props)]
-struct ViewportScrollbarProps {
-    #[prop(default)]
-    target: ScrollbarTarget,
-    #[prop(default)]
-    horizontal: bool,
-}
-
-#[component]
-fn ViewportScrollbar(props: ViewportScrollbarProps) -> impl IntoElement {
-    let bar = scrollbar_rail()
-        .target(props.target)
-        .horizontal(props.horizontal)
-        .absolute()
-        .map(|el| {
-            if props.horizontal {
-                el.left_0().right_0().bottom_0().h(px(TRACK_SPAN))
-            } else {
-                el.top_0().bottom_0().right_0().w(px(TRACK_SPAN))
-            }
-        });
-    view()
-        .accessible(false)
-        .pointer_events(PointerEvents::BoxNone)
-        .child(bar)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Props)]
-pub struct ScrollbarRailProps {
-    #[prop(default)]
-    pub target: ScrollbarTarget,
-    #[prop(default)]
-    pub horizontal: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Drag {
-    from: f32,
-}
-
-#[derive(Clone, Copy)]
-struct Ctl {
-    target: ScrollbarTarget,
-    axis: Axis,
-    metrics: Signal<Option<ScrollEvent>>,
-    rail: Signal<f32>,
-    rail_origin: Stored<Point<Points>>,
-    active: Signal<bool>,
-    over_track: Signal<bool>,
-    over_thumb: Signal<bool>,
-    drag: Signal<Option<Drag>>,
-    deadline: Stored<Option<Instant>>,
-    opacity: AnimatedValue,
-    fade_target: Stored<f32>,
-}
-
-impl Ctl {
-    fn node(self) -> Option<nsh_core::NodeId> {
-        self.target.node()
-    }
-
-    fn along(self) -> Option<(f32, f32, f32)> {
-        let m = self.metrics.get()?;
-        Some((
-            m.size.along(self.axis).0,
-            m.content_size.along(self.axis).0,
-            m.offset.along(self.axis).0,
-        ))
-    }
-
-    fn range(self) -> f32 {
-        self.along()
-            .map_or(0.0, |(view, content, _)| (content - view).max(0.0))
-    }
-
-    fn scrolls(self) -> bool {
-        self.range() > 1.0
-    }
-
-    fn thumb(self) -> f32 {
-        let rail = self.rail.get();
-        let Some((view, content, _)) = self.along() else {
-            return rail;
-        };
-        let min = MIN_THUMB.min(rail);
-        (rail * view / content.max(1.0)).clamp(min, rail)
-    }
-
-    fn position(self) -> f32 {
-        let range = self.range();
-        let Some((_, _, offset)) = self.along() else {
-            return 0.0;
-        };
-        if range <= 0.0 {
-            return 0.0;
-        }
-        (self.rail.get() - self.thumb()).max(0.0) * (offset / range).clamp(0.0, 1.0)
-    }
-
-    fn offset_at(self, position: f32) -> f32 {
-        untracked(|| {
-            let travel = (self.rail.get() - self.thumb()).max(0.0);
-            if travel <= 0.0 {
-                return 0.0;
-            }
-            (position / travel).clamp(0.0, 1.0) * self.range()
-        })
-    }
-
-    fn scroll_to(self, offset: f32) {
-        let Some(node) = self.node() else { return };
-        let Some(current) = self.metrics.get_untracked() else {
-            return;
-        };
-        let mut to = current.offset;
-        match self.axis {
-            Axis::Horizontal => to.x = px(offset),
-            Axis::Vertical => to.y = px(offset),
-        }
-        NodeRef(node).scroll_to(to, false);
-        self.metrics.set(Some(ScrollEvent {
-            offset: to,
-            ..current
-        }));
-    }
-
-    fn touch(self) {
-        if !self.active.get_untracked() {
-            self.active.set(true);
-        }
-        let delay = Duration::from_millis(IDLE_MS);
-        if self.deadline.replace(Some(now() + delay)).is_none() {
-            self.hide_after(delay);
-        }
-    }
-
-    fn hide_after(self, delay: Duration) {
-        set_timeout(delay, move || {
-            let Some(deadline) = self.deadline.get() else {
-                return;
-            };
-            let left = deadline.saturating_duration_since(now());
-            if left.is_zero() {
-                self.deadline.replace(None);
-                self.active.set(false);
-            } else {
-                self.hide_after(left);
-            }
-        });
-    }
-
-    fn shown(self) -> bool {
-        self.scrolls() && (self.drag.get().is_some() || self.over_track.get() || self.active.get())
-    }
-
-    fn fade_to(self, visible: bool, first: bool) {
-        let target = if visible { 1.0 } else { 0.0 };
-        let reduced = motion::reduced();
-        let changed = (self.fade_target.replace(target) - target).abs() >= f32::EPSILON;
-        let (ms, easing) = if first {
-            (0.0, Easing::Linear)
-        } else if visible {
-            (ENTER_MS, Easing::EaseOut)
-        } else {
-            (EXIT_MS, Easing::Curve(Curve::Cubic, EaseMode::In))
-        };
-        if first || changed || reduced {
-            let _ = motion::timing(self.opacity, target, ms, easing);
-        }
-    }
-
-    fn hover_track(self, over: bool) {
-        self.over_track.set(over);
-        if over || self.active.get_untracked() {
-            self.touch();
-        }
-    }
-
-    fn press_track(self, at: Point<Points>) {
-        let along = at.along(self.axis).0 - self.rail_origin.get().along(self.axis).0;
-        let thumb = untracked(|| self.thumb());
-        let offset = self.offset_at(along - thumb / 2.0);
-        self.drag.set(Some(Drag { from: offset }));
-        self.scroll_to(offset);
-    }
-
-    fn press_thumb(self) {
-        let from = untracked(|| self.along()).map_or(0.0, |(_, _, o)| o);
-        self.drag.set(Some(Drag {
-            from: from.clamp(0.0, untracked(|| self.range())),
-        }));
-    }
-
-    fn drag_by(self, delta: f32) {
-        let Some(drag) = self.drag.get_untracked() else {
-            return;
-        };
-        let (travel, range) =
-            untracked(|| ((self.rail.get() - self.thumb()).max(0.0), self.range()));
-        if travel <= 0.0 {
-            return;
-        }
-        let offset = (drag.from + delta * range / travel).clamp(0.0, range);
-        self.scroll_to(offset);
-    }
-
-    fn release(self) {
-        if self.drag.get_untracked().is_some() {
-            self.drag.set(None);
-            self.touch();
-        }
-    }
-}
-
-fn thumb_fill(emphasized: bool) -> AdaptiveColor {
-    let base = MUTED.resolve().dark;
-    let color = base.alpha(if emphasized { 0.72 } else { 0.38 });
-    AdaptiveColor {
-        light: color,
-        dark: color,
-    }
-}
-
-#[component]
-pub fn ScrollbarRail(props: ScrollbarRailProps, _cx: Scope<NoEvent>) -> impl IntoElement {
-    let axis = if props.horizontal {
-        Axis::Horizontal
-    } else {
-        Axis::Vertical
-    };
-    let ctl = Ctl {
-        target: props.target,
-        axis,
-        metrics: signal(None),
-        rail: signal(0.0),
-        rail_origin: stored(Point::default()),
-        active: signal(false),
-        over_track: signal(false),
-        over_thumb: signal(false),
-        drag: signal(None),
-        deadline: stored(None),
-        opacity: animated_value(0.0),
-        fade_target: stored(0.0),
-    };
-    watch_scroll(
-        move || ctl.node(),
-        move |e: &ScrollEvent| {
-            let before = ctl.metrics.get_untracked();
-            let mut next = *e;
-            if let Some(prev) = before.filter(|_| ctl.drag.get_untracked().is_some()) {
-                match axis {
-                    Axis::Horizontal => next.offset.x = prev.offset.x,
-                    Axis::Vertical => next.offset.y = prev.offset.y,
-                }
-            }
-            ctl.metrics.set(Some(next));
-            if before.is_some_and(|b| b.offset != next.offset) {
-                ctl.touch();
-            }
-        },
-    );
-    let shown = computed(move || ctl.shown());
-    let first = std::cell::Cell::new(true);
-    effect(move || {
-        let visible = shown.get();
-        ctl.fade_to(visible, first.replace(false));
-    });
-    let interactive = computed(move || ctl.scrolls());
-    let inner_pe = move || {
-        if interactive.get() {
-            PointerEvents::BoxNone
-        } else {
-            PointerEvents::None
-        }
-    };
-    let emphasized =
-        computed(move || ctl.drag.get().is_some() || ctl.over_thumb.get() || ctl.over_track.get());
-    let thumb_cross = move || {
-        Length::from(px(if emphasized.get() {
-            THUMB_ACTIVE
-        } else {
-            THUMB_IDLE
-        }))
-    };
-    let thumb = view()
-        .accessible(false)
-        .rounded_full()
+        .py(px(RAIL_PAD_ALONG))
+        .pr(px(RAIL_PAD_EDGE))
+        .items_end()
         .cursor_pointer()
-        .bg(move || thumb_fill(emphasized.get()))
-        .map(|v| match axis {
-            Axis::Vertical => v.h_full().w(thumb_cross),
-            Axis::Horizontal => v.w_full().h(thumb_cross),
-        })
-        .on_mouse_enter(move |_: &MouseEvent| ctl.over_thumb.set(true))
-        .on_mouse_leave(move |_: &MouseEvent| ctl.over_thumb.set(false))
-        .claim_touches(TouchClaim::on_start().ask(|request: &ClaimRequest| request.claim()))
-        .keep_touches(true)
-        .on_responder_grant(move |_: &ResponderEvent| ctl.press_thumb())
-        .on_responder_move(move |e: &ResponderEvent| ctl.drag_by(e.gesture.delta.along(axis).0))
-        .on_responder_release(move |_: &ResponderEvent| ctl.release())
-        .on_responder_terminate(move |_: &ResponderEvent| ctl.release());
-
-    let holder = view()
-        .accessible(false)
-        .flex_shrink_0()
-        .pointer_events(inner_pe)
-        .map(|v| match axis {
-            Axis::Vertical => v
-                .w_full()
-                .items_end()
-                .pr(px(1.5))
-                .h(move || Length::from(px(ctl.thumb())))
-                .translate_y(move || DefiniteLength::from(px(ctl.position()))),
-            Axis::Horizontal => v
-                .h_full()
-                .justify_end()
-                .pb(px(1.5))
-                .w(move || Length::from(px(ctl.thumb())))
-                .translate_x(move || DefiniteLength::from(px(ctl.position()))),
-        })
-        .child(thumb);
-
-    let rail = view()
-        .accessible(false)
-        .flex_1()
-        .pointer_events(inner_pe)
-        .map(|v| match axis {
-            Axis::Vertical => v.flex_col(),
-            Axis::Horizontal => v.flex_row(),
-        })
-        .on_layout(move |frame: &Bounds<Points>| {
-            ctl.rail_origin.replace(frame.origin);
-            ctl.rail.set(frame.size.along(axis).0);
-        })
-        .child(holder);
-
-    view()
-        .accessible(false)
-        .overflow_hidden()
-        .cursor_pointer()
-        .map(|v| match axis {
-            Axis::Vertical => v.flex_col().py(px(RAIL_PAD_ALONG)),
-            Axis::Horizontal => v.flex_row().px(px(RAIL_PAD_ALONG)),
-        })
-        .on_mouse_enter(move |_: &MouseEvent| ctl.hover_track(true))
-        .on_mouse_leave(move |_: &MouseEvent| ctl.hover_track(false))
-        .claim_touches(TouchClaim::on_start().ask(|request: &ClaimRequest| request.claim()))
-        .keep_touches(true)
-        .on_responder_grant(move |e: &ResponderEvent| ctl.press_track(e.location))
-        .on_responder_move(move |e: &ResponderEvent| ctl.drag_by(e.gesture.delta.along(axis).0))
-        .on_responder_release(move |_: &ResponderEvent| ctl.release())
-        .on_responder_terminate(move |_: &ResponderEvent| ctl.release())
-        .bind_opacity(&ctl.opacity)
-        .pointer_events(move || {
-            if interactive.get() {
-                PointerEvents::Auto
-            } else {
-                PointerEvents::None
-            }
-        })
-        .child(rail)
 }
 
 #[cfg(test)]
@@ -491,7 +147,7 @@ mod tests {
             }
         }
 
-        // First scroll() uses the built-in Canban scrollbar (platform indicator replaced & hidden).
+        // First scroll() uses the built-in themed scrollbar (platform indicator replaced & hidden).
         let (builtin_scroll_id, _, _) = scroll_nodes
             .iter()
             .copied()
@@ -538,16 +194,16 @@ mod tests {
     }
 
     #[test]
-    fn thumb_fill_tracks_named_theme_changes() {
+    fn scrollbar_tokens_track_named_theme_changes() {
         #[component]
         fn ProbeRoot() -> impl IntoElement {
             crate::tokens::install_theme();
-            let default_fill = thumb_fill(false).dark;
+            let (default_thumb, default_hover) = crate::tokens::scrollbar_thumb_colors();
+            assert_ne!(default_thumb.dark, default_hover.dark);
             crate::tokens::set_theme("gruvbox");
-            let gruvbox_fill = thumb_fill(false).dark;
-            assert_ne!(default_fill, gruvbox_fill);
-            assert!((gruvbox_fill.a - 0.38).abs() < 0.01);
-            assert!((thumb_fill(true).dark.a - 0.72).abs() < 0.01);
+            let (gruvbox_thumb, gruvbox_hover) = crate::tokens::scrollbar_thumb_colors();
+            assert_ne!(default_thumb.dark, gruvbox_thumb.dark);
+            assert_ne!(gruvbox_thumb.dark, gruvbox_hover.dark);
             view()
         }
         let mut core = Core::new(ApproxTextEngine, size(px(800.0), px(600.0)));
