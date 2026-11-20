@@ -44,34 +44,38 @@ pub fn sync_hint(project: &Project, status: Option<&GitHubSyncStatus>, time: u64
     format!("{}\n{message}", g.repository)
 }
 pub fn sync_button(ui: Ui, project_id: String) -> impl IntoElement {
+    let state_id = project_id.clone();
+    let button_state = computed(move || {
+        ui.snapshot.with(|state| {
+            let project = state.projects.iter().find(|p| p.id == state_id)?;
+            let g = project.github.as_ref()?;
+            let status = state
+                .github_sync
+                .get(&state_id)
+                .filter(|s| s.generation == g.generation);
+            let phase = status.map(|s| s.phase.as_str()).unwrap_or("");
+            let busy = matches!(phase, "queued" | "issues" | "prs" | "observations");
+            let icon = if phase == "queued" {
+                Icon::Clock
+            } else if busy {
+                Icon::Refresh
+            } else if status.is_some_and(|s| s.error.is_some()) || g.error.is_some() {
+                Icon::TriangleAlert
+            } else if g.paused {
+                Icon::CirclePause
+            } else {
+                Icon::Refresh
+            };
+            let hint = sync_hint(project, status, now());
+            Some((icon, hint, busy, busy && phase != "queued"))
+        })
+    });
     dynamic(move || {
-        let state = ui.snapshot.get();
-        let Some(project) = state.projects.iter().find(|p| p.id == project_id) else {
+        let Some((icon, hint, busy, spinning)) = button_state.get() else {
             return view().into_element();
         };
-        let Some(g) = &project.github else {
-            return view().into_element();
-        };
-        let status = state
-            .github_sync
-            .get(&project_id)
-            .filter(|s| s.generation == g.generation);
-        let phase = status.map(|s| s.phase.as_str()).unwrap_or("");
-        let busy = matches!(phase, "queued" | "issues" | "prs" | "observations");
-        let icon = if phase == "queued" {
-            Icon::Clock
-        } else if busy {
-            Icon::Refresh
-        } else if status.is_some_and(|s| s.error.is_some()) || g.error.is_some() {
-            Icon::TriangleAlert
-        } else if g.paused {
-            Icon::CirclePause
-        } else {
-            Icon::Refresh
-        };
-        let hint = sync_hint(project, status, now());
         let id = project_id.clone();
-        canban_ui_kit::chrome::sync_action(icon, hint, busy, busy && phase != "queued", move |_| {
+        canban_ui_kit::chrome::sync_action(icon, hint, busy, spinning, move |_| {
             dispatch(ui, "github.sync.request", json!({"project_id":id}));
         })
         .into_element()

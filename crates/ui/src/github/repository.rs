@@ -202,23 +202,47 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
             }
         });
     }
-    let info_repository = initial.0.clone();
-    if crate::APP.get().is_some() && !info_repository.is_empty() {
-        let pid = id.clone();
+    let saved_repo = computed(move || saved.get().0);
+    let info_ticket = signal(0u64);
+    let info_pid = id.clone();
+    effect(move || {
+        let repo = saved_repo.get();
+        let ticket = info_ticket.get_untracked() + 1;
+        info_ticket.set(ticket);
+        if repo.is_empty() {
+            if !repository_info.get_untracked().is_null() {
+                repository_info.set(Value::Null);
+            }
+            return;
+        }
+        if crate::APP.get().is_none() {
+            return;
+        }
+        let pid = info_pid.clone();
         ui.spawn(async move {
-            if let Ok(Ok(info)) = blocking(move || {
+            let result = blocking(move || {
                 crate::routed_call(
                     "github.repository.info",
-                    json!({"project_id":pid,"repository":info_repository}),
+                    json!({"project_id":pid,"repository":repo}),
                     Some(&pid),
                 )
             })
-            .await
-            {
-                repository_info.try_set(info);
+            .await;
+            if info_ticket.try_get() != Some(ticket) {
+                return;
+            }
+            match result {
+                Ok(Ok(info)) => {
+                    let _ = repository_info.try_set(info);
+                }
+                _ => {
+                    if repository_info.try_get().is_some_and(|v| !v.is_null()) {
+                        let _ = repository_info.try_set(Value::Null);
+                    }
+                }
             }
         });
-    }
+    });
     let baseline = signal(initial.1);
     effect(move || {
         let (repository, remote) = saved.get();
@@ -258,8 +282,35 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
     let sync = id.clone();
     let disconnect = id.clone();
     let status_id = id.clone();
+    let detected_id = id.clone();
     let banner_id = id.clone();
-    let hint_id = id.clone();
+    let sync_hint_id = id.clone();
+    let badge_state = computed(move || {
+        ui.snapshot.with(|s| {
+            s.projects
+                .iter()
+                .find(|p| p.id == status_id)
+                .and_then(|p| p.github.as_ref().map(|g| (g.repository.clone(), g.paused)))
+        })
+    });
+    let detected_state = computed(move || {
+        ui.snapshot.with(|s| {
+            s.projects
+                .iter()
+                .find(|p| p.id == detected_id)
+                .map(|p| (p.github.is_some(), p.detected_github.clone()))
+                .unwrap_or((false, None))
+        })
+    });
+    let sync_hint_text = computed(move || {
+        ui.snapshot.with(|s| {
+            s.projects
+                .iter()
+                .find(|p| p.id == sync_hint_id)
+                .map(|project| super::sync_hint(project, s.github_sync.get(&sync_hint_id), now()))
+                .unwrap_or_default()
+        })
+    });
 
     view()
         .max_w(px(780.))
@@ -272,20 +323,14 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
                     "Connect this Project to a GitHub repository so synced Cards and PR deliveries map directly.",
                 )
                 .trailing(dynamic(move || {
-                    let g = ui.snapshot.with(|s| {
-                        s.projects
-                            .iter()
-                            .find(|p| p.id == status_id)
-                            .and_then(|p| p.github.clone())
-                    });
-                    if let Some(g) = g {
+                    if let Some((repository, paused)) = badge_state.get() {
                         status(
-                            if g.paused {
-                                format!("{} · Paused", g.repository)
+                            if paused {
+                                format!("{repository} · Paused")
                             } else {
-                                format!("Connected · {}", g.repository)
+                                format!("Connected · {repository}")
                             },
-                            if g.paused { Tone::Neutral } else { Tone::Success },
+                            if paused { Tone::Neutral } else { Tone::Success },
                         )
                         .into_element()
                     } else {
@@ -296,13 +341,7 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
                     view()
                         .gap_2()
                         .child(dynamic(move || {
-                            let (connected, detected) = ui.snapshot.with(|s| {
-                                s.projects
-                                    .iter()
-                                    .find(|p| p.id == banner_id)
-                                    .map(|p| (p.github.is_some(), p.detected_github.clone()))
-                                    .unwrap_or((false, None))
-                            });
+                            let (connected, detected) = detected_state.get();
                             let Some(det) = detected.filter(|_| !connected) else {
                                 return view().into_element();
                             };
@@ -360,13 +399,7 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
                             .key("github-repository"),
                         )
                         .child(dynamic(move || {
-                            let (connected, detected) = ui.snapshot.with(|s| {
-                                s.projects
-                                    .iter()
-                                    .find(|p| p.id == hint_id)
-                                    .map(|p| (p.github.is_some(), p.detected_github.clone()))
-                                    .unwrap_or((false, None))
-                            });
+                            let (connected, detected) = detected_state.get();
                             let Some(det) = detected.filter(|_| connected) else {
                                 return view().into_element();
                             };
@@ -528,28 +561,32 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
                     )
                 })),
         )
-        .child(dynamic(move || {
-            let snapshot = ui.snapshot.get();
-            if let Some(project) = snapshot.projects.iter().find(|p| p.id == id) {
-                return view().child(muted(super::sync_hint(project, snapshot.github_sync.get(&id), now())));
-            }
-            view()
-        }))
+        .child(view().child(muted(move || sync_hint_text.get())))
 }
 
 pub fn screen(ui: Ui) -> impl IntoElement {
+    let active_project = computed(move || {
+        let pid = ui.project.get();
+        ui.index.with(|idx| {
+            idx.projects
+                .get(&pid)
+                .map(|p| (p.id.clone(), p.name.clone()))
+        })
+    });
     view()
         .flex_1()
         .min_h(px(0.))
         .p_5()
         .gap_4()
-        .child(scroll().flex_1().child(dynamic(move || {
-            let _ = ui.project.get();
-            if let Some(p) = ui.current_project() {
-                settings(ui, p.id, p.name).into_element()
-            } else {
-                muted("Select or create a Project first.").into_element()
-            }
+        .child(scroll().flex_1().min_h(px(0.)).child(dynamic(move || {
+            let project = active_project.get();
+            untracked(|| {
+                if let Some((id, name)) = project {
+                    settings(ui, id, name).into_element()
+                } else {
+                    muted("Select or create a Project first.").into_element()
+                }
+            })
         })))
 }
 
@@ -679,6 +716,157 @@ mod tests {
                 .iter()
                 .any(|t| t == "Detected from git remote `origin`"),
             "expected detected remote caption when connected, got {connected_texts:?}"
+        );
+    }
+
+    #[test]
+    fn repository_screen_stays_mounted_across_unrelated_snapshot_updates() {
+        use nsh_core::{EventKind, EventPayload, ROOT_ID};
+
+        fn sample_project(id: &str, name: &str, repo: &str) -> Project {
+            Project {
+                id: id.into(),
+                name: name.into(),
+                directory: format!("/tmp/{id}"),
+                location: None,
+                github: Some(GitHubSource {
+                    pr_intake: GitHubPrIntake::Off,
+                    authors: Vec::new(),
+                    labels: Vec::new(),
+                    include_drafts: false,
+                    paused: false,
+                    repository: repo.into(),
+                    repository_id: 1,
+                    generation: format!("gen-{id}"),
+                    intake: GitHubIntake::Off,
+                    synced_at: None,
+                    error: None,
+                }),
+                detected_github: Some(DetectedGitHub {
+                    repository: repo.into(),
+                    remote: "origin".into(),
+                }),
+                github_disconnected: false,
+                delivery_mode: Default::default(),
+                agent_overrides: Default::default(),
+                tags: Vec::new(),
+                workflow: Workflow::default(),
+                target_branch: Some("main".into()),
+                created_at: 1,
+            }
+        }
+
+        #[component]
+        fn StabilityProbe() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let mut snapshot = Snapshot::default();
+            snapshot
+                .projects
+                .push(sample_project("proj-1", "Canban", "jjyr/canban"));
+            snapshot
+                .projects
+                .push(sample_project("proj-2", "Other", "jjyr/other"));
+            ui.snapshot.set(snapshot);
+            ui.project.set("proj-1".into());
+            view()
+                .w(px(900.))
+                .h(px(700.))
+                .on_press(move |_: &()| {
+                    ui.snapshot.update(|s| {
+                        s.github_sync.insert(
+                            "proj-2".into(),
+                            GitHubSyncStatus {
+                                generation: "gen-proj-2".into(),
+                                phase: "issues".into(),
+                                ..Default::default()
+                            },
+                        );
+                        s.projects[1].target_branch = Some("develop".into());
+                    });
+                })
+                .child(
+                    compact_action("Switch project", Variant::Quiet, move |_| {
+                        ui.project.set("proj-2".into());
+                    })
+                    .accessibility_label("probe-switch-project"),
+                )
+                .child(screen(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(900.), px(700.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<StabilityProbe>());
+        let initial = core.commit().expect("initial mount");
+        let host = initial
+            .items
+            .iter()
+            .find_map(|item| match item {
+                MountItem::Insert { parent, child, .. } if *parent == ROOT_ID => Some(*child),
+                _ => None,
+            })
+            .expect("root host node");
+        let find_text = |items: &[MountItem], expected: &str| {
+            items.iter().find_map(|item| match item {
+                MountItem::Text { id, text, .. } if text.text == expected => Some(*id),
+                _ => None,
+            })
+        };
+        let heading_id =
+            find_text(&initial.items, "Repository Binding · Canban").expect("heading text");
+        let badge_id = find_text(&initial.items, "Connected · jjyr/canban").expect("badge text");
+        let detected_id =
+            find_text(&initial.items, "Detected from git remote `origin`").expect("detected text");
+        let save_id =
+            find_text(&initial.items, "Save repository settings").expect("save button text");
+        let switch_btn = initial
+            .items
+            .iter()
+            .find_map(|item| match item {
+                MountItem::ViewProps { id, props }
+                    if props.accessibility.label.as_deref() == Some("probe-switch-project") =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .expect("switch project button");
+
+        assert!(core.component_event(host, EventKind::Press, &EventPayload::None));
+        if let Some(update) = core.commit() {
+            let watched = [heading_id, badge_id, detected_id, save_id];
+            assert!(
+                !update.items.iter().any(|item| matches!(
+                    item,
+                    MountItem::Delete { id } if watched.contains(id)
+                )),
+                "github-repository nodes must not be deleted/remounted on unrelated snapshot updates: {:?}",
+                update.items
+            );
+            assert!(
+                !update.items.iter().any(|item| matches!(
+                    item,
+                    MountItem::Text { text, .. }
+                        if matches!(
+                            text.text.as_ref(),
+                            "Repository Binding · Canban"
+                                | "Connected · jjyr/canban"
+                                | "Detected from git remote `origin`"
+                                | "Save repository settings"
+                        )
+                )),
+                "github-repository texts must not be re-emitted on unrelated snapshot updates: {:?}",
+                update.items
+            );
+        }
+
+        // Switching the active project must remount settings for the new project.
+        assert!(core.component_event(switch_btn, EventKind::Press, &EventPayload::None));
+        let switched = core.commit().expect("project switch commit");
+        assert!(
+            find_text(&switched.items, "Repository Binding · Other").is_some(),
+            "expected switched project heading, got {:?}",
+            switched.items
         );
     }
 }
