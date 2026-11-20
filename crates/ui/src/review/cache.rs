@@ -176,6 +176,18 @@ impl ReadCache {
         inner.inflight.retain(|key, _| !key.starts_with(&prefix));
     }
 
+    pub fn invalidate_method(&self, host: &str, project: &str, method: &str) {
+        let prefix = format!(
+            "[{},{},{},",
+            serde_json::json!(host),
+            serde_json::json!(project),
+            serde_json::json!(method)
+        );
+        let mut inner = self.inner.lock().unwrap();
+        inner.entries.retain(|key, _| !key.starts_with(&prefix));
+        inner.inflight.retain(|key, _| !key.starts_with(&prefix));
+    }
+
     pub fn invalidate_checkout(&self, host: &str, project: &str, cwd: &str, card: Option<&str>) {
         let prefix = format!(
             "[{},{},",

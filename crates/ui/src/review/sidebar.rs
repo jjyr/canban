@@ -146,8 +146,9 @@ fn render_commits(ui: Ui) -> impl IntoElement {
             st.refs_data
                 .with(|r| build_log_ref_options(r, &log_branch(st)))
         },
-        move |chosen| git_ops::load_branch_log(ui, chosen, false),
+        move |chosen| git_ops::select_log_branch(ui, chosen),
     )
+    .loading(move || st.refs_loading.get())
     .placeholder("Search or type branch / ref…")
     .empty_text("No matching branches or tags")
     .custom_option(|q| {

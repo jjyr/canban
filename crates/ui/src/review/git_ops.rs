@@ -39,7 +39,47 @@ fn git_params(ui: Ui, mut extra: Value) -> Option<Value> {
     Some(extra)
 }
 
-/// Switches the active checkout (Project main directory, Card worktree, or ManagedWorktree).
+/// Starts the pull-to-refresh spinner on `target` and holds it for at least
+/// `MIN_PULL_REFRESH_HOLD` (~450ms) until active Git reads finish.
+fn start_pull_refresh_hold(ui: Ui, target: super::PullRefreshTarget) {
+    let st = ui.review_state;
+    let (refreshing, hold_ready, ticket_sig) = st.pull_slot(target);
+    let ticket = ticket_sig.get_untracked() + 1;
+    ticket_sig.set(ticket);
+    hold_ready.set(false);
+    refreshing.set(true);
+    let hold_until = nsh_core::time::now() + super::MIN_PULL_REFRESH_HOLD;
+    ui.spawn(async move {
+        timer_until(hold_until).await;
+        if ticket_sig.try_get() == Some(ticket) {
+            hold_ready.set(true);
+            super::maybe_finish_pull_refresh(st);
+        }
+    });
+}
+
+/// Triggers a non-blocking background `git.refs` refresh when the worktree picker opens
+/// so externally created Git worktrees appear without blocking or clearing cached options.
+fn refresh_worktrees_in_background(ui: Ui) {
+    let st = ui.review_state;
+    if crate::APP.get().is_none()
+        || st.refs_loading.get_untracked()
+        || untracked(|| ui.is_active_project_offline())
+    {
+        return;
+    }
+    let Some(project) = ui.current_project() else {
+        return;
+    };
+    let host = ui.active_project_host();
+    st.read_cache
+        .with(|c| c.invalidate_method(&host, &project.id, "git.refs"));
+    load_refs(ui);
+}
+
+/// Switches the active checkout (Project main directory, Card worktree, ManagedWorktree,
+/// or external Git worktree), animating the Commits pull-to-refresh indicator and
+/// defaulting the middle file list and right diff pane to `Uncommitted`.
 pub fn select_checkout(ui: Ui, cwd: String) {
     let st = ui.review_state;
     batch(move || {
@@ -58,7 +98,6 @@ pub fn select_checkout(ui: Ui, cwd: String) {
         st.auto_collapsed_seen
             .with(std::collections::BTreeSet::clear);
         st.log_branch.set(String::new());
-        st.log_commits.set(Vec::new());
         st.range_backup.set(None);
         st.selected_file.set(String::new());
         st.active_line.set(None);
@@ -71,7 +110,41 @@ pub fn select_checkout(ui: Ui, cwd: String) {
         st.error.set(String::new());
     });
     super::prepare_context(ui);
+    if let Some(project) = ui.current_project() {
+        st.read_cache.with(|c| {
+            c.invalidate_checkout(
+                &ui.active_project_host(),
+                &project.id,
+                &st.checkout_cwd.get_untracked(),
+                Some(&ui.card.get_untracked()),
+            )
+        });
+    }
+    start_pull_refresh_hold(ui, super::PullRefreshTarget::Commits);
     load_refs_and_compare(ui, false);
+}
+
+/// Switches the active branch in the Commits sidebar, reusing the Commits pull-to-refresh
+/// indicator, defaulting the diff target to `Uncommitted`, and refreshing files + diff.
+pub fn select_log_branch(ui: Ui, branch: String) {
+    super::prepare_context(ui);
+    let st = ui.review_state;
+    if let Some(project) = ui.current_project() {
+        st.read_cache.with(|c| {
+            c.invalidate_checkout(
+                &ui.active_project_host(),
+                &project.id,
+                &st.checkout_cwd.get_untracked(),
+                Some(&ui.card.get_untracked()),
+            )
+        });
+    }
+    start_pull_refresh_hold(ui, super::PullRefreshTarget::Commits);
+    load_branch_log(ui, branch, false);
+    st.compare_open.set(false);
+    st.range_backup.set(None);
+    select_git_pair(ui, "HEAD", "UNCOMMITTED");
+    load_refs(ui);
 }
 
 /// Loads paginated commit history for `branch` (or `st.log_branch` / `current_branch`).
@@ -96,7 +169,9 @@ pub fn load_branch_log(ui: Ui, branch: String, append: bool) {
         branch
     };
     if st.log_branch.get_untracked() != rev {
-        st.log_commits.set(Vec::new());
+        if !st.log_refreshing.get_untracked() {
+            st.log_commits.set(Vec::new());
+        }
         st.log_has_more.set(false);
     }
     st.log_branch.set(rev.clone());
@@ -223,16 +298,7 @@ pub fn pull_refresh(ui: Ui, target: super::PullRefreshTarget) {
         return;
     }
 
-    hold_ready.set(false);
-    refreshing.set(true);
-    let hold_until = nsh_core::time::now() + super::MIN_PULL_REFRESH_HOLD;
-    ui.spawn(async move {
-        timer_until(hold_until).await;
-        if ticket_sig.try_get() == Some(ticket) {
-            hold_ready.set(true);
-            super::maybe_finish_pull_refresh(st);
-        }
-    });
+    start_pull_refresh_hold(ui, target);
 
     if crate::APP.get().is_none() {
         match target {
@@ -749,6 +815,8 @@ pub fn render_checkout_picker(ui: Ui) -> impl IntoElement {
                     .selected(is_cur).keywords([path, branch])
             }).collect()
         }, move |path| select_checkout(ui, path))
+        .loading(move || st.refs_loading.get())
+        .on_open(move || refresh_worktrees_in_background(ui))
         .placeholder("Search worktree path or branch…").empty_text("No matching worktrees")
         .width(400.).list_height(320.))
 }

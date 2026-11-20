@@ -1022,7 +1022,11 @@ pub(crate) fn sync_log_commits_from_refs(st: State, val: &Value, current: &str) 
             .map(str::to_owned);
         let existing_len = st.log_commits.with_untracked(Vec::len);
         st.log_branch.set(current.to_owned());
-        if existing_len == 0 || existing_head != fresh_head || existing_len <= fresh.len() {
+        if existing_len == 0
+            || log.is_empty()
+            || existing_head != fresh_head
+            || existing_len <= fresh.len()
+        {
             let has_more = fresh.len() >= 40;
             st.log_commits.set(fresh);
             st.log_has_more.set(has_more);

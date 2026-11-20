@@ -139,15 +139,34 @@ impl AppServer {
                     .canonical(Path::new(req))
                     .ok()
                     .map(|pb| pb.to_string_lossy().into_owned());
-                let found = req_canon.and_then(|rc| {
+                let found = req_canon.as_ref().and_then(|rc| {
                     allowed_paths.iter().find_map(|(ap, cid)| {
                         let ap_canon = ops
                             .host
                             .canonical(Path::new(ap))
                             .ok()
                             .map(|pb| pb.to_string_lossy().into_owned())?;
-                        (ap_canon == rc).then(|| (ap.clone(), cid.clone()))
+                        (ap_canon == *rc).then(|| (ap.clone(), cid.clone()))
                     })
+                });
+                let found = found.or_else(|| {
+                    // Lazy fallback for external Git worktrees created outside Canban.
+                    let git_wts = ops.list_git_worktrees(Path::new(&project.directory));
+                    git_wts
+                        .iter()
+                        .find(|wt| wt.path == req)
+                        .map(|wt| (wt.path.clone(), None))
+                        .or_else(|| {
+                            let rc = req_canon.as_deref()?;
+                            git_wts.iter().find_map(|wt| {
+                                let wt_canon = ops
+                                    .host
+                                    .canonical(Path::new(&wt.path))
+                                    .ok()
+                                    .map(|pb| pb.to_string_lossy().into_owned())?;
+                                (wt_canon == rc).then(|| (wt.path.clone(), None))
+                            })
+                        })
                 });
                 let Some((path, cid)) = found else {
                     bail!(
@@ -222,15 +241,32 @@ impl AppServer {
     }
 
     fn git_refs_rpc(&self, p: Value) -> Result<Value> {
-        let ctx = self.resolve_project_checkout(&p)?;
+        let mut ctx = self.resolve_project_checkout(&p)?;
         let machine = ctx.project.work_location().machine;
         let _permit = self.check(&machine);
-        let mut resp = self
-            .ops(&machine)
-            .git_refs_in(&ctx.project, Some(&ctx.cwd))?;
+        let ops = self.ops(&machine);
+        let mut resp = ops.git_refs_in(&ctx.project, Some(&ctx.cwd))?;
+        for wt in ops.list_git_worktrees(Path::new(&ctx.project.directory)) {
+            let label = wt
+                .branch
+                .as_deref()
+                .map(|b| format!("{b} (worktree)"))
+                .unwrap_or_else(|| {
+                    Path::new(&wt.path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(&wt.path)
+                        .to_owned()
+                });
+            ctx.checkouts.push(json!({
+                "kind": "worktree",
+                "label": label,
+                "path": wt.path,
+                "branch": wt.branch,
+            }));
+        }
         // Match on this host's canonical checkout path, never on a branch name.
         // Multiple active Cards sharing a directory are deliberately unassigned.
-        let ops = self.ops(&machine);
         let canonical = |path: &str| {
             ops.host
                 .canonical(Path::new(path))

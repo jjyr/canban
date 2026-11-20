@@ -3799,6 +3799,42 @@ fn git_client_rpcs_enforce_checkout_containment_user_guard_and_remote_sync() {
     assert_eq!(refs["current_branch"], "feat/git-ui");
     assert_eq!(refs["checkouts"].as_array().unwrap().len(), 2);
 
+    // Externally created Git worktree (outside Canban's DB) must also be discovered
+    // in `git.refs` checkouts and accepted by `git.refs` / `git.compare`.
+    let ext_wt = Path::new(&source).join(".worktrees/ext-branch");
+    git(
+        Path::new(&source),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "fix/external-wt",
+            ext_wt.to_str().unwrap(),
+        ],
+    );
+    let ext_wt_str = ext_wt.to_string_lossy().into_owned();
+    std::fs::write(ext_wt.join("ext.rs"), "pub fn external() {}\n").unwrap();
+    let refs_with_ext = app.call("git.refs", json!({"project_id": p.id})).unwrap();
+    assert_eq!(refs_with_ext["checkouts"].as_array().unwrap().len(), 3);
+    assert!(
+        refs_with_ext["checkouts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["branch"] == "fix/external-wt"),
+        "expected external worktree in git.refs checkouts: {refs_with_ext}"
+    );
+    let ext_refs = app
+        .call("git.refs", json!({"project_id": p.id, "cwd": ext_wt_str}))
+        .unwrap();
+    assert_eq!(ext_refs["current_branch"], "fix/external-wt");
+    assert_eq!(ext_refs["dirty"], true);
+    // Unrelated outside directory must remain rejected even with external worktree fallback.
+    assert!(
+        app.call("git.refs", json!({"project_id": p.id, "cwd": outside}))
+            .is_err()
+    );
+
     // Stage, commit + push on managed worktree via RPCs.
     std::fs::write(Path::new(&wt_path).join("client.rs"), "pub fn sync() {}\n").unwrap();
     app.call(

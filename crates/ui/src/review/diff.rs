@@ -2889,6 +2889,128 @@ mod tests {
     }
 
     #[test]
+    fn switching_worktree_or_log_branch_animates_commits_and_defaults_to_uncommitted() {
+        #[component]
+        fn BranchAndWorktreeSwitchProbe() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let st = ui.review_state;
+            st.mode.set("git".into());
+            st.base_ref.set("main".into());
+            st.compare_ref.set("abc1234".into());
+            st.compare_open.set(true);
+            st.refs_data.set(json!({
+                "cwd": "/repo",
+                "current_branch": "main",
+                "default_branch": "main",
+                "dirty_count": 2,
+                "commits": [
+                    {"sha": "1111111", "short_sha": "1111111", "parents": [], "relative_time": "1m ago", "author": "a", "subject": "first"}
+                ]
+            }));
+            view()
+                .size_full()
+                .child(label(move || {
+                    format!(
+                        "state:{}:{}:{}:{}:{}:{}",
+                        st.log_refreshing.get(),
+                        st.base_ref.get(),
+                        st.compare_ref.get(),
+                        st.compare_open.get(),
+                        st.checkout_cwd.get(),
+                        st.log_branch.get(),
+                    )
+                }))
+                .child(
+                    canban_ui_kit::press_target()
+                        .accessibility_label("switch-worktree")
+                        .on_press(move |_: &()| {
+                            super::git_ops::select_checkout(
+                                ui,
+                                "/repo/.worktrees/fix-overpay".into(),
+                            );
+                        }),
+                )
+                .child(
+                    canban_ui_kit::press_target()
+                        .accessibility_label("switch-branch")
+                        .on_press(move |_: &()| {
+                            st.base_ref.set("old".into());
+                            st.compare_ref.set("deadbeef".into());
+                            st.compare_open.set(true);
+                            super::git_ops::select_log_branch(ui, "fix/overpay".into());
+                        }),
+                )
+        }
+
+        let clock = nsh_core::time::Clock::manual(std::time::SystemTime::UNIX_EPOCH);
+        let _clock = clock.enter();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let mut core = Core::new(ApproxTextEngine, size(px(900.), px(600.)));
+        core.set_content_culling(false);
+        core.set_components(nsh_base::registry());
+        core.set_task_runtime(runtime.handle().clone());
+        core.mount_root(&nsh_core::element::Root::of::<BranchAndWorktreeSwitchProbe>());
+        let mut tree = ProbeTree::new();
+        pump(&mut core, &mut tree);
+
+        let advance = |core: &mut Core<ApproxTextEngine>, tree: &mut ProbeTree, ms: u64| {
+            clock.advance_to(nsh_core::time::now() + std::time::Duration::from_millis(ms));
+            pump(core, tree);
+        };
+
+        // 1. Switching worktree starts Commits pull-refresh and defaults to HEAD -> UNCOMMITTED.
+        assert!(core.component_event(
+            tree.labels["switch-worktree"],
+            EventKind::Press,
+            &EventPayload::None
+        ));
+        advance(&mut core, &mut tree, 16);
+        assert!(
+            tree.texts
+                .values()
+                .any(|t| t == "state:true:HEAD:UNCOMMITTED:false:/repo/.worktrees/fix-overpay:"),
+            "worktree switch must start log_refreshing and default to Uncommitted; got: {:?}",
+            tree.texts.values().collect::<Vec<_>>()
+        );
+        advance(&mut core, &mut tree, 500);
+        assert!(
+            tree.texts
+                .values()
+                .any(|t| t == "state:false:HEAD:UNCOMMITTED:false:/repo/.worktrees/fix-overpay:"),
+            "worktree switch pull-refresh must settle after hold; got: {:?}",
+            tree.texts.values().collect::<Vec<_>>()
+        );
+
+        // 2. Switching branch in Commits picker starts Commits pull-refresh and resets to Uncommitted.
+        assert!(core.component_event(
+            tree.labels["switch-branch"],
+            EventKind::Press,
+            &EventPayload::None
+        ));
+        advance(&mut core, &mut tree, 16);
+        assert!(
+            tree.texts.values().any(|t| {
+                t == "state:true:HEAD:UNCOMMITTED:false:/repo/.worktrees/fix-overpay:fix/overpay"
+            }),
+            "branch switch must start log_refreshing and default to Uncommitted; got: {:?}",
+            tree.texts.values().collect::<Vec<_>>()
+        );
+        advance(&mut core, &mut tree, 500);
+        assert!(
+            tree.texts.values().any(|t| {
+                t == "state:false:HEAD:UNCOMMITTED:false:/repo/.worktrees/fix-overpay:fix/overpay"
+            }),
+            "branch switch pull-refresh must settle after hold; got: {:?}",
+            tree.texts.values().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn expanding_files_folding_and_commenting_do_not_remount_unaffected_files() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()

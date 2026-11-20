@@ -199,7 +199,68 @@ pub struct PrTrackingTarget {
     pub fetch_refspec: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitWorktree {
+    pub path: String,
+    pub branch: Option<String>,
+}
+
+pub(crate) fn parse_worktree_list_porcelain_z(raw: &str) -> Vec<GitWorktree> {
+    let mut out = Vec::new();
+    let mut path: Option<String> = None;
+    let mut branch: Option<String> = None;
+    let mut bare = false;
+    let mut prunable = false;
+
+    let flush = |out: &mut Vec<GitWorktree>,
+                 path: &mut Option<String>,
+                 branch: &mut Option<String>,
+                 bare: &mut bool,
+                 prunable: &mut bool| {
+        if let Some(p) = path.take()
+            && !p.is_empty()
+            && !*bare
+            && !*prunable
+        {
+            out.push(GitWorktree {
+                path: p,
+                branch: branch.take(),
+            });
+        } else {
+            *branch = None;
+        }
+        *bare = false;
+        *prunable = false;
+    };
+
+    for field in raw.split('\0') {
+        if field.is_empty() {
+            flush(&mut out, &mut path, &mut branch, &mut bare, &mut prunable);
+            continue;
+        }
+        if let Some(p) = field.strip_prefix("worktree ") {
+            path = Some(p.to_owned());
+        } else if let Some(b) = field.strip_prefix("branch ") {
+            branch = Some(b.strip_prefix("refs/heads/").unwrap_or(b).to_owned());
+        } else if field == "bare" {
+            bare = true;
+        } else if field == "prunable" || field.starts_with("prunable ") {
+            prunable = true;
+        }
+    }
+    flush(&mut out, &mut path, &mut branch, &mut bare, &mut prunable);
+    out
+}
+
 impl Ops {
+    /// Lists non-bare, non-prunable Git worktrees registered for `source`.
+    pub fn list_git_worktrees(&self, source: &Path) -> Vec<GitWorktree> {
+        let Ok(raw) = self.checked(source, &["worktree", "list", "--porcelain", "-z"]) else {
+            return Vec::new();
+        };
+        parse_worktree_list_porcelain_z(&raw)
+    }
+
     fn resolve_default_branch(&self, dir: &Path, project: &Project, current: &str) -> String {
         if let Some(t) = project
             .target_branch
@@ -1918,5 +1979,34 @@ mod tests {
             )
             .unwrap();
         assert_eq!(url_sha, sha);
+    }
+
+    #[test]
+    fn parse_worktree_list_filters_bare_and_prunable_entries() {
+        let raw = concat!(
+            "worktree /repo\0HEAD 1111111\0branch refs/heads/main\0\0",
+            "worktree /repo/.worktrees/fix-overpay\0HEAD 2222222\0branch refs/heads/fix/overpay\0\0",
+            "worktree /repo/.worktrees/detached\0HEAD 3333333\0detached\0\0",
+            "worktree /tmp/gone\0HEAD 4444444\0branch refs/heads/old\0prunable gitdir file points to non-existent location\0\0",
+            "worktree /repo/bare.git\0bare\0\0",
+        );
+        let list = parse_worktree_list_porcelain_z(raw);
+        assert_eq!(
+            list,
+            vec![
+                GitWorktree {
+                    path: "/repo".into(),
+                    branch: Some("main".into()),
+                },
+                GitWorktree {
+                    path: "/repo/.worktrees/fix-overpay".into(),
+                    branch: Some("fix/overpay".into()),
+                },
+                GitWorktree {
+                    path: "/repo/.worktrees/detached".into(),
+                    branch: None,
+                },
+            ]
+        );
     }
 }
