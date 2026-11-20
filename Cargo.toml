@@ -28,10 +28,10 @@ sha2 = "0.10"
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 tar = "0.4"
 zstd = "0.13"
-nsh-core = { git = "https://github.com/longbridge/nsh", rev = "5e3b0f78a999b11d0bad688ed08ec8fbab6e20be", features = ["svg"] }
-nsh-base = { git = "https://github.com/longbridge/nsh", rev = "5e3b0f78a999b11d0bad688ed08ec8fbab6e20be", default-features = false, features = ["editor", "highlight", "term"] }
-nsh-platform-macos = { git = "https://github.com/longbridge/nsh", rev = "5e3b0f78a999b11d0bad688ed08ec8fbab6e20be", default-features = false }
-nsh-platform-linux = { git = "https://github.com/longbridge/nsh", rev = "5e3b0f78a999b11d0bad688ed08ec8fbab6e20be", default-features = false, features = ["shader", "editor", "highlight", "term"] }
+nsh-core = { git = "https://github.com/longbridge/nsh", rev = "071c6e2fc1526ce70f6ccc8cb6b9936f168f1d7d", features = ["svg"] }
+nsh-base = { git = "https://github.com/longbridge/nsh", rev = "071c6e2fc1526ce70f6ccc8cb6b9936f168f1d7d", default-features = false, features = ["editor", "highlight", "term"] }
+nsh-platform-macos = { git = "https://github.com/longbridge/nsh", rev = "071c6e2fc1526ce70f6ccc8cb6b9936f168f1d7d", default-features = false }
+nsh-platform-linux = { git = "https://github.com/longbridge/nsh", rev = "071c6e2fc1526ce70f6ccc8cb6b9936f168f1d7d", default-features = false, features = ["shader", "editor", "highlight", "term"] }
 canban-profiler = { path = "crates/profiler" }
 canban-exec = { path = "crates/exec" }
 canban-themes = { path = "crates/themes" }

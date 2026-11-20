@@ -2,6 +2,53 @@
 //! and local machine copy helpers shared across macOS (`nsh-platform-macos`) and
 //! Linux (`nsh-platform-linux`).
 use anyhow::{Context, Result, ensure};
+use std::{marker::PhantomData, sync::Mutex};
+
+#[derive(Clone)]
+struct WindowLaunch {
+    title: String,
+    size: (i32, i32),
+}
+
+static WINDOW_LAUNCH: Mutex<Option<WindowLaunch>> = Mutex::new(None);
+
+struct WindowHost<C>(PhantomData<C>);
+
+impl<C> nsh_core::element::Component for WindowHost<C>
+where
+    C: nsh_core::element::Component,
+    C::Props: Default,
+{
+    type Props = ();
+    type Event = nsh_core::element::NoEvent;
+
+    fn view(
+        _props: Self::Props,
+        _cx: nsh_core::element::Scope<Self::Event>,
+    ) -> impl nsh_core::element::IntoElement {
+        let launch = WINDOW_LAUNCH
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or_else(|| WindowLaunch {
+                title: "Canban".to_owned(),
+                size: (1360, 900),
+            });
+        nsh_core::element::desktop::window()
+            .id("main")
+            .title(launch.title)
+            .default_size(nsh_core::geometry::size(
+                nsh_core::geometry::px(launch.size.0 as f32),
+                nsh_core::geometry::px(launch.size.1 as f32),
+            ))
+            .on_open_change(|change| {
+                if !change.open {
+                    nsh_core::element::desktop::quit();
+                }
+            })
+            .content(|| C::element(C::Props::default()))
+    }
+}
 
 /// Human-readable display label for the local machine (`"This Mac"` on macOS,
 /// `"This Linux"` on Linux).
@@ -40,11 +87,15 @@ where
     C::Props: Default,
 {
     let title = title.into();
+    *WINDOW_LAUNCH.lock().unwrap_or_else(|e| e.into_inner()) = Some(WindowLaunch {
+        title: title.clone(),
+        size,
+    });
     #[cfg(target_os = "macos")]
     {
         let code = nsh_platform_macos::run_app(
             nsh_platform_macos::AppSource::Rust(
-                nsh_platform_macos::Root::of::<C>().app_id(app_id.clone()),
+                nsh_platform_macos::Root::of::<WindowHost<C>>().app_id(app_id.clone()),
             ),
             nsh_platform_macos::AppOptions {
                 title,
@@ -60,7 +111,7 @@ where
     {
         let code = nsh_platform_linux::run_app(
             nsh_platform_linux::AppSource::Rust(
-                nsh_platform_linux::Root::of::<C>().app_id(app_id.clone()),
+                nsh_platform_linux::Root::of::<WindowHost<C>>().app_id(app_id.clone()),
             ),
             nsh_platform_linux::AppOptions {
                 title,

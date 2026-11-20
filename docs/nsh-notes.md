@@ -3,7 +3,7 @@
 Current pinned NSH dependency in root [Cargo.toml](../Cargo.toml):
 
 - **Crate version:** `0.6.0` (`nsh-core` with `svg` feature, `nsh-base`, `nsh-platform-macos`, `nsh-platform-linux`)
-- **Git revision:** `5e3b0f78a999b11d0bad688ed08ec8fbab6e20be`
+- **Git revision:** `071c6e2fc1526ce70f6ccc8cb6b9936f168f1d7d`
 - **Last reviewed:** 2026-11-20
 
 Use this document to track NSH-specific runtime quirks, rendering/input constraints, and Canban workarounds. When upgrading the NSH pin in `Cargo.toml`, audit each section below against the new revision and remove any workaround that upstream NSH has resolved.
