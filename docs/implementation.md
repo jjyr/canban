@@ -82,7 +82,7 @@ The [GitHub workspace and cache](github-workspace.md) extends the integration wi
 
 ## Build and launch
 
-Use the pinned mise Rust toolchain. NSH 0.5.0 is pinned to f4d68f7f9f31eb7b3ecc8a4cbc31096d5c6238a1 (upstream tag `v0.5.0`) in Cargo.toml and Cargo.lock (`nsh-platform-macos` on macOS; `nsh-platform-linux` with GTK4/Pango/GStreamer and without QuickJS/WebKitGTK on Linux). See the [upgrade and acceptance record](nsh-050-upgrade-20261111.md). On macOS, install Xcode command-line tools and librsvg (`brew install librsvg`); on Linux, install `pkg-config`, GTK4, GStreamer (`gstreamer-1.0` + `plugins-base`), `librsvg` (`rsvg-convert`) and `zstd`, plus a compatible `hc`.
+Use the pinned mise Rust toolchain. NSH 0.6.0 is pinned to `5e3b0f78a999b11d0bad688ed08ec8fbab6e20be` in Cargo.toml and Cargo.lock (`nsh-core` with `svg` feature; `nsh-platform-macos` on macOS; `nsh-platform-linux` with GTK4/Pango/GStreamer and without QuickJS/WebKitGTK on Linux). See [NSH integration notes](nsh-notes.md) and the historical [0.5.0 upgrade record](nsh-050-upgrade-20261111.md). On macOS, install Xcode command-line tools and librsvg (`brew install librsvg`); on Linux, install `pkg-config`, GTK4, GStreamer (`gstreamer-1.0` + `plugins-base`), `librsvg` (`rsvg-convert`) and `zstd`, plus a compatible `hc`.
 
 ```sh
 mise run dev

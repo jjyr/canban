@@ -69,14 +69,6 @@ pub fn tree_group(
                 .min_w(px(0.))
                 .border_l_1()
                 .border_color(BORDER)
-                .accessibility_elements_hidden(move || !open.get())
-                .pointer_events(move || {
-                    if open.get() {
-                        PointerEvents::Auto
-                    } else {
-                        PointerEvents::None
-                    }
-                })
                 .child(children),
         )
 }

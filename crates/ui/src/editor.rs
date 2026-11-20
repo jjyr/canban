@@ -254,15 +254,13 @@ mod tests {
 
     /// Regression guard: NSH's `Editor` draws lines with `FontFamily::new(MONO_FONT)`
     /// (`listed_fonts` cascade) while measuring per-grapheme caret X via
-    /// `CanvasFont::parse(&format!("13px \"{}\"", MONO_FONT))`, which splits on `,`
-    /// and measures using only the first family. If the first family in `MONO_FONT`
-    /// is not user-installed on macOS (e.g. `SF Mono`), `make_font` falls back to
-    /// proportional `.AppleSystemUIFont` during `measure_text`, causing massive
-    /// caret X drift relative to the Menlo/PingFang SC rendered line.
+    /// `CanvasFont::parse(&format!("13px {}", nsh_core::css_font_families(MONO_FONT)))`.
+    /// Verify the full macOS fallback cascade produces matching per-grapheme
+    /// advances and rendered CoreText line widths for ASCII and mixed CJK text.
     #[test]
     fn macos_editor_caret_measurement_matches_coretext_rendered_line_width() {
         let engine = CoreTextEngine::default();
-        let css = format!("13px \"{}\"", MONO_FONT.replace('"', ""));
+        let css = format!("13px {}", nsh_core::css_font_families(MONO_FONT));
         let measure_font = CanvasFont::parse(&css).expect("valid editor CSS font");
 
         let draw_style = ResolvedTextStyle {
