@@ -12,7 +12,7 @@ use canban_ui_kit::tokens::*;
 use canban_ui_kit::*;
 use nsh_core::prelude::*;
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 fn multiline_comment_input(
@@ -90,7 +90,7 @@ pub fn workbench(ui: Ui) -> impl IntoElement {
         bottom_space: signal(0.),
     };
     st.viewport.replace(Some(viewport));
-    let data = computed(move || {
+    let data: Memo<Arc<Value>> = computed(move || {
         let mut value = if crate::APP.get().is_none()
             && let Some(p) = ui.review.get()
         {
@@ -109,7 +109,7 @@ pub fn workbench(ui: Ui) -> impl IntoElement {
                 value["status_files"] = status;
             }
         }
-        value
+        Arc::new(value)
     });
     let last_diff_scroll = stored(Option::<ScrollEvent>::None);
     watch_scroll(
@@ -178,25 +178,14 @@ pub fn workbench(ui: Ui) -> impl IntoElement {
                         )
                         .child(
                             pull_refresh_scroll(
-                                scroll()
-                                    .min_w(px(0.))
-                                    .on_scroll(move |e: &ScrollEvent| {
-                                        last_diff_scroll.replace(Some(*e));
-                                        let total = data.with_untracked(|v| {
-                                            v["files"].as_array().map_or(0, Vec::len)
-                                        });
-                                        maybe_auto_expand_files(ui, total, e);
-                                    })
-                                    .child(
-                                        view()
-                                            .element_ref(&viewport.content)
-                                            .child(dynamic(move || {
-                                                code_content(ui, &data.get(), login)
-                                            }))
-                                            .child(
-                                                view().h(move || px(viewport.bottom_space.get())),
-                                            ),
-                                    ),
+                                scroll().min_w(px(0.)).child(
+                                    view()
+                                        .element_ref(&viewport.content)
+                                        .child(dynamic(move || {
+                                            code_content(ui, &data.get(), login)
+                                        }))
+                                        .child(view().h(move || px(viewport.bottom_space.get()))),
+                                ),
                                 viewport.scroll,
                                 move || st.diff_refreshing.get(),
                                 move || git_ops::pull_refresh(ui, super::PullRefreshTarget::Diff),
@@ -208,7 +197,7 @@ pub fn workbench(ui: Ui) -> impl IntoElement {
     )
 }
 
-fn files_pane(ui: Ui, data: Memo<Value>) -> impl IntoElement {
+fn files_pane(ui: Ui, data: Memo<Arc<Value>>) -> impl IntoElement {
     let st = ui.review_state;
     let files_scroll = element_ref();
     view()
@@ -255,12 +244,10 @@ fn standard_file_list(ui: Ui, data: &Value) -> AnyElement {
     let files = data["files"].as_array().cloned().unwrap_or_default();
     let total_add = data["total_additions"].as_u64().unwrap_or(0);
     let total_del = data["total_deletions"].as_u64().unwrap_or(0);
-    let selected = st.selected_file.get();
-    let pending_all = st.pending_comments.get();
     // Standard file list pane (216px)
     let file_count = files.len();
     let mut file_list = view().gap_0p5().p_1p5();
-    let all_selected = selected.is_empty();
+    let all_selected = computed(move || st.selected_file.with(String::is_empty));
     file_list = file_list.child(
         canban_ui_kit::press_target()
             .w_full()
@@ -272,18 +259,28 @@ fn standard_file_list(ui: Ui, data: &Value) -> AnyElement {
             .items_center()
             .justify_between()
             .gap_1p5()
-            .bg(if all_selected { SELECTED } else { CLEAR })
-            .hover(|s| s.bg(if all_selected { SELECTED } else { CARD_HOVER }))
+            .bg(move || if all_selected.get() { SELECTED } else { CLEAR })
+            .hover(move |s| {
+                s.bg(move || {
+                    if all_selected.get() {
+                        SELECTED
+                    } else {
+                        CARD_HOVER
+                    }
+                })
+            })
             .on_press(move |_: &()| {
                 super::show_all_files(ui);
             })
             .child(
                 label(format!("All files ({file_count})"))
                     .text_size(px(12.))
-                    .font_weight(if all_selected {
-                        FontWeight::SEMIBOLD
-                    } else {
-                        FontWeight::MEDIUM
+                    .style_with(move |s| {
+                        s.font_weight(if all_selected.get() {
+                            FontWeight::SEMIBOLD
+                        } else {
+                            FontWeight::MEDIUM
+                        })
                     }),
             )
             .child(
@@ -299,11 +296,16 @@ fn standard_file_list(ui: Ui, data: &Value) -> AnyElement {
         let f_del = f["deletions"].as_u64().unwrap_or(0);
         let f_status = f["status"].as_str().unwrap_or("modified");
         let key = super::model::file_key(f);
-        let is_sel = selected == key;
+        let sel_key = key.clone();
+        let is_sel = computed(move || st.selected_file.with(|s| s == &sel_key));
         let click_name = key.clone();
         let fold_key = key;
         let fold_path = fname.clone();
-        let pending_for_file = pending_all.iter().filter(|c| c.path == fname).count();
+        let pending_path = fname.clone();
+        let pending_for_file = computed(move || {
+            st.pending_comments
+                .with(|list| list.iter().filter(|c| c.path == pending_path).count())
+        });
         let short_name = fname.rsplit('/').next().unwrap_or(&fname).to_owned();
         let status_char = match f_status {
             "added" => ("A", SUCCESS),
@@ -312,11 +314,19 @@ fn standard_file_list(ui: Ui, data: &Value) -> AnyElement {
             _ => ("M", MUTED),
         };
 
-        let mut right_meta = view().flex_row().items_center().gap_1().flex_shrink_0();
-        if pending_for_file > 0 {
-            right_meta = right_meta.child(status(pending_for_file.to_string(), Tone::Info));
-        }
-        right_meta = right_meta
+        let right_meta = view()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .flex_shrink_0()
+            .child(dynamic(move || {
+                let count = pending_for_file.get();
+                if count > 0 {
+                    status(count.to_string(), Tone::Info).into_element()
+                } else {
+                    view().into_element()
+                }
+            }))
             .child(
                 label(format!("+{f_add}"))
                     .font_family(MONO_FONT)
@@ -348,8 +358,10 @@ fn standard_file_list(ui: Ui, data: &Value) -> AnyElement {
                         .items_center()
                         .justify_between()
                         .gap_1p5()
-                        .bg(if is_sel { SELECTED } else { CLEAR })
-                        .hover(|s| s.bg(if is_sel { SELECTED } else { CARD_HOVER }))
+                        .bg(move || if is_sel.get() { SELECTED } else { CLEAR })
+                        .hover(move |s| {
+                            s.bg(move || if is_sel.get() { SELECTED } else { CARD_HOVER })
+                        })
                         .on_press(move |_: &()| super::focus_file(ui, click_name.clone()))
                         .child(
                             view()
@@ -380,11 +392,36 @@ fn standard_file_list(ui: Ui, data: &Value) -> AnyElement {
     file_list.into_element()
 }
 
+#[derive(Clone)]
+struct FileCardItem {
+    ctx: Arc<FileRenderContext>,
+    additions: u64,
+    deletions: u64,
+    is_workdir_mode: bool,
+    is_file_staged: bool,
+    is_file_unstaged: bool,
+    fold_reason: Option<AutoFoldReason>,
+    initially_auto_folded: bool,
+}
+
+impl PartialEq for FileCardItem {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.ctx, &other.ctx)
+            && self.additions == other.additions
+            && self.deletions == other.deletions
+            && self.is_workdir_mode == other.is_workdir_mode
+            && self.is_file_staged == other.is_file_staged
+            && self.is_file_unstaged == other.is_file_unstaged
+            && self.fold_reason == other.fold_reason
+            && self.initially_auto_folded == other.initially_auto_folded
+    }
+}
+
 fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement {
     let st = ui.review_state;
     let files = data["files"].as_array().cloned().unwrap_or_default();
     let commits = data["commits"].as_array().cloned().unwrap_or_default();
-    let remote_threads = data["threads"].as_array().cloned().unwrap_or_default();
+    let remote_threads_all = data["threads"].as_array().cloned().unwrap_or_default();
     let truncated = data["truncated"].as_bool().unwrap_or(false);
     let commit_detail = data["commit_detail"]
         .as_object()
@@ -427,7 +464,13 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
                     .then(|| format!("https://github.com/{repo}/pull/{num}"))
             })
     });
-    let remote_threads = Arc::new(remote_threads);
+    let mut threads_by_path: HashMap<String, Vec<Value>> = HashMap::new();
+    for t in remote_threads_all {
+        if let Some(p) = t["path"].as_str() {
+            threads_by_path.entry(p.to_owned()).or_default().push(t);
+        }
+    }
+    let empty_threads: Arc<Vec<Value>> = Arc::new(Vec::new());
     let mode = st.mode.get();
     let compare_ref = st.compare_ref.get();
     let live_sha = data["compare_sha"].as_str().unwrap_or("").to_owned();
@@ -440,20 +483,28 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
             (!c.is_empty()).then_some(c)
         });
 
-    let status_files_for_actions: Vec<Value> = if is_workdir_mode {
+    let status_by_path: HashMap<String, (bool, bool)> = if is_workdir_mode {
         data["status_files"]
             .as_array()
             .cloned()
             .or_else(|| st.refs_data.with(|v| v["status_files"].as_array().cloned()))
             .unwrap_or_default()
+            .into_iter()
+            .filter_map(|s| {
+                let p = s["path"].as_str()?.to_owned();
+                let staged = s["staged"].as_bool().unwrap_or(false);
+                let unstaged = s["unstaged"].as_bool().unwrap_or(false)
+                    || s["untracked"].as_bool().unwrap_or(false);
+                Some((p, (staged, unstaged)))
+            })
+            .collect()
     } else {
-        Vec::new()
+        HashMap::new()
     };
 
     // Right main diff viewer
     let mut diff_column = view().gap_3().p_3();
     st.file_targets.replace(Default::default());
-    let collapsed_files = st.collapsed_files.get();
 
     if let Some(detail) = commit_detail {
         let detail = detail.clone();
@@ -527,58 +578,63 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
         }
     }));
 
-    // Collapsible commit summary bar when comparing branches/ranges (clickable to inspect single commit!)
+    // Collapsible commit summary bar when comparing branches/ranges (isolated from file list!)
     if !commits.is_empty() && commit_detail.is_none() {
-        let commit_len = commits.len();
-        let is_open = st.commits_open.get();
-        let mut commit_rows = view().gap_1().pt_1();
-        for c in commits.iter().take(30) {
-            let sha = c["sha"].as_str().unwrap_or("").to_owned();
-            let short = c["short_sha"].as_str().unwrap_or("").to_owned();
-            let subj = c["subject"].as_str().unwrap_or("").to_owned();
-            let author = c["author"].as_str().unwrap_or("").to_owned();
-            let rel = c["relative_time"].as_str().unwrap_or("").to_owned();
-            let click_sha = sha.clone();
-            commit_rows = commit_rows.child(
-                canban_ui_kit::press_target()
-                    .w_full()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .px_2()
-                    .py_1()
-                    .rounded(px(4.))
-                    .bg(INSET)
-                    .hover(|s| s.bg(CARD_HOVER))
-                    .on_press(move |_: &()| {
-                        if !click_sha.is_empty() {
-                            git_ops::select_single_commit(ui, click_sha.clone(), 0, true);
-                        }
-                    })
-                    .child(
-                        label(short)
-                            .font_family(MONO_FONT)
-                            .text_size(px(11.))
-                            .text_color(ACCENT),
-                    )
-                    .child(
-                        label(subj)
-                            .text_size(px(12.))
-                            .flex_1()
-                            .min_w(px(0.))
-                            .truncate(),
-                    )
-                    .child(muted(format!("{author} · {rel}")).text_size(px(11.)))
-                    .child(muted("Inspect →").text_size(px(10.5))),
-            );
-        }
-        diff_column = diff_column.child(collapsible_section_group(
-            "Commits in range",
-            Some(commit_len),
-            is_open,
-            move |_| st.commits_open.update(|v| *v = !*v),
-            commit_rows,
-        ));
+        let commits = Arc::new(commits);
+        diff_column = diff_column.child(dynamic(move || {
+            let commit_len = commits.len();
+            let is_open = st.commits_open.get();
+            let mut commit_rows = view().gap_1().pt_1();
+            if is_open {
+                for c in commits.iter().take(30) {
+                    let sha = c["sha"].as_str().unwrap_or("").to_owned();
+                    let short = c["short_sha"].as_str().unwrap_or("").to_owned();
+                    let subj = c["subject"].as_str().unwrap_or("").to_owned();
+                    let author = c["author"].as_str().unwrap_or("").to_owned();
+                    let rel = c["relative_time"].as_str().unwrap_or("").to_owned();
+                    let click_sha = sha.clone();
+                    commit_rows = commit_rows.child(
+                        canban_ui_kit::press_target()
+                            .w_full()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .rounded(px(4.))
+                            .bg(INSET)
+                            .hover(|s| s.bg(CARD_HOVER))
+                            .on_press(move |_: &()| {
+                                if !click_sha.is_empty() {
+                                    git_ops::select_single_commit(ui, click_sha.clone(), 0, true);
+                                }
+                            })
+                            .child(
+                                label(short)
+                                    .font_family(MONO_FONT)
+                                    .text_size(px(11.))
+                                    .text_color(ACCENT),
+                            )
+                            .child(
+                                label(subj)
+                                    .text_size(px(12.))
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .truncate(),
+                            )
+                            .child(muted(format!("{author} · {rel}")).text_size(px(11.)))
+                            .child(muted("Inspect →").text_size(px(10.5))),
+                    );
+                }
+            }
+            collapsible_section_group(
+                "Commits in range",
+                Some(commit_len),
+                is_open,
+                move |_| st.commits_open.update(|v| *v = !*v),
+                commit_rows,
+            )
+        }));
     }
 
     if files.is_empty() {
@@ -613,211 +669,61 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
     }
 
     let total_files = files.len();
-    let limit = st.visible_file_limit.get();
     let prepared_hunks = st.prepared_hunks.get();
-    let file_keys: BTreeSet<_> = files.iter().map(super::model::file_key).collect();
-    let mut expanded_file_keys = BTreeSet::new();
 
     // Seed GitHub-style default-fold protection for generated/lockfiles and extreme patches
     // even when fixture data was set directly without `apply_compare`.
-    let mut deferred_auto_fold = Vec::new();
+    let mut deferred_auto_fold = BTreeSet::new();
     st.auto_collapsed_seen.with(|seen| {
         for file in &files {
             let key = super::model::file_key(file);
             if seen.insert(key.clone()) {
                 let hunks = prepared_hunks.get(&key).map(|h| h.as_slice());
                 if auto_fold_reason(file, hunks).is_some() {
-                    deferred_auto_fold.push(key);
+                    deferred_auto_fold.insert(key);
                 }
             }
         }
     });
+    let deferred_applied = signal(deferred_auto_fold.is_empty());
     if !deferred_auto_fold.is_empty() {
-        let to_fold = deferred_auto_fold.clone();
+        let to_fold: Vec<String> = deferred_auto_fold.iter().cloned().collect();
         ui.spawn(async move {
-            st.collapsed_files.update(|set| {
-                set.extend(to_fold);
+            batch(|| {
+                st.collapsed_files.update(|set| {
+                    set.extend(to_fold);
+                });
+                deferred_applied.try_set(true);
             });
         });
     }
 
-    for file in files.into_iter().take(limit) {
+    let mut file_index_by_key: HashMap<String, usize> = HashMap::with_capacity(files.len());
+    let mut all_file_cards: Vec<FileCardItem> = Vec::with_capacity(files.len());
+    for (idx, file) in files.into_iter().enumerate() {
         let path = file["filename"].as_str().unwrap_or("").to_owned();
         let section = file["section"].as_str().unwrap_or("").to_owned();
         let key = super::model::file_key(&file);
-        let collapsed = collapsed_files.contains(&key) || deferred_auto_fold.contains(&key);
-        let target = element_ref();
-        st.file_targets.with(|targets| {
-            targets.insert(key.clone(), target);
-        });
+        file_index_by_key.insert(key.clone(), idx);
         let f_status = file["status"].as_str().unwrap_or("modified").to_owned();
         let additions = file["additions"].as_u64().unwrap_or(0);
         let deletions = file["deletions"].as_u64().unwrap_or(0);
         let patch = file["patch"].as_str().unwrap_or("").to_owned();
-        let file_btn_path = path.clone();
-        let sf_entry = status_files_for_actions
-            .iter()
-            .find(|s| s["path"].as_str() == Some(path.as_str()));
-        let is_file_staged = sf_entry
-            .and_then(|s| s["staged"].as_bool())
-            .unwrap_or(false);
-        let is_file_unstaged = sf_entry
-            .map(|s| {
-                s["unstaged"].as_bool().unwrap_or(false)
-                    || s["untracked"].as_bool().unwrap_or(false)
-            })
-            .unwrap_or(false);
-
-        let pending_path = path.clone();
-        let pending_section = section.clone();
-        let mut header = view()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .gap_2()
-            .px_3()
-            .py_1p5()
-            .bg(INSET)
-            .border_b_1()
-            .border_color(BORDER)
-            .child(fold_button(
-                ui,
-                key.clone(),
-                if section.is_empty() {
-                    path.clone()
-                } else {
-                    format!("{section} {path}")
-                },
-            ))
-            .child(if section.is_empty() {
-                view().into_element()
-            } else {
-                badge(if section == "staged" {
-                    "Staged"
-                } else {
-                    "Unstaged"
-                })
-                .into_element()
-            })
-            .child(
-                label(path.clone())
-                    .flex_1()
-                    .min_w(px(0.))
-                    .truncate()
-                    .font_family(MONO_FONT)
-                    .text_size(px(12.))
-                    .font_weight(FontWeight::SEMIBOLD),
-            )
-            .child(badge(f_status.clone()))
-            .child(dynamic(move || {
-                let count = st.pending_comments.with(|comments| {
-                    comments
-                        .iter()
-                        .filter(|item| item.path == pending_path && item.section == pending_section)
-                        .count()
-                });
-                if count == 0 {
-                    view().into_element()
-                } else {
-                    status(format!("{count} pending"), Tone::Info).into_element()
-                }
-            }))
-            .child(
-                label(format!("+{additions}"))
-                    .text_size(px(11.5))
-                    .font_family(MONO_FONT)
-                    .text_color(SUCCESS),
-            )
-            .child(
-                label(format!("−{deletions}"))
-                    .text_size(px(11.5))
-                    .font_family(MONO_FONT)
-                    .text_color(DANGER),
-            );
-
-        if is_workdir_mode {
-            if section != "staged" && (is_file_unstaged || !is_file_staged) {
-                let p_stage = path.clone();
-                header = header.child(compact_action("+ Stage", Variant::Quiet, move |_| {
-                    git_ops::run_stage(ui, vec![p_stage.clone()], false);
-                }));
-            }
-            if section != "unstaged" && is_file_staged {
-                let p_unstage = path.clone();
-                header = header.child(compact_action("− Unstage", Variant::Quiet, move |_| {
-                    git_ops::run_unstage(ui, vec![p_unstage.clone()], false);
-                }));
-            }
-            let p_discard = path.clone();
-            header = header.child(compact_action("Discard…", Variant::Quiet, move |_| {
-                git_ops::request_discard(ui, vec![p_discard.clone()]);
-            }));
-        }
-
-        let file_section = section.clone();
-        header = header.child(compact_action(
-            "+ File comment",
-            Variant::Quiet,
-            move |_| {
-                st.active_line.set(Some(LineTarget {
-                    path: file_btn_path.clone(),
-                    section: file_section.clone(),
-                    line: 1,
-                    side: "RIGHT".into(),
-                    snippet: String::new(),
-                    editing_author: None,
-                }));
-                st.line_draft.set(String::new());
-            },
-        ));
-
+        let (is_file_staged, is_file_unstaged) =
+            status_by_path.get(&path).copied().unwrap_or((false, false));
         let file_hunks = prepared_hunks
             .get(&key)
             .cloned()
             .unwrap_or_else(|| Arc::new(parse_unified_hunks(&patch)));
         let fold_reason = auto_fold_reason(&file, Some(file_hunks.as_slice()));
-
-        if collapsed {
-            let mut card = view()
-                .element_ref(&target)
-                .rounded(px(RADIUS))
-                .border_1()
-                .border_color(BORDER)
-                .bg(SURFACE)
-                .overflow_hidden()
-                .child(header);
-            if let Some(reason) = fold_reason {
-                let expand_key = key.clone();
-                let prompt = match reason {
-                    AutoFoldReason::Generated => {
-                        "Generated or lockfile diff is collapsed by default."
-                    }
-                    AutoFoldReason::LargeDiff(_) => {
-                        "Large file diff is collapsed by default for responsiveness."
-                    }
-                };
-                card = card.child(
-                    view()
-                        .px_3()
-                        .py_2()
-                        .flex_row()
-                        .flex_wrap()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .child(muted(prompt).text_size(px(11.5)))
-                        .child(compact_action("Load diff", Variant::Secondary, move |_| {
-                            super::toggle_file(ui, expand_key.clone());
-                        })),
-                );
-            }
-            diff_column = diff_column.child(card);
-            continue;
-        }
-        expanded_file_keys.insert(key.clone());
-        let file_ctx = FileRenderContext {
-            file: file.clone(),
-            key: key.clone(),
+        let initially_auto_folded = deferred_auto_fold.contains(&key);
+        let remote_threads = threads_by_path
+            .remove(&path)
+            .map(Arc::new)
+            .unwrap_or_else(|| empty_threads.clone());
+        let ctx = Arc::new(FileRenderContext {
+            file,
+            key,
             path,
             section,
             status: f_status,
@@ -829,36 +735,64 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
             cwd: compare_cwd.clone(),
             pr_target: pr_target.clone(),
             pr_base_url: pr_base_url.clone(),
-            remote_threads: remote_threads.clone(),
+            remote_threads,
             login,
-        };
+        });
+        all_file_cards.push(FileCardItem {
+            ctx,
+            additions,
+            deletions,
+            is_workdir_mode,
+            is_file_staged,
+            is_file_unstaged,
+            fold_reason,
+            initially_auto_folded,
+        });
+    }
+    let all_file_cards = Arc::new(all_file_cards);
+    let file_index_by_key = Arc::new(file_index_by_key);
+    let deferred_auto_fold = Arc::new(deferred_auto_fold);
 
-        diff_column = diff_column.child(
-            view()
-                .element_ref(&target)
-                .rounded(px(RADIUS))
-                .border_1()
-                .border_color(BORDER)
-                .bg(SURFACE)
-                .overflow_hidden()
-                .child(header)
-                .child(dynamic(move || render_file_body(ui, &file_ctx))),
-        );
+    if !all_file_cards.is_empty() {
+        let cards_for_each = all_file_cards.clone();
+        diff_column = diff_column.child(view().gap_3().child(each(
+            move || {
+                let limit = st.visible_file_limit.get();
+                cards_for_each
+                    .iter()
+                    .take(limit)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            },
+            |item| item.ctx.key.clone(),
+            move |item_sig, _| render_file_card(ui, item_sig.get_untracked(), deferred_applied),
+        )));
     }
 
     // Expanded file bodies render every comment in their section, including comments
     // outside the currently visible lines. Keep the remaining comments in the diff.
+    let index_for_fallback = file_index_by_key.clone();
+    let deferred_for_fallback = deferred_auto_fold.clone();
     diff_column = diff_column.child(dynamic(move || {
         let pending = st.pending_comments.get();
+        let active = st.active_line.get();
+        if pending.is_empty() && active.is_none() {
+            return view();
+        }
+        let limit = st.visible_file_limit.get();
+        let collapsed = st.collapsed_files.get();
+        let applied = deferred_applied.get();
+        let is_expanded = |key: &str| {
+            index_for_fallback.get(key).is_some_and(|&idx| idx < limit)
+                && !collapsed.contains(key)
+                && (applied || !deferred_for_fallback.contains(key))
+        };
         let unrendered_comments: Vec<_> = pending
             .iter()
-            .filter(|item| {
-                !expanded_file_keys.contains(&super::model::diff_key(&item.section, &item.path))
-            })
+            .filter(|item| !is_expanded(&super::model::diff_key(&item.section, &item.path)))
             .collect();
-        let unrendered_composer = st.active_line.get().filter(|target| {
-            !expanded_file_keys.contains(&super::model::diff_key(&target.section, &target.path))
-        });
+        let unrendered_composer = active
+            .filter(|target| !is_expanded(&super::model::diff_key(&target.section, &target.path)));
         if unrendered_comments.is_empty() && unrendered_composer.is_none() {
             return view();
         }
@@ -897,7 +831,7 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
             );
         for item in unrendered_comments {
             let key = super::model::diff_key(&item.section, &item.path);
-            let jump_key = file_keys.contains(&key).then_some(key);
+            let jump_key = index_for_fallback.contains_key(&key).then_some(key);
             fallback_section =
                 fallback_section.child(render_pending_comment_card_with_jump(ui, item, jump_key));
         }
@@ -907,33 +841,312 @@ fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement
         fallback_section
     }));
 
-    if total_files > limit {
-        diff_column = diff_column.child(compact_action(
-            format!("Show more files ({} remaining)", total_files - limit),
-            Variant::Secondary,
-            move |_| super::show_more_files(ui),
-        ));
-    }
+    diff_column = diff_column.child(dynamic(move || {
+        let limit = st.visible_file_limit.get();
+        if total_files > limit {
+            compact_action(
+                format!("Show more files ({} remaining)", total_files - limit),
+                Variant::Secondary,
+                move |_| super::show_more_files(ui),
+            )
+            .into_element()
+        } else {
+            view().into_element()
+        }
+    }));
 
     diff_column.into_element()
 }
 
-fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
+fn render_file_card(
+    ui: Ui,
+    item: FileCardItem,
+    deferred_applied: Signal<bool>,
+) -> impl IntoElement {
     let st = ui.review_state;
-    let mut active_line = st
-        .active_line
-        .get()
-        .filter(|target| target.path == ctx.path && target.section == ctx.section);
-    let pending_all = st.pending_comments.get();
-    let editing_remote = st.editing_remote_comment.get();
-    let deleting_remote = st.deleting_remote_comment.get();
-    let my_login = ctx.login.get();
-    let expanded_gaps = st.expanded_gaps.get();
-    let is_loading = st.file_lines_loading.with(|s| s.contains(&ctx.key));
-    let load_err = st.file_lines_errors.with(|m| m.get(&ctx.key).cloned());
-    let _rev = st.file_lines_revision.get();
+    let ctx = item.ctx;
+    let key = ctx.key.clone();
+    let path = ctx.path.clone();
+    let section = ctx.section.clone();
+    let f_status = ctx.status.clone();
+    let target = element_ref();
+    st.file_targets.with(|targets| {
+        targets.insert(key.clone(), target);
+    });
+
+    let pending_path = path.clone();
+    let pending_section = section.clone();
+    let file_pending_count = computed(move || {
+        st.pending_comments.with(|comments| {
+            comments
+                .iter()
+                .filter(|c| c.path == pending_path && c.section == pending_section)
+                .count()
+        })
+    });
+
+    let file_btn_path = path.clone();
+    let mut header = view()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .py_1p5()
+        .bg(INSET)
+        .border_b_1()
+        .border_color(BORDER)
+        .child(fold_button(
+            ui,
+            key.clone(),
+            if section.is_empty() {
+                path.clone()
+            } else {
+                format!("{section} {path}")
+            },
+        ))
+        .child(if section.is_empty() {
+            view().into_element()
+        } else {
+            badge(if section == "staged" {
+                "Staged"
+            } else {
+                "Unstaged"
+            })
+            .into_element()
+        })
+        .child(
+            label(path.clone())
+                .flex_1()
+                .min_w(px(0.))
+                .truncate()
+                .font_family(MONO_FONT)
+                .text_size(px(12.))
+                .font_weight(FontWeight::SEMIBOLD),
+        )
+        .child(badge(f_status))
+        .child(dynamic(move || {
+            let count = file_pending_count.get();
+            if count == 0 {
+                view().into_element()
+            } else {
+                status(format!("{count} pending"), Tone::Info).into_element()
+            }
+        }))
+        .child(
+            label(format!("+{}", item.additions))
+                .text_size(px(11.5))
+                .font_family(MONO_FONT)
+                .text_color(SUCCESS),
+        )
+        .child(
+            label(format!("−{}", item.deletions))
+                .text_size(px(11.5))
+                .font_family(MONO_FONT)
+                .text_color(DANGER),
+        );
+
+    if item.is_workdir_mode {
+        if section != "staged" && (item.is_file_unstaged || !item.is_file_staged) {
+            let p_stage = path.clone();
+            header = header.child(compact_action("+ Stage", Variant::Quiet, move |_| {
+                git_ops::run_stage(ui, vec![p_stage.clone()], false);
+            }));
+        }
+        if section != "unstaged" && item.is_file_staged {
+            let p_unstage = path.clone();
+            header = header.child(compact_action("− Unstage", Variant::Quiet, move |_| {
+                git_ops::run_unstage(ui, vec![p_unstage.clone()], false);
+            }));
+        }
+        let p_discard = path.clone();
+        header = header.child(compact_action("Discard…", Variant::Quiet, move |_| {
+            git_ops::request_discard(ui, vec![p_discard.clone()]);
+        }));
+    }
+
+    let file_section = section.clone();
+    header = header.child(compact_action(
+        "+ File comment",
+        Variant::Quiet,
+        move |_| {
+            st.active_line.set(Some(LineTarget {
+                path: file_btn_path.clone(),
+                section: file_section.clone(),
+                line: 1,
+                side: "RIGHT".into(),
+                snippet: String::new(),
+                editing_author: None,
+            }));
+            st.line_draft.set(String::new());
+        },
+    ));
+
+    let collapse_key = key.clone();
+    let initially_folded = item.initially_auto_folded;
+    let is_collapsed = computed(move || {
+        st.collapsed_files.with(|set| set.contains(&collapse_key))
+            || (initially_folded && !deferred_applied.get())
+    });
+
+    // Per-file scoped memos so interacting with one file never re-renders any other file.
+    let active_path = path.clone();
+    let active_section = section.clone();
+    let file_active_line = computed(move || {
+        st.active_line
+            .get()
+            .filter(|t| t.path == active_path && t.section == active_section)
+    });
+    let pend_path = path.clone();
+    let pend_section = section.clone();
+    let file_pending = computed(move || {
+        st.pending_comments.with(|all| {
+            all.iter()
+                .filter(|c| c.path == pend_path && c.section == pend_section)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+    });
+    let thread_ids: Arc<BTreeSet<u64>> = Arc::new(
+        ctx.remote_threads
+            .iter()
+            .filter_map(|t| t["id"].as_u64())
+            .filter(|&id| id > 0)
+            .collect(),
+    );
+    let edit_ids = thread_ids.clone();
+    let file_editing_remote = computed(move || {
+        st.editing_remote_comment
+            .get()
+            .filter(|id| edit_ids.contains(id))
+    });
+    let del_ids = thread_ids;
+    let file_deleting_remote = computed(move || {
+        st.deleting_remote_comment
+            .get()
+            .filter(|id| del_ids.contains(id))
+    });
+    let gaps_key = key.clone();
+    let file_expanded_gaps = computed(move || {
+        st.expanded_gaps.with(|map| {
+            map.iter()
+                .filter(|((k, _), _)| k == &gaps_key)
+                .map(|((_, idx), exp)| (*idx, *exp))
+                .collect::<BTreeMap<usize, super::model::GapExpansion>>()
+        })
+    });
+    let load_key = key.clone();
+    let file_loading = computed(move || st.file_lines_loading.with(|s| s.contains(&load_key)));
+    let err_key = key.clone();
+    let file_error = computed(move || st.file_lines_errors.with(|m| m.get(&err_key).cloned()));
     let cache_key = ctx.cache_key();
-    let cached_file = st.file_lines_cache.with(|c| c.get(&cache_key));
+    let file_cache_ready = computed(move || {
+        let _rev = st.file_lines_revision.get();
+        st.file_lines_cache
+            .with(|c| c.get(&cache_key).map(|entry| entry.total_lines))
+    });
+    let has_remote_threads = !ctx.remote_threads.is_empty();
+    let login_sig = ctx.login;
+    let file_login = computed(move || {
+        if has_remote_threads {
+            login_sig.get()
+        } else {
+            None
+        }
+    });
+
+    let fold_reason = item.fold_reason;
+    let expand_key = key;
+    view()
+        .element_ref(&target)
+        .rounded(px(RADIUS))
+        .border_1()
+        .border_color(BORDER)
+        .bg(SURFACE)
+        .overflow_hidden()
+        .child(header)
+        .child(dynamic(move || {
+            if is_collapsed.get() {
+                if let Some(reason) = fold_reason {
+                    let k = expand_key.clone();
+                    let prompt = match reason {
+                        AutoFoldReason::Generated => {
+                            "Generated or lockfile diff is collapsed by default."
+                        }
+                        AutoFoldReason::LargeDiff(_) => {
+                            "Large file diff is collapsed by default for responsiveness."
+                        }
+                    };
+                    view()
+                        .px_3()
+                        .py_2()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(muted(prompt).text_size(px(11.5)))
+                        .child(compact_action("Load diff", Variant::Secondary, move |_| {
+                            super::toggle_file(ui, k.clone());
+                        }))
+                        .into_element()
+                } else {
+                    view().into_element()
+                }
+            } else {
+                render_file_body(
+                    ui,
+                    &ctx,
+                    file_active_line.get(),
+                    &file_pending.get(),
+                    file_editing_remote.get(),
+                    file_deleting_remote.get(),
+                    file_login.get(),
+                    &file_expanded_gaps.get(),
+                    file_loading.get(),
+                    file_error.get(),
+                    file_cache_ready.get().is_some(),
+                )
+            }
+        }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_file_body(
+    ui: Ui,
+    ctx: &FileRenderContext,
+    mut active_line: Option<LineTarget>,
+    pending_all: &[PendingInlineComment],
+    editing_remote: Option<u64>,
+    deleting_remote: Option<u64>,
+    my_login: Option<String>,
+    expanded_gaps: &BTreeMap<usize, super::model::GapExpansion>,
+    is_loading: bool,
+    load_err: Option<String>,
+    has_cached_file: bool,
+) -> AnyElement {
+    let st = ui.review_state;
+    let cache_key = ctx.cache_key();
+    let cached_file = if has_cached_file {
+        st.file_lines_cache.with(|c| c.get(&cache_key))
+    } else {
+        None
+    };
+
+    let mut threads_by_line: HashMap<(u64, &str), Vec<&Value>> = HashMap::new();
+    for rt in ctx.remote_threads.iter() {
+        if let Some(ln) = rt["line"].as_u64().or_else(|| rt["original_line"].as_u64()) {
+            let side = rt["side"].as_str().unwrap_or("RIGHT");
+            threads_by_line.entry((ln, side)).or_default().push(rt);
+        }
+    }
+    let mut pending_by_line: HashMap<(u64, &str), Vec<&PendingInlineComment>> = HashMap::new();
+    for item in pending_all {
+        pending_by_line
+            .entry((item.line, item.side.as_str()))
+            .or_default()
+            .push(item);
+    }
 
     let mut rendered_comment_ids = BTreeSet::new();
 
@@ -961,10 +1174,7 @@ fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
             // Gap 0: before Hunk 0
             let first_entry_new = hunks[0].entry_new();
             let top_gap_len = first_entry_new.saturating_sub(1);
-            let top_exp = expanded_gaps
-                .get(&(ctx.key.clone(), 0))
-                .copied()
-                .unwrap_or_default();
+            let top_exp = expanded_gaps.get(&0).copied().unwrap_or_default();
             let top_shown = if cached_file.is_some() {
                 top_exp.from_bottom.min(top_gap_len)
             } else {
@@ -1004,7 +1214,8 @@ fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
                         &dl,
                         None,
                         &mut active_line,
-                        &pending_all,
+                        &threads_by_line,
+                        &pending_by_line,
                         editing_remote,
                         deleting_remote,
                         my_login.as_deref(),
@@ -1040,7 +1251,8 @@ fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
                         dl,
                         line_ref,
                         &mut active_line,
-                        &pending_all,
+                        &threads_by_line,
+                        &pending_by_line,
                         editing_remote,
                         deleting_remote,
                         my_login.as_deref(),
@@ -1056,10 +1268,7 @@ fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
                     let gap_start_new = hunk.exit_new();
                     let gap_end_new = next_hunk.entry_new();
                     let gap_len = gap_end_new.saturating_sub(gap_start_new);
-                    let gap_exp = expanded_gaps
-                        .get(&(ctx.key.clone(), i + 1))
-                        .copied()
-                        .unwrap_or_default();
+                    let gap_exp = expanded_gaps.get(&(i + 1)).copied().unwrap_or_default();
                     let shown_top = if cached_file.is_some() {
                         gap_exp.from_top.min(gap_len)
                     } else {
@@ -1085,7 +1294,8 @@ fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
                                 &dl,
                                 None,
                                 &mut active_line,
-                                &pending_all,
+                                &threads_by_line,
+                                &pending_by_line,
                                 editing_remote,
                                 deleting_remote,
                                 my_login.as_deref(),
@@ -1137,7 +1347,8 @@ fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
                                 &dl,
                                 None,
                                 &mut active_line,
-                                &pending_all,
+                                &threads_by_line,
+                                &pending_by_line,
                                 editing_remote,
                                 deleting_remote,
                                 my_login.as_deref(),
@@ -1156,10 +1367,7 @@ fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
                 let gap_idx = hunk_count;
                 let gap_start_old = last_hunk.exit_old();
                 let gap_start_new = last_hunk.exit_new();
-                let bot_exp = expanded_gaps
-                    .get(&(ctx.key.clone(), gap_idx))
-                    .copied()
-                    .unwrap_or_default();
+                let bot_exp = expanded_gaps.get(&gap_idx).copied().unwrap_or_default();
                 let (shown_top, remaining_opt) = if let Some(ref cached) = cached_file {
                     let gap_end_new = (cached.total_lines as u64 + 1).max(gap_start_new);
                     let gap_len = gap_end_new.saturating_sub(gap_start_new);
@@ -1179,7 +1387,8 @@ fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
                             &dl,
                             None,
                             &mut active_line,
-                            &pending_all,
+                            &threads_by_line,
+                            &pending_by_line,
                             editing_remote,
                             deleting_remote,
                             my_login.as_deref(),
@@ -1230,9 +1439,10 @@ fn render_file_body(ui: Ui, ctx: &FileRenderContext) -> AnyElement {
         .unwrap_or_else(|| view().into_element());
 
     let mut unanchored_for_file = view();
-    for item in pending_all.iter().filter(|c| {
-        c.path == ctx.path && c.section == ctx.section && !rendered_comment_ids.contains(&c.id)
-    }) {
+    for item in pending_all
+        .iter()
+        .filter(|c| !rendered_comment_ids.contains(&c.id))
+    {
         unanchored_for_file = unanchored_for_file.child(render_pending_comment_card(ui, item));
     }
 
@@ -1268,7 +1478,8 @@ fn render_diff_line_row(
     dl: &DiffLine,
     row_ref: Option<ElementRef>,
     active_line: &mut Option<LineTarget>,
-    pending_all: &[PendingInlineComment],
+    threads_by_line: &HashMap<(u64, &str), Vec<&Value>>,
+    pending_by_line: &HashMap<(u64, &str), Vec<&PendingInlineComment>>,
     editing_remote: Option<u64>,
     deleting_remote: Option<u64>,
     my_login: Option<&str>,
@@ -1353,152 +1564,147 @@ fn render_diff_line_row(
     );
 
     // Render existing remote GitHub PR review comments on this exact line
-    for rt in ctx.remote_threads.iter().filter(|t| {
-        t["path"].as_str() == Some(ctx.path.as_str())
-            && t["line"].as_u64().or_else(|| t["original_line"].as_u64()) == Some(comment_line)
-            && t["side"].as_str().unwrap_or("RIGHT") == comment_side
-    }) {
-        let author = rt["user"]["login"]
-            .as_str()
-            .unwrap_or("reviewer")
-            .to_owned();
-        let cid = rt["id"].as_u64().unwrap_or(0);
-        let web_url = crate::github::comment_web_url(rt, ctx.pr_base_url.as_deref(), "threads");
-        let is_own = cid > 0
-            && ctx.pr_target.is_some()
-            && my_login.is_some_and(|me| author.eq_ignore_ascii_case(me));
-        let is_editing = cid > 0 && editing_remote == Some(cid);
-        let is_deleting = cid > 0 && deleting_remote == Some(cid);
-        let was_edited = match (rt["created_at"].as_str(), rt["updated_at"].as_str()) {
-            (Some(c), Some(u)) if !c.is_empty() && !u.is_empty() => c != u,
-            _ => false,
-        };
-        let body_txt = rt["body"].as_str().unwrap_or("").to_owned();
-        let mut header_row = view()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .gap_2()
-            .child(icon(Icon::GitHub).w(px(12.)).h(px(12.)))
-            .child(
-                label(format!("@{author}"))
-                    .text_size(px(11.5))
-                    .font_weight(FontWeight::SEMIBOLD),
-            )
-            .child(badge("GitHub PR comment"));
-        if was_edited {
-            header_row = header_row.child(muted("· edited").text_size(px(11.)));
-        }
-        let mut trailing = view().flex_row().items_center().gap_1();
-        let mut has_trailing = false;
-        if let Some(jump_url) = web_url {
-            has_trailing = true;
-            trailing = trailing.child(
-                view()
-                    .tooltip(hint_tooltip("Open comment in GitHub"))
-                    .child(
-                        compact_action("GitHub ↗", Variant::Quiet, move |_| {
-                            crate::github::open_url(ui, jump_url.clone())
-                        })
-                        .accessibility_label(|| Some("Open comment in GitHub".into())),
-                    ),
-            );
-        }
-        if is_own && !is_editing && !is_deleting {
-            has_trailing = true;
-            let initial_body = body_txt.clone();
-            let anchor = element_ref();
-            trailing = trailing.child(
-                canban_ui_kit::press_target()
-                    .element_ref(&anchor)
-                    .w(px(26.))
-                    .h(px(26.))
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(5.))
-                    .bg(CLEAR)
-                    .hover(|s| s.bg(INSET))
-                    .focus(|s| s.border_1().border_color(ACCENT))
-                    .accessibility_label(|| Some("PR comment actions".into()))
-                    .child(icon_tinted(Icon::More, MUTED).w(px(15.)).h(px(15.)))
-                    .on_press(move |_: &()| {
-                        use nsh_core::element::desktop::{MenuItem, popup_menu_at};
-                        let body_val = initial_body.clone();
-                        ui.spawn(async move {
-                            let Some(bounds) = anchor.measure().await else {
-                                return;
-                            };
-                            popup_menu_at(
-                                vec![
-                                    MenuItem::new("Edit comment").on_select(move || {
-                                        let b = body_val.clone();
-                                        batch(move || {
-                                            st.remote_edit_error.set(String::new());
-                                            st.remote_delete_error.set(String::new());
-                                            st.deleting_remote_comment.set(None);
-                                            st.remote_edit_draft.set(b);
-                                            st.editing_remote_comment.set(Some(cid));
-                                        });
-                                    }),
-                                    MenuItem::new("Delete comment…").on_select(move || {
-                                        batch(move || {
-                                            st.remote_delete_error.set(String::new());
-                                            st.remote_edit_error.set(String::new());
-                                            st.editing_remote_comment.set(None);
-                                            st.deleting_remote_comment.set(Some(cid));
-                                        });
-                                    }),
-                                ],
-                                point(bounds.page.x, bounds.page.y + bounds.frame.size.height),
-                            )
-                            .await;
-                        });
-                    }),
-            );
-        }
-        if has_trailing {
-            header_row = header_row.child(view().flex_1()).child(trailing);
-        }
-        let mut comment_card = view()
-            .mx_4()
-            .my_1()
-            .p_2p5()
-            .rounded(px(RADIUS))
-            .border_1()
-            .border_color(if is_deleting {
-                DANGER
-            } else if is_editing {
-                ACCENT
+    if let Some(line_threads) = threads_by_line.get(&(comment_line, comment_side)) {
+        for &rt in line_threads {
+            let author = rt["user"]["login"]
+                .as_str()
+                .unwrap_or("reviewer")
+                .to_owned();
+            let cid = rt["id"].as_u64().unwrap_or(0);
+            let web_url = crate::github::comment_web_url(rt, ctx.pr_base_url.as_deref(), "threads");
+            let is_own = cid > 0
+                && ctx.pr_target.is_some()
+                && my_login.is_some_and(|me| author.eq_ignore_ascii_case(me));
+            let is_editing = cid > 0 && editing_remote == Some(cid);
+            let is_deleting = cid > 0 && deleting_remote == Some(cid);
+            let was_edited = match (rt["created_at"].as_str(), rt["updated_at"].as_str()) {
+                (Some(c), Some(u)) if !c.is_empty() && !u.is_empty() => c != u,
+                _ => false,
+            };
+            let body_txt = rt["body"].as_str().unwrap_or("").to_owned();
+            let mut header_row = view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child(icon(Icon::GitHub).w(px(12.)).h(px(12.)))
+                .child(
+                    label(format!("@{author}"))
+                        .text_size(px(11.5))
+                        .font_weight(FontWeight::SEMIBOLD),
+                )
+                .child(badge("GitHub PR comment"));
+            if was_edited {
+                header_row = header_row.child(muted("· edited").text_size(px(11.)));
+            }
+            let mut trailing = view().flex_row().items_center().gap_1();
+            let mut has_trailing = false;
+            if let Some(jump_url) = web_url {
+                has_trailing = true;
+                trailing = trailing.child(
+                    view()
+                        .tooltip(hint_tooltip("Open comment in GitHub"))
+                        .child(
+                            compact_action("GitHub ↗", Variant::Quiet, move |_| {
+                                crate::github::open_url(ui, jump_url.clone())
+                            })
+                            .accessibility_label(|| Some("Open comment in GitHub".into())),
+                        ),
+                );
+            }
+            if is_own && !is_editing && !is_deleting {
+                has_trailing = true;
+                let initial_body = body_txt.clone();
+                let anchor = element_ref();
+                trailing = trailing.child(
+                    canban_ui_kit::press_target()
+                        .element_ref(&anchor)
+                        .w(px(26.))
+                        .h(px(26.))
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(5.))
+                        .bg(CLEAR)
+                        .hover(|s| s.bg(INSET))
+                        .focus(|s| s.border_1().border_color(ACCENT))
+                        .accessibility_label(|| Some("PR comment actions".into()))
+                        .child(icon_tinted(Icon::More, MUTED).w(px(15.)).h(px(15.)))
+                        .on_press(move |_: &()| {
+                            use nsh_core::element::desktop::{MenuItem, popup_menu_at};
+                            let body_val = initial_body.clone();
+                            ui.spawn(async move {
+                                let Some(bounds) = anchor.measure().await else {
+                                    return;
+                                };
+                                popup_menu_at(
+                                    vec![
+                                        MenuItem::new("Edit comment").on_select(move || {
+                                            let b = body_val.clone();
+                                            batch(move || {
+                                                st.remote_edit_error.set(String::new());
+                                                st.remote_delete_error.set(String::new());
+                                                st.deleting_remote_comment.set(None);
+                                                st.remote_edit_draft.set(b);
+                                                st.editing_remote_comment.set(Some(cid));
+                                            });
+                                        }),
+                                        MenuItem::new("Delete comment…").on_select(move || {
+                                            batch(move || {
+                                                st.remote_delete_error.set(String::new());
+                                                st.remote_edit_error.set(String::new());
+                                                st.editing_remote_comment.set(None);
+                                                st.deleting_remote_comment.set(Some(cid));
+                                            });
+                                        }),
+                                    ],
+                                    point(bounds.page.x, bounds.page.y + bounds.frame.size.height),
+                                )
+                                .await;
+                            });
+                        }),
+                );
+            }
+            if has_trailing {
+                header_row = header_row.child(view().flex_1()).child(trailing);
+            }
+            let mut comment_card = view()
+                .mx_4()
+                .my_1()
+                .p_2p5()
+                .rounded(px(RADIUS))
+                .border_1()
+                .border_color(if is_deleting {
+                    DANGER
+                } else if is_editing {
+                    ACCENT
+                } else {
+                    BORDER
+                })
+                .bg(SURFACE)
+                .gap_1p5()
+                .child(header_row);
+            if is_deleting {
+                comment_card = comment_card.child(remote_pr_comment_delete_confirm(
+                    ui,
+                    cid,
+                    ctx.pr_target.clone(),
+                ));
+            }
+            let content = if is_editing {
+                remote_pr_comment_editor(ui, cid, ctx.pr_target.clone()).into_element()
             } else {
-                BORDER
-            })
-            .bg(SURFACE)
-            .gap_1p5()
-            .child(header_row);
-        if is_deleting {
-            comment_card = comment_card.child(remote_pr_comment_delete_confirm(
-                ui,
-                cid,
-                ctx.pr_target.clone(),
-            ));
+                canban_ui_kit::markdown::reader(move || body_txt.clone()).into_element()
+            };
+            rows = rows.child(comment_card.child(content));
         }
-        let content = if is_editing {
-            remote_pr_comment_editor(ui, cid, ctx.pr_target.clone()).into_element()
-        } else {
-            canban_ui_kit::markdown::reader(move || body_txt.clone()).into_element()
-        };
-        rows = rows.child(comment_card.child(content));
     }
 
     // Render any pending inline comments saved for this file + line + side
-    for item in pending_all.iter().filter(|c| {
-        c.path == ctx.path
-            && c.section == ctx.section
-            && c.line == comment_line
-            && c.side == comment_side
-    }) {
-        if rendered_comment_ids.insert(item.id.clone()) {
-            rows = rows.child(render_pending_comment_card(ui, item));
+    if let Some(line_pending) = pending_by_line.get(&(comment_line, comment_side)) {
+        for &item in line_pending {
+            if rendered_comment_ids.insert(item.id.clone()) {
+                rows = rows.child(render_pending_comment_card(ui, item));
+            }
         }
     }
 
@@ -1953,20 +2159,25 @@ fn remote_pr_comment_delete_confirm(ui: Ui, comment_id: u64, pr_target: Option<V
 /// Both file navigation and Changes dispatch this exact per-patch fold action.
 pub fn fold_button(ui: Ui, key: String, title: String) -> impl IntoElement {
     let st = ui.review_state;
-    let folded = st.collapsed_files.with(|files| files.contains(&key));
-    let label = format!(
-        "{} diff for {title}",
-        if folded { "Expand" } else { "Collapse" }
-    );
-    chrome_button(
-        if folded {
-            Icon::Forward
-        } else {
-            Icon::ChevronDown
-        },
-        label,
-        move |_| super::toggle_file(ui, key.clone()),
-    )
+    let check_key = key.clone();
+    let folded = computed(move || st.collapsed_files.with(|files| files.contains(&check_key)));
+    dynamic(move || {
+        let is_folded = folded.get();
+        let label = format!(
+            "{} diff for {title}",
+            if is_folded { "Expand" } else { "Collapse" }
+        );
+        let toggle_key = key.clone();
+        chrome_button(
+            if is_folded {
+                Icon::Forward
+            } else {
+                Icon::ChevronDown
+            },
+            label,
+            move |_| super::toggle_file(ui, toggle_key.clone()),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -2674,6 +2885,90 @@ mod tests {
         assert!(
             tree.texts.values().any(|t| t == "pull:false:false:false"),
             "must bounce back once compare_loading finishes after hold"
+        );
+    }
+
+    #[test]
+    fn expanding_files_folding_and_commenting_do_not_remount_unaffected_files() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let mut core = Core::new(ApproxTextEngine, size(px(1200.), px(700.)));
+        core.set_content_culling(false);
+        core.set_components(nsh_base::registry());
+        core.set_task_runtime(runtime.handle().clone());
+        core.mount_root(&nsh_core::element::Root::of::<
+            DiffAutoExpandAndProtectionProbe,
+        >());
+        let mut tree = ProbeTree::new();
+        pump(&mut core, &mut tree);
+
+        let file0_line1_before = tree.labels["Add review comment on src/big_new_module.rs line 1"];
+        let file2_line1_before = tree.labels["Add review comment on src/file_2.rs line 1"];
+        let file3_line1_before = tree.labels["Add review comment on src/file_3.rs line 1"];
+
+        // 1. Auto-expanding from 4 -> 6 files on scroll must keep existing files mounted.
+        let diff_code_node = tree.labels["Git diff code"];
+        let diff_scroll_id = *tree
+            .scroll_nodes
+            .iter()
+            .find(|id| tree.parents.get(id) == Some(&diff_code_node))
+            .expect("diff scroll view mounted");
+        for _ in 0..3 {
+            let max_y = tree.scroll_content_heights[&diff_scroll_id];
+            core.set_scroll_offset(diff_scroll_id, point(px(0.), px(max_y)), u32::MAX);
+            pump(&mut core, &mut tree);
+        }
+        assert!(
+            tree.labels
+                .contains_key("Add review comment on src/file_5.rs line 1")
+        );
+        assert_eq!(
+            tree.labels
+                .get("Add review comment on src/big_new_module.rs line 1"),
+            Some(&file0_line1_before),
+            "scrolling to load more files must not remount file 0"
+        );
+        assert_eq!(
+            tree.labels
+                .get("Add review comment on src/file_2.rs line 1"),
+            Some(&file2_line1_before),
+            "scrolling to load more files must not remount file 2"
+        );
+
+        // 2. Folding file 3 must not remount file 0 or file 2.
+        let fold_file3 = tree.labels["Collapse diff for src/file_3.rs"];
+        assert!(core.component_event(fold_file3, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert!(
+            !tree
+                .labels
+                .contains_key("Add review comment on src/file_3.rs line 1")
+        );
+        assert_eq!(
+            tree.labels
+                .get("Add review comment on src/big_new_module.rs line 1"),
+            Some(&file0_line1_before),
+            "folding file 3 must not remount file 0"
+        );
+        assert_eq!(
+            tree.labels
+                .get("Add review comment on src/file_2.rs line 1"),
+            Some(&file2_line1_before),
+            "folding file 3 must not remount file 2"
+        );
+        let _ = file3_line1_before;
+
+        // 3. Opening an inline comment composer on file 2 must not remount file 0.
+        assert!(core.component_event(file2_line1_before, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert_eq!(
+            tree.labels
+                .get("Add review comment on src/big_new_module.rs line 1"),
+            Some(&file0_line1_before),
+            "opening an inline comment in file 2 must not remount file 0"
         );
     }
 }

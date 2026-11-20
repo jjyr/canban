@@ -1003,8 +1003,6 @@ pub fn render_commit_detail_card(ui: Ui, detail: &Value) -> AnyElement {
 /// and per-file `+` / `−` / context menu actions.
 pub fn render_working_tree_list(ui: Ui, data: &Value) -> AnyElement {
     let st = ui.review_state;
-    let selected = st.selected_file.get();
-    let pending_all = st.pending_comments.get();
     let files = data["files"].as_array().cloned().unwrap_or_default();
     let total_add = data["total_additions"].as_u64().unwrap_or(0);
     let total_del = data["total_deletions"].as_u64().unwrap_or(0);
@@ -1029,7 +1027,7 @@ pub fn render_working_tree_list(ui: Ui, data: &Value) -> AnyElement {
     let mut list = view().gap_2().p_2();
 
     // All files filter pill
-    let all_selected = selected.is_empty();
+    let all_selected = computed(move || st.selected_file.with(String::is_empty));
     list = list.child(
         canban_ui_kit::press_target()
             .w_full()
@@ -1041,8 +1039,16 @@ pub fn render_working_tree_list(ui: Ui, data: &Value) -> AnyElement {
             .items_center()
             .justify_between()
             .gap_1p5()
-            .bg(if all_selected { SELECTED } else { CLEAR })
-            .hover(|s| s.bg(if all_selected { SELECTED } else { CARD_HOVER }))
+            .bg(move || if all_selected.get() { SELECTED } else { CLEAR })
+            .hover(move |s| {
+                s.bg(move || {
+                    if all_selected.get() {
+                        SELECTED
+                    } else {
+                        CARD_HOVER
+                    }
+                })
+            })
             .on_press(move |_: &()| {
                 if matches!(
                     st.compare_ref.get_untracked().as_str(),
@@ -1056,10 +1062,12 @@ pub fn render_working_tree_list(ui: Ui, data: &Value) -> AnyElement {
             .child(
                 label(format!("All changes ({})", files.len()))
                     .text_size(px(12.))
-                    .font_weight(if all_selected {
-                        FontWeight::SEMIBOLD
-                    } else {
-                        FontWeight::MEDIUM
+                    .style_with(move |s| {
+                        s.font_weight(if all_selected.get() {
+                            FontWeight::SEMIBOLD
+                        } else {
+                            FontWeight::MEDIUM
+                        })
                     }),
             )
             .child(
@@ -1104,15 +1112,7 @@ pub fn render_working_tree_list(ui: Ui, data: &Value) -> AnyElement {
         for sf in staged_items {
             let fname = sf["path"].as_str().unwrap_or("").to_owned();
             let code = sf["index_code"].as_str().unwrap_or("M").to_owned();
-            let pending_cnt = pending_all.iter().filter(|c| c.path == fname).count();
-            staged_grp = staged_grp.child(working_file_row(
-                ui,
-                fname,
-                code,
-                true,
-                selected.clone(),
-                pending_cnt,
-            ));
+            staged_grp = staged_grp.child(working_file_row(ui, fname, code, true));
         }
     }
     list = list.child(staged_grp);
@@ -1156,37 +1156,28 @@ pub fn render_working_tree_list(ui: Ui, data: &Value) -> AnyElement {
             } else {
                 sf["worktree_code"].as_str().unwrap_or("M").to_owned()
             };
-            let pending_cnt = pending_all.iter().filter(|c| c.path == fname).count();
-            unstaged_grp = unstaged_grp.child(working_file_row(
-                ui,
-                fname,
-                code,
-                false,
-                selected.clone(),
-                pending_cnt,
-            ));
+            unstaged_grp = unstaged_grp.child(working_file_row(ui, fname, code, false));
         }
     }
     list = list.child(unstaged_grp);
     list.into_element()
 }
 
-fn working_file_row(
-    ui: Ui,
-    fname: String,
-    code: String,
-    is_staged_row: bool,
-    selected: String,
-    pending_cnt: usize,
-) -> impl IntoElement {
+fn working_file_row(ui: Ui, fname: String, code: String, is_staged_row: bool) -> impl IntoElement {
     let st = ui.review_state;
-    let section = if st.compare_ref.get() == "UNCOMMITTED" {
+    let section = if st.compare_ref.get_untracked() == "UNCOMMITTED" {
         if is_staged_row { "staged" } else { "unstaged" }
     } else {
         ""
     };
     let key = super::model::diff_key(section, &fname);
-    let is_sel = selected == key;
+    let sel_key = key.clone();
+    let is_sel = computed(move || st.selected_file.with(|s| s == &sel_key));
+    let pending_path = fname.clone();
+    let pending_cnt = computed(move || {
+        st.pending_comments
+            .with(|list| list.iter().filter(|c| c.path == pending_path).count())
+    });
     let short_name = fname.rsplit('/').next().unwrap_or(&fname).to_owned();
     let badge_col = match code.as_str() {
         "A" | "U" => SUCCESS,
@@ -1213,8 +1204,8 @@ fn working_file_row(
         .gap_0p5()
         .px_1()
         .rounded(px(5.))
-        .bg(if is_sel { SELECTED } else { CLEAR })
-        .hover(|s| s.bg(if is_sel { SELECTED } else { CARD_HOVER }))
+        .bg(move || if is_sel.get() { SELECTED } else { CLEAR })
+        .hover(move |s| s.bg(move || if is_sel.get() { SELECTED } else { CARD_HOVER }))
         .on_context_menu(move |ev: &nsh_core::ContextMenuEvent| {
             let p = menu_path.clone();
             let pos = ev.page_position;
@@ -1283,11 +1274,14 @@ fn working_file_row(
                         .flex_1()
                         .min_w(px(0.)),
                 )
-                .child(if pending_cnt > 0 {
-                    status(pending_cnt.to_string(), Tone::Info).into_element()
-                } else {
-                    view().into_element()
-                }),
+                .child(dynamic(move || {
+                    let count = pending_cnt.get();
+                    if count > 0 {
+                        status(count.to_string(), Tone::Info).into_element()
+                    } else {
+                        view().into_element()
+                    }
+                })),
         )
         .child(
             compact_action(
@@ -1305,7 +1299,7 @@ fn working_file_row(
         )
 }
 
-pub fn render_commit_composer(ui: Ui, data: Memo<Value>) -> impl IntoElement {
+pub fn render_commit_composer(ui: Ui, data: Memo<std::sync::Arc<Value>>) -> impl IntoElement {
     let st = ui.review_state;
     let desc_focused = signal(false);
 
