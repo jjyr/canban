@@ -10,7 +10,7 @@ concurrency:
 jobs:
   macos:
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 60
     outputs:
       version: ${{ steps.identity.outputs.version }}
     env:
@@ -76,7 +76,7 @@ jobs:
   linux:
     needs: macos
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: true
       matrix:

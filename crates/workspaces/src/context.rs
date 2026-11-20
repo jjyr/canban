@@ -175,7 +175,7 @@ impl ContextCache {
             .paths
             .values()
             .flat_map(|v| {
-                [
+                let mut paths: Vec<PathBuf> = [
                     v["git_dir"].as_str(),
                     v["repo"].as_str(),
                     v["path"].as_str(),
@@ -183,6 +183,16 @@ impl ContextCache {
                 .into_iter()
                 .flatten()
                 .map(PathBuf::from)
+                .collect();
+                if v["git_dir"].is_null()
+                    && let Some(p) = v["path"].as_str()
+                {
+                    let dot_git = Path::new(p).join(".git");
+                    if dot_git.is_dir() {
+                        paths.push(dot_git);
+                    }
+                }
+                paths
             })
             .collect();
         out.sort();
@@ -513,8 +523,8 @@ print(json.dumps({'paths':rows,'git_dir':gd or None,'status':st}))"#,
             } else {
                 for p in &missing {
                     let row = if let Ok(path) = self.host.canonical(Path::new(p)) {
-                        let dirs = self
-                            .checked(
+                        let probe_dirs = || {
+                            self.checked(
                                 Path::new(p),
                                 &[
                                     "--no-optional-locks",
@@ -525,7 +535,20 @@ print(json.dumps({'paths':rows,'git_dir':gd or None,'status':st}))"#,
                                     "--show-toplevel",
                                 ],
                             )
-                            .ok();
+                            .ok()
+                        };
+                        let mut dirs = probe_dirs();
+                        // If `.git` was just created by an in-flight `git init`, `rev-parse`
+                        // can briefly fail before `HEAD`/`objects`/`refs` are written.
+                        if dirs.is_none() && path.join(".git").is_dir() {
+                            for _ in 0..5 {
+                                std::thread::sleep(std::time::Duration::from_millis(25));
+                                dirs = probe_dirs();
+                                if dirs.is_some() {
+                                    break;
+                                }
+                            }
+                        }
                         let parts = dirs
                             .as_deref()
                             .map(|d| d.lines().collect::<Vec<_>>())

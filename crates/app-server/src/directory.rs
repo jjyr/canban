@@ -30,6 +30,7 @@ pub(super) struct ContextQueue {
     mappings: BTreeMap<String, (String, Arc<Snapshot>)>,
     watcher: Option<RecommendedWatcher>,
     watched: BTreeSet<PathBuf>,
+    pending_watches: BTreeSet<PathBuf>,
     last_status_invalidation: Option<Instant>,
 }
 impl ContextQueue {
@@ -60,6 +61,7 @@ impl ContextQueue {
         self.results.clear();
         self.caches.clear();
         self.mappings.clear();
+        self.pending_watches.clear();
     }
 }
 fn signature(s: &Snapshot, machine: &str) -> String {
@@ -244,11 +246,17 @@ impl AppServer {
     pub(super) fn start_context_workers(self: &Arc<Self>) {
         let weak = Arc::downgrade(self);
         let watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-            let (head_or_git, structural, status_meta) = match result {
+            let (head_or_git, structural, status_meta, dot_git_dirs) = match result {
                 Ok(e) if !e.kind.is_access() => {
                     let has_name = |pred: fn(&std::ffi::OsStr) -> bool| {
                         e.paths.iter().any(|p| p.file_name().is_some_and(pred))
                     };
+                    let dot_git_dirs = e
+                        .paths
+                        .iter()
+                        .filter(|p| p.file_name().is_some_and(|n| n == ".git") && p.is_dir())
+                        .cloned()
+                        .collect();
                     (
                         has_name(|n| n == "HEAD" || n == "HEAD.lock" || n == ".git"),
                         has_name(|n| n == ".git"),
@@ -258,10 +266,11 @@ impl AppServer {
                                 || n == "ORIG_HEAD"
                                 || n == "packed-refs"
                         }),
+                        dot_git_dirs,
                     )
                 }
-                Ok(_) => (false, false, false),
-                Err(_) => (true, true, false),
+                Ok(_) => (false, false, false, Vec::new()),
+                Err(_) => (true, true, false, Vec::new()),
             };
             if !head_or_git && !status_meta {
                 return;
@@ -276,6 +285,7 @@ impl AppServer {
                     }
                     q.last_status_invalidation = Some(Instant::now());
                 }
+                q.pending_watches.extend(dot_git_dirs);
                 if structural {
                     q.caches.remove("local");
                 } else if let Some(cache) = q.caches.get("local") {
@@ -301,6 +311,15 @@ impl AppServer {
                     }
                     let next = {
                         let mut q = server.contexts.lock().unwrap();
+                        let pending_watches = std::mem::take(&mut q.pending_watches);
+                        for path in pending_watches {
+                            if q.watched.insert(path.clone())
+                                && let Some(w) = &mut q.watcher
+                                && let Err(e) = w.watch(&path, RecursiveMode::NonRecursive)
+                            {
+                                eprintln!("Canban context watcher {}: {e}", path.display());
+                            }
+                        }
                         let key = q
                             .pending
                             .keys()
