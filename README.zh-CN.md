@@ -14,15 +14,21 @@
 </p>
 
 <p align="center">
-  <strong>保留你的原生 Agent CLI，自动化你的工作流。</strong><br/>
-  用灵活的看板沉淀任务上下文，用通知中心掌握等待中的 Agent，用类似 GitHub Actions 的工作流自动化执行任务。
+  <strong>同时并行 10+ 个 Coding Agent，告别在十几个终端标签页里迷失。</strong><br/>
+  基于原生 <strong>Rust + <code>libghostty</code></strong> 构建的 <strong>Claude Code、Codex、Cursor CLI</strong> 工作台 —— 内置全局注意力收件箱（<code>⌘I</code>）、单卡片隔离 Git Worktree 行级代码审查，以及类 GitHub Actions 的本地自动化流水线。
 </p>
 
-<h3 align="center"><a href="#安装"><ins>安装 Canban</ins></a> · <a href="https://canban.dev/zh/"><ins>canban.dev</ins></a></h3>
+<h3 align="center"><a href="#安装"><ins>快速安装</ins></a> · <a href="https://canban.dev/zh/"><ins>canban.dev</ins></a> · <a href="https://canban.dev/zh/docs/"><ins>文档</ins></a></h3>
 
 <p align="center">
   <img src="docs/assets/canban-hero.gif" alt="Canban 看板、展开卡片与实时原生 Agent CLI 终端演示" width="960" />
 </p>
+
+## 为什么选择 Canban？
+
+- **不再盲目翻找 10 个 tmux 窗口**：全局注意力收件箱（`⌘I`）跨所有项目与远程主机，第一时间捕获哪个 Agent 正在等待 `[Y/n]` 权限确认、追问输入或代码审查，一键直达现场。
+- **零阉割的原生终端体验**：不做简陋的聊天框套壳。基于原生 Rust UI 与 `libghostty-vt` 驱动持久化防中断 PTY，直接运行你的 `claude`、`codex`、`agy` 或 `cursor-agent`，即使关闭或重启应用，终端会话依然存活。
+- **不切编辑器完成 Diff 审查与合并**：每张卡片自动分配独立 Git Worktree，内置行级 Diff 审查（直接在代码变更行写评论并 `@Agent` 返工），配合串行合并队列实现 `plan → develop → merge` 闭环。
 
 ## 核心功能
 
@@ -30,23 +36,21 @@
 <tr>
 <td width="50%" valign="middle">
 
-### 可编程工作流（Vibe Mode）
+### 全局注意力收件箱（`⌘I`）
 
-用类似 GitHub Actions 的 YAML 编排 Shell 脚本与 `agent` + prompt 步骤。将任意卡片转化为 `plan → develop → merge` 自动化流水线，内置独立 Git Worktree、定时任务（Cron）与串行合并队列。
-
-[文档 →](https://canban.dev/zh/docs/workflows/)
+不再漏掉任何一个卡住等待的 Agent。跨项目、跨 Worktree 与跨主机的全局通知中心，一眼看清哪个 Agent 正在等待输入、工具权限审批或代码审查，一次按键直达对应卡片与实时终端。
 
 </td>
 <td width="50%">
-  <img src="website/screenshots/workflow-studio.png" alt="Canban 可编程工作流：Visual Studio 与 Vibe Mode 流水线" width="100%" />
+  <img src="docs/assets/notification-center.jpg" alt="Canban 通知中心：集中查看等待中的 Agent 并一键跳转到卡片与终端" width="100%" />
 </td>
 </tr>
 <tr>
 <td width="50%" valign="middle">
 
-### 原生 Agent CLI 与终端
+### 原生 Agent CLI 与持久化终端
 
-不做聊天套壳。在基于 Rust、NSH 与 `libghostty-vt` 构建的持久化防中断 PTY 中，直接运行 Claude Code、Codex、Antigravity（`agy`）、Cursor CLI、Pi 或自定义 CLI，完整保留原生 TUI、权限、MCP、Skills 与会话恢复。
+拒绝聊天框套壳。在基于 Rust、NSH 与 `libghostty-vt` 构建的持久化防中断 PTY 中，直接运行 Claude Code、Codex、Antigravity（`agy`）、Cursor CLI、Pi 或自定义 CLI，完整保留原生 TUI、权限交互、MCP、Skills 与会话恢复能力。
 
 [文档 →](https://canban.dev/zh/docs/agents/)
 
@@ -58,23 +62,9 @@
 <tr>
 <td width="50%" valign="middle">
 
-### 多机器协作
+### 独立 Worktree 与行内 Diff 审查
 
-通过 SSH 或 Tailscale 将本地桌面端连接到无头 Linux `canband` 主机，与本地项目一起无缝管理远程看板、工作流和实时终端。
-
-[文档 →](https://canban.dev/zh/docs/remote-hosts/)
-
-</td>
-<td width="50%">
-  <img src="docs/assets/multi-machine.png" alt="Canban Connected Hosts 弹窗：展示本地 macOS Socket 与 Tailscale TCP 远程 Linux 主机" width="100%" />
-</td>
-</tr>
-<tr>
-<td width="50%" valign="middle">
-
-### 内置 Git 与 Diff 审查
-
-无需离开 Canban 即可查看提交历史与独立 Worktree 的代码改动。支持在变更行直接添加行内评论，并将评审意见一键发送给 `@Agent`。
+无需切出应用去开外部编辑器，直接查看提交历史与单卡片隔离 Worktree 的代码改动。支持在变更代码行上直接添加行内评审意见，并一键发送给 `@Agent` 继续修改。
 
 [文档 →](https://canban.dev/zh/docs/)
 
@@ -86,31 +76,52 @@
 <tr>
 <td width="50%" valign="middle">
 
-### 通知中心
+### 可编程工作流（本地 Agent 的 GitHub Actions）
 
-跨项目、跨 Worktree 与跨主机的全局注意力收件箱（`⌘I`）。一眼看清哪个 Agent 正在等待输入、审批或代码审查，点击直达对应卡片与实时终端。
+用类似 GitHub Actions 的 YAML 编排 Shell 脚本与 `agent` + prompt 步骤。将任意卡片转化为无人值守的 `plan → develop → merge` 自动化流水线，内置定时触发（Cron）与串行合并队列。
+
+[文档 →](https://canban.dev/zh/docs/workflows/)
 
 </td>
 <td width="50%">
-  <img src="docs/assets/notification-center.jpg" alt="Canban 通知中心：集中查看等待中的 Agent 并一键跳转到卡片与终端" width="100%" />
+  <img src="website/screenshots/workflow-studio.png" alt="Canban 可编程工作流：Visual Studio 与 Vibe Mode 流水线" width="100%" />
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### SSH / Tailscale 多机器协同
+
+把高负载编译和 Agent 任务交给远程 Linux 主机。通过 SSH 或 Tailscale 将本地桌面端连接到无头 `canband` 主机，像操作本地项目一样丝滑管理远程看板、工作流与 120Hz 实时终端。
+
+[文档 →](https://canban.dev/zh/docs/remote-hosts/)
+
+</td>
+<td width="50%">
+  <img src="docs/assets/multi-machine.png" alt="Canban Connected Hosts 弹窗：展示本地 macOS Socket 与 Tailscale TCP 远程 Linux 主机" width="100%" />
 </td>
 </tr>
 </table>
 
 ## 安装
 
-**前置要求**：
-- **macOS**：macOS 13.0+（Apple Silicon / `arm64`）
-- **Linux 桌面版**：`x86_64` 或 `aarch64`（`arm64`），已安装 GTK4 与 GStreamer 运行库（`libgtk-4-1` / `gtk4` + `gstreamer`）
-- **通用**：`git`、至少一个原生 Agent CLI（如 `claude`、`codex`、`agy`、`cursor-agent` 等），以及 **Herdr Core（`hc`）**（首次启动时若缺失会引导一键安装）。
+在 **macOS 13+**（Apple Silicon）或 **Linux 桌面版**（`x86_64` / `arm64`）上一键安装：
 
 ```bash
 curl -fsSL https://canban.dev/install.sh | bash
 ```
 
-### 从源码构建
+开箱即用，直接复用你现有的 `git` 与各类 Agent CLI（`claude`、`codex`、`agy`、`cursor-agent` 等）。首次启动时，若未安装持久化终端守护进程（`hc`），Canban 会自动引导一键完成配置。
 
-安装 `mise` 与系统构建依赖后执行 `mise run install-app`：
+<details>
+<summary><strong>Linux 运行库要求与从源码构建</strong></summary>
+
+<br/>
+
+**Linux 桌面版运行库依赖**：
+- 已安装 GTK4 与 GStreamer 运行库（`libgtk-4-1` / `gtk4` + `gstreamer`）
+
+**从源码构建**（需安装 `mise` 与系统构建依赖后执行 `mise run install-app`）：
 
 - **macOS**：`brew install librsvg`
 - **Ubuntu / Debian**：`sudo apt install pkg-config libgtk-4-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev librsvg2-bin zstd`
@@ -120,6 +131,8 @@ curl -fsSL https://canban.dev/install.sh | bash
 ```bash
 git clone https://github.com/jjyr/canban.git && cd canban && mise run install-app
 ```
+
+</details>
 
 ## 相关软件与致谢
 

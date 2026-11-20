@@ -14,15 +14,21 @@
 </p>
 
 <p align="center">
-  <strong>Keep your agent CLI. Automate your workflow.</strong><br/>
-  Organize context on flexible cards, catch waiting agents in one notification center, and automate tasks with GitHub Actions-like workflows.
+  <strong>Run 10+ coding agents without drowning in terminal tabs.</strong><br/>
+  A native <strong>Rust + <code>libghostty</code></strong> workbench for <strong>Claude Code, Codex, and Cursor CLI</strong> — with an instant attention inbox (<code>⌘I</code>), per-card Git worktree review, and GitHub Actions-like local workflows.
 </p>
 
-<h3 align="center"><a href="#installation"><ins>Install Canban</ins></a> · <a href="https://canban.dev"><ins>canban.dev</ins></a></h3>
+<h3 align="center"><a href="#installation"><ins>Quick Install</ins></a> · <a href="https://canban.dev"><ins>canban.dev</ins></a> · <a href="https://canban.dev/docs/"><ins>Docs</ins></a></h3>
 
 <p align="center">
   <img src="docs/assets/canban-hero.gif" alt="Canban Kanban board with an expanded card and live native Agent CLI terminal" width="960" />
 </p>
+
+## Why Canban?
+
+- **Stop hunting through 10 tmux panes**: One global attention inbox (`⌘I`) tells you the exact moment an agent pauses for `[Y/n]` permission, input, or code review across every project and host.
+- **Zero-wrapper native terminals**: Keep your real `claude`, `codex`, `agy`, or `cursor-agent` CLI. Powered by native Rust UI and `libghostty-vt` over persistent PTYs that survive app restarts.
+- **Review and merge without leaving the app**: Every card gets an isolated Git worktree, built-in inline diff review (`@Agent` comments on specific lines), and an automated `plan → develop → merge` queue.
 
 ## Features
 
@@ -30,23 +36,21 @@
 <tr>
 <td width="50%" valign="middle">
 
-### Programmable Workflows (Vibe Mode)
+### Attention Inbox (`⌘I`)
 
-Write GitHub Actions-like YAML with shell scripts and `agent` + prompt steps. Turn any card into a `plan → develop → merge` pipeline with isolated Git worktrees, cron schedules, and a serialized merge queue.
-
-[Docs →](https://canban.dev/docs/workflows/)
+Never miss a blocked agent again. One global notification center across all projects, worktrees, and remote hosts shows which agent is waiting for input, tool approval, or review — and jumps straight to its Card and live terminal in one keystroke.
 
 </td>
 <td width="50%">
-  <img src="website/screenshots/workflow-studio.png" alt="Canban Programmable Workflows: Visual Studio and Vibe Mode pipeline" width="100%" />
+  <img src="docs/assets/notification-center.jpg" alt="Canban Notification Center showing waiting agents and one-click jump to Card and terminal" width="100%" />
 </td>
 </tr>
 <tr>
 <td width="50%" valign="middle">
 
-### Native Agent CLI &amp; Terminals
+### Native Agent CLI &amp; Persistent Terminals
 
-No chat UI. Run Claude Code, Codex, Antigravity (`agy`), Cursor CLI, Pi, or custom CLIs directly inside persistent, restart-safe PTYs powered by Rust, NSH, and `libghostty-vt`, keeping native TUIs, permissions, MCPs, skills, and session resume intact.
+No dumbed-down chat wrapper. Run Claude Code, Codex, Antigravity (`agy`), Cursor CLI, Pi, or custom CLIs inside persistent, restart-safe PTYs powered by Rust, NSH, and `libghostty-vt` — preserving native TUIs, interactive permissions, MCPs, skills, and session resume.
 
 [Docs →](https://canban.dev/docs/agents/)
 
@@ -58,23 +62,9 @@ No chat UI. Run Claude Code, Codex, Antigravity (`agy`), Cursor CLI, Pi, or cust
 <tr>
 <td width="50%" valign="middle">
 
-### Multi-Machine
+### Per-Card Worktrees &amp; Inline Diff Review
 
-Connect your local desktop app to headless Linux `canband` hosts over SSH or Tailscale. Manage remote boards, workflows, and live terminals seamlessly alongside local projects.
-
-[Docs →](https://canban.dev/docs/remote-hosts/)
-
-</td>
-<td width="50%">
-  <img src="docs/assets/multi-machine.png" alt="Canban Connected Hosts popover showing local macOS socket and remote Linux host over Tailscale TCP" width="100%" />
-</td>
-</tr>
-<tr>
-<td width="50%" valign="middle">
-
-### Built-in Git &amp; Diff Review
-
-Inspect commits and per-card worktree diffs without leaving Canban. Leave inline review comments on changed lines and send focused feedback straight to `@Agent`.
+Inspect commits and isolated per-card worktree diffs without switching to an external editor. Leave inline review comments directly on changed lines and send focused revision requests straight back to `@Agent`.
 
 [Docs →](https://canban.dev/docs/)
 
@@ -86,31 +76,52 @@ Inspect commits and per-card worktree diffs without leaving Canban. Leave inline
 <tr>
 <td width="50%" valign="middle">
 
-### Notification Center
+### Programmable Workflows (GitHub Actions for Local Agents)
 
-One attention inbox across all projects, worktrees, and hosts (`⌘I`). Instantly see which agent is waiting for input, approval, or review, and jump straight to its Card and live terminal.
+Ready to automate the loop? Write GitHub Actions-like YAML combining shell scripts and `agent` + prompt steps. Turn any card into a hands-free `plan → develop → merge` pipeline with cron schedules and a serialized merge queue.
+
+[Docs →](https://canban.dev/docs/workflows/)
 
 </td>
 <td width="50%">
-  <img src="docs/assets/notification-center.jpg" alt="Canban Notification Center showing waiting agents and one-click jump to Card and terminal" width="100%" />
+  <img src="website/screenshots/workflow-studio.png" alt="Canban Programmable Workflows: Visual Studio and Vibe Mode pipeline" width="100%" />
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### Multi-Machine over SSH &amp; Tailscale
+
+Offload heavy builds and agent runs to remote Linux boxes. Connect your local macOS/Linux desktop app to headless `canband` hosts over SSH or Tailscale and control remote boards, workflows, and live 120Hz terminals seamlessly.
+
+[Docs →](https://canban.dev/docs/remote-hosts/)
+
+</td>
+<td width="50%">
+  <img src="docs/assets/multi-machine.png" alt="Canban Connected Hosts popover showing local macOS socket and remote Linux host over Tailscale TCP" width="100%" />
 </td>
 </tr>
 </table>
 
 ## Installation
 
-**Prerequisites**:
-- **macOS**: macOS 13.0+ (Apple Silicon / `arm64`)
-- **Linux Desktop**: `x86_64` or `aarch64` (`arm64`) with GTK4 and GStreamer runtime libraries (`libgtk-4-1` / `gtk4` + `gstreamer`)
-- **Common**: `git`, at least one native Agent CLI (`claude`, `codex`, `agy`, `cursor-agent`, etc.), and **Herdr Core (`hc`)** (Canban guides one-click `hc` setup on first launch if missing).
+Install on **macOS 13+** (Apple Silicon) or **Linux Desktop** (`x86_64` / `arm64`) with a single command:
 
 ```bash
 curl -fsSL https://canban.dev/install.sh | bash
 ```
 
-### Build from Source
+Works out of the box with `git` and your existing Agent CLIs (`claude`, `codex`, `agy`, `cursor-agent`, etc.). On first launch, Canban automatically guides one-click setup for the persistent PTY daemon (`hc`) if not already installed.
 
-Install `mise` plus platform build dependencies, then run `mise run install-app`:
+<details>
+<summary><strong>Linux runtime dependencies &amp; building from source</strong></summary>
+
+<br/>
+
+**Linux Desktop Runtime Libraries**:
+- GTK4 and GStreamer (`libgtk-4-1` / `gtk4` + `gstreamer`)
+
+**Build from Source** (requires `mise` and platform build dependencies):
 
 - **macOS**: `brew install librsvg`
 - **Ubuntu / Debian**: `sudo apt install pkg-config libgtk-4-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev librsvg2-bin zstd`
@@ -120,6 +131,8 @@ Install `mise` plus platform build dependencies, then run `mise run install-app`
 ```bash
 git clone https://github.com/jjyr/canban.git && cd canban && mise run install-app
 ```
+
+</details>
 
 ## Related Software and Acknowledgements
 
