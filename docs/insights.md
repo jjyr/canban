@@ -1,45 +1,47 @@
 # Insights
 
-Insights opens on **1D** (current local calendar day) with **Daily** velocity cadence, summarizing retained workspace throughput, Kanban pipeline health, Agent execution quality, automation leverage, and Day-over-Day / Week-over-Week efficiency trajectories.
+Insights opens on **1D** (current local calendar day) with a **timeline-first** layout combining personal active dwell time (`My time`), Agent working duration (`Agent working`), Kanban delivery throughput, automation funnel metrics, Project and Profile/Model Agent breakdowns, a 365-day activity heatmap, and always-visible timing percentiles and stage durations.
 
-## Periods, cadence, and comparisons
+## Periods, scope, and comparisons
 
-- **Top Chrome**: Project scope (`All Projects` or a single Project), Range (`1D`, `7D`, `30D`, `90D`), and Trend Cadence (`Daily` vs `Weekly`).
-- **Period Sub-bar**: Previous / next day steppers, `Today`, an ISO `YYYY-MM-DD` date field, baseline selector (`Previous period` or `Last week, same day` in `1D`), `Organic intake (excl. sync)` toggle, and inline Created / Resolved Card drilldown toggles. Future dates are unavailable. Returning from a Card retains scope, range, cadence, date, expanded timing section, sample tab, and scroll position.
+- **Top Chrome**: Project scope (`All Projects` or a single Project) and Range (`1D`, `7D`, `30D`, `90D`).
+- **Period Sub-bar**: Previous / next day steppers, `Today`, an ISO `YYYY-MM-DD` date field, baseline selector (`Previous period` or `Last week, same day` in `1D`), inline `Created Cards` / `Resolved Cards` drilldown toggles, and `Clear Project filter`. Future dates are unavailable. Returning from a Card retains scope, range, date, timing drilldown state, and scroll position.
 - **Same-Progress Cutoffs**:
   - Today runs from local midnight through the current clock time, comparing against yesterday (or last week's same weekday) through the **same local clock time**.
-  - Historical dates compare full calendar days. Multi-day periods compare the preceding equally sized calendar period, truncated to matching progress when the current period includes today.
-  - **Week-over-Week (WoW)** compares the current ISO week (`Monday 00:00` through the current weekday/clock cutoff) against the previous ISO week at the exact same weekday/clock cutoff, and projects full-week resolution pace when the current week is in progress.
+  - Historical dates compare full calendar days. Multi-day periods (`7D`, `30D`, `90D`) compare the preceding equally sized calendar period, truncated to matching progress when the current period includes today.
   - All boundaries resolve in the display machine's local timezone rather than subtracting fixed 24-hour durations.
 
-## Multi-dimensional cockpit layout
+## Timeline-first cockpit layout
 
-1. **Four-Dimensional KPI Strip** (each tile pairs a headline metric, comparison badge, proportional breakdown bar, and secondary context):
-   - **Resolution Throughput**: Resolved Cards (`+Δ%` vs baseline), Local merges, PR merges, and manual or Agent resolutions, Organic Created count (with muted initial-sync count disclosed), and 7-day daily reference pace.
-   - **Pipeline & WIP Health**: Active unresolved Board WIP (`Backlog / Develop / Review` bar), Human-gated count or Net WIP delta, active Projects, and period merge-conflict batches.
-   - **Agent Execution Quality**: Period Agent starts, resolved pass rate (`Completed %`), `Completed / Active / Blocked / Failed` bar, active Profiles, Providers, and overlapping cross-midnight runs.
-   - **Efficiency & Automation**: Execution-to-resolution `p50` (`Δ` vs baseline), Queue-to-start `p50`, Workflow Auto trigger share, Human asks per resolved Card, and Scheduled Task / Workflow run completions.
-2. **Velocity & Personal Efficiency Trajectory (2-column row)**:
-   - **Left — Output Velocity**: Switchable between **Daily (`14D` / `30D` or selected range)** with a 7-complete-day moving mean and **Weekly (`8W` / `12W` ISO weeks)** with a 4-complete-week moving mean and outlined full-week projection cap. Clicking a day bar drills into `1D`; clicking a week bar drills into `7D` ending on that week.
-   - **Right — Personal & Agent Efficiency Trajectory**: Same-progress WoW summary card (`Resolved`, `Cycle p50`, `Agent Pass %`, `Human asks / resolution`) above a 6-week or 7-day trajectory table pairing output rate, proportional `Cycle p50` bar, pass rate, and human interventions.
-3. **Hourly Pace & Intake / Pipeline Funnel**:
-   - In `1D`, **Hourly comparison** plots cumulative `Resolved`, `Created`, or `Agent starts` against the baseline day with `nice_ceil_tick` Y-axis scaling and blank future hours, paired beside **Intake sources & pipeline gates**.
-   - **Intake sources & pipeline gates** breaks down period Card creation into `Local manual`, `GitHub PR`, `GitHub Issue`, and `Initial sync`, alongside live Board stage counts, `Merging now`, `Human gates`, `Attention cards`, and `Merge batches / conflicts`.
-4. **Project & Agent Multi-Dimensional Matrices (2-column row)**:
-   - **Project contributions**: Sortable by `Resolved`, `Created`, `WIP`, or `Runs`, showing `+Created / Resolved (share)`, live `WIP (B/D/R)`, `Agent runs`, and a 7-day resolution sparkline. Clicking a Project scopes Insights; clicking the active Project again clears the filter.
-   - **Agents used**: Groupable by `Profile` (`@role (provider)`) or `Provider`, showing period starts, unique Cards touched, resolved `Pass %`, `Human asks` (`execution.input_required`), and per-`(profile, provider)` `Queue p50`, plus trigger-origin shares.
-5. **365-Day Yearly Activity Grid**:
-   - Full-width calendar heatmap independently selecting `Resolved`, `Created`, or `Agent starts` across the last 365 local dates including today, with active-day and current/longest streak summaries (an unfinished empty today does not break yesterday's streak).
-6. **Collapsible Efficiency & Timing Percentiles**:
-   - `Execution → resolution` and `Queue → start` `p50` / `p90` table with baseline values, absolute duration changes, sample counts, and paginated slowest-first Card drilldown lists.
+1. **Summary & 4-KPI Strip**:
+   - **Summary sentence**: Highlights period resolved count (`local` / `PR`), `My time`, `Agent working` time, and zero-human resolution rate.
+   - **RESOLVED**: Period resolved Cards (`+Δ%` vs baseline), local merge / PR merge / manual resolution breakdown bar, organic created count, net WIP delta, and 7-day daily reference pace.
+   - **MERGES (LOCAL / PR)**: Local vs PR merge split, merge queue batches, and clean batch rate (or current WIP when no queue batches exist).
+   - **MY TIME**: Active desktop window dwell total (`Δ` vs baseline), proportional `Card / Terminal / Other` bar, and per-lane breakdown.
+   - **AGENT WORKING**: Total Agent working time (`Δ` vs baseline), `Completed / Active / Blocked / Failed` run outcome bar, run count, pass rate, active profiles, and human asks.
+2. **Hero Activity Timeline**:
+   - **In `1D` (Hourly Swimlanes)**: Horizontal 00:00–24:00 swimlanes for `Me · Card`, `Me · Terminal`, `Me · Other`, and active Agent lanes (grouped by `Profile` or `Model` matching the Agents section toggle), plus clickable `Merges` markers. Blocks are color-coded by Project, reveal exact intervals in tooltips, open the underlying Card or Terminal on click, and dim future hours beyond the current clock marker.
+   - **In `7D` / `30D` / `90D` (Daily Activity)**: Daily rows comparing stacked `My time` (`Card / Terminal / Other`) against `Agent working` duration and daily resolved count; clicking any day row drills into `1D` for that date.
+3. **3-Panel Overview Row**:
+   - **Output**: On `1D`, cumulative hourly `Resolved`, `Created`, or `Agent starts` vs baseline day with blank future hours. On `7D`–`90D`, daily `Created / Resolved` bars with a 7-complete-day moving mean; clicking a bar opens `1D` for that date.
+   - **Automation funnel**: Period `Created → Agent touched → Reviewed → Merged` funnel, zero-human completion rate (`Δ` vs baseline), human asks, and live Board WIP (`Backlog / Develop / Review`), `Human gated`, `Merging now`, and `Attention` counts.
+   - **Projects**: Sortable by `Time`, `Resolved`, `Created`, `WIP`, or `Runs`, showing each Project's timeline color dot, `My time` + `Agent time`, resolved count, and an `Other / unattributed` row when all Projects are in scope. Clicking a row filters Insights to that Project; clicking again clears the filter.
+4. **Agents used**:
+   - Switchable between **`Profile`** (`@role (provider · model)`) and **`Model`** (`model (providers · N profiles)`), displaying working duration, period runs, outcome bar, resolved `Pass %`, unique Cards touched, `Queue p50` with baseline delta, human asks (`execution.input_required`), and trigger-source shares (`Workflow Auto`, `@mention Comment`, `Manual / Interactive`).
+5. **365-Day Yearly Activity Heatmap**:
+   - Full-width calendar heatmap switchable across `Resolved`, `My time`, and `Agent time` over the last 365 local dates including today, lazily fetching daily activity buckets on demand and reporting active days and streaks. Selecting a tile opens `1D` for that date.
+6. **Timings (Always Expanded)**:
+   - `Execution → resolution` and `Queue → start` percentile table (`p50`, `p90`, `Baseline p50`, `Δ`, `Samples`) with inline paginated slowest-first `[Inspect]` Card drilldown, paired with stage & merge-queue averages (`Develop`, `Review`, `Merge Queue`, `@mention Reply`, clean batch rate, average batch size, and conflict resolution duration).
+7. **Intake & Coverage Footer**:
+   - Single-row intake breakdown (`Local manual`, `GitHub PR`, `GitHub Issue`, `Initial sync`) with an inline `Exclude initial sync` / `Include initial sync` toggle, plus retained history start, undated exclusions, and offline-host notices.
 
-## Counting, organic intake, and data coverage
+## Time and Agent activity collection
 
-- **Organic Intake vs. Bulk Initial Sync**: Cards created with `card.created` `initial_sync: true` (automatic intake when first connecting an existing GitHub repository) are classified as `InitialSync` and excluded from organic `Created` velocity by default so historical issue imports do not flatten daily/weekly charts; toggling `All intake (incl. sync)` includes them.
-- **Resolutions** count each resolved Card once, including retained archived Cards. A merge or an explicit user or Agent resolve qualifies. Insights uses the Card resolution timestamp, the delivery timestamp, or a retained resolution or merge event. The footer discloses Cards that lack a reliable timestamp and are excluded from dated totals.
-- **Agent Usage & Per-Provider Queue Wait**: Reconstructed runs deduplicate `queued` / `started` / `continued` / `reported` events with retained `TerminalEntry` and `MergeBatch` facts. Provider attribution prefers the run's retained terminal profile preset/command before falling back to current Profile configuration, and `Queue p50` is keyed by `(profile_id, provider)` so provider switches never cross-contaminate medians.
-- **Indexed Event Projection**: Live UI rendering reads pre-bucketed `SnapshotIndex.events_by_card` positions rather than scanning cardless repository-observation events on each clock/snapshot tick.
+- **Personal dwell (`My time`)**: `crates/ui/src/activity.rs` tracks page, Card, and Terminal focus transitions via `DwellMachine` (`Card`, `Terminal`, `Other` lanes) and checks macOS `CGEventSourceSecondsSinceLastEventType` on the existing 60-second `utility_clock` interval (zero extra background timers, zero keystroke/pointer hooks, and zero cross-application focus sampling). Activity enforces a 300-second idle cutoff (with 60-second clock grace), drops segments shorter than 5 seconds, checkpoints every 5 minutes, caps in-memory pending segments at 500, and flushes closed/checkpointed segments to the local host via `activity.record`.
+- **Agent working duration (`Agent working`)**: `crates/app-server/src/observation.rs` & `activity.rs` derive Agent work directly from Herdr `Inventory` state transitions (`status.state == "working"` and state != `"finished"`, minimum 2 seconds). Completed intervals flush during runtime `tick()` and server shutdown; live open `working` intervals are merged on query.
+- **Storage, RPCs, and multi-host merging**: Segments persist in SQLite schema `v21` table `activity_segments` without foreign keys (so deleted Cards/Projects keep historical durations) and prune automatically after 400 days alongside event pruning. `activity.record` routes strictly to the local host (`canban-ui` also falls back gracefully on remote/deleted project IDs), while `insights.activity` (`<= 8` days, boundary-clipped + live open intervals) and `insights.activity_buckets` (`<= 400` boundaries) query all connected hosts and merge local dwell with per-host Agent activity. UI ↔ AppServer compatibility uses `DESKTOP_API = 76`.
+- **Intentional omissions & scope**: Commit counts and token/cost usage statistics are intentionally omitted (Herdr exposes only process/agent status transitions without usage or token accounting). Dwell records active Canban window focus (`Me · Card`, `Me · Terminal`, `Me · Other`) and does not track time spent in external tools or distinguish finer-grained `agy` screen-refinement sub-states beyond Herdr's `working` state.
 
 ## Verification surfaces
 
-Gallery scenes `insights`, `insights-weekly`, `insights-empty`, `insights-efficiency`, and `insights-short-history` use a fixed clock (`INSIGHTS_NOW`) and production components, including bulk initial-sync fixtures, multi-week cycle trends, two Projects, multiple Profiles, and unmerged archived Cards. Model and UI tests verify organic vs. initial-sync filtering, per-provider queue medians, same-progress WoW and DoD comparisons, DST/timezone boundaries, leap-year 365-day coverage, and interactive cadence/range switching.
+Gallery scenes `insights`, `insights-weekly` (`7D` multi-day view), `insights-agents-model` (`Model` grouping view), `insights-empty`, and `insights-short-history` use a fixed clock (`INSIGHTS_NOW`) and production components with synthetic dwell/agent activity (`fixtures::insights_activity`), bulk initial-sync fixtures, multiple Profiles/Models, and two Projects. Unit, storage, AppServer, dwell, and UI mount tests cover schema v21 migrations, `Inventory` working transitions, `activity.record` / `insights.activity` / `insights.activity_buckets` RPCs, `DwellMachine` idle cutoffs, model aggregation, timeline lanes, and interactive range/group/metric switching.

@@ -21,6 +21,10 @@ Status: native macOS (AppKit/Metal) and Linux (GTK4) desktop workbench with simu
 
 [Desktop utilities](desktop-utilities.md) covers the shared bottom bar, subscription Usage, Caffeine, persisted appearance, command catalog and cross-Project Card creation.
 
+## Timeline-first Insights redesign & activity tracking (2026-11-21)
+
+Insights uses a **timeline-first** layout with `1D` hourly swimlanes (`Me · Card`, `Me · Terminal`, `Me · Other`, plus `Profile` or `Model` Agent lanes and `Merges` markers), `7D`–`90D` daily stacked bars, a 3-panel Overview row (`Output`, `Automation funnel`, `Projects`), a `[Profile] / [Model]` Agents panel, a `[Resolved] / [My time] / [Agent time]` 365-day heatmap, and an always-expanded `Timings` panel. SQLite schema advances to **21** (`activity_segments` with 400-day retention) and desktop API version advances to **76** for `activity.record`, `insights.activity`, and `insights.activity_buckets`. Commit counts and token usage metrics remain intentionally omitted. See [Insights](insights.md).
+
 ## Agent RPC and CLI responses (2026-11-17)
 
 RPC and CLI now default to Agent-oriented Card summaries, normalized paginated

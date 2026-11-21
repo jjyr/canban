@@ -48,6 +48,7 @@ GitHub remote data follows the [disposable-cache contract](github-workspace.md):
 | Agent profile definitions and overrides | Profiles / AppServer | Editable command/preset configuration; Requests retain resolved snapshots for Scheduler execution |
 | Scheduling requests and execution attempts | Scheduler | Persistent queue/intent and attempt records |
 | Core/terminal association and last observation | Herdr adapter via Scheduler | Optional runtime binding and observed status/time |
+| Personal dwell and Agent working activity segments | Insights / AppServer | Time-range rows in SQLite `activity_segments` (400-day retention, no foreign keys) |
 | Descriptions, comments, resource references; retained legacy Notes | Context / Timeline, according to content ownership | Stable content IDs and immutable revisions; current-revision pointers |
 | Captured execution input | Context | Managed prompt/context files and snapshot manifest; database stores identity, revisions, and file references |
 | Card history, execution milestones, report links | Timeline | Append-only typed entries with per-card ordering |
