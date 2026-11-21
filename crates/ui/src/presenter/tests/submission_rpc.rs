@@ -195,7 +195,9 @@ fn submissions_finish_before_refresh_and_refresh_failure_does_not_fail_the_write
         }
     });
     let client = canban_app_server::AppClient::connect_ssh_socket(socket.clone()).unwrap();
-    assert!(crate::APP.set(client).is_ok());
+    assert!(
+        crate::backend::set(Arc::new(crate::backend::LocalBackend::from_client(client))).is_ok()
+    );
 
     #[component]
     fn ProbeRoot() -> impl IntoElement {

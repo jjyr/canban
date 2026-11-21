@@ -10,30 +10,41 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = ["local-host"]
+local-host = [
+    "dep:canban-app-server",
+    "dep:canban-exec",
+    "dep:canban-updater",
+    "dep:canban-scheduler",
+    "dep:signal-hook",
+    "canban-terminal/herdr-local",
+]
+
 [dependencies]
 canban-profiler.workspace = true
 canban-github.workspace = true
 canban-workflow-engine.workspace = true
-canban-updater.workspace = true
+canban-updater = { workspace = true, optional = true }
 canban-themes.workspace = true
 chrono.workspace = true
 anyhow.workspace = true
 url = "2"
 serde_json.workspace = true
 serde.workspace = true
-signal-hook = { version = "0.3", default-features = false }
+signal-hook = { version = "0.3", default-features = false, optional = true }
 base64.workspace = true
 nsh-core.workspace = true
 nsh-base.workspace = true
-canban-exec.workspace = true
+canban-exec = { workspace = true, optional = true }
 canban-types.workspace = true
 canban-profiles.workspace = true
 canban-context.workspace = true
-canban-scheduler.workspace = true
+canban-scheduler = { workspace = true, optional = true }
 canban-notifications.workspace = true
-canban-terminal.workspace = true
+canban-terminal = { workspace = true, default-features = false }
 canban-ui-kit.workspace = true
-canban-app-server.workspace = true
+canban-app-server = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 nsh-platform-macos.workspace = true
@@ -44,10 +55,12 @@ nsh-platform-linux.workspace = true
 [[bin]]
 name = "canban-ui"
 path = "src/main.rs"
+required-features = ["local-host"]
 
 [[example]]
 name = "gallery"
 path = "../../examples/gallery/main.rs"
+required-features = ["local-host"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }

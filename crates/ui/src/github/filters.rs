@@ -8,14 +8,14 @@ use std::sync::Mutex;
 static PENDING: Mutex<BTreeMap<String, Value>> = Mutex::new(BTreeMap::new());
 static WRITER: Mutex<()> = Mutex::new(());
 pub fn flush() {
-    let Some(app) = crate::APP.get() else {
+    let Some(backend) = crate::backend::get() else {
         return;
     };
     let _writer = WRITER.lock().unwrap();
     let patches = PENDING.lock().unwrap().clone();
     for (key, patch) in patches {
-        if app
-            .call("utilities.configure", json!({"board_filter":patch}))
+        if backend
+            .call_local("utilities.configure", json!({"board_filter":patch}))
             .is_ok()
         {
             let mut pending = PENDING.lock().unwrap();
@@ -91,7 +91,7 @@ pub fn edit(ui: Ui, pid: &str, change: impl FnOnce(&mut BoardFilter)) {
     if pid.is_empty() {
         return;
     }
-    if crate::APP.get().is_some() && ui.github.filter_account.get_untracked().is_none() {
+    if crate::backend::is_connected() && ui.github.filter_account.get_untracked().is_none() {
         return;
     }
     let mut filter = current(ui, pid);
@@ -119,7 +119,7 @@ pub fn edit(ui: Ui, pid: &str, change: impl FnOnce(&mut BoardFilter)) {
 
 /// Serialize writes; coalesce pending changes to the same account/Project.
 fn save_next(ui: Ui) {
-    let Some(app) = crate::APP.get().cloned() else {
+    let Some(backend) = crate::backend::get() else {
         return;
     };
     if ui.github.filter_saving.get_untracked() {
@@ -143,7 +143,7 @@ fn save_next(ui: Ui) {
             if PENDING.lock().unwrap().get(&write_key) != Some(&patch) {
                 return Ok(json!({}));
             }
-            let result = app.call("utilities.configure", json!({"board_filter":patch}));
+            let result = backend.call_local("utilities.configure", json!({"board_filter":patch}));
             if result.is_ok() {
                 let mut pending = PENDING.lock().unwrap();
                 if pending.get(&write_key) == Some(&patch) {
@@ -263,7 +263,7 @@ pub fn toolbar(ui: Ui) -> impl IntoElement {
         if pid.is_empty() {
             return view().into_element();
         }
-        if crate::APP.get().is_some() && ui.github.filter_account.get().is_none() {
+        if crate::backend::is_connected() && ui.github.filter_account.get().is_none() {
             return muted("Restoring Board filters…").into_element();
         }
         let filter = current(ui, &pid);

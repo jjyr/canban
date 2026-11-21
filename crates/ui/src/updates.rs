@@ -2,8 +2,10 @@
 use crate::presenter::*;
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
+#[cfg(any(feature = "local-host", test))]
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+#[cfg(any(feature = "local-host", test))]
 #[derive(Serialize, Deserialize)]
 struct Session {
     location: Location,
@@ -13,6 +15,7 @@ struct Session {
     tabs: Vec<String>,
     archive_query: String,
 }
+#[cfg(feature = "local-host")]
 fn capture(ui: Ui) -> Session {
     let drafts = ui.drafts.get();
     Session {
@@ -27,6 +30,7 @@ fn capture(ui: Ui) -> Session {
         archive_query: ui.archive_query.get_untracked(),
     }
 }
+#[cfg(any(feature = "local-host", test))]
 fn decode_session(bytes: &[u8]) -> anyhow::Result<Session> {
     let value: Value = serde_json::from_slice(bytes)?;
     let mut saved: Session = serde_json::from_value(value.clone())?;
@@ -69,11 +73,12 @@ mod session_tests {
         assert_eq!(restored.drafts["card:card"].comment, "unsent");
     }
 }
+#[cfg(feature = "local-host")]
 pub fn restore(ui: Ui) {
-    let Some(app) = crate::APP.get() else {
+    let Some(home) = crate::backend::local_home() else {
         return;
     };
-    let path = app.home.join("updates/ui-session.json");
+    let path = home.join("updates/ui-session.json");
     let Ok(bytes) = std::fs::read(&path) else {
         return;
     };
@@ -111,12 +116,18 @@ pub fn restore(ui: Ui) {
             ui.archive_query.set(query.get());
         });
     });
-    if !canban_updater::handoff::active(&app.home) {
+    if !canban_updater::handoff::active(&home) {
         let _ = std::fs::remove_file(path);
     }
 }
+
+#[cfg(not(feature = "local-host"))]
+pub fn restore(_ui: Ui) {}
+
 pub fn init(ui: Ui) {
+    #[cfg(feature = "local-host")]
     let saved_token = stored(String::new());
+    #[cfg(feature = "local-host")]
     let ready = stored(false);
     let idle_ticks = stored(0_u32);
     refresh(ui);
@@ -145,6 +156,7 @@ pub fn init(ui: Ui) {
             idle_ticks.replace(next);
         }
     });
+    #[cfg(feature = "local-host")]
     effect(move || {
         let v = ui.update.get();
         let phase = v["install"]["phase"].as_str().unwrap_or("");
@@ -153,16 +165,16 @@ pub fn init(ui: Ui) {
             if !token.is_empty() && saved_token.get() != token {
                 saved_token.replace(token.clone());
                 let snapshot = capture(ui);
-                let app = crate::APP.get().cloned();
+                let home = crate::backend::local_home();
                 ui.spawn(async move {
-                    if let Some(app) = app {
+                    if let Some(home) = home {
                         let r = blocking(move || -> anyhow::Result<()> {
                             canban_updater::atomic(
-                                &app.home.join("updates/ui-session.json"),
+                                &home.join("updates/ui-session.json"),
                                 &serde_json::to_vec(&snapshot)?,
                             )?;
                             canban_updater::atomic(
-                                &app.home.join("updates").join(format!("ui-saved-{token}")),
+                                &home.join("updates").join(format!("ui-saved-{token}")),
                                 b"ready",
                             )
                         })
@@ -190,13 +202,13 @@ pub fn init(ui: Ui) {
             // Write readiness directly instead of gating on `request_animation_frame`,
             // which macOS suspends when a background-spawned candidate window is occluded
             // or on an inactive Space.
-            if let (Some(app), Ok(token)) = (
-                crate::APP.get().cloned(),
+            if let (Some(home), Ok(token)) = (
+                crate::backend::local_home(),
                 std::env::var("CANBAN_UPGRADE_TOKEN"),
             ) {
                 ui.spawn(async move {
                     let _ = blocking(move || {
-                        let path = app.home.join("updates").join(format!("ui-ready-{token}"));
+                        let path = home.join("updates").join(format!("ui-ready-{token}"));
                         canban_updater::atomic(
                             &path,
                             &serde_json::to_vec(&canban_updater::Build::current())
@@ -210,7 +222,7 @@ pub fn init(ui: Ui) {
     });
 }
 fn refresh(ui: Ui) {
-    let Some(app) = crate::APP.get().cloned() else {
+    let Some(backend) = crate::backend::get() else {
         return;
     };
     if ui.update_loading.get_untracked() {
@@ -218,7 +230,7 @@ fn refresh(ui: Ui) {
     }
     ui.update_loading.set(true);
     ui.spawn(async move {
-        let r = blocking(move || app.call("update.state", json!({}))).await;
+        let r = blocking(move || backend.call_local("update.state", json!({}))).await;
         ui.update_loading.set(false);
         if let Ok(Ok(v)) = r {
             if !matches!(
@@ -234,7 +246,7 @@ fn refresh(ui: Ui) {
     });
 }
 pub fn check(ui: Ui) {
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         ui.update
             .update(|v| v["state"]["phase"] = json!("checking"));
         return;
@@ -246,7 +258,7 @@ pub fn install(ui: Ui) {
         return;
     }
     ui.update_busy.set(true);
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         ui.update.update(|v| {
             v["state"]["phase"] = json!("downloading");
             v["state"]["progress"] = json!(42);
@@ -454,6 +466,7 @@ pub fn settings(ui: Ui) -> impl IntoElement {
 }
 
 /// Standalone recovery UI reads only the updater journal, never application data.
+#[cfg(feature = "local-host")]
 #[component]
 pub fn Recovery() -> impl IntoElement {
     crate::startup::watch_quit();
@@ -474,10 +487,12 @@ pub fn Recovery() -> impl IntoElement {
     recovery_screen_auto(home.to_string_lossy().into_owned(), error, auto_start)
 }
 
+#[cfg(feature = "local-host")]
 pub fn recovery_screen(home: String, error: String) -> impl IntoElement {
     recovery_screen_auto(home, error, false)
 }
 
+#[cfg(feature = "local-host")]
 pub fn recovery_screen_auto(home: String, error: String, auto_start: bool) -> impl IntoElement {
     let directory = std::path::PathBuf::from(&home).join("updates");
     let home_path = std::path::PathBuf::from(&home);

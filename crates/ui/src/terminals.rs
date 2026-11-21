@@ -34,7 +34,7 @@ pub fn watch(ui: Ui) {
         if terminal.is_empty() {
             return;
         }
-        if crate::APP.get().is_some() {
+        if crate::backend::is_connected() {
             ui.spawn(async move {
                 let _ = blocking(move || {
                     crate::routed_call("terminal.context", json!({"terminal_id":terminal}), None)
@@ -55,7 +55,7 @@ pub fn watch(ui: Ui) {
     });
     let prev_entries = signal(Vec::<Entry>::new());
     effect(move || {
-        if crate::APP.get().is_some() && !ui.snapshot_ready.get() {
+        if crate::backend::is_connected() && !ui.snapshot_ready.get() {
             return;
         }
         let ids = listed.get();
@@ -590,7 +590,7 @@ pub fn create_in_card(ui: Ui, project_id: String, card_id: String, agent: bool) 
         ui.card_terminal_open.set(true);
         ui.card_terminal_focused.set(true);
     }
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         let id = gallery_create_entry(
             ui,
             json!({"project_id":project_id,"card_id":card_id,"agent":agent}),
@@ -678,7 +678,7 @@ pub(crate) fn launch_custom(ui: Ui, params: serde_json::Value) {
 fn launch(ui: Ui, params: serde_json::Value) {
     let source = ui.location();
     let selection = ui.terminal_selection.get_untracked();
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         let custom_name = params["name"]
             .as_str()
             .map(str::trim)
@@ -742,7 +742,7 @@ pub fn open_global(ui: Ui) {
         ui.snapshot
             .with_untracked(|s| s.projects.first().map(|p| p.id.clone()))
     };
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         if let Some(ref p) = target_project {
             ui.project.set(p.clone());
         }
@@ -1062,7 +1062,7 @@ pub fn close_entry_confirmed(ui: Ui, id: &str) {
     if id.is_empty() {
         return;
     }
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         // A static Gallery has no runtime; simulate the same closed outcome.
         ui.terminal_close_confirm.set(None);
         let was_selected = ui.terminal_selection.get_untracked() == id;

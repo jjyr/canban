@@ -79,7 +79,7 @@ fn apply_all_cards_read_local(ui: Ui, project_scope: Option<&str>) -> Vec<canban
 }
 
 pub fn mark_card_read(ui: Ui, card_id: String, sequence: u64) {
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         apply_card_read_local(ui, &card_id, sequence);
         return;
     }
@@ -116,7 +116,7 @@ pub fn mark_card_read(ui: Ui, card_id: String, sequence: u64) {
 }
 
 pub fn mark_all_read(ui: Ui, project_scope: Option<String>) {
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         apply_all_cards_read_local(ui, project_scope.as_deref());
         ui.notify("Marked updates read");
         return;

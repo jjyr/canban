@@ -38,7 +38,7 @@ pub(crate) fn start(ui: Ui, card: Card) {
     if busy(ui) {
         return;
     }
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         ui.operation_error
             .set("Gallery preview: no AppServer connected".into());
         return;

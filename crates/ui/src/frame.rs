@@ -1050,12 +1050,14 @@ mod tests {
             }));
             crate::review::apply_compare(ui, &value);
             crate::review::init(ui);
-            let event = move |host: &str| canban_app_server::hosts::HostEvent {
-                host_id: host.into(),
-                event: canban_types::AppEvent::Changed {
-                    topic: "resync",
-                    card_id: None,
-                },
+            let event = move |host: &str| {
+                crate::backend::BackendEvent::host(
+                    host,
+                    canban_types::AppEvent::Changed {
+                        topic: "resync",
+                        card_id: None,
+                    },
+                )
             };
             view()
                 .size_full()
@@ -1091,13 +1093,12 @@ mod tests {
                         .on_press(move |_: &()| {
                             crate::review::handle_host_events(
                                 ui,
-                                &[canban_app_server::hosts::HostEvent {
-                                    host_id: "local".into(),
-                                    event: canban_types::AppEvent::Changed {
+                                &[crate::backend::BackendEvent::local(
+                                    canban_types::AppEvent::Changed {
                                         topic: "review",
                                         card_id: Some("card-other".into()),
                                     },
-                                }],
+                                )],
                             )
                         }),
                 )
@@ -1107,13 +1108,12 @@ mod tests {
                         .on_press(move |_: &()| {
                             crate::review::handle_host_events(
                                 ui,
-                                &[canban_app_server::hosts::HostEvent {
-                                    host_id: "local".into(),
-                                    event: canban_types::AppEvent::Changed {
+                                &[crate::backend::BackendEvent::local(
+                                    canban_types::AppEvent::Changed {
                                         topic: "review",
                                         card_id: Some("card-worktree".into()),
                                     },
-                                }],
+                                )],
                             )
                         }),
                 )

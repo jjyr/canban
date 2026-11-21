@@ -287,7 +287,7 @@ fn load(ui: Ui, url: String, title: String, value: Signal<Preview>, loading: Sig
     if loading.get_untracked() {
         return;
     }
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         return;
     }
     loading.set(true);

@@ -12,7 +12,7 @@ pub fn restore(projects: &[Project], saved: Option<&str>) -> Option<String> {
 }
 
 pub fn remember(ui: Ui) {
-    let Some(app) = crate::APP.get().cloned() else {
+    let Some(backend) = crate::backend::get() else {
         return;
     };
     let pending = signal(None::<String>);
@@ -20,10 +20,8 @@ pub fn remember(ui: Ui) {
     let queued = stored(String::new());
     effect(move || {
         let _ = ui.update.get();
-        if crate::APP
-            .get()
-            .is_some_and(|a| canban_updater::handoff::active(&a.home))
-        {
+        #[cfg(feature = "local-host")]
+        if crate::backend::local_home().is_some_and(|home| canban_updater::handoff::active(&home)) {
             return;
         }
         let id = ui.project.get();
@@ -46,11 +44,13 @@ pub fn remember(ui: Ui) {
         };
         saving.set(true);
         pending.set(None);
-        let app = app.clone();
+        let backend = backend.clone();
         let target = id.clone();
         ui.spawn(async move {
-            let result =
-                blocking(move || app.call("utilities.configure", json!({"last_project":id}))).await;
+            let result = blocking(move || {
+                backend.call_local("utilities.configure", json!({"last_project":id}))
+            })
+            .await;
             let error = match result {
                 Ok(Ok(_)) => None,
                 Ok(Err(e)) => Some(format!("{e:#}")),

@@ -8,7 +8,7 @@ pub fn summary(ui: Ui) -> impl IntoElement {
         let max_agents = ui.max_agents.get();
         let (active, queued) = ui.snapshot.with(|snapshot| {
             (
-                canban_scheduler::active_count(snapshot),
+                crate::backend::active_agent_count(snapshot),
                 snapshot
                     .terminals
                     .iter()

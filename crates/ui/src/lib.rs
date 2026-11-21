@@ -1,8 +1,8 @@
 //! Production UI components and desktop host, shared with standalone examples.
 use anyhow::Result;
-use std::sync::Arc;
 pub mod agents_setup;
 pub mod archive;
+pub mod backend;
 pub mod board;
 pub(crate) mod cache;
 pub mod card;
@@ -37,6 +37,7 @@ pub mod reminders;
 pub mod schedules;
 pub mod sessions;
 pub mod settings;
+#[cfg(feature = "local-host")]
 pub mod startup;
 pub mod tags;
 pub mod terminals;
@@ -44,9 +45,6 @@ pub mod workflows;
 pub mod workspace;
 use nsh_core::prelude::*;
 use presenter::*;
-static APP: std::sync::OnceLock<Arc<canban_app_server::AppClient>> = std::sync::OnceLock::new();
-pub(crate) static HOSTS: std::sync::OnceLock<Arc<canban_app_server::hosts::HostRegistry>> =
-    std::sync::OnceLock::new();
 
 pub(crate) fn with_ui_projection(method: &str, mut params: serde_json::Value) -> serde_json::Value {
     if params.get("fields").is_none()
@@ -75,56 +73,26 @@ pub(crate) fn routed_call(
     params: serde_json::Value,
     active_project_id: Option<&str>,
 ) -> Result<serde_json::Value> {
-    // These writes hydrate the desktop's immediate, server-confirmed overlay.
-    let params = with_ui_projection(method, params);
-    if let Some(hosts) = HOSTS.get() {
-        return hosts.call_routed(method, params, active_project_id);
-    }
-    let app = APP
-        .get()
-        .ok_or_else(|| anyhow::anyhow!("Gallery preview: no AppServer connected"))?;
-    app.call(method, params)
+    backend::call_routed(method, params, active_project_id)
 }
 
 pub(crate) fn call_all_hosts(
     method: &str,
     params: serde_json::Value,
 ) -> Vec<(String, Result<serde_json::Value>)> {
-    let params = with_ui_projection(method, params);
-    if let Some(hosts) = HOSTS.get() {
-        return hosts.call_all_hosts(method, params);
-    }
-    if let Some(app) = APP.get() {
-        return vec![("local".to_string(), app.call(method, params))];
-    }
-    vec![(
-        "local".to_string(),
-        Err(anyhow::anyhow!("Gallery preview: no AppServer connected")),
-    )]
+    backend::call_all_hosts(method, params)
 }
 
 pub(crate) fn merged_snapshot() -> Result<canban_types::Snapshot> {
-    if let Some(hosts) = HOSTS.get() {
-        return hosts.merged_snapshot();
-    }
-    let app = APP
-        .get()
-        .ok_or_else(|| anyhow::anyhow!("Gallery preview: no AppServer connected"))?;
-    app.snapshot()
+    backend::merged_snapshot()
 }
 
 pub(crate) fn host_summaries() -> Vec<canban_types::HostSummary> {
-    if let Some(hosts) = HOSTS.get() {
-        return hosts.summaries();
-    }
-    Vec::new()
+    backend::host_summaries()
 }
 
 pub(crate) fn config_for_host(host_id: &str) -> canban_types::Config {
-    if let Some(hosts) = HOSTS.get() {
-        return hosts.config_for(host_id);
-    }
-    APP.get().map(|app| app.config()).unwrap_or_default()
+    backend::config_for_host(host_id)
 }
 #[native_module("canban/native")]
 fn native(_: &mut Registry) {}
@@ -135,8 +103,10 @@ pub fn Canban() -> impl IntoElement {
 }
 
 pub(crate) fn workspace_root() -> impl IntoElement {
+    #[cfg(feature = "local-host")]
     startup::ready();
     let ui = Ui::new();
+    #[cfg(feature = "local-host")]
     if let Some(boot) = startup::take_initial_bootstrap() {
         batch(move || {
             ui.apply_config(&boot.config);
@@ -151,12 +121,8 @@ pub(crate) fn workspace_root() -> impl IntoElement {
             ui.snapshot_ready.set(true);
         });
     }
-    ui.backend_notice.set(
-        APP.get()
-            .and_then(|app| app.server_notice())
-            .unwrap_or_default()
-            .to_owned(),
-    );
+    ui.backend_notice
+        .set(backend::server_notice().unwrap_or_default());
     updates::restore(ui);
     links::install(ui);
     let last_draft_err_epoch = stored(drafts::persistence::error_epoch());
@@ -212,7 +178,7 @@ pub(crate) fn workspace_root() -> impl IntoElement {
         let page = ui.page.get();
         let _ = ui.project.get();
         let _ = ui.settings_host.get();
-        if crate::APP.get().is_some() {
+        if backend::is_connected() {
             let target = ui.effective_config_host();
             ui.apply_config(&crate::config_for_host(&target));
             if last_cfg_host.get_untracked() != target {
@@ -225,28 +191,17 @@ pub(crate) fn workspace_root() -> impl IntoElement {
         }
     });
     review::init(ui);
-    let events = stored(if let Some(hosts) = crate::HOSTS.get() {
-        (Some(hosts.subscribe()), None)
-    } else {
-        (None, Some(crate::APP.get().unwrap().subscribe()))
-    });
+    let events = stored(backend::subscribe());
     let dirty = signal(false);
     set_interval(std::time::Duration::from_millis(250), move || {
-        let changed = events.with(|(hosts, local)| {
-            if let Some(rx) = hosts {
-                rx.try_iter().collect::<Vec<_>>()
-            } else {
-                local
-                    .as_ref()
-                    .unwrap()
-                    .try_iter()
-                    .map(canban_app_server::hosts::HostEvent::local)
-                    .collect()
-            }
+        let changed = events.with(|slot| {
+            slot.as_ref()
+                .map(|rx| rx.try_iter().collect::<Vec<_>>())
+                .unwrap_or_default()
         });
         if changed.iter().any(|e| {
             matches!(
-                &e.event,
+                e.app_event(),
                 canban_types::AppEvent::Changed {
                     topic: "resync",
                     ..
@@ -257,7 +212,7 @@ pub(crate) fn workspace_root() -> impl IntoElement {
         }
         if changed.iter().any(|e| {
             matches!(
-                &e.event,
+                e.app_event(),
                 canban_types::AppEvent::Changed {
                     topic: "github" | "resync",
                     ..
@@ -278,6 +233,7 @@ pub(crate) fn workspace_root() -> impl IntoElement {
     frame::screen(ui)
 }
 
+#[cfg(feature = "local-host")]
 pub fn run() -> Result<()> {
     platform::init_host(vec![nsh_base::registry(), registry()]);
     let mut session = None;
@@ -295,6 +251,7 @@ pub fn run() -> Result<()> {
     result
 }
 
+#[cfg(feature = "local-host")]
 fn run_application(ran_window: &mut bool) -> Result<()> {
     let home = canban_app_server::default_home()?;
     let cli = std::env::current_exe()?.with_file_name("canban");

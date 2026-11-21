@@ -48,7 +48,7 @@ fn upload(ui: Ui, draft: Signal<Draft>, card: String, item: Upload) {
     ui.spawn(async move {
         let saved = item.clone();
         let target = card.clone();
-        let has_app = crate::APP.get().is_some();
+        let has_app = crate::backend::is_connected();
         let active_proj = ui.project.get_untracked();
         let result = blocking(move || -> anyhow::Result<String> {
             anyhow::ensure!(has_app, "Gallery: no AppServer connected");
@@ -358,6 +358,7 @@ mod pasted {
         )
     }
 }
+#[cfg(any(feature = "local-host", test))]
 pub fn pause_after_upgrade(draft: &mut Draft) {
     for item in &mut draft.uploads {
         if matches!(item.state, State::Uploading) {

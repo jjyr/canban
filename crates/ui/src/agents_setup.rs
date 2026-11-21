@@ -11,10 +11,7 @@ use std::{
 };
 
 fn active_home_path() -> PathBuf {
-    crate::APP
-        .get()
-        .map(|app| app.home.clone())
-        .unwrap_or_else(|| PathBuf::from("/preview/.canban"))
+    PathBuf::from(crate::backend::home_for("local"))
 }
 
 pub fn skill_install_command() -> String {
@@ -140,7 +137,7 @@ pub fn refresh_catalog(ui: Ui) {
 
 /// Refresh `ui.agent_catalog` for a specific `canband` host (`"local"` or remote `host_id`).
 pub fn refresh_catalog_for_host(ui: Ui, host_id: &str) {
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         return;
     }
     let target_host = if host_id.trim().is_empty() {
@@ -709,7 +706,7 @@ fn apply_op_to_profiles(
 
 pub(crate) fn dispatch_agents_save(ui: Ui, payload: Value, on_ok: impl FnOnce(&Config) + 'static) {
     let raw_cat = ui.agent_catalog.get_untracked();
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         ui.update_profiles(|all, def| apply_op_to_profiles(all, def, &payload, &raw_cat));
         ui.agent_catalog
             .update(|cat| apply_op_to_catalog(cat, &payload, None));

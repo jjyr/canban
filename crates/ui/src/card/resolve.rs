@@ -154,7 +154,7 @@ pub(crate) fn start(ui: Ui, card: Card) {
     if !card.active() || card.resolved() || busy(ui) {
         return;
     }
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         apply_gallery_resolve(ui, &card.id);
         return;
     }
@@ -245,7 +245,7 @@ pub(crate) fn reopen(ui: Ui, card: Card) {
     if !card.active() || !card.resolved() || card.merged() || busy(ui) {
         return;
     }
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         apply_gallery_reopen(ui, &card.id);
         return;
     }

@@ -206,7 +206,7 @@ pub fn attach(
                 if epoch.try_get() != Some(generation) {
                     return;
                 }
-                if crate::APP.get().is_none() {
+                if !crate::backend::is_connected() {
                     return;
                 }
                 ui.spawn(async move {

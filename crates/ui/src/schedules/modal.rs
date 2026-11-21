@@ -218,7 +218,7 @@ fn submit_create_modal(ui: Ui) {
     };
     m.error.set(String::new());
 
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         create_offline_schedule(ui, payload);
         return;
     }
@@ -392,7 +392,7 @@ pub fn describe_with_agent(ui: Ui, scope: String, custom_seed: Option<String>) {
     });
     ui.schedules.agent_prompt.set(seed);
     ui.schedules.agent_open.set(true);
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         return;
     }
     ui.spawn(async move {
@@ -868,7 +868,7 @@ pub fn open_yaml_editor(ui: Ui, scope_id: String, filename: String) {
     ui.schedules.yaml_error.set(String::new());
     ui.schedules.yaml_open.set(true);
 
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         return;
     }
     let origin_scope = scope_id.clone();
@@ -904,7 +904,7 @@ fn save_yaml_modal(ui: Ui) {
         ui.schedules.yaml_error.set(format!("YAML error: {e}"));
         return;
     }
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         ui.snapshot.update(|s| {
             let _ = super::push_offline_workflow_source(s, &scope, &filename, &body);
         });

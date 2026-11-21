@@ -266,7 +266,7 @@ pub fn expand_context_gap(
     let cache_key = ctx.cache_key();
     let has_cached = st.file_lines_cache.with(|c| c.get(&cache_key).is_some());
 
-    if !has_cached && crate::APP.get().is_none() {
+    if !has_cached && !crate::backend::is_connected() {
         if let Some(lines) = ctx.preview_lines() {
             let total = lines.len();
             st.file_lines_cache

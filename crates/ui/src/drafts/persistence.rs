@@ -34,8 +34,8 @@ pub struct Service {
     tx: mpsc::Sender<Message>,
     entries: Arc<Mutex<BTreeMap<String, Entry>>>,
 }
-pub fn start(app: Arc<canban_app_server::AppClient>) -> Result<()> {
-    let rows = app.call("draft.list", json!({}))?;
+pub fn start(backend: Arc<dyn crate::backend::UiBackend>) -> Result<()> {
+    let rows = backend.call_local("draft.list", json!({}))?;
     let mut initial = BTreeMap::new();
     let mut entries = BTreeMap::new();
     for row in rows.as_array().into_iter().flatten() {
@@ -100,8 +100,8 @@ pub fn start(app: Arc<canban_app_server::AppClient>) -> Result<()> {
                         .get(&key)
                         .map(|e| e.revision)
                         .unwrap_or(0);
-                    let result = app
-                        .call(
+                    let result = backend
+                        .call_local(
                             "draft.save",
                             json!({"id":key,"revision":revision,"data":value}),
                         )
@@ -109,7 +109,7 @@ pub fn start(app: Arc<canban_app_server::AppClient>) -> Result<()> {
                             // A transport error can follow a committed write. Recover
                             // its acknowledged revision before sending newer input.
                             if !error.to_string().contains("draft_conflict")
-                                && let Ok(rows) = app.call("draft.list", json!({}))
+                                && let Ok(rows) = backend.call_local("draft.list", json!({}))
                                 && let Some(row) = rows.as_array().and_then(|rows| {
                                     rows.iter()
                                         .find(|row| row["id"] == key && row["data"] == value)

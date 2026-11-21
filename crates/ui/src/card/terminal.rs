@@ -373,7 +373,7 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                                 && ui.project_delete_confirm.get().is_none()
                         })
                     };
-                    if crate::APP.get().is_none() {
+                    if !crate::backend::is_connected() {
                         return native("canban/terminal")
                             .prop("theme", crate::utilities::terminal_theme)
                             .prop("font", move || crate::utilities::terminal_font(ui))
@@ -450,7 +450,7 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                             && ui.worktree_remove_confirm.get().is_none()
                             && ui.project_delete_confirm.get().is_none(),
                     };
-                    if crate::APP.get().is_none() {
+                    if !crate::backend::is_connected() {
                         return canban_terminal::linux::preview_terminal(
                             concat!(
                                 "\x1b[1;36mCard Live Terminal\x1b[0m · Side-by-side discussion\r\n",

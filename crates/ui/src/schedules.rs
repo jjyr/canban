@@ -782,7 +782,7 @@ pub fn toggle_schedule(ui: Ui, item: &ScheduleItem, enabled: bool) {
     }
 
     let sid = item.schedule_id.clone();
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         toggle_gallery_schedule(ui, &project, &filename, &rule_id, &sid, enabled);
         ui.notify(if enabled {
             "Schedule enabled"
@@ -834,7 +834,7 @@ pub fn delete_schedule(ui: Ui, item: &ScheduleItem) {
     let sid = item.schedule_id.clone();
     ui.schedules.confirm_delete.set(None);
 
-    if crate::APP.get().is_none() || !item.published {
+    if !crate::backend::is_connected() || !item.published {
         let mut empty_doc = false;
         mutate_workflow_file(ui, &project, &filename, |doc| {
             doc.on.remove(&rule_id);
@@ -900,7 +900,7 @@ pub fn trigger_schedule(ui: Ui, item: &ScheduleItem) {
         return;
     }
 
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         let now_ms = canban_types::now();
         let sid = item.schedule_id.clone();
         let wf_id = item.workflow_id.clone();
@@ -1085,7 +1085,7 @@ pub fn trigger_schedule_by_id(ui: Ui, schedule_id: &str) {
         trigger_schedule(ui, item);
         return;
     }
-    if crate::APP.get().is_some() {
+    if crate::backend::is_connected() {
         dispatch(
             ui,
             "schedule.trigger",
@@ -1107,7 +1107,7 @@ pub fn toggle_schedule_by_id(ui: Ui, schedule_id: &str) {
             .map(|st| st.enabled)
     });
     if let Some(enabled) = cur
-        && crate::APP.get().is_some()
+        && crate::backend::is_connected()
     {
         dispatch(
             ui,
@@ -1200,7 +1200,7 @@ fn run_label(state: &str) -> &'static str {
 
 fn open_run_artifact(ui: Ui, run: &ScheduledRun, path: Option<&str>, title: String) {
     let s = ui.schedules;
-    if crate::APP.get().is_none() || path.is_none() {
+    if !crate::backend::is_connected() || path.is_none() {
         let body = run
             .summary
             .clone()
@@ -1559,7 +1559,7 @@ pub fn render(ui: Ui) -> AnyElement {
 }
 
 fn save_scope_draft(ui: Ui, scope_id: &str) {
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         offline_save_schedules(ui, scope_id);
         ui.workflows.drafts.update(|d| {
             if let Some(dr) = d.get_mut(scope_id) {

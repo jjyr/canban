@@ -672,7 +672,7 @@ pub fn rename_dialog(ui: Ui) -> impl IntoElement {
                     error.set("Use at most 80 printable characters".into());
                     return;
                 }
-                if crate::APP.get().is_none() {
+                if !crate::backend::is_connected() {
                     ui.snapshot.update(|s| {
                         let trimmed = next.trim();
                         if !trimmed.is_empty() {

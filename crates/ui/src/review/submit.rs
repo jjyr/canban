@@ -599,7 +599,7 @@ fn submit_primary_button(ui: Ui, pr_info: Option<Value>) -> impl IntoElement {
             })
             .collect();
 
-        if crate::APP.get().is_none() {
+        if !crate::backend::is_connected() {
             // Gallery mode: simulate clean completion with toast feedback.
             st.pending_comments.set(Vec::new());
             st.submit_summary.set(String::new());

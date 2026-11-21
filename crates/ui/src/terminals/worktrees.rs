@@ -424,7 +424,7 @@ pub async fn card_scope_menu(ui: Ui, card: canban_types::Card, at: Option<Point<
 }
 
 pub fn open_shell(ui: Ui, wt: &ManagedWorktree) {
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         let id = format!("gallery-wt-shell-{}", canban_types::id());
         let saved = canban_types::TerminalEntry {
             id: id.clone(),
@@ -484,7 +484,7 @@ pub fn open_shell(ui: Ui, wt: &ManagedWorktree) {
 }
 
 pub fn open_agent(ui: Ui, wt: &ManagedWorktree, profile_id: &str) {
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         open_shell(ui, wt);
         return;
     }
@@ -590,7 +590,7 @@ pub fn open_diff(ui: Ui, wt: &ManagedWorktree) {
 }
 
 pub fn request_remove(ui: Ui, wt_id: String, force: bool) {
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         ui.snapshot
             .update(|s| s.worktrees.retain(|w| w.id != wt_id));
         ui.worktree_remove_confirm.set(None);
@@ -723,7 +723,7 @@ fn create_modal(ui: Ui) -> impl IntoElement {
                 let launch = launch_mode.get_untracked();
                 let prof = profile_id.get_untracked();
 
-                if crate::APP.get().is_none() {
+                if !crate::backend::is_connected() {
                     let wt = ManagedWorktree {
                         id: format!("wt-{}", canban_types::id()),
                         project_id: pid.clone(),
@@ -1043,7 +1043,7 @@ fn promote_modal(ui: Ui) -> impl IntoElement {
                     return;
                 }
                 let b = body.get_untracked();
-                if crate::APP.get().is_none() {
+                if !crate::backend::is_connected() {
                     ui.worktree_promote.set(None);
                     ui.notify("Promoted worktree to Card");
                     return;

@@ -26,7 +26,7 @@ fn load(
     let Some(card) = ui.current_card() else {
         return;
     };
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         return;
     }
     let token = generation.get_untracked() + 1;

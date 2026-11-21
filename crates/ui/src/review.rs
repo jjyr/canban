@@ -288,7 +288,7 @@ pub fn start_agent_review(
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| crate::sessions::default_review_profile(ui));
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         ui.notify(format!(
             "Gallery preview · started Agent review (@{profile})"
         ));
@@ -309,7 +309,7 @@ pub fn start_agent_review(
 }
 
 pub fn discard_review_draft(ui: Ui, card_id: &str) {
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         let cid = card_id.to_owned();
         ui.snapshot.update(|s| {
             s.review_drafts.retain(|d| d.card_id != cid);
@@ -348,7 +348,7 @@ pub fn discard_review_draft(ui: Ui, card_id: &str) {
 }
 
 pub fn sync_pending_draft_to_server(ui: Ui) {
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         return;
     }
     let cid = ui.card.get_untracked();
@@ -817,7 +817,7 @@ pub(crate) fn reset_pull_refresh(st: State) {
 }
 
 fn prepare_context(ui: Ui) {
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         return;
     }
     let st = ui.review_state;
@@ -950,15 +950,16 @@ pub(crate) fn init(ui: Ui) {
     });
 }
 
-pub(crate) fn handle_host_events(ui: Ui, events: &[canban_app_server::hosts::HostEvent]) {
+pub(crate) fn handle_host_events(ui: Ui, events: &[crate::backend::BackendEvent]) {
     let host = ui.active_project_host();
     let project = ui.project.get_untracked();
     let mut active_changed = false;
     for event in events {
-        let canban_types::AppEvent::Changed { topic, card_id } = &event.event;
+        let canban_types::AppEvent::Changed { topic, card_id } = event.app_event();
         if !matches!(*topic, "resync" | "review") {
             continue;
         }
+        let host_id = event.host_id();
         let card = card_id.as_ref().and_then(|id| {
             ui.snapshot
                 .with_untracked(|s| s.cards.iter().find(|c| &c.id == id).cloned())
@@ -967,12 +968,12 @@ pub(crate) fn handle_host_events(ui: Ui, events: &[canban_app_server::hosts::Hos
         let event_cwd = card.as_ref().and_then(|c| c.worktree.as_deref());
         ui.review_state.read_cache.with(|cache| {
             if let (Some(project), Some(cwd)) = (event_project, event_cwd) {
-                cache.invalidate_checkout(&event.host_id, project, cwd, card_id.as_deref());
+                cache.invalidate_checkout(host_id, project, cwd, card_id.as_deref());
             } else {
-                cache.invalidate_scope(&event.host_id, event_project);
+                cache.invalidate_scope(host_id, event_project);
             }
         });
-        active_changed |= event.host_id == host
+        active_changed |= host_id == host
             && event_project.is_none_or(|p| p == project)
             && event_cwd.is_none_or(|cwd| {
                 cwd == ui.review_state.checkout_cwd.get_untracked()
@@ -1043,7 +1044,7 @@ fn load_refs_impl(ui: Ui, compare: Option<bool>) {
     if untracked(|| ui.is_active_project_offline()) {
         return;
     }
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         git_ops::load_branch_log(ui, String::new(), false);
         return;
     }
@@ -1124,7 +1125,7 @@ pub fn refresh_active_diff(ui: Ui, force_remote_refresh: bool) {
 
 fn load_active_diff(ui: Ui, force_remote_refresh: bool) {
     let st = ui.review_state;
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         if let Some(p) = ui.review.get_untracked() {
             let value = cache::ReadValue::new(preview_to_compare_json(&p));
             apply_compare(ui, &value);
@@ -1283,7 +1284,7 @@ pub(crate) fn select_git_pair(ui: Ui, base: impl Into<String>, compare: impl Int
 pub fn screen(ui: Ui) -> impl IntoElement {
     let st = ui.review_state;
 
-    if crate::APP.get().is_some() {
+    if crate::backend::is_connected() {
         let has_card = !ui.card.get_untracked().is_empty();
         if !has_card {
             clear_foreign_project_selection(ui);

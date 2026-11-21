@@ -86,7 +86,7 @@ fn browse_directory(
     epoch: Signal<u64>,
 ) {
     let target_host = host_id.get_untracked();
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         listing.set(fixture_listing(&target_host, &path));
         return;
     }
@@ -175,7 +175,7 @@ pub fn directory_picker_for_host(
     directory: Signal<String>,
 ) -> impl IntoElement {
     let default_home = if host_id.get_untracked() == "local" || host_id.get_untracked().is_empty() {
-        if crate::APP.get().is_some() {
+        if crate::backend::is_connected() {
             std::env::var("HOME").unwrap_or_default()
         } else {
             "/Users/demo".to_owned()
@@ -194,7 +194,7 @@ pub fn directory_picker_for_host(
         if prev_host.replace(current_host.clone()) != current_host {
             epoch.update(|n| *n += 1);
             let next_home = if current_host == "local" || current_host.is_empty() {
-                if crate::APP.get().is_some() {
+                if crate::backend::is_connected() {
                     std::env::var("HOME").unwrap_or_default()
                 } else {
                     "/Users/demo".to_owned()
@@ -866,7 +866,7 @@ pub fn new_project_form(
         let trimmed = path.trim().to_owned();
         let generation = detect_epoch.get_untracked() + 1;
         detect_epoch.set(generation);
-        if crate::APP.get().is_none() {
+        if !crate::backend::is_connected() {
             return;
         }
         if trimmed.is_empty() || !std::path::Path::new(&trimmed).is_absolute() {

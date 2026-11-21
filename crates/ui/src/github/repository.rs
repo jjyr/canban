@@ -185,7 +185,7 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
     let candidates = signal(Value::Null);
     let candidate_error = signal(String::new());
     let repository_info = signal(Value::Null);
-    if crate::APP.get().is_some() {
+    if crate::backend::is_connected() {
         let pid = id.clone();
         ui.spawn(async move {
             let result = blocking(move || {
@@ -215,7 +215,7 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
             }
             return;
         }
-        if crate::APP.get().is_none() {
+        if !crate::backend::is_connected() {
             return;
         }
         let pid = info_pid.clone();

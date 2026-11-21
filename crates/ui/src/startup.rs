@@ -639,10 +639,11 @@ fn finalize_workspace(app: Arc<canban_app_server::AppClient>) -> Result<Option<(
             saved_project,
         });
     }
-    crate::drafts::persistence::start(app.clone())?;
     let registry = canban_app_server::hosts::HostRegistry::new(app.clone());
-    let _ = crate::HOSTS.set(registry);
-    let _ = crate::APP.set(app);
+    let backend: Arc<dyn crate::backend::UiBackend> =
+        Arc::new(crate::backend::LocalBackend::with_hosts(app, registry));
+    crate::drafts::persistence::start(backend.clone())?;
+    let _ = crate::backend::set(backend);
     clear_fatal_exit();
     Ok(counts)
 }

@@ -28,7 +28,7 @@ pub fn apply(ui: Ui, card: Card, action: Action) {
         .with_untracked(|s| s.cards.iter().find(|c| c.id == card.id).cloned())
         .unwrap_or(card);
     let id = card.id.clone();
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         ui.snapshot.update(|s| {
             if let Some(c) = s.cards.iter_mut().find(|c| c.id == id) {
                 match action {

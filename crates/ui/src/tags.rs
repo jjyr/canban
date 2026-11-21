@@ -367,7 +367,7 @@ pub fn register(ui: Ui, project_id: &str, raw_tag: &str) -> Option<String> {
                 .is_some_and(|p| p.tags.iter().any(|t| t.to_lowercase() == lower))
         });
         if !already_in_project {
-            if crate::APP.get().is_some() {
+            if crate::backend::is_connected() {
                 let send_tag = tag.clone();
                 ui.spawn(async move {
                     let result = blocking(move || {

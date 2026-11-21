@@ -75,7 +75,7 @@ pub(super) fn observe(ui: Ui) -> Signal<SummaryState> {
             state.set(SummaryState::Unavailable("Host offline".into()));
             return;
         }
-        if crate::APP.get().is_none() {
+        if !crate::backend::is_connected() {
             let data = ui.review_state.compare_data.get();
             state.set(if let Some(error) = data["summary_error"].as_str() {
                 SummaryState::Unavailable(error.into())

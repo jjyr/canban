@@ -197,7 +197,7 @@ pub fn init(ui: Ui) {
             super::detail::load(ui, false);
         }
     });
-    if crate::APP.get().is_some() {
+    if crate::backend::is_connected() {
         check_cli(ui);
     }
     effect(move || {
@@ -212,7 +212,7 @@ pub fn init(ui: Ui) {
 }
 
 pub fn launch_gh_login(ui: Ui) {
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         ui.notify("Fixture: opens a local terminal running `gh auth login`");
         return;
     }
@@ -224,11 +224,11 @@ pub fn launch_gh_login(ui: Ui) {
 }
 
 pub fn check_cli(ui: Ui) {
-    let Some(app) = crate::APP.get().cloned() else {
+    let Some(backend) = crate::backend::get() else {
         return;
     };
     ui.spawn(async move {
-        let result = blocking(move || app.call("github.cli.status", json!({}))).await;
+        let result = blocking(move || backend.call_local("github.cli.status", json!({}))).await;
         ui.github.gh_status.set(match result {
             Ok(Ok(v)) => v,
             Ok(Err(e)) => json!({"state":"unavailable","message":format!("{e:#}")}),
@@ -238,11 +238,12 @@ pub fn check_cli(ui: Ui) {
 }
 
 pub fn check_cache(ui: Ui) {
-    let Some(app) = crate::APP.get().cloned() else {
+    let Some(backend) = crate::backend::get() else {
         return;
     };
     ui.spawn(async move {
-        if let Ok(Ok(v)) = blocking(move || app.call("github.cache.status", json!({}))).await
+        if let Ok(Ok(v)) =
+            blocking(move || backend.call_local("github.cache.status", json!({}))).await
             && let Some(bytes) = v["bytes"].as_u64()
         {
             ui.github.cache_bytes.set(bytes);
@@ -252,7 +253,7 @@ pub fn check_cache(ui: Ui) {
 
 pub fn load(ui: Ui, refresh: bool) {
     let b = ui.github;
-    let Some(app) = crate::APP.get().cloned() else {
+    let Some(backend) = crate::backend::get() else {
         return;
     };
     let params = json!({
@@ -269,7 +270,7 @@ pub fn load(ui: Ui, refresh: bool) {
     b.loading.set(true);
     b.error.set(String::new());
     ui.spawn(async move {
-        let result = blocking(move || app.call("github.browse", params)).await;
+        let result = blocking(move || backend.call_local("github.browse", params)).await;
         if b.ticket.try_get() != Some(ticket) {
             return;
         }

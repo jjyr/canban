@@ -78,7 +78,7 @@ impl State {
 }
 
 pub fn refresh_events(ui: Ui) {
-    if crate::APP.get().is_none() || ui.page.get_untracked() != "insights" {
+    if !crate::backend::is_connected() || ui.page.get_untracked() != "insights" {
         return;
     }
     let scope = ui.insights.scope_project.get_untracked();

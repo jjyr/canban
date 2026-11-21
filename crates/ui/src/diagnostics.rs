@@ -47,12 +47,12 @@ pub fn fixture_diagnostics(host_id: &str) -> (Value, Value) {
                 "listen_config": { "tailscale": false, "port": 7680 },
                 "bound_tcp": [],
                 "auth_token_configured": false,
-                "api_version": canban_updater::DESKTOP_API,
+                "api_version": crate::backend::desktop_api(),
                 "build": {
                     "version": "20261115-1",
                     "commit": "abcdef0",
                     "schema": 1,
-                    "api": canban_updater::DESKTOP_API,
+                    "api": crate::backend::desktop_api(),
                     "platform": "macos-aarch64",
                 }
             },
@@ -97,12 +97,12 @@ pub fn fixture_diagnostics(host_id: &str) -> (Value, Value) {
                 "listen_config": { "tailscale": true, "port": 7680 },
                 "bound_tcp": ["100.84.0.2:7680"],
                 "auth_token_configured": true,
-                "api_version": canban_updater::DESKTOP_API,
+                "api_version": crate::backend::desktop_api(),
                 "build": {
                     "version": "20261115-1",
                     "commit": "abcdef0",
                     "schema": 1,
-                    "api": canban_updater::DESKTOP_API,
+                    "api": crate::backend::desktop_api(),
                     "platform": "linux-x86_64",
                 }
             },
@@ -155,7 +155,7 @@ pub fn refresh_diagnostics(ui: Ui) {
             cur
         }
     };
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         let (st, lg) = fixture_diagnostics(&host_id);
         ui.diagnostics.set(st);
         ui.diagnostics_logs.set(lg);
@@ -389,7 +389,7 @@ pub fn section_view_with_activation(ui: Ui, activated: Signal<bool>) -> impl Int
                     ))
                     .child(kv_row(
                         "Protocol API",
-                        format!("v{api_version} (Desktop v{})", canban_updater::DESKTOP_API),
+                        format!("v{api_version} (Desktop v{})", crate::backend::desktop_api()),
                     ))
                     .child(kv_row("Daemon build", format!("{version} ({platform})")));
             } else if let HostConnectionState::Updating { version } = &h.connection {

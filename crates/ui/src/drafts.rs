@@ -1,6 +1,6 @@
 //! Drafts and scroll positions outlive individual route/component owners.
 mod list;
-pub(crate) mod persistence;
+pub mod persistence;
 use crate::presenter::*;
 use canban_types::Card;
 pub use list::screen;

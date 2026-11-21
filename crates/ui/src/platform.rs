@@ -1,7 +1,10 @@
 //! Platform-specific desktop host setup, window launch, external URL/path opening,
 //! and local machine copy helpers shared across macOS (`nsh-platform-macos`) and
 //! Linux (`nsh-platform-linux`).
+#[cfg(feature = "local-host")]
 use anyhow::{Context, Result, ensure};
+#[cfg(not(feature = "local-host"))]
+use anyhow::{Result, ensure};
 use std::{marker::PhantomData, sync::Mutex};
 
 #[derive(Clone)]
@@ -137,7 +140,11 @@ where
 ///   is unavailable or returns non-zero.
 pub fn open_external(target: &str) -> Result<()> {
     ensure!(!target.trim().is_empty(), "External target is empty");
-    #[cfg(target_os = "macos")]
+    #[cfg(not(feature = "local-host"))]
+    {
+        anyhow::bail!("Opening external targets requires the local-host feature")
+    }
+    #[cfg(all(feature = "local-host", target_os = "macos"))]
     {
         let status = canban_exec::raw_command("/usr/bin/open")
             .arg(target)
@@ -146,7 +153,7 @@ pub fn open_external(target: &str) -> Result<()> {
         ensure!(status.success(), "macOS could not open {target}");
         Ok(())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(feature = "local-host", not(target_os = "macos")))]
     {
         use std::process::Stdio;
         let xdg = canban_exec::command("xdg-open")

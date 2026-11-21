@@ -45,7 +45,7 @@ pub fn effective_hosts(ui: Ui) -> Vec<HostSummary> {
     if !from_snapshot.is_empty() {
         return from_snapshot;
     }
-    let active = ui.snapshot.with(canban_scheduler::active_count);
+    let active = ui.snapshot.with(crate::backend::active_agent_count);
     let projects = ui.snapshot.with(|s| s.projects.len());
     vec![HostSummary {
         id: "local".into(),
@@ -57,7 +57,7 @@ pub fn effective_hosts(ui: Ui) -> Vec<HostSummary> {
         server_id: None,
         connection: HostConnectionState::Connected {
             rtt_ms: 0,
-            api_version: canban_updater::DESKTOP_API,
+            api_version: crate::backend::desktop_api(),
             version: env!("CARGO_PKG_VERSION").into(),
             platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         },
@@ -101,27 +101,34 @@ pub fn close_overlays(ui: Ui) {
 }
 
 pub fn refresh_discovery(ui: Ui) {
-    if ui.discovery_loading.get_untracked() || crate::APP.get().is_none() {
-        return;
-    }
-    ui.discovery_loading.set(true);
-    ui.spawn(async move {
-        let res = blocking(canban_app_server::network::discover_all).await;
-        let _ = ui.discovery_loading.try_set(false);
-        if let Ok(cat) = res {
-            let _ = ui.discovery.try_set(cat);
+    #[cfg(feature = "local-host")]
+    {
+        if ui.discovery_loading.get_untracked() || !crate::backend::is_connected() {
+            return;
         }
-    });
+        ui.discovery_loading.set(true);
+        ui.spawn(async move {
+            let res = blocking(canban_app_server::network::discover_all).await;
+            let _ = ui.discovery_loading.try_set(false);
+            if let Ok(cat) = res {
+                let _ = ui.discovery.try_set(cat);
+            }
+        });
+    }
+    #[cfg(not(feature = "local-host"))]
+    {
+        let _ = ui;
+    }
 }
 
 pub fn reconnect_host(ui: Ui, host_id: Option<String>) {
-    if let Some(reg) = crate::HOSTS.get().cloned() {
+    if let Some(backend) = crate::backend::get().filter(|b| b.has_host_registry()) {
         ui.spawn(async move {
             let target = host_id.clone();
             let _ = blocking(move || {
-                reg.reconnect(target.as_deref());
-                reg.poll_remotes_once();
-                (reg.summaries(), reg.merged_snapshot())
+                backend.reconnect_host(target.as_deref());
+                backend.poll_remotes_once();
+                (backend.host_summaries(), backend.merged_snapshot())
             })
             .await
             .map(|(sums, snap_res)| {
@@ -208,14 +215,14 @@ pub fn update_host_daemon(ui: Ui, summary: HostSummary) {
         },
     );
 
-    if let Some(reg) = crate::HOSTS.get().cloned() {
+    if let Some(backend) = crate::backend::get().filter(|b| b.has_host_registry()) {
         ui.notify(format!("Updating Canban daemon on {host_name}…"));
         ui.spawn(async move {
             let hid = host_id.clone();
             let res = blocking(move || {
-                let rpc_res = reg.update_remote_daemon(&hid);
-                let sums = reg.summaries();
-                let snap = reg.merged_snapshot();
+                let rpc_res = backend.update_remote_daemon(&hid);
+                let sums = backend.host_summaries();
+                let snap = backend.merged_snapshot();
                 (rpc_res, sums, snap)
             })
             .await;
@@ -265,7 +272,7 @@ pub fn update_host_daemon(ui: Ui, summary: HostSummary) {
                 let target_ver = env!("CARGO_PKG_VERSION").to_owned();
                 let connected = HostConnectionState::Connected {
                     rtt_ms: 9,
-                    api_version: canban_updater::DESKTOP_API,
+                    api_version: crate::backend::desktop_api(),
                     version: target_ver.clone(),
                     platform: "linux-x86_64".into(),
                 };
@@ -307,33 +314,42 @@ pub fn open_host_settings(ui: Ui, host_id: String, section: &'static str) {
 }
 
 fn spawn_ssh_bootstrap_terminal(ui: Ui, ssh_target: &str, prefer_tailscale: bool, port: u16) {
-    let repo = std::env::var("CANBAN_UPDATE_REPOSITORY")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "jjyr/canban".into());
-    let script = canban_app_server::network::build_ssh_bootstrap_command(
-        ssh_target,
-        &repo,
-        prefer_tailscale,
-        port,
-    );
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    let title = ui
-        .snapshot
-        .with_untracked(|s| s.next_unique_terminal_title("Add machine"));
-    close_overlays(ui);
-    crate::terminals::launch_custom(
-        ui,
-        json!({
-            "host_id": "local",
-            "name": title,
-            "setup_argv": [shell, "-lc", script],
-        }),
-    );
-    ui.notify(format!(
-        "Opened interactive setup terminal for {}",
-        ssh_target.trim()
-    ));
+    #[cfg(feature = "local-host")]
+    {
+        let repo = std::env::var("CANBAN_UPDATE_REPOSITORY")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "jjyr/canban".into());
+        let script = canban_app_server::network::build_ssh_bootstrap_command(
+            ssh_target,
+            &repo,
+            prefer_tailscale,
+            port,
+        );
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+        let title = ui
+            .snapshot
+            .with_untracked(|s| s.next_unique_terminal_title("Add machine"));
+        close_overlays(ui);
+        crate::terminals::launch_custom(
+            ui,
+            json!({
+                "host_id": "local",
+                "name": title,
+                "setup_argv": [shell, "-lc", script],
+            }),
+        );
+        ui.notify(format!(
+            "Opened interactive setup terminal for {}",
+            ssh_target.trim()
+        ));
+    }
+    #[cfg(not(feature = "local-host"))]
+    {
+        let _ = (ssh_target, prefer_tailscale, port);
+        ui.operation_error
+            .set("SSH bootstrap requires the local-host feature".into());
+    }
 }
 
 pub(crate) fn status_tone(summary: &HostSummary) -> Tone {
@@ -1068,7 +1084,7 @@ fn finish_host_registration(
     feedback: Signal<String>,
     feedback_tone: Signal<Tone>,
 ) {
-    if crate::HOSTS.get().is_none() {
+    let Some(backend) = crate::backend::get().filter(|b| b.has_host_registry()) else {
         let sum = HostSummary {
             id: saved.id.clone(),
             name: saved.name.clone(),
@@ -1079,7 +1095,7 @@ fn finish_host_registration(
             server_id: Some(format!("srv-{}", saved.id)),
             connection: HostConnectionState::Connected {
                 rtt_ms: 14,
-                api_version: canban_updater::DESKTOP_API,
+                api_version: crate::backend::desktop_api(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 platform: "linux-x86_64".into(),
             },
@@ -1101,17 +1117,16 @@ fn finish_host_registration(
         close_overlays(ui);
         ui.notify(format!("Connected to {}", saved.name));
         return;
-    }
-    let reg = crate::HOSTS.get().unwrap().clone();
+    };
     busy.set(true);
     feedback.set(format!("Connecting to {}…", saved.name));
     feedback_tone.set(Tone::Neutral);
     ui.spawn(async move {
         let host_name = saved.name.clone();
         let res = blocking(move || {
-            let sum = reg.add_host(saved)?;
-            let snap = reg.merged_snapshot()?;
-            let all = reg.summaries();
+            let sum = backend.add_host(saved)?;
+            let snap = backend.merged_snapshot()?;
+            let all = backend.host_summaries();
             Ok::<_, anyhow::Error>((sum, snap, all))
         })
         .await;
@@ -1421,7 +1436,7 @@ fn connect_tailscale_tab(
                             selected_ts_ip.set(peer_ip.clone());
                             selected_ts_name.set(peer_name.clone());
                             ts_needs_bootstrap.set(false);
-                            if crate::APP.get().is_none() {
+                            if !crate::backend::is_connected() {
                                 finish_host_registration(
                                     ui,
                                     SavedHost {
@@ -1457,17 +1472,32 @@ fn connect_tailscale_tab(
                                 let ip_c = peer_ip.clone();
                                 let ssh_c = ssh_spec.clone();
                                 let res = blocking(move || {
-                                    let probe = canban_app_server::network::probe_tcp_host(
-                                        &format!("{ip_c}:{DEFAULT_DAEMON_PORT}"),
-                                        Duration::from_secs(2),
-                                    );
-                                    let ssh_pair =
-                                        canban_app_server::network::pair_via_ssh_noninteractive(
-                                            &ssh_c,
-                                            true,
-                                            DEFAULT_DAEMON_PORT,
+                                    #[cfg(feature = "local-host")]
+                                    {
+                                        let probe = canban_app_server::network::probe_tcp_host(
+                                            &format!("{ip_c}:{DEFAULT_DAEMON_PORT}"),
+                                            Duration::from_secs(2),
                                         );
-                                    (probe, ssh_pair)
+                                        let ssh_pair =
+                                            canban_app_server::network::pair_via_ssh_noninteractive(
+                                                &ssh_c,
+                                                true,
+                                                DEFAULT_DAEMON_PORT,
+                                            );
+                                        (probe, ssh_pair)
+                                    }
+                                    #[cfg(not(feature = "local-host"))]
+                                    {
+                                        let _ = (ip_c, ssh_c);
+                                        (
+                                            Err::<serde_json::Value, anyhow::Error>(anyhow::anyhow!(
+                                                "Host probing requires the local-host feature"
+                                            )),
+                                            Err::<serde_json::Value, anyhow::Error>(anyhow::anyhow!(
+                                                "SSH pairing requires the local-host feature"
+                                            )),
+                                        )
+                                    }
                                 })
                                 .await;
                                 let _ = busy.try_set(false);
@@ -1740,7 +1770,7 @@ fn connect_ssh_tab(
                         }
                     };
                     let prefer_ts = ssh_prefer_tailscale.get_untracked();
-                    if crate::APP.get().is_none() {
+                    if !crate::backend::is_connected() {
                         finish_host_registration(
                             ui,
                             SavedHost {
@@ -1768,11 +1798,21 @@ fn connect_ssh_tab(
                     ui.spawn(async move {
                         let t_clone = target.clone();
                         let pair_res = blocking(move || {
-                            canban_app_server::network::pair_via_ssh_noninteractive(
-                                &t_clone,
-                                prefer_ts,
-                                DEFAULT_DAEMON_PORT,
-                            )
+                            #[cfg(feature = "local-host")]
+                            {
+                                canban_app_server::network::pair_via_ssh_noninteractive(
+                                    &t_clone,
+                                    prefer_ts,
+                                    DEFAULT_DAEMON_PORT,
+                                )
+                            }
+                            #[cfg(not(feature = "local-host"))]
+                            {
+                                let _ = (t_clone, prefer_ts);
+                                Err::<serde_json::Value, anyhow::Error>(anyhow::anyhow!(
+                                    "SSH pairing requires the local-host feature"
+                                ))
+                            }
                         })
                         .await;
                         let _ = busy.try_set(false);
@@ -1917,9 +1957,9 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
     let saved_map = signal(Vec::<SavedHost>::new());
 
     let reload_saved = move || {
-        if let Some(reg) = crate::HOSTS.get() {
-            saved_map.set(reg.saved_hosts());
-            let mut sums = reg.summaries();
+        if let Some(backend) = crate::backend::get().filter(|b| b.has_host_registry()) {
+            saved_map.set(backend.saved_hosts());
+            let mut sums = backend.host_summaries();
             if let Some(local) = sums
                 .iter_mut()
                 .find(|h| h.is_local && h.last_synced_at.is_none())
@@ -2020,8 +2060,12 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
                             if is_enabled { "Disable" } else { "Enable" },
                             Variant::Quiet,
                             move |_| {
-                                if let Some(reg) = crate::HOSTS.get() {
-                                    if let Err(e) = reg.set_host_enabled(&hid_toggle, !is_enabled) {
+                                if let Some(backend) =
+                                    crate::backend::get().filter(|b| b.has_host_registry())
+                                {
+                                    if let Err(e) =
+                                        backend.set_host_enabled(&hid_toggle, !is_enabled)
+                                    {
                                         ui.operation_error.set(format!("{e:#}"));
                                     } else {
                                         reload_saved();
@@ -2040,8 +2084,10 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
                         renaming_id.set(Some(hid_edit.clone()));
                     }))
                     .child(compact_action("Remove", Variant::Danger, move |_| {
-                        if let Some(reg) = crate::HOSTS.get() {
-                            if let Err(e) = reg.remove_host(&hid_remove) {
+                        if let Some(backend) =
+                            crate::backend::get().filter(|b| b.has_host_registry())
+                        {
+                            if let Err(e) = backend.remove_host(&hid_remove) {
                                 ui.operation_error.set(format!("{e:#}"));
                             } else {
                                 if ui.settings_host.get_untracked() == hid_remove {
@@ -2118,8 +2164,10 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
                         )
                         .child(compact_action("Save", Variant::Primary, move |_| {
                             let next = rename_draft.get_untracked();
-                            if let Some(reg) = crate::HOSTS.get() {
-                                match reg.rename_host(&save_id, &next) {
+                            if let Some(backend) =
+                                crate::backend::get().filter(|b| b.has_host_registry())
+                            {
+                                match backend.rename_host(&save_id, &next) {
                                     Ok(()) => {
                                         renaming_id.set(None);
                                         reload_saved();

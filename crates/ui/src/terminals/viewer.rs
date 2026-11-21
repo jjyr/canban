@@ -139,7 +139,7 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
         };
         #[cfg(target_os = "macos")]
         {
-            let native_view = if crate::APP.get().is_none() {
+            let native_view = if !crate::backend::is_connected() {
                 native("canban/terminal")
                     .prop("theme", crate::utilities::terminal_theme)
                     .prop("font", move || crate::utilities::terminal_font(ui))
@@ -251,7 +251,7 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                     && ui.worktree_remove_confirm.get().is_none()
                     && ui.project_delete_confirm.get().is_none(),
             };
-            if crate::APP.get().is_none() {
+            if !crate::backend::is_connected() {
                 return canban_terminal::linux::preview_terminal(
                     concat!(
                         "\x1b[1;36mCanban native Terminal\x1b[0m · Gallery preview (no Core connection)\r\n",

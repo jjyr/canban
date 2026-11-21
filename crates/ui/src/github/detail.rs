@@ -6,7 +6,7 @@ pub fn load(ui: Ui, refresh: bool) {
     let Some(r) = b.reference.get_untracked() else {
         return;
     };
-    let Some(app) = crate::APP.get().cloned() else {
+    let Some(backend) = crate::backend::get() else {
         return;
     };
     let section = b.section.get_untracked();
@@ -22,7 +22,7 @@ pub fn load(ui: Ui, refresh: bool) {
     ui.spawn(async move {
         let result = blocking(move || -> anyhow::Result<(Value, Value)> {
             // Resolve the displayed version from shared cache before loading any section.
-            let overview = app.call(
+            let overview = backend.call_local(
                 "github.detail",
                 json!({"reference": r, "section": "overview", "refresh": refresh}),
             )?;
@@ -35,7 +35,7 @@ pub fn load(ui: Ui, refresh: bool) {
             let detail = if section == "overview" {
                 overview.clone()
             } else {
-                app.call(
+                backend.call_local(
                     "github.detail",
                     json!({"reference": r, "section": section, "page": page, "refresh": refresh, "head": head}),
                 )?
@@ -828,7 +828,7 @@ fn github_comment_delete_confirm(
                                     return;
                                 };
                                 b.delete_error.set(String::new());
-                                if crate::APP.get().is_none() {
+                                if !crate::backend::is_connected() {
                                     b.detail.update(|det| {
                                         if let Some(arr) = det["data"].as_array_mut() {
                                             arr.retain(|x| x["id"].as_u64() != Some(comment_id));
@@ -944,7 +944,7 @@ fn github_comment_editor(
                             return;
                         };
                         b.edit_error.set(String::new());
-                        if crate::APP.get().is_none() {
+                        if !crate::backend::is_connected() {
                             let now_iso = "2026-04-19T12:00:00Z";
                             b.detail.update(|det| {
                                 if let Some(arr) = det["data"].as_array_mut()

@@ -3630,6 +3630,7 @@ mod tests {
         assert_eq!(percentile(&samples, 90), Some(9));
     }
 
+    #[cfg(feature = "local-host")]
     #[test]
     fn local_dst_boundaries_follow_civil_days() {
         if std::env::var_os("CANBAN_INSIGHTS_DST_CHILD").is_none() {

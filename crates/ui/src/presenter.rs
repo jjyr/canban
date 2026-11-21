@@ -466,7 +466,7 @@ impl Ui {
             card_target: signal(String::new()),
             card_submit: signal(0),
             comment_submit: signal(0),
-            update: signal(json!({"build":canban_updater::Build::current(),"state":{}})),
+            update: signal(json!({"build":crate::backend::build_info(),"state":{}})),
             update_loading: signal(false),
             update_busy: signal(false),
             task_submit: signal(0),
@@ -520,10 +520,9 @@ impl Ui {
             report_inflight: stored(BTreeSet::new()),
             parsed_markdown: stored(crate::cache::LruCache::new(PARSED_MARKDOWN_CACHE_CAP)),
             idle_minutes: signal(
-                crate::APP
-                    .get()
-                    .map(|a| a.config().scheduler.idle_minutes)
-                    .unwrap_or(15),
+                crate::backend::config_for_host("local")
+                    .scheduler
+                    .idle_minutes,
             ),
             overview_selection: signal(String::new()),
             overview_closed: signal(false),
@@ -534,39 +533,18 @@ impl Ui {
             editing_comment: signal(None),
             deleting_comment: signal(None),
             max_agents: signal(
-                crate::APP
-                    .get()
-                    .map(|a| a.config().scheduler.max_agents)
-                    .unwrap_or(8),
+                crate::backend::config_for_host("local")
+                    .scheduler
+                    .max_agents,
             ),
-            terminal_env_mode: signal(
-                crate::APP
-                    .get()
-                    .map(|a| a.config().terminal_env_mode)
-                    .unwrap_or_default(),
-            ),
+            terminal_env_mode: signal(crate::backend::config_for_host("local").terminal_env_mode),
             profiles: signal({
-                let cfg = crate::APP.get().map(|app| app.config()).unwrap_or_default();
+                let cfg = crate::backend::config_for_host("local");
                 ordered_enabled_profiles(&cfg.profiles, &cfg.default_agent)
             }),
-            all_profiles: signal(
-                crate::APP
-                    .get()
-                    .map(|app| app.config().profiles)
-                    .unwrap_or_default(),
-            ),
-            default_agent: signal(
-                crate::APP
-                    .get()
-                    .map(|app| app.config().default_agent)
-                    .unwrap_or_else(|| "developer".into()),
-            ),
-            onboarded: signal(
-                crate::APP
-                    .get()
-                    .map(|app| app.config().onboarded)
-                    .unwrap_or(false),
-            ),
+            all_profiles: signal(crate::backend::config_for_host("local").profiles),
+            default_agent: signal(crate::backend::config_for_host("local").default_agent),
+            onboarded: signal(crate::backend::config_for_host("local").onboarded),
             agent_catalog: signal(Value::Null),
             agent_catalog_loading: signal(false),
             agent_config_epoch: signal(0),
@@ -806,7 +784,7 @@ impl Ui {
             .with(|cache| cache.insert((card_id, path), CachedReportBody { version, body }));
     }
     pub fn prefetch_active_reports(self) {
-        if crate::APP.get().is_none() {
+        if !crate::backend::is_connected() {
             return;
         }
         let project = self.project.get_untracked();
@@ -973,7 +951,7 @@ impl Ui {
     }
 
     pub fn ensure_card_timeline(self, card_id: String) {
-        if card_id.is_empty() || crate::APP.get().is_none() {
+        if card_id.is_empty() || !crate::backend::is_connected() {
             return;
         }
         let existing = self
@@ -1099,7 +1077,7 @@ impl Ui {
     }
 
     pub fn load_older_card_timeline(self, card_id: String) {
-        if card_id.is_empty() || crate::APP.get().is_none() {
+        if card_id.is_empty() || !crate::backend::is_connected() {
             return;
         }
         let existing = self
@@ -1158,7 +1136,7 @@ impl Ui {
     }
 
     pub fn load_card_timeline_around(self, card_id: String, target_seq: u64) {
-        if card_id.is_empty() || crate::APP.get().is_none() {
+        if card_id.is_empty() || !crate::backend::is_connected() {
             return;
         }
         let existing = self
@@ -1290,7 +1268,7 @@ pub fn refresh(ui: Ui) {
         ui.refresh_requested.set(true);
         return;
     }
-    let Some(app) = crate::APP.get().cloned() else {
+    let Some(backend) = crate::backend::get() else {
         ui.status
             .set("Gallery preview: no AppServer connected".into());
         return;
@@ -1305,7 +1283,7 @@ pub fn refresh(ui: Ui) {
             let snapshot = crate::merged_snapshot()?;
             let summaries = snapshot_summaries(&snapshot);
             let saved_project = if restore_project {
-                app.call("utilities.state", json!({}))?["preferences"]["last_project"]
+                backend.call_local("utilities.state", json!({}))?["preferences"]["last_project"]
                     .as_str()
                     .map(str::to_owned)
             } else {
@@ -1425,7 +1403,7 @@ pub fn dispatch_complete(
         ));
         return;
     }
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         after(Err("Gallery preview: no AppServer connected".into()));
         return;
     }
@@ -1467,10 +1445,8 @@ pub fn dispatch_complete(
         method == "config.agents.save" && params["op"].as_str() == Some("set_terminal_env_mode");
     let source = ui.location();
     let active_project = ui.project.get_untracked();
-    let target_host = crate::HOSTS
-        .get()
-        .map(|hosts| hosts.resolve_target_host(method, &params, Some(active_project.as_str())))
-        .unwrap_or_else(|| "local".into());
+    let target_host =
+        crate::backend::resolve_target_host(method, &params, Some(active_project.as_str()));
     let cfg_host = ui.effective_config_host();
     let config_only = submission::config_only(method);
     let immediate = submission::immediate(method);
@@ -1768,7 +1744,7 @@ pub fn move_card(ui: Ui, card_id: &str, target: &str) {
     if let Some(c) = card {
         let prev = c.clone();
         let target_stage = target.to_owned();
-        if crate::APP.get().is_none() {
+        if !crate::backend::is_connected() {
             ui.snapshot.update(|s| {
                 if let Some(cur) = s.cards.iter_mut().find(|x| x.id == prev.id) {
                     cur.stage = target_stage;
@@ -1815,7 +1791,7 @@ pub fn hold_auto_merge(ui: Ui, card_id: &str, fallback_revision: u64, hold: bool
         .as_ref()
         .map(|c| c.revision)
         .unwrap_or(fallback_revision);
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         ui.snapshot.update(|s| {
             if let Some(cur) = s.cards.iter_mut().find(|x| x.id == card_id) {
                 cur.hold_auto_merge = hold;
@@ -1856,7 +1832,7 @@ pub fn load_text(ui: Ui, method: &'static str, params: Value) {
     let generation = ui.output_request.get_untracked() + 1;
     ui.output_request.set(generation);
     ui.output.set("Loading…".into());
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         ui.status
             .set("Gallery preview: no AppServer connected".into());
         return;
@@ -1897,7 +1873,7 @@ pub fn load_text(ui: Ui, method: &'static str, params: Value) {
 }
 
 pub fn open_resource(ui: Ui, card_id: String, path: String) {
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         ui.status
             .set("Gallery preview: no AppServer connected".into());
         return;

@@ -91,7 +91,7 @@ pub fn init(ui: Ui) {
     });
 }
 fn refresh(ui: Ui) {
-    let Some(app) = crate::APP.get().cloned() else {
+    let Some(backend) = crate::backend::get() else {
         return;
     };
     if ui.utility_loading.get_untracked() {
@@ -100,7 +100,7 @@ fn refresh(ui: Ui) {
     ui.utility_loading.set(true);
     let epoch = ui.utility_epoch.get_untracked();
     ui.spawn(async move {
-        let r = blocking(move || app.call("utilities.state", json!({}))).await;
+        let r = blocking(move || backend.call_local("utilities.state", json!({}))).await;
         ui.utility_loading.set(false);
         if epoch != ui.utility_epoch.get_untracked() {
             return;
@@ -131,7 +131,7 @@ fn apply_preferences_patch(state: &mut Value, patch: &Value) {
 }
 
 pub fn configure_preferences(ui: Ui, patch: Value) {
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         ui.utility.update(|v| apply_preferences_patch(v, &patch));
         return;
     }
@@ -351,7 +351,7 @@ pub fn terminal_settings(ui: Ui) -> impl IntoElement {
     ))
 }
 pub fn usage(ui: Ui, host_id: String, force: bool) {
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         if force {
             ui.notify("Subscription usage refreshed");
         }
@@ -414,7 +414,7 @@ pub fn toggle_awake(ui: Ui) {
         return;
     }
     let on = ui.utility.with_untracked(|v| v["awake"] == true);
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         ui.utility.update(|v| v["awake"] = json!(!on));
         return;
     }

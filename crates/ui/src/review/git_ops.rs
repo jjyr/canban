@@ -66,7 +66,7 @@ fn start_pull_refresh_hold(ui: Ui, target: super::PullRefreshTarget) {
 /// so externally created Git worktrees appear without blocking or clearing cached options.
 fn refresh_worktrees_in_background(ui: Ui) {
     let st = ui.review_state;
-    if crate::APP.get().is_none()
+    if !crate::backend::is_connected()
         || st.refs_loading.get_untracked()
         || untracked(|| ui.is_active_project_offline())
     {
@@ -187,7 +187,7 @@ pub fn load_branch_log(ui: Ui, branch: String, append: bool) {
         0
     };
 
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         // Gallery fallback: filter static fixture commits in memory (with 40-item pagination).
         let q = query.trim().to_lowercase();
         let all: Vec<Value> = st.refs_data.with_untracked(|v| {
@@ -287,7 +287,7 @@ pub fn pull_refresh(ui: Ui, target: super::PullRefreshTarget) {
     ticket_sig.set(ticket);
 
     if untracked(|| ui.is_active_project_offline())
-        || (crate::APP.get().is_some() && ui.current_project().is_none())
+        || (crate::backend::is_connected() && ui.current_project().is_none())
     {
         // Briefly toggle `true -> false` across a frame so NSH clears any native
         // `pulled_to_refresh` latch and smoothly bounces back.
@@ -304,7 +304,7 @@ pub fn pull_refresh(ui: Ui, target: super::PullRefreshTarget) {
 
     start_pull_refresh_hold(ui, target);
 
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         match target {
             super::PullRefreshTarget::Commits => {
                 let branch = st.log_branch.get_untracked();
@@ -514,7 +514,7 @@ fn run_sync(ui: Ui, method: &'static str, mut params: Value) {
 }
 
 pub fn run_fetch(ui: Ui) {
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         ui.notify("Fetched from origin (Gallery preview)");
         return;
     }
@@ -525,7 +525,7 @@ pub fn run_fetch(ui: Ui) {
 }
 
 pub fn run_pull(ui: Ui) {
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         ui.review_state.refs_data.update(|v| {
             v["behind"] = json!(0);
         });
@@ -539,7 +539,7 @@ pub fn run_pull(ui: Ui) {
 }
 
 pub fn run_push(ui: Ui) {
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         ui.review_state.refs_data.update(|v| {
             v["ahead"] = json!(0);
         });
@@ -572,7 +572,7 @@ fn change_status(ui: Ui, method: &'static str, params: Value) {
 
 pub fn run_stage(ui: Ui, paths: Vec<String>, all: bool) {
     let st = ui.review_state;
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         let update_fn = |v: &mut Value| {
             let counts = v["status_files"].as_array_mut().map(|arr| {
                 for item in arr.iter_mut() {
@@ -610,7 +610,7 @@ pub fn run_stage(ui: Ui, paths: Vec<String>, all: bool) {
 
 pub fn run_unstage(ui: Ui, paths: Vec<String>, all: bool) {
     let st = ui.review_state;
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         let update_fn = |v: &mut Value| {
             let counts = v["status_files"].as_array_mut().map(|arr| {
                 for item in arr.iter_mut() {
@@ -654,7 +654,7 @@ pub fn confirm_discard(ui: Ui) {
     let Some(paths) = st.discard_confirm.get_untracked() else {
         return;
     };
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         st.discard_confirm.set(None);
         st.refs_data.update(|v| {
             if let Some(arr) = v["status_files"].as_array_mut() {
@@ -708,7 +708,7 @@ pub fn run_commit(ui: Ui, and_push: bool) {
         .with_untracked(|v| v["dirty_count"].as_u64().unwrap_or(0));
     let stage_all = !amend && staged_count == 0 && dirty_count > 0;
 
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         st.commit_summary.set(String::new());
         st.commit_description.set(String::new());
         st.commit_amend.set(false);

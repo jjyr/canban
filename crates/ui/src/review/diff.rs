@@ -91,11 +91,11 @@ pub fn workbench(ui: Ui) -> impl IntoElement {
     };
     st.viewport.replace(Some(viewport));
     let data: Memo<Arc<Value>> = computed(move || {
-        let mut value = if crate::APP.get().is_none()
+        let mut value = if !crate::backend::is_connected()
             && let Some(p) = ui.review.get()
         {
             super::preview_to_compare_json(&p)
-        } else if crate::APP.get().is_none()
+        } else if !crate::backend::is_connected()
             && !ui.card.get().is_empty()
             && ui.current_card().is_some_and(|c| c.delivery.is_some())
         {
@@ -1965,7 +1965,7 @@ fn remote_pr_comment_editor(ui: Ui, comment_id: u64, pr_target: Option<Value>) -
                             return;
                         }
                         st.remote_edit_error.set(String::new());
-                        if crate::APP.get().is_none() {
+                        if !crate::backend::is_connected() {
                             st.compare_data.update(|cd| {
                                 if let Some(arr) = cd["threads"].as_array_mut()
                                     && let Some(item) =
@@ -2087,7 +2087,7 @@ fn remote_pr_comment_delete_confirm(ui: Ui, comment_id: u64, pr_target: Option<V
                                     return;
                                 }
                                 st.remote_delete_error.set(String::new());
-                                if crate::APP.get().is_none() {
+                                if !crate::backend::is_connected() {
                                     st.compare_data.update(|cd| {
                                         if let Some(arr) = cd["threads"].as_array_mut() {
                                             arr.retain(|x| x["id"].as_u64() != Some(comment_id));

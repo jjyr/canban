@@ -226,7 +226,7 @@ pub fn set_default_workflow(ui: Ui) {
         ));
         return;
     }
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         let project_name = ui.current_project().map(|p| p.name);
         let draft_files: Vec<canban_types::WorkflowTemplateFile> = state
             .drafts
@@ -290,7 +290,7 @@ pub fn set_default_workflow(ui: Ui) {
 }
 
 pub fn reset_default_workflow(ui: Ui) {
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         ui.snapshot.update(|s| {
             s.workflow_templates
                 .retain(|t| t.id != canban_types::DEFAULT_WORKFLOW_TEMPLATE_ID);
@@ -311,7 +311,7 @@ fn project_source_stamp(ui: Ui, project: &str) -> SourceStamp {
     })
 }
 pub(crate) fn load(ui: Ui, discard: bool) {
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         return;
     }
     let project = ui.project.get_untracked();
@@ -388,7 +388,7 @@ pub(crate) fn save(ui: Ui) {
         return;
     }
     state.error.set(String::new());
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         for (fname, raw) in &draft.sources {
             match canban_workflow_engine::source::parse(raw) {
                 Ok(doc) => match doc.compile() {
@@ -468,7 +468,7 @@ pub fn edit_agent(ui: Ui) {
     let state = ui.workflows;
     let profile = crate::sessions::default_profile(ui);
     state.profile.set(profile.clone());
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         state.agent.set(true);
         return;
     }
@@ -1082,7 +1082,7 @@ fn show_history(ui: Ui) {
             .set("Save this Workflow before viewing its history.".into());
         return;
     };
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         return;
     }
     ui.spawn(async move {

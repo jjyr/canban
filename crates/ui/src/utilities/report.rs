@@ -2,8 +2,8 @@ use crate::presenter::*;
 pub fn diagnostics() -> String {
     format!(
         "Canban {}\nCommit: {}\nPlatform: {} {}",
-        canban_updater::Build::current().version,
-        canban_updater::Build::current().commit,
+        crate::backend::build_version(),
+        crate::backend::build_commit(),
         std::env::consts::OS,
         std::env::consts::ARCH
     )
@@ -52,7 +52,7 @@ mod tests {
         assert!(!u.contains('\n'));
         assert!(u.contains(&format!(
             "Canban%20{}%0ACommit%3A%20",
-            canban_updater::Build::current().version
+            crate::backend::build_version()
         )));
         assert!(u.contains("%0APlatform%3A%20"));
         assert!(body().contains("## Canban version\n\nCanban "));

@@ -575,7 +575,7 @@ fn render_narrative(
     let delete_error = signal(String::new());
     if cached_report.is_none()
         && let Some(path) = report_path
-        && crate::APP.get().is_some()
+        && crate::backend::is_connected()
     {
         let card = card.clone();
         ui.spawn(async move {
@@ -829,7 +829,7 @@ fn render_narrative(
                                     .child(
                                         compact_action("Delete", Variant::Danger, move |_| {
                                             delete_error.set(String::new());
-                                            if crate::APP.get().is_none() {
+                                            if !crate::backend::is_connected() {
                                                 let card_id = confirm_card.clone();
                                                 let cid = confirm_cid.clone();
                                                 ui.card_timelines.update(|timelines| {
@@ -924,7 +924,7 @@ fn render_narrative(
                             ui.editing_comment.set(None);
                             return;
                         }
-                        if crate::APP.get().is_none() {
+                        if !crate::backend::is_connected() {
                             body.set(updated.clone());
                             let card_id = save_card.clone();
                             let cid = save_cid.clone();

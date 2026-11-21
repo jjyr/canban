@@ -606,15 +606,7 @@ pub(crate) fn terminal_env_section(ui: Ui) -> impl IntoElement {
 pub fn screen(ui: Ui) -> impl IntoElement {
     let active_host_home = move || {
         let hid = ui.settings_host.get();
-        if let Some(reg) = crate::HOSTS.get() {
-            reg.home_for(&hid).to_string_lossy().into_owned()
-        } else if let Some(app) = crate::APP.get() {
-            app.home.to_string_lossy().into_owned()
-        } else if hid == "local" || hid.is_empty() {
-            "/preview/.canban".into()
-        } else {
-            "/home/builder/.canban".into()
-        }
+        crate::backend::home_for(&hid)
     };
     let config_path = format!("{}/config/agents.json", untracked(active_host_home));
 

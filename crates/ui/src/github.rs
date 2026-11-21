@@ -50,7 +50,7 @@ pub fn open_url(ui: Ui, url: String) {
         ui.operation_error.set("Invalid GitHub URL".into());
         return;
     }
-    if crate::APP.get().is_none() {
+    if !crate::backend::is_connected() {
         ui.notify(format!("Fixture: opens {url}"));
         return;
     }
@@ -578,13 +578,13 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
             if epoch.try_get() != Some(generation) {
                 return;
             }
-            let Some(app) = crate::APP.get().cloned() else {
+            let Some(backend) = crate::backend::get() else {
                 loading.try_set(false);
                 return;
             };
             ui.spawn(async move {
                 let result = blocking(move || {
-                    app.call(
+                    backend.call_local(
                         "github.issue.search",
                         json!({"project_id":project,"query":query,"kind":search_kind}),
                     )

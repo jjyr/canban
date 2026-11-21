@@ -177,7 +177,7 @@ impl Reader {
                     return;
                 };
                 self.writing.set(true);
-                if crate::APP.get().is_none() {
+                if !crate::backend::is_connected() {
                     ui.snapshot.update(|s| {
                         let project = s
                             .cards
