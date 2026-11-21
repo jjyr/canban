@@ -1410,11 +1410,23 @@ pub fn Gallery() -> impl IntoElement {
             | "insights-weekly"
             | "insights-agents-model"
             | "insights-empty"
-            | "insights-short-history")
+            | "insights-short-history"
+            | "insights-loading")
     ) {
         canban_ui::frame::configure_window_chrome();
         let scene_name = std::env::var("CANBAN_GALLERY_SCENE").unwrap_or_default();
-        if scene_name == "insights-empty" {
+        ui.insights.preview_loading.set(false);
+        ui.insights.loading.set(false);
+        if scene_name == "insights-loading" {
+            let (snap, _events) = fixtures::insights();
+            ui.snapshot.set(snap);
+            ui.insights.events.set(std::rc::Rc::new(Vec::new()));
+            ui.insights.activity.set(std::rc::Rc::new(
+                canban_ui::insights::model::ActivityInput::default(),
+            ));
+            ui.insights.preview_loading.set(true);
+            ui.insights.loading.set(true);
+        } else if scene_name == "insights-empty" {
             let mut empty = canban_types::Snapshot::default();
             empty
                 .projects
@@ -3211,6 +3223,8 @@ pub fn Gallery() -> impl IntoElement {
                 .child(action("Insights", Variant::Quiet, move |_| {
                     let (snap, events) = fixtures::insights();
                     ui.snapshot.set(snap);
+                    ui.insights.preview_loading.set(false);
+                    ui.insights.loading.set(false);
                     ui.insights.events.set(std::rc::Rc::new(events));
                     ui.insights
                         .activity
@@ -3236,6 +3250,21 @@ pub fn Gallery() -> impl IntoElement {
                             ..Default::default()
                         },
                     ]);
+                    ui.project.set("gallery-project".into());
+                    ui.insights.scope_project.set(String::new());
+                    scene.set("workspace".into());
+                    ui.navigate("insights");
+                }))
+                .child(action("Insights · Loading", Variant::Quiet, move |_| {
+                    let (snap, _) = fixtures::insights();
+                    ui.snapshot.set(snap);
+                    ui.insights.events.set(std::rc::Rc::new(Vec::new()));
+                    ui.insights.activity.set(std::rc::Rc::new(
+                        canban_ui::insights::model::ActivityInput::default(),
+                    ));
+                    ui.insights.anchor_ms.set(Some(fixtures::INSIGHTS_NOW));
+                    ui.insights.preview_loading.set(true);
+                    ui.insights.loading.set(true);
                     ui.project.set("gallery-project".into());
                     ui.insights.scope_project.set(String::new());
                     scene.set("workspace".into());

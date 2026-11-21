@@ -13,11 +13,11 @@ use canban_ui_kit::{tokens::*, *};
 use model::{
     ActivityFetchPlan, ActivityInput, ActivityMetric, AgentGroup, Comparison, Dashboard,
     DayActivityRow, DayBucket, DurationSample, HeatmapMetric, ModelAgentStat, ProfileStat,
-    ProjectSort, RangeWindow, TimelineLaneKind, ViewOptions, format_delta_pct,
-    format_duration_compact, format_duration_delta, percentile,
+    ProjectSort, RangeWindow, TimelineLaneKind, ViewOptions, format_duration_compact,
+    format_duration_delta, percentile,
 };
 use nsh_core::{
-    element::{AdaptiveColor, rgb},
+    element::{AdaptiveColor, ImageSrc, rgb},
     prelude::*,
 };
 use std::collections::{BTreeMap, HashMap};
@@ -36,6 +36,19 @@ pub struct ActivityCacheKey {
     pub clock_minute: u64,
     pub generation: u64,
     pub want_annual: bool,
+    pub activity_flush_seq: u64,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct LoadedInsights {
+    pub scope: String,
+    pub range: RangeWindow,
+    pub selected_date: Option<chrono::NaiveDate>,
+    pub comparison: Comparison,
+    pub events: Rc<Vec<canban_types::Event>>,
+    pub activity: Rc<ActivityInput>,
+    pub annual_loaded: bool,
+    pub now_ms: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -51,9 +64,8 @@ pub struct State {
     pub agent_group: Signal<AgentGroup>,
     pub trend_days: Signal<i64>,
     pub exclude_initial_sync: Signal<bool>,
+    pub timeline_full_24h: Signal<bool>,
     pub scroll: Signal<Option<ElementRef>>,
-    pub annual_width: Signal<f32>,
-    pub timeline_width: Signal<f32>,
     pub project_sort: Signal<ProjectSort>,
     pub drilldown: Signal<String>,
     pub timing_tab: Signal<String>,
@@ -61,12 +73,16 @@ pub struct State {
     /// Optional fixed timestamp (ms) for deterministic Gallery/test rendering; `None` uses live clock.
     pub anchor_ms: Signal<Option<u64>>,
     pub events: Signal<Rc<Vec<canban_types::Event>>>,
-    pub events_loading: Signal<bool>,
     pub events_key: Signal<Option<(String, u64)>>,
     pub activity: Signal<Rc<ActivityInput>>,
-    pub activity_loading: Signal<bool>,
     pub activity_key: Signal<Option<ActivityCacheKey>>,
-    pub annual_activity_key: Signal<Option<(String, String)>>,
+    pub annual_activity_key: Signal<Option<(String, String, u64, u64)>>,
+    pub request_seq: Signal<u64>,
+    pub loading: Signal<bool>,
+    pub heatmap_loading: Signal<bool>,
+    pub loaded_data: Signal<Option<LoadedInsights>>,
+    pub preview_loading: Signal<bool>,
+    inflight_key: Signal<Option<ActivityCacheKey>>,
 }
 
 impl Default for State {
@@ -88,27 +104,25 @@ impl State {
             agent_group: signal(AgentGroup::Profile),
             trend_days: signal(14),
             exclude_initial_sync: signal(true),
+            timeline_full_24h: signal(false),
             scroll: signal(None),
-            annual_width: signal(0.),
-            timeline_width: signal(0.),
             project_sort: signal(ProjectSort::Time),
             drilldown: signal(String::new()),
             timing_tab: signal(String::new()),
             timing_page: signal(0),
             anchor_ms: signal(None),
             events: signal(Rc::new(Vec::new())),
-            events_loading: signal(false),
             events_key: signal(None),
             activity: signal(Rc::new(ActivityInput::default())),
-            activity_loading: signal(false),
             activity_key: signal(None),
             annual_activity_key: signal(None),
+            request_seq: signal(0),
+            loading: signal(false),
+            heatmap_loading: signal(false),
+            loaded_data: signal(None),
+            preview_loading: signal(false),
+            inflight_key: signal(None),
         }
-    }
-
-    pub fn timeline_width_px(&self) -> f32 {
-        let w = self.timeline_width.get();
-        if w > 20.0 { w } else { 900.0 }
     }
 }
 
@@ -116,69 +130,34 @@ fn has_backend() -> bool {
     crate::backend::is_connected()
 }
 
-pub fn refresh_events(ui: Ui) {
-    if !has_backend() || ui.page.get_untracked() != "insights" {
-        return;
-    }
-    let scope = ui.insights.scope_project.get_untracked();
-    let generation = ui.index.with_untracked(|idx| idx.generation);
-    let key = (scope.clone(), generation);
-    if ui.insights.events_key.get_untracked().as_ref() == Some(&key)
-        || ui.insights.events_loading.get_untracked()
-    {
-        return;
-    }
-    ui.insights.events_loading.set(true);
-    ui.spawn(async move {
-        let scope_req = scope.clone();
-        let fetched = blocking(move || -> Vec<canban_types::Event> {
-            let parse_events = |val: serde_json::Value| -> Vec<canban_types::Event> {
-                val["events"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| {
-                                serde_json::from_value::<canban_types::Event>(v.clone()).ok()
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            };
-            if !scope_req.is_empty() {
-                crate::routed_call(
-                    "insights.events",
-                    serde_json::json!({"project_id": scope_req}),
-                    Some(scope_req.as_str()),
-                )
-                .map(parse_events)
-                .unwrap_or_default()
-            } else {
-                let mut all = Vec::new();
-                for (_host, res) in crate::call_all_hosts("insights.events", serde_json::json!({}))
-                {
-                    if let Ok(val) = res {
-                        all.extend(parse_events(val));
-                    }
-                }
-                all
-            }
-        })
-        .await;
-        ui.insights.events_loading.set(false);
-        if let Ok(events) = fetched {
-            batch(move || {
-                ui.insights.events.set(Rc::new(events));
-                ui.insights.events_key.set(Some(key));
-            });
-            let current_scope = ui.insights.scope_project.get_untracked();
-            let current_gen = ui.index.with_untracked(|idx| idx.generation);
-            if ui.page.get_untracked() == "insights"
-                && (current_scope != scope || current_gen != generation)
-            {
-                refresh_events(ui);
+fn fetch_events_for_scope(scope: &str) -> Vec<canban_types::Event> {
+    let parse_events = |val: serde_json::Value| -> Vec<canban_types::Event> {
+        val["events"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| serde_json::from_value::<canban_types::Event>(v.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    if !scope.is_empty() {
+        crate::routed_call(
+            "insights.events",
+            serde_json::json!({"project_id": scope}),
+            Some(scope),
+        )
+        .map(parse_events)
+        .unwrap_or_default()
+    } else {
+        let mut all = Vec::new();
+        for (_host, res) in crate::call_all_hosts("insights.events", serde_json::json!({})) {
+            if let Ok(val) = res {
+                all.extend(parse_events(val));
             }
         }
-    });
+        all
+    }
 }
 
 fn fetch_merged_segments(from_ms: u64, to_ms: u64, scope: &str) -> Vec<ActivitySegment> {
@@ -285,7 +264,9 @@ fn fetch_merged_buckets(boundaries: &[u64], scope: &str) -> Vec<ActivityBucket> 
     merge_bucket_lists(per_host, boundaries)
 }
 
-pub fn refresh_activity(ui: Ui) {
+/// Coordinated non-blocking loader fetching events, period/baseline activity,
+/// and optional annual buckets in a single background pass with sequence fencing.
+pub fn refresh_data(ui: Ui) {
     if !has_backend() || ui.page.get_untracked() != "insights" {
         return;
     }
@@ -306,6 +287,10 @@ pub fn refresh_activity(ui: Ui) {
         .date_naive()
         .to_string();
     let generation = ui.index.with_untracked(|idx| idx.generation);
+    let activity_flush_seq = ui.activity_flush_seq.get_untracked();
+
+    let events_cache_key = (scope.clone(), generation);
+    let need_events = ui.insights.events_key.get_untracked().as_ref() != Some(&events_cache_key);
     let key = ActivityCacheKey {
         scope: scope.clone(),
         range,
@@ -314,17 +299,32 @@ pub fn refresh_activity(ui: Ui) {
         clock_minute: now / 60_000,
         generation,
         want_annual,
+        activity_flush_seq,
     };
-    if ui.insights.activity_key.get_untracked().as_ref() == Some(&key)
-        || ui.insights.activity_loading.get_untracked()
+
+    if !need_events && ui.insights.activity_key.get_untracked().as_ref() == Some(&key) {
+        return;
+    }
+    if ui.insights.loading.get_untracked()
+        && ui.insights.inflight_key.get_untracked().as_ref() == Some(&key)
     {
         return;
     }
 
-    let annual_cache_key = (scope.clone(), actual_today_key);
+    let annual_cache_key = (
+        scope.clone(),
+        actual_today_key,
+        generation,
+        activity_flush_seq,
+    );
     let annual_cached =
         ui.insights.annual_activity_key.get_untracked().as_ref() == Some(&annual_cache_key);
     let fetch_annual = want_annual && !annual_cached;
+    let existing_events = if need_events {
+        None
+    } else {
+        Some(ui.insights.events.get_untracked())
+    };
     let existing_annual = if annual_cached {
         ui.insights
             .activity
@@ -335,59 +335,84 @@ pub fn refresh_activity(ui: Ui) {
 
     let plan: ActivityFetchPlan =
         model::activity_fetch_plan(range, now, &chrono::Local, selected_date, comparison);
+    let seq = ui.insights.request_seq.get_untracked().wrapping_add(1);
+    let inflight = key.clone();
+    batch(move || {
+        ui.insights.request_seq.set(seq);
+        ui.insights.inflight_key.set(Some(inflight));
+        ui.insights.loading.set(true);
+        ui.insights.heatmap_loading.set(fetch_annual);
+    });
 
-    ui.insights.activity_loading.set(true);
     ui.spawn(async move {
         let scope_req = scope.clone();
-        let fetched = blocking(move || -> ActivityInput {
-            let mut input = ActivityInput {
-                loaded: true,
-                annual_buckets: existing_annual,
-                ..Default::default()
-            };
-            if range == RangeWindow::Today {
-                input.period_segments =
-                    fetch_merged_segments(plan.period_from, plan.period_until, &scope_req);
-                input.baseline_segments =
-                    fetch_merged_segments(plan.prev_from, plan.prev_until, &scope_req);
-            } else {
-                input.range_buckets = fetch_merged_buckets(&plan.range_boundaries, &scope_req);
-                input.baseline_buckets =
-                    fetch_merged_buckets(&plan.baseline_boundaries, &scope_req);
-            }
-            if fetch_annual {
-                input.annual_buckets = fetch_merged_buckets(&plan.annual_boundaries, &scope_req);
-            }
-            input
-        })
+        let fetched = blocking(
+            move || -> (Option<Vec<canban_types::Event>>, ActivityInput) {
+                let fetched_events = need_events.then(|| fetch_events_for_scope(&scope_req));
+                let mut input = ActivityInput {
+                    loaded: true,
+                    annual_buckets: existing_annual,
+                    ..Default::default()
+                };
+                if range == RangeWindow::Today {
+                    input.period_segments =
+                        fetch_merged_segments(plan.period_from, plan.period_until, &scope_req);
+                    input.baseline_segments =
+                        fetch_merged_segments(plan.prev_from, plan.prev_until, &scope_req);
+                } else {
+                    input.range_buckets = fetch_merged_buckets(&plan.range_boundaries, &scope_req);
+                    input.baseline_buckets =
+                        fetch_merged_buckets(&plan.baseline_boundaries, &scope_req);
+                }
+                if fetch_annual {
+                    input.annual_buckets =
+                        fetch_merged_buckets(&plan.annual_boundaries, &scope_req);
+                }
+                (fetched_events, input)
+            },
+        )
         .await;
 
-        ui.insights.activity_loading.set(false);
-        if let Ok(input) = fetched {
-            batch(move || {
-                ui.insights.activity.set(Rc::new(input));
-                ui.insights.activity_key.set(Some(key));
-                if fetch_annual {
-                    ui.insights.annual_activity_key.set(Some(annual_cache_key));
-                }
-            });
-            let cur_now = ui
-                .insights
-                .anchor_ms
-                .get_untracked()
-                .unwrap_or_else(canban_types::now);
-            let cur_want_annual =
-                ui.insights.heatmap_metric.get_untracked() != HeatmapMetric::Resolved;
-            if ui.page.get_untracked() == "insights"
-                && (ui.insights.scope_project.get_untracked() != scope
-                    || ui.insights.range.get_untracked() != range
-                    || ui.insights.selected_date.get_untracked() != selected_date
-                    || ui.insights.comparison.get_untracked() != comparison
-                    || cur_want_annual != want_annual
-                    || cur_now / 60_000 != now / 60_000
-                    || ui.index.with_untracked(|idx| idx.generation) != generation)
-            {
-                refresh_activity(ui);
+        if ui.insights.request_seq.get_untracked() != seq {
+            return;
+        }
+        match fetched {
+            Ok((maybe_events, input)) => {
+                let events_rc = maybe_events
+                    .map(Rc::new)
+                    .or(existing_events)
+                    .unwrap_or_else(|| Rc::new(Vec::new()));
+                let activity_rc = Rc::new(input);
+                let annual_loaded = want_annual || annual_cached;
+                batch(move || {
+                    ui.insights.events.set(events_rc.clone());
+                    ui.insights.events_key.set(Some(events_cache_key));
+                    ui.insights.activity.set(activity_rc.clone());
+                    ui.insights.activity_key.set(Some(key));
+                    if fetch_annual {
+                        ui.insights.annual_activity_key.set(Some(annual_cache_key));
+                    }
+                    ui.insights.loaded_data.set(Some(LoadedInsights {
+                        scope,
+                        range,
+                        selected_date,
+                        comparison,
+                        events: events_rc,
+                        activity: activity_rc,
+                        annual_loaded,
+                        now_ms: now,
+                    }));
+                    ui.insights.inflight_key.set(None);
+                    ui.insights.loading.set(false);
+                    ui.insights.heatmap_loading.set(false);
+                });
+            }
+            Err(_) => {
+                batch(move || {
+                    ui.insights.inflight_key.set(None);
+                    ui.insights.loading.set(false);
+                    ui.insights.heatmap_loading.set(false);
+                });
             }
         }
     });
@@ -464,11 +489,15 @@ fn now_ms(ui: Ui) -> u64 {
     }
 }
 
-pub fn select_date(ui: Ui, date: Option<chrono::NaiveDate>) {
-    let actual = chrono::DateTime::from_timestamp_millis(now_ms(ui) as i64)
+fn current_today(ui: Ui) -> chrono::NaiveDate {
+    chrono::DateTime::from_timestamp_millis(now_ms(ui) as i64)
         .unwrap()
         .with_timezone(&chrono::Local)
-        .date_naive();
+        .date_naive()
+}
+
+pub fn select_date(ui: Ui, date: Option<chrono::NaiveDate>) {
+    let actual = current_today(ui);
     if date.is_some_and(|d| d > actual) {
         return;
     }
@@ -494,10 +523,7 @@ pub fn intent(ui: Ui, operation: &str) {
             set_range(ui, RangeWindow::Today);
         }
         "previous-day" | "next-day" => {
-            let actual = chrono::DateTime::from_timestamp_millis(now_ms(ui) as i64)
-                .unwrap()
-                .with_timezone(&chrono::Local)
-                .date_naive();
+            let actual = current_today(ui);
             let day = ui.insights.selected_date.get().unwrap_or(actual);
             select_date(
                 ui,
@@ -529,6 +555,7 @@ pub fn intent(ui: Ui, operation: &str) {
         "sort-wip" => ui.insights.project_sort.set(ProjectSort::Wip),
         "sort-runs" => ui.insights.project_sort.set(ProjectSort::Runs),
         "toggle-initial-sync" => ui.insights.exclude_initial_sync.update(|v| *v = !*v),
+        "toggle-timeline-24h" => ui.insights.timeline_full_24h.update(|v| *v = !*v),
         "cards-created" => ui.insights.drilldown.update(|cur| {
             *cur = if cur == "created" {
                 String::new()
@@ -585,9 +612,120 @@ pub fn chrome_bar(ui: Ui) -> View {
         })
     });
 
+    let date_label = computed(move || {
+        let actual = current_today(ui);
+        let selected = ui.insights.selected_date.get();
+        let today = selected.unwrap_or(actual).min(actual);
+        let range = ui.insights.range.get();
+        if range == RangeWindow::Today {
+            format!("{today} ({})", today.format("%a"))
+        } else {
+            let start = today - chrono::Duration::days(range.days() - 1);
+            format!("{} – {}", start.format("%b %-d"), today.format("%b %-d"))
+        }
+    });
+
+    let at_latest_date = computed(move || {
+        let actual = current_today(ui);
+        ui.insights.selected_date.get().is_none_or(|d| d >= actual)
+    });
+
+    let date_popover_open = signal(false);
+    let date_input = element_ref();
+    let date_picker = nsh_base::popover()
+        .open(move || Some(date_popover_open.get()))
+        .placement(Placement::Bottom)
+        .align(Align::Start)
+        .offset(px(4.))
+        .margin(px(8.))
+        .popup_class(canban_ui_kit::motion::POPUP_CLASS)
+        .popup_starting_class(canban_ui_kit::motion::POPUP_STARTING_CLASS)
+        .popup_ending_class(canban_ui_kit::motion::POPUP_ENDING_CLASS)
+        .on_open_change(move |e: &nsh_base::PopoverEvent| {
+            if let nsh_base::PopoverEvent::OpenChange(next, _) = e {
+                if *next {
+                    let active = ui
+                        .insights
+                        .selected_date
+                        .get_untracked()
+                        .unwrap_or_else(|| current_today(ui));
+                    ui.insights.date_text.set(active.to_string());
+                }
+                date_popover_open.set(*next);
+            }
+        })
+        .on_open(move || date_input.focus())
+        .trigger(
+            press_target()
+                .h(px(26.))
+                .px_2()
+                .rounded(px(5.))
+                .hover(|s| s.bg(INSET))
+                .focus(|s| s.border_1().border_color(ACCENT))
+                .active(|s| s.opacity(0.75))
+                .flex_row()
+                .items_center()
+                .accessibility_label(move || Some(format!("Date: {}", date_label.get()).into()))
+                .child(
+                    label(move || date_label.get())
+                        .font_family(MONO_FONT)
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::MEDIUM),
+                ),
+        )
+        .child({
+            let submit_date = move || {
+                intent(ui, "apply-date");
+                date_popover_open.set(false);
+            };
+            view()
+                .w(px(232.))
+                .p_3()
+                .gap_2()
+                .bg(SURFACE)
+                .rounded(px(8.))
+                .border_1()
+                .border_color(BORDER)
+                .shadow_lg()
+                .child(
+                    label("Jump to date")
+                        .text_size(px(11.5))
+                        .font_weight(FontWeight::SEMIBOLD),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .child(
+                            field(ui.insights.date_text, "YYYY-MM-DD")
+                                .element_ref(&date_input)
+                                .label("Insights date")
+                                .min_h(px(28.))
+                                .px_2()
+                                .py_1()
+                                .text_size(px(12.))
+                                .flex_1()
+                                .on_submit(move |_: &str| submit_date()),
+                        )
+                        .child(
+                            compact_action("Apply", Variant::Primary, move |_| submit_date())
+                                .disabled(move || {
+                                    let actual = current_today(ui);
+                                    chrono::NaiveDate::parse_from_str(
+                                        &ui.insights.date_text.get(),
+                                        "%Y-%m-%d",
+                                    )
+                                    .ok()
+                                    .is_none_or(|d| d > actual)
+                                }),
+                        ),
+                )
+        });
+
     let scope_picker = search_popover(
         press_target()
-            .h(px(28.))
+            .h(px(26.))
             .px_2p5()
             .rounded(px(6.))
             .border_1()
@@ -607,7 +745,7 @@ pub fn chrome_bar(ui: Ui) -> View {
                 label(move || scope_label.get())
                     .text_size(px(CAPTION_SIZE))
                     .font_weight(FontWeight::MEDIUM)
-                    .max_w(px(180.))
+                    .max_w(px(160.))
                     .truncate(),
             )
             .child(icon(Icon::ChevronDown).w(px(11.)).h(px(11.))),
@@ -685,6 +823,20 @@ pub fn chrome_bar(ui: Ui) -> View {
             .collect::<Vec<_>>(),
         );
 
+    let spinner_slot = view()
+        .w(px(16.))
+        .h(px(16.))
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .child(dynamic(move || {
+            if ui.insights.loading.get() || ui.insights.preview_loading.get() {
+                loading_spinner(12., MUTED).into_element()
+            } else {
+                view().w(px(12.)).h(px(12.)).into_element()
+            }
+        }));
+
     view()
         .flex_1()
         .min_w(px(0.))
@@ -714,8 +866,31 @@ pub fn chrome_bar(ui: Ui) -> View {
                         ),
                 )
                 .child(view().w(px(1.)).h(px(14.)).bg(BORDER))
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .child(chrome_button(Icon::Back, "Previous day", move |_| {
+                            intent(ui, "previous-day")
+                        }))
+                        .child(date_picker)
+                        .child(chrome_button_disabled(
+                            Icon::Forward,
+                            "Next day",
+                            move || at_latest_date.get(),
+                            move |_| intent(ui, "next-day"),
+                        ))
+                        .child(
+                            compact_action("Today", Variant::Quiet, move |_| intent(ui, "today"))
+                                .accessibility_label("Today"),
+                        ),
+                )
+                .child(view().w(px(1.)).h(px(14.)).bg(BORDER))
+                .child(range_bar)
+                .child(view().w(px(1.)).h(px(14.)).bg(BORDER))
                 .child(scope_picker)
-                .child(range_bar),
+                .child(spinner_slot),
         )
         .child(view().flex_1().h_full().window_drag(true))
 }
@@ -773,244 +948,170 @@ fn choice(ui: Ui, title: &'static str, op: &'static str, selected: bool) -> impl
     .accessibility_label(title)
 }
 
-fn segmented_bar(segments: &[(usize, AdaptiveColor)]) -> View {
-    let total: usize = segments.iter().map(|(v, _)| *v).sum();
-    if total == 0 {
-        return view().w_full().h(px(6.)).rounded(px(3.)).bg(INSET);
-    }
-    view()
-        .w_full()
-        .h(px(6.))
-        .rounded(px(3.))
-        .overflow_hidden()
-        .bg(INSET)
-        .flex_row()
-        .gap(px(1.))
-        .children(
-            segments
-                .iter()
-                .filter(|(v, _)| *v > 0)
-                .map(|&(v, col)| view().flex_grow(v as f32).h_full().bg(col).into_element())
-                .collect::<Vec<_>>(),
-        )
-}
-
-struct KpiSpec {
-    mark: Icon,
-    mark_tint: ThemeColor,
-    eyebrow: &'static str,
-    hero: String,
-    pill_text: Option<(String, Tone)>,
-    bar_segments: Vec<(usize, AdaptiveColor)>,
-    sub_primary: String,
-    sub_secondary: String,
-}
-
-fn kpi_card(spec: KpiSpec) -> View {
-    let KpiSpec {
-        mark,
-        mark_tint,
-        eyebrow,
-        hero,
-        pill_text,
-        bar_segments,
-        sub_primary,
-        sub_secondary,
-    } = spec;
-    let mut header = view()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .gap_2()
-        .child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap_1p5()
-                .child(icon_tinted(mark, mark_tint).w(px(14.)).h(px(14.)))
-                .child(
-                    text(eyebrow)
-                        .text_size(px(10.5))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(MUTED),
-                ),
-        );
-    if let Some((pt, tone)) = pill_text {
-        header = header.child(status(pt, tone));
-    }
-
-    card_surface()
-        .flex_1()
-        .min_w(px(200.))
-        .gap_2()
-        .child(header)
-        .child(
-            text(hero)
-                .font_family(MONO_FONT)
-                .text_size(px(23.))
-                .font_weight(FontWeight::BOLD)
-                .text_color(TEXT),
-        )
-        .child(segmented_bar(&bar_segments))
-        .child(
-            view()
-                .gap_0p5()
-                .child(label(sub_primary).text_size(px(CAPTION_SIZE)).truncate())
-                .child(muted(sub_secondary).text_size(px(11.5)).truncate()),
-        )
-}
-
-fn render_period_subbar(ui: Ui, dash: &Dashboard) -> View {
-    let actual = dash.annual_end;
-    let dash_date = dash.selected_date;
-
-    let mut top = view()
-        .p_3()
-        .gap_2()
-        .bg(SURFACE)
-        .rounded(px(RADIUS))
-        .border_1()
-        .border_color(BORDER)
-        .child(
-            view()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(
-                    row()
-                        .child(chrome_button(Icon::Back, "Previous day", move |_| {
-                            intent(ui, "previous-day")
-                        }))
-                        .child(label(dash.period_label.clone()).font_weight(FontWeight::MEDIUM))
-                        .child(chrome_button_disabled(
-                            Icon::Forward,
-                            "Next day",
-                            move || dash_date >= actual,
-                            move |_| intent(ui, "next-day"),
-                        ))
-                        .child(compact_action("Today", Variant::Quiet, move |_| {
-                            intent(ui, "today")
-                        }))
-                        .child(note(format!(
-                            "vs {} · {}",
-                            dash.comparison_label, dash.timezone
-                        ))),
-                )
-                .child(
-                    row()
-                        .child(choice(
-                            ui,
-                            "Previous period",
-                            "compare-previous",
-                            ui.insights.comparison.get() == Comparison::Previous,
-                        ))
-                        .child(if dash.range == RangeWindow::Today {
-                            choice(
-                                ui,
-                                "Last week, same day",
-                                "compare-week",
-                                ui.insights.comparison.get() == Comparison::LastWeek,
-                            )
-                            .into_element()
-                        } else {
-                            view().into_element()
-                        }),
-                ),
-        )
-        .child(
-            view()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(
-                    row()
-                        .child(
-                            field(ui.insights.date_text, "YYYY-MM-DD")
-                                .label("Insights date")
-                                .w(px(136.)),
-                        )
-                        .child(
-                            compact_action("Apply date", Variant::Quiet, move |_| {
-                                intent(ui, "apply-date")
-                            })
-                            .disabled(move || {
-                                chrono::NaiveDate::parse_from_str(
-                                    &ui.insights.date_text.get(),
-                                    "%Y-%m-%d",
-                                )
-                                .ok()
-                                .is_none_or(|d| d > actual)
-                            }),
-                        )
-                        .child(compact_action(
-                            format!("Created Cards ({})", dash.created_total),
-                            if ui.insights.drilldown.get() == "created" {
-                                Variant::Secondary
-                            } else {
-                                Variant::Quiet
-                            },
-                            move |_| intent(ui, "cards-created"),
-                        ))
-                        .child(compact_action(
-                            format!("Resolved Cards ({})", dash.merged_total),
-                            if ui.insights.drilldown.get() == "merged" {
-                                Variant::Secondary
-                            } else {
-                                Variant::Quiet
-                            },
-                            move |_| intent(ui, "cards-merged"),
-                        )),
-                )
-                .child(if !ui.insights.scope_project.get().is_empty() {
-                    compact_action("Clear Project filter", Variant::Quiet, move |_| {
-                        ui.insights.scope_project.set(String::new());
-                    })
-                    .into_element()
-                } else {
-                    view().into_element()
-                }),
-        );
-
-    if dash.history_start.is_none_or(|h| h > dash.selected_date) {
-        top = top.child(note(
-            "No retained history for this period; unavailable counts are shown as —.",
-        ));
+fn render_compare_subbar(ui: Ui, dash: &Dashboard) -> View {
+    let notice_text = if dash.history_start.is_none_or(|h| h > dash.selected_date) {
+        Some("No retained history for this period; unavailable counts are shown as —.")
     } else if dash
         .history_start
         .is_some_and(|h| h.to_string() > dash.window_start_key)
     {
-        top = top.child(note(
-            "Partial history: the selected period starts before retained records.",
-        ));
-    }
-    top
-}
-
-fn non_merge_breakdown(count: usize) -> String {
-    if count > 0 {
-        format!(" · {count} manual/agent")
+        Some("Partial history: the selected period starts before retained records.")
     } else {
-        String::new()
+        None
+    };
+
+    let left = if let Some(msg) = notice_text {
+        note(msg).into_element()
+    } else if !ui.insights.scope_project.get().is_empty() {
+        compact_action("Clear Project filter", Variant::Quiet, move |_| {
+            ui.insights.scope_project.set(String::new());
+        })
+        .into_element()
+    } else {
+        view().into_element()
+    };
+
+    let right = if dash.range == RangeWindow::Today {
+        let prev_label = if dash.selected_date == dash.annual_end {
+            "Yesterday so far"
+        } else {
+            "Previous day"
+        };
+        view()
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .child(note("Compare:"))
+            .child(choice(
+                ui,
+                prev_label,
+                "compare-previous",
+                ui.insights.comparison.get() == Comparison::Previous,
+            ))
+            .child(choice(
+                ui,
+                "Last week",
+                "compare-week",
+                ui.insights.comparison.get() == Comparison::LastWeek,
+            ))
+            .into_element()
+    } else {
+        let prior = match dash.range {
+            RangeWindow::Days7 => "vs prior 7d",
+            RangeWindow::Days30 => "vs prior 30d",
+            RangeWindow::Days90 => "vs prior 90d",
+            RangeWindow::Today => "",
+        };
+        view()
+            .tooltip(tooltip_box().child(note(format!(
+                "Comparing against {} · {}",
+                dash.comparison_label, dash.timezone
+            ))))
+            .child(note(prior))
+            .into_element()
+    };
+
+    view()
+        .w_full()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .child(left)
+        .child(right)
+}
+
+fn format_count_delta(current: usize, previous: usize, baseline_known: bool) -> (String, bool) {
+    if !baseline_known {
+        return (String::new(), true);
+    }
+    if current > previous {
+        (format!("▲{}", current - previous), true)
+    } else if current < previous {
+        (format!("▼{}", previous - current), false)
+    } else {
+        ("0".into(), true)
     }
 }
 
-fn format_time_delta_pill(current: u64, previous: u64, baseline_known: bool) -> (String, Tone) {
-    if !baseline_known {
-        return ("No baseline".into(), Tone::Neutral);
+fn format_pct_delta(current: u64, previous: u64, baseline_known: bool, act_known: bool) -> String {
+    if !baseline_known || !act_known {
+        return String::new();
+    }
+    if previous == 0 {
+        if current == 0 {
+            return "0%".into();
+        }
+        return format!("▲{}", format_duration_compact(current));
     }
     if current == previous {
-        return ("0s vs prev".into(), Tone::Neutral);
+        return "0%".into();
     }
-    let diff = format_duration_compact(current.abs_diff(previous));
-    let sign = if current > previous { "+" } else { "−" };
-    (format!("{sign}{diff} vs prev"), Tone::Neutral)
+    let diff = current.abs_diff(previous);
+    let pct = (diff * 100 + previous / 2) / previous;
+    if current > previous {
+        format!("▲{pct}%")
+    } else {
+        format!("▼{pct}%")
+    }
 }
 
-fn render_summary_and_kpis(dash: &Dashboard, narrow: bool) -> View {
+fn format_dur_delta(current: u64, previous: u64, baseline_known: bool, act_known: bool) -> String {
+    if !baseline_known || !act_known {
+        return String::new();
+    }
+    if current == previous {
+        return "0s".into();
+    }
+    let diff = format_duration_compact(current.abs_diff(previous));
+    if current > previous {
+        format!("▲{diff}")
+    } else {
+        format!("▼{diff}")
+    }
+}
+
+fn kpi_strip_item(
+    title: &'static str,
+    value: String,
+    delta: String,
+    delta_positive: Option<bool>,
+    tip: String,
+) -> View {
+    let mut val_row = view().flex_row().items_baseline().gap_2().child(
+        text(value)
+            .font_family(MONO_FONT)
+            .text_size(px(22.))
+            .font_weight(FontWeight::BOLD)
+            .text_color(TEXT),
+    );
+    if !delta.is_empty() {
+        let color = match delta_positive {
+            Some(true) => SUCCESS,
+            Some(false) => ATTENTION,
+            None => MUTED,
+        };
+        val_row = val_row.child(
+            text(delta)
+                .font_family(MONO_FONT)
+                .text_size(px(12.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(color),
+        );
+    }
+    view()
+        .flex_1()
+        .min_w(px(150.))
+        .py_2()
+        .px_3()
+        .gap_1()
+        .tooltip(tooltip_box().child(note(tip)))
+        .child(muted(title).text_size(px(11.5)))
+        .child(val_row)
+}
+
+fn render_summary_and_kpis(ui: Ui, dash: &Dashboard, narrow: bool) -> View {
     let known = dash.history_start.is_some_and(|d| d <= dash.selected_date);
     let act_known = known
         && (dash.activity_loaded
@@ -1051,174 +1152,187 @@ fn render_summary_and_kpis(dash: &Dashboard, narrow: bool) -> View {
     .text_size(px(13.))
     .text_color(TEXT);
 
-    let delivery_pill = if dash.baseline_known {
-        format_delta_pct(dash.merged_total, dash.prev_merged_total)
-    } else {
-        "Insufficient history".into()
-    };
     let sync_suffix = if dash.initial_sync_period > 0 && dash.exclude_initial_sync {
         format!(" (+{} sync muted)", dash.initial_sync_period)
     } else {
         String::new()
     };
     let net_sign = if dash.net_wip_delta > 0 { "+" } else { "" };
+    let pace_txt = if dash.range == RangeWindow::Today {
+        dash.reference_merged
+            .map(|n| format!("7D pace {n:.1}/d"))
+            .unwrap_or_else(|| format!("{} active WIP", dash.pipeline.active_wip))
+    } else {
+        format!(
+            "Prev {} · {} active WIP",
+            if dash.baseline_known {
+                dash.prev_merged_total.to_string()
+            } else {
+                "—".into()
+            },
+            dash.pipeline.active_wip
+        )
+    };
+    let resolved_tip = format!(
+        "{} local · {} PR · {} manual · +{} organic{} · net WIP {net_sign}{} · {pace_txt} · Click to inspect resolved Cards",
+        dash.local_merges,
+        dash.pr_merges,
+        dash.manual_resolutions,
+        dash.created_total,
+        sync_suffix,
+        dash.net_wip_delta
+    );
+    let (res_delta, res_pos) = format_count_delta(
+        dash.merged_total,
+        dash.prev_merged_total,
+        dash.baseline_known,
+    );
+    let resolved_active = ui.insights.drilldown.get() == "merged";
+    let resolved_cell = press_target()
+        .flex_1()
+        .min_w(px(150.))
+        .rounded(px(6.))
+        .bg(if resolved_active {
+            SELECTED.resolve()
+        } else {
+            AdaptiveColor::TRANSPARENT
+        })
+        .hover(|s| s.bg(CARD_HOVER))
+        .accessibility_label("Resolved KPI")
+        .on_press(move |_: &()| intent(ui, "cards-merged"))
+        .child(kpi_strip_item(
+            "Resolved",
+            if known {
+                dash.merged_total.to_string()
+            } else {
+                "—".into()
+            },
+            res_delta,
+            (!res_pos || dash.merged_total > dash.prev_merged_total).then_some(res_pos),
+            resolved_tip,
+        ));
 
     let total_merges = dash.local_merges + dash.pr_merges;
+    let prev_merges = dash.prev_local_merges + dash.prev_pr_merges;
+    let (merge_delta, merge_pos) =
+        format_count_delta(total_merges, prev_merges, dash.baseline_known);
     let clean_pct_str = dash
         .timings
         .clean_merge_rate_pct()
         .map(|p| format!("{p}% clean"))
         .unwrap_or_else(|| "— clean".into());
-    let merge_sub_secondary = if dash.timings.merge_queue_batches > 0 {
+    let merge_tip = if dash.timings.merge_queue_batches > 0 {
         format!(
-            "{} queue batches · {}",
-            dash.timings.merge_queue_batches, clean_pct_str
+            "{} local · {} PR · {} queue batches · {}",
+            dash.local_merges, dash.pr_merges, dash.timings.merge_queue_batches, clean_pct_str
         )
     } else {
         format!(
-            "WIP {}/{}/{} (B/D/R)",
-            dash.pipeline.backlog, dash.pipeline.develop, dash.pipeline.review
+            "{} local · {} PR · WIP {}/{}/{} (B/D/R)",
+            dash.local_merges,
+            dash.pr_merges,
+            dash.pipeline.backlog,
+            dash.pipeline.develop,
+            dash.pipeline.review
         )
     };
+    let merges_cell = kpi_strip_item(
+        "Merges (Local / PR)",
+        if known {
+            format!("{total_merges} ({}/{})", dash.local_merges, dash.pr_merges)
+        } else {
+            "—".into()
+        },
+        merge_delta,
+        (total_merges != prev_merges).then_some(merge_pos),
+        merge_tip,
+    );
+
+    let my_time_delta = format_pct_delta(
+        t.dwell_total_ms,
+        t.prev_dwell_total_ms,
+        dash.baseline_known,
+        act_known,
+    );
+    let my_time_tip = format!(
+        "Card {} · Terminal {} · Other {} · Active window dwell (5m idle cutoff)",
+        format_duration_compact(t.dwell_card_ms),
+        format_duration_compact(t.dwell_terminal_ms),
+        format_duration_compact(t.dwell_other_ms),
+    );
+    let my_time_cell = kpi_strip_item("My time", my_time_hero, my_time_delta, None, my_time_tip);
 
     let pass_str = dash
         .success_rate_pct
         .map(|p| format!("{p}% pass"))
         .unwrap_or_else(|| "No runs".into());
+    let agent_delta = format_dur_delta(
+        t.agent_total_ms,
+        t.prev_agent_total_ms,
+        dash.baseline_known,
+        act_known,
+    );
+    let agent_tip = format!(
+        "{} runs ({} completed · {} active · {} blocked · {} failed) · {} · {} profiles · {} human asks",
+        dash.scheduled_total,
+        dash.completed_runs,
+        dash.active_runs,
+        dash.blocked_runs,
+        dash.failed_runs,
+        pass_str,
+        dash.used_profiles,
+        dash.human_asks_period
+    );
+    let agent_cell = kpi_strip_item("Agent working", agent_hero, agent_delta, None, agent_tip);
 
-    let dwell_pill =
-        format_time_delta_pill(t.dwell_total_ms, t.prev_dwell_total_ms, dash.baseline_known);
-    let agent_pill =
-        format_time_delta_pill(t.agent_total_ms, t.prev_agent_total_ms, dash.baseline_known);
-
-    let cards = [
-        KpiSpec {
-            mark: Icon::Check,
-            mark_tint: SUCCESS,
-            eyebrow: "RESOLVED",
-            hero: if known {
-                dash.merged_total.to_string()
-            } else {
-                "—".into()
-            },
-            pill_text: Some((delivery_pill, Tone::Neutral)),
-            bar_segments: vec![
-                (dash.local_merges, ACCENT.resolve()),
-                (dash.pr_merges, SUCCESS.resolve()),
-                (dash.manual_resolutions, alpha_tint(MUTED, 0.55)),
-            ],
-            sub_primary: format!(
-                "+{} organic{} · net WIP {net_sign}{}",
-                dash.created_total, sync_suffix, dash.net_wip_delta
-            ),
-            sub_secondary: if dash.range == RangeWindow::Today {
-                dash.reference_merged
-                    .map(|n| format!("7D pace: {n:.1}/day ({}d)", dash.reference_days))
-                    .unwrap_or_else(|| format!("{} active WIP", dash.pipeline.active_wip))
-            } else {
-                format!(
-                    "Prev resolved: {} · {} active WIP",
-                    if dash.baseline_known {
-                        dash.prev_merged_total.to_string()
-                    } else {
-                        "—".into()
-                    },
-                    dash.pipeline.active_wip
-                )
-            },
-        },
-        KpiSpec {
-            mark: Icon::GitMerge,
-            mark_tint: ACCENT,
-            eyebrow: "MERGES (LOCAL / PR)",
-            hero: if known {
-                format!("{} / {}", dash.local_merges, dash.pr_merges)
-            } else {
-                "—".into()
-            },
-            pill_text: Some((format!("{total_merges} merges"), Tone::Neutral)),
-            bar_segments: vec![
-                (dash.local_merges, ACCENT.resolve()),
-                (dash.pr_merges, SUCCESS.resolve()),
-            ],
-            sub_primary: format!(
-                "{} local · {} PR{}",
-                dash.local_merges,
-                dash.pr_merges,
-                non_merge_breakdown(dash.manual_resolutions)
-            ),
-            sub_secondary: merge_sub_secondary,
-        },
-        KpiSpec {
-            mark: Icon::Clock,
-            mark_tint: ACCENT,
-            eyebrow: "MY TIME",
-            hero: my_time_hero,
-            pill_text: Some(dwell_pill),
-            bar_segments: vec![
-                (
-                    t.dwell_card_ms.min(u64::from(u32::MAX)) as usize,
-                    ACCENT.resolve(),
-                ),
-                (
-                    t.dwell_terminal_ms.min(u64::from(u32::MAX)) as usize,
-                    SUCCESS.resolve(),
-                ),
-                (
-                    t.dwell_other_ms.min(u64::from(u32::MAX)) as usize,
-                    alpha_tint(MUTED, 0.55),
-                ),
-            ],
-            sub_primary: format!(
-                "Card {} · Terminal {} · Other {}",
-                format_duration_compact(t.dwell_card_ms),
-                format_duration_compact(t.dwell_terminal_ms),
-                format_duration_compact(t.dwell_other_ms),
-            ),
-            sub_secondary: "Active window dwell (5m idle cutoff)".into(),
-        },
-        KpiSpec {
-            mark: Icon::Agent,
-            mark_tint: SUCCESS,
-            eyebrow: "AGENT WORKING",
-            hero: agent_hero,
-            pill_text: Some(agent_pill),
-            bar_segments: vec![
-                (dash.completed_runs, SUCCESS.resolve()),
-                (dash.active_runs, ACCENT.resolve()),
-                (dash.blocked_runs, ATTENTION.resolve()),
-                (dash.failed_runs, DANGER.resolve()),
-            ],
-            sub_primary: format!(
-                "{} runs · {} · {} profiles",
-                dash.scheduled_total, pass_str, dash.used_profiles
-            ),
-            sub_secondary: format!(
-                "{} human asks · {} active now",
-                dash.human_asks_period, dash.active_runs
-            ),
-        },
-    ]
-    .into_iter()
-    .map(kpi_card)
-    .collect::<Vec<_>>();
-
-    let mut iter = cards.into_iter();
-    let grid = if narrow {
+    let v_sep = || {
         view()
-            .gap_3()
+            .w(px(1.))
+            .my_2()
+            .bg(BORDER)
+            .opacity(0.65)
+            .flex_shrink_0()
+    };
+
+    let strip = if narrow {
+        view()
+            .pb_2()
+            .border_b_1()
+            .border_color(BORDER)
+            .gap_1()
             .child(
                 view()
                     .flex_row()
-                    .gap_3()
-                    .children(iter.by_ref().take(2).collect::<Vec<_>>()),
+                    .items_stretch()
+                    .child(resolved_cell)
+                    .child(v_sep())
+                    .child(merges_cell),
             )
-            .child(view().flex_row().gap_3().children(iter.collect::<Vec<_>>()))
+            .child(
+                view()
+                    .flex_row()
+                    .items_stretch()
+                    .child(my_time_cell)
+                    .child(v_sep())
+                    .child(agent_cell),
+            )
     } else {
-        view().flex_row().gap_3().children(iter.collect::<Vec<_>>())
+        view()
+            .pb_2()
+            .border_b_1()
+            .border_color(BORDER)
+            .flex_row()
+            .items_stretch()
+            .child(resolved_cell)
+            .child(v_sep())
+            .child(merges_cell)
+            .child(v_sep())
+            .child(my_time_cell)
+            .child(v_sep())
+            .child(agent_cell)
     };
 
-    view().gap_2p5().child(summary_sentence).child(grid)
+    view().gap_2p5().child(summary_sentence).child(strip)
 }
 
 fn format_hhmm(ms: u64) -> String {
@@ -1227,133 +1341,143 @@ fn format_hhmm(ms: u64) -> String {
         .unwrap_or_else(|| "—".into())
 }
 
-fn render_timeline_1d(ui: Ui, dash: &Dashboard, project_order: &[String]) -> View {
-    let tl = &dash.timeline;
-    let total_span = tl.day_end_ms.saturating_sub(tl.day_start_ms).max(1) as f64;
-    let track_w = ui.insights.timeline_width_px();
+fn render_timeline_track_backdrop(
+    tick_count: usize,
+    active_ratio: Option<f32>,
+    is_all_future: bool,
+) -> View {
+    let mut backdrop = view()
+        .absolute()
+        .inset_0()
+        .pointer_events(PointerEvents::None);
 
-    let project_legend = dash
-        .project_stats
-        .iter()
-        .take(6)
-        .map(|p| legend_swatch(project_color(Some(&p.id), project_order), &p.name).into_element())
-        .collect::<Vec<_>>();
-
-    let mut header_legend = row().children(project_legend);
-    if !tl.merges.is_empty() {
-        header_legend = header_legend.child(
+    if tick_count >= 2 {
+        backdrop = backdrop.child(
             view()
+                .absolute()
+                .inset_0()
                 .flex_row()
-                .items_center()
-                .gap_1p5()
-                .child(view().w(px(8.)).h(px(8.)).rounded(px(4.)).bg(SUCCESS))
-                .child(muted("Merges").text_size(px(11.5))),
+                .justify_between()
+                .children((0..tick_count).map(|i| {
+                    if i == 0 || i + 1 == tick_count {
+                        view().w(px(1.)).h_full().into_element()
+                    } else {
+                        view()
+                            .w(px(1.))
+                            .h_full()
+                            .bg(BORDER)
+                            .opacity(0.30)
+                            .into_element()
+                    }
+                })),
         );
     }
+
+    if is_all_future {
+        backdrop = backdrop.child(view().w_full().h_full().bg(BACKGROUND).opacity(0.45));
+    } else if let Some(ratio) = active_ratio {
+        backdrop = backdrop.child(
+            view()
+                .absolute()
+                .inset_0()
+                .flex_row()
+                .child(view().flex_grow(ratio).basis(px(0.)).h_full())
+                .child(view().w(px(1.)).h_full().bg(ACCENT).opacity(0.65))
+                .child(
+                    view()
+                        .flex_grow((1.0 - ratio).max(0.0))
+                        .basis(px(0.))
+                        .h_full()
+                        .bg(BACKGROUND)
+                        .opacity(0.45),
+                ),
+        );
+    }
+    backdrop
+}
+
+fn render_timeline_1d(ui: Ui, dash: &Dashboard, project_order: &[String]) -> View {
+    let tl = &dash.timeline;
+    let full_24h = ui.insights.timeline_full_24h.get();
+    let (start_h, end_h) = if full_24h {
+        (0u32, 24u32)
+    } else {
+        tl.visible_hour_window()
+    };
+    let win_start_ms = (tl.day_start_ms + u64::from(start_h) * 3_600_000).min(tl.day_end_ms);
+    let win_end_ms = if end_h >= 24 {
+        tl.day_end_ms
+    } else {
+        (tl.day_start_ms + u64::from(end_h) * 3_600_000).min(tl.day_end_ms)
+    }
+    .max(win_start_ms.saturating_add(1));
+    let span = (win_end_ms.saturating_sub(win_start_ms)).max(1) as f64;
+
+    let step = if end_h.saturating_sub(start_h) <= 14 {
+        1usize
+    } else {
+        3usize
+    };
+    let ticks: Vec<u32> = (start_h..=end_h).step_by(step).collect();
+    let tick_count = ticks.len();
+
+    let is_all_future = tl.active_until_ms <= win_start_ms;
+    let active_ratio = (!is_all_future && tl.active_until_ms < win_end_ms).then(|| {
+        ((tl.active_until_ms.saturating_sub(win_start_ms)) as f64 / span).clamp(0.0, 1.0) as f32
+    });
 
     let axis_row = view()
         .flex_row()
         .items_center()
         .gap_2()
-        .child(view().w(px(140.)).flex_shrink_0())
+        .child(view().w(px(136.)).flex_shrink_0())
         .child(
             view()
                 .flex_1()
                 .min_w(px(0.))
-                .on_layout(move |b: &Bounds<Points>| {
-                    let w = b.size.width.0;
-                    if w > 20.0 && (ui.insights.timeline_width.get_untracked() - w).abs() > 0.5 {
-                        ui.insights.timeline_width.set(w);
-                    }
-                })
                 .flex_row()
                 .justify_between()
                 .children(
-                    [
-                        "00:00", "04:00", "08:00", "12:00", "16:00", "20:00", "24:00",
-                    ]
-                    .into_iter()
-                    .map(|t| {
-                        text(t)
-                            .font_family(MONO_FONT)
-                            .text_size(px(10.))
-                            .text_color(MUTED)
-                            .into_element()
-                    })
-                    .collect::<Vec<_>>(),
+                    ticks
+                        .into_iter()
+                        .map(|h| {
+                            text(h.to_string())
+                                .font_family(MONO_FONT)
+                                .text_size(px(10.))
+                                .text_color(MUTED)
+                                .into_element()
+                        })
+                        .collect::<Vec<_>>(),
                 ),
         )
-        .child(view().w(px(58.)).flex_shrink_0());
+        .child(view().w(px(54.)).flex_shrink_0());
 
-    let active_ratio =
-        ((tl.active_until_ms.saturating_sub(tl.day_start_ms)) as f64 / total_span).clamp(0.0, 1.0);
-    let now_x = (active_ratio as f32) * track_w;
-    let is_partial_day = tl.active_until_ms < tl.day_end_ms;
-
+    let mut seen_first_agent = false;
     let lane_views = tl
         .lanes
         .iter()
         .map(|lane| {
-            let mut track = view()
-                .flex_1()
-                .min_w(px(0.))
-                .h(px(22.))
-                .rounded(px(4.))
-                .bg(INSET)
-                .relative()
-                .overflow_hidden();
-
-            for idx in 1..6 {
-                let gx = (idx as f32 / 6.0) * track_w;
-                track = track.child(
-                    view()
-                        .absolute()
-                        .left(px(gx))
-                        .top_0()
-                        .bottom_0()
-                        .w(px(1.))
-                        .bg(BORDER)
-                        .opacity(0.35)
-                        .pointer_events(PointerEvents::None),
-                );
-            }
-
-            if is_partial_day {
-                let future_w = (track_w - now_x).max(0.0);
-                track = track
-                    .child(
-                        view()
-                            .absolute()
-                            .left(px(now_x))
-                            .top_0()
-                            .bottom_0()
-                            .w(px(future_w))
-                            .bg(BACKGROUND)
-                            .opacity(0.45)
-                            .pointer_events(PointerEvents::None),
-                    )
-                    .child(
-                        view()
-                            .absolute()
-                            .left(px(now_x))
-                            .top_0()
-                            .bottom_0()
-                            .w(px(1.))
-                            .bg(ACCENT)
-                            .opacity(0.65)
-                            .pointer_events(PointerEvents::None),
-                    );
-            }
-
+            let mut cursor = 0.0f32;
+            let mut blocks_children: Vec<AnyElement> = Vec::new();
             for b in &lane.blocks {
-                let left_ratio = ((b.start_ms.saturating_sub(tl.day_start_ms)) as f64 / total_span)
-                    .clamp(0.0, 1.0) as f32;
-                let width_ratio = ((b.end_ms.saturating_sub(b.start_ms)) as f64 / total_span)
-                    .clamp(0.0, 1.0) as f32;
-                let left_px = (left_ratio * track_w).min((track_w - 3.0).max(0.0));
-                let width_px = (width_ratio * track_w)
-                    .max(3.0)
-                    .min((track_w - left_px).max(3.0));
+                if b.end_ms <= win_start_ms || b.start_ms >= win_end_ms {
+                    continue;
+                }
+                let s_ms = b.start_ms.max(win_start_ms);
+                let e_ms = b.end_ms.min(win_end_ms);
+                let start_r = ((s_ms - win_start_ms) as f64 / span).clamp(0.0, 1.0) as f32;
+                let end_r = ((e_ms - win_start_ms) as f64 / span).clamp(0.0, 1.0) as f32;
+                let gap = (start_r - cursor).max(0.0);
+                if gap > 0.0 {
+                    blocks_children
+                        .push(view().flex_grow(gap).basis(px(0.)).h_full().into_element());
+                    cursor += gap;
+                }
+                let block_r = (end_r - cursor).max(0.0);
+                if block_r <= 0.0 && e_ms <= s_ms {
+                    continue;
+                }
+
                 let dur = b.end_ms.saturating_sub(b.start_ms);
                 let color = project_color(b.project_id.as_deref(), project_order);
                 let tip = format!(
@@ -1398,31 +1522,91 @@ fn render_timeline_1d(ui: Ui, dash: &Dashboard, project_order: &[String]) -> Vie
                     });
                 }
 
-                track = track.child(
+                blocks_children.push(
                     view()
-                        .absolute()
-                        .left(px(left_px))
-                        .top(px(2.))
-                        .bottom(px(2.))
-                        .w(px(width_px))
+                        .flex_grow(block_r.max(0.002))
+                        .basis(px(0.))
+                        .min_w(px(3.))
+                        .h_full()
                         .tooltip(tooltip_box().child(note(tip)))
-                        .child(block),
+                        .child(block)
+                        .into_element(),
+                );
+                cursor += block_r;
+            }
+            let tail = (1.0 - cursor).max(0.0);
+            if tail > 0.0 || blocks_children.is_empty() {
+                blocks_children.push(
+                    view()
+                        .flex_grow(tail.max(0.001))
+                        .basis(px(0.))
+                        .h_full()
+                        .into_element(),
                 );
             }
 
-            let left_label = if let Some(sub) = lane.sublabel.as_deref() {
-                view()
-                    .w(px(140.))
-                    .flex_shrink_0()
-                    .gap(px(1.))
-                    .child(label(lane.label.clone()).text_size(px(12.)).truncate())
-                    .child(note(sub).text_size(px(10.5)).truncate())
-            } else {
-                view()
-                    .w(px(140.))
-                    .flex_shrink_0()
-                    .child(label(lane.label.clone()).text_size(px(12.)).truncate())
+            let track = view()
+                .flex_1()
+                .min_w(px(0.))
+                .h(px(20.))
+                .rounded(px(4.))
+                .bg(INSET)
+                .relative()
+                .overflow_hidden()
+                .child(render_timeline_track_backdrop(
+                    tick_count,
+                    active_ratio,
+                    is_all_future,
+                ))
+                .child(
+                    view()
+                        .w_full()
+                        .h_full()
+                        .py(px(2.))
+                        .flex_row()
+                        .items_center()
+                        .children(blocks_children),
+                );
+
+            let (group_txt, item_txt) = match lane.kind {
+                TimelineLaneKind::MeCard => ("Me", "Card"),
+                TimelineLaneKind::MeTerminal => ("", "Terminal"),
+                TimelineLaneKind::MeOther => ("", "Other"),
+                TimelineLaneKind::Agent => {
+                    let g = if !seen_first_agent {
+                        seen_first_agent = true;
+                        "Agent"
+                    } else {
+                        ""
+                    };
+                    (g, lane.label.as_str())
+                }
             };
+
+            let mut left_label = view()
+                .w(px(136.))
+                .flex_shrink_0()
+                .flex_row()
+                .items_center()
+                .gap_1p5()
+                .child(
+                    muted(group_txt)
+                        .text_size(px(11.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .w(px(46.))
+                        .flex_shrink_0(),
+                )
+                .child(
+                    label(item_txt.to_owned())
+                        .text_size(px(12.))
+                        .truncate()
+                        .flex_1()
+                        .min_w(px(0.)),
+                );
+            if let Some(sub) = lane.sublabel.as_deref() {
+                left_label = left_label
+                    .tooltip(tooltip_box().child(note(format!("{} ({sub})", lane.label))));
+            }
 
             view()
                 .flex_row()
@@ -1439,24 +1623,26 @@ fn render_timeline_1d(ui: Ui, dash: &Dashboard, project_order: &[String]) -> Vie
                         },
                         11.5,
                     )
-                    .w(px(58.)),
+                    .w(px(54.))
+                    .flex_shrink_0(),
                 )
                 .into_element()
         })
         .collect::<Vec<_>>();
 
-    let mut merges_track = view()
-        .flex_1()
-        .min_w(px(0.))
-        .h(px(18.))
-        .rounded(px(4.))
-        .bg(INSET)
-        .relative()
-        .overflow_hidden();
+    let mut merge_cursor = 0.0f32;
+    let mut merge_children: Vec<AnyElement> = Vec::new();
     for m in &tl.merges {
-        let ratio = ((m.timestamp_ms.saturating_sub(tl.day_start_ms)) as f64 / total_span)
-            .clamp(0.0, 1.0) as f32;
-        let x = ((ratio * track_w) - 4.0).max(0.0);
+        if m.timestamp_ms < win_start_ms || m.timestamp_ms > win_end_ms {
+            continue;
+        }
+        let ratio =
+            ((m.timestamp_ms.saturating_sub(win_start_ms)) as f64 / span).clamp(0.0, 1.0) as f32;
+        let gap = (ratio - merge_cursor).max(0.0);
+        if gap > 0.0 {
+            merge_children.push(view().flex_grow(gap).basis(px(0.)).h_full().into_element());
+            merge_cursor += gap;
+        }
         let tip = format!(
             "#{} {} · merged at {}",
             m.card_number,
@@ -1464,13 +1650,11 @@ fn render_timeline_1d(ui: Ui, dash: &Dashboard, project_order: &[String]) -> Vie
             format_hhmm(m.timestamp_ms)
         );
         let cid = m.card_id.clone();
-        merges_track = merges_track.child(
+        merge_children.push(
             view()
-                .absolute()
-                .left(px(x))
-                .top(px(5.))
                 .w(px(8.))
                 .h(px(8.))
+                .flex_shrink_0()
                 .tooltip(tooltip_box().child(note(tip)))
                 .child(
                     press_target()
@@ -1480,39 +1664,114 @@ fn render_timeline_1d(ui: Ui, dash: &Dashboard, project_order: &[String]) -> Vie
                         .bg(SUCCESS)
                         .hover(|s| s.border_1().border_color(TEXT))
                         .on_press(move |_: &()| ui.open_card(cid.clone())),
-                ),
+                )
+                .into_element(),
         );
     }
+    let merge_tail = (1.0 - merge_cursor).max(0.0);
+    if merge_tail > 0.0 || merge_children.is_empty() {
+        merge_children.push(
+            view()
+                .flex_grow(merge_tail.max(0.001))
+                .basis(px(0.))
+                .h_full()
+                .into_element(),
+        );
+    }
+
+    let merges_track = view()
+        .flex_1()
+        .min_w(px(0.))
+        .h(px(18.))
+        .rounded(px(4.))
+        .bg(INSET)
+        .relative()
+        .overflow_hidden()
+        .child(render_timeline_track_backdrop(
+            tick_count,
+            active_ratio,
+            is_all_future,
+        ))
+        .child(
+            view()
+                .w_full()
+                .h_full()
+                .flex_row()
+                .items_center()
+                .children(merge_children),
+        );
+
     let merges_row = view()
         .flex_row()
         .items_center()
         .gap_2()
-        .child(note("Merges").w(px(140.)).flex_shrink_0())
+        .child(
+            muted("Merges")
+                .text_size(px(11.5))
+                .font_weight(FontWeight::MEDIUM)
+                .w(px(136.))
+                .flex_shrink_0(),
+        )
         .child(merges_track)
-        .child(mono_val(tl.merges.len().to_string(), 11.5).w(px(58.)));
+        .child(
+            mono_val(tl.merges.len().to_string(), 11.5)
+                .w(px(54.))
+                .flex_shrink_0(),
+        );
+
+    let mut footer = view()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap_1p5()
+        .child(note("Color = Project ("));
+    for (idx, p) in dash.project_stats.iter().take(6).enumerate() {
+        if idx > 0 {
+            footer = footer.child(note(" "));
+        }
+        footer = footer.child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(note(p.name.clone()))
+                .child(
+                    view()
+                        .w(px(8.))
+                        .h(px(8.))
+                        .rounded(px(2.))
+                        .bg(project_color(Some(&p.id), project_order)),
+                ),
+        );
+    }
+    footer = footer.child(note(") · Hover for card & duration · Click to open"));
 
     let has_any = tl.lanes.iter().any(|l| !l.blocks.is_empty()) || !tl.merges.is_empty();
     let mut panel = card_surface()
         .child(
             view()
                 .flex_row()
-                .flex_wrap()
                 .items_center()
                 .justify_between()
                 .gap_2()
+                .child(heading("Timeline"))
                 .child(
-                    view()
-                        .gap_0p5()
-                        .child(heading("Activity timeline"))
-                        .child(note(
-                            "Hourly swimlanes across personal focus, Agents, and Card merges · click a block to jump in",
-                        )),
-                )
-                .child(header_legend),
+                    compact_action(
+                        "24h",
+                        if full_24h {
+                            Variant::Secondary
+                        } else {
+                            Variant::Quiet
+                        },
+                        move |_| intent(ui, "toggle-timeline-24h"),
+                    )
+                    .accessibility_label("24h"),
+                ),
         )
         .child(axis_row)
         .children(lane_views)
-        .child(merges_row);
+        .child(merges_row)
+        .child(footer);
 
     if !has_any {
         panel = panel.child(note(
@@ -1573,6 +1832,7 @@ fn render_timeline_multi_day(ui: Ui, dash: &Dashboard) -> View {
                 ];
                 let filled = view()
                     .flex_grow(dwell_ratio)
+                    .basis(px(0.))
                     .h_full()
                     .rounded(px(3.))
                     .overflow_hidden()
@@ -1581,7 +1841,14 @@ fn render_timeline_multi_day(ui: Ui, dash: &Dashboard) -> View {
                     .children(
                         segs.into_iter()
                             .filter(|(v, _)| *v > 0)
-                            .map(|(v, c)| view().flex_grow(v as f32).h_full().bg(c).into_element())
+                            .map(|(v, c)| {
+                                view()
+                                    .flex_grow(v as f32)
+                                    .basis(px(0.))
+                                    .h_full()
+                                    .bg(c)
+                                    .into_element()
+                            })
                             .collect::<Vec<_>>(),
                     );
                 view()
@@ -1592,7 +1859,12 @@ fn render_timeline_multi_day(ui: Ui, dash: &Dashboard) -> View {
                     .overflow_hidden()
                     .flex_row()
                     .child(filled)
-                    .child(view().flex_grow((1.0 - dwell_ratio).max(0.0)).h_full())
+                    .child(
+                        view()
+                            .flex_grow((1.0 - dwell_ratio).max(0.0))
+                            .basis(px(0.))
+                            .h_full(),
+                    )
             };
 
             let agent_bar = view()
@@ -1605,11 +1877,17 @@ fn render_timeline_multi_day(ui: Ui, dash: &Dashboard) -> View {
                 .child(
                     view()
                         .flex_grow(agent_ratio)
+                        .basis(px(0.))
                         .h_full()
                         .rounded(px(3.))
                         .bg(alpha_tint(SUCCESS, 0.85)),
                 )
-                .child(view().flex_grow((1.0 - agent_ratio).max(0.0)).h_full());
+                .child(
+                    view()
+                        .flex_grow((1.0 - agent_ratio).max(0.0))
+                        .basis(px(0.))
+                        .h_full(),
+                );
 
             let date_parsed = chrono::NaiveDate::parse_from_str(&d.date_key, "%Y-%m-%d").ok();
             let tip = format!(
@@ -1855,6 +2133,16 @@ fn plot_grid_frame(top_tick: usize, col_gap: f32, columns: Vec<AnyElement>) -> V
         )
 }
 
+fn hsla_hex(color: AdaptiveColor) -> String {
+    let rgb = color.dark.to_rgb();
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        (rgb.r.clamp(0.0, 1.0) * 255.0).round() as u8,
+        (rgb.g.clamp(0.0, 1.0) * 255.0).round() as u8,
+        (rgb.b.clamp(0.0, 1.0) * 255.0).round() as u8,
+    )
+}
+
 fn render_hourly_output(ui: Ui, dash: &Dashboard) -> View {
     let raw_max = dash
         .hours
@@ -1864,9 +2152,58 @@ fn render_hourly_output(ui: Ui, dash: &Dashboard) -> View {
         .max()
         .unwrap_or(0);
     let top_tick = nice_ceil_tick(raw_max);
-    let usable_h = CHART_HEIGHT - 8.0;
 
-    let cols = dash
+    let svg_w = 240.0f32;
+    let svg_h = 120.0f32;
+    let pad_y = 6.0f32;
+    let plot_h = svg_h - pad_y * 2.0;
+    let point_xy = |idx: usize, val: usize| -> (f32, f32) {
+        let x = (idx as f32 + 0.5) / 24.0 * svg_w;
+        let y = (svg_h - pad_y) - (val as f32 / top_tick as f32).clamp(0.0, 1.0) * plot_h;
+        (x, y)
+    };
+
+    let mut base_pts = Vec::with_capacity(24);
+    let mut cur_pts = Vec::with_capacity(24);
+    for (idx, h) in dash.hours.iter().enumerate() {
+        base_pts.push(point_xy(idx, h.previous));
+        if !h.future {
+            cur_pts.push(point_xy(idx, h.current));
+        }
+    }
+
+    let polyline_path = |pts: &[(f32, f32)]| -> String {
+        let mut d = String::new();
+        for (i, &(x, y)) in pts.iter().enumerate() {
+            use std::fmt::Write;
+            let cmd = if i == 0 { 'M' } else { 'L' };
+            let _ = write!(d, "{cmd}{x:.1} {y:.1} ");
+        }
+        d
+    };
+
+    let base_hex = hsla_hex(MUTED.resolve());
+    let accent_hex = hsla_hex(ACCENT.resolve());
+    let base_d = polyline_path(&base_pts);
+    let cur_d = polyline_path(&cur_pts);
+    let area_d = if let (Some(&(fx, _)), Some(&(lx, _))) = (cur_pts.first(), cur_pts.last()) {
+        let y_bot = svg_h - pad_y;
+        format!("{cur_d}L{lx:.1} {y_bot:.1} L{fx:.1} {y_bot:.1} Z")
+    } else {
+        String::new()
+    };
+    let end_dot = cur_pts
+        .last()
+        .map(|&(lx, ly)| {
+            format!(r#"<circle cx="{lx:.1}" cy="{ly:.1}" r="2.8" fill="{accent_hex}"/>"#)
+        })
+        .unwrap_or_default();
+
+    let svg_markup = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_w} {svg_h}" preserveAspectRatio="none"><path d="{base_d}" fill="none" stroke="{base_hex}" stroke-opacity="0.55" stroke-width="1.6" stroke-dasharray="4 3" stroke-linecap="round" stroke-linejoin="round"/><path d="{area_d}" fill="{accent_hex}" fill-opacity="0.10"/><path d="{cur_d}" fill="none" stroke="{accent_hex}" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/>{end_dot}</svg>"#
+    );
+
+    let hover_cols = dash
         .hours
         .iter()
         .map(|h| {
@@ -1877,66 +2214,99 @@ fn render_hourly_output(ui: Ui, dash: &Dashboard) -> View {
                 h.previous,
                 if h.future { " · future" } else { "" }
             );
-            let prev_h = if h.previous == 0 {
-                0.0
-            } else {
-                (h.previous as f32 / top_tick as f32 * usable_h).max(2.5)
-            };
-            let cur_h = if h.current == 0 {
-                0.0
-            } else {
-                (h.current as f32 / top_tick as f32 * usable_h).max(2.5)
-            };
             view()
                 .flex_1()
                 .min_w(px(0.))
                 .h(px(CHART_HEIGHT))
-                .justify_end()
-                .relative()
                 .tooltip(tooltip_box().child(note(title)))
-                .child(if h.future {
-                    view().into_element()
-                } else {
-                    view()
-                        .w_full()
-                        .flex_row()
-                        .gap(px(1.))
-                        .items_end()
-                        .child(
-                            view()
-                                .flex_1()
-                                .h(px(prev_h))
-                                .rounded(px(1.5))
-                                .bg(alpha_tint(MUTED, 0.45)),
-                        )
-                        .child(view().flex_1().h(px(cur_h)).rounded(px(1.5)).bg(ACCENT))
-                        .into_element()
-                })
                 .into_element()
         })
         .collect::<Vec<_>>();
+
+    let curve_frame = view()
+        .flex_row()
+        .items_center()
+        .child(chart_y_axis(top_tick))
+        .child(
+            view()
+                .flex_1()
+                .min_w(px(0.))
+                .h(px(CHART_HEIGHT))
+                .relative()
+                .child(
+                    view()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top(px(4.))
+                        .h(px(1.))
+                        .bg(BORDER)
+                        .opacity(0.45)
+                        .pointer_events(PointerEvents::None),
+                )
+                .child(
+                    view()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top(px(CHART_HEIGHT / 2.0))
+                        .h(px(1.))
+                        .bg(BORDER)
+                        .opacity(0.45)
+                        .pointer_events(PointerEvents::None),
+                )
+                .child(
+                    view()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .h(px(1.))
+                        .bg(BORDER)
+                        .pointer_events(PointerEvents::None),
+                )
+                .child(
+                    svg(ImageSrc::svg_markup(&svg_markup))
+                        .w_full()
+                        .h_full()
+                        .pointer_events(PointerEvents::None),
+                )
+                .child(view().absolute().inset_0().flex_row().children(hover_cols)),
+        );
 
     let hourly_metric = ui.insights.hourly_metric.get();
     card_surface()
         .flex_1()
         .min_w(px(280.))
+        .justify_between()
         .child(
             view()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_2()
+                .gap_2p5()
                 .child(
                     view()
-                        .gap_0p5()
-                        .child(heading("Hourly output"))
-                        .child(note("Cumulative pace vs baseline")),
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(heading("Output (cumulative)"))
+                        .child(
+                            row()
+                                .child(legend_swatch(ACCENT, "Selected"))
+                                .child(legend_swatch(move || alpha_tint(MUTED, 0.55), "Baseline")),
+                        ),
                 )
+                .child(curve_frame)
                 .child(
-                    row()
-                        .child(legend_swatch(move || alpha_tint(MUTED, 0.45), "Baseline"))
-                        .child(legend_swatch(ACCENT, "Selected day")),
+                    view()
+                        .pl(px(28.))
+                        .flex_row()
+                        .justify_between()
+                        .child(note("00:00"))
+                        .child(note("06:00"))
+                        .child(note("12:00"))
+                        .child(note("18:00"))
+                        .child(note("24:00")),
                 ),
         )
         .child(
@@ -1959,18 +2329,6 @@ fn render_hourly_output(ui: Ui, dash: &Dashboard) -> View {
                     "hourly-runs",
                     hourly_metric == ActivityMetric::Runs,
                 )),
-        )
-        .child(plot_grid_frame(top_tick, 2.0, cols))
-        .child(
-            view()
-                .pl(px(28.))
-                .flex_row()
-                .justify_between()
-                .child(note("00:00"))
-                .child(note("06:00"))
-                .child(note("12:00"))
-                .child(note("18:00"))
-                .child(note("24:00")),
         )
 }
 
@@ -2144,7 +2502,7 @@ fn render_automation_funnel(dash: &Dashboard) -> View {
             .flex_row()
             .items_center()
             .gap_2()
-            .child(label(name).text_size(px(12.)).w(px(104.)).truncate())
+            .child(label(name).text_size(px(12.)).w(px(64.)).truncate())
             .child(
                 view()
                     .flex_1()
@@ -2157,79 +2515,88 @@ fn render_automation_funnel(dash: &Dashboard) -> View {
                     .child(
                         view()
                             .flex_grow(ratio.max(0.0))
+                            .basis(px(0.))
                             .h_full()
                             .rounded(px(3.))
                             .bg(color),
                     )
-                    .child(view().flex_grow((1.0 - ratio).max(0.0)).h_full()),
+                    .child(
+                        view()
+                            .flex_grow((1.0 - ratio).max(0.0))
+                            .basis(px(0.))
+                            .h_full(),
+                    ),
             )
-            .child(mono_val(count.to_string(), 11.5).w(px(36.)))
+            .child(mono_val(count.to_string(), 11.5).w(px(32.)))
     };
 
-    let zero_human_delta = match (f.zero_human_pct(), f.prev_zero_human_pct()) {
+    let asks_line = match f.human_asks_per_resolved() {
+        Some(rate) => format!("Human asks: {} · {rate:.1}/card", f.human_asks),
+        None => format!("Human asks: {} · —/card", f.human_asks),
+    };
+
+    let (zh_val, zh_color) = match (f.zero_human_pct(), f.prev_zero_human_pct()) {
         (Some(cur), Some(prev)) => {
             let diff = cur as isize - prev as isize;
-            Some((
-                format!(
-                    "{cur}% ({}{diff}% vs prev)",
-                    if diff >= 0 { "+" } else { "" }
-                ),
-                if diff >= 0 {
-                    Tone::Success
-                } else {
-                    Tone::Attention
-                },
-            ))
+            if diff > 0 {
+                (format!("{cur}% ▲{diff}pt"), SUCCESS)
+            } else if diff < 0 {
+                (format!("{cur}% ▼{}pt", -diff), ATTENTION)
+            } else {
+                (format!("{cur}% 0pt"), MUTED)
+            }
         }
-        (Some(cur), None) => Some((format!("{cur}%"), Tone::Neutral)),
-        _ => None,
+        (Some(cur), None) => (format!("{cur}%"), TEXT),
+        _ => ("—".into(), MUTED),
     };
 
-    let mut summary_row = view()
-        .flex_row()
-        .flex_wrap()
-        .items_center()
-        .justify_between()
-        .gap_2()
-        .child(note("Zero-human resolution"));
-    if let Some((txt, tone)) = zero_human_delta {
-        summary_row = summary_row.child(status(txt, tone));
-    } else {
-        summary_row = summary_row.child(mono_val("—", 11.5));
-    }
-
-    let pipe = &dash.pipeline;
     card_surface()
         .flex_1()
-        .min_w(px(280.))
+        .min_w(px(260.))
+        .justify_between()
         .child(
-            view()
-                .gap_0p5()
-                .child(heading("Automation funnel"))
-                .child(note("Period flow & live WIP gates")),
+            view().gap_3().child(heading("Automation")).child(
+                view()
+                    .gap_2()
+                    .child(step_row("Created", f.created, alpha_tint(ACCENT, 0.55)))
+                    .child(step_row("Agent", f.agent_touched, ACCENT.resolve()))
+                    .child(step_row("Review", f.reviewed, ATTENTION.resolve()))
+                    .child(step_row("Merged", f.merged, SUCCESS.resolve())),
+            ),
         )
         .child(
             view()
-                .gap_2()
-                .child(step_row("Created", f.created, alpha_tint(ACCENT, 0.55)))
-                .child(step_row("Agent touched", f.agent_touched, ACCENT.resolve()))
-                .child(step_row("Reviewed", f.reviewed, ATTENTION.resolve()))
-                .child(step_row("Merged", f.merged, SUCCESS.resolve())),
+                .pt_2p5()
+                .border_t_1()
+                .border_color(BORDER)
+                .gap_1()
+                .child(note(asks_line))
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(note("Zero-human completion:"))
+                        .child(
+                            text(zh_val)
+                                .font_family(MONO_FONT)
+                                .text_size(px(11.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(zh_color),
+                        ),
+                ),
         )
-        .child(view().w_full().h(px(1.)).bg(BORDER))
-        .child(
-            view()
-                .gap_1p5()
-                .child(summary_row)
-                .child(note(format!(
-                    "Human asks: {} · WIP: {} (B {} / D {} / R {})",
-                    f.human_asks, pipe.active_wip, pipe.backlog, pipe.develop, pipe.review
-                )))
-                .child(note(format!(
-                    "Human gated: {} · Merging now: {} · Attention: {}",
-                    pipe.human_gated, pipe.merging_now, pipe.attention_cards
-                ))),
-        )
+}
+
+fn project_sort_label(sort: ProjectSort) -> &'static str {
+    match sort {
+        ProjectSort::Time => "Time",
+        ProjectSort::Merged => "Merged",
+        ProjectSort::Created => "Created",
+        ProjectSort::Wip => "WIP",
+        ProjectSort::Runs => "Runs",
+    }
 }
 
 fn render_projects(ui: Ui, dash: &Dashboard, project_order: &[String]) -> View {
@@ -2300,121 +2667,88 @@ fn render_projects(ui: Ui, dash: &Dashboard, project_order: &[String]) -> View {
             let dot_color = project_color(Some(&p.id), project_order);
             let total_wip = p.total_wip();
 
-            let bar_track = match sort_mode {
+            let (ratio, fill_color) = match sort_mode {
                 ProjectSort::Time => {
                     let tot = p.total_time_ms();
-                    let ratio = if tot == 0 {
+                    let r = if tot == 0 {
                         0.0
                     } else {
                         (tot as f32 / max_metric as f32).clamp(0.05, 1.0)
                     };
-                    let segs: [(usize, AdaptiveColor); 2] = [
-                        (
-                            p.dwell_ms.min(u64::from(u32::MAX)) as usize,
-                            ACCENT.resolve(),
-                        ),
-                        (
-                            p.agent_ms.min(u64::from(u32::MAX)) as usize,
-                            SUCCESS.resolve(),
-                        ),
-                    ];
-                    let filled = view()
-                        .flex_grow(ratio)
-                        .h_full()
-                        .rounded(px(3.5))
-                        .overflow_hidden()
-                        .flex_row()
-                        .gap(px(1.))
-                        .children(
-                            segs.into_iter()
-                                .filter(|(v, _)| *v > 0)
-                                .map(|(v, col)| {
-                                    view().flex_grow(v as f32).h_full().bg(col).into_element()
-                                })
-                                .collect::<Vec<_>>(),
-                        );
-                    view()
-                        .flex_1()
-                        .min_w(px(64.))
-                        .h(px(7.))
-                        .rounded(px(3.5))
-                        .bg(INSET)
-                        .overflow_hidden()
-                        .flex_row()
-                        .child(filled)
-                        .child(view().flex_grow((1.0 - ratio).max(0.0)).h_full())
+                    (r, ACCENT.resolve())
                 }
-                ProjectSort::Wip => {
-                    let ratio = if total_wip == 0 {
+                ProjectSort::Merged => (
+                    if p.merged == 0 {
+                        0.0
+                    } else {
+                        (p.merged as f32 / max_metric as f32).clamp(0.05, 1.0)
+                    },
+                    SUCCESS.resolve(),
+                ),
+                ProjectSort::Created => (
+                    if p.created == 0 {
+                        0.0
+                    } else {
+                        (p.created as f32 / max_metric as f32).clamp(0.05, 1.0)
+                    },
+                    ACCENT.resolve(),
+                ),
+                ProjectSort::Wip => (
+                    if total_wip == 0 {
                         0.0
                     } else {
                         (total_wip as f32 / max_metric as f32).clamp(0.05, 1.0)
-                    };
-                    let wip_segs: [(usize, AdaptiveColor); 3] = [
-                        (p.wip_backlog, alpha_tint(MUTED, 0.55)),
-                        (p.wip_develop, ACCENT.resolve()),
-                        (p.wip_review, SUCCESS.resolve()),
-                    ];
-                    let filled = view()
-                        .flex_grow(ratio)
-                        .h_full()
-                        .rounded(px(3.5))
-                        .overflow_hidden()
-                        .flex_row()
-                        .gap(px(1.))
-                        .children(
-                            wip_segs
-                                .into_iter()
-                                .filter(|(v, _)| *v > 0)
-                                .map(|(v, col)| {
-                                    view().flex_grow(v as f32).h_full().bg(col).into_element()
-                                })
-                                .collect::<Vec<_>>(),
-                        );
-                    view()
-                        .flex_1()
-                        .min_w(px(64.))
-                        .h(px(7.))
-                        .rounded(px(3.5))
-                        .bg(INSET)
-                        .overflow_hidden()
-                        .flex_row()
-                        .child(filled)
-                        .child(view().flex_grow((1.0 - ratio).max(0.0)).h_full())
-                }
-                _ => {
-                    let (val, fill_color) = match sort_mode {
-                        ProjectSort::Merged => (p.merged as u64, SUCCESS.resolve()),
-                        ProjectSort::Created => (p.created as u64, ACCENT.resolve()),
-                        ProjectSort::Runs => (p.agent_runs as u64, alpha_tint(ACCENT, 0.8)),
-                        ProjectSort::Time | ProjectSort::Wip => unreachable!(),
-                    };
-                    let ratio = if val == 0 {
+                    },
+                    ATTENTION.resolve(),
+                ),
+                ProjectSort::Runs => (
+                    if p.agent_runs == 0 {
                         0.0
                     } else {
-                        (val as f32 / max_metric as f32).clamp(0.04, 1.0)
-                    };
+                        (p.agent_runs as f32 / max_metric as f32).clamp(0.05, 1.0)
+                    },
+                    alpha_tint(ACCENT, 0.8),
+                ),
+            };
+
+            let bar_track = view()
+                .w(px(64.))
+                .flex_shrink_0()
+                .h(px(6.))
+                .rounded(px(3.))
+                .bg(INSET)
+                .overflow_hidden()
+                .flex_row()
+                .child(
                     view()
-                        .flex_1()
-                        .min_w(px(64.))
-                        .h(px(7.))
-                        .rounded(px(3.5))
-                        .bg(INSET)
-                        .overflow_hidden()
-                        .flex_row()
-                        .child(
-                            view()
-                                .flex_grow(ratio.max(0.0))
-                                .h_full()
-                                .rounded(px(3.5))
-                                .bg(fill_color),
-                        )
-                        .child(view().flex_grow((1.0 - ratio).max(0.0)).h_full())
+                        .flex_grow(ratio.max(0.0))
+                        .basis(px(0.))
+                        .h_full()
+                        .rounded(px(3.))
+                        .bg(fill_color),
+                )
+                .child(
+                    view()
+                        .flex_grow((1.0 - ratio).max(0.0))
+                        .basis(px(0.))
+                        .h_full(),
+                );
+
+            let right_sub = match sort_mode {
+                ProjectSort::Time | ProjectSort::Merged => {
+                    format!(
+                        "{} {}",
+                        p.merged,
+                        if p.merged == 1 { "card" } else { "cards" }
+                    )
                 }
+                ProjectSort::Created => format!("+{} created", p.created),
+                ProjectSort::Wip => format!("{total_wip} wip"),
+                ProjectSort::Runs => format!("{} runs", p.agent_runs),
             };
 
             let tip = format!(
-                "{} · My {} · Agent {} · {} resolved · +{} created · WIP {total_wip} · {} runs",
+                "{} · Me {} · Agent {} · {} resolved · +{} created · WIP {total_wip} · {} runs",
                 p.name,
                 format_duration_compact(p.dwell_ms),
                 format_duration_compact(p.agent_ms),
@@ -2429,7 +2763,8 @@ fn render_projects(ui: Ui, dash: &Dashboard, project_order: &[String]) -> View {
                 .child(
                     press_target()
                         .w_full()
-                        .p_2()
+                        .px_2()
+                        .py_1p5()
                         .rounded(px(6.))
                         .bg(if is_scoped {
                             SELECTED.resolve()
@@ -2449,68 +2784,61 @@ fn render_projects(ui: Ui, dash: &Dashboard, project_order: &[String]) -> View {
                         .child(
                             view()
                                 .w_full()
-                                .gap_1()
+                                .gap_0p5()
                                 .child(
                                     view()
                                         .flex_row()
-                                        .flex_wrap()
                                         .items_center()
                                         .justify_between()
                                         .gap_2()
                                         .child(
                                             view()
+                                                .flex_1()
+                                                .min_w(px(0.))
                                                 .flex_row()
                                                 .items_center()
                                                 .gap_1p5()
                                                 .child(
                                                     view()
-                                                        .w(px(8.))
-                                                        .h(px(8.))
-                                                        .rounded(px(4.))
-                                                        .bg(dot_color),
+                                                        .w(px(7.))
+                                                        .h(px(7.))
+                                                        .rounded(px(3.5))
+                                                        .bg(dot_color)
+                                                        .flex_shrink_0(),
                                                 )
                                                 .child(
                                                     label(p.name.clone())
+                                                        .text_size(px(12.5))
                                                         .font_weight(FontWeight::MEDIUM)
-                                                        .max_w(px(140.))
-                                                        .truncate(),
+                                                        .truncate()
+                                                        .min_w(px(0.)),
                                                 ),
                                         )
-                                        .child(note(format!(
-                                            "My {} · Agent {} · {} res",
-                                            format_duration_compact(p.dwell_ms),
-                                            format_duration_compact(p.agent_ms),
-                                            p.merged
-                                        ))),
+                                        .child(
+                                            view()
+                                                .flex_row()
+                                                .items_center()
+                                                .gap_2()
+                                                .flex_shrink_0()
+                                                .child(note(format!(
+                                                    "Me {}",
+                                                    format_duration_compact(p.dwell_ms)
+                                                )))
+                                                .child(bar_track),
+                                        ),
                                 )
                                 .child(
                                     view()
-                                        .w_full()
+                                        .pl(px(13.))
                                         .flex_row()
                                         .items_center()
+                                        .justify_between()
                                         .gap_2()
-                                        .child(bar_track)
-                                        .child(
-                                            mono_val(
-                                                match sort_mode {
-                                                    ProjectSort::Time => {
-                                                        format_duration_compact(p.total_time_ms())
-                                                    }
-                                                    ProjectSort::Merged => {
-                                                        format!("{} res", p.merged)
-                                                    }
-                                                    ProjectSort::Created => {
-                                                        format!("+{}", p.created)
-                                                    }
-                                                    ProjectSort::Wip => format!("{total_wip} wip"),
-                                                    ProjectSort::Runs => {
-                                                        format!("{} runs", p.agent_runs)
-                                                    }
-                                                },
-                                                11.,
-                                            )
-                                            .w(px(54.)),
-                                        ),
+                                        .child(note(format!(
+                                            "Agent {}",
+                                            format_duration_compact(p.agent_ms)
+                                        )))
+                                        .child(note(right_sub)),
                                 ),
                         ),
                 )
@@ -2527,9 +2855,9 @@ fn render_projects(ui: Ui, dash: &Dashboard, project_order: &[String]) -> View {
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .child(note("Other / unattributed"))
+                .child(note("Other"))
                 .child(note(format!(
-                    "My {} · Agent {}",
+                    "Me {} · Agent {}",
                     format_duration_compact(dash.other_dwell_ms),
                     format_duration_compact(dash.other_agent_ms)
                 )))
@@ -2537,174 +2865,274 @@ fn render_projects(ui: Ui, dash: &Dashboard, project_order: &[String]) -> View {
         );
     }
 
-    let mut panel = card_surface().flex_1().min_w(px(280.)).child(
+    let sort_open = signal(false);
+    let sort_options = [
+        (ProjectSort::Time, "Time", "sort-time"),
+        (ProjectSort::Merged, "Merged", "sort-merged"),
+        (ProjectSort::Created, "Created", "sort-created"),
+        (ProjectSort::Wip, "WIP", "sort-wip"),
+        (ProjectSort::Runs, "Runs", "sort-runs"),
+    ];
+    let sort_popover = nsh_base::popover()
+        .open(move || Some(sort_open.get()))
+        .placement(Placement::Top)
+        .align(Align::Start)
+        .offset(px(4.))
+        .margin(px(8.))
+        .popup_class(canban_ui_kit::motion::POPUP_CLASS)
+        .popup_starting_class(canban_ui_kit::motion::POPUP_STARTING_CLASS)
+        .popup_ending_class(canban_ui_kit::motion::POPUP_ENDING_CLASS)
+        .on_open_change(move |e: &nsh_base::PopoverEvent| {
+            if let nsh_base::PopoverEvent::OpenChange(next, _) = e {
+                sort_open.set(*next);
+            }
+        })
+        .trigger(
+            press_target()
+                .h(px(24.))
+                .px_2()
+                .rounded(px(5.))
+                .bg(INSET)
+                .border_1()
+                .border_color(BORDER)
+                .hover(|s| s.bg(CARD_HOVER))
+                .focus(|s| s.border_color(ACCENT))
+                .flex_row()
+                .items_center()
+                .gap_1p5()
+                .accessibility_label(format!("Sort Projects: {}", project_sort_label(sort_mode)))
+                .child(note(format!("Sort: {}", project_sort_label(sort_mode))))
+                .child(icon(Icon::ChevronDown).w(px(11.)).h(px(11.))),
+        )
+        .child(
+            view()
+                .w(px(136.))
+                .p_1p5()
+                .gap_0p5()
+                .bg(SURFACE)
+                .rounded(px(8.))
+                .border_1()
+                .border_color(BORDER)
+                .shadow_lg()
+                .children(
+                    sort_options
+                        .into_iter()
+                        .map(|(mode, title, op)| {
+                            let is_sel = sort_mode == mode;
+                            press_target()
+                                .w_full()
+                                .px_2()
+                                .py_1()
+                                .rounded(px(5.))
+                                .bg(if is_sel {
+                                    SELECTED.resolve()
+                                } else {
+                                    AdaptiveColor::TRANSPARENT
+                                })
+                                .hover(|s| s.bg(CARD_HOVER))
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .accessibility_label(title)
+                                .on_press(move |_: &()| {
+                                    intent(ui, op);
+                                    sort_open.set(false);
+                                })
+                                .child(label(title).text_size(px(12.)))
+                                .child(if is_sel {
+                                    icon(Icon::Check).w(px(12.)).h(px(12.)).into_element()
+                                } else {
+                                    view().into_element()
+                                })
+                                .into_element()
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+        );
+
+    let mut body = view().gap_1p5().child(heading("Projects"));
+    if rows.is_empty() {
+        body = body.child(note("No Project activity or active WIP in this period."));
+    } else {
+        body = body.children(rows);
+    }
+
+    card_surface()
+        .flex_1()
+        .min_w(px(260.))
+        .justify_between()
+        .child(body)
+        .child(view().pt_1().items_start().child(sort_popover))
+}
+
+struct AgentRowSpec {
+    name: String,
+    runs: usize,
+    working_ms: u64,
+    max_work_ms: u64,
+    pass_pct: Option<usize>,
+    active_runs: usize,
+    asks: usize,
+    queue_p50_ms: Option<u64>,
+    prev_queue_p50_ms: Option<u64>,
+    tooltip: String,
+}
+
+fn render_agent_table_row(spec: AgentRowSpec) -> View {
+    let work_ratio = if spec.working_ms > 0 && spec.max_work_ms > 0 {
+        (spec.working_ms as f32 / spec.max_work_ms as f32).clamp(0.04, 1.0)
+    } else {
+        0.0
+    };
+    let (pass_txt, pass_color) = match spec.pass_pct {
+        Some(pct) if pct >= 85 => (format!("{pct}%"), SUCCESS),
+        Some(pct) if pct < 60 => (format!("{pct}%"), ATTENTION),
+        Some(pct) => (format!("{pct}%"), TEXT),
+        None if spec.active_runs > 0 => ("active".into(), ACCENT),
+        None => ("—".into(), MUTED),
+    };
+    let q_str = spec
+        .queue_p50_ms
+        .map(format_duration_compact)
+        .unwrap_or_else(|| "—".into());
+    let q_delta = format_duration_delta(spec.queue_p50_ms, spec.prev_queue_p50_ms)
+        .map(|(txt, _)| format!(" {txt}"))
+        .unwrap_or_default();
+
+    view()
+        .w_full()
+        .py_1p5()
+        .px_2()
+        .border_b_1()
+        .border_color(alpha_tint(BORDER, 0.45))
+        .hover(|s| s.bg(CARD_HOVER))
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .tooltip(tooltip_box().child(note(spec.tooltip)))
+        .child(
+            label(spec.name)
+                .text_size(px(12.5))
+                .font_weight(FontWeight::MEDIUM)
+                .flex_1()
+                .min_w(px(120.))
+                .truncate(),
+        )
+        .child(
+            mono_val(spec.runs.to_string(), 12.)
+                .w(px(48.))
+                .flex_shrink_0(),
+        )
+        .child(
+            view()
+                .flex_1()
+                .min_w(px(140.))
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(
+                    view()
+                        .flex_1()
+                        .min_w(px(56.))
+                        .h(px(6.))
+                        .rounded(px(3.))
+                        .bg(INSET)
+                        .overflow_hidden()
+                        .flex_row()
+                        .child(
+                            view()
+                                .flex_grow(work_ratio)
+                                .basis(px(0.))
+                                .h_full()
+                                .rounded(px(3.))
+                                .bg(ACCENT),
+                        )
+                        .child(
+                            view()
+                                .flex_grow((1.0 - work_ratio).max(0.0))
+                                .basis(px(0.))
+                                .h_full(),
+                        ),
+                )
+                .child(
+                    mono_val(format_duration_compact(spec.working_ms), 11.5)
+                        .w(px(54.))
+                        .flex_shrink_0(),
+                ),
+        )
+        .child(
+            text(pass_txt)
+                .font_family(MONO_FONT)
+                .text_size(px(12.))
+                .text_color(pass_color)
+                .w(px(54.))
+                .flex_shrink_0(),
+        )
+        .child(
+            mono_val(spec.asks.to_string(), 12.)
+                .w(px(44.))
+                .flex_shrink_0(),
+        )
+        .child(
+            mono_val(format!("{q_str}{q_delta}"), 11.5)
+                .w(px(130.))
+                .flex_shrink_0(),
+        )
+}
+
+fn render_agents(ui: Ui, dash: &Dashboard) -> View {
+    let agent_group = ui.insights.agent_group.get();
+    let mut panel = card_surface().child(
         view()
             .flex_row()
             .flex_wrap()
             .items_center()
             .justify_between()
             .gap_2()
-            .child(heading("Projects"))
+            .child(heading("Agents"))
             .child(
                 row()
+                    .child(note("Group:"))
                     .child(choice(
                         ui,
-                        "Time",
-                        "sort-time",
-                        sort_mode == ProjectSort::Time,
+                        "Profile",
+                        "group-profile",
+                        agent_group == AgentGroup::Profile,
                     ))
                     .child(choice(
                         ui,
-                        "Resolved",
-                        "sort-merged",
-                        sort_mode == ProjectSort::Merged,
-                    ))
-                    .child(choice(
-                        ui,
-                        "Created",
-                        "sort-created",
-                        sort_mode == ProjectSort::Created,
-                    ))
-                    .child(choice(ui, "WIP", "sort-wip", sort_mode == ProjectSort::Wip))
-                    .child(choice(
-                        ui,
-                        "Runs",
-                        "sort-runs",
-                        sort_mode == ProjectSort::Runs,
+                        "Model",
+                        "group-model",
+                        agent_group == AgentGroup::Model,
                     )),
             ),
     );
-    if rows.is_empty() {
-        panel = panel.child(note("No Project activity or active WIP in this period."));
-    }
-    panel.children(rows)
-}
 
-struct AgentBarSpec {
-    runs: usize,
-    max_runs: usize,
-    working_ms: u64,
-    max_work_ms: u64,
-    completed: usize,
-    active: usize,
-    blocked: usize,
-    failed: usize,
-}
-
-fn render_agent_stacked_bar(spec: AgentBarSpec) -> View {
-    let AgentBarSpec {
-        runs,
-        max_runs,
-        working_ms,
-        max_work_ms,
-        completed,
-        active,
-        blocked,
-        failed,
-    } = spec;
-    let ratio = if runs > 0 && max_runs > 0 {
-        (runs as f32 / max_runs as f32).clamp(0.05, 1.0)
-    } else if working_ms > 0 && max_work_ms > 0 {
-        (working_ms as f32 / max_work_ms as f32).clamp(0.05, 1.0)
-    } else {
-        0.0
-    };
-    let segs: [(usize, AdaptiveColor); 4] = [
-        (completed, SUCCESS.resolve()),
-        (active, ACCENT.resolve()),
-        (blocked, ATTENTION.resolve()),
-        (failed, DANGER.resolve()),
-    ];
-    let filled_total = completed + active + blocked + failed;
-    let filled = if filled_total == 0 {
-        view()
-            .flex_grow(ratio)
-            .h_full()
-            .rounded(px(3.5))
-            .bg(if working_ms > 0 {
-                ACCENT.resolve()
-            } else {
-                alpha_tint(MUTED, 0.45)
-            })
-    } else {
-        view()
-            .flex_grow(ratio)
-            .h_full()
-            .rounded(px(3.5))
-            .overflow_hidden()
-            .flex_row()
-            .gap(px(1.))
-            .children(
-                segs.into_iter()
-                    .filter(|(v, _)| *v > 0)
-                    .map(|(v, col)| view().flex_grow(v as f32).h_full().bg(col).into_element())
-                    .collect::<Vec<_>>(),
-            )
+    let first_col = match agent_group {
+        AgentGroup::Profile => "Profile",
+        AgentGroup::Model => "Model",
     };
 
-    view()
+    let header_row = view()
         .w_full()
-        .h(px(8.))
-        .rounded(px(4.))
-        .bg(BACKGROUND)
-        .overflow_hidden()
+        .px_2()
+        .pb_1()
+        .border_b_1()
+        .border_color(BORDER)
         .flex_row()
-        .tooltip(tooltip_box().child(note(format!(
-            "{completed} completed · {active} active · {blocked} blocked · {failed} failed"
-        ))))
-        .child(filled)
-        .child(view().flex_grow((1.0 - ratio).max(0.0)).h_full())
-}
+        .items_center()
+        .gap_3()
+        .child(note(first_col).flex_1().min_w(px(120.)))
+        .child(note("Runs").w(px(48.)).flex_shrink_0())
+        .child(note("Working").flex_1().min_w(px(140.)))
+        .child(note("Pass").w(px(54.)).flex_shrink_0())
+        .child(note("Asks").w(px(44.)).flex_shrink_0())
+        .child(note("Queue p50").w(px(130.)).flex_shrink_0());
 
-fn format_q_delta(cur: Option<u64>, prev: Option<u64>) -> String {
-    format_duration_delta(cur, prev)
-        .map(|(txt, _)| format!(" ({txt})"))
-        .unwrap_or_default()
-}
-
-fn render_agents(ui: Ui, dash: &Dashboard) -> View {
-    let agent_group = ui.insights.agent_group.get();
-    let mut panel = card_surface()
-        .child(
-            view()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(heading("Agents used"))
-                .child(
-                    row()
-                        .child(choice(
-                            ui,
-                            "Profile",
-                            "group-profile",
-                            agent_group == AgentGroup::Profile,
-                        ))
-                        .child(choice(
-                            ui,
-                            "Model",
-                            "group-model",
-                            agent_group == AgentGroup::Model,
-                        )),
-                ),
-        )
-        .child(
-            row()
-                .child(legend_swatch(SUCCESS, "Completed"))
-                .child(legend_swatch(ACCENT, "Active"))
-                .child(legend_swatch(ATTENTION, "Blocked"))
-                .child(legend_swatch(DANGER, "Failed")),
-        );
+    panel = panel.child(header_row);
 
     match agent_group {
         AgentGroup::Profile => {
-            let max_runs = dash
-                .profile_stats
-                .iter()
-                .map(|p| p.total_runs)
-                .max()
-                .unwrap_or(0);
             let max_work = dash
                 .profile_stats
                 .iter()
@@ -2713,7 +3141,7 @@ fn render_agents(ui: Ui, dash: &Dashboard) -> View {
                 .unwrap_or(1)
                 .max(1);
             for p in &dash.profile_stats {
-                panel = panel.child(render_profile_agent_row(p, max_runs, max_work));
+                panel = panel.child(render_profile_agent_row(p, max_work));
             }
             if dash.profile_stats.is_empty() {
                 panel = panel.child(note(
@@ -2722,12 +3150,6 @@ fn render_agents(ui: Ui, dash: &Dashboard) -> View {
             }
         }
         AgentGroup::Model => {
-            let max_runs = dash
-                .model_stats
-                .iter()
-                .map(|m| m.total_runs)
-                .max()
-                .unwrap_or(0);
             let max_work = dash
                 .model_stats
                 .iter()
@@ -2736,7 +3158,7 @@ fn render_agents(ui: Ui, dash: &Dashboard) -> View {
                 .unwrap_or(1)
                 .max(1);
             for m in &dash.model_stats {
-                panel = panel.child(render_model_agent_row(m, max_runs, max_work));
+                panel = panel.child(render_model_agent_row(m, max_work));
             }
             if dash.model_stats.is_empty() {
                 panel = panel.child(note(
@@ -2746,225 +3168,75 @@ fn render_agents(ui: Ui, dash: &Dashboard) -> View {
         }
     }
 
-    let trigger_color = |kind: model::TriggerKind| match kind {
-        model::TriggerKind::Workflow => ACCENT.resolve(),
-        model::TriggerKind::Mention => SUCCESS.resolve(),
-        model::TriggerKind::Interactive => ATTENTION.resolve(),
-    };
-    let trigger_segments: Vec<(usize, AdaptiveColor)> = dash
-        .trigger_stats
-        .iter()
-        .map(|s| (s.count, trigger_color(s.kind)))
-        .collect();
-    let trigger_legend = row().children(
-        dash.trigger_stats
-            .iter()
-            .map(|s| {
-                let col = trigger_color(s.kind);
-                view()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .child(view().w(px(7.)).h(px(7.)).rounded(px(2.)).bg(col))
-                    .child(note(format!(
-                        "{}: {} ({}%)",
-                        s.kind.label(),
-                        s.count,
-                        s.share_pct
-                    )))
-                    .into_element()
-            })
-            .collect::<Vec<_>>(),
-    );
-
     panel
-        .child(view().w_full().h(px(1.)).bg(BORDER))
-        .child(
-            view()
-                .gap_1p5()
-                .child(note("Trigger sources"))
-                .child(segmented_bar(&trigger_segments))
-                .child(trigger_legend),
-        )
-        .child(note(
-            "Working duration reflects live and historical Herdr working intervals. Queue p50 compares against the baseline period.",
-        ))
 }
 
-fn render_profile_agent_row(p: &ProfileStat, max_runs: usize, max_work: u64) -> View {
-    let pass_pct = p.pass_rate_pct();
-    let pass_tone = match pass_pct {
-        Some(pct) if pct >= 85 => Tone::Success,
-        Some(pct) if pct < 60 => Tone::Attention,
-        _ => Tone::Neutral,
-    };
-    let pass_txt = pass_pct
-        .map(|pct| format!("{pct}% pass"))
-        .unwrap_or_else(|| {
-            if p.active_runs > 0 {
-                "active".into()
-            } else {
-                "—".into()
-            }
-        });
-    let exec_str = p
-        .avg_exec_ms
-        .map(format_duration_compact)
-        .unwrap_or_else(|| "—".into());
-    let q_str = p
-        .median_queue_wait_ms
-        .map(format_duration_compact)
-        .unwrap_or_else(|| "—".into());
-    let q_delta = format_q_delta(p.median_queue_wait_ms, p.prev_median_queue_wait_ms);
-    let reply_suffix = p
-        .avg_mention_reply_ms
-        .map(|ms| format!(" · reply avg {}", format_duration_compact(ms)))
-        .unwrap_or_default();
+fn render_profile_agent_row(p: &ProfileStat, max_work: u64) -> View {
     let title = if p.profile_id == "manual" {
         "Manual".to_owned()
     } else {
         format!("@{}", p.profile_id)
     };
-
-    view()
-        .w_full()
-        .p_2p5()
-        .gap_1p5()
-        .rounded(px(6.))
-        .bg(INSET)
-        .child(
-            view()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_1p5()
-                        .child(label(title).font_weight(FontWeight::MEDIUM).truncate())
-                        .child(note(format!("({} · {})", p.provider, p.model))),
-                )
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .child(mono_val(
-                            format!(
-                                "{} · {} runs",
-                                format_duration_compact(p.working_ms),
-                                p.total_runs
-                            ),
-                            11.5,
-                        ))
-                        .child(status(pass_txt, pass_tone)),
-                ),
-        )
-        .child(render_agent_stacked_bar(AgentBarSpec {
-            runs: p.total_runs,
-            max_runs,
-            working_ms: p.working_ms,
-            max_work_ms: max_work,
-            completed: p.completed_runs,
-            active: p.active_runs,
-            blocked: p.blocked_runs,
-            failed: p.failed_runs,
-        }))
-        .child(note(format!(
-            "{} Cards · Q p50 {q_str}{q_delta} · {} asks · exec avg {exec_str}{reply_suffix}",
-            p.cards_touched, p.human_asks
-        )))
+    let exec_str = p
+        .avg_exec_ms
+        .map(format_duration_compact)
+        .unwrap_or_else(|| "—".into());
+    let reply_suffix = p
+        .avg_mention_reply_ms
+        .map(|ms| format!(" · reply avg {}", format_duration_compact(ms)))
+        .unwrap_or_default();
+    let tooltip = format!(
+        "{title} ({} · {}) · {} completed · {} active · {} blocked · {} failed · {} Cards · exec avg {exec_str}{reply_suffix}",
+        p.provider,
+        p.model,
+        p.completed_runs,
+        p.active_runs,
+        p.blocked_runs,
+        p.failed_runs,
+        p.cards_touched
+    );
+    render_agent_table_row(AgentRowSpec {
+        name: title,
+        runs: p.total_runs,
+        working_ms: p.working_ms,
+        max_work_ms: max_work,
+        pass_pct: p.pass_rate_pct(),
+        active_runs: p.active_runs,
+        asks: p.human_asks,
+        queue_p50_ms: p.median_queue_wait_ms,
+        prev_queue_p50_ms: p.prev_median_queue_wait_ms,
+        tooltip,
+    })
 }
 
-fn render_model_agent_row(m: &ModelAgentStat, max_runs: usize, max_work: u64) -> View {
-    let pass_pct = m.pass_rate_pct();
-    let pass_tone = match pass_pct {
-        Some(pct) if pct >= 85 => Tone::Success,
-        Some(pct) if pct < 60 => Tone::Attention,
-        _ => Tone::Neutral,
-    };
-    let pass_txt = pass_pct
-        .map(|pct| format!("{pct}% pass"))
-        .unwrap_or_else(|| {
-            if m.active_runs > 0 {
-                "active".into()
-            } else {
-                "—".into()
-            }
-        });
+fn render_model_agent_row(m: &ModelAgentStat, max_work: u64) -> View {
     let providers = if m.providers.is_empty() {
         "—".into()
     } else {
         m.providers.iter().cloned().collect::<Vec<_>>().join(", ")
     };
-    let q_str = m
-        .median_queue_wait_ms
-        .map(format_duration_compact)
-        .unwrap_or_else(|| "—".into());
-    let q_delta = format_q_delta(m.median_queue_wait_ms, m.prev_median_queue_wait_ms);
-
-    view()
-        .w_full()
-        .p_2p5()
-        .gap_1p5()
-        .rounded(px(6.))
-        .bg(INSET)
-        .child(
-            view()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_1p5()
-                        .child(
-                            label(m.model.clone())
-                                .font_weight(FontWeight::MEDIUM)
-                                .truncate(),
-                        )
-                        .child(note(format!(
-                            "({} · {} profiles)",
-                            providers,
-                            m.profiles.len()
-                        ))),
-                )
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .child(mono_val(
-                            format!(
-                                "{} · {} runs",
-                                format_duration_compact(m.working_ms),
-                                m.total_runs
-                            ),
-                            11.5,
-                        ))
-                        .child(status(pass_txt, pass_tone)),
-                ),
-        )
-        .child(render_agent_stacked_bar(AgentBarSpec {
-            runs: m.total_runs,
-            max_runs,
-            working_ms: m.working_ms,
-            max_work_ms: max_work,
-            completed: m.completed_runs,
-            active: m.active_runs,
-            blocked: m.blocked_runs,
-            failed: m.failed_runs,
-        }))
-        .child(note(format!(
-            "{} Cards · Q p50 {q_str}{q_delta} · {} asks",
-            m.cards_touched, m.human_asks
-        )))
+    let tooltip = format!(
+        "{} ({providers} · {} profiles) · {} completed · {} active · {} blocked · {} failed · {} Cards",
+        m.model,
+        m.profiles.len(),
+        m.completed_runs,
+        m.active_runs,
+        m.blocked_runs,
+        m.failed_runs,
+        m.cards_touched
+    );
+    render_agent_table_row(AgentRowSpec {
+        name: m.model.clone(),
+        runs: m.total_runs,
+        working_ms: m.working_ms,
+        max_work_ms: max_work,
+        pass_pct: m.pass_rate_pct(),
+        active_runs: m.active_runs,
+        asks: m.human_asks,
+        queue_p50_ms: m.median_queue_wait_ms,
+        prev_queue_p50_ms: m.prev_median_queue_wait_ms,
+        tooltip,
+    })
 }
 
 fn heatmap_level_bg(level: u8) -> AdaptiveColor {
@@ -2978,20 +3250,19 @@ fn heatmap_level_bg(level: u8) -> AdaptiveColor {
 }
 
 fn render_heatmap_panel(ui: Ui, dash: &Dashboard) -> View {
-    let annual_scroll = element_ref();
-    let cell_size = 14.;
-    let gap = 3.;
+    let cell_size = 11.;
+    let gap = 2.5;
     let headers = dash
         .heatmap_weeks
         .iter()
         .map(|w| {
             view()
                 .w(px(cell_size))
-                .h(px(16.))
+                .h(px(14.))
                 .flex_shrink_0()
                 .child(
                     note(w.month_header.clone().unwrap_or_default())
-                        .w(px(32.))
+                        .w(px(30.))
                         .flex_shrink_0()
                         .text_size(px(10.)),
                 )
@@ -3035,7 +3306,7 @@ fn render_heatmap_panel(ui: Ui, dash: &Dashboard) -> View {
                                         .h(px(cell_size))
                                         .min_w(px(cell_size))
                                         .min_h(px(cell_size))
-                                        .rounded(px(3.))
+                                        .rounded(px(2.))
                                         .bg(heatmap_level_bg(c.level))
                                         .border_1()
                                         .border_color(if c.is_today {
@@ -3060,20 +3331,23 @@ fn render_heatmap_panel(ui: Ui, dash: &Dashboard) -> View {
                 .into_element()
         })
         .collect::<Vec<_>>();
+    let grid_height = 14.0 + 4.0 + 7.0 * cell_size + 6.0 * gap;
     let grid = view()
-        .min_w(px(dash.heatmap_weeks.len() as f32 * (cell_size + gap) + 32.))
-        .gap_1()
-        .child(view().flex_row().pl(px(32.)).gap(px(gap)).children(headers))
+        .min_w(px(dash.heatmap_weeks.len() as f32 * (cell_size + gap) + 28.))
+        .h(px(grid_height))
+        .gap(px(4.))
+        .child(view().flex_row().pl(px(28.)).gap(px(gap)).children(headers))
         .child(
             view()
                 .flex_row()
                 .child(
-                    view().w(px(32.)).gap(px(gap)).children(
-                        ["Mon", "", "Wed", "", "Fri", "", "Sun"]
+                    view().w(px(28.)).gap(px(gap)).children(
+                        ["Mon", "", "Wed", "", "Fri", "", ""]
                             .into_iter()
                             .map(|d| {
                                 view()
                                     .h(px(cell_size))
+                                    .justify_center()
                                     .child(note(d).text_size(px(9.)))
                                     .into_element()
                             })
@@ -3084,6 +3358,20 @@ fn render_heatmap_panel(ui: Ui, dash: &Dashboard) -> View {
         );
 
     let hm_metric = ui.insights.heatmap_metric.get();
+    let hm_spinner = view()
+        .w(px(14.))
+        .h(px(14.))
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .child(dynamic(move || {
+            if ui.insights.heatmap_loading.get() {
+                loading_spinner(11., MUTED).into_element()
+            } else {
+                view().w(px(11.)).h(px(11.)).into_element()
+            }
+        }));
+
     card_surface()
         .child(
             view()
@@ -3092,48 +3380,47 @@ fn render_heatmap_panel(ui: Ui, dash: &Dashboard) -> View {
                 .items_center()
                 .justify_between()
                 .gap_2()
-                .child(heading("Yearly activity"))
                 .child(
-                    row()
-                        .child(choice(
-                            ui,
-                            "Resolved",
-                            "metric-merged",
-                            hm_metric == HeatmapMetric::Resolved,
-                        ))
-                        .child(choice(
-                            ui,
-                            "My time",
-                            "metric-dwell",
-                            hm_metric == HeatmapMetric::Dwell,
-                        ))
-                        .child(choice(
-                            ui,
-                            "Agent time",
-                            "metric-agent",
-                            hm_metric == HeatmapMetric::Agent,
-                        )),
-                ),
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(heading("Past year"))
+                        .child(
+                            row()
+                                .child(choice(
+                                    ui,
+                                    "Resolved",
+                                    "metric-merged",
+                                    hm_metric == HeatmapMetric::Resolved,
+                                ))
+                                .child(choice(
+                                    ui,
+                                    "My time",
+                                    "metric-dwell",
+                                    hm_metric == HeatmapMetric::Dwell,
+                                ))
+                                .child(choice(
+                                    ui,
+                                    "Agent time",
+                                    "metric-agent",
+                                    hm_metric == HeatmapMetric::Agent,
+                                )),
+                        )
+                        .child(hm_spinner),
+                )
+                .child(note(format!(
+                    "Streak {}d · Longest {}d",
+                    dash.current_streak, dash.longest_streak
+                ))),
         )
-        .child(note(format!(
-            "{} – {} · Last 365 days · {}",
-            dash.annual_start,
-            dash.annual_end,
-            hm_metric.label()
-        )))
         .child(
             scroll()
                 .horizontal()
                 .w_full()
-                .element_ref(&annual_scroll)
+                .h(px(grid_height + 2.0))
                 .content_offset(Point::new(px(10_000.), px(0.)))
-                .on_layout(move |bounds: &Bounds<Points>| {
-                    let width = bounds.size.width.0;
-                    if (ui.insights.annual_width.get_untracked() - width).abs() > 0.5 {
-                        ui.insights.annual_width.set(width);
-                        annual_scroll.scroll_to_end(false);
-                    }
-                })
                 .child(grid),
         )
         .child(
@@ -3144,8 +3431,8 @@ fn render_heatmap_panel(ui: Ui, dash: &Dashboard) -> View {
                 .justify_between()
                 .gap_2()
                 .child(note(format!(
-                    "{} active days · Current streak: {}d · Longest: {}d",
-                    dash.active_days, dash.current_streak, dash.longest_streak
+                    "{} active days · Click a tile to inspect",
+                    dash.active_days
                 )))
                 .child(
                     row()
@@ -3154,8 +3441,8 @@ fn render_heatmap_panel(ui: Ui, dash: &Dashboard) -> View {
                             (0..=4)
                                 .map(|n| {
                                     view()
-                                        .w(px(10.))
-                                        .h(px(10.))
+                                        .w(px(9.))
+                                        .h(px(9.))
                                         .rounded(px(2.))
                                         .bg(heatmap_level_bg(n))
                                         .into_element()
@@ -3165,9 +3452,6 @@ fn render_heatmap_panel(ui: Ui, dash: &Dashboard) -> View {
                         .child(note("More")),
                 ),
         )
-        .child(note(
-            "Select a tile to inspect that date. Faded tiles precede retained history. Project scope applies.",
-        ))
 }
 
 fn render_percentile_row(
@@ -3191,49 +3475,61 @@ fn render_percentile_row(
     let prev_txt = prev_p50
         .map(format_duration_compact)
         .unwrap_or_else(|| "—".into());
-    let delta = format_duration_delta(p50, prev_p50);
-    let inspect_label = if active_tab == tab_id {
-        "Hide samples"
-    } else {
-        "Inspect"
+    let (baseline_txt, baseline_color) = match format_duration_delta(p50, prev_p50) {
+        Some((delta_txt, faster)) => (
+            format!("{prev_txt} ({delta_txt})"),
+            if faster { SUCCESS } else { MUTED },
+        ),
+        None => (prev_txt, MUTED),
     };
-
-    let delta_view = if let Some((txt, faster)) = delta {
-        status(txt, if faster { Tone::Success } else { Tone::Neutral }).into_element()
-    } else {
-        mono_val("—", 11.5).into_element()
-    };
+    let is_open = active_tab == tab_id;
+    let inspect_label = if is_open { "Hide ▾" } else { "Inspect ▸" };
 
     view()
         .w_full()
         .py_1p5()
         .px_2()
-        .rounded(px(5.))
-        .bg(INSET)
+        .border_b_1()
+        .border_color(alpha_tint(BORDER, 0.45))
         .flex_row()
-        .flex_wrap()
         .items_center()
-        .gap_2()
+        .gap_3()
         .child(
             label(title)
                 .text_size(px(12.5))
                 .font_weight(FontWeight::MEDIUM)
-                .w(px(180.)),
+                .flex_1()
+                .min_w(px(150.)),
         )
-        .child(mono_val(p50_txt, 12.).w(px(64.)))
-        .child(mono_val(p90_txt, 12.).w(px(64.)))
-        .child(mono_val(prev_txt, 11.5).w(px(86.)))
-        .child(view().w(px(120.)).child(delta_view))
-        .child(mono_val(samples.len().to_string(), 11.5).w(px(64.)))
-        .child(view().flex_1().items_end().child(compact_action(
-            inspect_label,
-            if active_tab == tab_id {
-                Variant::Secondary
-            } else {
-                Variant::Quiet
-            },
-            move |_| intent(ui, op),
-        )))
+        .child(mono_val(p50_txt, 12.).w(px(64.)).flex_shrink_0())
+        .child(mono_val(p90_txt, 12.).w(px(64.)).flex_shrink_0())
+        .child(
+            text(baseline_txt)
+                .font_family(MONO_FONT)
+                .text_size(px(11.5))
+                .text_color(baseline_color)
+                .w(px(148.))
+                .flex_shrink_0(),
+        )
+        .child(
+            mono_val(samples.len().to_string(), 11.5)
+                .w(px(58.))
+                .flex_shrink_0(),
+        )
+        .child(
+            view().w(px(88.)).flex_shrink_0().items_end().child(
+                compact_action(
+                    inspect_label,
+                    if is_open {
+                        Variant::Secondary
+                    } else {
+                        Variant::Quiet
+                    },
+                    move |_| intent(ui, op),
+                )
+                .accessibility_label(format!("{inspect_label} {title}")),
+            ),
+        )
 }
 
 fn render_timings(ui: Ui, dash: &Dashboard) -> View {
@@ -3244,167 +3540,44 @@ fn render_timings(ui: Ui, dash: &Dashboard) -> View {
         _ => &[],
     };
 
-    let t = &dash.timings;
-    let max_avg = [
-        t.develop_stage.avg_ms,
-        t.review_stage.avg_ms,
-        t.merge_queue.avg_ms,
-        t.mention_reply.avg_ms,
-    ]
-    .into_iter()
-    .flatten()
-    .max()
-    .unwrap_or(1)
-    .max(1);
-
-    let stage_row = |title: &'static str,
-                     stat: &model::TimingStat,
-                     color: AdaptiveColor,
-                     extra_detail: Option<String>| {
-        let ratio = stat
-            .avg_ms
-            .map(|ms| (ms as f32 / max_avg as f32).clamp(0.05, 1.0))
-            .unwrap_or(0.0);
-        let avg_txt = stat
-            .avg_ms
-            .map(format_duration_compact)
-            .unwrap_or_else(|| "—".into());
-        let p50_txt = stat
-            .p50_ms
-            .map(format_duration_compact)
-            .unwrap_or_else(|| "—".into());
-        let delta = format_duration_delta(stat.avg_ms, stat.prev_avg_ms);
-        let mut detail = format!("p50 {p50_txt} · n={}", stat.samples);
-        if let Some(extra) = extra_detail {
-            detail.push_str(" · ");
-            detail.push_str(&extra);
-        }
-
-        let mut header =
-            view()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_1p5()
-                        .child(view().w(px(7.)).h(px(7.)).rounded(px(2.)).bg(color))
-                        .child(
-                            label(title)
-                                .text_size(px(12.))
-                                .font_weight(FontWeight::MEDIUM),
-                        ),
-                )
-                .child(view().flex_row().items_center().gap_1p5().child(
-                    mono_val(format!("avg {avg_txt}"), 11.5).font_weight(FontWeight::SEMIBOLD),
-                ));
-        if let Some((delta_txt, faster)) = delta {
-            header = header.child(status(
-                delta_txt,
-                if faster { Tone::Success } else { Tone::Neutral },
-            ));
-        }
-
+    let mut panel = card_surface().child(heading("Timings")).child(
         view()
-            .flex_1()
-            .min_w(px(220.))
-            .gap_1()
-            .child(header)
+            .gap_0p5()
             .child(
                 view()
-                    .w_full()
-                    .h(px(7.))
-                    .rounded(px(3.5))
-                    .bg(INSET)
-                    .overflow_hidden()
+                    .px_2()
+                    .pb_1()
+                    .border_b_1()
+                    .border_color(BORDER)
                     .flex_row()
-                    .child(
-                        view()
-                            .flex_grow(ratio.max(0.0))
-                            .h_full()
-                            .rounded(px(3.5))
-                            .bg(color),
-                    )
-                    .child(view().flex_grow((1.0 - ratio).max(0.0)).h_full()),
+                    .items_center()
+                    .gap_3()
+                    .child(note("Metric").flex_1().min_w(px(150.)))
+                    .child(note("p50").w(px(64.)).flex_shrink_0())
+                    .child(note("p90").w(px(64.)).flex_shrink_0())
+                    .child(note("vs Baseline").w(px(148.)).flex_shrink_0())
+                    .child(note("Samples").w(px(58.)).flex_shrink_0())
+                    .child(view().w(px(88.)).flex_shrink_0()),
             )
-            .child(note(detail))
-    };
-
-    let dev_exec_detail = t.develop_exec.avg_ms.map(|ms| {
-        format!(
-            "Agent exec avg {} (n={})",
-            format_duration_compact(ms),
-            t.develop_exec.samples
-        )
-    });
-
-    let clean_pill = t
-        .clean_merge_rate_pct()
-        .map(|pct| {
-            let tone = if pct >= 85 {
-                Tone::Success
-            } else if pct < 60 {
-                Tone::Attention
-            } else {
-                Tone::Neutral
-            };
-            status(format!("{pct}% clean"), tone)
-        })
-        .unwrap_or_else(|| status("No batches", Tone::Neutral));
-
-    let batch_size_str = t
-        .merge_queue_avg_batch_size
-        .map(|sz| format!("{sz:.1} cards/batch"))
-        .unwrap_or_else(|| "— cards/batch".into());
-    let conflict_str = t
-        .merge_queue_conflict_avg_ms
-        .map(|ms| format!(" · Conflict resolve avg {}", format_duration_compact(ms)))
-        .unwrap_or_default();
-
-    let mut panel = card_surface()
-        .child(view().gap_0p5().child(heading("Timings")).child(note(
-            "Delivery and queue percentiles plus stage averages and merge queue efficiency",
-        )))
-        .child(
-            view()
-                .gap_1p5()
-                .child(
-                    view()
-                        .px_2()
-                        .flex_row()
-                        .flex_wrap()
-                        .items_center()
-                        .gap_2()
-                        .child(note("Metric").w(px(180.)))
-                        .child(note("p50").w(px(64.)))
-                        .child(note("p90").w(px(64.)))
-                        .child(note("Baseline p50").w(px(86.)))
-                        .child(note("Δ").w(px(120.)))
-                        .child(note("Samples").w(px(64.)))
-                        .child(view().flex_1()),
-                )
-                .child(render_percentile_row(
-                    ui,
-                    "Execution → resolution",
-                    &dash.efficiency.cycle,
-                    &dash.efficiency.previous_cycle,
-                    "cycle",
-                    "timing-cycle",
-                    &tab,
-                ))
-                .child(render_percentile_row(
-                    ui,
-                    "Queue → start",
-                    &dash.efficiency.queue,
-                    &dash.efficiency.previous_queue,
-                    "queue",
-                    "timing-queue",
-                    &tab,
-                )),
-        );
+            .child(render_percentile_row(
+                ui,
+                "Execution → resolution",
+                &dash.efficiency.cycle,
+                &dash.efficiency.previous_cycle,
+                "cycle",
+                "timing-cycle",
+                &tab,
+            ))
+            .child(render_percentile_row(
+                ui,
+                "Queue → start",
+                &dash.efficiency.queue,
+                &dash.efficiency.previous_queue,
+                "queue",
+                "timing-queue",
+                &tab,
+            )),
+    );
 
     if !tab.is_empty() {
         let total = samples.len();
@@ -3499,52 +3672,6 @@ fn render_timings(ui: Ui, dash: &Dashboard) -> View {
     }
 
     panel
-        .child(view().w_full().h(px(1.)).bg(BORDER))
-        .child(
-            view()
-                .flex_row()
-                .flex_wrap()
-                .gap_4()
-                .child(stage_row(
-                    "Develop",
-                    &t.develop_stage,
-                    ACCENT.resolve(),
-                    dev_exec_detail,
-                ))
-                .child(stage_row(
-                    "Review",
-                    &t.review_stage,
-                    SUCCESS.resolve(),
-                    None,
-                ))
-                .child(stage_row(
-                    "Merge Queue",
-                    &t.merge_queue,
-                    ATTENTION.resolve(),
-                    None,
-                ))
-                .child(stage_row(
-                    "@mention Reply",
-                    &t.mention_reply,
-                    alpha_tint(ACCENT, 0.7),
-                    None,
-                )),
-        )
-        .child(
-            view()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(note(format!(
-                    "Merge queue efficiency: {} batches ({} clean · {} conflicts) · Avg {batch_size_str}{conflict_str}",
-                    t.merge_queue_batches,
-                    t.merge_queue_clean_batches,
-                    t.merge_queue_conflict_batches
-                )))
-                .child(clean_pill),
-        )
 }
 
 fn render_card_drilldown(ui: Ui, dash: &Dashboard) -> View {
@@ -3622,51 +3749,255 @@ fn render_footer(ui: Ui, dash: &Dashboard) -> View {
             .join(", ")
     });
 
-    view()
+    let toggle_box = nsh_base::checkbox()
+        .checked(move || ui.insights.exclude_initial_sync.get())
+        .on_change(move |_: &bool| intent(ui, "toggle-initial-sync"))
+        .cursor_pointer()
+        .px_1()
+        .py_0p5()
+        .rounded(px(4.))
+        .hover(|s| s.bg(INSET))
+        .focus(|s| s.border_1().border_color(ACCENT))
+        .accessibility_label("Exclude initial sync")
+        .child(mono_val(if excl { "☑" } else { "☐" }, 12.));
+
+    let row_view = view()
+        .w_full()
+        .pt_2()
+        .border_t_1()
+        .border_color(BORDER)
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .justify_between()
         .gap_2()
+        .child(note(format!(
+            "Intake  Local {} · GitHub PR {} · Issue {}",
+            intake.local_manual, intake.github_pr, intake.github_issue
+        )))
         .child(
             view()
-                .p_3()
-                .bg(SURFACE)
-                .rounded(px(RADIUS))
-                .border_1()
-                .border_color(BORDER)
                 .flex_row()
-                .flex_wrap()
+                .items_center()
+                .gap_1()
+                .child(note(format!(
+                    "(Initial sync {} {}",
+                    intake.initial_sync,
+                    if excl { "excluded" } else { "included" }
+                )))
+                .child(toggle_box)
+                .child(note(")")),
+        );
+
+    if offline.is_empty() {
+        row_view
+    } else {
+        view().gap_1p5().child(row_view).child(note(format!(
+            "Offline hosts: {offline}; cached data may be stale."
+        )))
+    }
+}
+
+fn skeleton_bar(width_pct: f32, height: f32) -> View {
+    view()
+        .h(px(height))
+        .w(Percentage(width_pct))
+        .rounded(px(4.))
+        .bg(BORDER)
+        .opacity(0.45)
+}
+
+fn render_loading_skeleton(narrow: bool) -> View {
+    let kpi_col = || {
+        view()
+            .flex_1()
+            .min_w(px(150.))
+            .py_2()
+            .px_3()
+            .gap_1p5()
+            .child(skeleton_bar(0.45, 11.))
+            .child(skeleton_bar(0.60, 24.))
+    };
+    let v_sep = || {
+        view()
+            .w(px(1.))
+            .my_2()
+            .bg(BORDER)
+            .opacity(0.65)
+            .flex_shrink_0()
+    };
+
+    let kpi_strip = if narrow {
+        view()
+            .pb_2()
+            .border_b_1()
+            .border_color(BORDER)
+            .gap_1()
+            .child(
+                view()
+                    .flex_row()
+                    .child(kpi_col())
+                    .child(v_sep())
+                    .child(kpi_col()),
+            )
+            .child(
+                view()
+                    .flex_row()
+                    .child(kpi_col())
+                    .child(v_sep())
+                    .child(kpi_col()),
+            )
+    } else {
+        view()
+            .pb_2()
+            .border_b_1()
+            .border_color(BORDER)
+            .flex_row()
+            .child(kpi_col())
+            .child(v_sep())
+            .child(kpi_col())
+            .child(v_sep())
+            .child(kpi_col())
+            .child(v_sep())
+            .child(kpi_col())
+    };
+
+    let timeline_skel = card_surface()
+        .h(px(220.))
+        .justify_between()
+        .child(
+            view()
+                .flex_row()
                 .items_center()
                 .justify_between()
-                .gap_2()
-                .child(note(format!(
-                    "Intake: {} local · {} GitHub PR · {} GitHub Issue · {} initial sync",
-                    intake.local_manual,
-                    intake.github_pr,
-                    intake.github_issue,
-                    intake.initial_sync
-                )))
-                .child(choice(
-                    ui,
-                    if excl {
-                        "Exclude initial sync"
-                    } else {
-                        "Include initial sync"
-                    },
-                    "toggle-initial-sync",
-                    excl,
-                )),
+                .child(heading("Timeline"))
+                .child(skeleton_bar(0.10, 20.)),
         )
-        .child(note(format!(
-            "Retained history from {} · {} resolved Cards have no reliable resolution date and are excluded from date totals. {} Agent batches have no retained launch timestamp.{}",
-            dash.history_start
-                .map(|d| d.to_string())
-                .unwrap_or_else(|| "—".into()),
-            dash.unknown_merge_dates,
-            dash.unknown_batch_starts,
-            if offline.is_empty() {
-                String::new()
-            } else {
-                format!(" Offline hosts: {offline}; cached data may be stale.")
-            }
-        )))
+        .child(
+            view()
+                .gap_2()
+                .child(skeleton_bar(0.96, 18.))
+                .child(skeleton_bar(0.92, 18.))
+                .child(skeleton_bar(0.88, 18.))
+                .child(skeleton_bar(0.95, 18.))
+                .child(skeleton_bar(0.84, 18.)),
+        )
+        .child(skeleton_bar(0.48, 12.));
+
+    let overview_a = card_surface()
+        .flex_1()
+        .min_w(px(260.))
+        .h(px(248.))
+        .justify_between()
+        .child(heading("Output (cumulative)"))
+        .child(skeleton_bar(1.0, CHART_HEIGHT))
+        .child(skeleton_bar(0.65, 22.));
+    let overview_b = card_surface()
+        .flex_1()
+        .min_w(px(260.))
+        .h(px(248.))
+        .justify_between()
+        .child(heading("Automation"))
+        .child(
+            view()
+                .gap_2p5()
+                .child(skeleton_bar(0.95, 12.))
+                .child(skeleton_bar(0.85, 12.))
+                .child(skeleton_bar(0.72, 12.))
+                .child(skeleton_bar(0.64, 12.)),
+        )
+        .child(
+            view()
+                .gap_1p5()
+                .child(skeleton_bar(0.62, 12.))
+                .child(skeleton_bar(0.76, 12.)),
+        );
+    let overview_c = card_surface()
+        .flex_1()
+        .min_w(px(260.))
+        .h(px(248.))
+        .justify_between()
+        .child(heading("Projects"))
+        .child(
+            view()
+                .gap_3()
+                .child(skeleton_bar(0.94, 28.))
+                .child(skeleton_bar(0.86, 28.))
+                .child(skeleton_bar(0.55, 14.)),
+        )
+        .child(skeleton_bar(0.36, 22.));
+
+    let agents_skel = card_surface()
+        .h(px(176.))
+        .justify_between()
+        .child(heading("Agents"))
+        .child(
+            view()
+                .gap_2p5()
+                .child(skeleton_bar(1.0, 18.))
+                .child(skeleton_bar(0.96, 18.))
+                .child(skeleton_bar(0.90, 18.)),
+        );
+
+    let heatmap_skel = card_surface()
+        .h(px(188.))
+        .justify_between()
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(heading("Past year"))
+                .child(skeleton_bar(0.24, 14.)),
+        )
+        .child(skeleton_bar(1.0, 110.))
+        .child(skeleton_bar(0.32, 12.));
+
+    let timings_skel = card_surface()
+        .h(px(124.))
+        .justify_between()
+        .child(heading("Timings"))
+        .child(
+            view()
+                .gap_2()
+                .child(skeleton_bar(0.98, 22.))
+                .child(skeleton_bar(0.94, 22.)),
+        );
+
+    let intake_skel = view()
+        .w_full()
+        .h(px(28.))
+        .pt_2()
+        .border_t_1()
+        .border_color(BORDER)
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .child(skeleton_bar(0.38, 12.))
+        .child(skeleton_bar(0.24, 12.));
+
+    view()
+        .gap_4()
+        .min_w(px(0.))
+        .child(
+            view()
+                .h(px(24.))
+                .items_end()
+                .justify_center()
+                .child(skeleton_bar(0.28, 12.)),
+        )
+        .child(
+            view()
+                .gap_2p5()
+                .child(skeleton_bar(0.64, 16.))
+                .child(kpi_strip),
+        )
+        .child(timeline_skel)
+        .child(overview_row(narrow, overview_a, overview_b, overview_c))
+        .child(agents_skel)
+        .child(heatmap_skel)
+        .child(timings_skel)
+        .child(intake_skel)
 }
 
 fn overview_row(narrow: bool, a: View, b: View, c: View) -> View {
@@ -3684,11 +4015,47 @@ fn overview_row(narrow: bool, a: View, b: View, c: View) -> View {
     }
 }
 
-fn dashboard(ui: Ui) -> Dashboard {
+fn dashboard(ui: Ui) -> Option<Dashboard> {
+    let profiles = ui.all_profiles.get();
+    if has_backend() {
+        let loaded = ui.insights.loaded_data.get()?;
+        let effective_heatmap = if loaded.annual_loaded {
+            ui.insights.heatmap_metric.get()
+        } else {
+            HeatmapMetric::Resolved
+        };
+        let now = ui.insights.anchor_ms.get().unwrap_or(loaded.now_ms);
+        let opts = ViewOptions {
+            range: loaded.range,
+            now_ms: now,
+            selected: loaded.selected_date,
+            comparison: loaded.comparison,
+            heatmap_metric: effective_heatmap,
+            hourly_metric: ui.insights.hourly_metric.get(),
+            agent_group: ui.insights.agent_group.get(),
+            trend_days: ui.insights.trend_days.get(),
+            exclude_initial_sync: ui.insights.exclude_initial_sync.get(),
+        };
+        return Some(ui.snapshot.with(|s| {
+            model::compute_dashboard(
+                s,
+                &loaded.events,
+                &loaded.activity,
+                (!loaded.scope.is_empty()).then_some(loaded.scope.as_str()),
+                &chrono::Local,
+                &profiles,
+                opts,
+            )
+        }));
+    }
+
+    if ui.insights.preview_loading.get() {
+        return None;
+    }
+
     let scope = ui.insights.scope_project.get();
     let range = ui.insights.range.get();
     let now = now_ms(ui);
-    let profiles = ui.all_profiles.get();
     let opts = ViewOptions {
         range,
         now_ms: now,
@@ -3700,7 +4067,7 @@ fn dashboard(ui: Ui) -> Dashboard {
         trend_days: ui.insights.trend_days.get(),
         exclude_initial_sync: ui.insights.exclude_initial_sync.get(),
     };
-    ui.insights.activity.with(|act| {
+    Some(ui.insights.activity.with(|act| {
         ui.insights.events.with(|evs| {
             ui.snapshot.with(|s| {
                 model::compute_dashboard(
@@ -3714,7 +4081,7 @@ fn dashboard(ui: Ui) -> Dashboard {
                 )
             })
         })
-    })
+    }))
 }
 
 pub fn screen(ui: Ui) -> impl IntoElement {
@@ -3727,9 +4094,9 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         let _hm = ui.insights.heatmap_metric.get();
         let _clock = ui.utility_clock.get();
         let _gen = ui.index.with(|idx| idx.generation);
+        let _flush = ui.activity_flush_seq.get();
         if page == "insights" {
-            refresh_events(ui);
-            refresh_activity(ui);
+            refresh_data(ui);
         }
     });
     let dashboard = computed(move || dashboard(ui));
@@ -3759,42 +4126,55 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         .p_5()
                         .gap_4()
                         .child(dynamic(move || {
-                            let dash = dashboard.get();
                             let narrow = ui.narrow.get();
+                            let Some(dash) = dashboard.get() else {
+                                return render_loading_skeleton(narrow).into_element();
+                            };
                             let project_order: Vec<String> =
                                 dash.project_stats.iter().map(|p| p.id.clone()).collect();
 
-                            let mut content = view()
+                            let mut body = view()
                                 .gap_4()
                                 .min_w(px(0.))
-                                .child(render_period_subbar(ui, &dash))
-                                .child(render_summary_and_kpis(&dash, narrow));
+                                .opacity(move || {
+                                    if ui.insights.loading.get() {
+                                        0.72_f32
+                                    } else {
+                                        1.0_f32
+                                    }
+                                })
+                                .child(render_summary_and_kpis(ui, &dash, narrow));
 
                             if !ui.insights.drilldown.get().is_empty() {
-                                content = content.child(render_card_drilldown(ui, &dash));
+                                body = body.child(render_card_drilldown(ui, &dash));
                             }
 
-                            content = content.child(render_timeline(ui, &dash, &project_order));
+                            body = body.child(render_timeline(ui, &dash, &project_order));
 
                             let output_panel = if dash.range == RangeWindow::Today {
                                 render_hourly_output(ui, &dash)
                             } else {
                                 render_daily_output(ui, &dash)
                             };
-                            content = content.child(overview_row(
+                            body = body.child(overview_row(
                                 narrow,
                                 output_panel,
                                 render_automation_funnel(&dash),
                                 render_projects(ui, &dash, &project_order),
                             ));
 
-                            content = content
+                            body = body
                                 .child(render_agents(ui, &dash))
                                 .child(render_heatmap_panel(ui, &dash))
                                 .child(render_timings(ui, &dash))
                                 .child(render_footer(ui, &dash));
 
-                            content.into_element()
+                            view()
+                                .gap_3()
+                                .min_w(px(0.))
+                                .child(render_compare_subbar(ui, &dash))
+                                .child(body)
+                                .into_element()
                         })),
                 ),
         )
@@ -3884,6 +4264,12 @@ mod tests {
                 .iter()
                 .any(|(id, t)| t == needle && self.is_mounted(*id))
         }
+
+        fn has_mounted_substring(&self, needle: &str) -> bool {
+            self.texts
+                .iter()
+                .any(|(id, t)| t.contains(needle) && self.is_mounted(*id))
+        }
     }
 
     fn pump(core: &mut Core<ApproxTextEngine>, tree: &mut Tracker) {
@@ -3921,142 +4307,158 @@ mod tests {
         }
     }
 
+    fn build_test_ui(now_ms: u64, loading: bool) -> Ui {
+        canban_ui_kit::tokens::install_theme();
+        let ui = Ui::new();
+        ui.insights.anchor_ms.set(Some(now_ms));
+
+        ui.all_profiles.set(vec![
+            Profile {
+                id: "developer".into(),
+                preset: Some("codex".into()),
+                model: Some("gpt-5.4".into()),
+                ..Default::default()
+            },
+            Profile {
+                id: "planner".into(),
+                preset: Some("codex".into()),
+                model: Some("gpt-5.4".into()),
+                ..Default::default()
+            },
+            Profile {
+                id: "reviewer".into(),
+                preset: Some("claude".into()),
+                model: Some("claude-sonnet-4".into()),
+                ..Default::default()
+            },
+        ]);
+
+        let mut snap = Snapshot::default();
+        snap.projects.push(Project {
+            id: "p1".into(),
+            name: "Canban".into(),
+            directory: "/tmp/canban".into(),
+            location: None,
+            github: None,
+            detected_github: None,
+            github_disconnected: false,
+            delivery_mode: Default::default(),
+            agent_overrides: BTreeMap::new(),
+            tags: Vec::new(),
+            workflow: Workflow::default(),
+            target_branch: Some("main".into()),
+            created_at: 1,
+        });
+        let mut card: Card = serde_json::from_value(json!({
+            "id": "card-41",
+            "project_id": "p1",
+            "number": 41,
+            "title": "Insights statistics dashboard",
+            "body": "",
+            "stage": "review",
+            "revision": 2,
+            "created_at": now_ms - 7_200_000,
+        }))
+        .unwrap();
+        card.delivery = Some(Delivery {
+            target_branch: "main".into(),
+            commit: "abc41".into(),
+            request_key: "merge:card-41".into(),
+            merged_at: now_ms - 1_800_000,
+        });
+        snap.cards.push(card);
+        let events = vec![
+            Event {
+                id: "ev-1".into(),
+                project_id: "p1".into(),
+                card_id: "card-41".into(),
+                sequence: 1,
+                kind: "execution.queued".into(),
+                actor: "system".into(),
+                message: String::new(),
+                data: json!({"terminal_id": "card-41:developer", "run_number": 1, "trigger": "workflow", "workflow_run_id": "wf-41"}),
+                created_at: now_ms - 5_400_000,
+            },
+            Event {
+                id: "ev-1s".into(),
+                project_id: "p1".into(),
+                card_id: "card-41".into(),
+                sequence: 2,
+                kind: "execution.started".into(),
+                actor: "system".into(),
+                message: String::new(),
+                data: json!({"terminal_id": "card-41:developer", "run_number": 1, "trigger": "workflow", "workflow_run_id": "wf-41"}),
+                created_at: now_ms - 5_340_000,
+            },
+            Event {
+                id: "ev-2".into(),
+                project_id: "p1".into(),
+                card_id: "card-41".into(),
+                sequence: 3,
+                kind: "execution.reported".into(),
+                actor: "agent:developer".into(),
+                message: String::new(),
+                data: json!({"state": "completed", "workflow_run_id": "wf-41"}),
+                created_at: now_ms - 2_400_000,
+            },
+        ];
+
+        let activity = ActivityInput {
+            loaded: true,
+            period_segments: vec![
+                ActivitySegment {
+                    id: Some(1),
+                    kind: ActivityKind::Dwell,
+                    start_ms: now_ms - 3_600_000,
+                    end_ms: now_ms - 2_400_000,
+                    project_id: Some("p1".into()),
+                    card_id: Some("card-41".into()),
+                    terminal_id: None,
+                    open: false,
+                    data: ActivityDetail::Dwell(DwellData {
+                        lane: DwellLane::Card,
+                        page: "card".into(),
+                    }),
+                },
+                ActivitySegment {
+                    id: Some(2),
+                    kind: ActivityKind::Agent,
+                    start_ms: now_ms - 3_000_000,
+                    end_ms: now_ms - 1_200_000,
+                    project_id: Some("p1".into()),
+                    card_id: Some("card-41".into()),
+                    terminal_id: Some("card-41:developer".into()),
+                    open: false,
+                    data: ActivityDetail::Agent(AgentWorkData {
+                        profile_id: "developer".into(),
+                        provider: "codex".into(),
+                        model: "gpt-5.4".into(),
+                        engine: Some("codex".into()),
+                        stage: Some("develop".into()),
+                        run_number: Some(1),
+                        trigger: Some("workflow".into()),
+                        manual: false,
+                    }),
+                },
+            ],
+            ..Default::default()
+        };
+
+        ui.snapshot.set(snap);
+        ui.insights.events.set(Rc::new(events));
+        ui.insights.activity.set(Rc::new(activity));
+        ui.insights.preview_loading.set(loading);
+        ui.insights.loading.set(loading);
+        ui.project.set("p1".into());
+        ui.page.set("insights".into());
+        ui
+    }
+
     #[test]
     fn insights_route_mounts_timeline_first_cockpit_and_switches_agent_groups_and_ranges() {
         #[component]
         fn InsightsHarness() -> impl IntoElement {
-            canban_ui_kit::tokens::install_theme();
-            let ui = Ui::new();
-            let now_ms = 1_794_744_000_000u64;
-            ui.insights.anchor_ms.set(Some(now_ms));
-
-            ui.all_profiles.set(vec![
-                Profile {
-                    id: "developer".into(),
-                    preset: Some("codex".into()),
-                    model: Some("gpt-5.4".into()),
-                    ..Default::default()
-                },
-                Profile {
-                    id: "planner".into(),
-                    preset: Some("codex".into()),
-                    model: Some("gpt-5.4".into()),
-                    ..Default::default()
-                },
-                Profile {
-                    id: "reviewer".into(),
-                    preset: Some("claude".into()),
-                    model: Some("claude-sonnet-4".into()),
-                    ..Default::default()
-                },
-            ]);
-
-            let mut snap = Snapshot::default();
-            snap.projects.push(Project {
-                id: "p1".into(),
-                name: "Canban".into(),
-                directory: "/tmp/canban".into(),
-                location: None,
-                github: None,
-                detected_github: None,
-                github_disconnected: false,
-                delivery_mode: Default::default(),
-                agent_overrides: BTreeMap::new(),
-                tags: Vec::new(),
-                workflow: Workflow::default(),
-                target_branch: Some("main".into()),
-                created_at: 1,
-            });
-            let mut card: Card = serde_json::from_value(json!({
-                "id": "card-41",
-                "project_id": "p1",
-                "number": 41,
-                "title": "Insights statistics dashboard",
-                "body": "",
-                "stage": "review",
-                "revision": 2,
-                "created_at": now_ms - 7_200_000,
-            }))
-            .unwrap();
-            card.delivery = Some(Delivery {
-                target_branch: "main".into(),
-                commit: "abc41".into(),
-                request_key: "merge:card-41".into(),
-                merged_at: now_ms - 1_800_000,
-            });
-            snap.cards.push(card);
-            let events = vec![
-                Event {
-                    id: "ev-1".into(),
-                    project_id: "p1".into(),
-                    card_id: "card-41".into(),
-                    sequence: 1,
-                    kind: "execution.queued".into(),
-                    actor: "system".into(),
-                    message: String::new(),
-                    data: json!({"terminal_id": "card-41:developer", "run_number": 1, "trigger": "workflow", "workflow_run_id": "wf-41"}),
-                    created_at: now_ms - 5_400_000,
-                },
-                Event {
-                    id: "ev-2".into(),
-                    project_id: "p1".into(),
-                    card_id: "card-41".into(),
-                    sequence: 2,
-                    kind: "execution.reported".into(),
-                    actor: "agent:developer".into(),
-                    message: String::new(),
-                    data: json!({"state": "completed", "workflow_run_id": "wf-41"}),
-                    created_at: now_ms - 2_400_000,
-                },
-            ];
-
-            let activity = ActivityInput {
-                loaded: true,
-                period_segments: vec![
-                    ActivitySegment {
-                        id: Some(1),
-                        kind: ActivityKind::Dwell,
-                        start_ms: now_ms - 3_600_000,
-                        end_ms: now_ms - 2_400_000,
-                        project_id: Some("p1".into()),
-                        card_id: Some("card-41".into()),
-                        terminal_id: None,
-                        open: false,
-                        data: ActivityDetail::Dwell(DwellData {
-                            lane: DwellLane::Card,
-                            page: "card".into(),
-                        }),
-                    },
-                    ActivitySegment {
-                        id: Some(2),
-                        kind: ActivityKind::Agent,
-                        start_ms: now_ms - 3_000_000,
-                        end_ms: now_ms - 1_200_000,
-                        project_id: Some("p1".into()),
-                        card_id: Some("card-41".into()),
-                        terminal_id: Some("card-41:developer".into()),
-                        open: false,
-                        data: ActivityDetail::Agent(AgentWorkData {
-                            profile_id: "developer".into(),
-                            provider: "codex".into(),
-                            model: "gpt-5.4".into(),
-                            engine: Some("codex".into()),
-                            stage: Some("develop".into()),
-                            run_number: Some(1),
-                            trigger: Some("workflow".into()),
-                            manual: false,
-                        }),
-                    },
-                ],
-                ..Default::default()
-            };
-
-            ui.snapshot.set(snap);
-            ui.insights.events.set(Rc::new(events));
-            ui.insights.activity.set(Rc::new(activity));
-            ui.project.set("p1".into());
-            ui.page.set("insights".into());
-
+            let ui = build_test_ui(1_794_744_000_000u64, false);
             view()
                 .w(px(1400.))
                 .h(px(3600.))
@@ -4070,35 +4472,70 @@ mod tests {
         pump(&mut core, &mut tree);
 
         assert!(tree.has_mounted_text("Insights"));
-        assert!(tree.has_mounted_text("RESOLVED"));
-        assert!(tree.has_mounted_text("MERGES (LOCAL / PR)"));
-        assert!(tree.has_mounted_text("MY TIME"));
-        assert!(tree.has_mounted_text("AGENT WORKING"));
-        assert!(tree.has_mounted_text("Activity timeline"));
-        assert!(tree.has_mounted_text("Hourly output"));
-        assert!(tree.has_mounted_text("Automation funnel"));
+        assert!(tree.has_mounted_text("Resolved"));
+        assert!(tree.has_mounted_text("Merges (Local / PR)"));
+        assert!(tree.has_mounted_text("My time"));
+        assert!(tree.has_mounted_text("Agent working"));
+        assert!(tree.has_mounted_text("Timeline"));
+        assert!(tree.has_mounted_text("Output (cumulative)"));
+        assert!(tree.has_mounted_text("Automation"));
         assert!(tree.has_mounted_text("Projects"));
-        assert!(tree.has_mounted_text("Agents used"));
-        assert!(tree.has_mounted_text("Yearly activity"));
+        assert!(tree.has_mounted_text("Agents"));
+        assert!(tree.has_mounted_text("Past year"));
         assert!(tree.has_mounted_text("Timings"));
         assert!(tree.has_mounted_text("Execution → resolution"));
         assert!(tree.has_mounted_text("Queue → start"));
-        assert!(!tree.has_mounted_text("▸ Efficiency & timing percentiles"));
-        assert!(!tree.has_mounted_text("Daily"));
+        assert!(tree.has_mounted_substring("Human asks:"));
+        assert!(tree.has_mounted_substring("Intake  Local"));
+        assert!(tree.has_mounted_substring("Streak "));
 
-        // Switch Agents grouping to Model
+        // Removed blocks must stay absent
+        assert!(!tree.has_mounted_text("Trigger sources"));
+        assert!(!tree.has_mounted_substring("Merge queue efficiency"));
+        assert!(!tree.has_mounted_text("▸ Efficiency & timing percentiles"));
+        assert!(!tree.has_mounted_text("Develop"));
+        assert!(!tree.has_mounted_text("Daily"));
+        assert!(!tree.has_mounted_text("24"));
+
+        // Toggle [24h] timeline window
+        let btn_24h = *tree.labels.get("24h").expect("24h timeline toggle");
+        assert!(core.component_event(btn_24h, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert!(tree.has_mounted_text("24"));
+
+        // Toggle [Inspect ▸] timing drawer
+        let btn_inspect = *tree
+            .labels
+            .get("Inspect ▸ Execution → resolution")
+            .expect("Inspect cycle button");
+        assert!(core.component_event(btn_inspect, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert!(tree.has_mounted_text("Hide ▾"));
+        assert!(tree.has_mounted_substring("slowest-first"));
+
+        // Switch Agents grouping to Model and back to Profile
         let btn_model = *tree.labels.get("Model").expect("Model group button");
         assert!(core.component_event(btn_model, EventKind::Press, &EventPayload::None));
         pump(&mut core, &mut tree);
         assert!(tree.has_mounted_text("gpt-5.4"));
 
-        // Switch range to 7D via segmented button
+        let btn_profile = *tree.labels.get("Profile").expect("Profile group button");
+        assert!(core.component_event(btn_profile, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert!(tree.has_mounted_text("@developer"));
+
+        // Switch range to 7D via segmented button and back to 1D
         let btn_7d = *tree.labels.get("7D").expect("7D segment button");
         assert!(core.component_event(btn_7d, EventKind::Press, &EventPayload::None));
         pump(&mut core, &mut tree);
         assert!(tree.has_mounted_text("Daily activity"));
         assert!(tree.has_mounted_text("Daily output"));
-        assert!(!tree.has_mounted_text("Hourly output"));
+        assert!(!tree.has_mounted_text("Output (cumulative)"));
+
+        let btn_1d = *tree.labels.get("1D").expect("1D segment button");
+        assert!(core.component_event(btn_1d, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert!(tree.has_mounted_text("Output (cumulative)"));
 
         // Switch heatmap metric to My time
         let btn_my_time = *tree
@@ -4107,6 +4544,34 @@ mod tests {
             .expect("My time heatmap metric button");
         assert!(core.component_event(btn_my_time, EventKind::Press, &EventPayload::None));
         pump(&mut core, &mut tree);
-        assert!(tree.has_mounted_text("Yearly activity"));
+        assert!(tree.has_mounted_text("Past year"));
+    }
+
+    #[test]
+    fn insights_loading_skeleton_renders_fixed_height_sections() {
+        #[component]
+        fn LoadingHarness() -> impl IntoElement {
+            let ui = build_test_ui(1_794_744_000_000u64, true);
+            view()
+                .w(px(1400.))
+                .h(px(3600.))
+                .child(crate::frame::screen(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1400.), px(3600.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<LoadingHarness>());
+        let mut tree = Tracker::new();
+        pump(&mut core, &mut tree);
+
+        assert!(tree.has_mounted_text("Insights"));
+        assert!(tree.has_mounted_text("Timeline"));
+        assert!(tree.has_mounted_text("Output (cumulative)"));
+        assert!(tree.has_mounted_text("Automation"));
+        assert!(tree.has_mounted_text("Projects"));
+        assert!(tree.has_mounted_text("Agents"));
+        assert!(tree.has_mounted_text("Past year"));
+        assert!(tree.has_mounted_text("Timings"));
+        assert!(!tree.has_mounted_text("Execution → resolution"));
     }
 }

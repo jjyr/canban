@@ -946,6 +946,10 @@ pub fn execute(ui: Ui, id: &str) {
                 ui.notify("Select a Project first");
             }
         }
+        "insights-toggle-24h" => {
+            crate::insights::intent(ui, "toggle-timeline-24h");
+            ui.navigate("insights");
+        }
         "go-workflows" => {
             ui.workflows.section.set("workflows".into());
             ui.navigate("workflows");
