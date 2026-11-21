@@ -1358,6 +1358,7 @@ impl HostRegistry {
             || method.starts_with("update.")
             || method.starts_with("workflow.default.")
             || method == "host.discover"
+            || method == "activity.record"
             || method.starts_with("github.auth.")
             || matches!(
                 method,
@@ -1489,7 +1490,10 @@ impl HostRegistry {
                     | "execution.output"
                     | "resource.read"
                     | "timeline.list"
+                    | "activity.record"
                     | "insights.events"
+                    | "insights.activity"
+                    | "insights.activity_buckets"
                     | "usage.status"
                     | "usage.refresh"
             )

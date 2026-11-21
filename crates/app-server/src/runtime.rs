@@ -526,6 +526,7 @@ impl AppServer {
         let _ = self.pump_cardless_agents();
         let _ = self.pump_resolved_archives();
         self.observe_terminals()?;
+        self.flush_agent_work()?;
         self.reconcile_merge_batches()?;
         self.pump_configuration()?;
         self.pump_schedules()?;

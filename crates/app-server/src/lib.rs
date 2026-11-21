@@ -93,6 +93,7 @@ impl Drop for Running {
         for handle in self.accept_handles.drain(..) {
             let _ = handle.join();
         }
+        let _ = self.server.finish_agent_work();
         let _ = self.server._service_lock.unlock();
     }
 }
@@ -1152,6 +1153,7 @@ pub mod representation;
 pub mod startup_progress;
 mod state;
 pub use client::{AppClient, BackendOlder, ClientEndpoint, ConnectProgress};
+mod activity;
 mod adoption;
 mod agents;
 mod authoring;

@@ -176,6 +176,7 @@ impl AppServer {
                         "AppServer identity changed; refusing shutdown"
                     );
                 }
+                let _ = self.finish_agent_work();
                 self.stop.store(true, Ordering::SeqCst);
                 self.close_active_tcp_streams();
                 self.wake_runtime();
@@ -250,7 +251,10 @@ impl AppServer {
             }
             "card.list" => self.card_page(&p),
             "timeline.list" => self.timeline_page(&p),
+            "activity.record" => self.activity_record(&p),
             "insights.events" => self.insights_events(&p),
+            "insights.activity" => self.insights_activity(&p),
+            "insights.activity_buckets" => self.insights_activity_buckets(&p),
             "execution.get" => {
                 let s = self.snapshot()?;
                 if let Some(tid) = p["terminal_id"].as_str().filter(|v| !v.is_empty()) {

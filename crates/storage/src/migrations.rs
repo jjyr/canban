@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 pub const BASELINE: u32 = 8;
-pub const CURRENT: u32 = 20;
+pub const CURRENT: u32 = 21;
 pub struct Migration {
     pub version: u32,
     pub up: fn(&Transaction<'_>) -> Result<()>,
@@ -74,7 +74,34 @@ const STEPS: &[Migration] = &[
         up: schedules_up,
         down: schedules_down,
     },
+    Migration {
+        version: 21,
+        up: activity_up,
+        down: activity_down,
+    },
 ];
+
+fn activity_up(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS activity_segments(\
+            id INTEGER PRIMARY KEY,\
+            kind TEXT NOT NULL,\
+            start_ms INTEGER NOT NULL,\
+            end_ms INTEGER NOT NULL,\
+            project_id TEXT,\
+            card_id TEXT,\
+            terminal_id TEXT,\
+            data TEXT NOT NULL\
+        );\
+        CREATE INDEX IF NOT EXISTS activity_segments_time ON activity_segments(kind, start_ms);",
+    )?;
+    Ok(())
+}
+
+fn activity_down(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch("DROP TABLE IF EXISTS activity_segments;")?;
+    Ok(())
+}
 
 fn schedules_up(tx: &Transaction<'_>) -> Result<()> {
     tx.execute_batch(
@@ -3642,5 +3669,38 @@ mod tests {
 
         assert_eq!(migrate(home.path(), 19).unwrap(), 19);
         assert_eq!(migrate(home.path(), 20).unwrap(), 20);
+    }
+
+    #[test]
+    fn schema_21_creates_activity_segments_and_round_trips_cleanly() {
+        let home = tempfile::tempdir().unwrap();
+        let store = crate::Store::open(home.path()).unwrap();
+        assert_eq!(version(&store.conn).unwrap(), 21);
+        let seg = canban_types::ActivitySegment {
+            id: None,
+            kind: canban_types::ActivityKind::Dwell,
+            start_ms: 1_000,
+            end_ms: 10_000,
+            project_id: Some("missing-project".into()),
+            card_id: Some("missing-card".into()),
+            terminal_id: None,
+            open: false,
+            data: canban_types::ActivityDetail::Dwell(canban_types::DwellData {
+                lane: canban_types::DwellLane::Card,
+                page: "card".into(),
+            }),
+        };
+        assert_eq!(store.db().insert_activity_segments(&[seg]).unwrap(), 1);
+        let (rows, truncated) = store
+            .db()
+            .query_activity_segments(0, 20_000, None, None, 100)
+            .unwrap();
+        assert!(!truncated);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].project_id.as_deref(), Some("missing-project"));
+        drop(store);
+
+        assert_eq!(migrate(home.path(), 20).unwrap(), 20);
+        assert_eq!(migrate(home.path(), 21).unwrap(), 21);
     }
 }

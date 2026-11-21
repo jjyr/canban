@@ -1,4 +1,6 @@
+mod activity;
 mod board_filter;
+pub use activity::*;
 pub use board_filter::BoardFilter;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -192,6 +194,28 @@ impl Profile {
             .and_then(|s| std::path::Path::new(s).file_name())
             .and_then(|s| s.to_str())
             .unwrap_or("command")
+            .to_owned()
+    }
+    /// Canonical provider name from preset, falling back to the launch executable basename.
+    pub fn provider_name(&self) -> String {
+        self.preset
+            .clone()
+            .filter(|p| !p.is_empty())
+            .or_else(|| {
+                self.command()
+                    .first()
+                    .and_then(|cmd| std::path::Path::new(cmd).file_name())
+                    .map(|cmd| cmd.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "Unknown".into())
+    }
+    /// Configured model name, defaulting to `"default"` when unset or blank.
+    pub fn effective_model(&self) -> String {
+        self.model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .unwrap_or("default")
             .to_owned()
     }
 }

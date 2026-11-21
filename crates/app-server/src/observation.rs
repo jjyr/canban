@@ -2,11 +2,31 @@
 use super::*;
 use std::{collections::BTreeMap, sync::mpsc::RecvTimeoutError, time::Instant};
 
+const MIN_AGENT_WORK_MS: u64 = 2_000;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct OpenAgentWork {
+    pub core: String,
+    pub since: u64,
+    pub engine: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ClosedAgentWork {
+    pub core: String,
+    pub address: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub engine: Option<String>,
+}
+
 #[derive(Default)]
 pub(super) struct Inventory {
     pub core: String,
     pub machines: Value,
     pub records: BTreeMap<String, Value>,
+    pub working: std::collections::HashMap<String, OpenAgentWork>,
+    pub closed_work: Vec<ClosedAgentWork>,
     pub last_at: u64,
     pub generation: u64,
     pub error: Option<String>,
@@ -14,6 +34,9 @@ pub(super) struct Inventory {
     seq: u64,
 }
 impl Inventory {
+    pub(super) fn is_working(record: &Value) -> bool {
+        record["status"]["state"] == "working" && record["state"] != "finished"
+    }
     pub(super) fn address(&self, address: &str) -> String {
         let Some((name, local)) = address.split_once('/') else {
             return address.into();
@@ -26,26 +49,110 @@ impl Inventory {
         format!("{owner}/{local}")
     }
     fn snapshot(&mut self, snapshot: &Value) {
+        self.snapshot_at(snapshot, now());
+    }
+    pub(super) fn snapshot_at(&mut self, snapshot: &Value, ts: u64) {
         self.seq = snapshot["seq"].as_u64().unwrap_or(0);
-        self.records.clear();
+        let mut next_records = BTreeMap::new();
         for value in snapshot["terminals"].as_array().into_iter().flatten() {
             if let Some(address) = value["address"].as_str() {
                 let address = self.address(address);
                 let mut v = value.clone();
                 v["address"] = json!(address);
-                self.records.insert(address, v);
+                next_records.insert(address, v);
+            }
+        }
+        let mut next_working = std::collections::HashMap::new();
+        for (addr, mut open) in self.working.drain() {
+            if open.core == self.core
+                && let Some(rec) = next_records.get(&addr)
+                && Self::is_working(rec)
+            {
+                if open.engine.is_none() {
+                    open.engine = canban_profiles::identify_herdr_agent(rec).map(str::to_owned);
+                }
+                next_working.insert(addr, open);
+            } else if ts.saturating_sub(open.since) >= MIN_AGENT_WORK_MS {
+                self.closed_work.push(ClosedAgentWork {
+                    core: open.core,
+                    address: addr,
+                    start_ms: open.since,
+                    end_ms: ts,
+                    engine: open.engine,
+                });
+            }
+        }
+        for (addr, val) in &next_records {
+            if Self::is_working(val) && !next_working.contains_key(addr) {
+                next_working.insert(
+                    addr.clone(),
+                    OpenAgentWork {
+                        core: self.core.clone(),
+                        since: ts,
+                        engine: canban_profiles::identify_herdr_agent(val).map(str::to_owned),
+                    },
+                );
+            }
+        }
+        self.records = next_records;
+        self.working = next_working;
+    }
+    fn sync_working_key(&mut self, key: &str, ts: u64) {
+        if let Some(rec) = self.records.get(key)
+            && Self::is_working(rec)
+        {
+            let engine = canban_profiles::identify_herdr_agent(rec).map(str::to_owned);
+            if let Some(existing) = self.working.get_mut(key) {
+                if existing.engine.is_none() {
+                    existing.engine = engine;
+                }
+            } else {
+                self.working.insert(
+                    key.to_owned(),
+                    OpenAgentWork {
+                        core: self.core.clone(),
+                        since: ts,
+                        engine,
+                    },
+                );
+            }
+        } else if let Some(open) = self.working.remove(key)
+            && ts.saturating_sub(open.since) >= MIN_AGENT_WORK_MS
+        {
+            self.closed_work.push(ClosedAgentWork {
+                core: open.core,
+                address: key.to_owned(),
+                start_ms: open.since,
+                end_ms: ts,
+                engine: open.engine,
+            });
+        }
+    }
+    pub(super) fn close_all_working(&mut self, ts: u64) {
+        for (addr, open) in self.working.drain() {
+            if ts.saturating_sub(open.since) >= MIN_AGENT_WORK_MS {
+                self.closed_work.push(ClosedAgentWork {
+                    core: open.core,
+                    address: addr,
+                    start_ms: open.since,
+                    end_ms: ts,
+                    engine: open.engine,
+                });
             }
         }
     }
     fn apply(&mut self, message: &Value) -> bool {
-        self.last_at = now();
+        self.apply_at(message, now())
+    }
+    pub(super) fn apply_at(&mut self, message: &Value, ts: u64) -> bool {
+        self.last_at = ts;
         self.error = None;
         if message["method"] == "heartbeat" {
             return false;
         }
         let p = &message["params"];
         if message["method"] == "missed" {
-            self.snapshot(p);
+            self.snapshot_at(p, ts);
             self.generation += 1;
             return true;
         }
@@ -65,6 +172,7 @@ impl Inventory {
         let kind = p["type"].as_str().unwrap_or("");
         if kind == "removed" {
             self.records.remove(&key);
+            self.sync_working_key(&key, ts);
             return true;
         }
         if matches!(kind, "created" | "restarted") || data["record"].is_object() {
@@ -74,7 +182,8 @@ impl Inventory {
                 data.clone()
             };
             value["address"] = json!(key);
-            self.records.insert(key, value);
+            self.records.insert(key.clone(), value);
+            self.sync_working_key(&key, ts);
             return true;
         }
         let Some(value) = self.records.get_mut(&key) else {
@@ -110,7 +219,9 @@ impl Inventory {
             "title" => value["title"] = data["title"].clone(),
             _ => return false,
         }
-        before != *value
+        let changed = before != *value;
+        self.sync_working_key(&key, ts);
+        changed
     }
 }
 impl AppServer {
@@ -220,6 +331,9 @@ impl AppServer {
                     Ok(subscription) => {
                         {
                             let mut inv = server.inventory.lock().unwrap();
+                            if !inv.core.is_empty() && inv.core != subscription.core {
+                                inv.close_all_working(now());
+                            }
                             inv.core = subscription.core.clone();
                             inv.machines = subscription.machines.clone();
                             inv.generation += 1;
@@ -775,5 +889,78 @@ mod tests {
         assert!(!inv.records.contains_key("owner/t1"));
         assert_eq!(inv.records["t9"]["state"], "live");
         assert!(!inv.apply(&json!({"method":"heartbeat","params":{"seq":20}})));
+    }
+
+    #[test]
+    fn working_transitions_record_closed_segments_and_drop_short_bursts() {
+        let mut inv = Inventory {
+            core: "core-a".into(),
+            machines: json!({"machines":[{"id":"owner","name":"box"}]}),
+            ..Default::default()
+        };
+        inv.snapshot_at(
+            &json!({"seq":1,"terminals":[{"address":"box/t1","state":"live","status":{"state":"idle"}}]}),
+            10_000,
+        );
+        assert!(inv.working.is_empty());
+
+        // Short working burst (< 2s) is dropped when stopped.
+        inv.apply_at(
+            &json!({"method":"event","params":{"seq":2,"type":"status","terminal":"box/t1","data":{"status":{"state":"working","app":"claude"}}}}),
+            11_000,
+        );
+        assert_eq!(inv.working["owner/t1"].since, 11_000);
+        assert_eq!(inv.working["owner/t1"].engine.as_deref(), Some("claude"));
+        inv.apply_at(
+            &json!({"method":"event","params":{"seq":3,"type":"status","terminal":"box/t1","data":{"status":{"state":"idle"}}}}),
+            12_500,
+        );
+        assert!(inv.working.is_empty());
+        assert!(inv.closed_work.is_empty());
+
+        // Working >= 2s through finished closes and records a segment.
+        inv.apply_at(
+            &json!({"method":"event","params":{"seq":4,"type":"status","terminal":"box/t1","data":{"status":{"state":"working","app":"codex"}}}}),
+            20_000,
+        );
+        inv.apply_at(
+            &json!({"method":"event","params":{"seq":5,"type":"finished","terminal":"box/t1","data":{"exit_code":0}}}),
+            25_000,
+        );
+        assert!(inv.working.is_empty());
+        assert_eq!(inv.closed_work.len(), 1);
+        assert_eq!(inv.closed_work[0].start_ms, 20_000);
+        assert_eq!(inv.closed_work[0].end_ms, 25_000);
+        assert_eq!(inv.closed_work[0].engine.as_deref(), Some("codex"));
+
+        // Missed snapshot preserves still-working terminals and closes removed ones.
+        inv.apply_at(
+            &json!({"method":"event","params":{"seq":6,"type":"created","terminal":"t2","data":{"state":"live","status":{"state":"working"},"foreground":{"name":"claude","argv":["claude"]}}}}),
+            30_000,
+        );
+        inv.apply_at(
+            &json!({"method":"event","params":{"seq":7,"type":"created","terminal":"t3","data":{"state":"live","status":{"state":"working"}}}}),
+            30_500,
+        );
+        inv.apply_at(
+            &json!({"method":"missed","params":{"seq":10,"terminals":[{"address":"t2","state":"live","status":{"state":"working"}}]}}),
+            35_000,
+        );
+        assert_eq!(inv.working["t2"].since, 30_000);
+        assert!(!inv.working.contains_key("t3"));
+        assert_eq!(inv.closed_work.len(), 2);
+        assert_eq!(inv.closed_work[1].address, "t3");
+        assert_eq!(inv.closed_work[1].end_ms, 35_000);
+
+        // Removing a working terminal closes it cleanly.
+        inv.apply_at(
+            &json!({"method":"event","params":{"seq":11,"type":"removed","terminal":"t2","data":{}}}),
+            40_000,
+        );
+        assert!(inv.working.is_empty());
+        assert_eq!(inv.closed_work.len(), 3);
+        assert_eq!(inv.closed_work[2].address, "t2");
+        assert_eq!(inv.closed_work[2].start_ms, 30_000);
+        assert_eq!(inv.closed_work[2].end_ms, 40_000);
     }
 }

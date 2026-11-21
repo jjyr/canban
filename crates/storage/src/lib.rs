@@ -829,4 +829,151 @@ impl Db<'_> {
             ..Default::default()
         })
     }
+
+    pub fn insert_activity_segments(&self, segments: &[ActivitySegment]) -> Result<usize> {
+        if segments.is_empty() {
+            return Ok(0);
+        }
+        let mut stmt = self.conn.prepare(
+            "INSERT INTO activity_segments(kind, start_ms, end_ms, project_id, card_id, terminal_id, data) \
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        for seg in segments {
+            let data = serde_json::to_string(&seg.data)?;
+            stmt.execute(params![
+                seg.kind.as_str(),
+                seg.start_ms as i64,
+                seg.end_ms as i64,
+                seg.project_id.as_deref(),
+                seg.card_id.as_deref(),
+                seg.terminal_id.as_deref(),
+                data,
+            ])?;
+        }
+        Ok(segments.len())
+    }
+
+    pub fn query_activity_segments(
+        &self,
+        from_ms: u64,
+        to_ms: u64,
+        project_id: Option<&str>,
+        kinds: Option<&[ActivityKind]>,
+        limit: usize,
+    ) -> Result<(Vec<ActivitySegment>, bool)> {
+        let mut segments = Vec::new();
+        if let Some([]) = kinds {
+            return Ok((segments, false));
+        }
+        let kind_clause = activity_kind_clause(kinds);
+        let sql = format!(
+            "SELECT id, kind, start_ms, end_ms, project_id, card_id, terminal_id, data \
+             FROM activity_segments \
+             WHERE {kind_clause} AND end_ms > ?1 AND start_ms < ?2 \
+               AND (?3 IS NULL OR project_id = ?3) \
+             ORDER BY start_ms ASC, id ASC \
+             LIMIT ?4"
+        );
+        let mut q = self.conn.prepare(&sql)?;
+        let rows = q.query_map(
+            params![
+                from_ms as i64,
+                to_ms as i64,
+                project_id,
+                (limit.saturating_add(1)) as i64
+            ],
+            decode_activity_row,
+        )?;
+        for row in rows {
+            segments.push(row?);
+        }
+        let truncated = segments.len() > limit;
+        if truncated {
+            segments.truncate(limit);
+        }
+        Ok((segments, truncated))
+    }
+
+    pub fn for_each_activity_segment(
+        &self,
+        from_ms: u64,
+        to_ms: u64,
+        project_id: Option<&str>,
+        kinds: Option<&[ActivityKind]>,
+        mut f: impl FnMut(ActivitySegment) -> Result<()>,
+    ) -> Result<()> {
+        if let Some([]) = kinds {
+            return Ok(());
+        }
+        let kind_clause = activity_kind_clause(kinds);
+        let sql = format!(
+            "SELECT id, kind, start_ms, end_ms, project_id, card_id, terminal_id, data \
+             FROM activity_segments \
+             WHERE {kind_clause} AND end_ms > ?1 AND start_ms < ?2 \
+               AND (?3 IS NULL OR project_id = ?3) \
+             ORDER BY start_ms ASC, id ASC"
+        );
+        let mut q = self.conn.prepare(&sql)?;
+        let rows = q.query_map(
+            params![from_ms as i64, to_ms as i64, project_id],
+            decode_activity_row,
+        )?;
+        for row in rows {
+            f(row?)?;
+        }
+        Ok(())
+    }
+
+    pub fn prune_activity_segments(&self, max_age_ms: u64) -> Result<usize> {
+        let cutoff = now().saturating_sub(max_age_ms);
+        let deleted = self.conn.execute(
+            "DELETE FROM activity_segments WHERE end_ms < ?1",
+            params![cutoff as i64],
+        )?;
+        Ok(deleted)
+    }
+}
+
+fn activity_kind_clause(kinds: Option<&[ActivityKind]>) -> &'static str {
+    match kinds {
+        Some([ActivityKind::Dwell]) => "kind = 'dwell'",
+        Some([ActivityKind::Agent]) => "kind = 'agent'",
+        _ => "kind IN ('dwell', 'agent')",
+    }
+}
+
+fn decode_activity_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActivitySegment> {
+    let row_id: i64 = row.get(0)?;
+    let kind_raw: String = row.get(1)?;
+    let start_ms: i64 = row.get(2)?;
+    let end_ms: i64 = row.get(3)?;
+    let project_id: Option<String> = row.get(4)?;
+    let card_id: Option<String> = row.get(5)?;
+    let terminal_id: Option<String> = row.get(6)?;
+    let data_raw: String = row.get(7)?;
+    let kind = match kind_raw.as_str() {
+        "dwell" => ActivityKind::Dwell,
+        "agent" => ActivityKind::Agent,
+        other => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Text,
+                format!("unknown activity kind '{other}'").into(),
+            ));
+        }
+    };
+    let data: ActivityDetail = serde_json::from_str(&data_raw).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    Ok(ActivitySegment {
+        id: Some(row_id),
+        kind,
+        start_ms: u64::try_from(start_ms).unwrap_or(0),
+        end_ms: u64::try_from(end_ms).unwrap_or(0),
+        project_id,
+        card_id,
+        terminal_id,
+        open: false,
+        data,
+    })
 }

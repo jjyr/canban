@@ -451,3 +451,264 @@ fn tcp_first_frame_accepts_payloads_over_64_kib() {
     .expect("first TCP RPC > 64 KiB must succeed without truncation");
     assert_eq!(reply["body"].as_str().unwrap().len(), 100 * 1024);
 }
+
+#[test]
+fn activity_record_and_insights_activity_validate_clip_and_include_open_agent_work() {
+    let (_dir, app, project, card) = setup();
+    let now_ts = canban_types::now();
+    let base = now_ts - 3_600_000;
+
+    // Validation rejections for activity.record
+    let too_many: Vec<Value> = (0..201)
+        .map(|i| json!({"start_ms": base + i, "end_ms": base + i + 100, "lane": "other", "page": "board"}))
+        .collect();
+    assert!(
+        app.call("activity.record", json!({"segments": too_many}))
+            .is_err()
+    );
+    assert!(
+        app.call(
+            "activity.record",
+            json!({"segments":[{"start_ms": base + 500, "end_ms": base + 500, "lane": "card", "page": "card"}]})
+        )
+        .is_err()
+    );
+    assert!(
+        app.call(
+            "activity.record",
+            json!({"segments":[{"start_ms": base, "end_ms": base + 12 * 3_600_000 + 1, "lane": "card", "page": "card"}]})
+        )
+        .is_err()
+    );
+    assert!(
+        app.call(
+            "activity.record",
+            json!({"segments":[{"start_ms": now_ts, "end_ms": now_ts + 120_000, "lane": "card", "page": "card"}]})
+        )
+        .is_err()
+    );
+    assert!(
+        app.call(
+            "activity.record",
+            json!({"segments":[{"start_ms": base, "end_ms": base + 10_000, "lane": "bogus", "page": "card"}]})
+        )
+        .is_err()
+    );
+
+    // Valid dwell segments
+    let rec = app
+        .call(
+            "activity.record",
+            json!({
+                "segments": [
+                    {
+                        "start_ms": base,
+                        "end_ms": base + 60_000,
+                        "lane": "card",
+                        "page": "card",
+                        "project_id": project.id,
+                        "card_id": card.id,
+                    },
+                    {
+                        "start_ms": base + 70_000,
+                        "end_ms": base + 130_000,
+                        "lane": "terminal",
+                        "page": "terminals",
+                        "project_id": project.id,
+                        "terminal_id": "term-1",
+                    }
+                ]
+            }),
+        )
+        .unwrap();
+    assert_eq!(rec["recorded"], 2);
+
+    // Attach an AgentRun and an open working entry in Inventory
+    let mut profile = app.config().profiles[0].clone();
+    profile.id = "developer".into();
+    profile.preset = Some("claude".into());
+    profile.model = Some("claude-sonnet-4".into());
+    let run = AgentRun {
+        workflow_run_id: None,
+        workflow_step: None,
+        resume_session: false,
+        trigger: ExecutionTrigger::Workflow,
+        stage: "develop".into(),
+        profile,
+        instruction: "go".into(),
+        on_completed: None,
+        require_human_review: false,
+        runtime_home: None,
+        workspace: None,
+        location: None,
+        owner_core_id: Some("core-1".into()),
+        lifecycle: Default::default(),
+        project_id: project.id.clone(),
+        card_id: card.id.clone(),
+        card_number: card.number,
+        number: 1,
+        state: "running".into(),
+        core_id: Some("core-1".into()),
+        terminal: Some("t-agent".into()),
+        cwd: "/tmp".into(),
+        input_path: String::new(),
+        output_path: None,
+        observed: None,
+        error: None,
+        started_at: Some(base + 10_000),
+        updated_at: base + 10_000,
+        provider_session_id: None,
+        close_state: String::new(),
+        turn_ended_at: None,
+        response_path: None,
+        completed_at: None,
+        completion_turn: None,
+        close_requested_at: None,
+        connection_state: "connected".into(),
+        pending: None,
+        applied_env: Default::default(),
+    };
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            db.save(&TerminalEntry {
+                id: "term-agent-1".into(),
+                conversation_id: Some("conv-1".into()),
+                number: 1,
+                name: None,
+                origin_project_id: Some(project.id.clone()),
+                origin_card_id: Some(card.id.clone()),
+                agent_engine: None,
+                runtime: None,
+                agent: Some(run),
+                created_at: base + 10_000,
+            })?;
+            db.save(&TerminalEntry {
+                id: "term-manual-1".into(),
+                conversation_id: None,
+                number: 2,
+                name: Some("Manual".into()),
+                origin_project_id: Some(project.id.clone()),
+                origin_card_id: None,
+                agent_engine: Some("codex".into()),
+                runtime: Some(TerminalRuntime {
+                    machine: "local".into(),
+                    owner_core_id: Some("core-1".into()),
+                    core_id: Some("core-1".into()),
+                    terminal: Some("t-manual".into()),
+                    state: "running".into(),
+                    connection: "connected".into(),
+                    error: None,
+                    agent_status: Some("working".into()),
+                    agent_turn: None,
+                    observed_agent: Some("codex".into()),
+                    waiting: None,
+                }),
+                agent: None,
+                created_at: base + 20_000,
+            })
+        })
+        .unwrap();
+
+    {
+        let mut inv = app.inventory.lock().unwrap();
+        inv.core = "core-1".into();
+        inv.snapshot_at(
+            &json!({
+                "seq": 1,
+                "terminals": [
+                    {"address": "t-agent", "state": "live", "status": {"state": "working"}},
+                    {"address": "t-manual", "state": "live", "status": {"state": "working"}}
+                ]
+            }),
+            base + 200_000,
+        );
+        inv.apply_at(
+            &json!({"method":"event","params":{"seq":2,"type":"status","terminal":"t-manual","data":{"status":{"state":"idle"}}}}),
+            base + 210_000,
+        );
+    }
+    app.flush_agent_work().unwrap();
+
+    // Reject > 8 days range
+    assert!(
+        app.call(
+            "insights.activity",
+            json!({"from_ms": base, "to_ms": base + 9 * 24 * 3_600_000})
+        )
+        .is_err()
+    );
+
+    // Clipping test: [base + 30_000, base + 250_000]
+    let res = app
+        .call(
+            "insights.activity",
+            json!({"from_ms": base + 30_000, "to_ms": base + 250_000, "project_id": project.id}),
+        )
+        .unwrap();
+    let segs: Vec<ActivitySegment> = serde_json::from_value(res["segments"].clone()).unwrap();
+    assert_eq!(segs.len(), 4);
+    assert_eq!(segs[0].kind, ActivityKind::Dwell);
+    assert_eq!(segs[0].start_ms, base + 30_000);
+    assert_eq!(segs[0].end_ms, base + 60_000);
+    assert_eq!(segs[1].kind, ActivityKind::Dwell);
+    assert_eq!(segs[1].start_ms, base + 70_000);
+    assert_eq!(segs[1].end_ms, base + 130_000);
+
+    let open_agent = segs
+        .iter()
+        .find(|s| s.open)
+        .expect("open working agent must appear");
+    let open_info = open_agent.agent_data().unwrap();
+    assert_eq!(open_info.profile_id, "developer");
+    assert_eq!(open_info.provider, "claude");
+    assert_eq!(open_info.model, "claude-sonnet-4");
+    assert!(!open_info.manual);
+
+    let closed_manual = segs
+        .iter()
+        .find(|s| s.kind == ActivityKind::Agent && !s.open)
+        .expect("closed manual agent must be persisted");
+    assert_eq!(closed_manual.duration_ms(), 10_000);
+    assert_eq!(closed_manual.agent_data().unwrap().profile_id, "manual");
+    assert_eq!(closed_manual.agent_data().unwrap().provider, "codex");
+    assert!(closed_manual.agent_data().unwrap().manual);
+
+    // Bucket validation and math across segment split boundary
+    assert!(
+        app.call("insights.activity_buckets", json!({"boundaries": [base]}))
+            .is_err()
+    );
+    assert!(
+        app.call(
+            "insights.activity_buckets",
+            json!({"boundaries": [base + 100, base + 100]})
+        )
+        .is_err()
+    );
+    let b_res = app
+        .call(
+            "insights.activity_buckets",
+            json!({
+                "boundaries": [base, base + 30_000, base + 220_000],
+                "project_id": project.id,
+            }),
+        )
+        .unwrap();
+    let buckets: Vec<ActivityBucket> = serde_json::from_value(b_res["buckets"].clone()).unwrap();
+    assert_eq!(buckets.len(), 2);
+    assert_eq!(buckets[0].dwell.card, 30_000);
+    assert_eq!(buckets[0].dwell.terminal, 0);
+    assert_eq!(buckets[1].dwell.card, 30_000);
+    assert_eq!(buckets[1].dwell.terminal, 60_000);
+    assert_eq!(buckets[1].agent_ms, 30_000); // 10_000 closed manual + 20_000 clipped open developer
+    assert_eq!(
+        buckets[1].by_project.get(&project.id).unwrap().dwell_ms,
+        90_000
+    );
+    assert_eq!(
+        buckets[1].by_project.get(&project.id).unwrap().agent_ms,
+        30_000
+    );
+}

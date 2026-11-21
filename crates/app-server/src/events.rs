@@ -3,6 +3,7 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const CARDLESS_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+const ACTIVITY_RETENTION_MS: u64 = 400 * 24 * 60 * 60 * 1000;
 const CARDLESS_KEEP_RECENT: usize = 2_000;
 const PRUNE_INTERVAL_MS: u64 = 5 * 60 * 1000;
 static LAST_CARDLESS_PRUNE_AT: AtomicU64 = AtomicU64::new(0);
@@ -250,6 +251,7 @@ pub(super) fn pump(db: Db<'_>, config: &Config) -> Result<()> {
         let safe_offset = min_enabled_cursor.unwrap_or(top);
         let _ =
             db.prune_cardless_events(CARDLESS_RETENTION_MS, CARDLESS_KEEP_RECENT, safe_offset)?;
+        let _ = db.prune_activity_segments(ACTIVITY_RETENTION_MS)?;
     }
     Ok(())
 }
