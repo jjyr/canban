@@ -2775,6 +2775,9 @@ pub fn insights() -> (canban_types::Snapshot, Vec<Event>) {
             card.created_at = created_at;
             card.attention = None;
             card.human_gate = None;
+            if !is_pr {
+                card.pull_request = None;
+            }
 
             // Keep a couple of unmerged archived cards so Gallery verifies merge-only counting
             let unmerged_archived = card_num == 24 || card_num == 51;
@@ -3197,7 +3200,7 @@ pub fn insights_activity() -> canban_ui::insights::model::ActivityInput {
             open: false,
             data: ActivityDetail::Agent(AgentWorkData {
                 profile_id: "developer".into(),
-                provider: "Codex".into(),
+                provider: "codex".into(),
                 model: "gpt-5.4".into(),
                 engine: Some("codex".into()),
                 stage: Some("develop".into()),
@@ -3217,7 +3220,7 @@ pub fn insights_activity() -> canban_ui::insights::model::ActivityInput {
             open: false,
             data: ActivityDetail::Agent(AgentWorkData {
                 profile_id: "reviewer".into(),
-                provider: "Claude".into(),
+                provider: "claude".into(),
                 model: "claude-sonnet-4-6".into(),
                 engine: Some("claude".into()),
                 stage: Some("review".into()),
@@ -3237,7 +3240,7 @@ pub fn insights_activity() -> canban_ui::insights::model::ActivityInput {
             open: true,
             data: ActivityDetail::Agent(AgentWorkData {
                 profile_id: "planner".into(),
-                provider: "Codex".into(),
+                provider: "codex".into(),
                 model: "gpt-5.4".into(),
                 engine: Some("codex".into()),
                 stage: Some("backlog".into()),
@@ -3275,7 +3278,7 @@ pub fn insights_activity() -> canban_ui::insights::model::ActivityInput {
             open: false,
             data: ActivityDetail::Agent(AgentWorkData {
                 profile_id: "developer".into(),
-                provider: "Codex".into(),
+                provider: "codex".into(),
                 model: "gpt-5.4".into(),
                 engine: Some("codex".into()),
                 stage: Some("develop".into()),
@@ -3319,13 +3322,13 @@ pub fn insights_activity() -> canban_ui::insights::model::ActivityInput {
                 let mut by_agent = vec![
                     AgentBucketStat {
                         profile_id: "developer".into(),
-                        provider: "Codex".into(),
+                        provider: "codex".into(),
                         model: "gpt-5.4".into(),
                         ms: dev_ms,
                     },
                     AgentBucketStat {
                         profile_id: "reviewer".into(),
-                        provider: "Claude".into(),
+                        provider: "claude".into(),
                         model: "claude-sonnet-4-6".into(),
                         ms: rev_ms,
                     },
@@ -3333,7 +3336,7 @@ pub fn insights_activity() -> canban_ui::insights::model::ActivityInput {
                 if plan_ms > 0 {
                     by_agent.push(AgentBucketStat {
                         profile_id: "planner".into(),
-                        provider: "Codex".into(),
+                        provider: "codex".into(),
                         model: "gpt-5.4".into(),
                         ms: plan_ms,
                     });
@@ -3369,12 +3372,13 @@ pub fn insights_activity() -> canban_ui::insights::model::ActivityInput {
             .collect()
     };
 
+    let annual_buckets = make_buckets(&plan.annual_boundaries);
     ActivityInput {
         period_segments,
         baseline_segments,
-        range_buckets: make_buckets(&plan.range_boundaries),
-        baseline_buckets: make_buckets(&plan.baseline_boundaries),
-        annual_buckets: make_buckets(&plan.annual_boundaries),
+        range_buckets: annual_buckets.clone(),
+        baseline_buckets: annual_buckets.clone(),
+        annual_buckets,
         loaded: true,
     }
 }

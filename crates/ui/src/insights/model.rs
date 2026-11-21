@@ -1568,9 +1568,29 @@ pub fn activity_fetch_plan<Tz: TimeZone>(
 }
 
 pub fn time_totals(range: RangeWindow, activity: &ActivityInput) -> TimeTotals {
+    let period_segs: Vec<&ActivitySegment> = activity.period_segments.iter().collect();
+    let baseline_segs: Vec<&ActivitySegment> = activity.baseline_segments.iter().collect();
+    let range_buckets: Vec<&ActivityBucket> = activity.range_buckets.iter().collect();
+    let baseline_buckets: Vec<&ActivityBucket> = activity.baseline_buckets.iter().collect();
+    time_totals_filtered(
+        range,
+        &period_segs,
+        &baseline_segs,
+        &range_buckets,
+        &baseline_buckets,
+    )
+}
+
+fn time_totals_filtered(
+    range: RangeWindow,
+    period_segments: &[&ActivitySegment],
+    baseline_segments: &[&ActivitySegment],
+    range_buckets: &[&ActivityBucket],
+    baseline_buckets: &[&ActivityBucket],
+) -> TimeTotals {
     let mut totals = TimeTotals::default();
     if range == RangeWindow::Today {
-        for seg in &activity.period_segments {
+        for seg in period_segments {
             let dur = seg.duration_ms();
             match (&seg.kind, &seg.data) {
                 (ActivityKind::Dwell, ActivityDetail::Dwell(d)) => {
@@ -1587,7 +1607,7 @@ pub fn time_totals(range: RangeWindow, activity: &ActivityInput) -> TimeTotals {
                 _ => {}
             }
         }
-        for seg in &activity.baseline_segments {
+        for seg in baseline_segments {
             let dur = seg.duration_ms();
             match seg.kind {
                 ActivityKind::Dwell => totals.prev_dwell_total_ms += dur,
@@ -1595,14 +1615,14 @@ pub fn time_totals(range: RangeWindow, activity: &ActivityInput) -> TimeTotals {
             }
         }
     } else {
-        for b in &activity.range_buckets {
+        for b in range_buckets {
             totals.dwell_card_ms += b.dwell.card;
             totals.dwell_terminal_ms += b.dwell.terminal;
             totals.dwell_other_ms += b.dwell.other;
             totals.dwell_total_ms += b.dwell.total();
             totals.agent_total_ms += b.agent_ms;
         }
-        for b in &activity.baseline_buckets {
+        for b in baseline_buckets {
             totals.prev_dwell_total_ms += b.dwell.total();
             totals.prev_agent_total_ms += b.agent_ms;
         }
@@ -1954,6 +1974,35 @@ pub fn compute_dashboard<Tz: TimeZone>(
     };
     let current = |ts: u64| ts > 0 && ts >= from && ts < until;
     let previous = |ts: u64| ts > 0 && ts >= prev_from && ts < prev_until;
+
+    let cur_segments: Vec<&ActivitySegment> = activity
+        .period_segments
+        .iter()
+        .filter(|s| {
+            s.end_ms > from
+                && s.start_ms < until
+                && scope.is_none_or(|pid| s.project_id.as_deref() == Some(pid))
+        })
+        .collect();
+    let prev_segments: Vec<&ActivitySegment> = activity
+        .baseline_segments
+        .iter()
+        .filter(|s| {
+            s.end_ms > prev_from
+                && s.start_ms < prev_until
+                && scope.is_none_or(|pid| s.project_id.as_deref() == Some(pid))
+        })
+        .collect();
+    let cur_buckets: Vec<&ActivityBucket> = activity
+        .range_buckets
+        .iter()
+        .filter(|b| b.end_ms > from && b.start_ms < until)
+        .collect();
+    let prev_buckets: Vec<&ActivityBucket> = activity
+        .baseline_buckets
+        .iter()
+        .filter(|b| b.end_ms > prev_from && b.start_ms < prev_until)
+        .collect();
 
     let valid_cards: BTreeMap<&str, &Card> = snapshot
         .cards
@@ -2346,7 +2395,7 @@ pub fn compute_dashboard<Tz: TimeZone>(
                 }
             }
 
-            if card.stage == "review" && card.created_at < until {
+            if !card.resolved() && card.stage == "review" && card.created_at < until {
                 reviewed_cards.insert(card.id.clone());
             }
             if evs.iter().any(|ev| {
@@ -2596,7 +2645,7 @@ pub fn compute_dashboard<Tz: TimeZone>(
                     .map(Profile::effective_model)
             })
             .unwrap_or_else(|| "default".into());
-        let group_key = format!("{}:{provider}", run.profile_id);
+        let group_key = format!("{}:{}", run.profile_id, provider.to_ascii_lowercase());
 
         if overlaps {
             used_runs += 1;
@@ -2706,7 +2755,7 @@ pub fn compute_dashboard<Tz: TimeZone>(
         if ms == 0 {
             return;
         }
-        let gkey = format!("{profile_id}:{provider}");
+        let gkey = format!("{}:{}", profile_id, provider.to_ascii_lowercase());
         let stat = profile_map.entry(gkey).or_insert_with(|| ProfileStat {
             card_ids: BTreeSet::new(),
             profile_id: profile_id.to_owned(),
@@ -2732,7 +2781,7 @@ pub fn compute_dashboard<Tz: TimeZone>(
         stat.working_ms = stat.working_ms.saturating_add(ms);
     };
     if range == RangeWindow::Today {
-        for seg in &activity.period_segments {
+        for seg in &cur_segments {
             if let (ActivityKind::Agent, ActivityDetail::Agent(agent)) = (&seg.kind, &seg.data) {
                 add_agent_work(
                     &agent.profile_id,
@@ -2743,7 +2792,7 @@ pub fn compute_dashboard<Tz: TimeZone>(
             }
         }
     } else {
-        for bucket in &activity.range_buckets {
+        for bucket in &cur_buckets {
             for a in &bucket.by_agent {
                 add_agent_work(&a.profile_id, &a.provider, &a.model, a.ms);
             }
@@ -2850,7 +2899,7 @@ pub fn compute_dashboard<Tz: TimeZone>(
     let mut other_dwell_ms = 0u64;
     let mut other_agent_ms = 0u64;
     if range == RangeWindow::Today {
-        for seg in &activity.period_segments {
+        for seg in &cur_segments {
             let dur = seg.duration_ms();
             if dur == 0 {
                 continue;
@@ -2874,7 +2923,7 @@ pub fn compute_dashboard<Tz: TimeZone>(
             }
         }
     } else {
-        for b in &activity.range_buckets {
+        for b in &cur_buckets {
             let mut matched_dwell = 0u64;
             let mut matched_agent = 0u64;
             for (pid, pt) in &b.by_project {
@@ -2924,12 +2973,19 @@ pub fn compute_dashboard<Tz: TimeZone>(
             .then_with(|| a.name.cmp(&b.name))
     });
 
-    let time_totals = time_totals(range, activity);
+    let time_totals = time_totals_filtered(
+        range,
+        &cur_segments,
+        &prev_segments,
+        &cur_buckets,
+        &prev_buckets,
+    );
     merges_on_selected_day.sort_by_key(|m| m.timestamp_ms);
     let timeline = if range == RangeWindow::Today {
+        let owned_cur: Vec<ActivitySegment> = cur_segments.iter().map(|s| (*s).clone()).collect();
         timeline_lanes(
             snapshot,
-            &activity.period_segments,
+            &owned_cur,
             merges_on_selected_day,
             today,
             partial.then_some(now_ms),
@@ -4438,6 +4494,41 @@ mod tests {
             merged_at: ts_utc8(2026, 11, 21, 11, 0),
         });
         s.cards.push(c1);
+        // Historical resolved card resting in "review" must not inflate today's funnel
+        let mut old_resolved = sample_card("c0", "p1", 99, ts_utc8(2026, 11, 1, 8, 0));
+        old_resolved.stage = "review".into();
+        old_resolved.delivery = Some(Delivery {
+            target_branch: "main".into(),
+            commit: "old".into(),
+            request_key: "merge:c0".into(),
+            merged_at: ts_utc8(2026, 11, 1, 10, 0),
+        });
+        s.cards.push(old_resolved);
+
+        let events = vec![
+            Event {
+                id: "ev-q".into(),
+                project_id: "p1".into(),
+                card_id: "c1".into(),
+                sequence: 1,
+                kind: "execution.queued".into(),
+                actor: "system".into(),
+                message: String::new(),
+                data: json!({"terminal_id": "c1:developer", "run_number": 1, "trigger": "workflow", "provider": "Claude"}),
+                created_at: ts_utc8(2026, 11, 21, 9, 5),
+            },
+            Event {
+                id: "ev-s".into(),
+                project_id: "p1".into(),
+                card_id: "c1".into(),
+                sequence: 2,
+                kind: "execution.started".into(),
+                actor: "system".into(),
+                message: String::new(),
+                data: json!({"terminal_id": "c1:developer", "run_number": 1, "trigger": "workflow"}),
+                created_at: ts_utc8(2026, 11, 21, 9, 10),
+            },
+        ];
 
         let profiles = vec![
             Profile {
@@ -4555,48 +4646,93 @@ mod tests {
                     page: "card".into(),
                 }),
             }],
-            range_buckets: vec![ActivityBucket {
-                start_ms: ts_utc8(2026, 11, 21, 0, 0),
-                end_ms: ts_utc8(2026, 11, 21, 16, 0),
-                dwell: DwellBucketTotals {
-                    card: 20 * 60_000,
-                    terminal: 15 * 60_000,
-                    other: 0,
-                },
-                agent_ms: 40 * 60_000,
-                by_project: BTreeMap::from([(
-                    "p1".into(),
-                    ProjectActivityTotals {
-                        dwell_ms: 20 * 60_000,
-                        agent_ms: 40 * 60_000,
+            range_buckets: vec![
+                // Outside 7D window — must be ignored when computing 7D totals
+                ActivityBucket {
+                    start_ms: ts_utc8(2026, 10, 1, 0, 0),
+                    end_ms: ts_utc8(2026, 10, 2, 0, 0),
+                    dwell: DwellBucketTotals {
+                        card: 99 * 60_000,
+                        terminal: 0,
+                        other: 0,
                     },
-                )]),
-                by_agent: vec![
-                    AgentBucketStat {
+                    agent_ms: 88 * 60_000,
+                    by_project: BTreeMap::from([(
+                        "p1".into(),
+                        ProjectActivityTotals {
+                            dwell_ms: 99 * 60_000,
+                            agent_ms: 88 * 60_000,
+                        },
+                    )]),
+                    by_agent: vec![AgentBucketStat {
                         profile_id: "developer".into(),
                         provider: "claude".into(),
                         model: "claude-sonnet-4".into(),
-                        ms: 30 * 60_000,
+                        ms: 88 * 60_000,
+                    }],
+                },
+                ActivityBucket {
+                    start_ms: ts_utc8(2026, 11, 21, 0, 0),
+                    end_ms: ts_utc8(2026, 11, 21, 16, 0),
+                    dwell: DwellBucketTotals {
+                        card: 20 * 60_000,
+                        terminal: 15 * 60_000,
+                        other: 0,
                     },
-                    AgentBucketStat {
-                        profile_id: "reviewer".into(),
-                        provider: "claude".into(),
-                        model: "claude-sonnet-4".into(),
-                        ms: 10 * 60_000,
-                    },
-                ],
+                    agent_ms: 40 * 60_000,
+                    by_project: BTreeMap::from([(
+                        "p1".into(),
+                        ProjectActivityTotals {
+                            dwell_ms: 20 * 60_000,
+                            agent_ms: 40 * 60_000,
+                        },
+                    )]),
+                    by_agent: vec![
+                        AgentBucketStat {
+                            profile_id: "developer".into(),
+                            provider: "claude".into(),
+                            model: "claude-sonnet-4".into(),
+                            ms: 30 * 60_000,
+                        },
+                        AgentBucketStat {
+                            profile_id: "reviewer".into(),
+                            provider: "claude".into(),
+                            model: "claude-sonnet-4".into(),
+                            ms: 10 * 60_000,
+                        },
+                    ],
+                },
+            ],
+            baseline_buckets: vec![ActivityBucket {
+                start_ms: ts_utc8(2026, 10, 1, 0, 0),
+                end_ms: ts_utc8(2026, 10, 2, 0, 0),
+                dwell: DwellBucketTotals {
+                    card: 77 * 60_000,
+                    terminal: 0,
+                    other: 0,
+                },
+                agent_ms: 66 * 60_000,
+                ..Default::default()
             }],
-            baseline_buckets: Vec::new(),
             annual_buckets: Vec::new(),
         };
 
         let opts = ViewOptions::with_now(now);
-        let d1 = compute_dashboard(&s, &[], &act, None, &tz, &profiles, opts);
+        let d1 = compute_dashboard(&s, &events, &act, None, &tz, &profiles, opts);
         assert_eq!(d1.time_totals.dwell_total_ms, 35 * 60_000);
         assert_eq!(d1.time_totals.dwell_card_ms, 20 * 60_000);
         assert_eq!(d1.time_totals.dwell_terminal_ms, 15 * 60_000);
         assert_eq!(d1.time_totals.prev_dwell_total_ms, 10 * 60_000);
         assert_eq!(d1.time_totals.agent_total_ms, 40 * 60_000);
+        assert_eq!(d1.funnel.reviewed, 1);
+        assert_eq!(d1.profile_stats.len(), 2);
+        let dev = d1
+            .profile_stats
+            .iter()
+            .find(|p| p.profile_id == "developer")
+            .unwrap();
+        assert_eq!(dev.total_runs, 1);
+        assert_eq!(dev.working_ms, 30 * 60_000);
 
         // Timeline lanes: 3 Me lanes + 2 Agent lanes (@developer, @reviewer)
         assert_eq!(d1.timeline.lanes.len(), 5);
@@ -4618,21 +4754,28 @@ mod tests {
         // Model timeline merges into 1 agent lane
         let mut opts_model = opts;
         opts_model.agent_group = AgentGroup::Model;
-        let d_model = compute_dashboard(&s, &[], &act, None, &tz, &profiles, opts_model);
+        let d_model = compute_dashboard(&s, &events, &act, None, &tz, &profiles, opts_model);
         assert_eq!(d_model.timeline.lanes.len(), 4);
         assert_eq!(d_model.timeline.lanes[3].label, "claude-sonnet-4");
 
-        // 7D day_rows joins range_buckets cleanly
+        // 7D day_rows & totals filter out the out-of-window October bucket cleanly
         let mut opts_7d = opts;
         opts_7d.range = RangeWindow::Days7;
-        let d7 = compute_dashboard(&s, &[], &act, None, &tz, &profiles, opts_7d);
+        let d7 = compute_dashboard(&s, &events, &act, None, &tz, &profiles, opts_7d);
         assert_eq!(d7.day_rows.len(), 7);
+        assert_eq!(d7.time_totals.dwell_total_ms, 35 * 60_000);
+        assert_eq!(d7.time_totals.prev_dwell_total_ms, 0);
+        assert_eq!(d7.time_totals.agent_total_ms, 40 * 60_000);
+        let p1 = d7.project_stats.iter().find(|p| p.id == "p1").unwrap();
+        assert_eq!(p1.dwell_ms, 20 * 60_000);
+        assert_eq!(p1.agent_ms, 40 * 60_000);
         let today_row = d7.day_rows.last().unwrap();
         assert!(today_row.is_today);
         assert_eq!(today_row.dwell_total_ms(), 35 * 60_000);
         assert_eq!(today_row.agent_ms, 40 * 60_000);
         assert_eq!(today_row.resolved_cards, 1);
         assert_eq!(d7.funnel.created, 1);
+        assert_eq!(d7.funnel.reviewed, 1);
         assert_eq!(d7.funnel.merged, 1);
         assert_eq!(d7.funnel.zero_human_pct(), Some(100));
     }
