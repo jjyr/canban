@@ -94,6 +94,7 @@ fn base(variant: Variant) -> nsh_base::ButtonElement {
         Variant::Quiet => CLEAR,
     };
     press_target()
+        .app_class(super::motion::CONTROL_TRANSITION)
         .min_h(px(CONTROL_HEIGHT))
         .px_3()
         .justify_center()
@@ -137,6 +138,7 @@ pub fn toggle(
         .child(text(label).text_size(px(12.)).text_color(TEXT))
         .child(
             view()
+                .app_class(super::motion::CONTROL_TRANSITION)
                 .w(px(34.))
                 .h(px(20.))
                 .rounded_full()
@@ -144,11 +146,12 @@ pub fn toggle(
                 .bg(move || if value() { ACCENT_FILL } else { INSET })
                 .child(
                     view()
+                        .app_class(super::motion::CONTROL_TRANSITION)
                         .w(px(16.))
                         .h(px(16.))
                         .rounded_full()
                         .bg(TEXT)
-                        .ml(move || px(if value() { 14. } else { 0. })),
+                        .translate_x(move || px(if value() { 14. } else { 0. })),
                 ),
         )
         .on_press(move |_: &()| changed(!value()))

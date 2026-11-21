@@ -88,7 +88,25 @@ pub(super) fn observe(ui: Ui) -> Signal<SummaryState> {
             });
             return;
         }
-        state.set(SummaryState::Loading);
+        let cache_key =
+            crate::review::cache::key(&query.host, &query.project, "git.compare", &query.params);
+        if let Some(value) = ui
+            .review_state
+            .read_cache
+            .with(|c| c.peek_fresh(&cache_key))
+        {
+            state.set(
+                Summary::from_data(&value.data)
+                    .map(SummaryState::Ready)
+                    .unwrap_or_else(|| {
+                        SummaryState::Unavailable("Git returned no comparison summary".into())
+                    }),
+            );
+            return;
+        }
+        if !matches!(state.get_untracked(), SummaryState::Ready(_)) {
+            state.set(SummaryState::Loading);
+        }
         ui.spawn(async move {
             let result =
                 crate::review::cached_read(ui, "git.compare", query.params, query.project).await;

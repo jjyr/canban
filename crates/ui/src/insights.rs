@@ -182,10 +182,10 @@ fn alpha_tint(token: ThemeColor, alpha: f32) -> AdaptiveColor {
 }
 
 fn now_ms(ui: Ui) -> u64 {
-    ui.insights.anchor_ms.get().unwrap_or_else(|| {
-        ui.runtime_clock.get();
-        canban_types::now()
-    })
+    ui.insights
+        .anchor_ms
+        .get()
+        .unwrap_or_else(canban_types::now)
 }
 
 pub fn select_date(ui: Ui, date: Option<chrono::NaiveDate>) {
@@ -648,8 +648,6 @@ fn kpi_card(spec: KpiSpec) -> View {
 fn render_period_subbar(ui: Ui, dash: &Dashboard) -> View {
     let actual = dash.annual_end;
     let dash_date = dash.selected_date;
-    let valid_date =
-        chrono::NaiveDate::parse_from_str(&ui.insights.date_text.get(), "%Y-%m-%d").ok();
     let excl_sync = ui.insights.exclude_initial_sync.get();
 
     let mut top = view()
@@ -735,7 +733,14 @@ fn render_period_subbar(ui: Ui, dash: &Dashboard) -> View {
                             compact_action("Apply date", Variant::Quiet, move |_| {
                                 intent(ui, "apply-date")
                             })
-                            .disabled(valid_date.is_none_or(|d| d > actual)),
+                            .disabled(move || {
+                                chrono::NaiveDate::parse_from_str(
+                                    &ui.insights.date_text.get(),
+                                    "%Y-%m-%d",
+                                )
+                                .ok()
+                                .is_none_or(|d| d > actual)
+                            }),
                         )
                         .child(compact_action(
                             format!("Created Cards ({})", dash.created_total),

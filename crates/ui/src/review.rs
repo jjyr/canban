@@ -1173,6 +1173,42 @@ fn load_active_diff(ui: Ui, force_remote_refresh: bool) {
     if same_request && st.compare_loading.get_untracked() {
         return;
     }
+    if let Some(cached) = st.read_cache.with(|c| c.peek_fresh(&request)) {
+        let ticket = st.compare_ticket.get_untracked() + 1;
+        batch(|| {
+            if !same_request {
+                st.refresh_pending.set(false);
+                st.compare_request.replace(request);
+                st.selected_file.set(String::new());
+                st.visible_file_limit.set(4);
+                st.collapsed_files.set(Default::default());
+                st.auto_collapsed_seen
+                    .with(std::collections::BTreeSet::clear);
+                clear_context_expansion(st);
+                st.anchor_targets.with(std::collections::BTreeMap::clear);
+            }
+            st.compare_ticket.set(ticket);
+            st.compare_loading.set(false);
+            st.error.set(String::new());
+            let val = &cached.data;
+            if mode == "github_pr" {
+                if let Some(base) = val["base_ref"].as_str() {
+                    st.base_ref.set(base.into());
+                }
+                if let Some(compare) = val["compare_ref"].as_str() {
+                    st.compare_ref.set(compare.into());
+                }
+            }
+            ui.review.set(if mode == "card_local" {
+                serde_json::from_value::<ReviewPreview>(val["review_preview"].clone()).ok()
+            } else {
+                None
+            });
+            apply_compare(ui, &cached);
+            maybe_finish_pull_refresh(st);
+        });
+        return;
+    }
     if !same_request {
         st.refresh_pending.set(false);
         st.compare_request.replace(request);

@@ -80,25 +80,32 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                 ))
             })
     });
-    let has_live_target = computed(move || target.with(|t| t.is_some()));
+    let binding_key = computed(move || {
+        target.with(|t| {
+            t.as_ref().map(|(entry_id, core_id, terminal, _, _)| {
+                (entry_id.clone(), core_id.clone(), terminal.clone())
+            })
+        })
+    });
+    let has_live_target = computed(move || binding_key.with(Option::is_some));
     dynamic(move || {
-        if !has_live_target.get() {
-            if !in_terminals.get() {
-                return view()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .bg(crate::utilities::terminal_bg_color)
-                    .into_element();
-            }
+        if !in_terminals.get() {
+            return view()
+                .flex_1()
+                .min_h(px(0.))
+                .bg(crate::utilities::terminal_bg_color)
+                .into_element();
+        }
+        let placeholder = move || {
             let sel = selected_id.get();
             let has_entry = !sel.is_empty()
                 && !ui.closing_terminals.with(|c| c.contains(&sel))
                 && ui
                     .terminal_entries
                     .with(|rows| rows.iter().any(|e| e.saved.id == sel));
-            return view()
-                .flex_1()
-                .min_h(px(0.))
+            view()
+                .absolute()
+                .inset_0()
                 .bg(crate::utilities::terminal_bg_color)
                 .p_5()
                 .gap_3()
@@ -129,12 +136,11 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                             .disabled(move || ui.pending.get()),
                     )
                 })
-                .into_element();
-        }
+        };
         #[cfg(target_os = "macos")]
         {
-            if crate::APP.get().is_none() {
-                return native("canban/terminal")
+            let native_view = if crate::APP.get().is_none() {
+                native("canban/terminal")
                     .prop("theme", crate::utilities::terminal_theme)
                     .prop("font", move || crate::utilities::terminal_font(ui))
                     .prop(
@@ -144,7 +150,8 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                     .prop("focus", move || {
                         json!({
                             "ticket": ui.terminal_focus.get(),
-                            "enabled": !ui.quick_open.get()
+                            "enabled": has_live_target.get()
+                                && !ui.quick_open.get()
                                 && ui.utility_popup.get().is_empty()
                                 && ui.terminal_rename.get().is_none()
                                 && ui.terminal_close_confirm.get().is_none()
@@ -166,58 +173,68 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                     .w_full()
                     .flex_1()
                     .min_h(px(0.))
-                    .into_element();
-            }
-            native("canban/terminal")
-                .prop("theme", crate::utilities::terminal_theme)
-                .prop("font", move || crate::utilities::terminal_font(ui))
-                .prop(
-                    "ui_command_keys",
-                    json!(["o", "n", "/", "i", "j", "t", "w", "[", "]", "{", "}"]),
-                )
-                .prop("focus", move || {
-                    json!({
-                        "ticket": ui.terminal_focus.get(),
-                        "enabled": !ui.quick_open.get()
-                            && ui.utility_popup.get().is_empty()
-                            && ui.terminal_rename.get().is_none()
-                            && ui.terminal_close_confirm.get().is_none()
-                            && ui.worktree_modal.get().is_none()
-                            && ui.worktree_promote.get().is_none()
-                            && ui.worktree_remove_confirm.get().is_none()
-                            && ui.project_delete_confirm.get().is_none()
+                    .style_when(move || !has_live_target.get(), |s| s.hidden())
+            } else {
+                native("canban/terminal")
+                    .prop("theme", crate::utilities::terminal_theme)
+                    .prop("font", move || crate::utilities::terminal_font(ui))
+                    .prop(
+                        "ui_command_keys",
+                        json!(["o", "n", "/", "i", "j", "t", "w", "[", "]", "{", "}"]),
+                    )
+                    .prop("focus", move || {
+                        json!({
+                            "ticket": ui.terminal_focus.get(),
+                            "enabled": has_live_target.get()
+                                && !ui.quick_open.get()
+                                && ui.utility_popup.get().is_empty()
+                                && ui.terminal_rename.get().is_none()
+                                && ui.terminal_close_confirm.get().is_none()
+                                && ui.worktree_modal.get().is_none()
+                                && ui.worktree_promote.get().is_none()
+                                && ui.worktree_remove_confirm.get().is_none()
+                                && ui.project_delete_confirm.get().is_none()
+                        })
                     })
-                })
-                .prop("binding", move || {
-                    target.with(|t| match t {
-                        Some((entry_id, core_id, terminal, _, _)) => {
-                            let host_id = ui
-                                .snapshot
-                                .with_untracked(|s| s.terminal_host(entry_id).to_owned());
-                            json!({
-                                "config": crate::config_for_host(&host_id),
-                                "terminal": terminal,
-                                "core_id": core_id,
-                            })
-                        }
-                        None => serde_json::Value::Null,
+                    .prop("binding", move || {
+                        binding_key.with(|t| match t {
+                            Some((entry_id, core_id, terminal)) => {
+                                let host_id = ui
+                                    .snapshot
+                                    .with_untracked(|s| s.terminal_host(entry_id).to_owned());
+                                json!({
+                                    "config": crate::config_for_host(&host_id),
+                                    "terminal": terminal,
+                                    "core_id": core_id,
+                                })
+                            }
+                            None => serde_json::Value::Null,
+                        })
                     })
-                })
-                .prop("read_only", move || {
-                    target.with(|t| json!(t.as_ref().is_none_or(|(_, _, _, ro, _)| *ro)))
-                })
-                .prop("input_status", move || {
-                    target.with(|t| {
-                        json!(
-                            t.as_ref()
-                                .map(|(_, _, _, _, status)| status.as_str())
-                                .unwrap_or("")
-                        )
+                    .prop("read_only", move || {
+                        target.with(|t| json!(t.as_ref().is_none_or(|(_, _, _, ro, _)| *ro)))
                     })
-                })
-                .w_full()
+                    .prop("input_status", move || {
+                        target.with(|t| {
+                            json!(
+                                t.as_ref()
+                                    .map(|(_, _, _, _, status)| status.as_str())
+                                    .unwrap_or("")
+                            )
+                        })
+                    })
+                    .w_full()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .style_when(move || !has_live_target.get(), |s| s.hidden())
+            };
+            view()
+                .relative()
                 .flex_1()
                 .min_h(px(0.))
+                .bg(crate::utilities::terminal_bg_color)
+                .child(native_view)
+                .child(when(move || !has_live_target.get(), placeholder))
                 .into_element()
         }
         #[cfg(not(target_os = "macos"))]

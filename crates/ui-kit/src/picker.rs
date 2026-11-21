@@ -227,6 +227,9 @@ impl IntoElement for SearchPopover {
             .align(self.align)
             .offset(px(4.))
             .margin(px(8.))
+            .popup_class(super::motion::POPUP_CLASS)
+            .popup_starting_class(super::motion::POPUP_STARTING_CLASS)
+            .popup_ending_class(super::motion::POPUP_ENDING_CLASS)
             .on_open_change(move |e: &PopoverEvent| {
                 if let PopoverEvent::OpenChange(next, _) = e {
                     if *next {

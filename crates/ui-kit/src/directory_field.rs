@@ -631,33 +631,38 @@ pub fn path_combobox(
                         .child(icon(Icon::ChevronDown).w(px(13.)).h(px(13.))),
                 ),
         )
-        .child(when(
-            move || open.get() && width.with(Option::is_some),
-            move || {
-                let choose_final = choose_final.clone();
-                overlay()
-                    .anchor(&anchor)
-                    .placement(Placement::Bottom)
-                    .align(Align::Start)
-                    .offset(px(4.))
-                    .margin(px(8.))
-                    .w(move || Length::from(width.get().unwrap_or(px(360.))))
-                    .on_press_outside(move |_: &Point<Points>| {
-                        open.set(false);
-                    })
-                    .on_cancel(move || {
-                        open.set(false);
-                    })
-                    .child(
-                        view()
-                            .w_full()
-                            .bg(SURFACE)
-                            .rounded(px(10.))
-                            .border_1()
-                            .border_color(BORDER)
-                            .shadow_lg()
-                            .overflow_hidden()
-                            .child(
+        .child({
+            let dropdown_open = computed(move || open.get() && width.with(Option::is_some));
+            let presence = super::motion::Presence::new(dropdown_open);
+            when(
+                move || presence.mounted.get(),
+                move || {
+                    let choose_final = choose_final.clone();
+                    overlay()
+                        .anchor(&anchor)
+                        .placement(Placement::Bottom)
+                        .align(Align::Start)
+                        .offset(px(4.))
+                        .margin(px(8.))
+                        .w(move || Length::from(width.get().unwrap_or(px(360.))))
+                        .on_press_outside(move |_: &Point<Points>| {
+                            open.set(false);
+                        })
+                        .on_cancel(move || {
+                            open.set(false);
+                        })
+                        .child(
+                            view()
+                                .element_ref(&presence.region)
+                                .bind_opacity(&presence.opacity)
+                                .w_full()
+                                .bg(SURFACE)
+                                .rounded(px(10.))
+                                .border_1()
+                                .border_color(BORDER)
+                                .shadow_lg()
+                                .overflow_hidden()
+                                .child(
                                 nsh_base::command()
                                     .component_ref(&command_ref)
                                     .searchable(false)
@@ -803,7 +808,8 @@ pub fn path_combobox(
                     )
                     .into_element()
             },
-        ))
+        )
+        })
         .child(dynamic(move || {
             let err = listing_memo.with(|l| l.error.clone());
             if err.is_empty() {

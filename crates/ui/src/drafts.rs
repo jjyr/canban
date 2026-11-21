@@ -169,7 +169,7 @@ pub fn capture_scroll(ui: Ui, key: String, e: &ScrollEvent) {
 }
 pub fn save_card(ui: Ui, id: String, draft: Signal<Draft>) {
     let value = draft.get_untracked();
-    if ui.pending.get_untracked()
+    if ui.is_method_pending("card.update")
         || value.title.trim().is_empty()
         || crate::card::attachments::busy(draft, false)
     {

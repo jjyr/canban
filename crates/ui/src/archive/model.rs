@@ -25,11 +25,15 @@ pub fn project_entries_with_tags(
     project_id: &str,
     query: &str,
 ) -> Vec<Entry> {
-    groups_with_tags(snapshot, local_tags, query)
-        .into_iter()
-        .filter(|g| project_id.is_empty() || g.id == project_id)
-        .flat_map(|g| g.entries)
-        .collect()
+    groups_for_project(
+        snapshot,
+        local_tags,
+        (!project_id.is_empty()).then_some(project_id),
+        query,
+    )
+    .into_iter()
+    .flat_map(|g| g.entries)
+    .collect()
 }
 
 pub fn groups(snapshot: &Snapshot, query: &str) -> Vec<Group> {
@@ -41,39 +45,66 @@ pub fn groups_with_tags(
     local_tags: &BTreeSet<String>,
     query: &str,
 ) -> Vec<Group> {
-    let known_tags = crate::tags::known_map(snapshot, local_tags, None);
+    groups_for_project(snapshot, local_tags, None, query)
+}
+
+fn groups_for_project(
+    snapshot: &Snapshot,
+    local_tags: &BTreeSet<String>,
+    project_filter: Option<&str>,
+    query: &str,
+) -> Vec<Group> {
+    let known_tags = crate::tags::known_map(snapshot, local_tags, project_filter);
     let (tag_terms, other_query) = crate::tags::split_tag_query(query);
+    let project_names: std::collections::HashMap<&str, &str> = snapshot
+        .projects
+        .iter()
+        .map(|p| (p.id.as_str(), p.name.as_str()))
+        .collect();
+    let mut conv_by_card: std::collections::HashMap<&str, Vec<(&str, &str)>> =
+        std::collections::HashMap::new();
+    for c in &snapshot.conversations {
+        conv_by_card
+            .entry(c.card_id.as_str())
+            .or_default()
+            .push((c.profile_id.as_str(), c.provider.as_str()));
+    }
+    let mut term_by_card: std::collections::HashMap<&str, Vec<(&str, String)>> =
+        std::collections::HashMap::new();
+    for a in snapshot.terminals.iter().filter_map(|t| t.agent.as_ref()) {
+        term_by_card
+            .entry(a.card_id.as_str())
+            .or_default()
+            .push((a.profile.id.as_str(), a.profile.command_name()));
+    }
     let mut groups = BTreeMap::<String, Vec<(usize, Entry)>>::new();
     for card in snapshot
         .cards
         .iter()
-        .filter(|c| c.archived_at.is_some() && c.removed_at.is_none())
+        .filter(|c| {
+            c.archived_at.is_some()
+                && c.removed_at.is_none()
+                && project_filter.is_none_or(|pid| c.project_id == pid)
+        })
         .cloned()
     {
-        let name = snapshot
-            .projects
-            .iter()
-            .find(|p| p.id == card.project_id)
-            .map(|p| p.name.as_str())
+        let name = project_names
+            .get(card.project_id.as_str())
+            .copied()
             .unwrap_or("Unknown Project");
         let mut agents = BTreeSet::new();
         let mut providers = BTreeSet::new();
-        for c in snapshot
-            .conversations
-            .iter()
-            .filter(|c| c.card_id == card.id)
-        {
-            agents.insert(format!("@{}", c.profile_id));
-            providers.insert(c.provider.clone());
+        if let Some(convs) = conv_by_card.get(card.id.as_str()) {
+            for (profile_id, provider) in convs {
+                agents.insert(format!("@{profile_id}"));
+                providers.insert((*provider).to_owned());
+            }
         }
-        for a in snapshot
-            .terminals
-            .iter()
-            .filter_map(|t| t.agent.as_ref())
-            .filter(|a| a.card_id == card.id)
-        {
-            agents.insert(format!("@{}", a.profile.id));
-            providers.insert(a.profile.command_name());
+        if let Some(terms) = term_by_card.get(card.id.as_str()) {
+            for (profile_id, cmd) in terms {
+                agents.insert(format!("@{profile_id}"));
+                providers.insert(cmd.clone());
+            }
         }
         let agents = agents.into_iter().collect::<Vec<_>>();
         let tags = crate::tags::card_tags(&card, &known_tags);

@@ -26,6 +26,7 @@ pub fn chrome_action(
 ) -> nsh_base::ButtonElement {
     let title = title.into();
     crate::press_target()
+        .app_class(super::motion::CONTROL_TRANSITION)
         .disabled_style(|s| s.opacity(0.4))
         .w(px(30.))
         .h(px(30.))
@@ -54,6 +55,7 @@ pub fn chrome_indicator_button(
         .tooltip(hint_tooltip(move || SharedString::from(title())).placement(Placement::Bottom))
         .child(
             crate::press_target()
+                .app_class(super::motion::CONTROL_TRANSITION)
                 .relative()
                 .w(px(30.))
                 .h(px(30.))

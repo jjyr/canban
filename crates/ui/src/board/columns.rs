@@ -138,6 +138,7 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage, compact: bool) -> i
             .child(
                 scroll()
                     .element_ref(&scroll_ref)
+                    .content_offset(position)
                     .scrollbar(false)
                     .flex_1()
                     .on_scroll(move |e: &ScrollEvent| {
@@ -150,10 +151,7 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage, compact: bool) -> i
                             .w_full()
                             .on_layout(move |_: &Bounds<Points>| {
                                 if !restored.replace(true) && position.y.0 > 0. {
-                                    spawn(async move {
-                                        next_frame().await;
-                                        scroll_ref.scroll_to(position, false);
-                                    });
+                                    scroll_ref.scroll_to(position, false);
                                 }
                             })
                             .h(move || {

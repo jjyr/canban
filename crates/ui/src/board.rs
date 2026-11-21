@@ -209,6 +209,13 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         .child(crate::github::filters::toolbar(ui))
         .child(dynamic(move || {
             let Some(project) = project.get() else {
+                if !ui.snapshot_ready.get() {
+                    return canban_ui_kit::loading_panel(
+                        "Loading workspace…",
+                        "Connecting to your Projects and Cards.",
+                    )
+                    .into_element();
+                }
                 let create = entry_card(
                     Icon::Plus,
                     "Create a Project",

@@ -335,26 +335,20 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             .into_element()
     };
 
-    dynamic(move || {
-        let term_open = show_terminal.get();
-        let is_narrow = ui.narrow.get();
-        untracked(|| {
-            if !term_open {
-                reader_column()
-            } else if is_narrow {
-                terminal::pane(ui).into_element()
-            } else {
-                canban_ui_kit::split(
-                    reader_column(),
-                    terminal::pane(ui).into_element(),
-                    ui.card_terminal_width,
-                    400.,
-                    360.,
-                )
-                .into_element()
-            }
-        })
-    })
+    let is_narrow = computed(move || ui.narrow.get());
+    canban_ui_kit::split::reveal_split(
+        reader_column(),
+        move || terminal::pane(ui).into_element(),
+        ui.card_terminal_width,
+        is_narrow,
+        show_terminal,
+        move || {
+            batch(|| {
+                ui.card_terminal_open.set(false);
+                ui.card_terminal_focused.set(false);
+            });
+        },
+    )
     .into_element()
 }
 

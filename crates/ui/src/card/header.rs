@@ -661,17 +661,6 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 });
             if !review_mode && c.active() && !c.resolved() && is_pr {
                 if let Some((prof, started_at)) = active_review {
-                    let now_ms = ui.runtime_clock.get();
-                    let elapsed = started_at
-                        .map(|t| {
-                            format!(
-                                " · {}",
-                                crate::components::activity::compact_duration(
-                                    now_ms.saturating_sub(t)
-                                )
-                            )
-                        })
-                        .unwrap_or_default();
                     let cid_term = c.id.clone();
                     row = row.child(
                         canban_ui_kit::press_target()
@@ -692,9 +681,21 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                             })
                             .child(live_dot(ACCENT))
                             .child(
-                                label(format!("@{prof} reviewing{elapsed}"))
-                                    .text_size(px(11.5))
-                                    .text_color(ACCENT),
+                                label(move || {
+                                    let elapsed = started_at
+                                        .map(|t| {
+                                            format!(
+                                                " · {}",
+                                                crate::components::activity::compact_duration(
+                                                    ui.runtime_clock.get().saturating_sub(t)
+                                                )
+                                            )
+                                        })
+                                        .unwrap_or_default();
+                                    format!("@{prof} reviewing{elapsed}")
+                                })
+                                .text_size(px(11.5))
+                                .text_color(ACCENT),
                             ),
                     );
                 } else if let Some(ref d) = review_draft {

@@ -15,7 +15,6 @@ use super::*;
 #[derive(Clone, PartialEq)]
 pub(crate) struct CardTileModel {
     pub card: Card,
-    pub live_entries: Vec<crate::terminals::Entry>,
     pub has_terminal: bool,
     pub terminal_tint: ThemeColor,
     pub github_cached: Option<(String, String)>,
@@ -147,7 +146,6 @@ impl CardTileModel {
         let pr_view = crate::components::pr_status::from_card(snapshot, idx, &card);
         Self {
             card,
-            live_entries,
             has_terminal,
             terminal_tint,
             github_cached,
@@ -183,7 +181,6 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
         review_draft,
         review_running,
         pr_view,
-        ..
     } = model;
     let reminder_id = card.id.clone();
     let count = computed(move || {

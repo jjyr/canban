@@ -6,7 +6,7 @@ use nsh_core::prelude::*;
 /// handles: a 1pt `BORDER` hairline along the full boundary that highlights and
 /// widens to 3pt in `ACCENT` (`ring` / `primary`) while the 9pt handle band is
 /// hovered, pressed, or dragged.
-pub const HANDLE_CLASS: &str = "w-px bg-border group-hover:w-[3px] group-hover:bg-ring group-active:w-[3px] group-active:bg-primary";
+pub const HANDLE_CLASS: &str = "w-px bg-border transition-all duration-150 ease-out motion-reduce:transition-none group-hover:w-[3px] group-hover:bg-ring group-active:w-[3px] group-active:bg-primary";
 
 /// Horizontal resizable panel group pre-configured with Canban's shared split
 /// handle indicator (`1pt BORDER` idle, `3pt ACCENT` on hover/drag) and

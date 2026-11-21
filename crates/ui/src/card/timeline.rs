@@ -20,6 +20,7 @@ pub(crate) struct ProjectedRow {
     pub narrative: bool,
     pub spine: Spine,
     pub fold: Option<FoldSpec>,
+    pub is_first_for_terminal: bool,
 }
 
 /// A durable event is either a Markdown message or a compact milestone row.
@@ -220,6 +221,7 @@ pub(crate) fn project_rows(
                 narrative: true,
                 spine: Spine::ISOLATED,
                 fold: None,
+                is_first_for_terminal: false,
             });
             idx += 1;
             continue;
@@ -236,6 +238,7 @@ pub(crate) fn project_rows(
                 narrative: false,
                 spine: Spine::ISOLATED,
                 fold: None,
+                is_first_for_terminal: false,
             });
             continue;
         }
@@ -254,6 +257,7 @@ pub(crate) fn project_rows(
                     narrative: false,
                     spine: Spine::ISOLATED,
                     fold: None,
+                    is_first_for_terminal: false,
                 });
             }
         }
@@ -268,15 +272,20 @@ pub(crate) fn project_rows(
                 expanded: is_open,
                 hidden_alert,
             }),
+            is_first_for_terminal: false,
         });
     }
 
     let total = rows.len();
+    let mut seen_terminals = BTreeSet::<String>::new();
     for (i, row) in rows.iter_mut().enumerate() {
         row.spine = Spine {
             first: i == 0,
             last: i + 1 == total,
         };
+        if let Some(tid) = row.event.data["terminal_id"].as_str() {
+            row.is_first_for_terminal = seen_terminals.insert(tid.to_owned());
+        }
     }
     rows
 }
@@ -375,6 +384,10 @@ pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
     view()
         .gap_2p5()
         .child(when(
+            move || timeline_state.with(|st| !st.initialized && st.loading),
+            move || muted("Loading activity…"),
+        ))
+        .child(when(
             move || !rows.with(Vec::is_empty),
             move || muted("Activity"),
         ))
@@ -424,25 +437,23 @@ pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
                     });
                     // One detail owner per Agent terminal, placed inside the right column of its
                     // earliest rendered row so the vertical spine stays unbroken.
-                    let trailing_detail = row.event.data["terminal_id"]
-                        .as_str()
-                        .map(str::to_owned)
-                        .and_then(|terminal_id| {
-                            let first = rows.with(|all| {
-                                all.iter()
-                                    .filter(|r| {
-                                        r.event.data["terminal_id"].as_str()
-                                            == Some(terminal_id.as_str())
-                                    })
-                                    .map(|r| r.event.sequence)
-                                    .min()
-                            });
-                            (first == Some(sequence))
-                                .then(|| execution(ui, reading, terminal_id).into_element())
-                        });
+                    let trailing_detail = if row.is_first_for_terminal {
+                        row.event.data["terminal_id"].as_str().map(|terminal_id| {
+                            execution(ui, reading, terminal_id.to_owned()).into_element()
+                        })
+                    } else {
+                        None
+                    };
                     view()
                         .element_ref(&target)
                         .on_layout(move |_: &Bounds<Points>| {
+                            let wants_jump = ui.card_event.get_untracked() == Some(sequence);
+                            let has_unread = ui.reminder_counts.with_untracked(|m| {
+                                m.get(&ui.card_id()).is_some_and(|c| c.total > 0)
+                            });
+                            if !wants_jump && !has_unread {
+                                return;
+                            }
                             ui.spawn(async move {
                                 let Some(bounds) = reading.bounds(target).await else {
                                     return;
@@ -459,7 +470,7 @@ pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
                                     reading.follow.set(false);
                                     reading.scroll.scroll_to(
                                         Point::new(px(0.), px((bounds.origin.y.0 - 12.).max(0.))),
-                                        false,
+                                        !canban_ui_kit::motion::reduced(),
                                     );
                                 }
                             });

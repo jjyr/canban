@@ -256,6 +256,7 @@ pub fn icon_action(
         .tooltip(crate::hint_tooltip(hint).placement(Placement::Right))
         .child(
             crate::press_target()
+                .app_class(super::motion::CONTROL_TRANSITION)
                 .w(px(40.))
                 .h(px(40.))
                 .items_center()

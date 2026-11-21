@@ -118,8 +118,33 @@ pub fn restore(ui: Ui) {
 pub fn init(ui: Ui) {
     let saved_token = stored(String::new());
     let ready = stored(false);
+    let idle_ticks = stored(0_u32);
     refresh(ui);
-    set_interval(std::time::Duration::from_secs(1), move || refresh(ui));
+    set_interval(std::time::Duration::from_secs(1), move || {
+        let (disabled, active) = ui.update.with_untracked(|v| {
+            let disabled = v["disabled"].as_bool().unwrap_or(false);
+            let state_phase = v["state"]["phase"].as_str().unwrap_or("");
+            let install_phase = v["install"]["phase"].as_str().unwrap_or("");
+            let active = matches!(state_phase, "checking" | "downloading" | "installing")
+                || matches!(install_phase, "prepared" | "stopping");
+            (disabled, active)
+        });
+        if disabled {
+            return;
+        }
+        if active {
+            idle_ticks.replace(0);
+            refresh(ui);
+            return;
+        }
+        let next = idle_ticks.get() + 1;
+        if next >= 30 {
+            idle_ticks.replace(0);
+            refresh(ui);
+        } else {
+            idle_ticks.replace(next);
+        }
+    });
     effect(move || {
         let v = ui.update.get();
         let phase = v["install"]["phase"].as_str().unwrap_or("");

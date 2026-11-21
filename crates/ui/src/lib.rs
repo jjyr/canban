@@ -137,6 +137,20 @@ pub fn Canban() -> impl IntoElement {
 pub(crate) fn workspace_root() -> impl IntoElement {
     startup::ready();
     let ui = Ui::new();
+    if let Some(boot) = startup::take_initial_bootstrap() {
+        batch(move || {
+            ui.apply_config(&boot.config);
+            if let Some(id) = crate::projects::selection::restore(
+                &boot.snapshot.projects,
+                boot.saved_project.as_deref(),
+            ) {
+                ui.project.set(id);
+            }
+            ui.runtime_clock.set(canban_types::now());
+            ui.snapshot.set(boot.snapshot);
+            ui.snapshot_ready.set(true);
+        });
+    }
     ui.backend_notice.set(
         APP.get()
             .and_then(|app| app.server_notice())
@@ -145,8 +159,13 @@ pub(crate) fn workspace_root() -> impl IntoElement {
     );
     updates::restore(ui);
     links::install(ui);
+    let last_draft_err_epoch = stored(drafts::persistence::error_epoch());
     set_interval(std::time::Duration::from_millis(250), move || {
-        ui.draft_status.update(|n| *n += 1)
+        let epoch = drafts::persistence::error_epoch();
+        if last_draft_err_epoch.get() != epoch {
+            last_draft_err_epoch.replace(epoch);
+            ui.draft_status.update(|n| *n += 1);
+        }
     });
     commands::bindings(ui);
     utilities::init(ui);

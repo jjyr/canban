@@ -6,6 +6,9 @@ use nsh_core::{element::IntoReactive, prelude::*};
 /// Callers may adjust `.placement(..)` or `.delay(..)` and attach arbitrary children.
 pub fn tooltip_box() -> nsh_base::TooltipElement {
     nsh_base::tooltip()
+        .app_class(super::motion::POPUP_CLASS)
+        .starting_class(super::motion::TOOLTIP_STARTING_CLASS)
+        .ending_class(super::motion::TOOLTIP_ENDING_CLASS)
         .px_2p5()
         .py_1p5()
         .rounded(px(6.))

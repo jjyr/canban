@@ -607,11 +607,38 @@ enum BootOutcome {
     AppServerError(String),
 }
 
-fn finalize_workspace(app: Arc<canban_app_server::AppClient>) -> Result<Option<(usize, usize)>> {
-    let counts = app
-        .snapshot()
+pub(crate) struct InitialBootstrap {
+    pub snapshot: canban_types::Snapshot,
+    pub config: canban_types::Config,
+    pub saved_project: Option<String>,
+}
+
+static INITIAL_BOOTSTRAP: std::sync::Mutex<Option<InitialBootstrap>> = std::sync::Mutex::new(None);
+
+pub(crate) fn take_initial_bootstrap() -> Option<InitialBootstrap> {
+    INITIAL_BOOTSTRAP
+        .lock()
         .ok()
-        .map(|s| (s.projects.len(), s.cards.len()));
+        .and_then(|mut slot| slot.take())
+}
+
+fn finalize_workspace(app: Arc<canban_app_server::AppClient>) -> Result<Option<(usize, usize)>> {
+    let snapshot = app.snapshot().ok();
+    let counts = snapshot.as_ref().map(|s| (s.projects.len(), s.cards.len()));
+    let config = app.config();
+    let saved_project = app
+        .call("utilities.state", json!({}))
+        .ok()
+        .and_then(|v| v["preferences"]["last_project"].as_str().map(str::to_owned));
+    if let Some(snapshot) = snapshot
+        && let Ok(mut slot) = INITIAL_BOOTSTRAP.lock()
+    {
+        *slot = Some(InitialBootstrap {
+            snapshot,
+            config,
+            saved_project,
+        });
+    }
     crate::drafts::persistence::start(app.clone())?;
     let registry = canban_app_server::hosts::HostRegistry::new(app.clone());
     let _ = crate::HOSTS.set(registry);
@@ -834,13 +861,7 @@ pub fn Bootstrap() -> impl IntoElement {
                                     b.mark_boot_complete(projects, cards, done_ms);
                                 }
                             });
-                            if show_checking_panel.get_untracked() {
-                                set_timeout(Duration::from_millis(120), move || {
-                                    stage.set(Stage::Workspace);
-                                });
-                            } else {
-                                stage.set(Stage::Workspace);
-                            }
+                            stage.set(Stage::Workspace);
                         }
                         Ok(BootOutcome::HerdrSetup(app, view)) => {
                             let resume_poll = view.installing;

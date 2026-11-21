@@ -1,7 +1,7 @@
 //! Window-owned Git read cache. RPC and patch preparation run on the blocking
 //! pool; identical concurrent reads share a result. Scoped events/manual refresh detach
 //! matching flights so older requests cannot repopulate invalidated entries.
-use super::model::{DiffHunk, DiffLine, parse_unified_hunk_lines, parse_unified_hunks};
+use super::model::{DiffHunk, DiffLine, parse_unified_hunks};
 use crate::cache::LruCache;
 use serde_json::Value;
 use std::{
@@ -114,8 +114,21 @@ impl ReadValue {
         for f in data["files"].as_array().into_iter().flatten() {
             let key = super::model::file_key(f);
             let patch = f["patch"].as_str().unwrap_or("");
-            lines.insert(key.clone(), Arc::new(parse_unified_hunk_lines(patch)));
-            hunks.insert(key, Arc::new(parse_unified_hunks(patch)));
+            let parsed_hunks = parse_unified_hunks(patch);
+            let flat_lines: Vec<DiffLine> = parsed_hunks
+                .iter()
+                .flat_map(|h| {
+                    std::iter::once(DiffLine {
+                        kind: '@',
+                        old_line: None,
+                        new_line: None,
+                        text: h.header.clone(),
+                    })
+                    .chain(h.lines.iter().cloned())
+                })
+                .collect();
+            lines.insert(key.clone(), Arc::new(flat_lines));
+            hunks.insert(key, Arc::new(parsed_hunks));
         }
         Self {
             data,
@@ -212,6 +225,16 @@ impl ReadCache {
         let mut inner = self.inner.lock().unwrap();
         inner.entries.retain(|key, _| !matches(key));
         inner.inflight.retain(|key, _| !matches(key));
+    }
+
+    pub fn peek_fresh(&self, key: &str) -> Option<Arc<ReadValue>> {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some((at, value)) = inner.entries.get(key)
+            && at.elapsed() < self.ttl
+        {
+            return Some(value.clone());
+        }
+        None
     }
 
     pub fn load(&self, key: String, fetch: impl FnOnce() -> Result<Value, String>) -> ReadResult {

@@ -4,11 +4,20 @@ use anyhow::Result;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex, OnceLock, mpsc},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 
 static SERVICE: OnceLock<Service> = OnceLock::new();
+static ERROR_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+pub fn error_epoch() -> u64 {
+    ERROR_EPOCH.load(Ordering::Relaxed)
+}
 #[derive(Default)]
 struct Entry {
     revision: u64,
@@ -116,10 +125,17 @@ pub fn start(app: Arc<canban_app_server::AppClient>) -> Result<()> {
                         Ok(saved) => {
                             entry.revision = saved["revision"].as_u64().unwrap_or(revision);
                             entry.saved = value;
-                            entry.error.clear();
+                            if !entry.error.is_empty() {
+                                entry.error.clear();
+                                ERROR_EPOCH.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                         Err(error) => {
-                            entry.error = format!("Draft not saved: {error:#}");
+                            let next_err = format!("Draft not saved: {error:#}");
+                            if entry.error != next_err {
+                                entry.error = next_err;
+                                ERROR_EPOCH.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     }
                 }
@@ -149,7 +165,10 @@ pub fn queue(key: &str, data: Value) {
         return;
     }
     entry.latest = data.clone();
-    entry.error.clear();
+    if !entry.error.is_empty() {
+        entry.error.clear();
+        ERROR_EPOCH.fetch_add(1, Ordering::Relaxed);
+    }
     let _ = service.tx.send(Message::Write(key.into(), data));
 }
 pub fn retry(key: &str) {

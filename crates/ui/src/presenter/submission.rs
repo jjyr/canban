@@ -18,6 +18,8 @@ pub(super) fn config_only(method: &str) -> bool {
             | "utilities.awake"
             | "github.notification.read"
             | "github.notification.done"
+            | "update.check"
+            | "update.install"
     )
 }
 
@@ -25,7 +27,10 @@ pub(super) fn immediate(method: &str) -> bool {
     matches!(
         method,
         "card.create"
+            | "card.update"
             | "card.move"
+            | "card.archive"
+            | "card.restore"
             | "card.resolve"
             | "card.reopen"
             | "card.hold_auto_merge"

@@ -30,8 +30,10 @@ pub fn toggle(ui: Ui) {
         return;
     }
     if ui.card_terminal_open.get_untracked() {
-        ui.card_terminal_open.set(false);
-        ui.card_terminal_focused.set(false);
+        batch(|| {
+            ui.card_terminal_open.set(false);
+            ui.card_terminal_focused.set(false);
+        });
         return;
     }
     let Some(card) = ui.current_card() else {
@@ -39,9 +41,11 @@ pub fn toggle(ui: Ui) {
     };
     let recent = ui.terminal_recent.with(|m| m.get(&card.id).cloned());
     if let Some(id) = untracked(|| default_card_terminal_for_ui(ui, &card.id, recent.as_deref())) {
-        select_card_tab(ui, &card.id, id);
-        ui.card_terminal_open.set(true);
-        ui.card_terminal_focused.set(true);
+        batch(|| {
+            select_card_tab(ui, &card.id, id);
+            ui.card_terminal_open.set(true);
+            ui.card_terminal_focused.set(true);
+        });
         return;
     }
     if card.archived_at.is_some() {
@@ -61,13 +65,17 @@ pub fn pop_out(ui: Ui) {
         && entry.listed()
         && entry.binding().is_some()
     {
-        ui.card_terminal_open.set(false);
-        ui.card_terminal_focused.set(false);
-        ui.open_terminal(entry.saved.id);
+        batch(|| {
+            ui.card_terminal_open.set(false);
+            ui.card_terminal_focused.set(false);
+            ui.open_terminal(entry.saved.id);
+        });
     } else {
-        ui.card_terminal_open.set(false);
-        ui.card_terminal_focused.set(false);
-        crate::terminals::open_card(ui, &cid);
+        batch(|| {
+            ui.card_terminal_open.set(false);
+            ui.card_terminal_focused.set(false);
+            crate::terminals::open_card(ui, &cid);
+        });
     }
 }
 

@@ -15,14 +15,26 @@ must not start movement throughout the window.
 | --- | --- | --- |
 | Board → Card pane | 220ms ease-out reveal and fade | Board stays mounted; text is laid out at the final pane width |
 | Card pane → Board | 180ms ease-out collapse and fade | Outgoing Card remains mounted until native animation completion; pointer input and submit shortcuts stop immediately |
+| Card live terminal / GitHub detail split | `reveal_split` (220ms in / 180ms out) | Primary left pane stays mounted (preserving scroll, selection and undo); right pane reveals/collapses without tearing down the reader or list |
 | Focused/unfocused comment editor | 160ms scoped layout transition | Same editor, selection and undo owner; focused controls expand and blur compacts them |
 | Quick Open / Project chooser / utility popup / Terminal rename | NSH native 200ms fade | Native modal dismissal removes interaction immediately and animates its outgoing image |
+| `SearchPopover` / `tooltip_box` | 150ms ease-out opacity (+ `scale-95` for popovers) | Uses NSH `PopupPresence` (`POPUP_CLASS`, `starting_*`/`ending_*`) so exit transitions finish before unmount |
+| Toast / error banner / `path_combobox` dropdown | `Presence` (220ms in / 180ms out) | Bound via `.bind_opacity(&presence.opacity)`; retains last displayed text during exit fade and disables pointer events while closing |
+| Interactive controls & collapsible sections | 150ms ease-out (`CONTROL_TRANSITION`) / NSH `collapsible().reveal(...)` | Applied via `.app_class(...)` on buttons, segments, chrome/rail icons, split handles and toggle thumbs (`translate_x`); skips when reduced motion is active |
 
 The native modal fade is 200ms rather than introducing a custom shorter modal
 engine. This preserves NSH's dismissal and keyboard ownership. The macOS Reduce
 Motion preference skips Canban transitions. Gallery can additionally opt into
 reduced motion through a scoped `ReducedMotion` context without changing OS
 settings.
+
+## Component and overlay motion patterns
+
+- **Popovers and tooltips:** Attach `motion::POPUP_CLASS` plus `POPUP_STARTING_CLASS` / `POPUP_ENDING_CLASS` (or `TOOLTIP_*` for tooltips) to `nsh_base::popover()` / `nsh_base::tooltip()`. Without ending classes, NSH unmounts the popup immediately with no exit transition.
+- **Presence-managed overlays:** Never mount/unmount toasts, error banners, or custom anchored dropdowns via bare `when(...)`. Wrap them in `motion::Presence::new(open)` and bind opacity with `.bind_opacity(&presence.opacity)` on the animated container; keep a retained text signal for notifications so the label does not blank out mid-fade.
+- **Micro-interactions on controls:** Apply `motion::CONTROL_TRANSITION` (which includes `motion-reduce:transition-none`) through NSH's `.app_class(...)` on shared controls (buttons, segmented tabs, chrome/rail icon buttons, split handles). Animate toggle thumbs via `translate_x` rather than layout margin (`ml`).
+- **Toggleable split panes:** Route toggleable secondary panes (such as Card's side-by-side Live Terminal or GitHub's detail pane) through `canban_ui_kit::split::reveal_split` instead of swapping branches inside `dynamic(...)`. This animates the reveal and prevents tearing down the primary pane's scroll host, Markdown views, or editor undo stack.
+- **Collapsible groups:** Use `nsh_base::collapsible().open(...).reveal(move || !motion::reduced())` instead of raw `if open { ... }` branching so height transitions remain smooth and still honor both OS and app-level `ReducedMotion`.
 
 ## Card workspace
 

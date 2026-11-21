@@ -35,14 +35,42 @@ pub fn host(ui: Ui) -> String {
 pub fn init(ui: Ui) {
     ensure_fonts_loaded(ui);
     refresh(ui);
-    set_interval(std::time::Duration::from_secs(5), move || refresh(ui));
+    let utility_ticks = stored(0_u32);
+    set_interval(std::time::Duration::from_secs(5), move || {
+        let open = !ui.utility_popup.get_untracked().is_empty();
+        if open {
+            utility_ticks.replace(0);
+            refresh(ui);
+        } else {
+            let next = utility_ticks.get() + 1;
+            if next >= 6 {
+                utility_ticks.replace(0);
+                refresh(ui);
+            } else {
+                utility_ticks.replace(next);
+            }
+        }
+    });
     let target = computed(move || host(ui));
     effect(move || {
         let host_id = target.get();
         untracked(|| usage(ui, host_id, false));
     });
+    let usage_ticks = stored(0_u32);
     set_interval(std::time::Duration::from_secs(5), move || {
-        usage(ui, host(ui), false)
+        let open = ui.utility_popup.get_untracked() == "usage";
+        if open {
+            usage_ticks.replace(0);
+            usage(ui, untracked(|| host(ui)), false);
+        } else {
+            let next = usage_ticks.get() + 1;
+            if next >= 6 {
+                usage_ticks.replace(0);
+                usage(ui, untracked(|| host(ui)), false);
+            } else {
+                usage_ticks.replace(next);
+            }
+        }
     });
     set_interval(std::time::Duration::from_secs(60), move || {
         ui.utility_clock.set(canban_types::now() / 1000);

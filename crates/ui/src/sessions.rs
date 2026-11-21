@@ -4,11 +4,13 @@ use serde_json::json;
 
 /// Explicit Start/Resume intent for a specific Card/profile conversation.
 pub fn open(ui: Ui, card: String, profile: String) {
-    if ui.pending.get_untracked() {
+    if ui.is_method_pending("agent.open") {
         return;
     }
     let key = canban_types::Conversation::key(&card, &profile);
-    if let Some(row) = crate::terminals::model::conversations(&ui.snapshot.get_untracked())
+    if let Some(row) = ui
+        .snapshot
+        .with_untracked(crate::terminals::model::conversations)
         .into_iter()
         .find(|r| r.id == key)
     {

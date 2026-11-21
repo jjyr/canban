@@ -290,15 +290,10 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             settings_mounted.set(true);
         }
     });
-    let workspace_project = signal::<Option<String>>(if is_workspace.get_untracked() {
-        Some(ui.project.get_untracked())
-    } else {
-        None
-    });
+    let workspace_mounted = signal(is_workspace.get_untracked());
     effect(move || {
-        let project = ui.project.get();
-        if is_workspace.get() && workspace_project.get_untracked().as_ref() != Some(&project) {
-            workspace_project.set(Some(project));
+        if is_workspace.get() && !workspace_mounted.get_untracked() {
+            workspace_mounted.set(true);
         }
     });
     let subpage_route = computed(move || {
@@ -389,11 +384,9 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                             .flex_1()
                                             .min_h(px(0.))
                                             .min_w(px(0.))
-                                            .child(dynamic(move || {
-                                                let Some(_project) = workspace_project.get() else {
-                                                    return view().into_element();
-                                                };
-                                                untracked(|| {
+                                            .child(when(
+                                                move || workspace_mounted.get(),
+                                                move || {
                                                     view()
                                                         .flex_1()
                                                         .min_h(px(0.))
@@ -413,9 +406,8 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                                             }
                                                         })
                                                         .child(crate::workspace::screen(ui))
-                                                        .into_element()
-                                                })
-                                            }))
+                                                },
+                                            ))
                                             .child(when(
                                                 move || settings_mounted.get(),
                                                 move || {
@@ -453,70 +445,104 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     )
             },
         ))
-        .child(when(
-            move || ui.operation_error.get().is_empty() && !ui.toast.get().is_empty(),
-            move || {
-                view()
-                    .absolute()
-                    .bottom(px(44.))
-                    .right(px(16.))
-                    .max_w(px(420.))
-                    .px_3()
-                    .py_2()
-                    .bg(canban_ui_kit::tokens::SURFACE)
-                    .border_1()
-                    .border_color(canban_ui_kit::tokens::BORDER)
-                    .rounded(px(8.))
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .pointer_events(PointerEvents::None)
-                    .child(
-                        canban_ui_kit::icon_tinted(
-                            canban_ui_kit::Icon::Check,
-                            canban_ui_kit::tokens::ACCENT,
+        .child({
+            let toast_open =
+                computed(move || ui.operation_error.get().is_empty() && !ui.toast.get().is_empty());
+            let toast_presence = canban_ui_kit::motion::Presence::new(toast_open);
+            let toast_text = signal(ui.toast.get_untracked());
+            effect(move || {
+                let next = ui.toast.get();
+                if !next.is_empty() {
+                    toast_text.set(next);
+                }
+            });
+            when(
+                move || toast_presence.mounted.get(),
+                move || {
+                    view()
+                        .element_ref(&toast_presence.region)
+                        .bind_opacity(&toast_presence.opacity)
+                        .absolute()
+                        .bottom(px(44.))
+                        .right(px(16.))
+                        .max_w(px(420.))
+                        .px_3()
+                        .py_2()
+                        .bg(canban_ui_kit::tokens::SURFACE)
+                        .border_1()
+                        .border_color(canban_ui_kit::tokens::BORDER)
+                        .rounded(px(8.))
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .pointer_events(PointerEvents::None)
+                        .child(
+                            canban_ui_kit::icon_tinted(
+                                canban_ui_kit::Icon::Check,
+                                canban_ui_kit::tokens::ACCENT,
+                            )
+                            .w(px(15.))
+                            .h(px(15.)),
                         )
-                        .w(px(15.))
-                        .h(px(15.)),
-                    )
-                    .child(
-                        canban_ui_kit::label(move || ui.toast.get())
-                            .font_weight(FontWeight::MEDIUM)
-                            .truncate()
-                            .min_w(px(0.)),
-                    )
-            },
-        ))
-        .child(when(
-            move || !ui.operation_error.get().is_empty(),
-            move || {
-                view()
-                    .absolute()
-                    .bottom(px(44.))
-                    .right(px(16.))
-                    .max_w(px(520.))
-                    .px_3()
-                    .py_2()
-                    .bg(canban_ui_kit::tokens::ATTENTION_SURFACE)
-                    .border_1()
-                    .border_color(canban_ui_kit::tokens::ATTENTION)
-                    .rounded(px(8.))
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        canban_ui_kit::label(move || ui.operation_error.get())
-                            .text_color(canban_ui_kit::tokens::ATTENTION)
-                            .flex_1()
-                            .min_w(px(0.)),
-                    )
-                    .child(canban_ui_kit::chrome_button(
-                        canban_ui_kit::Icon::Close,
-                        "Dismiss message",
-                        move |_| ui.operation_error.set(String::new()),
-                    ))
-            },
-        ))
+                        .child(
+                            canban_ui_kit::label(move || toast_text.get())
+                                .font_weight(FontWeight::MEDIUM)
+                                .truncate()
+                                .min_w(px(0.)),
+                        )
+                },
+            )
+        })
+        .child({
+            let err_open = computed(move || !ui.operation_error.get().is_empty());
+            let err_presence = canban_ui_kit::motion::Presence::new(err_open);
+            let err_text = signal(ui.operation_error.get_untracked());
+            effect(move || {
+                let next = ui.operation_error.get();
+                if !next.is_empty() {
+                    err_text.set(next);
+                }
+            });
+            when(
+                move || err_presence.mounted.get(),
+                move || {
+                    view()
+                        .element_ref(&err_presence.region)
+                        .bind_opacity(&err_presence.opacity)
+                        .absolute()
+                        .bottom(px(44.))
+                        .right(px(16.))
+                        .max_w(px(520.))
+                        .px_3()
+                        .py_2()
+                        .bg(canban_ui_kit::tokens::ATTENTION_SURFACE)
+                        .border_1()
+                        .border_color(canban_ui_kit::tokens::ATTENTION)
+                        .rounded(px(8.))
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .pointer_events(move || {
+                            if err_open.get() {
+                                PointerEvents::Auto
+                            } else {
+                                PointerEvents::None
+                            }
+                        })
+                        .child(
+                            canban_ui_kit::label(move || err_text.get())
+                                .text_color(canban_ui_kit::tokens::ATTENTION)
+                                .flex_1()
+                                .min_w(px(0.)),
+                        )
+                        .child(canban_ui_kit::chrome_button(
+                            canban_ui_kit::Icon::Close,
+                            "Dismiss message",
+                            move |_| ui.operation_error.set(String::new()),
+                        ))
+                },
+            )
+        })
         .child(quick_open::overlay(ui))
         .child(crate::utilities::overlay(ui))
         .child(terminals::tabs::rename_dialog(ui))

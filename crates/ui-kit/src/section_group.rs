@@ -203,16 +203,18 @@ pub fn collapsible_section_group(
         .child(left)
         .child(muted(if open { "Collapse" } else { "Expand" }).text_size(px(11.)));
 
-    let mut container = view().gap_2().min_w(px(0.)).child(
-        view()
-            .pb_1p5()
-            .border_b_1()
-            .border_color(BORDER)
-            .min_w(px(0.))
-            .child(header_btn),
-    );
-    if open {
-        container = container.child(view().gap_1().min_w(px(0.)).child(children));
-    }
-    container
+    nsh_base::collapsible()
+        .open(open)
+        .reveal(move || !super::motion::reduced())
+        .gap_2()
+        .min_w(px(0.))
+        .child(
+            view()
+                .pb_1p5()
+                .border_b_1()
+                .border_color(BORDER)
+                .min_w(px(0.))
+                .child(header_btn),
+        )
+        .content(view().gap_1().min_w(px(0.)).child(children))
 }

@@ -91,41 +91,43 @@ pub fn open_section(ui: Ui, r: GitHubReference, section: &str) {
     let b = ui.github;
     let changed_ref = b.reference.get_untracked().as_ref() != Some(&r);
     let changed_sec = b.section.get_untracked() != section;
-    if changed_ref {
-        b.reference.set(Some(r.clone()));
-        b.section.set(section.into());
-        b.detail_page.set(1);
-        b.editing_comment.set(None);
-        b.edit_draft.set(String::new());
-        b.edit_error.set(String::new());
-        b.deleting_comment.set(None);
-        b.delete_error.set(String::new());
-        // Seed overview from current list row if available so title/status render immediately.
-        let seeded = b.list.with_untracked(|v| {
-            v["items"]
-                .as_array()
-                .and_then(|rows| {
-                    rows.iter().find_map(|row| {
-                        let row_ref: Option<GitHubReference> =
-                            serde_json::from_value(row["reference"].clone()).ok();
-                        (row_ref.as_ref() == Some(&r)).then(|| row["item"].clone())
+    batch(|| {
+        if changed_ref {
+            b.reference.set(Some(r.clone()));
+            b.section.set(section.into());
+            b.detail_page.set(1);
+            b.editing_comment.set(None);
+            b.edit_draft.set(String::new());
+            b.edit_error.set(String::new());
+            b.deleting_comment.set(None);
+            b.delete_error.set(String::new());
+            // Seed overview from current list row if available so title/status render immediately.
+            let seeded = b.list.with_untracked(|v| {
+                v["items"]
+                    .as_array()
+                    .and_then(|rows| {
+                        rows.iter().find_map(|row| {
+                            let row_ref: Option<GitHubReference> =
+                                serde_json::from_value(row["reference"].clone()).ok();
+                            (row_ref.as_ref() == Some(&r)).then(|| row["item"].clone())
+                        })
                     })
-                })
-                .unwrap_or_else(|| json!({}))
-        });
-        b.overview.set(seeded);
-        b.detail.set(json!({}));
-    } else if changed_sec {
-        b.section.set(section.into());
-        b.detail_page.set(1);
-        b.editing_comment.set(None);
-        b.edit_draft.set(String::new());
-        b.edit_error.set(String::new());
-        b.deleting_comment.set(None);
-        b.delete_error.set(String::new());
-        b.detail.set(json!({}));
-    }
-    ui.navigate("github");
+                    .unwrap_or_else(|| json!({}))
+            });
+            b.overview.set(seeded);
+            b.detail.set(json!({}));
+        } else if changed_sec {
+            b.section.set(section.into());
+            b.detail_page.set(1);
+            b.editing_comment.set(None);
+            b.edit_draft.set(String::new());
+            b.edit_error.set(String::new());
+            b.deleting_comment.set(None);
+            b.delete_error.set(String::new());
+            b.detail.set(json!({}));
+        }
+        ui.navigate("github");
+    });
 }
 
 pub fn init(ui: Ui) {
@@ -143,8 +145,10 @@ pub fn init(ui: Ui) {
     effect(move || {
         let current = scope.get();
         if previous_scope.replace(current.clone()) != current {
-            b.page.set(1);
-            b.list.set(json!({}));
+            batch(|| {
+                b.page.set(1);
+                b.loading.set(true);
+            });
         }
     });
     let account = computed(move || {
@@ -464,7 +468,11 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
                     "Refresh GitHub",
                     move || b.loading.get() || b.detail_loading.get(),
                     move |_| {
-                        b.page.set(1);
+                        if b.page.get_untracked() != 1 {
+                            b.page.set(1);
+                        }
+                        let next_ticket = b.ticket.get_untracked() + 1;
+                        b.ticket.set(next_ticket);
                         load(ui, true);
                         check_cli(ui);
                         if b.reference.get_untracked().is_some() {
@@ -499,28 +507,20 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             },
             move || notice(move || b.error.get(), Tone::Attention),
         ))
-        .child(dynamic(move || {
-            let has_detail = b.reference.get().is_some();
-            let narrow = ui.narrow.get();
-            untracked(|| {
-                if has_detail {
-                    if narrow {
-                        super::detail::screen(ui).into_element()
-                    } else {
-                        canban_ui_kit::split(
-                            list_panel(ui).into_element(),
-                            super::detail::screen(ui).into_element(),
-                            b.width,
-                            300.,
-                            380.,
-                        )
-                        .into_element()
-                    }
-                } else {
-                    list_panel(ui).into_element()
-                }
-            })
-        }))
+        .child({
+            let has_detail = computed(move || b.reference.get().is_some());
+            let narrow = computed(move || ui.narrow.get());
+            canban_ui_kit::split::reveal_split(
+                list_panel(ui).into_element(),
+                move || super::detail::screen(ui).into_element(),
+                b.width,
+                narrow,
+                has_detail,
+                move || {
+                    b.reference.set(None);
+                },
+            )
+        })
 }
 
 fn filter_bar(ui: Ui) -> impl IntoElement {

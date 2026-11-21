@@ -38,6 +38,7 @@ fn segment_inner(
     let selected = computed(selected);
     let a11y_title = title.clone();
     let mut button = crate::press_target()
+        .app_class(super::motion::CONTROL_TRANSITION)
         .min_h(px(height))
         .flex_row()
         .items_center()

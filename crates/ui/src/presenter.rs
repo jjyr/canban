@@ -258,6 +258,17 @@ impl Ui {
     }
 
     pub fn apply_config(self, cfg: &Config) {
+        let unchanged = self
+            .default_agent
+            .with_untracked(|v| v == &cfg.default_agent)
+            && self.onboarded.get_untracked() == cfg.onboarded
+            && self.all_profiles.with_untracked(|v| v == &cfg.profiles)
+            && self.max_agents.get_untracked() == cfg.scheduler.max_agents
+            && self.idle_minutes.get_untracked() == cfg.scheduler.idle_minutes
+            && self.terminal_env_mode.get_untracked() == cfg.terminal_env_mode;
+        if unchanged {
+            return;
+        }
         batch(move || {
             self.default_agent.set(cfg.default_agent.clone());
             self.onboarded.set(cfg.onboarded);
@@ -689,24 +700,26 @@ impl Ui {
         self.terminal_recent.with(|recent| {
             recent.insert(scope_key, conversation.clone());
         });
-        self.card_standalone.set(false);
-        self.clear_output();
-        self.review_request
-            .set(self.review_request.get_untracked() + 1);
-        self.terminal_details.set(false);
-        self.terminal_focus.update(|v| *v += 1);
-        self.terminal_tabs.update(|tabs| {
-            if !tabs.contains(&conversation) {
-                tabs.push(conversation.clone());
+        batch(|| {
+            self.card_standalone.set(false);
+            self.clear_output();
+            self.review_request
+                .set(self.review_request.get_untracked() + 1);
+            self.terminal_details.set(false);
+            self.terminal_focus.update(|v| *v += 1);
+            self.terminal_tabs.update(|tabs| {
+                if !tabs.contains(&conversation) {
+                    tabs.push(conversation.clone());
+                }
+            });
+            self.terminal_selection.set(conversation.clone());
+            if reveal_scope {
+                crate::terminals::reveal(self, &conversation);
+            } else {
+                crate::terminals::reveal_project(self, &conversation);
             }
+            self.page.set("terminals".into());
         });
-        self.terminal_selection.set(conversation.clone());
-        if reveal_scope {
-            crate::terminals::reveal(self, &conversation);
-        } else {
-            crate::terminals::reveal_project(self, &conversation);
-        }
-        self.page.set("terminals".into());
     }
     pub fn terminal_card(self, card: String, terminal: Option<String>) {
         let target_terminal = terminal.or_else(|| {

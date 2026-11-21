@@ -7,6 +7,15 @@ use nsh_core::{
 pub const PANEL_IN: f32 = 220.;
 pub const PANEL_OUT: f32 = 180.;
 pub const COMPOSER: f32 = 160.;
+pub const CONTROL_TRANSITION: &str =
+    "transition-all duration-150 ease-out motion-reduce:transition-none";
+pub const COLOR_TRANSITION: &str =
+    "transition-colors duration-150 ease-out motion-reduce:transition-none";
+pub const POPUP_CLASS: &str = "transition-all duration-150 ease-out motion-reduce:transition-none";
+pub const POPUP_STARTING_CLASS: &str = "opacity-0 scale-95";
+pub const POPUP_ENDING_CLASS: &str = "opacity-0 scale-95";
+pub const TOOLTIP_STARTING_CLASS: &str = "opacity-0";
+pub const TOOLTIP_ENDING_CLASS: &str = "opacity-0";
 /// An embedding host may opt into less motion; the OS preference always wins.
 #[derive(Clone, Copy)]
 pub struct ReducedMotion(pub Signal<bool>);
