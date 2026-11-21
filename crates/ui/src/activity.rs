@@ -144,6 +144,30 @@ impl DwellMachine {
         }
     }
 
+    pub fn take_flush_batch(&mut self) -> Vec<PendingDwell> {
+        if self.flushing || self.pending.is_empty() {
+            return Vec::new();
+        }
+        self.flushing = true;
+        let count = self.pending.len().min(FLUSH_BATCH_SIZE);
+        self.pending.drain(..count).collect()
+    }
+
+    pub fn finish_flush(&mut self, batch: Vec<PendingDwell>, ok: bool) -> bool {
+        self.flushing = false;
+        if !ok {
+            let mut restored = batch;
+            restored.append(&mut self.pending);
+            if restored.len() > MAX_PENDING_SEGMENTS {
+                let overflow = restored.len() - MAX_PENDING_SEGMENTS;
+                restored.drain(..overflow);
+            }
+            self.pending = restored;
+            return false;
+        }
+        !self.pending.is_empty()
+    }
+
     fn handle_event(&mut self, now: u64, wake: u32, key: Option<DwellKey>, idle_secs: Option<u64>) {
         if self.last_wake.is_some_and(|prev| prev != wake) {
             if let Some((cur, start)) = self.current.take() {
@@ -246,35 +270,33 @@ fn current_dwell_key(
 }
 
 fn flush_pending(ui: Ui) {
-    let batch: Vec<PendingDwell> = ui.dwell.with(|m| {
-        if m.flushing || m.pending.is_empty() {
-            return Vec::new();
-        }
-        m.flushing = true;
-        let count = m.pending.len().min(FLUSH_BATCH_SIZE);
-        m.pending.drain(..count).collect()
-    });
+    let Some(batch) = ui.dwell.try_with(DwellMachine::take_flush_batch) else {
+        return;
+    };
     if batch.is_empty() {
         return;
     }
+    let batch_len = batch.len();
     ui.spawn(async move {
-        let payload = serde_json::json!({ "segments": batch });
+        let payload = serde_json::json!({ "segments": &batch });
         let res = blocking(move || crate::routed_call("activity.record", payload, None)).await;
         let ok = matches!(res, Ok(Ok(_)));
-        let flush_more = ui.dwell.with(|m| {
-            m.flushing = false;
-            if !ok {
-                let mut restored = batch;
-                restored.append(&mut m.pending);
-                if restored.len() > MAX_PENDING_SEGMENTS {
-                    let overflow = restored.len() - MAX_PENDING_SEGMENTS;
-                    restored.drain(..overflow);
-                }
-                m.pending = restored;
-                return false;
-            }
-            !m.pending.is_empty()
-        });
+        let recorded = match &res {
+            Ok(Ok(val)) => val
+                .get("recorded")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(batch_len as u64),
+            _ => 0,
+        };
+        let Some(flush_more) = ui.dwell.try_with(|m| m.finish_flush(batch, ok)) else {
+            return;
+        };
+        if ok
+            && recorded >= 1
+            && let Some(cur) = ui.activity_flush_seq.try_get()
+        {
+            let _ = ui.activity_flush_seq.try_set(cur.wrapping_add(1));
+        }
         if flush_more {
             flush_pending(ui);
         }
@@ -432,5 +454,97 @@ mod tests {
         assert_eq!(m.pending[0].start_ms, 10_000);
         assert_eq!(m.pending[0].end_ms, 70_000);
         assert_eq!(m.current, Some((card, 10_810_000)));
+    }
+
+    #[test]
+    fn flush_queue_requeues_on_failure_and_enforces_500_cap() {
+        let mut m = DwellMachine::default();
+        assert!(m.take_flush_batch().is_empty());
+
+        let board = key(DwellLane::Other, "board", None);
+        let card = key(DwellLane::Card, "card", Some("c1"));
+        for i in 0..250u64 {
+            let k = if i % 2 == 0 {
+                board.clone()
+            } else {
+                card.clone()
+            };
+            m.transition((i + 1) * 10_000, Some(k), Some(0));
+        }
+        // Finalize the 250th segment so all 250 sit in pending.
+        m.transition(251 * 10_000, None, Some(0));
+        assert_eq!(m.pending.len(), 250);
+
+        let batch = m.take_flush_batch();
+        assert_eq!(batch.len(), FLUSH_BATCH_SIZE);
+        assert_eq!(m.pending.len(), 50);
+        // Concurrent flush attempt while in-flight is ignored.
+        assert!(m.take_flush_batch().is_empty());
+
+        // New segments arrive while the batch is in flight.
+        for i in 251..651u64 {
+            let k = if i % 2 == 0 {
+                board.clone()
+            } else {
+                card.clone()
+            };
+            m.transition(i * 10_000, Some(k), Some(0));
+        }
+        m.transition(651 * 10_000, None, Some(0));
+        assert_eq!(m.pending.len(), 450);
+
+        // Failure re-queues unsent batch ahead of new pending segments and enforces 500-cap.
+        assert!(!m.finish_flush(batch, false));
+        assert_eq!(m.pending.len(), MAX_PENDING_SEGMENTS);
+        assert_eq!(m.pending[0].start_ms, 151 * 10_000);
+        assert_eq!(m.pending[MAX_PENDING_SEGMENTS - 1].start_ms, 650 * 10_000);
+
+        // Drain all 500 segments cleanly across three batches on success.
+        let b1 = m.take_flush_batch();
+        assert_eq!(b1.len(), 200);
+        assert!(m.finish_flush(b1, true));
+        let b2 = m.take_flush_batch();
+        assert_eq!(b2.len(), 200);
+        assert!(m.finish_flush(b2, true));
+        let b3 = m.take_flush_batch();
+        assert_eq!(b3.len(), 100);
+        assert!(!m.finish_flush(b3, true));
+        assert!(m.pending.is_empty());
+
+        // Re-queue below cap preserves exact chronological order without loss.
+        for i in 0..10u64 {
+            let k = if i % 2 == 0 {
+                board.clone()
+            } else {
+                card.clone()
+            };
+            m.transition((i + 1) * 10_000, Some(k), Some(0));
+        }
+        m.transition(11 * 10_000, None, Some(0));
+        let b_small = m.take_flush_batch();
+        assert_eq!(b_small.len(), 10);
+        m.transition(12 * 10_000, Some(board), Some(0));
+        m.transition(13 * 10_000, None, Some(0));
+        assert_eq!(m.pending.len(), 1);
+        assert!(!m.finish_flush(b_small, false));
+        assert_eq!(m.pending.len(), 11);
+        assert_eq!(m.pending[0].start_ms, 10_000);
+        assert_eq!(m.pending[10].start_ms, 120_000);
+    }
+
+    #[test]
+    fn ui_initializes_activity_flush_seq_at_zero() {
+        #[component]
+        fn Root() -> impl IntoElement {
+            let ui = Ui::new();
+            assert_eq!(ui.activity_flush_seq.get_untracked(), 0);
+            view()
+        }
+        let mut core = nsh_core::Core::new(
+            nsh_core::ApproxTextEngine,
+            nsh_core::geometry::size(px(100.), px(100.)),
+        );
+        core.mount_root(&nsh_core::element::Root::of::<Root>());
+        let _ = core.commit();
     }
 }

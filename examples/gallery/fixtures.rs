@@ -3252,12 +3252,20 @@ pub fn insights_activity() -> canban_ui::insights::model::ActivityInput {
     ];
 
     let day_ms: u64 = 86_400_000;
+    let yesterday_start = plan
+        .annual_boundaries
+        .get(plan.annual_boundaries.len().saturating_sub(3))
+        .copied()
+        .unwrap_or_else(|| today_start.saturating_sub(day_ms));
+    let shift_to_yesterday =
+        |ts: u64| yesterday_start.saturating_add(ts.saturating_sub(today_start));
+
     let baseline_segments = vec![
         ActivitySegment {
             id: Some(8),
             kind: ActivityKind::Dwell,
-            start_ms: dc1_a.saturating_sub(day_ms),
-            end_ms: dc1_b.saturating_sub(day_ms),
+            start_ms: shift_to_yesterday(dc1_a),
+            end_ms: shift_to_yesterday(dc1_b),
             project_id: Some("gallery-project".into()),
             card_id: Some(card_gallery.clone()),
             terminal_id: None,
@@ -3270,8 +3278,8 @@ pub fn insights_activity() -> canban_ui::insights::model::ActivityInput {
         ActivitySegment {
             id: Some(9),
             kind: ActivityKind::Agent,
-            start_ms: ag1_a.saturating_sub(day_ms),
-            end_ms: ag1_b.saturating_sub(day_ms),
+            start_ms: shift_to_yesterday(ag1_a),
+            end_ms: shift_to_yesterday(ag1_b),
             project_id: Some("gallery-project".into()),
             card_id: Some(card_gallery),
             terminal_id: None,
@@ -3288,6 +3296,72 @@ pub fn insights_activity() -> canban_ui::insights::model::ActivityInput {
             }),
         },
     ];
+
+    let aggregate_bucket =
+        |start_ms: u64, end_ms: u64, segments: &[ActivitySegment]| -> ActivityBucket {
+            let mut dwell = DwellBucketTotals::default();
+            let mut agent_ms = 0u64;
+            let mut by_project: BTreeMap<String, ProjectActivityTotals> = BTreeMap::new();
+            let mut by_agent_map: BTreeMap<(String, String, String), u64> = BTreeMap::new();
+
+            for seg in segments {
+                let overlap = seg
+                    .end_ms
+                    .min(end_ms)
+                    .saturating_sub(seg.start_ms.max(start_ms));
+                if overlap == 0 {
+                    continue;
+                }
+                let pid = seg.project_id.as_deref().filter(|s| !s.is_empty());
+                match (&seg.kind, &seg.data) {
+                    (ActivityKind::Dwell, ActivityDetail::Dwell(d)) => {
+                        match d.lane {
+                            DwellLane::Card => dwell.card += overlap,
+                            DwellLane::Terminal => dwell.terminal += overlap,
+                            DwellLane::Other => dwell.other += overlap,
+                        }
+                        if let Some(pid) = pid {
+                            by_project.entry(pid.to_owned()).or_default().dwell_ms += overlap;
+                        }
+                    }
+                    (ActivityKind::Agent, ActivityDetail::Agent(a)) => {
+                        agent_ms += overlap;
+                        if let Some(pid) = pid {
+                            by_project.entry(pid.to_owned()).or_default().agent_ms += overlap;
+                        }
+                        *by_agent_map
+                            .entry((a.profile_id.clone(), a.provider.clone(), a.model.clone()))
+                            .or_default() += overlap;
+                    }
+                    _ => {}
+                }
+            }
+
+            let mut by_agent: Vec<AgentBucketStat> = by_agent_map
+                .into_iter()
+                .map(|((profile_id, provider, model), ms)| AgentBucketStat {
+                    profile_id,
+                    provider,
+                    model,
+                    ms,
+                })
+                .collect();
+            by_agent.sort_by(|a, b| {
+                b.ms.cmp(&a.ms)
+                    .then_with(|| a.profile_id.cmp(&b.profile_id))
+                    .then_with(|| a.provider.cmp(&b.provider))
+                    .then_with(|| a.model.cmp(&b.model))
+            });
+
+            ActivityBucket {
+                start_ms,
+                end_ms,
+                dwell,
+                agent_ms,
+                by_project,
+                by_agent,
+            }
+        };
 
     let make_buckets = |boundaries: &[u64]| -> Vec<ActivityBucket> {
         let len = boundaries.len().saturating_sub(1);
@@ -3372,7 +3446,16 @@ pub fn insights_activity() -> canban_ui::insights::model::ActivityInput {
             .collect()
     };
 
-    let annual_buckets = make_buckets(&plan.annual_boundaries);
+    let mut annual_buckets = make_buckets(&plan.annual_boundaries);
+    let len = annual_buckets.len();
+    if len >= 2 {
+        let y_b = &annual_buckets[len - 2];
+        annual_buckets[len - 2] = aggregate_bucket(y_b.start_ms, y_b.end_ms, &baseline_segments);
+    }
+    if len >= 1 {
+        let t_b = &annual_buckets[len - 1];
+        annual_buckets[len - 1] = aggregate_bucket(t_b.start_ms, t_b.end_ms, &period_segments);
+    }
     ActivityInput {
         period_segments,
         baseline_segments,
@@ -4101,4 +4184,96 @@ pub fn large_board() -> canban_types::Snapshot {
         }
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use canban_ui::insights::model::{
+        HeatmapMetric, RangeWindow, ViewOptions, compute_dashboard, time_totals,
+    };
+
+    #[test]
+    fn gallery_insights_activity_has_1d_7d_and_heatmap_parity() {
+        let (snap, events) = insights();
+        let act = insights_activity();
+        assert!(act.loaded);
+        assert_eq!(act.annual_buckets.len(), 365);
+        assert_eq!(act.range_buckets, act.annual_buckets);
+        assert_eq!(act.baseline_buckets, act.annual_buckets);
+
+        let totals_1d = time_totals(RangeWindow::Today, &act);
+        let today_bucket = act.annual_buckets.last().unwrap();
+        let yesterday_bucket = &act.annual_buckets[act.annual_buckets.len() - 2];
+
+        assert_eq!(today_bucket.dwell.card, totals_1d.dwell_card_ms);
+        assert_eq!(today_bucket.dwell.terminal, totals_1d.dwell_terminal_ms);
+        assert_eq!(today_bucket.dwell.other, totals_1d.dwell_other_ms);
+        assert_eq!(today_bucket.dwell.total(), totals_1d.dwell_total_ms);
+        assert_eq!(today_bucket.agent_ms, totals_1d.agent_total_ms);
+
+        assert_eq!(
+            yesterday_bucket.dwell.total(),
+            totals_1d.prev_dwell_total_ms
+        );
+        assert_eq!(yesterday_bucket.agent_ms, totals_1d.prev_agent_total_ms);
+
+        let d1 = compute_dashboard(
+            &snap,
+            &events,
+            &act,
+            None,
+            &chrono::Local,
+            &[],
+            ViewOptions::with_now(INSIGHTS_NOW),
+        );
+        let mut opts_7d = ViewOptions::with_now(INSIGHTS_NOW);
+        opts_7d.range = RangeWindow::Days7;
+        let d7 = compute_dashboard(&snap, &events, &act, None, &chrono::Local, &[], opts_7d);
+
+        let row_today = d7.day_rows.last().unwrap();
+        let row_yesterday = &d7.day_rows[d7.day_rows.len() - 2];
+        assert!(row_today.is_today);
+        assert_eq!(row_today.dwell_card_ms, d1.time_totals.dwell_card_ms);
+        assert_eq!(
+            row_today.dwell_terminal_ms,
+            d1.time_totals.dwell_terminal_ms
+        );
+        assert_eq!(row_today.dwell_other_ms, d1.time_totals.dwell_other_ms);
+        assert_eq!(row_today.dwell_total_ms(), d1.time_totals.dwell_total_ms);
+        assert_eq!(row_today.agent_ms, d1.time_totals.agent_total_ms);
+
+        assert_eq!(
+            row_yesterday.dwell_total_ms(),
+            d1.time_totals.prev_dwell_total_ms
+        );
+        assert_eq!(row_yesterday.agent_ms, d1.time_totals.prev_agent_total_ms);
+
+        let mut opts_dwell_hm = ViewOptions::with_now(INSIGHTS_NOW);
+        opts_dwell_hm.heatmap_metric = HeatmapMetric::Dwell;
+        let d_hm = compute_dashboard(
+            &snap,
+            &events,
+            &act,
+            None,
+            &chrono::Local,
+            &[],
+            opts_dwell_hm,
+        );
+        let cells: Vec<_> = d_hm
+            .heatmap_weeks
+            .iter()
+            .flat_map(|w| w.cells.iter())
+            .filter(|c| !c.is_future)
+            .collect();
+        let today_cell = cells.iter().find(|c| c.is_today).unwrap();
+        let yest_cell = cells
+            .iter()
+            .find(|c| c.date_key == row_yesterday.date_key)
+            .unwrap();
+        assert_eq!(today_cell.dwell_ms, d1.time_totals.dwell_total_ms);
+        assert_eq!(today_cell.agent_ms, d1.time_totals.agent_total_ms);
+        assert_eq!(yest_cell.dwell_ms, d1.time_totals.prev_dwell_total_ms);
+        assert_eq!(yest_cell.agent_ms, d1.time_totals.prev_agent_total_ms);
+    }
 }

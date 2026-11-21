@@ -712,3 +712,295 @@ fn activity_record_and_insights_activity_validate_clip_and_include_open_agent_wo
         30_000
     );
 }
+
+#[test]
+fn insights_activity_and_activity_buckets_have_exact_parity_for_same_window() {
+    use canban_types::{
+        ActivityBucket, ActivityDetail, ActivityKind, ActivitySegment, AgentBucketStat,
+        DwellBucketTotals, DwellLane, ProjectActivityTotals,
+    };
+    use std::collections::BTreeMap;
+
+    let (_dir, app, project, card) = setup();
+    let project2: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Second", "directory": _dir.path().join("second")}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let now_ts = canban_types::now();
+    let day_end = now_ts - 60_000;
+    let day_start = day_end - 8 * 3_600_000;
+
+    // Record dwell segments:
+    // - straddling day_start (clipped to 90_000 in project)
+    // - fully inside (180_000 in project2, terminal)
+    // - straddling day_end (clipped to 45_000 unattributed other)
+    // - fully outside (after day_end, excluded)
+    app.call(
+        "activity.record",
+        json!({
+            "segments": [
+                {
+                    "start_ms": day_start - 30_000,
+                    "end_ms": day_start + 90_000,
+                    "lane": "card",
+                    "page": "card",
+                    "project_id": project.id,
+                    "card_id": card.id,
+                },
+                {
+                    "start_ms": day_start + 300_000,
+                    "end_ms": day_start + 480_000,
+                    "lane": "terminal",
+                    "page": "terminals",
+                    "project_id": project2.id,
+                    "terminal_id": "term-p2",
+                },
+                {
+                    "start_ms": day_end - 45_000,
+                    "end_ms": day_end + 30_000,
+                    "lane": "other",
+                    "page": "board",
+                },
+                {
+                    "start_ms": day_end + 10_000,
+                    "end_ms": day_end + 40_000,
+                    "lane": "card",
+                    "page": "card",
+                    "project_id": project.id,
+                    "card_id": card.id,
+                },
+            ]
+        }),
+    )
+    .unwrap();
+
+    // Seed one open AgentRun terminal (project) and one closed manual terminal (project2).
+    let mut profile = app.config().profiles[0].clone();
+    profile.id = "developer".into();
+    profile.preset = Some("claude".into());
+    profile.model = Some("claude-sonnet-4".into());
+    let run = AgentRun {
+        workflow_run_id: None,
+        workflow_step: None,
+        resume_session: false,
+        trigger: ExecutionTrigger::Workflow,
+        stage: "develop".into(),
+        profile,
+        instruction: "go".into(),
+        on_completed: None,
+        require_human_review: false,
+        runtime_home: None,
+        workspace: None,
+        location: None,
+        owner_core_id: Some("core-1".into()),
+        lifecycle: Default::default(),
+        project_id: project.id.clone(),
+        card_id: card.id.clone(),
+        card_number: card.number,
+        number: 1,
+        state: "running".into(),
+        core_id: Some("core-1".into()),
+        terminal: Some("t-open".into()),
+        cwd: "/tmp".into(),
+        input_path: String::new(),
+        output_path: None,
+        observed: None,
+        error: None,
+        started_at: Some(day_end - 120_000),
+        updated_at: day_end - 120_000,
+        provider_session_id: None,
+        close_state: String::new(),
+        turn_ended_at: None,
+        response_path: None,
+        completed_at: None,
+        completion_turn: None,
+        close_requested_at: None,
+        connection_state: "connected".into(),
+        pending: None,
+        applied_env: Default::default(),
+    };
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            db.save(&TerminalEntry {
+                id: "term-open-1".into(),
+                conversation_id: Some("conv-open".into()),
+                number: 1,
+                name: None,
+                origin_project_id: Some(project.id.clone()),
+                origin_card_id: Some(card.id.clone()),
+                agent_engine: None,
+                runtime: None,
+                agent: Some(run),
+                created_at: day_end - 120_000,
+            })?;
+            db.save(&TerminalEntry {
+                id: "term-closed-2".into(),
+                conversation_id: None,
+                number: 2,
+                name: Some("Manual".into()),
+                origin_project_id: Some(project2.id.clone()),
+                origin_card_id: None,
+                agent_engine: Some("codex".into()),
+                runtime: Some(TerminalRuntime {
+                    machine: "local".into(),
+                    owner_core_id: Some("core-1".into()),
+                    core_id: Some("core-1".into()),
+                    terminal: Some("t-closed".into()),
+                    state: "running".into(),
+                    connection: "connected".into(),
+                    error: None,
+                    agent_status: Some("working".into()),
+                    agent_turn: None,
+                    observed_agent: Some("codex".into()),
+                    waiting: None,
+                }),
+                agent: None,
+                created_at: day_start + 50_000,
+            })
+        })
+        .unwrap();
+
+    {
+        let mut inv = app.inventory.lock().unwrap();
+        inv.core = "core-1".into();
+        inv.snapshot_at(
+            &json!({
+                "seq": 1,
+                "terminals": [
+                    {"address": "t-open", "state": "live", "status": {"state": "working"}},
+                    {"address": "t-closed", "state": "live", "status": {"state": "working"}},
+                ]
+            }),
+            day_start + 60_000,
+        );
+        inv.apply_at(
+            &json!({"method": "event", "params": {"seq": 2, "type": "status", "terminal": "t-closed", "data": {"status": {"state": "idle"}}}}),
+            day_start + 85_000,
+        );
+        // Reset open agent start time cleanly to day_end - 120_000 so it clips at day_end.
+        inv.working.get_mut("t-open").unwrap().since = day_end - 120_000;
+    }
+    app.flush_agent_work().unwrap();
+
+    let aggregate = |segments: &[ActivitySegment]| -> ActivityBucket {
+        let mut dwell = DwellBucketTotals::default();
+        let mut agent_ms = 0u64;
+        let mut by_project: BTreeMap<String, ProjectActivityTotals> = BTreeMap::new();
+        let mut by_agent_map: BTreeMap<(String, String, String), u64> = BTreeMap::new();
+        for seg in segments {
+            let dur = seg
+                .end_ms
+                .min(day_end)
+                .saturating_sub(seg.start_ms.max(day_start));
+            if dur == 0 {
+                continue;
+            }
+            let pid = seg.project_id.as_deref().filter(|s| !s.is_empty());
+            match (&seg.kind, &seg.data) {
+                (ActivityKind::Dwell, ActivityDetail::Dwell(d)) => {
+                    match d.lane {
+                        DwellLane::Card => dwell.card += dur,
+                        DwellLane::Terminal => dwell.terminal += dur,
+                        DwellLane::Other => dwell.other += dur,
+                    }
+                    if let Some(pid) = pid {
+                        by_project.entry(pid.to_owned()).or_default().dwell_ms += dur;
+                    }
+                }
+                (ActivityKind::Agent, ActivityDetail::Agent(a)) => {
+                    agent_ms += dur;
+                    if let Some(pid) = pid {
+                        by_project.entry(pid.to_owned()).or_default().agent_ms += dur;
+                    }
+                    *by_agent_map
+                        .entry((a.profile_id.clone(), a.provider.clone(), a.model.clone()))
+                        .or_default() += dur;
+                }
+                _ => {}
+            }
+        }
+        let mut by_agent: Vec<AgentBucketStat> = by_agent_map
+            .into_iter()
+            .map(|((profile_id, provider, model), ms)| AgentBucketStat {
+                profile_id,
+                provider,
+                model,
+                ms,
+            })
+            .collect();
+        by_agent.sort_by(|a, b| {
+            b.ms.cmp(&a.ms)
+                .then_with(|| a.profile_id.cmp(&b.profile_id))
+                .then_with(|| a.provider.cmp(&b.provider))
+                .then_with(|| a.model.cmp(&b.model))
+        });
+        ActivityBucket {
+            start_ms: day_start,
+            end_ms: day_end,
+            dwell,
+            agent_ms,
+            by_project,
+            by_agent,
+        }
+    };
+
+    // Unscoped parity check
+    let act_res = app
+        .call(
+            "insights.activity",
+            json!({"from_ms": day_start, "to_ms": day_end}),
+        )
+        .unwrap();
+    let segs: Vec<ActivitySegment> = serde_json::from_value(act_res["segments"].clone()).unwrap();
+    assert!(segs.iter().any(|s| s.open));
+    let bucket_res = app
+        .call(
+            "insights.activity_buckets",
+            json!({"boundaries": [day_start, day_end]}),
+        )
+        .unwrap();
+    let buckets: Vec<ActivityBucket> =
+        serde_json::from_value(bucket_res["buckets"].clone()).unwrap();
+    assert_eq!(buckets.len(), 1);
+    let expected = aggregate(&segs);
+    assert_eq!(expected.dwell, buckets[0].dwell);
+    assert_eq!(expected.agent_ms, buckets[0].agent_ms);
+    assert_eq!(expected.by_project, buckets[0].by_project);
+    assert_eq!(expected.by_agent, buckets[0].by_agent);
+    assert_eq!(buckets[0].dwell.card, 90_000);
+    assert_eq!(buckets[0].dwell.terminal, 180_000);
+    assert_eq!(buckets[0].dwell.other, 45_000);
+    assert_eq!(buckets[0].agent_ms, 145_000); // 120_000 open + 25_000 closed
+
+    // Project-scoped parity check
+    let scoped_act = app
+        .call(
+            "insights.activity",
+            json!({"from_ms": day_start, "to_ms": day_end, "project_id": project.id}),
+        )
+        .unwrap();
+    let scoped_segs: Vec<ActivitySegment> =
+        serde_json::from_value(scoped_act["segments"].clone()).unwrap();
+    let scoped_buckets_res = app
+        .call(
+            "insights.activity_buckets",
+            json!({"boundaries": [day_start, day_end], "project_id": project.id}),
+        )
+        .unwrap();
+    let scoped_buckets: Vec<ActivityBucket> =
+        serde_json::from_value(scoped_buckets_res["buckets"].clone()).unwrap();
+    let expected_scoped = aggregate(&scoped_segs);
+    assert_eq!(expected_scoped.dwell, scoped_buckets[0].dwell);
+    assert_eq!(expected_scoped.agent_ms, scoped_buckets[0].agent_ms);
+    assert_eq!(expected_scoped.by_project, scoped_buckets[0].by_project);
+    assert_eq!(expected_scoped.by_agent, scoped_buckets[0].by_agent);
+    assert_eq!(scoped_buckets[0].dwell.card, 90_000);
+    assert_eq!(scoped_buckets[0].agent_ms, 120_000);
+}

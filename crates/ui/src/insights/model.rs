@@ -229,6 +229,43 @@ pub struct TimelineData {
     pub merges: Vec<TimelineMergeMarker>,
 }
 
+impl TimelineData {
+    pub fn visible_hour_window(&self) -> (u32, u32) {
+        const HOUR_MS: u64 = 3_600_000;
+        let has_blocks = self.lanes.iter().any(|l| !l.blocks.is_empty());
+        if !has_blocks && self.merges.is_empty() {
+            return (8, 20);
+        }
+        let mut min_ms = u64::MAX;
+        let mut max_ms = 0u64;
+        for lane in &self.lanes {
+            for block in &lane.blocks {
+                min_ms = min_ms.min(block.start_ms);
+                max_ms = max_ms.max(block.end_ms.max(block.start_ms));
+            }
+        }
+        for merge in &self.merges {
+            min_ms = min_ms.min(merge.timestamp_ms);
+            max_ms = max_ms.max(merge.timestamp_ms);
+        }
+        let earliest = (min_ms.saturating_sub(self.day_start_ms) / HOUR_MS).min(24) as u32;
+        let latest = (max_ms.saturating_sub(self.day_start_ms).div_ceil(HOUR_MS)).min(24) as u32;
+        let mut start = earliest.saturating_sub(1);
+        let mut end = (latest + 1).min(24);
+        if end <= start {
+            start = start.min(23);
+            end = (start + 1).min(24);
+        }
+        while end.saturating_sub(start) < 8 && (start > 0 || end < 24) {
+            start = start.saturating_sub(1);
+            if end.saturating_sub(start) < 8 && end < 24 {
+                end += 1;
+            }
+        }
+        (start, end)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DayActivityRow {
     pub date_key: String,
@@ -271,6 +308,10 @@ impl AutomationFunnel {
         (self.prev_merged > 0).then(|| {
             (self.prev_zero_human_resolved * 100 + self.prev_merged / 2) / self.prev_merged
         })
+    }
+
+    pub fn human_asks_per_resolved(&self) -> Option<f64> {
+        (self.merged > 0).then(|| self.human_asks as f64 / self.merged as f64)
     }
 }
 
@@ -510,6 +551,8 @@ pub struct Dashboard {
     pub prev_merged_total: usize,
     pub local_merges: usize,
     pub pr_merges: usize,
+    pub prev_local_merges: usize,
+    pub prev_pr_merges: usize,
     pub manual_resolutions: usize,
     pub created_total: usize,
     pub initial_sync_period: usize,
@@ -2106,6 +2149,8 @@ pub fn compute_dashboard<Tz: TimeZone>(
     let mut prev_merged_total = 0;
     let mut local_merges = 0;
     let mut pr_merges = 0;
+    let mut prev_local_merges = 0;
+    let mut prev_pr_merges = 0;
     let mut manual_resolutions = 0;
     let mut unknown_merge_dates = 0;
     let mut created_times = Vec::new();
@@ -2491,6 +2536,13 @@ pub fn compute_dashboard<Tz: TimeZone>(
             prev_merged_total += 1;
             if !had_human_ask {
                 prev_zero_human_resolved += 1;
+            }
+            if card.merged() {
+                if is_pr {
+                    prev_pr_merges += 1;
+                } else {
+                    prev_local_merges += 1;
+                }
             }
         }
         if let Some(began) = resolve_work_started_at(card, merged_at, card_evs) {
@@ -3306,6 +3358,8 @@ pub fn compute_dashboard<Tz: TimeZone>(
         prev_merged_total,
         local_merges,
         pr_merges,
+        prev_local_merges,
+        prev_pr_merges,
         manual_resolutions,
         created_total,
         initial_sync_period,
@@ -4778,5 +4832,217 @@ mod tests {
         assert_eq!(d7.funnel.reviewed, 1);
         assert_eq!(d7.funnel.merged, 1);
         assert_eq!(d7.funnel.zero_human_pct(), Some(100));
+    }
+
+    #[test]
+    fn prev_merges_and_human_asks_per_resolved_match_classification() {
+        let mut snap = Snapshot::default();
+        snap.projects.push(sample_project("p1", "Canban"));
+        let tz = tz_plus_8();
+        let now = ts_utc8(2026, 11, 21, 18, 0);
+
+        // Baseline day (2026-11-20): 1 local merge, 1 PR merge, 1 manual resolution (before 18:00),
+        // plus 1 local merge AFTER 18:00 (excluded by same-progress cutoff in 1D, included in 7D? no, 7D prev is 11-08..11-14).
+        let mut prev_local = sample_card("prev-local", "p1", 1, ts_utc8(2026, 11, 20, 8, 0));
+        prev_local.delivery = Some(Delivery {
+            target_branch: "main".into(),
+            commit: "p1a".into(),
+            request_key: "merge:prev-local".into(),
+            merged_at: ts_utc8(2026, 11, 20, 11, 0),
+        });
+        let mut prev_pr = sample_card("prev-pr", "p1", 2, ts_utc8(2026, 11, 20, 9, 0));
+        prev_pr.delivery = Some(Delivery {
+            target_branch: "main".into(),
+            commit: "p2a".into(),
+            request_key: "github:jjyr/canban#91".into(),
+            merged_at: ts_utc8(2026, 11, 20, 14, 0),
+        });
+        let mut prev_manual = sample_card("prev-manual", "p1", 3, ts_utc8(2026, 11, 20, 9, 30));
+        prev_manual.resolution = Some(canban_types::CardResolution {
+            resolved_at: ts_utc8(2026, 11, 20, 15, 0),
+            kind: "manual".into(),
+            reason: None,
+            actor: "user".into(),
+        });
+        let mut prev_late = sample_card("prev-late", "p1", 4, ts_utc8(2026, 11, 20, 10, 0));
+        prev_late.delivery = Some(Delivery {
+            target_branch: "main".into(),
+            commit: "p4a".into(),
+            request_key: "merge:prev-late".into(),
+            merged_at: ts_utc8(2026, 11, 20, 20, 0),
+        });
+
+        // Current day (2026-11-21): 2 local merges, 1 PR merge, plus 2 human asks.
+        let mut cur_local_1 = sample_card("cur-local-1", "p1", 5, ts_utc8(2026, 11, 21, 9, 0));
+        cur_local_1.delivery = Some(Delivery {
+            target_branch: "main".into(),
+            commit: "c1a".into(),
+            request_key: "merge:cur-local-1".into(),
+            merged_at: ts_utc8(2026, 11, 21, 10, 0),
+        });
+        let mut cur_local_2 = sample_card("cur-local-2", "p1", 6, ts_utc8(2026, 11, 21, 10, 0));
+        cur_local_2.delivery = Some(Delivery {
+            target_branch: "main".into(),
+            commit: "c2a".into(),
+            request_key: "merge:cur-local-2".into(),
+            merged_at: ts_utc8(2026, 11, 21, 12, 0),
+        });
+        let mut cur_pr = sample_card("cur-pr", "p1", 7, ts_utc8(2026, 11, 21, 11, 0));
+        cur_pr.delivery = Some(Delivery {
+            target_branch: "main".into(),
+            commit: "c3a".into(),
+            request_key: "github:jjyr/canban#92".into(),
+            merged_at: ts_utc8(2026, 11, 21, 13, 0),
+        });
+
+        snap.cards.extend([
+            prev_local,
+            prev_pr,
+            prev_manual,
+            prev_late,
+            cur_local_1,
+            cur_local_2,
+            cur_pr,
+        ]);
+        let events = vec![
+            Event {
+                id: "ask-1".into(),
+                project_id: "p1".into(),
+                card_id: "cur-local-1".into(),
+                sequence: 1,
+                kind: "execution.input_required".into(),
+                actor: "agent:developer".into(),
+                message: String::new(),
+                data: json!({"terminal_id": "cur-local-1:developer"}),
+                created_at: ts_utc8(2026, 11, 21, 9, 30),
+            },
+            Event {
+                id: "ask-2".into(),
+                project_id: "p1".into(),
+                card_id: "cur-pr".into(),
+                sequence: 2,
+                kind: "review.merge_conflict".into(),
+                actor: "system".into(),
+                message: String::new(),
+                data: json!({}),
+                created_at: ts_utc8(2026, 11, 21, 12, 30),
+            },
+        ];
+
+        let dash = compute(&snap, &events, None, RangeWindow::Today, now, &tz);
+        assert_eq!(dash.merged_total, 3);
+        assert_eq!(dash.local_merges, 2);
+        assert_eq!(dash.pr_merges, 1);
+        assert_eq!(dash.prev_merged_total, 3);
+        assert_eq!(dash.prev_local_merges, 1);
+        assert_eq!(dash.prev_pr_merges, 1);
+        let asks_per = dash.funnel.human_asks_per_resolved().unwrap();
+        assert!((asks_per - (2.0 / 3.0)).abs() < 1e-9);
+
+        let empty_funnel = AutomationFunnel {
+            human_asks: 3,
+            merged: 0,
+            ..Default::default()
+        };
+        assert_eq!(empty_funnel.human_asks_per_resolved(), None);
+    }
+
+    #[test]
+    fn visible_hour_window_covers_empty_midday_early_morning_and_late_night() {
+        let day_start = ts_utc8(2026, 11, 21, 0, 0);
+        let day_end = ts_utc8(2026, 11, 22, 0, 0);
+        let hour = 3_600_000u64;
+        let min = 60_000u64;
+
+        let empty_lane = TimelineLane {
+            kind: TimelineLaneKind::MeCard,
+            label: "Me · Card".into(),
+            sublabel: None,
+            total_ms: 0,
+            blocks: Vec::new(),
+        };
+
+        // Empty (including empty lanes) -> (8, 20)
+        let tl_empty = TimelineData {
+            day_start_ms: day_start,
+            day_end_ms: day_end,
+            active_until_ms: day_end,
+            lanes: vec![empty_lane.clone()],
+            merges: Vec::new(),
+        };
+        assert_eq!(tl_empty.visible_hour_window(), (8, 20));
+
+        // Midday burst: 11:15..12:30 -> pad [10, 14] -> expand symmetrically to (8, 16)
+        let tl_midday = TimelineData {
+            day_start_ms: day_start,
+            day_end_ms: day_end,
+            active_until_ms: day_end,
+            lanes: vec![TimelineLane {
+                kind: TimelineLaneKind::MeCard,
+                label: "Me · Card".into(),
+                sublabel: None,
+                total_ms: 75 * min,
+                blocks: vec![TimelineBlock {
+                    start_ms: day_start + 11 * hour + 15 * min,
+                    end_ms: day_start + 12 * hour + 30 * min,
+                    project_id: None,
+                    card_id: None,
+                    terminal_id: None,
+                    label: "Card".into(),
+                    open: false,
+                }],
+            }],
+            merges: Vec::new(),
+        };
+        assert_eq!(tl_midday.visible_hour_window(), (8, 16));
+
+        // Early morning: 00:30..02:15 -> pad [0, 4] -> clamped left, expand right to (0, 8)
+        let tl_early = TimelineData {
+            day_start_ms: day_start,
+            day_end_ms: day_end,
+            active_until_ms: day_end,
+            lanes: vec![TimelineLane {
+                kind: TimelineLaneKind::Agent,
+                label: "@dev".into(),
+                sublabel: None,
+                total_ms: 105 * min,
+                blocks: vec![TimelineBlock {
+                    start_ms: day_start + 30 * min,
+                    end_ms: day_start + 2 * hour + 15 * min,
+                    project_id: None,
+                    card_id: None,
+                    terminal_id: None,
+                    label: "Run".into(),
+                    open: false,
+                }],
+            }],
+            merges: Vec::new(),
+        };
+        assert_eq!(tl_early.visible_hour_window(), (0, 8));
+
+        // Late night merge-only / block: 21:30..23:15 -> pad [20, 24] -> clamped right, expand left to (16, 24)
+        let tl_late = TimelineData {
+            day_start_ms: day_start,
+            day_end_ms: day_end,
+            active_until_ms: day_end,
+            lanes: vec![empty_lane],
+            merges: vec![
+                TimelineMergeMarker {
+                    timestamp_ms: day_start + 21 * hour + 30 * min,
+                    project_id: "p1".into(),
+                    card_id: "c1".into(),
+                    card_number: 1,
+                    title: "Early merge".into(),
+                },
+                TimelineMergeMarker {
+                    timestamp_ms: day_start + 23 * hour + 15 * min,
+                    project_id: "p1".into(),
+                    card_id: "c2".into(),
+                    card_number: 2,
+                    title: "Late merge".into(),
+                },
+            ],
+        };
+        assert_eq!(tl_late.visible_hour_window(), (16, 24));
     }
 }

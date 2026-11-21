@@ -169,6 +169,7 @@ pub struct Ui {
     /// Shared minute-granularity clock (s) for utility bar usage countdowns.
     pub utility_clock: Signal<u64>,
     pub(crate) dwell: Stored<crate::activity::DwellMachine>,
+    pub activity_flush_seq: Signal<u64>,
     pub refreshing: Signal<bool>,
     pub(crate) refresh_requested: Signal<bool>,
     pub snapshot_epoch: Signal<u64>,
@@ -530,6 +531,7 @@ impl Ui {
             overview_idle: signal(false),
             terminal_recent: stored(BTreeMap::new()),
             dwell: stored(Default::default()),
+            activity_flush_seq: signal(0),
             terminal_pending_open: signal(None),
             card_event: signal(None),
             editing_comment: signal(None),
