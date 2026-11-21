@@ -100,6 +100,30 @@ For example, a Button owns its appearance and interaction contract; a CardTile o
 
 Keep persistent state separate from UI state. AppServer supplies accepted card/run state; UI owns navigation, focus, selection and drafts. A presenter translates async operations into pending/success/failure feedback, unregisters subscriptions on disposal, and prevents a late response for one Card from replacing the view for another. Business eligibility is still validated by AppServer. Components expose these states so the gallery can reproduce them without a live Agent.
 
+## Client-transport and terminal decoupling boundaries
+
+Architecture direction, 2026-11-21: keep `canban-ui` and `canban-terminal` decoupled from local daemon processes, local SQLite storage, and platform-specific view toolkits so desktop and future remote-only/mobile clients (such as iOS) share the same core UI and terminal stack.
+
+```text
+canban-ui (pure UI core: --no-default-features)
+  Screens / Presenters / Components / UiBackend trait
+       |                                    |
+       v                                    v
+  [feature: local-host]              canban-terminal (core: --no-default-features)
+    desktop startup / updater          model.rs (libghostty-vt) + view_state.rs
+    canban-app-server / HostRegistry   LiveSession LRU pool + PtyTransport trait
+    local socket & child processes          |                        |
+                                            v                        v
+                                    [feature: herdr-local]    Renderer / View host
+                                      canban-herdr / hc         apple_render.m (CG/CT)
+                                                                + macos_view.m (AppKit)
+                                                                / linux.rs (NSH canvas)
+```
+
+- **`UiBackend` boundary in `canban-ui`:** All RPC routing (`routed_call`, `call_all_hosts`), merged snapshots, host summaries, host configs, event subscriptions, and draft persistence route through a single `UiBackend` trait instead of scattered `APP` / `HOSTS` globals or direct `std::fs` calls. Desktop-only process startup (`startup.rs`), local self-updates (`updates.rs`), `signal-hook`, `canban-exec`, `canban-updater`, and `canban-app-server` sit behind the `local-host` Cargo feature (enabled by default for desktop builds). `cargo check -p canban-ui --no-default-features` must remain free of local server, SQLite, and subprocess crates.
+- **`PtyTransport` boundary in `canban-terminal`:** `LiveSession`, the bounded LRU session pool (`MAX_POOLED_SESSIONS`), and `model.rs` communicate with PTYs through a transport-agnostic `PtyTransport` trait (`attach`, `write`, `resize`, `detach`). The local `hc` implementation (`HerdrLocalTransport`) sits behind the optional `herdr-local` Cargo feature so remote WebSocket/stream transports can plug into the same session pool and VT engine without pulling `canban-herdr` or `canban-exec`.
+- **Layered terminal view and renderer:** Platform-independent terminal view state (dirty-row snapshot polling, cursor blink/animation timing, optimistic CJK IME commit cursor hold, and link hover state) belongs in pure Rust (`crates/terminal/src/view_state.rs`). On Apple platforms, CoreGraphics/CoreText rendering (`apple_render.m`: vector box/block/Powerline glyphs, font fallback, underlines, Kitty image layers, and grid draw loop using `CGRect`/`CGColorRef` with zero AppKit imports) stays separate from the thin platform view host (`macos_view.m` for AppKit `NSView`/`NSTextInputClient`/drag-and-drop; future `ios_view.m` for UIKit).
+
 ## State synchronization, ownership and memory cost
 
 The UI contract includes the cost of supplying data to components, not only the

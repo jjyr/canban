@@ -17,12 +17,12 @@ Accepted architecture update, 2026-11-11: the [unified workflow engine](product/
 | Timeline | canban-timeline | crates/timeline | Durable card history/comments/reports and history queries |
 | Notifications | canban-notifications | crates/notifications | Internal notifications/events; later native delivery |
 | Herdr adapter | canban-herdr | crates/herdr | Core client protocol, terminal binding, launch/observation/control |
-| Native Terminal | canban-terminal | crates/terminal | libghostty-vt state/input and AppKit viewer; Herdr stream binding, without Card/workflow/storage dependencies |
+| Native Terminal | canban-terminal | crates/terminal | libghostty-vt model, shared Rust view state, transport-agnostic `PtyTransport` (`herdr-local` optional), shared Apple CoreGraphics/CoreText renderer + thin platform view hosts, without Card/workflow/storage dependencies |
 | Workspaces | canban-workspaces | crates/workspaces | Directory/Git/worktree preparation/reuse, Review preview/commit/merge and Archive handling |
 | Storage | canban-storage | crates/storage | Shared local persistence/attachment IO implementations |
 | Shared boundary types | canban-types | crates/types | Only shared IDs, command/event/report/action payloads needed across crates |
 | UI Kit | canban-ui-kit | crates/ui-kit | Generic tokens, styled reusable NSH controls, and shared interaction conventions; no product/service dependencies |
-| UI/desktop host | canban-ui | crates/ui | Reusable product UI library, presenters/screens, UI state and independent-service desktop client; standalone Gallery imports it from examples/gallery |
+| UI/desktop host | canban-ui | crates/ui | Reusable product UI library, presenters/screens, UI state and `UiBackend` client boundary (`local-host` feature isolates desktop AppServer/daemon startup and updater); standalone Gallery imports it from examples/gallery |
 | Agent CLI | canban-cli | crates/cli | Thin agent-facing adapter to AppServer operations |
 
 This layout is now represented by workspace crates in the initial MVP. Core components have compile-time boundaries and run in one Canban process; the CLI also provides a headless host without linking NSH UI. Timer internals and future capabilities below remain proposals. See [implementation and acceptance](implementation.md).
