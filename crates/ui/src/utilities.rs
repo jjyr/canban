@@ -74,6 +74,7 @@ pub fn init(ui: Ui) {
     });
     set_interval(std::time::Duration::from_secs(60), move || {
         ui.utility_clock.set(canban_types::now() / 1000);
+        crate::activity::tick(ui);
     });
     effect(move || {
         let v = ui.utility.get();

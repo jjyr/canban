@@ -1,5 +1,6 @@
 //! Production UI components and desktop host, shared with standalone examples.
 use anyhow::Result;
+pub mod activity;
 pub mod agents_setup;
 pub mod archive;
 pub mod backend;
@@ -135,6 +136,7 @@ pub(crate) fn workspace_root() -> impl IntoElement {
     });
     commands::bindings(ui);
     utilities::init(ui);
+    activity::init(ui);
     updates::init(ui);
     github::init(ui);
     github::filters::init(ui);
