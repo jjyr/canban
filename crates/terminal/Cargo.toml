@@ -11,6 +11,10 @@ keywords.workspace = true
 categories.workspace = true
 links = "ghostty-vt"
 
+[features]
+default = ["herdr-local"]
+herdr-local = ["dep:canban-herdr", "dep:canban-exec"]
+
 [dependencies]
 canban-profiler.workspace = true
 anyhow.workspace = true
@@ -18,8 +22,8 @@ png.workspace = true
 serde_json.workspace = true
 nsh-core.workspace = true
 nsh-base.workspace = true
-canban-exec.workspace = true
-canban-herdr.workspace = true
+canban-exec = { workspace = true, optional = true }
+canban-herdr = { workspace = true, optional = true }
 canban-types.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]

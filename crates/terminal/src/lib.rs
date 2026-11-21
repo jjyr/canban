@@ -14,6 +14,7 @@ pub mod model;
 #[cfg(target_os = "macos")]
 pub mod native;
 pub mod session;
+pub mod view_state;
 
 /// Installed font family catalog discovered from the host OS.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

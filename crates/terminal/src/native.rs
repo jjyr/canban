@@ -355,6 +355,7 @@ impl Host {
             size_ready: prev_ready,
             focused: prev_focused,
             theme,
+            transport: None,
         });
         if !self.view_ptr.is_null() {
             attach_nsview_wake(&session.wake, self.view_ptr);

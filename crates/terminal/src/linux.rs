@@ -15,9 +15,10 @@ use nsh_base::{
 };
 use nsh_core::prelude::*;
 use serde_json::Value;
+#[cfg(any(feature = "herdr-local", test))]
+use std::collections::BTreeSet;
 use std::{
     cell::RefCell,
-    collections::BTreeSet,
     future::Future,
     pin::Pin,
     rc::Rc,
@@ -233,6 +234,7 @@ pub fn emulator_factory(theme: Option<Value>) -> TerminalEmulatorFactory {
     })
 }
 
+#[cfg(any(feature = "herdr-local", test))]
 fn is_non_ascii_symbol_font(family: &str) -> bool {
     let lower = family.to_ascii_lowercase();
     lower.contains("emoji")
@@ -243,6 +245,7 @@ fn is_non_ascii_symbol_font(family: &str) -> bool {
         || lower.contains("katex")
 }
 
+#[cfg(any(feature = "herdr-local", test))]
 pub(crate) fn parse_fc_list_output(all_output: &str, ascii_mono_output: &str) -> InstalledFonts {
     let mut mono_set = BTreeSet::new();
     for line in ascii_mono_output.lines() {
@@ -306,26 +309,34 @@ pub fn try_installed_fonts() -> Option<InstalledFonts> {
 
 /// Discovers installed monospaced and proportional font families on Linux via `fc-list`.
 pub fn installed_fonts() -> InstalledFonts {
-    CACHED_FONTS
-        .get_or_init(|| {
-            let run_fc = |args: &[&str]| -> Option<String> {
-                let out = canban_exec::command("fc-list").args(args).output().ok()?;
-                if !out.status.success() {
-                    return None;
-                }
-                Some(String::from_utf8_lossy(&out.stdout).into_owned())
-            };
-            let Some(all_out) = run_fc(&["--format=%{family[0]}\t%{spacing}\t%{color}\n"]) else {
-                return InstalledFonts::default();
-            };
-            let ascii_out = run_fc(&[
-                ":charset=41 6d",
-                "--format=%{family[0]}\t%{spacing}\t%{color}\n",
-            ])
-            .unwrap_or_default();
-            parse_fc_list_output(&all_out, &ascii_out)
-        })
-        .clone()
+    #[cfg(feature = "herdr-local")]
+    {
+        CACHED_FONTS
+            .get_or_init(|| {
+                let run_fc = |args: &[&str]| -> Option<String> {
+                    let out = canban_exec::command("fc-list").args(args).output().ok()?;
+                    if !out.status.success() {
+                        return None;
+                    }
+                    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+                };
+                let Some(all_out) = run_fc(&["--format=%{family[0]}\t%{spacing}\t%{color}\n"])
+                else {
+                    return InstalledFonts::default();
+                };
+                let ascii_out = run_fc(&[
+                    ":charset=41 6d",
+                    "--format=%{family[0]}\t%{spacing}\t%{color}\n",
+                ])
+                .unwrap_or_default();
+                parse_fc_list_output(&all_out, &ascii_out)
+            })
+            .clone()
+    }
+    #[cfg(not(feature = "herdr-local"))]
+    {
+        CACHED_FONTS.get_or_init(InstalledFonts::default).clone()
+    }
 }
 
 // --- Async wakeup channel & shared session slot for `<nsh_base::Terminal />` ---
@@ -483,6 +494,7 @@ impl ControllerSlot {
             size_ready: prev_ready,
             focused: prev_focused,
             theme,
+            transport: None,
         });
 
         let wake_target = self.wake.clone();
@@ -1373,7 +1385,7 @@ Adwaita Mono\t100\tFalse
         crate::evict_session("core-lx", "tty-lx-b");
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "herdr-local"))]
     #[test]
     fn linux_installed_fonts_discovers_host_families_gracefully() {
         let catalog = crate::installed_fonts();

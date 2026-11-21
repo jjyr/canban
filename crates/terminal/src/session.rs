@@ -1,9 +1,6 @@
-//! Platform-neutral Herdr PTY live attachment pool shared across macOS and Linux viewers.
+//! Platform-neutral, transport-agnostic PTY live attachment pool shared across macOS, Linux,
+//! and future remote/mobile viewers.
 use crate::model::Model;
-use canban_herdr::{
-    Client,
-    stream::{Attachment, DisplayFacts, Event},
-};
 use canban_types::Config;
 use serde_json::Value;
 use std::{
@@ -18,6 +15,252 @@ use std::{
 
 pub const CONNECTING_GRACE: Duration = Duration::from_millis(180);
 pub const MAX_POOLED_SESSIONS: usize = 8;
+
+/// Display geometry and color facts reported to the remote/local PTY backend.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DisplayFacts {
+    pub fg: Option<[u8; 3]>,
+    pub bg: Option<[u8; 3]>,
+    pub cursor: Option<[u8; 3]>,
+    pub cell: Option<(u32, u32)>,
+}
+
+/// Transport-agnostic events emitted by an attached PTY stream.
+#[derive(Debug)]
+pub enum PtyEvent {
+    Data(Vec<u8>),
+    Resize(u16, u16),
+    Closed(Value),
+    Lost(String),
+}
+
+/// Parameters passed to [`PtyTransport::attach`].
+#[derive(Clone, Debug)]
+pub struct PtyAttachParams {
+    pub core_id: String,
+    pub terminal: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub display: DisplayFacts,
+}
+
+/// Thread-safe writer handle for an active PTY attachment.
+pub trait PtyWriter: Send + Sync {
+    fn write(&self, bytes: &[u8]) -> anyhow::Result<()>;
+
+    fn write_auto(&self, bytes: &[u8]) -> anyhow::Result<()> {
+        self.write(bytes)
+    }
+
+    fn resize(&self, cols: u16, rows: u16) -> anyhow::Result<()>;
+
+    fn focus(&self, focused: bool) -> anyhow::Result<()> {
+        let _ = focused;
+        Ok(())
+    }
+
+    fn facts(&self, display: &DisplayFacts) -> anyhow::Result<()> {
+        let _ = display;
+        Ok(())
+    }
+}
+
+/// Active attached PTY stream owned by a [`LiveSession`] worker thread.
+pub trait PtyAttachment: Send {
+    fn writer(&self) -> Arc<dyn PtyWriter>;
+
+    fn recv(&mut self, timeout: Duration) -> anyhow::Result<Option<PtyEvent>>;
+
+    fn consumed(&mut self, len: usize) -> anyhow::Result<()> {
+        let _ = len;
+        Ok(())
+    }
+
+    fn write(&mut self, bytes: &[u8], automatic: bool) -> anyhow::Result<()> {
+        if automatic {
+            self.writer().write_auto(bytes)
+        } else {
+            self.writer().write(bytes)
+        }
+    }
+
+    fn resize(&mut self, cols: u16, rows: u16) -> anyhow::Result<()> {
+        self.writer().resize(cols, rows)
+    }
+
+    fn focus(&mut self, focused: bool) -> anyhow::Result<()> {
+        self.writer().focus(focused)
+    }
+
+    fn facts(&mut self, display: &DisplayFacts) -> anyhow::Result<()> {
+        self.writer().facts(display)
+    }
+
+    fn detach(self: Box<Self>) {}
+}
+
+/// Transport-agnostic PTY attachment backend (`attach`, `write`, `resize`, `detach`).
+pub trait PtyTransport: Send + Sync + 'static {
+    fn attach(&self, params: &PtyAttachParams) -> anyhow::Result<Box<dyn PtyAttachment>>;
+
+    fn write(&self, attachment: &mut dyn PtyAttachment, bytes: &[u8]) -> anyhow::Result<()> {
+        attachment.write(bytes, false)
+    }
+
+    fn resize(
+        &self,
+        attachment: &mut dyn PtyAttachment,
+        cols: u16,
+        rows: u16,
+    ) -> anyhow::Result<()> {
+        attachment.resize(cols, rows)
+    }
+
+    fn detach(&self, attachment: Box<dyn PtyAttachment>) {
+        attachment.detach();
+    }
+}
+
+/// Local/relay Herdr (`hc`) PTY transport implementation.
+#[cfg(feature = "herdr-local")]
+pub struct HerdrLocalTransport {
+    config: Config,
+}
+
+#[cfg(feature = "herdr-local")]
+impl HerdrLocalTransport {
+    pub fn new(config: Config) -> Self {
+        Self { config }
+    }
+
+    fn to_herdr_display(display: &DisplayFacts) -> canban_herdr::stream::DisplayFacts {
+        canban_herdr::stream::DisplayFacts {
+            fg: display.fg,
+            bg: display.bg,
+            cursor: display.cursor,
+            cell: display.cell,
+        }
+    }
+}
+
+#[cfg(feature = "herdr-local")]
+struct HerdrWriter(canban_herdr::stream::InputWriter);
+
+#[cfg(feature = "herdr-local")]
+impl PtyWriter for HerdrWriter {
+    fn write(&self, bytes: &[u8]) -> anyhow::Result<()> {
+        self.0.input(bytes)
+    }
+
+    fn write_auto(&self, bytes: &[u8]) -> anyhow::Result<()> {
+        self.0.automatic_input(bytes)
+    }
+
+    fn resize(&self, cols: u16, rows: u16) -> anyhow::Result<()> {
+        self.0.resize(cols, rows)
+    }
+
+    fn focus(&self, focused: bool) -> anyhow::Result<()> {
+        self.0.focus(focused)
+    }
+
+    fn facts(&self, display: &DisplayFacts) -> anyhow::Result<()> {
+        self.0
+            .facts(&HerdrLocalTransport::to_herdr_display(display))
+    }
+}
+
+#[cfg(feature = "herdr-local")]
+struct HerdrAttachment(canban_herdr::stream::Attachment);
+
+#[cfg(feature = "herdr-local")]
+impl PtyAttachment for HerdrAttachment {
+    fn writer(&self) -> Arc<dyn PtyWriter> {
+        Arc::new(HerdrWriter(self.0.input_writer()))
+    }
+
+    fn recv(&mut self, timeout: Duration) -> anyhow::Result<Option<PtyEvent>> {
+        use canban_herdr::stream::Event;
+        let ev = self.0.recv(timeout)?;
+        Ok(ev.map(|e| match e {
+            Event::Data(data) => PtyEvent::Data(data),
+            Event::Resize(c, r) => PtyEvent::Resize(c, r),
+            Event::Closed(reason) => PtyEvent::Closed(reason),
+            Event::Lost(error) => PtyEvent::Lost(error),
+        }))
+    }
+
+    fn consumed(&mut self, len: usize) -> anyhow::Result<()> {
+        self.0.consumed(len)
+    }
+
+    fn write(&mut self, bytes: &[u8], automatic: bool) -> anyhow::Result<()> {
+        self.0.input(bytes, automatic)
+    }
+
+    fn resize(&mut self, cols: u16, rows: u16) -> anyhow::Result<()> {
+        self.0.resize(cols, rows)
+    }
+
+    fn focus(&mut self, focused: bool) -> anyhow::Result<()> {
+        self.0.focus(focused)
+    }
+
+    fn facts(&mut self, display: &DisplayFacts) -> anyhow::Result<()> {
+        self.0
+            .facts(&HerdrLocalTransport::to_herdr_display(display))
+    }
+}
+
+#[cfg(feature = "herdr-local")]
+impl PtyTransport for HerdrLocalTransport {
+    fn attach(&self, params: &PtyAttachParams) -> anyhow::Result<Box<dyn PtyAttachment>> {
+        let relay_fenced = self.config.relay_endpoint.is_some();
+        let client = canban_herdr::Client {
+            config: self.config.clone(),
+        };
+        if !relay_fenced {
+            anyhow::ensure!(
+                client.status()?["core"]["id"] == params.core_id,
+                "Original core identity changed"
+            );
+        }
+        let herdr_display = Self::to_herdr_display(&params.display);
+        let mut attachment = client.attach_fenced_with_display(
+            &params.terminal,
+            params.cols,
+            params.rows,
+            Some(&params.core_id),
+            Some(&herdr_display),
+        )?;
+        if !relay_fenced {
+            attachment.track_view(&params.core_id, &params.terminal);
+        }
+        Ok(Box::new(HerdrAttachment(attachment)))
+    }
+}
+
+#[cfg(not(feature = "herdr-local"))]
+struct UnavailableTransport;
+
+#[cfg(not(feature = "herdr-local"))]
+impl PtyTransport for UnavailableTransport {
+    fn attach(&self, _params: &PtyAttachParams) -> anyhow::Result<Box<dyn PtyAttachment>> {
+        anyhow::bail!("herdr-local feature is disabled; provide a custom PtyTransport")
+    }
+}
+
+fn default_transport(config: Config) -> Arc<dyn PtyTransport> {
+    #[cfg(feature = "herdr-local")]
+    {
+        Arc::new(HerdrLocalTransport::new(config))
+    }
+    #[cfg(not(feature = "herdr-local"))]
+    {
+        let _ = config;
+        Arc::new(UnavailableTransport)
+    }
+}
 
 type WakeCallback = Arc<dyn Fn() + Send + Sync>;
 
@@ -161,6 +404,7 @@ pub struct SessionInit {
     pub size_ready: bool,
     pub focused: bool,
     pub theme: Option<Value>,
+    pub transport: Option<Arc<dyn PtyTransport>>,
 }
 
 fn session_pool() -> &'static Mutex<VecDeque<Arc<LiveSession>>> {
@@ -266,7 +510,9 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
         size_ready,
         focused,
         theme,
+        transport,
     } = init;
+    let transport = transport.unwrap_or_else(|| default_transport(config));
     let cols = initial_cols.max(2);
     let rows = initial_rows.max(1);
     let mut model = Model::new(cols, rows);
@@ -330,8 +576,6 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
     });
 
     std::thread::spawn(move || {
-        let relay_fenced = config.relay_endpoint.is_some();
-        let client = Client { config };
         {
             let mut guard = state.lock().unwrap();
             while !guard.size_ready {
@@ -344,15 +588,10 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                 guard = next;
             }
         }
+        type AttachOutcome = (Box<dyn PtyAttachment>, (u16, u16), DisplayFacts);
         let mut first_attach = true;
         while !stop.load(Ordering::SeqCst) {
-            let attempt = (|| -> anyhow::Result<(Attachment, (u16, u16), DisplayFacts)> {
-                if !relay_fenced {
-                    anyhow::ensure!(
-                        client.status()?["core"]["id"] == core,
-                        "Original core identity changed"
-                    );
-                }
+            let attempt = (|| -> anyhow::Result<AttachOutcome> {
                 let (size, display) = {
                     let s = state.lock().unwrap();
                     (
@@ -360,19 +599,17 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                         display_facts_for_model(&s.model, s.theme.as_ref()),
                     )
                 };
-                let mut attachment = client.attach_fenced_with_display(
-                    &terminal,
-                    size.0,
-                    size.1,
-                    Some(&core),
-                    Some(&display),
-                )?;
-                if !relay_fenced {
-                    attachment.track_view(&core, &terminal);
-                }
+                let params = PtyAttachParams {
+                    core_id: core.clone(),
+                    terminal: terminal.clone(),
+                    cols: size.0,
+                    rows: size.1,
+                    display: display.clone(),
+                };
+                let attachment = transport.attach(&params)?;
                 Ok((attachment, size, display))
             })();
-            let (attach, attached_size, attached_display) = match attempt {
+            let (mut attach, attached_size, attached_display) = match attempt {
                 Ok(v) => v,
                 Err(e) => {
                     {
@@ -427,7 +664,7 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                 };
                 // Layout may have resized the view or updated font/theme while attach was connecting.
                 if setup_res.is_ok() && s.size_ready && size != attached_size {
-                    setup_res = attach.resize(size.0, size.1);
+                    setup_res = transport.resize(attach.as_mut(), size.0, size.1);
                 }
                 let latest_display = display_facts_for_model(&s.model, s.theme.as_ref());
                 if setup_res.is_ok() && latest_display != attached_display {
@@ -436,6 +673,7 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                 if let Err(e) = setup_res {
                     s.status = format!("Attach setup failed: {e} · reconnecting");
                     drop(s);
+                    transport.detach(attach);
                     wake.notify();
                     continue;
                 }
@@ -446,7 +684,7 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
             let input_stop = Arc::new(AtomicBool::new(false));
             let failed = Arc::new(AtomicBool::new(false));
             let input_worker = {
-                let writer = attach.input_writer();
+                let writer = attach.writer();
                 let rx = rx.clone();
                 let stopped = input_stop.clone();
                 let failed = failed.clone();
@@ -456,8 +694,8 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                     while !stopped.load(Ordering::SeqCst) {
                         let message = rx.lock().unwrap().recv_timeout(Duration::from_millis(20));
                         let result = match message {
-                            Ok(Input::Bytes(bytes)) => writer.input(&bytes),
-                            Ok(Input::AutoBytes(bytes)) => writer.automatic_input(&bytes),
+                            Ok(Input::Bytes(bytes)) => writer.write(&bytes),
+                            Ok(Input::AutoBytes(bytes)) => writer.write_auto(&bytes),
                             Ok(Input::Resize(c, r)) => writer.resize(c, r),
                             Ok(Input::Focus(on)) => writer.focus(on),
                             Ok(Input::Facts(facts)) => writer.facts(&facts),
@@ -476,7 +714,7 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
             let mut reconnect = false;
             while !stop.load(Ordering::SeqCst) && !failed.load(Ordering::SeqCst) {
                 match attach.recv(Duration::from_millis(15)) {
-                    Ok(Some(Event::Data(data))) => {
+                    Ok(Some(PtyEvent::Data(data))) => {
                         let (replies, should_wake) = {
                             let mut s = state.lock().unwrap();
                             s.model.write(&data);
@@ -491,7 +729,7 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                             if replies.is_empty() {
                                 Ok(())
                             } else {
-                                attach.input(&replies, true)
+                                attach.write(&replies, true)
                             }
                         });
                         if result.is_err() {
@@ -499,7 +737,7 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                             break;
                         }
                     }
-                    Ok(Some(Event::Resize(c, r))) => {
+                    Ok(Some(PtyEvent::Resize(c, r))) => {
                         let mut s = state.lock().unwrap();
                         if !s.size_ready {
                             s.model.resize(c, r);
@@ -507,7 +745,7 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                             wake.notify();
                         }
                     }
-                    Ok(Some(Event::Closed(reason))) => {
+                    Ok(Some(PtyEvent::Closed(reason))) => {
                         {
                             let mut s = state.lock().unwrap();
                             s.connected = false;
@@ -521,10 +759,11 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                         wake.notify();
                         input_stop.store(true, Ordering::SeqCst);
                         let _ = input_worker.join();
+                        transport.detach(attach);
                         evict_session(&core, &terminal);
                         return;
                     }
-                    Ok(Some(Event::Lost(error))) => {
+                    Ok(Some(PtyEvent::Lost(error))) => {
                         state.lock().unwrap().status =
                             format!("Disconnected · {error} · reconnecting");
                         wake.notify();
@@ -554,7 +793,7 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
             reconnect |= failed.load(Ordering::SeqCst);
             state.lock().unwrap().connected = false;
             wake.notify();
-            drop(attach);
+            transport.detach(attach);
             if !reconnect {
                 break;
             }
@@ -631,5 +870,158 @@ pub fn detach_session_listener(session: &LiveSession, listener_id: usize) {
         if was_focused {
             let _ = session.input.send(Input::Focus(false));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct MockWriter {
+        written: Arc<Mutex<Vec<Vec<u8>>>>,
+        resizes: Arc<Mutex<Vec<(u16, u16)>>>,
+    }
+
+    impl PtyWriter for MockWriter {
+        fn write(&self, bytes: &[u8]) -> anyhow::Result<()> {
+            self.written.lock().unwrap().push(bytes.to_vec());
+            Ok(())
+        }
+
+        fn resize(&self, cols: u16, rows: u16) -> anyhow::Result<()> {
+            self.resizes.lock().unwrap().push((cols, rows));
+            Ok(())
+        }
+    }
+
+    struct MockAttachment {
+        writer: Arc<MockWriter>,
+        rx: mpsc::Receiver<PtyEvent>,
+        detached: Arc<AtomicBool>,
+    }
+
+    impl PtyAttachment for MockAttachment {
+        fn writer(&self) -> Arc<dyn PtyWriter> {
+            self.writer.clone()
+        }
+
+        fn recv(&mut self, timeout: Duration) -> anyhow::Result<Option<PtyEvent>> {
+            match self.rx.recv_timeout(timeout) {
+                Ok(ev) => Ok(Some(ev)),
+                Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+                Err(_) => Ok(Some(PtyEvent::Closed(serde_json::json!({"reason": "eof"})))),
+            }
+        }
+
+        fn detach(self: Box<Self>) {
+            self.detached.store(true, Ordering::SeqCst);
+        }
+    }
+
+    struct MockTransport {
+        written: Arc<Mutex<Vec<Vec<u8>>>>,
+        resizes: Arc<Mutex<Vec<(u16, u16)>>>,
+        detached: Arc<AtomicBool>,
+        events_rx: Mutex<Option<mpsc::Receiver<PtyEvent>>>,
+    }
+
+    impl PtyTransport for MockTransport {
+        fn attach(&self, _params: &PtyAttachParams) -> anyhow::Result<Box<dyn PtyAttachment>> {
+            let rx = self
+                .events_rx
+                .lock()
+                .unwrap()
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("already attached"))?;
+            Ok(Box::new(MockAttachment {
+                writer: Arc::new(MockWriter {
+                    written: self.written.clone(),
+                    resizes: self.resizes.clone(),
+                }),
+                rx,
+                detached: self.detached.clone(),
+            }))
+        }
+    }
+
+    #[test]
+    fn custom_pty_transport_drives_live_session_and_lru_pool() {
+        let (ev_tx, ev_rx) = mpsc::channel();
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let resizes = Arc::new(Mutex::new(Vec::new()));
+        let detached = Arc::new(AtomicBool::new(false));
+        let transport = Arc::new(MockTransport {
+            written: written.clone(),
+            resizes: resizes.clone(),
+            detached: detached.clone(),
+            events_rx: Mutex::new(Some(ev_rx)),
+        });
+
+        let session = get_or_spawn_session(SessionInit {
+            config: Config::default(),
+            core: "mock-core".into(),
+            terminal: "mock-tty".into(),
+            initial_cols: 80,
+            initial_rows: 24,
+            initial_cell: (8, 16),
+            size_ready: true,
+            focused: true,
+            theme: None,
+            transport: Some(transport),
+        });
+
+        // Wait for transport.attach() to connect.
+        for _ in 0..50 {
+            if session.state.lock().unwrap().connected {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(session.state.lock().unwrap().connected);
+
+        // Send output from transport and input/resize from viewer.
+        ev_tx
+            .send(PtyEvent::Data(b"hello custom transport\r\n".to_vec()))
+            .unwrap();
+        session.input.send(Input::Bytes(b"ls\n".to_vec())).unwrap();
+        session.input.send(Input::Resize(100, 30)).unwrap();
+
+        for _ in 0..50 {
+            let has_text = session
+                .state
+                .lock()
+                .unwrap()
+                .model
+                .viewport_text()
+                .contains("hello custom transport");
+            let has_write = !written.lock().unwrap().is_empty();
+            let has_resize = !resizes.lock().unwrap().is_empty();
+            if has_text && has_write && has_resize {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            session
+                .state
+                .lock()
+                .unwrap()
+                .model
+                .viewport_text()
+                .contains("hello custom transport")
+        );
+        assert_eq!(written.lock().unwrap().as_slice(), &[b"ls\n".to_vec()]);
+        assert_eq!(resizes.lock().unwrap().as_slice(), &[(100, 30)]);
+
+        // Evict and verify clean detach.
+        evict_session("mock-core", "mock-tty");
+        for _ in 0..50 {
+            if detached.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(detached.load(Ordering::SeqCst));
     }
 }
