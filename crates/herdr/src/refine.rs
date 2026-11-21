@@ -2,8 +2,8 @@
 //!
 //! Herdr tracks OSC 7501 status transitions (`working`, `idle`, `done`, `blocked`, `error`)
 //! emitted by interactive CLI agents. Some agents (such as Antigravity `agy`) emit `idle` or
-//! `done` as soon as the root prompt turn finishes, even while asynchronous Swarm workers or
-//! background tasks continue running in their bottom TUI tray.
+//! `done` as soon as the root prompt turn finishes, even while asynchronous background tasks
+//! continue running in their bottom TUI tray.
 //!
 //! This module provides pure, side-effect-free refinement rules keyed by canonical agent ID,
 //! plus JSON projection helpers used by the observation layer after an on-demand
@@ -143,20 +143,20 @@ mod tests {
 
     #[test]
     fn non_idle_or_non_agy_inputs_always_keep_raw_status() {
-        let swarm_screen = "\
+        let task_screen = "\
 ────────────────────────────────────────────────────────────────────────────────
 >
 ────────────────────────────────────────────────────────────────────────────────
-  ● Swarm(Demo)  worker: thinking · 2 posts · alt+s board · alt+x dismiss
+  ● [21:54:14] cargo nextest run --workspace running
 ────────────────────────────────────────────────────────────────────────────────
-? for shortcuts                                 accept-edits · Gemini 4 Carbon";
+? for shortcuts                        accept-edits · Gemini 4 Carbon · 1 task(s) · /tasks";
 
         for raw in [None, Some("working"), Some("blocked"), Some("error")] {
             assert_eq!(
                 refine(RefineInput {
                     agent_id: "agy",
                     raw_status: raw,
-                    screen_text: swarm_screen,
+                    screen_text: task_screen,
                 }),
                 RefineDecision::Keep
             );
@@ -165,7 +165,7 @@ mod tests {
             refine(RefineInput {
                 agent_id: "codex",
                 raw_status: Some("done"),
-                screen_text: swarm_screen,
+                screen_text: task_screen,
             }),
             RefineDecision::Keep
         );
@@ -182,11 +182,11 @@ mod tests {
         apply_decision(
             &mut record,
             RefineDecision::Working {
-                reason: "agy.swarm",
+                reason: "agy.background_task",
             },
         );
         assert_eq!(record["status"]["state"], "working");
         assert_eq!(record["status"]["raw_state"], "done");
-        assert_eq!(record["status"]["refined"], "agy.swarm");
+        assert_eq!(record["status"]["refined"], "agy.background_task");
     }
 }

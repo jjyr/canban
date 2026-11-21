@@ -5,7 +5,7 @@
 //!   `None` states perform zero `terminal.read` RPCs.
 //! - When a live `agy` terminal enters `idle` or `done`, AppServer probes `terminal.read(lines: 0)`
 //!   once for that status fingerprint.
-//! - If no Swarm or `running` background task is present (`RefineDecision::Keep`), the result is
+//! - If no `running` background task is present (`RefineDecision::Keep`), the result is
 //!   cached for that fingerprint with `next_check_at = None` (zero timers, zero further RPCs).
 //! - Only while a terminal is actively refined to `Working` does AppServer schedule a bounded
 //!   re-probe (`LOCAL_RECHECK_MS` / `REMOTE_RECHECK_MS`) so background tasks that exit or get
@@ -157,7 +157,7 @@ impl AppServer {
     }
 
     /// Direct safety check before sending an idle-close exit/kill to a terminal: verifies via
-    /// `terminal.read(lines: 0)` that an `idle`/`done` `agy` session has not started a Swarm or
+    /// `terminal.read(lines: 0)` that an `idle`/`done` `agy` session has not started a
     /// background task since the last observation.
     pub(super) fn is_refined_working_now(
         &self,

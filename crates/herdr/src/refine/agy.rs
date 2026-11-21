@@ -1,27 +1,24 @@
 //! Antigravity (`agy`) TUI bottom-chrome status refinement.
 //!
-//! When `agy` finishes its foreground turn and returns to the `>` prompt while a Swarm,
-//! subagent, or background command/schedule is still active, its bottom TUI renders an
+//! When `agy` finishes its foreground turn and returns to the `>` prompt while a
+//! background command/schedule is still active, its bottom TUI renders an
 //! active-items tray delimited by horizontal rule lines (`───...`) above the footer bar:
 //!
 //! ```text
 //! ────────────────────────────────────────────────────────────────────────────────
 //! >
 //! ────────────────────────────────────────────────────────────────────────────────
-//!   ● Swarm(Feature Audit)  reviewer: checking edge cases · 4 posts · alt+s board · alt+x dismiss
-//!   ● Agent(worker: Codebase Researcher)  Working · 01m12s
 //!   ● [21:54:14] cargo nextest run --workspace running
 //! ────────────────────────────────────────────────────────────────────────────────
-//! ? for shortcuts              accept-edits · Gemini 4 Carbon · low · 1 subagent(s) · 1 task(s) · /tasks
+//! ? for shortcuts              accept-edits · Gemini 4 Carbon · low · 1 task(s) · /tasks
 //! ```
 //!
 //! Crucially, inspection is anchored strictly to the bottom TUI chrome (or full-screen
-//! `/swarm board` / `/tasks` views), so user prompts or conversation history above the
-//! prompt box discussing `"Swarm"` or `"xxxxxx running"` never cause false positives.
+//! `/tasks` view), so user prompts or conversation history above the prompt box
+//! discussing `"xxxxxx running"` never cause false positives.
 
 use super::RefineDecision;
 
-pub const REASON_SWARM: &str = "agy.swarm";
 pub const REASON_BACKGROUND_TASK: &str = "agy.background_task";
 
 /// Inspect the visible screen text of an `idle` / `done` `agy` terminal.
@@ -39,20 +36,6 @@ pub fn refine_screen(screen_text: &str) -> RefineDecision {
     }
 
     let chrome = extract_bottom_chrome(&lines);
-    for row in &chrome.tray_lines {
-        if is_active_swarm_or_subagent_row(row) {
-            return RefineDecision::Working {
-                reason: REASON_SWARM,
-            };
-        }
-    }
-    for footer in &chrome.footer_lines {
-        if has_positive_counter(footer, "subagent(s)") {
-            return RefineDecision::Working {
-                reason: REASON_SWARM,
-            };
-        }
-    }
     for row in &chrome.tray_lines {
         if is_running_background_task_row(row) {
             return RefineDecision::Working {
@@ -230,19 +213,6 @@ fn strip_tray_prefix(line: &str) -> Option<&str> {
     None
 }
 
-fn is_active_swarm_or_subagent_row(line: &str) -> bool {
-    let Some(body) = strip_tray_prefix(line) else {
-        return false;
-    };
-    if is_swarm_item_label(body) {
-        return !is_swarm_row_finished(body);
-    }
-    if body.starts_with("Agent(") {
-        return is_agent_row_active(body);
-    }
-    false
-}
-
 fn is_swarm_item_label(body: &str) -> bool {
     body.starts_with("Swarm(")
         || body == "Swarm"
@@ -250,82 +220,8 @@ fn is_swarm_item_label(body: &str) -> bool {
         || body.starts_with("Swarm·")
 }
 
-/// In `agy` 1.5.5+, a finished Swarm stays in the tray until dismissed (`alt+x`),
-/// displaying `Done` or `✓ done` (e.g.
-/// `"● Swarm(<title>)  Done · 14 posts · alt+s board · alt+x dismiss"` or `"● Swarm  ✓ done"`).
-fn is_swarm_row_finished(body: &str) -> bool {
-    let lower = body.to_ascii_lowercase();
-    if lower.contains("✓ done") || lower.contains("✔ done") {
-        return true;
-    }
-    // Strip trailing keyboard shortcut hints (`· alt+s board`, `· alt+x dismiss`, etc.)
-    // so we can inspect the status segment cleanly without false-matching a title word.
-    let mut core = body.trim();
-    for sep in [" · alt+", " · enter ", " · press "] {
-        if let Some((before, _)) = core.split_once(sep) {
-            core = before.trim();
-        }
-    }
-    let after_title = if let Some(rest) = core.strip_prefix("Swarm(") {
-        let Some(idx) = find_matching_paren(rest).or_else(|| rest.find(")  ")) else {
-            return false;
-        };
-        rest[idx + 1..].trim()
-    } else {
-        core.strip_prefix("Swarm").unwrap_or(core).trim()
-    };
-
-    // Inspect only `agy`'s own status segment (the first `·`-delimited segment immediately
-    // after `Swarm(...)`), not arbitrary `<member>: <message>` post previews that contain `:`.
-    let first_segment = after_title.split('·').next().unwrap_or("").trim();
-    let normalized = first_segment
-        .trim_end_matches('…')
-        .trim_end_matches("...")
-        .trim();
-    !normalized.contains(':')
-        && matches!(
-            normalized.to_ascii_lowercase().as_str(),
-            "done" | "✓ done" | "✔ done" | "completed" | "stopped" | "killed"
-        )
-}
-
-fn find_matching_paren(s: &str) -> Option<usize> {
-    let mut depth = 1usize;
-    for (idx, ch) in s.char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(idx);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn is_agent_row_active(body: &str) -> bool {
-    let Some(rest) = body.strip_prefix("Agent(") else {
-        return false;
-    };
-    let after = find_matching_paren(rest)
-        .map(|idx| rest[idx + 1..].trim())
-        .unwrap_or(rest);
-    let lower = after.to_ascii_lowercase();
-    if lower.contains("done")
-        || lower.contains("killed")
-        || lower.contains("failed")
-        || lower.contains("completed")
-    {
-        return false;
-    }
-    lower.contains("working") || lower.contains("running") || lower.contains("starting")
-}
-
 /// Match background task rows in the active-items tray (`● [21:54:14] <desc> running` or
-/// `● <task> running`).
+/// `● <task> running`), excluding Swarm and Agent rows.
 fn is_running_background_task_row(line: &str) -> bool {
     let Some(body) = strip_tray_prefix(line) else {
         return false;
@@ -351,36 +247,11 @@ fn ends_with_running_token(text: &str) -> bool {
     prefix.ends_with(char::is_whitespace) && !prefix.trim().is_empty()
 }
 
-/// Check full-screen modal views in `agy` (`/swarm board` and `/tasks` overlay) where the
-/// normal prompt rules are replaced by an alternate-screen board.
+/// Check full-screen `/tasks` modal view in `agy` where the normal prompt rules are replaced
+/// by an alternate-screen task list (`<N> running, <M> done`).
 fn check_fullscreen_views(lines: &[&str]) -> Option<RefineDecision> {
-    let head_end = lines.len().min(6);
     let tail_start = lines.len().saturating_sub(6);
 
-    // 1. Full-screen `/swarm board`:
-    // Header has `Swarm(...)` or `Swarm  ✓ done`, and bottom/pane chrome mentions
-    // `Swarm board` or `Roster` + `Posts`.
-    let has_board_chrome = lines[tail_start..]
-        .iter()
-        .any(|l| l.contains("Swarm board") || l.contains("prev/next post"))
-        || (lines.iter().any(|l| l.contains("Roster"))
-            && lines.iter().any(|l| l.contains("Posts")));
-    if has_board_chrome
-        && let Some(header) = lines[..head_end]
-            .iter()
-            .map(|l| l.trim())
-            .find(|l| l.contains("Swarm(") || l.starts_with("Swarm "))
-    {
-        if header.contains("✓ done") || header.contains("✔ done") || is_swarm_row_finished(header)
-        {
-            return Some(RefineDecision::Keep);
-        }
-        return Some(RefineDecision::Working {
-            reason: REASON_SWARM,
-        });
-    }
-
-    // 2. `/tasks` modal view (`<N> running, <M> done`):
     for line in lines.iter().take(12).chain(lines[tail_start..].iter()) {
         if let Some(running) = parse_running_done_summary(line) {
             if running > 0 {
@@ -442,72 +313,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn active_swarm_tray_row_refines_to_working() {
-        let screen = "\
+    fn swarm_and_subagent_rows_do_not_refine_to_working() {
+        for screen in [
+            "\
 ● Done dispatching workers. Waiting on the board.
 
 ────────────────────────────────────────────────────────────────────────────────
 >
 ────────────────────────────────────────────────────────────────────────────────
-  ● Swarm(Morpho #3 Hybrid & #4 Exit Risk Assessment)  hybrid-risk: @risk-verifier … · 9 posts · alt+s board · alt+x dismiss
+  ● Swarm(Morpho #3 Hybrid & #4 Exit Risk Assessment)  hybrid-risk: running · 9 posts · alt+s board · alt+x dismiss
 ────────────────────────────────────────────────────────────────────────────────
-? for shortcuts                                 accept-edits · Gemini 4 Carbon · low";
-        assert_eq!(
-            refine_screen(screen),
-            RefineDecision::Working {
-                reason: REASON_SWARM
-            }
-        );
-    }
-
-    #[test]
-    fn finished_undismissed_swarm_rows_do_not_refine_to_working() {
-        for finished_row in [
-            "  ● Swarm(Morpho #3 Hybrid & #4 Exit Risk Assessment)  Done · 14 posts · alt+s board · alt+x dismiss",
-            "  ● Swarm(Morpho #3 Hybrid & #4 Exit Risk Assessment)  Done · 14 posts · alt+s…",
-            "  ● Swarm(Unbalanced (title)  Done · 8 posts · alt+s board · alt+x dismiss",
-            "  ● Swarm(Feature Audit)  ✓ done · 12 posts · alt+s board · alt+x dismiss",
-            "  ● Swarm  ✓ done · alt+s board · alt+x dismiss",
-            "  ● Swarm(Feature Audit)  Done · alt+s board · alt+x dismiss",
-            "  ● Swarm(Feature Audit)  Done",
-        ] {
-            let screen = format!(
-                "\
-● All swarm workers finished and reported back.
-
+? for shortcuts                                 accept-edits · Gemini 4 Carbon · low",
+            "\
 ────────────────────────────────────────────────────────────────────────────────
 >
 ────────────────────────────────────────────────────────────────────────────────
-{finished_row}
+  ● Agent(worker: Codebase Researcher)  Working · 2m14s
 ────────────────────────────────────────────────────────────────────────────────
-? for shortcuts                                 accept-edits · Gemini 4 Carbon · low"
-            );
-            assert_eq!(
-                refine_screen(&screen),
-                RefineDecision::Keep,
-                "{finished_row}"
-            );
+? for shortcuts                                 accept-edits · Gemini 4 Carbon",
+            "\
+────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────
+? for shortcuts             accept-edits · Gemini 4 Carbon · low · 2 subagent(s)",
+            "\
+Swarm(Backend Refactor)  3 working · 8 posts
+Roster                           Posts
+● author-1  working              #8 @coordinator: status check
+● verifier  waiting              #7 @author-1: tests green
+tab switch pane · all on Swarm board · esc close",
+        ] {
+            assert_eq!(refine_screen(screen), RefineDecision::Keep, "{screen}");
         }
 
-        // Conversely, an active Swarm whose worker post preview contains `Done` after `member:`
-        // must still be recognized as Working!
-        let active_preview_with_done = "\
-────────────────────────────────────────────────────────────────────────────────
->
-────────────────────────────────────────────────────────────────────────────────
-  ● Swarm(Morpho #3 Hybrid & #4 Exit Risk Assessment)  verifier: Done checking #3 · 6 posts · alt+s board · alt+x dismiss
-────────────────────────────────────────────────────────────────────────────────
-? for shortcuts                                 accept-edits · Gemini 4 Carbon · low";
-        assert_eq!(
-            refine_screen(active_preview_with_done),
-            RefineDecision::Working {
-                reason: REASON_SWARM
-            }
-        );
-
-        // And if an undismissed `Done` Swarm row shares the tray with a live background task,
-        // the terminal still refines to Working (`agy.background_task`) for the live task!
-        let finished_swarm_plus_running_task = "\
+        // If a Swarm row shares the tray with a live background task, the background task
+        // still refines to Working (`agy.background_task`).
+        let swarm_plus_running_task = "\
 ────────────────────────────────────────────────────────────────────────────────
 >
 ────────────────────────────────────────────────────────────────────────────────
@@ -516,38 +357,9 @@ mod tests {
 ────────────────────────────────────────────────────────────────────────────────
 ? for shortcuts                        accept-edits · Gemini 4 Carbon · 1 task(s) · /tasks";
         assert_eq!(
-            refine_screen(finished_swarm_plus_running_task),
+            refine_screen(swarm_plus_running_task),
             RefineDecision::Working {
                 reason: REASON_BACKGROUND_TASK
-            }
-        );
-    }
-
-    #[test]
-    fn active_subagent_row_or_footer_count_refines_to_working() {
-        let row_screen = "\
-────────────────────────────────────────────────────────────────────────────────
->
-────────────────────────────────────────────────────────────────────────────────
-  ● Agent(worker: Codebase Researcher)  Working · 2m14s
-────────────────────────────────────────────────────────────────────────────────
-? for shortcuts                                 accept-edits · Gemini 4 Carbon";
-        assert_eq!(
-            refine_screen(row_screen),
-            RefineDecision::Working {
-                reason: REASON_SWARM
-            }
-        );
-
-        let footer_screen = "\
-────────────────────────────────────────────────────────────────────────────────
->
-────────────────────────────────────────────────────────────────────────────────
-? for shortcuts             accept-edits · Gemini 4 Carbon · low · 2 subagent(s)";
-        assert_eq!(
-            refine_screen(footer_screen),
-            RefineDecision::Working {
-                reason: REASON_SWARM
             }
         );
     }
@@ -581,15 +393,10 @@ mod tests {
     }
 
     #[test]
-    fn card_93_prompt_and_chat_history_mentions_never_cause_false_positives() {
+    fn prompt_and_chat_history_mentions_never_cause_false_positives() {
         let screen = "\
 # Card #93: herdr 返回的状态不精确
-特征有两个
-1. swarm 模式会在下方 tui 有个 Swarm 的列表
-2. 后台任务执行时下方 tui 列表会有 xxxxxx running
-  ● Swarm(Example In Chat Transcript)  worker: running · alt+s board · alt+x dismiss
   ● [21:54:14] fake command in markdown block running
-这两个状态因为 agent 不活动都会被判断为 done, 但是其实应该是 running
 
 ● 已完成分析，请确认方案。
 
@@ -601,38 +408,17 @@ mod tests {
     }
 
     #[test]
-    fn user_typing_swarm_or_running_inside_prompt_box_is_ignored() {
+    fn user_typing_running_inside_prompt_box_is_ignored() {
         let screen = "\
 ────────────────────────────────────────────────────────────────────────────────
 > ● [12:00:00] test running
-  ● Swarm(Drafting prompt) running
 ────────────────────────────────────────────────────────────────────────────────
 ? for shortcuts                                 accept-edits · Gemini 4 Carbon · low";
         assert_eq!(refine_screen(screen), RefineDecision::Keep);
     }
 
     #[test]
-    fn fullscreen_swarm_board_and_tasks_modal_views_are_handled() {
-        let active_board = "\
-Swarm(Backend Refactor)  3 working · 8 posts
-Roster                           Posts
-● author-1  working              #8 @coordinator: status check
-● verifier  waiting              #7 @author-1: tests green
-tab switch pane · all on Swarm board · esc close";
-        assert_eq!(
-            refine_screen(active_board),
-            RefineDecision::Working {
-                reason: REASON_SWARM
-            }
-        );
-
-        let done_board = "\
-Swarm(Backend Refactor)  ✓ done · 12 posts
-Roster                           Posts
-● author-1  killed               #12 @coordinator: all landed
-tab switch pane · all on Swarm board · esc close";
-        assert_eq!(refine_screen(done_board), RefineDecision::Keep);
-
+    fn fullscreen_tasks_modal_views_are_handled() {
         let active_tasks_modal = "\
 Background Tasks  2 running, 1 done
   [21:54:14] mise run acceptance  running

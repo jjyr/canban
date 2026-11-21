@@ -676,7 +676,7 @@ fn authoritative_missing_resolves_terminal_input_but_keeps_task_decisions_and_kn
 }
 
 #[test]
-fn agy_screen_refinement_keeps_swarm_and_background_tasks_working_without_idle_polling() {
+fn agy_screen_refinement_keeps_background_tasks_working_without_idle_polling() {
     let (dir, app, p, c) = setup();
     let hc_script = dir.path().join("refine-hc");
     std::fs::write(
@@ -770,19 +770,19 @@ for line in sys.stdin:
         })
         .unwrap();
 
-    // 2. Both terminals emit raw `idle`/`done` after turn 1, while `t1` has an active Swarm row
-    //    and `t2` has a running background task in the bottom TUI tray.
+    // 2. Both terminals emit raw `idle`/`done` after turn 1 while running background tasks
+    //    in the bottom TUI tray.
     std::fs::write(
         dir.path().join("screen-t1.txt"),
         "\
-● Launched Swarm workers.
+● Running checks in the background.
 
 ────────────────────────────────────────────────────────────────────────────────
 >
 ────────────────────────────────────────────────────────────────────────────────
-  ● Swarm(Card #93 Verification)  verifier: running checks · 3 posts · alt+s board · alt+x dismiss
+  ● [22:55:00] cargo nextest run --workspace running
 ────────────────────────────────────────────────────────────────────────────────
-? for shortcuts                                 accept-edits · Gemini 4 Carbon · low\n",
+? for shortcuts                        accept-edits · Gemini 4 Carbon · 1 task(s) · /tasks\n",
     )
     .unwrap();
     std::fs::write(
@@ -837,7 +837,7 @@ for line in sys.stdin:
     assert_eq!(a1.observed.as_ref().unwrap()["status"]["raw_state"], "idle");
     assert_eq!(
         a1.observed.as_ref().unwrap()["status"]["refined"],
-        "agy.swarm"
+        "agy.background_task"
     );
     assert!(a1.lifecycle.idle_since.is_none());
     assert_eq!(canban_scheduler::active_count(&s), 1);
@@ -888,8 +888,8 @@ for line in sys.stdin:
             .is_some()
     );
 
-    // 4. Swarm finishes (`Done · 14 posts ...` remaining undismissed in tray) and background task
-    //    exits; when raw status returns to `done` at turn 2, a single probe marks both `Done` and
+    // 4. Background tasks exit (even if an undismissed Swarm row remains in the tray);
+    //    when raw status returns to `done` at turn 2, a single probe marks both `Done` and
     //    clears `refine_deadline` (zero further polling!).
     std::fs::write(
         dir.path().join("screen-t1.txt"),
@@ -897,7 +897,7 @@ for line in sys.stdin:
 ────────────────────────────────────────────────────────────────────────────────
 >
 ────────────────────────────────────────────────────────────────────────────────
-  ● Swarm(Card #93 Verification)  Done · 14 posts · alt+s board · alt+x dismiss
+  ● Swarm(Card #93 Verification)  verifier: running checks · 3 posts · alt+s board · alt+x dismiss
 ────────────────────────────────────────────────────────────────────────────────
 ? for shortcuts                                 accept-edits · Gemini 4 Carbon · low\n",
     )
