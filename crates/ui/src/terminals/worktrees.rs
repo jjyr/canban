@@ -696,11 +696,17 @@ fn create_modal(ui: Ui) -> impl IntoElement {
             let error = signal(String::new());
 
             let close_modal = move || {
+                if ui.is_method_pending("worktree.create") {
+                    return;
+                }
                 ui.worktree_modal.set(None);
                 ui.terminal_focus.update(|n| *n += 1);
             };
 
             let submit = move || {
+                if ui.is_method_pending("worktree.create") {
+                    return;
+                }
                 let pid = project_id.get_untracked();
                 let br = branch.get_untracked().trim().to_owned();
                 if pid.is_empty() {
@@ -711,6 +717,7 @@ fn create_modal(ui: Ui) -> impl IntoElement {
                     error.set("Enter a Git branch name (for example feat/my-branch)".into());
                     return;
                 }
+                error.set(String::new());
                 let base = base_branch.get_untracked().trim().to_owned();
                 let sync = sync_base.get_untracked();
                 let launch = launch_mode.get_untracked();
@@ -731,9 +738,11 @@ fn create_modal(ui: Ui) -> impl IntoElement {
                         created_at: canban_types::now(),
                     };
                     let wt_open = wt.clone();
-                    ui.snapshot.update(|s| s.worktrees.push(wt));
-                    ui.worktree_modal.set(None);
-                    ui.navigate("terminals");
+                    batch(|| {
+                        ui.snapshot.update(|s| s.worktrees.push(wt));
+                        ui.worktree_modal.set(None);
+                        ui.navigate("terminals");
+                    });
                     if launch != "none" {
                         open_shell(ui, &wt_open);
                     }
@@ -753,12 +762,14 @@ fn create_modal(ui: Ui) -> impl IntoElement {
                     }),
                     move |res| match res {
                         Ok(val) => {
-                            ui.worktree_modal.set(None);
-                            if let Some(tid) = val["terminal"]["id"].as_str() {
-                                ui.open_terminal(tid.to_owned());
-                            } else {
-                                ui.navigate("terminals");
-                            }
+                            batch(|| {
+                                ui.worktree_modal.set(None);
+                                if let Some(tid) = val["terminal"]["id"].as_str() {
+                                    ui.open_terminal(tid.to_owned());
+                                } else {
+                                    ui.navigate("terminals");
+                                }
+                            });
                         }
                         Err(e) => {
                             let _ = error.try_set(e);
@@ -945,6 +956,25 @@ fn create_modal(ui: Ui) -> impl IntoElement {
                                         )),
                                 )
                                 .child(when(
+                                    move || ui.is_method_pending("worktree.create"),
+                                    move || {
+                                        view()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(live_dot(ACCENT))
+                                            .child(muted(move || {
+                                                if sync_base.get() {
+                                                    "Syncing base branch, creating Git worktree and starting terminal…"
+                                                } else if launch_mode.get() == "none" {
+                                                    "Creating Git branch worktree…"
+                                                } else {
+                                                    "Creating Git branch worktree and starting terminal…"
+                                                }
+                                            }))
+                                    },
+                                ))
+                                .child(when(
                                     move || !error.get().is_empty(),
                                     move || notice(move || error.get(), Tone::Attention),
                                 ))
@@ -953,12 +983,25 @@ fn create_modal(ui: Ui) -> impl IntoElement {
                                         .flex_row()
                                         .justify_end()
                                         .gap_2()
-                                        .child(action("Cancel", Variant::Quiet, move |_| {
-                                            close_modal()
-                                        }))
+                                        .child(
+                                            action("Cancel", Variant::Quiet, move |_| close_modal())
+                                                .disabled(move || {
+                                                    ui.is_method_pending("worktree.create")
+                                                }),
+                                        )
                                         .child(
                                             action(
-                                                "Create Worktree",
+                                                move || {
+                                                    if ui.is_method_pending("worktree.create") {
+                                                        if sync_base.get() {
+                                                            "Syncing & creating…"
+                                                        } else {
+                                                            "Creating…"
+                                                        }
+                                                    } else {
+                                                        "Create Worktree"
+                                                    }
+                                                },
                                                 Variant::Primary,
                                                 move |_| submit(),
                                             )

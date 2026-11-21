@@ -191,6 +191,174 @@ fn pane_extent(total: f32, left: f32, full: bool) -> f32 {
         (total - left).clamp(340., (total - 540.).max(340.))
     }
 }
+
+/// A stable resizable workspace whose left pane reveals and collapses at its
+/// fixed target width. Uses NSH native layout transitions (`PANEL_IN` /
+/// `PANEL_OUT`) plus `Presence` opacity so content never reflows frame-by-frame
+/// while sliding and the right pane (e.g. live native Terminal) smoothly yields
+/// or reclaims space.
+#[allow(clippy::too_many_arguments)]
+pub fn reveal_left_split(
+    left: AnyElement,
+    right: AnyElement,
+    width: Signal<f32>,
+    min_left: f32,
+    max_left: f32,
+    min_right: f32,
+    full: Memo<bool>,
+    open: Memo<bool>,
+    handle_label: impl Into<SharedString>,
+    on_resize: impl Fn(f32) + 'static,
+) -> impl IntoElement {
+    let total = signal(0f32);
+    let group_ref = element_ref();
+    let presence = super::motion::Presence::new(open);
+    let extent = signal(width.get_untracked().clamp(min_left, max_left));
+    effect(move || {
+        if open.get() {
+            let t = total.get();
+            let next = if full.get() {
+                if t > 0. { t } else { min_left }
+            } else if t > 0. {
+                width
+                    .get()
+                    .clamp(min_left, max_left.min((t - min_right).max(min_left)))
+            } else {
+                width.get().clamp(min_left, max_left)
+            };
+            extent.set(next);
+        }
+    });
+    let prev_open = stored(open.get_untracked());
+    effect(move || {
+        let is_open = open.get();
+        if prev_open.replace(is_open) != is_open {
+            let ms = if is_open {
+                super::motion::PANEL_IN
+            } else {
+                super::motion::PANEL_OUT
+            };
+            super::motion::layout(group_ref, ms);
+        }
+    });
+    let wide = computed(move || open.get() && !full.get());
+    view()
+        .element_ref(&group_ref)
+        .flex_1()
+        .min_w(px(0.))
+        .min_h(px(0.))
+        .on_layout(move |b: &Bounds<Points>| {
+            if (b.size.width.0 - total.get_untracked()).abs() > 0.5 {
+                total.set(b.size.width.0);
+            }
+        })
+        .child(
+            nsh_base::h_resizable()
+                .flex_1()
+                .min_h(px(0.))
+                .min_w(px(0.))
+                .disabled(move || !wide.get())
+                .handle_class(move || {
+                    if wide.get() {
+                        Some(SharedString::from(HANDLE_CLASS))
+                    } else {
+                        Some(SharedString::from("w-0"))
+                    }
+                })
+                .handle_accessibility_label(handle_label.into())
+                .on_resize(move |sizes: &Vec<Points>| {
+                    if wide.get_untracked()
+                        && let Some(size) = sizes.first()
+                    {
+                        let clamped = size.0.max(min_left);
+                        width.set(clamped);
+                        on_resize(clamped);
+                    }
+                })
+                .child(
+                    nsh_base::resizable_panel()
+                        .size(move || px(if open.get() { extent.get() } else { 0. }))
+                        .min_size(move || px(if wide.get() { min_left } else { 0. }))
+                        .max_size(move || {
+                            px(if wide.get() {
+                                let t = total.get();
+                                if t > 0. {
+                                    max_left.min((t - min_right).max(min_left))
+                                } else {
+                                    max_left
+                                }
+                            } else if open.get() {
+                                let t = total.get();
+                                if t > 0. { t } else { 10000. }
+                            } else {
+                                0.
+                            })
+                        })
+                        .fixed(move || !wide.get())
+                        .child(
+                            view()
+                                .element_ref(&presence.region)
+                                .flex_1()
+                                .min_w(px(0.))
+                                .min_h(px(0.))
+                                .overflow_hidden()
+                                .accessibility_elements_hidden(move || !open.get())
+                                .pointer_events(move || {
+                                    if open.get() {
+                                        PointerEvents::Auto
+                                    } else {
+                                        PointerEvents::None
+                                    }
+                                })
+                                .bind_opacity(&presence.opacity)
+                                .child(
+                                    view()
+                                        .w(move || px(extent.get()))
+                                        .h_full()
+                                        .flex_shrink_0()
+                                        .child(left),
+                                ),
+                        ),
+                )
+                .child(
+                    nsh_base::resizable_panel()
+                        .size(move || {
+                            let t = total.get();
+                            if t > 0. {
+                                Some(px((t - if open.get() { extent.get() } else { 0. }).max(0.)))
+                            } else {
+                                None
+                            }
+                        })
+                        .min_size(move || px(if wide.get() { min_right } else { 0. }))
+                        .max_size(move || {
+                            px(if open.get() && full.get() {
+                                0.
+                            } else {
+                                let t = total.get();
+                                if t > 0. { t } else { 10000. }
+                            })
+                        })
+                        .fixed(move || !wide.get())
+                        .child(
+                            view()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .min_h(px(0.))
+                                .overflow_hidden()
+                                .accessibility_elements_hidden(move || open.get() && full.get())
+                                .pointer_events(move || {
+                                    if open.get() && full.get() {
+                                        PointerEvents::None
+                                    } else {
+                                        PointerEvents::Auto
+                                    }
+                                })
+                                .child(right),
+                        ),
+                ),
+        )
+}
 #[cfg(test)]
 mod tests {
     use super::*;

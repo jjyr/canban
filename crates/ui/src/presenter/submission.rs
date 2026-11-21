@@ -228,14 +228,35 @@ impl CommittedWrites {
                 }
             }
             "worktree.create" => {
-                if let Ok(wt) = serde_json::from_value::<ManagedWorktree>(reply["worktree"].clone())
-                {
+                let created_wt =
+                    serde_json::from_value::<ManagedWorktree>(reply["worktree"].clone()).ok();
+                if let Some(wt) = created_wt.clone() {
                     self.removed_worktrees.remove(&wt.id);
                     self.worktrees.insert(wt.id.clone(), (wt, host.into()));
                 }
                 if let Ok(terminal) =
                     serde_json::from_value::<TerminalEntry>(reply["terminal"].clone())
                 {
+                    if let (Some(wt), Some(runtime)) =
+                        (created_wt.as_ref(), terminal.runtime.as_ref())
+                        && let (Some(core_id), Some(pty_id)) =
+                            (runtime.core_id.as_ref(), runtime.terminal.as_ref())
+                    {
+                        self.record_terminal_hint(TerminalContext {
+                            machine: wt.location.machine.clone(),
+                            terminal_id: terminal.id.clone(),
+                            core_id: core_id.clone(),
+                            terminal: pty_id.clone(),
+                            cwd: Some(wt.path.clone()),
+                            directory_root: Some(wt.path.clone()),
+                            project_id: Some(wt.project_id.clone()),
+                            card_id: None,
+                            worktree_id: Some(wt.id.clone()),
+                            branch: Some(wt.branch.clone()),
+                            dirty: false,
+                            ..Default::default()
+                        });
+                    }
                     self.record_terminal(terminal, host);
                 }
             }

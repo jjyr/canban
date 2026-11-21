@@ -1371,67 +1371,49 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .flex_1()
                 .min_h(px(0.))
                 .min_w(px(0.))
-                .child(
-                    canban_ui_kit::split::horizontal_group("Resize Terminal sidebar")
-                        .on_resize(move |sizes: &Vec<Points>| {
-                            if !ui.narrow.get_untracked()
-                                && ui.terminal_sidebar.get_untracked()
-                                && let Some(size) = sizes.first()
-                            {
-                                ui.terminal_width.set(size.0.max(190.));
-                                ui.terminal_focus.update(|v| *v += 1);
-                            }
-                        })
+                .child({
+                    let narrow = computed(move || ui.narrow.get());
+                    let sidebar_open = computed(move || ui.terminal_sidebar.get());
+                    let left_pane = view()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .bg(SURFACE)
                         .child(
-                            nsh_base::resizable_panel()
-                                .visible(move || ui.terminal_sidebar.get())
-                                .size(move || {
-                                    if ui.narrow.get() {
-                                        None
-                                    } else {
-                                        Some(px(ui.terminal_width.get()))
-                                    }
-                                })
-                                .min_size(px(190.))
-                                .max_size(move || px(if ui.narrow.get() { 10000. } else { 544. }))
-                                .fixed(move || !ui.narrow.get())
-                                .child(
-                                    view()
-                                        .flex_1()
-                                        .min_h(px(0.))
-                                        .bg(SURFACE)
-                                        .child(
-                                            view()
-                                                .h(px(42.))
-                                                .flex_shrink_0()
-                                                .flex_row()
-                                                .items_center()
-                                                .border_b_1()
-                                                .border_color(BORDER)
-                                                .window_drag(true)
-                                                .pl(move || {
-                                                    px((crate::frame::chrome_left_padding() - 56.)
-                                                        .max(6.))
-                                                })
-                                                .child(controls(ui)),
-                                        )
-                                        .child(tree::sidebar(ui)),
-                                ),
+                            view()
+                                .h(px(42.))
+                                .flex_shrink_0()
+                                .flex_row()
+                                .items_center()
+                                .border_b_1()
+                                .border_color(BORDER)
+                                .window_drag(true)
+                                .pl(move || px((crate::frame::chrome_left_padding() - 56.).max(6.)))
+                                .child(controls(ui)),
                         )
-                        .child(
-                            nsh_base::resizable_panel()
-                                .min_size(px(300.))
-                                .visible(move || !ui.narrow.get() || !ui.terminal_sidebar.get())
-                                .child(
-                                    view()
-                                        .flex_1()
-                                        .min_h(px(0.))
-                                        .min_w(px(0.))
-                                        .child(tabs::header(ui))
-                                        .child(viewer::screen(ui)),
-                                ),
-                        ),
-                )
+                        .child(tree::sidebar(ui))
+                        .into_element();
+                    let right_pane = view()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .min_w(px(0.))
+                        .child(tabs::header(ui))
+                        .child(viewer::screen(ui))
+                        .into_element();
+                    canban_ui_kit::split::reveal_left_split(
+                        left_pane,
+                        right_pane,
+                        ui.terminal_width,
+                        190.,
+                        544.,
+                        300.,
+                        narrow,
+                        sidebar_open,
+                        "Resize Terminal sidebar",
+                        move |_| {
+                            ui.terminal_focus.update(|v| *v += 1);
+                        },
+                    )
+                })
                 .child(crate::frame::backend_notice(ui))
                 .child(crate::utilities::bar(ui)),
         )

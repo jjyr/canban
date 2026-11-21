@@ -748,12 +748,6 @@ print(json.dumps({'kind':'clean'}))"#,
         let source = Path::new(&project.directory);
         let branch = branch.trim();
         ensure!(!branch.is_empty(), "Branch name is required");
-        ensure!(
-            self.git(source, &["rev-parse", "--verify", "HEAD"])?
-                .status
-                .success(),
-            "Initialize a Git repository with at least one commit before creating a worktree"
-        );
         self.checked(source, &["check-ref-format", "--branch", branch])?;
         let base = base_branch
             .map(str::trim)
@@ -775,7 +769,18 @@ print(json.dumps({'kind':'clean'}))"#,
             }
         }
         let start_ref = format!("refs/heads/{base}");
-        let base_commit = self.checked(source, &["rev-parse", "--verify", &start_ref])?;
+        let base_commit = match self.checked(source, &["rev-parse", "--verify", &start_ref]) {
+            Ok(commit) => commit,
+            Err(err) => {
+                ensure!(
+                    self.git(source, &["rev-parse", "--verify", "HEAD"])?
+                        .status
+                        .success(),
+                    "Initialize a Git repository with at least one commit before creating a worktree"
+                );
+                return Err(err);
+            }
+        };
         let target = self.create_standalone(home, project, branch, &start_ref)?;
         Ok((target, base, base_commit))
     }

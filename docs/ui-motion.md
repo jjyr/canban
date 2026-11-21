@@ -15,7 +15,7 @@ must not start movement throughout the window.
 | --- | --- | --- |
 | Board → Card pane | 220ms ease-out reveal and fade | Board stays mounted; text is laid out at the final pane width |
 | Card pane → Board | 180ms ease-out collapse and fade | Outgoing Card remains mounted until native animation completion; pointer input and submit shortcuts stop immediately |
-| Card live terminal / GitHub detail split | `reveal_split` (220ms in / 180ms out) | Primary left pane stays mounted (preserving scroll, selection and undo); right pane reveals/collapses without tearing down the reader or list |
+| Card live terminal / GitHub detail split / Terminals sidebar | `reveal_split` / `reveal_left_split` (220ms in / 180ms out) | Primary pane stays mounted while the collapsible pane reveals/collapses at its fixed target width with opacity fade |
 | Focused/unfocused comment editor | 160ms scoped layout transition | Same editor, selection and undo owner; focused controls expand and blur compacts them |
 | Quick Open / Project chooser / utility popup / Terminal rename | NSH native 200ms fade | Native modal dismissal removes interaction immediately and animates its outgoing image |
 | `SearchPopover` / `tooltip_box` | 150ms ease-out opacity (+ `scale-95` for popovers) | Uses NSH `PopupPresence` (`POPUP_CLASS`, `starting_*`/`ending_*`) so exit transitions finish before unmount |
