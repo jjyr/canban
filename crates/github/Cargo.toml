@@ -10,15 +10,23 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = ["client"]
+client = [
+    "dep:ureq",
+    "dep:secrecy",
+    "dep:tempfile",
+    "dep:sha2",
+    "dep:canban-exec",
+]
+
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-ureq = { version = "3", features = ["json"] }
-secrecy = { version = "0.10", features = ["serde"] }
-
-tempfile.workspace = true
-
-sha2.workspace = true
-canban-exec.workspace = true
+ureq = { version = "3", features = ["json"], optional = true }
+secrecy = { version = "0.10", features = ["serde"], optional = true }
+tempfile = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+canban-exec = { workspace = true, optional = true }
 canban-types.workspace = true

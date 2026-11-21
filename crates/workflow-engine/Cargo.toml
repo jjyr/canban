@@ -10,14 +10,24 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = ["runtime"]
+runtime = [
+    "dep:canban-storage",
+    "dep:canban-timeline",
+    "dep:canban-notifications",
+    "dep:canban-kanban",
+    "dep:canban-context",
+]
+
 [dependencies]
 anyhow.workspace = true
 canban-types.workspace = true
 serde_json.workspace = true
-canban-storage.workspace = true
-canban-timeline.workspace = true
-canban-notifications.workspace = true
-canban-kanban.workspace = true
-canban-context.workspace = true
+canban-storage = { workspace = true, optional = true }
+canban-timeline = { workspace = true, optional = true }
+canban-notifications = { workspace = true, optional = true }
+canban-kanban = { workspace = true, optional = true }
+canban-context = { workspace = true, optional = true }
 serde.workspace = true
 serde_yaml_ng = "0.10"

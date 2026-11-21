@@ -72,6 +72,7 @@ pub mod definition;
 pub use definition::{compile_rule_selector, matches, validate_definition};
 
 pub mod migrations;
+#[cfg(feature = "runtime")]
 pub mod runtime;
 
 pub mod source;

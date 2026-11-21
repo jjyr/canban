@@ -1,6 +1,9 @@
 //! Resolve editable presets and prepare provider-adapted process launches.
+#[cfg(feature = "local-exec")]
 mod adapters;
+#[cfg(feature = "local-exec")]
 pub mod launch;
+#[cfg(feature = "local-exec")]
 pub use launch::{LaunchRequest, LaunchSpec, prepare_launch};
 pub mod mentions;
 pub use mentions::{addressed, remove_address};
@@ -14,10 +17,9 @@ pub use catalog::{
 use anyhow::{Context, Result, bail, ensure};
 use canban_types::{Config, ExitAction, Profile, Project};
 use serde_json::{Value, json};
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+#[cfg(feature = "local-exec")]
+use std::path::PathBuf;
+use std::{collections::BTreeMap, path::Path};
 
 pub fn presets(home: &Path) -> Result<BTreeMap<String, Profile>> {
     let mut presets = BTreeMap::new();
@@ -177,7 +179,10 @@ fn sync_inherited_resume_binary(
 pub fn resolve(config: Config, home: &Path) -> Result<Config> {
     let presets = presets(home)?;
     let mut config = config;
-    config.hc = executable_with_env(&config.hc, &config.hc_env);
+    #[cfg(feature = "local-exec")]
+    {
+        config.hc = executable_with_env(&config.hc, &config.hc_env);
+    }
     let snapshot_profiles = config.profiles.clone();
     for profile in &mut config.profiles {
         profile.model = profile
@@ -464,6 +469,7 @@ pub fn apply_project_override(
 }
 
 /// Find an executable path on the local host if installed; returns `None` when missing.
+#[cfg(feature = "local-exec")]
 pub fn find_local_executable(program: &str) -> Option<PathBuf> {
     find_local_executable_with_env(program, &BTreeMap::new())
 }
@@ -471,6 +477,7 @@ pub fn find_local_executable(program: &str) -> Option<PathBuf> {
 /// Find a local executable, honoring optional overrides (`CANBAN_HERDR_SEARCH_PATHS`,
 /// `HC_INSTALL_DIR`) from `env` or process environment, and falling back from default
 /// `hc` to `herdr-core` when another tool did not claim `hc`.
+#[cfg(feature = "local-exec")]
 pub fn find_local_executable_with_env(
     program: &str,
     env: &BTreeMap<String, String>,
@@ -497,10 +504,12 @@ pub fn find_local_executable_with_env(
     None
 }
 
+#[cfg(feature = "local-exec")]
 pub fn executable(program: &str) -> String {
     executable_with_env(program, &BTreeMap::new())
 }
 
+#[cfg(feature = "local-exec")]
 pub fn executable_with_env(program: &str, env: &BTreeMap<String, String>) -> String {
     find_local_executable_with_env(program, env)
         .map(|p| p.to_string_lossy().into_owned())

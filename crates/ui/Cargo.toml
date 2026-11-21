@@ -23,8 +23,8 @@ local-host = [
 
 [dependencies]
 canban-profiler.workspace = true
-canban-github.workspace = true
-canban-workflow-engine.workspace = true
+canban-github = { workspace = true, default-features = false }
+canban-workflow-engine = { workspace = true, default-features = false }
 canban-updater = { workspace = true, optional = true }
 canban-themes.workspace = true
 chrono.workspace = true
@@ -38,7 +38,7 @@ nsh-core.workspace = true
 nsh-base.workspace = true
 canban-exec = { workspace = true, optional = true }
 canban-types.workspace = true
-canban-profiles.workspace = true
+canban-profiles = { workspace = true, default-features = false }
 canban-context.workspace = true
 canban-scheduler = { workspace = true, optional = true }
 canban-notifications.workspace = true

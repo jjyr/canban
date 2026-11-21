@@ -1,11 +1,32 @@
 //! GitHub protocol and credentials. No Card, database, UI or execution policy.
+#[cfg(feature = "client")]
 pub mod auth;
+#[cfg(feature = "client")]
 pub mod cache;
+#[cfg(feature = "client")]
 pub mod cli;
+#[cfg(feature = "client")]
 mod client;
+#[cfg(feature = "client")]
 mod credentials;
+#[cfg(feature = "client")]
 pub mod models;
-pub use client::{Client, remote_repository, repository, segment};
+#[cfg(feature = "client")]
+pub use client::{Client, remote_repository, segment};
+
+pub fn repository(value: &str) -> anyhow::Result<String> {
+    let parts: Vec<_> = value.trim().split('/').collect();
+    anyhow::ensure!(
+        parts.len() == 2
+            && parts.iter().all(|s| !s.is_empty()
+                && *s != "."
+                && *s != ".."
+                && s.bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))),
+        "Use a GitHub repository in owner/repo form"
+    );
+    Ok(parts.join("/"))
+}
 
 /// Canonical GitHub references; parsing never creates a Card or performs network IO.
 pub fn parse_reference(url: &str) -> anyhow::Result<canban_types::GitHubReference> {

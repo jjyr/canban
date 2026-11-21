@@ -13,19 +13,7 @@ pub struct Client {
     cache_generation: u64,
     cli: Option<(std::sync::Arc<crate::cli::Service>, u64, u64)>,
 }
-pub fn repository(value: &str) -> Result<String> {
-    let parts: Vec<_> = value.trim().split('/').collect();
-    ensure!(
-        parts.len() == 2
-            && parts.iter().all(|s| !s.is_empty()
-                && *s != "."
-                && *s != ".."
-                && s.bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))),
-        "Use a GitHub repository in owner/repo form"
-    );
-    Ok(parts.join("/"))
-}
+pub use crate::repository;
 pub fn segment(value: &str) -> String {
     value
         .bytes()

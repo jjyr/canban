@@ -10,11 +10,15 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = ["local-exec"]
+local-exec = ["dep:canban-exec"]
+
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-canban-exec.workspace = true
+canban-exec = { workspace = true, optional = true }
 canban-types.workspace = true
 
 [dev-dependencies]
