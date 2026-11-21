@@ -1413,10 +1413,15 @@ fn render_timeline_1d(ui: Ui, dash: &Dashboard, project_order: &[String]) -> Vie
     .max(win_start_ms.saturating_add(1));
     let span = (win_end_ms.saturating_sub(win_start_ms)).max(1) as f64;
 
-    let step = if end_h.saturating_sub(start_h) <= 14 {
+    let span_h = end_h.saturating_sub(start_h);
+    let step = if span_h <= 12 {
         1usize
-    } else {
+    } else if span_h.is_multiple_of(3) {
         3usize
+    } else if span_h.is_multiple_of(2) {
+        2usize
+    } else {
+        1usize
     };
     let ticks: Vec<u32> = (start_h..=end_h).step_by(step).collect();
     let tick_count = ticks.len();
@@ -1430,7 +1435,7 @@ fn render_timeline_1d(ui: Ui, dash: &Dashboard, project_order: &[String]) -> Vie
         .flex_row()
         .items_center()
         .gap_2()
-        .child(view().w(px(136.)).flex_shrink_0())
+        .child(view().w(px(168.)).flex_shrink_0())
         .child(
             view()
                 .flex_1()
@@ -1584,7 +1589,7 @@ fn render_timeline_1d(ui: Ui, dash: &Dashboard, project_order: &[String]) -> Vie
             };
 
             let mut left_label = view()
-                .w(px(136.))
+                .w(px(168.))
                 .flex_shrink_0()
                 .flex_row()
                 .items_center()
@@ -1709,7 +1714,7 @@ fn render_timeline_1d(ui: Ui, dash: &Dashboard, project_order: &[String]) -> Vie
             muted("Merges")
                 .text_size(px(11.5))
                 .font_weight(FontWeight::MEDIUM)
-                .w(px(136.))
+                .w(px(168.))
                 .flex_shrink_0(),
         )
         .child(merges_track)
@@ -1719,32 +1724,34 @@ fn render_timeline_1d(ui: Ui, dash: &Dashboard, project_order: &[String]) -> Vie
                 .flex_shrink_0(),
         );
 
-    let mut footer = view()
-        .flex_row()
-        .flex_wrap()
-        .items_center()
-        .gap_1p5()
-        .child(note("Color = Project ("));
-    for (idx, p) in dash.project_stats.iter().take(6).enumerate() {
-        if idx > 0 {
-            footer = footer.child(note(" "));
+    let mut footer = view().flex_row().flex_wrap().items_center().gap_1p5();
+    if dash.project_stats.is_empty() {
+        footer = footer.child(note(
+            "Color = Project · Hover for card & duration · Click to open",
+        ));
+    } else {
+        footer = footer.child(note("Color = Project ("));
+        for (idx, p) in dash.project_stats.iter().take(6).enumerate() {
+            if idx > 0 {
+                footer = footer.child(note(" "));
+            }
+            footer = footer.child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(note(p.name.clone()))
+                    .child(
+                        view()
+                            .w(px(8.))
+                            .h(px(8.))
+                            .rounded(px(2.))
+                            .bg(project_color(Some(&p.id), project_order)),
+                    ),
+            );
         }
-        footer = footer.child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .child(note(p.name.clone()))
-                .child(
-                    view()
-                        .w(px(8.))
-                        .h(px(8.))
-                        .rounded(px(2.))
-                        .bg(project_color(Some(&p.id), project_order)),
-                ),
-        );
+        footer = footer.child(note(") · Hover for card & duration · Click to open"));
     }
-    footer = footer.child(note(") · Hover for card & duration · Click to open"));
 
     let has_any = tl.lanes.iter().any(|l| !l.blocks.is_empty()) || !tl.merges.is_empty();
     let mut panel = card_surface()
@@ -4573,5 +4580,35 @@ mod tests {
         assert!(tree.has_mounted_text("Past year"));
         assert!(tree.has_mounted_text("Timings"));
         assert!(!tree.has_mounted_text("Execution → resolution"));
+    }
+
+    #[test]
+    fn insights_empty_state_omits_empty_project_parentheses() {
+        #[component]
+        fn EmptyHarness() -> impl IntoElement {
+            let ui = build_test_ui(1_794_744_000_000u64, false);
+            ui.snapshot.set(Snapshot::default());
+            ui.insights.events.set(Rc::new(Vec::new()));
+            ui.insights.activity.set(Rc::new(ActivityInput {
+                loaded: true,
+                ..Default::default()
+            }));
+            ui.project.set(ALL_PROJECTS_OPTION.into());
+            view()
+                .w(px(1400.))
+                .h(px(3600.))
+                .child(crate::frame::screen(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1400.), px(3600.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<EmptyHarness>());
+        let mut tree = Tracker::new();
+        pump(&mut core, &mut tree);
+
+        assert!(
+            tree.has_mounted_text("Color = Project · Hover for card & duration · Click to open")
+        );
+        assert!(!tree.has_mounted_substring("Color = Project ("));
     }
 }
