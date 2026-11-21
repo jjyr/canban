@@ -304,7 +304,7 @@ fn flush_pending(ui: Ui) {
 }
 
 pub fn init(ui: Ui) {
-    if crate::APP.get().is_none() && crate::HOSTS.get().is_none() {
+    if !crate::backend::is_connected() {
         return;
     }
     effect(move || {
@@ -329,7 +329,7 @@ pub fn init(ui: Ui) {
 }
 
 pub fn tick(ui: Ui) {
-    if crate::APP.get().is_none() && crate::HOSTS.get().is_none() {
+    if !crate::backend::is_connected() {
         return;
     }
     let now = canban_types::now();
