@@ -1,11 +1,13 @@
-//! Pure local-date aggregation of Kanban completions (merges), pipeline WIP, Agent scheduling,
-//! automation health, and Day-over-Day / Week-over-Week personal efficiency trajectories.
+//! Pure local-date aggregation of time allocation, Agent working duration,
+//! Kanban throughput, pipeline automation, and same-progress period comparisons.
 //!
-//! Operates directly on `canban_types::Snapshot` (optionally accelerated with pre-bucketed
-//! `events_by_card` indices) with zero extra RPCs or SQLite queries, so multi-host merged
-//! snapshots and standalone Gallery fixtures behave identically.
+//! Operates directly on `canban_types::Snapshot`, `Event`, and persisted
+//! `ActivitySegment` / `ActivityBucket` data with zero extra IO.
 
-use canban_types::{Card, CardContent, Event, ExecutionTrigger, Profile, Snapshot};
+use canban_types::{
+    ActivityBucket, ActivityDetail, ActivityKind, ActivitySegment, Card, CardContent, DwellLane,
+    Event, ExecutionTrigger, Profile, Snapshot,
+};
 use chrono::{Datelike, Duration, NaiveDate, TimeZone, Timelike};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -48,15 +50,34 @@ impl RangeWindow {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum TrendCadence {
+pub enum AgentGroup {
     #[default]
-    Daily,
-    Weekly,
+    Profile,
+    Model,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HeatmapMetric {
+    #[default]
+    Resolved,
+    Dwell,
+    Agent,
+}
+
+impl HeatmapMetric {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Resolved => "Resolved",
+            Self::Dwell => "My time",
+            Self::Agent => "Agent time",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ProjectSort {
     #[default]
+    Time,
     Merged,
     Created,
     Wip,
@@ -141,62 +162,180 @@ impl DayBucket {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct WeekBucket {
-    pub week_start: NaiveDate,
-    pub week_end: NaiveDate,
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ActivityInput {
+    pub period_segments: Vec<ActivitySegment>,
+    pub baseline_segments: Vec<ActivitySegment>,
+    pub range_buckets: Vec<ActivityBucket>,
+    pub baseline_buckets: Vec<ActivityBucket>,
+    pub annual_buckets: Vec<ActivityBucket>,
+    pub loaded: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TimeTotals {
+    pub dwell_total_ms: u64,
+    pub dwell_card_ms: u64,
+    pub dwell_terminal_ms: u64,
+    pub dwell_other_ms: u64,
+    pub prev_dwell_total_ms: u64,
+    pub agent_total_ms: u64,
+    pub prev_agent_total_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimelineLaneKind {
+    MeCard,
+    MeTerminal,
+    MeOther,
+    Agent,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TimelineBlock {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub project_id: Option<String>,
+    pub card_id: Option<String>,
+    pub terminal_id: Option<String>,
     pub label: String,
+    pub open: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TimelineMergeMarker {
+    pub timestamp_ms: u64,
+    pub project_id: String,
+    pub card_id: String,
+    pub card_number: u64,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TimelineLane {
+    pub kind: TimelineLaneKind,
+    pub label: String,
+    pub sublabel: Option<String>,
+    pub total_ms: u64,
+    pub blocks: Vec<TimelineBlock>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TimelineData {
+    pub day_start_ms: u64,
+    pub day_end_ms: u64,
+    pub active_until_ms: u64,
+    pub lanes: Vec<TimelineLane>,
+    pub merges: Vec<TimelineMergeMarker>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DayActivityRow {
+    pub date_key: String,
     pub short_label: String,
-    pub is_partial: bool,
-    pub known: bool,
-    pub created_cards: usize,
-    pub initial_sync_cards: usize,
-    pub merged_cards: usize,
-    pub projected_merges: Option<usize>,
-    pub local_merges: usize,
-    pub pr_merges: usize,
+    pub weekday_label: &'static str,
+    pub is_today: bool,
+    pub dwell_card_ms: u64,
+    pub dwell_terminal_ms: u64,
+    pub dwell_other_ms: u64,
+    pub agent_ms: u64,
+    pub resolved_cards: usize,
+}
+
+impl DayActivityRow {
+    pub fn dwell_total_ms(&self) -> u64 {
+        self.dwell_card_ms
+            .saturating_add(self.dwell_terminal_ms)
+            .saturating_add(self.dwell_other_ms)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AutomationFunnel {
+    pub created: usize,
+    pub agent_touched: usize,
+    pub reviewed: usize,
+    pub merged: usize,
+    pub human_asks: usize,
+    pub zero_human_resolved: usize,
+    pub prev_zero_human_resolved: usize,
+    pub prev_merged: usize,
+}
+
+impl AutomationFunnel {
+    pub fn zero_human_pct(&self) -> Option<usize> {
+        (self.merged > 0).then(|| (self.zero_human_resolved * 100 + self.merged / 2) / self.merged)
+    }
+
+    pub fn prev_zero_human_pct(&self) -> Option<usize> {
+        (self.prev_merged > 0).then(|| {
+            (self.prev_zero_human_resolved * 100 + self.prev_merged / 2) / self.prev_merged
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelAgentStat {
+    pub model: String,
+    pub providers: BTreeSet<String>,
+    pub profiles: BTreeSet<String>,
+    pub cards_touched: usize,
     pub total_runs: usize,
     pub completed_runs: usize,
     pub blocked_runs: usize,
     pub failed_runs: usize,
-    pub pass_rate_pct: Option<usize>,
-    pub cycle_p50_ms: Option<u64>,
-    pub human_touches: usize,
-    pub elapsed_days: f64,
+    pub active_runs: usize,
+    pub human_asks: usize,
+    pub working_ms: u64,
+    pub median_queue_wait_ms: Option<u64>,
+    pub prev_median_queue_wait_ms: Option<u64>,
 }
 
-impl WeekBucket {
-    pub fn merges_per_day(&self) -> f64 {
-        if self.elapsed_days <= 0.05 {
-            0.0
-        } else {
-            self.merged_cards as f64 / self.elapsed_days
+impl ModelAgentStat {
+    pub fn pass_rate_pct(&self) -> Option<usize> {
+        let resolved = self.completed_runs + self.blocked_runs + self.failed_runs;
+        (resolved > 0).then(|| (self.completed_runs * 100 + resolved / 2) / resolved)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ViewOptions {
+    pub range: RangeWindow,
+    pub now_ms: u64,
+    pub selected: Option<NaiveDate>,
+    pub comparison: Comparison,
+    pub heatmap_metric: HeatmapMetric,
+    pub hourly_metric: ActivityMetric,
+    pub agent_group: AgentGroup,
+    pub trend_days: i64,
+    pub exclude_initial_sync: bool,
+}
+
+impl ViewOptions {
+    pub fn with_now(now_ms: u64) -> Self {
+        Self {
+            range: RangeWindow::Today,
+            now_ms,
+            selected: None,
+            comparison: Comparison::Previous,
+            heatmap_metric: HeatmapMetric::Resolved,
+            hourly_metric: ActivityMetric::Merged,
+            agent_group: AgentGroup::Profile,
+            trend_days: 14,
+            exclude_initial_sync: true,
         }
     }
-
-    pub fn touches_per_merge(&self) -> Option<f64> {
-        (self.merged_cards > 0).then(|| self.human_touches as f64 / self.merged_cards as f64)
-    }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct WowComparison {
-    pub baseline_known: bool,
-    pub is_partial: bool,
-    pub current_label: String,
-    pub previous_label: String,
-    pub current_merged: usize,
-    pub previous_merged: usize,
-    pub current_created: usize,
-    pub previous_created: usize,
-    pub current_runs: usize,
-    pub previous_runs: usize,
-    pub current_pass_pct: Option<usize>,
-    pub previous_pass_pct: Option<usize>,
-    pub current_cycle_p50_ms: Option<u64>,
-    pub previous_cycle_p50_ms: Option<u64>,
-    pub current_touches_per_merge: Option<f64>,
-    pub previous_touches_per_merge: Option<f64>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActivityFetchPlan {
+    pub period_from: u64,
+    pub period_until: u64,
+    pub prev_from: u64,
+    pub prev_until: u64,
+    pub range_boundaries: Vec<u64>,
+    pub baseline_boundaries: Vec<u64>,
+    pub annual_boundaries: Vec<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -239,6 +378,8 @@ pub struct HeatmapCell {
     pub merged_cards: usize,
     pub created_cards: usize,
     pub total_runs: usize,
+    pub dwell_ms: u64,
+    pub agent_ms: u64,
     pub known: bool,
     pub level: u8,
     pub is_future: bool,
@@ -288,10 +429,13 @@ pub struct ProfileStat {
     pub card_ids: BTreeSet<String>,
     pub profile_id: String,
     pub provider: String,
+    pub model: String,
     pub cards_touched: usize,
     pub median_queue_wait_ms: Option<u64>,
+    pub prev_median_queue_wait_ms: Option<u64>,
     pub avg_exec_ms: Option<u64>,
     pub avg_mention_reply_ms: Option<u64>,
+    pub working_ms: u64,
     pub total_runs: usize,
     pub overlapping_runs: usize,
     pub completed_runs: usize,
@@ -340,10 +484,13 @@ pub struct Dashboard {
     pub efficiency: Efficiency,
     pub timings: StageQueueTimings,
     pub moving_average: Vec<Option<f64>>,
-    pub weeks: Vec<WeekBucket>,
-    pub weekly_moving_average: Vec<Option<f64>>,
-    pub max_weekly_kanban: usize,
-    pub wow: WowComparison,
+    pub time_totals: TimeTotals,
+    pub timeline: TimelineData,
+    pub day_rows: Vec<DayActivityRow>,
+    pub funnel: AutomationFunnel,
+    pub other_dwell_ms: u64,
+    pub other_agent_ms: u64,
+    pub activity_loaded: bool,
     pub pipeline: PipelineSnapshot,
     pub intake: IntakeBreakdown,
     pub schedules: ScheduleSummary,
@@ -386,6 +533,7 @@ pub struct Dashboard {
     pub max_daily_runs: usize,
     pub heatmap_weeks: Vec<HeatmapWeek>,
     pub profile_stats: Vec<ProfileStat>,
+    pub model_stats: Vec<ModelAgentStat>,
     pub trigger_stats: Vec<TriggerStat>,
     pub has_any_history: bool,
 }
@@ -433,6 +581,8 @@ pub struct ProjectStat {
     pub wip_review: usize,
     pub wip_gated: usize,
     pub agent_runs: usize,
+    pub dwell_ms: u64,
+    pub agent_ms: u64,
     pub cards: BTreeSet<String>,
     pub profiles: BTreeSet<String>,
     pub recent_merges: Vec<usize>,
@@ -441,6 +591,10 @@ pub struct ProjectStat {
 impl ProjectStat {
     pub fn total_wip(&self) -> usize {
         self.wip_backlog + self.wip_develop + self.wip_review
+    }
+
+    pub fn total_time_ms(&self) -> u64 {
+        self.dwell_ms.saturating_add(self.agent_ms)
     }
 }
 
@@ -1115,7 +1269,7 @@ fn reconstruct_runs(
             agent.profile.id.clone()
         };
         let explicit_prov = {
-            let p = provider_name(&agent.profile);
+            let p = agent.profile.provider_name();
             (p != "Unknown").then_some(p)
         };
         let scheduled_at = agent
@@ -1200,7 +1354,7 @@ fn reconstruct_runs(
                     pending.profile.id.clone()
                 };
                 let p_prov = {
-                    let p = provider_name(&pending.profile);
+                    let p = pending.profile.provider_name();
                     (p != "Unknown").then_some(p)
                 };
                 runs.insert(
@@ -1239,7 +1393,7 @@ fn reconstruct_runs(
         .iter()
         .filter_map(|t| {
             let a = t.agent.as_ref()?;
-            let p = provider_name(&a.profile);
+            let p = a.profile.provider_name();
             (p != "Unknown").then_some((t.id.as_str(), p))
         })
         .collect();
@@ -1337,19 +1491,389 @@ pub fn percentile(samples: &[DurationSample], p: usize) -> Option<u64> {
     )
 }
 
-fn provider_name(profile: &Profile) -> String {
-    profile
-        .preset
-        .clone()
-        .filter(|p| !p.is_empty())
-        .or_else(|| {
-            profile
-                .command()
-                .first()
-                .and_then(|cmd| std::path::Path::new(cmd).file_name())
-                .map(|cmd| cmd.to_string_lossy().into_owned())
+pub fn activity_fetch_plan<Tz: TimeZone>(
+    range: RangeWindow,
+    now_ms: u64,
+    tz: &Tz,
+    selected: Option<NaiveDate>,
+    comparison: Comparison,
+) -> ActivityFetchPlan {
+    let now = chrono::DateTime::from_timestamp_millis(now_ms as i64)
+        .unwrap()
+        .with_timezone(tz);
+    let actual_today = now.date_naive();
+    let today = selected.unwrap_or(actual_today).min(actual_today);
+    let partial = today == actual_today;
+    let start = today - Duration::days(range.days() - 1);
+    let midnight = chrono::NaiveTime::MIN;
+    let period_from = boundary(start, midnight, tz);
+    let period_until = if partial {
+        now_ms.saturating_add(1)
+    } else {
+        boundary(today + Duration::days(1), midnight, tz)
+    };
+    let shift = if range == RangeWindow::Today && comparison == Comparison::LastWeek {
+        7
+    } else {
+        range.days()
+    };
+    let previous_start = start - Duration::days(shift);
+    let previous_date = today - Duration::days(shift);
+    let prev_from = boundary(previous_start, midnight, tz);
+    let prev_until = if partial {
+        boundary(previous_date, now.time(), tz).saturating_add(1)
+    } else {
+        boundary(previous_date + Duration::days(1), midnight, tz)
+    };
+
+    let day_bounds = |d0: NaiveDate, days: i64, end_cap: u64| -> Vec<u64> {
+        let mut bounds = Vec::with_capacity(days as usize + 1);
+        for i in 0..=days {
+            let ts = if i == days {
+                end_cap
+            } else {
+                boundary(d0 + Duration::days(i), midnight, tz)
+            };
+            if bounds.last().is_none_or(|&prev| ts > prev) {
+                bounds.push(ts);
+            }
+        }
+        bounds
+    };
+    let range_boundaries = day_bounds(start, range.days(), period_until);
+    let baseline_boundaries = day_bounds(previous_start, range.days(), prev_until);
+
+    let annual_start = actual_today - Duration::days(364);
+    let mut annual_boundaries = Vec::with_capacity(366);
+    for i in 0..=365 {
+        let ts = if i == 365 {
+            now_ms.saturating_add(1)
+        } else {
+            boundary(annual_start + Duration::days(i), midnight, tz)
+        };
+        if annual_boundaries.last().is_none_or(|&prev| ts > prev) {
+            annual_boundaries.push(ts);
+        }
+    }
+
+    ActivityFetchPlan {
+        period_from,
+        period_until,
+        prev_from,
+        prev_until,
+        range_boundaries,
+        baseline_boundaries,
+        annual_boundaries,
+    }
+}
+
+pub fn time_totals(range: RangeWindow, activity: &ActivityInput) -> TimeTotals {
+    let mut totals = TimeTotals::default();
+    if range == RangeWindow::Today {
+        for seg in &activity.period_segments {
+            let dur = seg.duration_ms();
+            match (&seg.kind, &seg.data) {
+                (ActivityKind::Dwell, ActivityDetail::Dwell(d)) => {
+                    totals.dwell_total_ms += dur;
+                    match d.lane {
+                        DwellLane::Card => totals.dwell_card_ms += dur,
+                        DwellLane::Terminal => totals.dwell_terminal_ms += dur,
+                        DwellLane::Other => totals.dwell_other_ms += dur,
+                    }
+                }
+                (ActivityKind::Agent, ActivityDetail::Agent(_)) => {
+                    totals.agent_total_ms += dur;
+                }
+                _ => {}
+            }
+        }
+        for seg in &activity.baseline_segments {
+            let dur = seg.duration_ms();
+            match seg.kind {
+                ActivityKind::Dwell => totals.prev_dwell_total_ms += dur,
+                ActivityKind::Agent => totals.prev_agent_total_ms += dur,
+            }
+        }
+    } else {
+        for b in &activity.range_buckets {
+            totals.dwell_card_ms += b.dwell.card;
+            totals.dwell_terminal_ms += b.dwell.terminal;
+            totals.dwell_other_ms += b.dwell.other;
+            totals.dwell_total_ms += b.dwell.total();
+            totals.agent_total_ms += b.agent_ms;
+        }
+        for b in &activity.baseline_buckets {
+            totals.prev_dwell_total_ms += b.dwell.total();
+            totals.prev_agent_total_ms += b.agent_ms;
+        }
+    }
+    totals
+}
+
+fn push_timeline_block(blocks: &mut Vec<TimelineBlock>, block: TimelineBlock) {
+    if block.end_ms <= block.start_ms {
+        return;
+    }
+    if let Some(prev) = blocks.last_mut()
+        && prev.project_id == block.project_id
+        && prev.card_id == block.card_id
+        && prev.terminal_id == block.terminal_id
+        && block.start_ms <= prev.end_ms.saturating_add(5_000)
+    {
+        prev.end_ms = prev.end_ms.max(block.end_ms);
+        prev.open |= block.open;
+        return;
+    }
+    blocks.push(block);
+}
+
+fn describe_segment_target(seg: &ActivitySegment, snapshot: &Snapshot, fallback: &str) -> String {
+    if let Some(cid) = seg.card_id.as_deref()
+        && let Some(card) = snapshot.cards.iter().find(|c| c.id == cid)
+    {
+        return format!("#{} {}", card.number, card.title);
+    }
+    if let Some(tid) = seg.terminal_id.as_deref()
+        && let Some(term) = snapshot.terminals.iter().find(|t| t.id == tid)
+    {
+        return term.title();
+    }
+    if let Some(pid) = seg.project_id.as_deref()
+        && let Some(proj) = snapshot.projects.iter().find(|p| p.id == pid)
+    {
+        return proj.name.clone();
+    }
+    fallback.to_owned()
+}
+
+pub fn timeline_lanes<Tz: TimeZone>(
+    snapshot: &Snapshot,
+    segments: &[ActivitySegment],
+    merges: Vec<TimelineMergeMarker>,
+    today: NaiveDate,
+    partial_now_ms: Option<u64>,
+    tz: &Tz,
+    agent_group: AgentGroup,
+) -> TimelineData {
+    let midnight = chrono::NaiveTime::MIN;
+    let day_start_ms = boundary(today, midnight, tz);
+    let day_end_ms = boundary(today + Duration::days(1), midnight, tz).max(day_start_ms + 1);
+    let active_until_ms =
+        partial_now_ms.map_or(day_end_ms, |ms| ms.clamp(day_start_ms, day_end_ms));
+
+    let mut me_card = TimelineLane {
+        kind: TimelineLaneKind::MeCard,
+        label: "Me · Card".into(),
+        sublabel: None,
+        total_ms: 0,
+        blocks: Vec::new(),
+    };
+    let mut me_terminal = TimelineLane {
+        kind: TimelineLaneKind::MeTerminal,
+        label: "Me · Terminal".into(),
+        sublabel: None,
+        total_ms: 0,
+        blocks: Vec::new(),
+    };
+    let mut me_other = TimelineLane {
+        kind: TimelineLaneKind::MeOther,
+        label: "Me · Other".into(),
+        sublabel: None,
+        total_ms: 0,
+        blocks: Vec::new(),
+    };
+
+    let mut agent_lanes: BTreeMap<String, (Option<String>, Vec<TimelineBlock>, u64)> =
+        BTreeMap::new();
+
+    let mut sorted: Vec<&ActivitySegment> = segments.iter().collect();
+    sorted.sort_by_key(|s| (s.start_ms, s.end_ms));
+
+    for seg in sorted {
+        let start = seg.start_ms.max(day_start_ms);
+        let end = seg.end_ms.min(active_until_ms);
+        if end <= start {
+            continue;
+        }
+        let dur = end - start;
+        match (&seg.kind, &seg.data) {
+            (ActivityKind::Dwell, ActivityDetail::Dwell(dwell)) => {
+                let target_label = describe_segment_target(seg, snapshot, &dwell.page);
+                let block = TimelineBlock {
+                    start_ms: start,
+                    end_ms: end,
+                    project_id: seg.project_id.clone(),
+                    card_id: seg.card_id.clone(),
+                    terminal_id: seg.terminal_id.clone(),
+                    label: target_label,
+                    open: false,
+                };
+                match dwell.lane {
+                    DwellLane::Card => {
+                        me_card.total_ms += dur;
+                        push_timeline_block(&mut me_card.blocks, block);
+                    }
+                    DwellLane::Terminal => {
+                        me_terminal.total_ms += dur;
+                        push_timeline_block(&mut me_terminal.blocks, block);
+                    }
+                    DwellLane::Other => {
+                        me_other.total_ms += dur;
+                        push_timeline_block(&mut me_other.blocks, block);
+                    }
+                }
+            }
+            (ActivityKind::Agent, ActivityDetail::Agent(agent)) => {
+                let (lane_key, sublabel) = match agent_group {
+                    AgentGroup::Profile => (
+                        if agent.profile_id == "manual" {
+                            format!("Manual ({})", agent.provider)
+                        } else {
+                            format!("@{}", agent.profile_id)
+                        },
+                        Some(agent.provider.clone()),
+                    ),
+                    AgentGroup::Model => (agent.model.clone(), Some(agent.provider.clone())),
+                };
+                let target_label = describe_segment_target(seg, snapshot, &lane_key);
+                let entry = agent_lanes
+                    .entry(lane_key)
+                    .or_insert_with(|| (sublabel, Vec::new(), 0));
+                entry.2 += dur;
+                push_timeline_block(
+                    &mut entry.1,
+                    TimelineBlock {
+                        start_ms: start,
+                        end_ms: end,
+                        project_id: seg.project_id.clone(),
+                        card_id: seg.card_id.clone(),
+                        terminal_id: seg.terminal_id.clone(),
+                        label: target_label,
+                        open: seg.open,
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+
+    let mut lanes = vec![me_card, me_terminal, me_other];
+    let mut agent_vec: Vec<TimelineLane> = agent_lanes
+        .into_iter()
+        .map(|(label, (sublabel, blocks, total_ms))| TimelineLane {
+            kind: TimelineLaneKind::Agent,
+            label,
+            sublabel,
+            total_ms,
+            blocks,
         })
-        .unwrap_or_else(|| "Unknown".into())
+        .collect();
+    agent_vec.sort_by(|a, b| {
+        b.total_ms
+            .cmp(&a.total_ms)
+            .then_with(|| a.label.cmp(&b.label))
+    });
+    lanes.extend(agent_vec);
+
+    TimelineData {
+        day_start_ms,
+        day_end_ms,
+        active_until_ms,
+        lanes,
+        merges,
+    }
+}
+
+pub fn day_rows<Tz: TimeZone>(
+    days: &[DayBucket],
+    buckets: &[ActivityBucket],
+    actual_today: NaiveDate,
+    tz: &Tz,
+) -> Vec<DayActivityRow> {
+    let mut by_date: BTreeMap<String, &ActivityBucket> = BTreeMap::new();
+    for b in buckets {
+        let mid = b
+            .start_ms
+            .saturating_add(b.end_ms.saturating_sub(b.start_ms) / 2);
+        by_date.insert(local_date(mid, tz).to_string(), b);
+    }
+    let today_key = actual_today.to_string();
+    days.iter()
+        .map(|d| {
+            let act = by_date.get(&d.date_key);
+            DayActivityRow {
+                date_key: d.date_key.clone(),
+                short_label: d.short_label.clone(),
+                weekday_label: d.weekday_label,
+                is_today: d.date_key == today_key,
+                dwell_card_ms: act.map_or(0, |b| b.dwell.card),
+                dwell_terminal_ms: act.map_or(0, |b| b.dwell.terminal),
+                dwell_other_ms: act.map_or(0, |b| b.dwell.other),
+                agent_ms: act.map_or(0, |b| b.agent_ms),
+                resolved_cards: d.merged_cards,
+            }
+        })
+        .collect()
+}
+
+pub fn group_agents_by_model(
+    stats: &[ProfileStat],
+    prev_queue_by_model: &BTreeMap<String, Option<u64>>,
+) -> Vec<ModelAgentStat> {
+    let mut grouped: BTreeMap<String, (ModelAgentStat, BTreeSet<String>, Vec<u64>)> =
+        BTreeMap::new();
+    for p in stats {
+        let entry = grouped.entry(p.model.clone()).or_insert_with(|| {
+            (
+                ModelAgentStat {
+                    model: p.model.clone(),
+                    providers: BTreeSet::new(),
+                    profiles: BTreeSet::new(),
+                    cards_touched: 0,
+                    total_runs: 0,
+                    completed_runs: 0,
+                    blocked_runs: 0,
+                    failed_runs: 0,
+                    active_runs: 0,
+                    human_asks: 0,
+                    working_ms: 0,
+                    median_queue_wait_ms: None,
+                    prev_median_queue_wait_ms: prev_queue_by_model.get(&p.model).copied().flatten(),
+                },
+                BTreeSet::new(),
+                Vec::new(),
+            )
+        });
+        let (agg, cards, waits) = entry;
+        agg.providers.insert(p.provider.clone());
+        agg.profiles.insert(p.profile_id.clone());
+        cards.extend(p.card_ids.iter().cloned());
+        agg.total_runs += p.total_runs;
+        agg.completed_runs += p.completed_runs;
+        agg.blocked_runs += p.blocked_runs;
+        agg.failed_runs += p.failed_runs;
+        agg.active_runs += p.active_runs;
+        agg.human_asks += p.human_asks;
+        agg.working_ms += p.working_ms;
+        if let Some(q) = p.median_queue_wait_ms {
+            waits.push(q);
+        }
+    }
+    let mut out: Vec<ModelAgentStat> = grouped
+        .into_values()
+        .map(|(mut agg, cards, waits)| {
+            agg.cards_touched = cards.len();
+            agg.median_queue_wait_ms = median_u64(waits);
+            agg
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.working_ms
+            .cmp(&a.working_ms)
+            .then_with(|| b.total_runs.cmp(&a.total_runs))
+            .then_with(|| a.model.cmp(&b.model))
+    });
+    out
 }
 
 #[cfg(test)]
@@ -1361,72 +1885,39 @@ pub fn compute<Tz: TimeZone>(
     now_ms: u64,
     tz: &Tz,
 ) -> Dashboard {
-    compute_view(
+    let mut opts = ViewOptions::with_now(now_ms);
+    opts.range = range;
+    compute_dashboard(
         snapshot,
         events,
+        &ActivityInput::default(),
         scope_project,
-        range,
-        now_ms,
         tz,
-        None,
-        Comparison::Previous,
-        ActivityMetric::Merged,
-        ActivityMetric::Merged,
-        14,
         &[],
+        opts,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn compute_view<Tz: TimeZone>(
+pub fn compute_dashboard<Tz: TimeZone>(
     snapshot: &Snapshot,
     events: &[Event],
+    activity: &ActivityInput,
     scope_project: Option<&str>,
-    range: RangeWindow,
-    now_ms: u64,
     tz: &Tz,
-    selected: Option<NaiveDate>,
-    comparison: Comparison,
-    metric: ActivityMetric,
-    hourly_metric: ActivityMetric,
-    trend_days: i64,
     profiles: &[Profile],
+    opts: ViewOptions,
 ) -> Dashboard {
-    compute_full(
-        snapshot,
-        events,
-        scope_project,
+    let ViewOptions {
         range,
         now_ms,
-        tz,
         selected,
         comparison,
-        metric,
+        heatmap_metric,
         hourly_metric,
+        agent_group,
         trend_days,
-        8,
-        true,
-        profiles,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn compute_full<Tz: TimeZone>(
-    snapshot: &Snapshot,
-    events: &[Event],
-    scope_project: Option<&str>,
-    range: RangeWindow,
-    now_ms: u64,
-    tz: &Tz,
-    selected: Option<NaiveDate>,
-    comparison: Comparison,
-    metric: ActivityMetric,
-    hourly_metric: ActivityMetric,
-    trend_days: i64,
-    trend_weeks: i64,
-    exclude_initial_sync: bool,
-    profiles: &[Profile],
-) -> Dashboard {
+        exclude_initial_sync,
+    } = opts;
     let scope = scope_project.filter(|s| !s.is_empty());
     let in_scope = |pid: &str| {
         scope.map_or_else(
@@ -1482,6 +1973,27 @@ pub fn compute_full<Tz: TimeZone>(
         card_events.sort_by_key(|e| (e.created_at, e.sequence));
     }
 
+    let activity_start = activity
+        .annual_buckets
+        .iter()
+        .filter(|b| b.dwell.total() > 0 || b.agent_ms > 0)
+        .map(|b| local_date(b.start_ms, tz))
+        .chain(
+            activity
+                .range_buckets
+                .iter()
+                .filter(|b| b.dwell.total() > 0 || b.agent_ms > 0)
+                .map(|b| local_date(b.start_ms, tz)),
+        )
+        .chain(
+            activity
+                .period_segments
+                .iter()
+                .filter(|s| s.duration_ms() > 0)
+                .map(|s| local_date(s.start_ms, tz)),
+        )
+        .min();
+
     let history_start = valid_cards
         .values()
         .map(|c| c.created_at)
@@ -1495,7 +2007,10 @@ pub fn compute_full<Tz: TimeZone>(
         .chain(events_by_card.values().flatten().map(|e| e.created_at))
         .filter(|t| *t > 0 && *t <= now_ms)
         .min()
-        .map(|t| local_date(t, tz));
+        .map(|t| local_date(t, tz))
+        .into_iter()
+        .chain(activity_start)
+        .min();
 
     let mut projects: BTreeMap<String, ProjectStat> = snapshot
         .projects
@@ -1547,11 +2062,13 @@ pub fn compute_full<Tz: TimeZone>(
     let mut created_times = Vec::new();
     let mut merge_times = Vec::new();
     let mut start_times = Vec::new();
-    let mut all_cycles: Vec<(u64, u64)> = Vec::new();
-    let mut all_human_touches: Vec<u64> = Vec::new();
     let mut human_asks_by_profile_period = BTreeMap::<String, usize>::new();
     let mut human_asks_period = 0usize;
     let mut prev_human_asks_period = 0usize;
+    let mut reviewed_cards: BTreeSet<String> = BTreeSet::new();
+    let mut zero_human_resolved = 0usize;
+    let mut prev_zero_human_resolved = 0usize;
+    let mut merges_on_selected_day: Vec<TimelineMergeMarker> = Vec::new();
 
     let mut project_merges: BTreeMap<String, BTreeMap<NaiveDate, usize>> = BTreeMap::new();
 
@@ -1600,7 +2117,6 @@ pub fn compute_full<Tz: TimeZone>(
             {
                 let d = local_date(ev.created_at, tz);
                 *daily_touches.entry(d).or_default() += 1;
-                all_human_touches.push(ev.created_at);
                 if current(ev.created_at) {
                     human_asks_period += 1;
                     if ev.kind == "execution.input_required" {
@@ -1830,6 +2346,16 @@ pub fn compute_full<Tz: TimeZone>(
                 }
             }
 
+            if card.stage == "review" && card.created_at < until {
+                reviewed_cards.insert(card.id.clone());
+            }
+            if evs.iter().any(|ev| {
+                ev.kind == "card.stage_changed"
+                    && current(ev.created_at)
+                    && parse_stage_transition(ev).is_some_and(|(_, to)| to == "review")
+            }) {
+                reviewed_cards.insert(card.id.clone());
+            }
             if let Some((dur, exit_ts)) = compute_stage_dwell(evs, "develop", resolved_ts) {
                 if current(exit_ts) {
                     develop_stage_cur.push(dur);
@@ -1876,26 +2402,51 @@ pub fn compute_full<Tz: TimeZone>(
             .or_default()
             .entry(d)
             .or_default() += 1;
+        let had_human_ask = card_evs.is_some_and(|evs| {
+            evs.iter().any(|e| {
+                matches!(
+                    e.kind.as_str(),
+                    "execution.input_required" | "review.merge_conflict"
+                )
+            })
+        });
         if current(merged_at) {
             merged_ids.push(card.id.clone());
             merged_total += 1;
             p.merged += 1;
             p.cards.insert(card.id.clone());
+            if !had_human_ask {
+                zero_human_resolved += 1;
+            }
+            if d == today {
+                merges_on_selected_day.push(TimelineMergeMarker {
+                    timestamp_ms: merged_at,
+                    project_id: card.project_id.clone(),
+                    card_id: card.id.clone(),
+                    card_number: card.number,
+                    title: card.title.clone(),
+                });
+            }
             if !card.merged() {
                 manual_resolutions += 1;
-            } else if is_pr {
-                pr_merges += 1;
             } else {
-                local_merges += 1;
+                reviewed_cards.insert(card.id.clone());
+                if is_pr {
+                    pr_merges += 1;
+                } else {
+                    local_merges += 1;
+                }
             }
         }
         if previous(merged_at) {
             prev_merged_total += 1;
+            if !had_human_ask {
+                prev_zero_human_resolved += 1;
+            }
         }
         if let Some(began) = resolve_work_started_at(card, merged_at, card_evs) {
             let dur = merged_at - began;
             daily_cycles.entry(d).or_default().push(dur);
-            all_cycles.push((merged_at, dur));
             let sample = DurationSample {
                 card_id: card.id.clone(),
                 number: card.number,
@@ -1979,10 +2530,14 @@ pub fn compute_full<Tz: TimeZone>(
     let mut prev_outcomes = [0usize; 4];
     let mut profile_map: BTreeMap<String, ProfileStat> = BTreeMap::new();
     let mut profile_waits: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let mut prev_profile_waits: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let mut model_waits: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let mut prev_model_waits: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     let mut profile_execs: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     let mut develop_exec_cur: Vec<u64> = Vec::new();
     let mut develop_exec_prev: Vec<u64> = Vec::new();
     let mut trigger_counts: BTreeMap<TriggerKind, usize> = BTreeMap::new();
+    let mut agent_touched_cards: BTreeSet<String> = BTreeSet::new();
     let mut used_runs = 0;
 
     for run in &runs {
@@ -2017,7 +2572,7 @@ pub fn compute_full<Tz: TimeZone>(
                 profiles
                     .iter()
                     .find(|p| p.id == run.profile_id)
-                    .map(provider_name)
+                    .map(Profile::provider_name)
             })
             .or_else(|| {
                 snapshot
@@ -2025,9 +2580,22 @@ pub fn compute_full<Tz: TimeZone>(
                     .iter()
                     .filter_map(|t| t.agent.as_ref())
                     .find(|a| a.project_id == run.project_id && a.profile.id == run.profile_id)
-                    .map(|a| provider_name(&a.profile))
+                    .map(|a| a.profile.provider_name())
             })
             .unwrap_or_else(|| "Unknown".into());
+        let model = snapshot
+            .terminals
+            .iter()
+            .filter_map(|t| t.agent.as_ref())
+            .find(|a| a.project_id == run.project_id && a.profile.id == run.profile_id)
+            .map(|a| a.profile.effective_model())
+            .or_else(|| {
+                profiles
+                    .iter()
+                    .find(|p| p.id == run.profile_id)
+                    .map(Profile::effective_model)
+            })
+            .unwrap_or_else(|| "default".into());
         let group_key = format!("{}:{provider}", run.profile_id);
 
         if overlaps {
@@ -2038,10 +2606,13 @@ pub fn compute_full<Tz: TimeZone>(
                     card_ids: BTreeSet::new(),
                     profile_id: run.profile_id.clone(),
                     provider: provider.clone(),
+                    model: model.clone(),
                     cards_touched: 0,
                     median_queue_wait_ms: None,
+                    prev_median_queue_wait_ms: None,
                     avg_exec_ms: None,
                     avg_mention_reply_ms: None,
+                    working_ms: 0,
                     total_runs: 0,
                     overlapping_runs: 0,
                     completed_runs: 0,
@@ -2062,6 +2633,7 @@ pub fn compute_full<Tz: TimeZone>(
             }
             for id in &run.card_ids {
                 stat.card_ids.insert(id.clone());
+                agent_touched_cards.insert(id.clone());
                 if let Some(p) = projects.get_mut(&run.project_id) {
                     p.cards.insert(id.clone());
                     p.profiles.insert(run.profile_id.clone());
@@ -2107,13 +2679,73 @@ pub fn compute_full<Tz: TimeZone>(
             };
             if current(began) {
                 profile_waits
-                    .entry(group_key)
+                    .entry(group_key.clone())
+                    .or_default()
+                    .push(sample.duration);
+                model_waits
+                    .entry(model.clone())
                     .or_default()
                     .push(sample.duration);
                 efficiency.queue.push(sample.clone());
             }
             if previous(began) {
+                prev_profile_waits
+                    .entry(group_key)
+                    .or_default()
+                    .push(sample.duration);
+                prev_model_waits
+                    .entry(model)
+                    .or_default()
+                    .push(sample.duration);
                 efficiency.previous_queue.push(sample);
+            }
+        }
+    }
+
+    let mut add_agent_work = |profile_id: &str, provider: &str, model: &str, ms: u64| {
+        if ms == 0 {
+            return;
+        }
+        let gkey = format!("{profile_id}:{provider}");
+        let stat = profile_map.entry(gkey).or_insert_with(|| ProfileStat {
+            card_ids: BTreeSet::new(),
+            profile_id: profile_id.to_owned(),
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+            cards_touched: 0,
+            median_queue_wait_ms: None,
+            prev_median_queue_wait_ms: None,
+            avg_exec_ms: None,
+            avg_mention_reply_ms: None,
+            working_ms: 0,
+            total_runs: 0,
+            overlapping_runs: 0,
+            completed_runs: 0,
+            blocked_runs: 0,
+            failed_runs: 0,
+            active_runs: 0,
+            human_asks: 0,
+        });
+        if stat.model == "default" && model != "default" && model != "unknown" {
+            stat.model = model.to_owned();
+        }
+        stat.working_ms = stat.working_ms.saturating_add(ms);
+    };
+    if range == RangeWindow::Today {
+        for seg in &activity.period_segments {
+            if let (ActivityKind::Agent, ActivityDetail::Agent(agent)) = (&seg.kind, &seg.data) {
+                add_agent_work(
+                    &agent.profile_id,
+                    &agent.provider,
+                    &agent.model,
+                    seg.duration_ms(),
+                );
+            }
+        }
+    } else {
+        for bucket in &activity.range_buckets {
+            for a in &bucket.by_agent {
+                add_agent_work(&a.profile_id, &a.provider, &a.model, a.ms);
             }
         }
     }
@@ -2124,6 +2756,7 @@ pub fn compute_full<Tz: TimeZone>(
         .map(|(gkey, mut p)| {
             p.cards_touched = p.card_ids.len();
             p.median_queue_wait_ms = profile_waits.remove(&gkey).and_then(median_u64);
+            p.prev_median_queue_wait_ms = prev_profile_waits.remove(&gkey).and_then(median_u64);
             p.avg_exec_ms = profile_execs.remove(&gkey).and_then(|vals| mean_u64(&vals));
             if assigned_ask_profiles.insert(p.profile_id.clone()) {
                 p.human_asks = human_asks_by_profile_period
@@ -2138,11 +2771,21 @@ pub fn compute_full<Tz: TimeZone>(
         })
         .collect();
     profile_stats.sort_by(|a, b| {
-        b.total_runs
-            .cmp(&a.total_runs)
+        b.working_ms
+            .cmp(&a.working_ms)
+            .then_with(|| b.total_runs.cmp(&a.total_runs))
             .then_with(|| b.overlapping_runs.cmp(&a.overlapping_runs))
             .then_with(|| a.profile_id.cmp(&b.profile_id))
     });
+
+    let prev_queue_by_model: BTreeMap<String, Option<u64>> = prev_model_waits
+        .into_iter()
+        .map(|(m, waits)| (m, median_u64(waits)))
+        .collect();
+    let mut model_stats = group_agents_by_model(&profile_stats, &prev_queue_by_model);
+    for m in &mut model_stats {
+        m.median_queue_wait_ms = model_waits.remove(&m.model).and_then(median_u64);
+    }
 
     let providers = profile_stats
         .iter()
@@ -2204,201 +2847,52 @@ pub fn compute_full<Tz: TimeZone>(
         })
         .collect();
 
-    let num_weeks = trend_weeks.clamp(4, 16);
-    let current_week_monday =
-        today - Duration::days(i64::from(today.weekday().num_days_from_monday()));
-    let first_week_monday = current_week_monday - Duration::weeks(num_weeks - 1);
-    let weeks: Vec<WeekBucket> = (0..num_weeks)
-        .map(|w| {
-            let ws = first_week_monday + Duration::weeks(w);
-            let we = (ws + Duration::days(6)).min(today);
-            let is_curr_partial =
-                ws == current_week_monday && (today < ws + Duration::days(6) || partial);
-            let w_from = boundary(ws, midnight, tz);
-            let w_until = if ws == current_week_monday && partial {
-                until
-            } else {
-                boundary(we + Duration::days(1), midnight, tz)
-            };
-            let elapsed_ms = w_until.saturating_sub(w_from);
-            let elapsed_days = if is_curr_partial {
-                (elapsed_ms as f64 / 86_400_000.0).clamp(0.05, 7.0)
-            } else {
-                ((we - ws).num_days() + 1) as f64
-            };
-            let mut w_created = 0;
-            let mut w_sync = 0;
-            let mut w_local = 0;
-            let mut w_pr = 0;
-            let mut w_manual = 0;
-            let mut w_runs = [0usize; 4];
-            let mut w_touches = 0;
-            let mut w_cycles = Vec::new();
-            let span_days = (we - ws).num_days() + 1;
-            for di in 0..span_days {
-                let d = ws + Duration::days(di);
-                w_created += daily_created.get(&d).copied().unwrap_or(0);
-                w_sync += daily_initial_sync.get(&d).copied().unwrap_or(0);
-                w_local += daily_local.get(&d).copied().unwrap_or(0);
-                w_pr += daily_pr.get(&d).copied().unwrap_or(0);
-                w_manual += daily_manual.get(&d).copied().unwrap_or(0);
-                let ro = daily_runs.get(&d).copied().unwrap_or_default();
-                for k in 0..4 {
-                    w_runs[k] += ro[k];
+    let mut other_dwell_ms = 0u64;
+    let mut other_agent_ms = 0u64;
+    if range == RangeWindow::Today {
+        for seg in &activity.period_segments {
+            let dur = seg.duration_ms();
+            if dur == 0 {
+                continue;
+            }
+            let pid = seg.project_id.as_deref().filter(|s| !s.is_empty());
+            match seg.kind {
+                ActivityKind::Dwell => {
+                    if let Some(p) = pid.and_then(|id| projects.get_mut(id)) {
+                        p.dwell_ms = p.dwell_ms.saturating_add(dur);
+                    } else if scope.is_none() {
+                        other_dwell_ms = other_dwell_ms.saturating_add(dur);
+                    }
                 }
-                w_touches += daily_touches.get(&d).copied().unwrap_or(0);
-                if let Some(cs) = daily_cycles.get(&d) {
-                    w_cycles.extend(cs.iter().copied());
+                ActivityKind::Agent => {
+                    if let Some(p) = pid.and_then(|id| projects.get_mut(id)) {
+                        p.agent_ms = p.agent_ms.saturating_add(dur);
+                    } else if scope.is_none() {
+                        other_agent_ms = other_agent_ms.saturating_add(dur);
+                    }
                 }
             }
-            let w_merged = w_local + w_pr + w_manual;
-            let resolved_r = w_runs[0] + w_runs[1] + w_runs[2];
-            let total_r = resolved_r + w_runs[3];
-            let projected_merges = if is_curr_partial && elapsed_days >= 0.25 && w_merged > 0 {
-                Some(((w_merged as f64 / elapsed_days) * 7.0).round() as usize)
-            } else {
-                None
-            };
-            let iso_w = ws.iso_week().week();
-            WeekBucket {
-                week_start: ws,
-                week_end: we,
-                label: format!("W{iso_w:02} · {}", ws.format("%m-%d")),
-                short_label: format!("W{iso_w:02}"),
-                is_partial: is_curr_partial,
-                known: history_start.is_some_and(|h| we >= h),
-                created_cards: w_created,
-                initial_sync_cards: w_sync,
-                merged_cards: w_merged,
-                projected_merges,
-                local_merges: w_local,
-                pr_merges: w_pr,
-                total_runs: total_r,
-                completed_runs: w_runs[0],
-                blocked_runs: w_runs[1],
-                failed_runs: w_runs[2],
-                pass_rate_pct: (resolved_r > 0)
-                    .then(|| (w_runs[0] * 100 + resolved_r / 2) / resolved_r),
-                cycle_p50_ms: median_u64(w_cycles),
-                human_touches: w_touches,
-                elapsed_days,
-            }
-        })
-        .collect();
-
-    let weekly_moving_average: Vec<Option<f64>> = weeks
-        .iter()
-        .enumerate()
-        .map(|(idx, w)| {
-            if w.is_partial || idx < 3 {
-                return None;
-            }
-            let slice = &weeks[idx - 3..=idx];
-            if slice.iter().all(|b| b.known) {
-                Some(slice.iter().map(|b| b.merged_cards).sum::<usize>() as f64 / 4.0)
-            } else {
-                None
-            }
-        })
-        .collect();
-    let max_weekly_kanban = weeks
-        .iter()
-        .map(|w| {
-            w.created_cards
-                .max(w.merged_cards)
-                .max(w.projected_merges.unwrap_or(0))
-        })
-        .max()
-        .unwrap_or(0);
-
-    let prev_week_monday = current_week_monday - Duration::days(7);
-    let prev_week_cutoff_date = today - Duration::days(7);
-    let cur_w_from = boundary(current_week_monday, midnight, tz);
-    let cur_w_until = until;
-    let prev_w_from = boundary(prev_week_monday, midnight, tz);
-    let prev_w_until = if partial {
-        boundary(prev_week_cutoff_date, now.time(), tz).saturating_add(1)
+        }
     } else {
-        boundary(prev_week_cutoff_date + Duration::days(1), midnight, tz)
-    };
-    let in_cur_w = |ts: u64| ts >= cur_w_from && ts < cur_w_until;
-    let in_prev_w = |ts: u64| ts >= prev_w_from && ts < prev_w_until;
-    let cur_w_merged = merge_times.iter().filter(|&&t| in_cur_w(t)).count();
-    let prev_w_merged = merge_times.iter().filter(|&&t| in_prev_w(t)).count();
-    let cur_w_created = created_times.iter().filter(|&&t| in_cur_w(t)).count();
-    let prev_w_created = created_times.iter().filter(|&&t| in_prev_w(t)).count();
-    let mut cur_w_r = [0usize; 4];
-    let mut prev_w_r = [0usize; 4];
-    for r in &runs {
-        if let Some(began) = r.started_at.filter(|&t| t > 0 && t <= now_ms) {
-            let k = match r.outcome {
-                OutcomeKind::Completed => 0,
-                OutcomeKind::Blocked => 1,
-                OutcomeKind::Failed => 2,
-                OutcomeKind::Active => 3,
-            };
-            if in_cur_w(began) {
-                cur_w_r[k] += 1;
+        for b in &activity.range_buckets {
+            let mut matched_dwell = 0u64;
+            let mut matched_agent = 0u64;
+            for (pid, pt) in &b.by_project {
+                if let Some(p) = projects.get_mut(pid) {
+                    p.dwell_ms = p.dwell_ms.saturating_add(pt.dwell_ms);
+                    p.agent_ms = p.agent_ms.saturating_add(pt.agent_ms);
+                    matched_dwell = matched_dwell.saturating_add(pt.dwell_ms);
+                    matched_agent = matched_agent.saturating_add(pt.agent_ms);
+                }
             }
-            if in_prev_w(began) {
-                prev_w_r[k] += 1;
+            if scope.is_none() {
+                other_dwell_ms =
+                    other_dwell_ms.saturating_add(b.dwell.total().saturating_sub(matched_dwell));
+                other_agent_ms =
+                    other_agent_ms.saturating_add(b.agent_ms.saturating_sub(matched_agent));
             }
         }
     }
-    let cur_w_res = cur_w_r[0] + cur_w_r[1] + cur_w_r[2];
-    let prev_w_res = prev_w_r[0] + prev_w_r[1] + prev_w_r[2];
-    let cur_w_cyc = median_u64(
-        all_cycles
-            .iter()
-            .filter(|&&(t, _)| in_cur_w(t))
-            .map(|&(_, d)| d)
-            .collect(),
-    );
-    let prev_w_cyc = median_u64(
-        all_cycles
-            .iter()
-            .filter(|&&(t, _)| in_prev_w(t))
-            .map(|&(_, d)| d)
-            .collect(),
-    );
-    let cur_w_touches = all_human_touches.iter().filter(|&&t| in_cur_w(t)).count();
-    let prev_w_touches = all_human_touches.iter().filter(|&&t| in_prev_w(t)).count();
-    let wow = WowComparison {
-        baseline_known: history_start.is_some_and(|h| h <= prev_week_monday),
-        is_partial: today < current_week_monday + Duration::days(6) || partial,
-        current_label: format!(
-            "W{:02} ({}..{})",
-            current_week_monday.iso_week().week(),
-            current_week_monday.format("%m-%d"),
-            today.format("%m-%d")
-        ),
-        previous_label: format!(
-            "W{:02} ({}..{}{})",
-            prev_week_monday.iso_week().week(),
-            prev_week_monday.format("%m-%d"),
-            prev_week_cutoff_date.format("%m-%d"),
-            if partial {
-                format!(" {}", now.fixed_offset().format("%H:%M"))
-            } else {
-                String::new()
-            }
-        ),
-        current_merged: cur_w_merged,
-        previous_merged: prev_w_merged,
-        current_created: cur_w_created,
-        previous_created: prev_w_created,
-        current_runs: cur_w_res + cur_w_r[3],
-        previous_runs: prev_w_res + prev_w_r[3],
-        current_pass_pct: (cur_w_res > 0).then(|| (cur_w_r[0] * 100 + cur_w_res / 2) / cur_w_res),
-        previous_pass_pct: (prev_w_res > 0)
-            .then(|| (prev_w_r[0] * 100 + prev_w_res / 2) / prev_w_res),
-        current_cycle_p50_ms: cur_w_cyc,
-        previous_cycle_p50_ms: prev_w_cyc,
-        current_touches_per_merge: (cur_w_merged > 0)
-            .then(|| cur_w_touches as f64 / cur_w_merged as f64),
-        previous_touches_per_merge: (prev_w_merged > 0)
-            .then(|| prev_w_touches as f64 / prev_w_merged as f64),
-    };
 
     for p in projects.values_mut() {
         p.recent_merges = (0..7)
@@ -2413,15 +2907,49 @@ pub fn compute_full<Tz: TimeZone>(
     }
     let mut project_stats: Vec<_> = projects
         .into_values()
-        .filter(|p| !p.cards.is_empty() || p.total_wip() > 0 || p.initial_sync > 0)
+        .filter(|p| {
+            !p.cards.is_empty()
+                || p.total_wip() > 0
+                || p.initial_sync > 0
+                || p.dwell_ms > 0
+                || p.agent_ms > 0
+        })
         .collect();
     project_stats.sort_by(|a, b| {
-        b.merged
-            .cmp(&a.merged)
+        b.total_time_ms()
+            .cmp(&a.total_time_ms())
+            .then_with(|| b.merged.cmp(&a.merged))
             .then_with(|| b.created.cmp(&a.created))
             .then_with(|| b.total_wip().cmp(&a.total_wip()))
             .then_with(|| a.name.cmp(&b.name))
     });
+
+    let time_totals = time_totals(range, activity);
+    merges_on_selected_day.sort_by_key(|m| m.timestamp_ms);
+    let timeline = if range == RangeWindow::Today {
+        timeline_lanes(
+            snapshot,
+            &activity.period_segments,
+            merges_on_selected_day,
+            today,
+            partial.then_some(now_ms),
+            tz,
+            agent_group,
+        )
+    } else {
+        TimelineData::default()
+    };
+    let day_rows = day_rows(&days, &activity.range_buckets, actual_today, tz);
+    let funnel = AutomationFunnel {
+        created: created_total,
+        agent_touched: agent_touched_cards.len(),
+        reviewed: reviewed_cards.len(),
+        merged: merged_total,
+        human_asks: human_asks_period,
+        zero_human_resolved,
+        prev_zero_human_resolved,
+        prev_merged: prev_merged_total,
+    };
 
     let hourly = |times: &[u64], date: NaiveDate, cutoff: u64, hour: u32| {
         times
@@ -2473,18 +3001,53 @@ pub fn compute_full<Tz: TimeZone>(
     let heatmap_end =
         actual_today + Duration::days(6 - i64::from(actual_today.weekday().num_days_from_monday()));
     let num_hm_weeks = (heatmap_end - heatmap_start).num_days() / 7 + 1;
-    let activity_on = |d: NaiveDate| {
-        metric.value(
-            daily_created.get(&d).copied().unwrap_or(0),
-            merged_on(d),
-            daily_runs.get(&d).map(|v| v.iter().sum()).unwrap_or(0),
-        )
+
+    let mut annual_dwell_by_day: BTreeMap<NaiveDate, u64> = BTreeMap::new();
+    let mut annual_agent_by_day: BTreeMap<NaiveDate, u64> = BTreeMap::new();
+    for b in &activity.annual_buckets {
+        let mid = b
+            .start_ms
+            .saturating_add(b.end_ms.saturating_sub(b.start_ms) / 2);
+        let d = local_date(mid, tz);
+        *annual_dwell_by_day.entry(d).or_default() += b.dwell.total();
+        *annual_agent_by_day.entry(d).or_default() += b.agent_ms;
+    }
+    let activity_on = |d: NaiveDate| -> usize {
+        match heatmap_metric {
+            HeatmapMetric::Resolved => merged_on(d),
+            HeatmapMetric::Dwell => annual_dwell_by_day
+                .get(&d)
+                .copied()
+                .map(|ms| {
+                    if ms == 0 {
+                        0
+                    } else {
+                        ms.div_ceil(60_000) as usize
+                    }
+                })
+                .unwrap_or(0),
+            HeatmapMetric::Agent => annual_agent_by_day
+                .get(&d)
+                .copied()
+                .map(|ms| {
+                    if ms == 0 {
+                        0
+                    } else {
+                        ms.div_ceil(60_000) as usize
+                    }
+                })
+                .unwrap_or(0),
+        }
+    };
+    let min_peak = match heatmap_metric {
+        HeatmapMetric::Resolved => 4,
+        HeatmapMetric::Dwell | HeatmapMetric::Agent => 30,
     };
     let peak = (0..365)
         .map(|i| activity_on(annual_start + Duration::days(i)))
         .max()
         .unwrap_or(0)
-        .max(4);
+        .max(min_peak);
     let mut active_days = 0;
     let mut streak = 0;
     let mut longest_streak = 0;
@@ -2519,6 +3082,8 @@ pub fn compute_full<Tz: TimeZone>(
                         merged_cards: merged_on(d),
                         created_cards: daily_created.get(&d).copied().unwrap_or(0),
                         total_runs: daily_runs.get(&d).map(|v| v.iter().sum()).unwrap_or(0),
+                        dwell_ms: annual_dwell_by_day.get(&d).copied().unwrap_or(0),
+                        agent_ms: annual_agent_by_day.get(&d).copied().unwrap_or(0),
                         known,
                         level: if !known || a == 0 {
                             0
@@ -2659,10 +3224,13 @@ pub fn compute_full<Tz: TimeZone>(
         unknown_merge_dates,
         hours,
         moving_average,
-        weeks,
-        weekly_moving_average,
-        max_weekly_kanban,
-        wow,
+        time_totals,
+        timeline,
+        day_rows,
+        funnel,
+        other_dwell_ms,
+        other_agent_ms,
+        activity_loaded: activity.loaded,
         pipeline,
         intake,
         schedules,
@@ -2712,8 +3280,19 @@ pub fn compute_full<Tz: TimeZone>(
         days,
         heatmap_weeks,
         profile_stats,
+        model_stats,
         trigger_stats,
-        has_any_history: !valid_cards.is_empty() || !runs.is_empty(),
+        has_any_history: !valid_cards.is_empty()
+            || !runs.is_empty()
+            || !activity.period_segments.is_empty()
+            || activity
+                .range_buckets
+                .iter()
+                .any(|b| b.dwell.total() > 0 || b.agent_ms > 0)
+            || activity
+                .annual_buckets
+                .iter()
+                .any(|b| b.dwell.total() > 0 || b.agent_ms > 0),
     }
 }
 
@@ -2783,7 +3362,6 @@ mod tests {
         assert_eq!(dash.median_lead_time_ms, None);
         assert_eq!(dash.median_queue_wait_ms, None);
         assert_eq!(dash.days.len(), 30);
-        assert_eq!(dash.weeks.len(), 8);
         assert_eq!(dash.heatmap_weeks.len(), 53);
         assert!(!dash.has_any_history);
     }
@@ -2845,8 +3423,6 @@ mod tests {
         assert_eq!(dash.created_total, 4);
         assert_eq!(dash.net_wip_delta, 1);
         assert_eq!(dash.pipeline.active_wip, 0);
-        assert_eq!(dash.weeks.last().unwrap().merged_cards, 3);
-        assert_eq!(dash.wow.current_merged, 3);
 
         let today_bucket = dash.days.last().unwrap();
         assert_eq!(today_bucket.date_key, "2026-11-15");
@@ -2883,21 +3459,17 @@ mod tests {
         assert_eq!(default_dash.intake.initial_sync, 1);
         assert_eq!(default_dash.intake.local_manual, 1);
 
-        let inclusive = compute_full(
+        let mut opts = ViewOptions::with_now(now);
+        opts.hourly_metric = ActivityMetric::Created;
+        opts.exclude_initial_sync = false;
+        let inclusive = compute_dashboard(
             &snap,
             &events,
+            &ActivityInput::default(),
             None,
-            RangeWindow::Today,
-            now,
             &tz_plus_8(),
-            None,
-            Comparison::Previous,
-            ActivityMetric::Created,
-            ActivityMetric::Created,
-            14,
-            8,
-            false,
             &[],
+            opts,
         );
         assert_eq!(inclusive.created_total, 2);
     }
@@ -3044,13 +3616,6 @@ mod tests {
             .unwrap();
         assert_eq!(codex_row.median_queue_wait_ms, Some(10_000));
         assert_eq!(agy_row.median_queue_wait_ms, Some(40_000));
-
-        assert_eq!(dash.wow.current_merged, 2);
-        assert_eq!(dash.wow.previous_merged, 1);
-        assert_eq!(dash.wow.current_cycle_p50_ms, Some(30 * 60_000));
-        assert_eq!(dash.wow.previous_cycle_p50_ms, Some(2 * 3_600_000));
-        assert_eq!(dash.wow.current_touches_per_merge, Some(0.0));
-        assert_eq!(dash.wow.previous_touches_per_merge, Some(1.0));
     }
 
     #[test]
@@ -3370,51 +3935,42 @@ mod tests {
         assert_eq!(d.hours[15].current, 1);
         assert!(d.hours[16].future);
         assert_eq!(d.reference_days, 7);
-        let longer_trend = compute_view(
+        let mut opts_long = ViewOptions::with_now(now);
+        opts_long.trend_days = 30;
+        let longer_trend = compute_dashboard(
             &s,
             &[],
+            &ActivityInput::default(),
             None,
-            RangeWindow::Today,
-            now,
             &tz,
-            None,
-            Comparison::Previous,
-            ActivityMetric::Merged,
-            ActivityMetric::Merged,
-            30,
             &[],
+            opts_long,
         );
         assert_eq!(longer_trend.days.len(), 30);
         assert_eq!(longer_trend.merged_total, d.merged_total);
         assert_eq!(longer_trend.prev_merged_total, d.prev_merged_total);
-        let week = compute_view(
+        let mut opts_week = ViewOptions::with_now(now);
+        opts_week.comparison = Comparison::LastWeek;
+        let week = compute_dashboard(
             &s,
             &[],
+            &ActivityInput::default(),
             None,
-            RangeWindow::Today,
-            now,
             &tz,
-            None,
-            Comparison::LastWeek,
-            ActivityMetric::Merged,
-            ActivityMetric::Merged,
-            14,
             &[],
+            opts_week,
         );
         assert_eq!(week.prev_merged_total, 1);
-        let historical = compute_view(
+        let mut opts_hist = ViewOptions::with_now(now);
+        opts_hist.selected = Some(chrono::NaiveDate::from_ymd_opt(2026, 11, 16).unwrap());
+        let historical = compute_dashboard(
             &s,
             &[],
+            &ActivityInput::default(),
             None,
-            RangeWindow::Today,
-            now,
             &tz,
-            Some(chrono::NaiveDate::from_ymd_opt(2026, 11, 16).unwrap()),
-            Comparison::Previous,
-            ActivityMetric::Merged,
-            ActivityMetric::Merged,
-            14,
             &[],
+            opts_hist,
         );
         assert_eq!(historical.merged_total, 2);
         assert!(!historical.hours.iter().any(|h| h.future));
@@ -3534,19 +4090,14 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let d = compute_view(
+        let d = compute_dashboard(
             &s,
             &events,
+            &ActivityInput::default(),
             None,
-            RangeWindow::Today,
-            now,
             &tz_plus_8(),
-            None,
-            Comparison::Previous,
-            ActivityMetric::Merged,
-            ActivityMetric::Merged,
-            14,
             &profiles,
+            ViewOptions::with_now(now),
         );
         assert_eq!(
             (d.used_profiles, d.providers, d.used_runs, d.scheduled_total),
@@ -3865,5 +4416,224 @@ mod tests {
             .expect("reviewer profile");
         assert_eq!(rev.avg_exec_ms, Some(2 * min));
         assert_eq!(rev.avg_mention_reply_ms, Some(2 * min));
+    }
+
+    #[test]
+    fn activity_totals_timeline_day_rows_and_model_grouping() {
+        use canban_types::{
+            ActivityBucket, ActivityDetail, ActivityKind, ActivitySegment, AgentBucketStat,
+            AgentWorkData, DwellBucketTotals, DwellData, DwellLane, ProjectActivityTotals,
+        };
+
+        let tz = tz_plus_8();
+        let now = ts_utc8(2026, 11, 21, 16, 0);
+        let mut s = Snapshot::default();
+        s.projects.push(sample_project("p1", "Canban"));
+        s.projects.push(sample_project("p2", "Herdr"));
+        let mut c1 = sample_card("c1", "p1", 1, ts_utc8(2026, 11, 21, 8, 30));
+        c1.delivery = Some(Delivery {
+            target_branch: "main".into(),
+            commit: "abc".into(),
+            request_key: "merge:c1".into(),
+            merged_at: ts_utc8(2026, 11, 21, 11, 0),
+        });
+        s.cards.push(c1);
+
+        let profiles = vec![
+            Profile {
+                id: "developer".into(),
+                preset: Some("claude".into()),
+                model: Some("claude-sonnet-4".into()),
+                ..Default::default()
+            },
+            Profile {
+                id: "reviewer".into(),
+                preset: Some("claude".into()),
+                model: Some("claude-sonnet-4".into()),
+                ..Default::default()
+            },
+        ];
+
+        let act = ActivityInput {
+            loaded: true,
+            period_segments: vec![
+                // Split checkpoint blocks in same Card -> should merge in timeline
+                ActivitySegment {
+                    id: Some(1),
+                    kind: ActivityKind::Dwell,
+                    start_ms: ts_utc8(2026, 11, 21, 9, 0),
+                    end_ms: ts_utc8(2026, 11, 21, 9, 5),
+                    project_id: Some("p1".into()),
+                    card_id: Some("c1".into()),
+                    terminal_id: None,
+                    open: false,
+                    data: ActivityDetail::Dwell(DwellData {
+                        lane: DwellLane::Card,
+                        page: "card".into(),
+                    }),
+                },
+                ActivitySegment {
+                    id: Some(2),
+                    kind: ActivityKind::Dwell,
+                    start_ms: ts_utc8(2026, 11, 21, 9, 5),
+                    end_ms: ts_utc8(2026, 11, 21, 9, 20),
+                    project_id: Some("p1".into()),
+                    card_id: Some("c1".into()),
+                    terminal_id: None,
+                    open: false,
+                    data: ActivityDetail::Dwell(DwellData {
+                        lane: DwellLane::Card,
+                        page: "card".into(),
+                    }),
+                },
+                ActivitySegment {
+                    id: Some(3),
+                    kind: ActivityKind::Dwell,
+                    start_ms: ts_utc8(2026, 11, 21, 10, 0),
+                    end_ms: ts_utc8(2026, 11, 21, 10, 15),
+                    project_id: Some("p2".into()),
+                    card_id: None,
+                    terminal_id: Some("term-2".into()),
+                    open: false,
+                    data: ActivityDetail::Dwell(DwellData {
+                        lane: DwellLane::Terminal,
+                        page: "terminals".into(),
+                    }),
+                },
+                ActivitySegment {
+                    id: Some(4),
+                    kind: ActivityKind::Agent,
+                    start_ms: ts_utc8(2026, 11, 21, 9, 10),
+                    end_ms: ts_utc8(2026, 11, 21, 9, 40),
+                    project_id: Some("p1".into()),
+                    card_id: Some("c1".into()),
+                    terminal_id: Some("c1:developer".into()),
+                    open: false,
+                    data: ActivityDetail::Agent(AgentWorkData {
+                        profile_id: "developer".into(),
+                        provider: "claude".into(),
+                        model: "claude-sonnet-4".into(),
+                        engine: None,
+                        stage: Some("develop".into()),
+                        run_number: Some(1),
+                        trigger: None,
+                        manual: false,
+                    }),
+                },
+                ActivitySegment {
+                    id: Some(5),
+                    kind: ActivityKind::Agent,
+                    start_ms: ts_utc8(2026, 11, 21, 10, 10),
+                    end_ms: ts_utc8(2026, 11, 21, 10, 20),
+                    project_id: Some("p1".into()),
+                    card_id: Some("c1".into()),
+                    terminal_id: Some("c1:reviewer".into()),
+                    open: true,
+                    data: ActivityDetail::Agent(AgentWorkData {
+                        profile_id: "reviewer".into(),
+                        provider: "claude".into(),
+                        model: "claude-sonnet-4".into(),
+                        engine: None,
+                        stage: Some("review".into()),
+                        run_number: Some(1),
+                        trigger: None,
+                        manual: false,
+                    }),
+                },
+            ],
+            baseline_segments: vec![ActivitySegment {
+                id: Some(6),
+                kind: ActivityKind::Dwell,
+                start_ms: ts_utc8(2026, 11, 20, 9, 0),
+                end_ms: ts_utc8(2026, 11, 20, 9, 10),
+                project_id: Some("p1".into()),
+                card_id: Some("c1".into()),
+                terminal_id: None,
+                open: false,
+                data: ActivityDetail::Dwell(DwellData {
+                    lane: DwellLane::Card,
+                    page: "card".into(),
+                }),
+            }],
+            range_buckets: vec![ActivityBucket {
+                start_ms: ts_utc8(2026, 11, 21, 0, 0),
+                end_ms: ts_utc8(2026, 11, 21, 16, 0),
+                dwell: DwellBucketTotals {
+                    card: 20 * 60_000,
+                    terminal: 15 * 60_000,
+                    other: 0,
+                },
+                agent_ms: 40 * 60_000,
+                by_project: BTreeMap::from([(
+                    "p1".into(),
+                    ProjectActivityTotals {
+                        dwell_ms: 20 * 60_000,
+                        agent_ms: 40 * 60_000,
+                    },
+                )]),
+                by_agent: vec![
+                    AgentBucketStat {
+                        profile_id: "developer".into(),
+                        provider: "claude".into(),
+                        model: "claude-sonnet-4".into(),
+                        ms: 30 * 60_000,
+                    },
+                    AgentBucketStat {
+                        profile_id: "reviewer".into(),
+                        provider: "claude".into(),
+                        model: "claude-sonnet-4".into(),
+                        ms: 10 * 60_000,
+                    },
+                ],
+            }],
+            baseline_buckets: Vec::new(),
+            annual_buckets: Vec::new(),
+        };
+
+        let opts = ViewOptions::with_now(now);
+        let d1 = compute_dashboard(&s, &[], &act, None, &tz, &profiles, opts);
+        assert_eq!(d1.time_totals.dwell_total_ms, 35 * 60_000);
+        assert_eq!(d1.time_totals.dwell_card_ms, 20 * 60_000);
+        assert_eq!(d1.time_totals.dwell_terminal_ms, 15 * 60_000);
+        assert_eq!(d1.time_totals.prev_dwell_total_ms, 10 * 60_000);
+        assert_eq!(d1.time_totals.agent_total_ms, 40 * 60_000);
+
+        // Timeline lanes: 3 Me lanes + 2 Agent lanes (@developer, @reviewer)
+        assert_eq!(d1.timeline.lanes.len(), 5);
+        assert_eq!(d1.timeline.lanes[0].blocks.len(), 1); // merged checkpoint blocks
+        assert_eq!(d1.timeline.lanes[0].total_ms, 20 * 60_000);
+        assert_eq!(d1.timeline.merges.len(), 1);
+        assert_eq!(d1.timeline.merges[0].card_number, 1);
+
+        // Model grouping collapses developer + reviewer into claude-sonnet-4 (40m)
+        let models = group_agents_by_model(&d1.profile_stats, &BTreeMap::new());
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].model, "claude-sonnet-4");
+        assert_eq!(models[0].working_ms, 40 * 60_000);
+        assert_eq!(d1.model_stats.len(), 1);
+        assert_eq!(d1.model_stats[0].model, "claude-sonnet-4");
+        assert_eq!(d1.model_stats[0].working_ms, 40 * 60_000);
+        assert!(d1.has_any_history);
+
+        // Model timeline merges into 1 agent lane
+        let mut opts_model = opts;
+        opts_model.agent_group = AgentGroup::Model;
+        let d_model = compute_dashboard(&s, &[], &act, None, &tz, &profiles, opts_model);
+        assert_eq!(d_model.timeline.lanes.len(), 4);
+        assert_eq!(d_model.timeline.lanes[3].label, "claude-sonnet-4");
+
+        // 7D day_rows joins range_buckets cleanly
+        let mut opts_7d = opts;
+        opts_7d.range = RangeWindow::Days7;
+        let d7 = compute_dashboard(&s, &[], &act, None, &tz, &profiles, opts_7d);
+        assert_eq!(d7.day_rows.len(), 7);
+        let today_row = d7.day_rows.last().unwrap();
+        assert!(today_row.is_today);
+        assert_eq!(today_row.dwell_total_ms(), 35 * 60_000);
+        assert_eq!(today_row.agent_ms, 40 * 60_000);
+        assert_eq!(today_row.resolved_cards, 1);
+        assert_eq!(d7.funnel.created, 1);
+        assert_eq!(d7.funnel.merged, 1);
+        assert_eq!(d7.funnel.zero_human_pct(), Some(100));
     }
 }

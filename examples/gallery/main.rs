@@ -1406,45 +1406,70 @@ pub fn Gallery() -> impl IntoElement {
     }
     if matches!(
         std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
-        Ok("insights" | "insights-weekly" | "insights-empty" | "insights-short-history")
+        Ok("insights"
+            | "insights-weekly"
+            | "insights-agents-model"
+            | "insights-empty"
+            | "insights-short-history")
     ) {
         canban_ui::frame::configure_window_chrome();
-        if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("insights-empty") {
+        let scene_name = std::env::var("CANBAN_GALLERY_SCENE").unwrap_or_default();
+        if scene_name == "insights-empty" {
             let mut empty = canban_types::Snapshot::default();
             empty
                 .projects
                 .push(fixtures::workspace().projects.remove(0));
             ui.snapshot.set(empty);
             ui.insights.events.set(std::rc::Rc::new(Vec::new()));
+            ui.insights.activity.set(std::rc::Rc::new(
+                canban_ui::insights::model::ActivityInput {
+                    loaded: true,
+                    ..Default::default()
+                },
+            ));
         } else {
             let (snap, events) = fixtures::insights();
             ui.snapshot.set(snap);
             ui.insights.events.set(std::rc::Rc::new(events));
+            ui.insights
+                .activity
+                .set(std::rc::Rc::new(fixtures::insights_activity()));
         }
         ui.insights.anchor_ms.set(Some(fixtures::INSIGHTS_NOW));
-        if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("insights-weekly") {
-            ui.insights
-                .cadence
-                .set(canban_ui::insights::model::TrendCadence::Weekly);
+        match scene_name.as_str() {
+            "insights-weekly" => {
+                ui.insights
+                    .range
+                    .set(canban_ui::insights::model::RangeWindow::Days7);
+            }
+            "insights-agents-model" => {
+                ui.insights
+                    .agent_group
+                    .set(canban_ui::insights::model::AgentGroup::Model);
+            }
+            _ => {}
         }
         ui.all_profiles.set(vec![
             canban_types::Profile {
                 id: "developer".into(),
                 preset: Some("codex".into()),
+                model: Some("gpt-5.4".into()),
                 ..Default::default()
             },
             canban_types::Profile {
                 id: "reviewer".into(),
                 preset: Some("claude".into()),
+                model: Some("claude-sonnet-4-6".into()),
                 ..Default::default()
             },
             canban_types::Profile {
                 id: "planner".into(),
                 preset: Some("codex".into()),
+                model: Some("gpt-5.4".into()),
                 ..Default::default()
             },
         ]);
-        if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("insights-short-history") {
+        if scene_name == "insights-short-history" {
             let cutoff = fixtures::INSIGHTS_NOW - 3_600_000;
             ui.snapshot.update(|s| {
                 s.cards.retain(|c| c.created_at >= cutoff);
@@ -1459,6 +1484,18 @@ pub fn Gallery() -> impl IntoElement {
                     .cloned()
                     .collect();
                 *evs = std::rc::Rc::new(filtered);
+            });
+            ui.insights.activity.update(|act| {
+                let mut next = (**act).clone();
+                next.period_segments.retain(|s| s.end_ms >= cutoff);
+                for seg in &mut next.period_segments {
+                    seg.start_ms = seg.start_ms.max(cutoff);
+                }
+                next.baseline_segments.clear();
+                next.range_buckets.retain(|b| b.end_ms >= cutoff);
+                next.baseline_buckets.clear();
+                next.annual_buckets.retain(|b| b.end_ms >= cutoff);
+                *act = std::rc::Rc::new(next);
             });
         }
         ui.project.set("gallery-project".into());
@@ -3175,6 +3212,30 @@ pub fn Gallery() -> impl IntoElement {
                     let (snap, events) = fixtures::insights();
                     ui.snapshot.set(snap);
                     ui.insights.events.set(std::rc::Rc::new(events));
+                    ui.insights
+                        .activity
+                        .set(std::rc::Rc::new(fixtures::insights_activity()));
+                    ui.insights.anchor_ms.set(Some(fixtures::INSIGHTS_NOW));
+                    ui.all_profiles.set(vec![
+                        canban_types::Profile {
+                            id: "developer".into(),
+                            preset: Some("codex".into()),
+                            model: Some("gpt-5.4".into()),
+                            ..Default::default()
+                        },
+                        canban_types::Profile {
+                            id: "reviewer".into(),
+                            preset: Some("claude".into()),
+                            model: Some("claude-sonnet-4-6".into()),
+                            ..Default::default()
+                        },
+                        canban_types::Profile {
+                            id: "planner".into(),
+                            preset: Some("codex".into()),
+                            model: Some("gpt-5.4".into()),
+                            ..Default::default()
+                        },
+                    ]);
                     ui.project.set("gallery-project".into());
                     ui.insights.scope_project.set(String::new());
                     scene.set("workspace".into());

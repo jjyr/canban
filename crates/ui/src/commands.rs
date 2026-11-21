@@ -857,20 +857,24 @@ pub fn execute(ui: Ui, id: &str) {
             crate::insights::intent(ui, "metric-merged");
             ui.navigate("insights");
         }
-        "insights-metric-created" => {
-            crate::insights::intent(ui, "metric-created");
+        "insights-metric-dwell" => {
+            crate::insights::intent(ui, "metric-dwell");
             ui.navigate("insights");
         }
-        "insights-metric-runs" => {
-            crate::insights::intent(ui, "metric-runs");
-            ui.navigate("insights");
-        }
-        "insights-group-provider" => {
-            crate::insights::intent(ui, "group-provider");
+        "insights-metric-agent" => {
+            crate::insights::intent(ui, "metric-agent");
             ui.navigate("insights");
         }
         "insights-group-profile" => {
             crate::insights::intent(ui, "group-profile");
+            ui.navigate("insights");
+        }
+        "insights-group-model" => {
+            crate::insights::intent(ui, "group-model");
+            ui.navigate("insights");
+        }
+        "insights-sort-time" => {
+            crate::insights::intent(ui, "sort-time");
             ui.navigate("insights");
         }
         "insights-sort-created" => {
@@ -903,22 +907,6 @@ pub fn execute(ui: Ui, id: &str) {
         }
         "insights-hourly-runs" => {
             crate::insights::intent(ui, "hourly-runs");
-            ui.navigate("insights");
-        }
-        "insights-trend-14" => {
-            crate::insights::intent(ui, "trend-14");
-            ui.navigate("insights");
-        }
-        "insights-trend-30" => {
-            crate::insights::intent(ui, "trend-30");
-            ui.navigate("insights");
-        }
-        "insights-cadence-daily" => {
-            crate::insights::intent(ui, "cadence-daily");
-            ui.navigate("insights");
-        }
-        "insights-cadence-weekly" => {
-            crate::insights::intent(ui, "cadence-weekly");
             ui.navigate("insights");
         }
         "insights-toggle-initial-sync" => {

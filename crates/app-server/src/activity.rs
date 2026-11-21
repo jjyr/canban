@@ -446,8 +446,7 @@ impl AppServer {
             let db = store.db();
             let project = project_raw
                 .as_deref()
-                .map(|pid| super::resolve_project_id(db, pid))
-                .transpose()?;
+                .map(|pid| super::resolve_project_id(db, pid).unwrap_or_else(|_| pid.to_owned()));
             let (rows, truncated) = db.query_activity_segments(
                 from_ms,
                 to_ms,
@@ -533,8 +532,7 @@ impl AppServer {
             let db = store.db();
             let project = project_raw
                 .as_deref()
-                .map(|pid| super::resolve_project_id(db, pid))
-                .transpose()?;
+                .map(|pid| super::resolve_project_id(db, pid).unwrap_or_else(|_| pid.to_owned()));
             db.for_each_activity_segment(
                 first,
                 last,

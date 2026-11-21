@@ -3078,6 +3078,307 @@ pub fn insights() -> (canban_types::Snapshot, Vec<Event>) {
     (s, events)
 }
 
+pub fn insights_activity() -> canban_ui::insights::model::ActivityInput {
+    use canban_types::{
+        ActivityBucket, ActivityDetail, ActivityKind, ActivitySegment, AgentBucketStat,
+        AgentWorkData, DwellBucketTotals, DwellData, DwellLane, ProjectActivityTotals,
+    };
+    use canban_ui::insights::model::{ActivityInput, Comparison, RangeWindow, activity_fetch_plan};
+    use std::collections::BTreeMap;
+
+    let base_now = INSIGHTS_NOW;
+    let plan = activity_fetch_plan(
+        RangeWindow::Days90,
+        base_now,
+        &chrono::Local,
+        None,
+        Comparison::Previous,
+    );
+    let min_ms: u64 = 60_000;
+    let (snap, _) = insights();
+    let card_gallery = snap
+        .cards
+        .iter()
+        .rfind(|c| c.project_id == "gallery-project" && !c.id.starts_with("insights-sync-"))
+        .map(|c| c.id.clone())
+        .unwrap_or_else(|| "card-1".into());
+    let card_herdr = snap
+        .cards
+        .iter()
+        .rfind(|c| c.project_id == "herdr-core" && !c.id.starts_with("insights-sync-"))
+        .map(|c| c.id.clone())
+        .unwrap_or_else(|| "card-2".into());
+
+    let today_start = plan
+        .range_boundaries
+        .get(plan.range_boundaries.len().saturating_sub(2))
+        .copied()
+        .unwrap_or_else(|| base_now.saturating_sub(8 * 3_600_000));
+    let span = base_now.saturating_sub(today_start).max(1);
+    let seg_bounds = |frac_start: f64, frac_end: f64| -> (u64, u64) {
+        let a = today_start + ((span as f64) * frac_start) as u64;
+        let b = today_start + ((span as f64) * frac_end) as u64;
+        (a, b.max(a + 60_000).min(base_now))
+    };
+
+    let (dc1_a, dc1_b) = seg_bounds(0.18, 0.34);
+    let (dc2_a, dc2_b) = seg_bounds(0.54, 0.72);
+    let (dt1_a, dt1_b) = seg_bounds(0.36, 0.50);
+    let (do1_a, do1_b) = seg_bounds(0.75, 0.84);
+    let (ag1_a, ag1_b) = seg_bounds(0.20, 0.44);
+    let (ag2_a, ag2_b) = seg_bounds(0.46, 0.68);
+    let (ag3_a, ag3_b) = seg_bounds(0.76, 1.00);
+
+    let period_segments = vec![
+        ActivitySegment {
+            id: Some(1),
+            kind: ActivityKind::Dwell,
+            start_ms: dc1_a,
+            end_ms: dc1_b,
+            project_id: Some("gallery-project".into()),
+            card_id: Some(card_gallery.clone()),
+            terminal_id: None,
+            open: false,
+            data: ActivityDetail::Dwell(DwellData {
+                lane: DwellLane::Card,
+                page: "card".into(),
+            }),
+        },
+        ActivitySegment {
+            id: Some(2),
+            kind: ActivityKind::Dwell,
+            start_ms: dt1_a,
+            end_ms: dt1_b,
+            project_id: Some("herdr-core".into()),
+            card_id: Some(card_herdr.clone()),
+            terminal_id: Some(format!("{card_herdr}:reviewer")),
+            open: false,
+            data: ActivityDetail::Dwell(DwellData {
+                lane: DwellLane::Terminal,
+                page: "terminals".into(),
+            }),
+        },
+        ActivitySegment {
+            id: Some(3),
+            kind: ActivityKind::Dwell,
+            start_ms: dc2_a,
+            end_ms: dc2_b,
+            project_id: Some("gallery-project".into()),
+            card_id: Some(card_gallery.clone()),
+            terminal_id: None,
+            open: false,
+            data: ActivityDetail::Dwell(DwellData {
+                lane: DwellLane::Card,
+                page: "card".into(),
+            }),
+        },
+        ActivitySegment {
+            id: Some(4),
+            kind: ActivityKind::Dwell,
+            start_ms: do1_a,
+            end_ms: do1_b,
+            project_id: None,
+            card_id: None,
+            terminal_id: None,
+            open: false,
+            data: ActivityDetail::Dwell(DwellData {
+                lane: DwellLane::Other,
+                page: "board".into(),
+            }),
+        },
+        ActivitySegment {
+            id: Some(5),
+            kind: ActivityKind::Agent,
+            start_ms: ag1_a,
+            end_ms: ag1_b,
+            project_id: Some("gallery-project".into()),
+            card_id: Some(card_gallery.clone()),
+            terminal_id: Some(format!("{card_gallery}:developer")),
+            open: false,
+            data: ActivityDetail::Agent(AgentWorkData {
+                profile_id: "developer".into(),
+                provider: "Codex".into(),
+                model: "gpt-5.4".into(),
+                engine: Some("codex".into()),
+                stage: Some("develop".into()),
+                run_number: Some(1),
+                trigger: Some("workflow".into()),
+                manual: false,
+            }),
+        },
+        ActivitySegment {
+            id: Some(6),
+            kind: ActivityKind::Agent,
+            start_ms: ag2_a,
+            end_ms: ag2_b,
+            project_id: Some("herdr-core".into()),
+            card_id: Some(card_herdr.clone()),
+            terminal_id: Some(format!("{card_herdr}:reviewer")),
+            open: false,
+            data: ActivityDetail::Agent(AgentWorkData {
+                profile_id: "reviewer".into(),
+                provider: "Claude".into(),
+                model: "claude-sonnet-4-6".into(),
+                engine: Some("claude".into()),
+                stage: Some("review".into()),
+                run_number: Some(1),
+                trigger: Some("comment:rev".into()),
+                manual: false,
+            }),
+        },
+        ActivitySegment {
+            id: Some(7),
+            kind: ActivityKind::Agent,
+            start_ms: ag3_a,
+            end_ms: ag3_b,
+            project_id: Some("gallery-project".into()),
+            card_id: Some(card_gallery.clone()),
+            terminal_id: Some(format!("{card_gallery}:planner")),
+            open: true,
+            data: ActivityDetail::Agent(AgentWorkData {
+                profile_id: "planner".into(),
+                provider: "Codex".into(),
+                model: "gpt-5.4".into(),
+                engine: Some("codex".into()),
+                stage: Some("backlog".into()),
+                run_number: Some(1),
+                trigger: Some("workflow".into()),
+                manual: false,
+            }),
+        },
+    ];
+
+    let day_ms: u64 = 86_400_000;
+    let baseline_segments = vec![
+        ActivitySegment {
+            id: Some(8),
+            kind: ActivityKind::Dwell,
+            start_ms: dc1_a.saturating_sub(day_ms),
+            end_ms: dc1_b.saturating_sub(day_ms),
+            project_id: Some("gallery-project".into()),
+            card_id: Some(card_gallery.clone()),
+            terminal_id: None,
+            open: false,
+            data: ActivityDetail::Dwell(DwellData {
+                lane: DwellLane::Card,
+                page: "card".into(),
+            }),
+        },
+        ActivitySegment {
+            id: Some(9),
+            kind: ActivityKind::Agent,
+            start_ms: ag1_a.saturating_sub(day_ms),
+            end_ms: ag1_b.saturating_sub(day_ms),
+            project_id: Some("gallery-project".into()),
+            card_id: Some(card_gallery),
+            terminal_id: None,
+            open: false,
+            data: ActivityDetail::Agent(AgentWorkData {
+                profile_id: "developer".into(),
+                provider: "Codex".into(),
+                model: "gpt-5.4".into(),
+                engine: Some("codex".into()),
+                stage: Some("develop".into()),
+                run_number: Some(1),
+                trigger: Some("workflow".into()),
+                manual: false,
+            }),
+        },
+    ];
+
+    let make_buckets = |boundaries: &[u64]| -> Vec<ActivityBucket> {
+        let len = boundaries.len().saturating_sub(1);
+        boundaries
+            .windows(2)
+            .enumerate()
+            .map(|(i, w)| {
+                let rev_idx = len.saturating_sub(1 + i) as u64;
+                let pattern = (rev_idx * 7 + 3) % 11;
+                if pattern == 0 || pattern == 5 {
+                    return ActivityBucket {
+                        start_ms: w[0],
+                        end_ms: w[1],
+                        ..Default::default()
+                    };
+                }
+                let card = (25 + (rev_idx % 4) * 12) * min_ms;
+                let terminal = (15 + (rev_idx % 3) * 10) * min_ms;
+                let other = (6 + (rev_idx % 2) * 5) * min_ms;
+                let dev_ms = (32 + (rev_idx % 5) * 14) * min_ms;
+                let rev_ms = (14 + (rev_idx % 3) * 8) * min_ms;
+                let plan_ms = if rev_idx.is_multiple_of(2) {
+                    12 * min_ms
+                } else {
+                    0
+                };
+                let agent_ms = dev_ms + rev_ms + plan_ms;
+                let g_dwell = card + terminal * 2 / 5;
+                let h_dwell = terminal - terminal * 2 / 5;
+                let g_agent = dev_ms + plan_ms;
+                let h_agent = rev_ms;
+                let mut by_agent = vec![
+                    AgentBucketStat {
+                        profile_id: "developer".into(),
+                        provider: "Codex".into(),
+                        model: "gpt-5.4".into(),
+                        ms: dev_ms,
+                    },
+                    AgentBucketStat {
+                        profile_id: "reviewer".into(),
+                        provider: "Claude".into(),
+                        model: "claude-sonnet-4-6".into(),
+                        ms: rev_ms,
+                    },
+                ];
+                if plan_ms > 0 {
+                    by_agent.push(AgentBucketStat {
+                        profile_id: "planner".into(),
+                        provider: "Codex".into(),
+                        model: "gpt-5.4".into(),
+                        ms: plan_ms,
+                    });
+                }
+                ActivityBucket {
+                    start_ms: w[0],
+                    end_ms: w[1],
+                    dwell: DwellBucketTotals {
+                        card,
+                        terminal,
+                        other,
+                    },
+                    agent_ms,
+                    by_project: BTreeMap::from([
+                        (
+                            "gallery-project".into(),
+                            ProjectActivityTotals {
+                                dwell_ms: g_dwell,
+                                agent_ms: g_agent,
+                            },
+                        ),
+                        (
+                            "herdr-core".into(),
+                            ProjectActivityTotals {
+                                dwell_ms: h_dwell,
+                                agent_ms: h_agent,
+                            },
+                        ),
+                    ]),
+                    by_agent,
+                }
+            })
+            .collect()
+    };
+
+    ActivityInput {
+        period_segments,
+        baseline_segments,
+        range_buckets: make_buckets(&plan.range_boundaries),
+        baseline_buckets: make_buckets(&plan.baseline_boundaries),
+        annual_buckets: make_buckets(&plan.annual_boundaries),
+        loaded: true,
+    }
+}
+
 pub fn schedules() -> (canban_types::Snapshot, canban_ui::workflows::Draft) {
     use canban_types::*;
     let mut s = workspace();
