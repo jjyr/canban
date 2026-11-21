@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 DESKTOP_PLATFORMS = ('macos-aarch64', 'linux-x86_64', 'linux-aarch64')
 CLI_PLATFORMS = ('linux-x86_64', 'linux-aarch64')
+CI_WORKFLOW = 'ci.yml'
 
 def pack_tar_gz(source, output):
     source=pathlib.Path(source)
@@ -209,13 +210,69 @@ def reserve(repo,commit,run_id):
             if error.code!=422 or get_optional(f'/repos/{repo}/git/ref/tags/{version}') is None:raise
     raise RuntimeError('Release numbering exceeded retry bound')
 
+def ci_runs(repo,sha,token=None):
+    data=api('GET',f'/repos/{repo}/actions/workflows/{CI_WORKFLOW}/runs?head_sha={sha}&per_page=20',token=token) or {}
+    return data.get('workflow_runs',[])
+
+def classify_ci_runs(runs):
+    if not runs:return ('missing',None)
+    ordered=sorted(runs,key=lambda r:(r.get('created_at',''),r.get('id',0)),reverse=True)
+    for run in ordered:
+        if run.get('conclusion')=='success':return ('success',run)
+    for run in ordered:
+        if run.get('status')!='completed':return ('pending',run)
+    return ('failure',ordered[0])
+
+def wait_for_ci(repo,sha,token=None,timeout=5400,missing_grace=600,poll=30,sleep=time.sleep,clock=time.monotonic):
+    start=clock()
+    deadline=start+timeout
+    missing_deadline=start+missing_grace
+    sha7=sha[:7]
+    while True:
+        runs=ci_runs(repo,sha,token=token)
+        state,run=classify_ci_runs(runs)
+        if state=='success':return run
+        if state=='failure':
+            url=run.get('html_url') or f'https://github.com/{repo}/actions/workflows/{CI_WORKFLOW}'
+            rid=run.get('id')
+            hint=f'gh run rerun --failed {rid}' if rid is not None else 'gh run rerun --failed <run-id>'
+            raise RuntimeError(f'CI failed for {sha7}: {url} (retry failed jobs with `{hint}`, then dispatch release again)')
+        now=clock()
+        if state=='missing' and now>=missing_deadline:
+            raise RuntimeError(f'No CI run found for {sha7} within {missing_grace}s')
+        if now>=deadline:
+            raise RuntimeError(f'Timed out waiting for CI on {sha7} ({state})')
+        if state=='pending':
+            url=run.get('html_url') or ''
+            msg=f'Waiting for CI ({run.get("status")}) on {sha7}: {url}' if url else f'Waiting for CI ({run.get("status")}) on {sha7}'
+            print(msg,flush=True)
+        else:
+            print(f'Waiting for CI run to appear for {sha7}...',flush=True)
+        sleep(poll)
+
 def dispatch(repo,ref='main',workflow='release.yml',watch=False,poll_interval=2.0,discover_timeout=30.0):
     token=resolve_gh_token()
+    ref_param=urllib.parse.quote(ref,safe='')
+    sha=api('GET',f'/repos/{repo}/commits/{ref_param}',token=token)['sha']
+    sha7=sha[:7]
+    state,ci_run=classify_ci_runs(ci_runs(repo,sha,token=token))
+    if state=='failure':
+        url=ci_run.get('html_url') or f'https://github.com/{repo}/actions/workflows/{CI_WORKFLOW}'
+        rid=ci_run.get('id')
+        hint=f'gh run rerun --failed {rid}' if rid is not None else 'gh run rerun --failed <run-id>'
+        raise RuntimeError(f'CI failed for {sha7}: {url} (fix or run `{hint}` before dispatching release)')
+    if state=='pending':
+        url=ci_run.get('html_url') or ''
+        msg=f'CI still running for {sha7}; release ci-gate will wait: {url}' if url else f'CI still running for {sha7}; release ci-gate will wait'
+        print(msg)
+    elif state=='missing':
+        print(f'No CI run found yet for {sha7}; release ci-gate will wait up to 10 min for {CI_WORKFLOW} to appear')
+    else:
+        print(f'CI green for {sha7}')
     dispatched_at=datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(seconds=2)
     api('POST',f'/repos/{repo}/actions/workflows/{workflow}/dispatches',{'ref':ref},token=token)
     deadline=time.monotonic()+discover_timeout
     run=None
-    ref_param=urllib.parse.quote(ref,safe='')
     while time.monotonic()<deadline:
         listing=api('GET',f'/repos/{repo}/actions/workflows/{workflow}/runs?event=workflow_dispatch&branch={ref_param}&per_page=10',token=token) or {}
         for candidate in listing.get('workflow_runs',[]):
@@ -239,7 +296,7 @@ def dispatch(repo,ref='main',workflow='release.yml',watch=False,poll_interval=2.
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command',choices=['dispatch','reserve','package','package-cli','verify-dist','publish'])
+    parser.add_argument('command',choices=['dispatch','ci-gate','reserve','package','package-cli','verify-dist','publish'])
     parser.add_argument('--directory',type=pathlib.Path,default=pathlib.Path('dist'))
     parser.add_argument('--ref',default='main',help='Branch or tag ref to release (dispatch only, default: main)')
     parser.add_argument('--repo',default=None,help='GitHub owner/repo override (default: GITHUB_REPOSITORY or jjyr/canban)')
@@ -251,6 +308,10 @@ def main():
         dispatch(repo,ref=args.ref,watch=args.watch)
         return
     commit=os.environ['CANBAN_RELEASE_COMMIT'];version=os.environ.get('CANBAN_RELEASE_VERSION','')
+    if args.command=='ci-gate':
+        run=wait_for_ci(repo,commit)
+        print('CI green: '+(run.get('html_url') or commit[:7]))
+        return
     if args.command=='reserve':
         version=reserve(repo,commit,os.environ['GITHUB_RUN_ID'])
         if os.environ.get('GITHUB_OUTPUT'):

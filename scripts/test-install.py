@@ -57,10 +57,8 @@ exec "$(dirname "$0")/canban-real" "$@"
     cli.write_text(wrapper)
     cli.chmod(0o755)
     if is_macos:
-        subprocess.run(
-            ["/usr/bin/codesign", "--force", "--deep", "--sign", "-", "--timestamp=none", str(bundle)],
-            check=True,
-            capture_output=True,
+        run_checked(
+            ["/usr/bin/codesign", "--force", "--deep", "--sign", "-", "--timestamp=none", str(bundle)]
         )
     else:
         meta_path = bundle / "bundle.json"
@@ -369,6 +367,27 @@ exit 0
         shutil.rmtree(base, ignore_errors=True)
 
 
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def run_checked(cmd, **kw):
+    kw.setdefault("capture_output", True)
+    kw.setdefault("text", True)
+    res = subprocess.run(cmd, **kw)
+    if res.returncode != 0:
+        raise AssertionError(
+            f"Command {cmd!r} failed ({res.returncode}):\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
+        )
+    return res
+
+
 def rpc(sock_path: pathlib.Path, method: str, params=None):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
         s.settimeout(10)
@@ -543,7 +562,7 @@ def main():
         installed_info = json.loads(subprocess.check_output([str(installed_cli), "build-info"], text=True))
         assert installed_info["version"] == "20261114-1", installed_info
         if is_macos:
-            subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(dest)], check=True, capture_output=True)
+            run_checked(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(dest)])
             q_check = subprocess.run(["/usr/bin/xattr", "-p", "com.apple.quarantine", str(dest)], capture_output=True, text=True)
             assert q_check.returncode != 0, "Expected no com.apple.quarantine on installed bundle"
         else:
@@ -635,6 +654,7 @@ def main():
         # Shut down upgraded AppServer cleanly before schema migration test
         rpc(home / "app.sock", "app.shutdown", {"expected_pid": new_ping["pid"]})
         wait_until(lambda: not (home / "app.sock").exists(), "AppServer socket cleanup")
+        wait_until(lambda: not pid_alive(new_ping["pid"]), "upgraded AppServer exit")
 
         # 3b. Database schema migration (10 -> current) & data preservation
         current_schema = rel3["info"]["schema"]
@@ -644,11 +664,9 @@ def main():
             db.execute("INSERT INTO keep VALUES('preserved')")
             db.commit()
             db.close()
-            subprocess.run(
+            run_checked(
                 [str(installed_cli), "--home", str(home), "database", "--target", "10"],
                 env=inst_env,
-                check=True,
-                capture_output=True,
             )
             db = sqlite3.connect(home / "canban.sqlite")
             assert db.execute("PRAGMA user_version").fetchone()[0] == 10

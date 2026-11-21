@@ -159,10 +159,12 @@ class Releases(unittest.TestCase):
             with patch.object(release,'api',api),patch.object(sys,'argv',['release.py','publish','--directory',directory]),patch.dict(os.environ,{'CANBAN_RELEASE_COMMIT':'c'*40,'CANBAN_RELEASE_VERSION':'20261110-1'}):
                 with self.assertRaisesRegex(RuntimeError,'Injected upload failure'):release.main()
         self.assertFalse(any(method=='PATCH' for method,_ in calls))
-    def test_workflow_is_manual_only_official_release_with_pre_release_integration_tests(self):
+    def test_workflow_is_manual_only_official_release_with_ci_gate(self):
         root=pathlib.Path(__file__).resolve().parents[1]
         workflow=root/'.github/workflows/release.yml'
         content=workflow.read_text()
+        ci_content=(root/'.github/workflows/ci.yml').read_text()
+        nextest_content=(root/'.config/nextest.toml').read_text()
         mise_content=(root/'mise.toml').read_text()
         self.assertTrue(content.startswith('name: Release\n'))
         self.assertNotIn('internal release',content.lower())
@@ -183,13 +185,10 @@ class Releases(unittest.TestCase):
         self.assertIn('cargo nextest run --workspace --locked',mise_content)
         self.assertIn('CANBAN_GH_BIN = "/usr/bin/false"',mise_content)
         self.assertNotIn('\n      GH_TOKEN:',content.split('steps:')[0])
-        self.assertIn('mise run test-integration',content)
-        self.assertIn('scripts/test-install.py',content)
-        self.assertIn('scripts/test-release-upgrade.py',content)
+        self.assertIn('scripts/release.py ci-gate',content)
+        self.assertNotIn('mise run test-integration',content)
         self.assertIn('scripts/test-release-upgrade.py --dist dist',content)
-        self.assertLess(content.index('mise run test-integration'),content.index('scripts/release.py reserve'))
-        self.assertLess(content.index('scripts/test-install.py'),content.index('scripts/release.py reserve'))
-        self.assertLess(content.index('scripts/test-release-upgrade.py\n'),content.index('scripts/release.py reserve'))
+        self.assertLess(content.index('scripts/release.py ci-gate'),content.index('scripts/release.py reserve'))
         self.assertLess(content.index('scripts/release.py reserve'),content.index('mise run build-release'))
         self.assertLess(content.index('mise run build-release'),content.index('scripts/release.py package'))
         self.assertLess(content.index('scripts/release.py package'),content.index('scripts/test-release-upgrade.py --dist dist'))
@@ -203,6 +202,17 @@ class Releases(unittest.TestCase):
         self.assertIn('scripts/release.py package-cli',content)
         self.assertIn('scripts/test-install.py --bundle .local/canban',content)
         self.assertIn('scripts/release.py publish --require-all-platforms',content)
+        self.assertIn('push:',ci_content)
+        self.assertIn('main',ci_content)
+        self.assertIn('pull_request:',ci_content)
+        self.assertIn('NEXTEST_PROFILE: ci',ci_content)
+        self.assertIn('mise run test',ci_content)
+        self.assertIn('mise run test-integration',ci_content)
+        self.assertIn('scripts/test-install.py',ci_content)
+        self.assertIn('scripts/test-release-upgrade.py',ci_content)
+        self.assertIn('ubuntu-24.04-arm',ci_content)
+        self.assertIn('[profile.ci]',nextest_content)
+        self.assertIn('retries',nextest_content)
     def test_upgrade_gate_baseline_selection_and_redirect_auth_stripping(self):
         gate_spec=importlib.util.spec_from_file_location('test_release_upgrade',pathlib.Path(__file__).with_name('test-release-upgrade.py'))
         gate=importlib.util.module_from_spec(gate_spec);gate_spec.loader.exec_module(gate)
@@ -236,6 +246,10 @@ class Releases(unittest.TestCase):
         now=release.datetime.datetime.now(release.datetime.timezone.utc).isoformat().replace('+00:00','Z')
         def api(method,path,body=None,**kwargs):
             calls.append((method,path,body,kwargs.get('token')))
+            if method=='GET' and path=='/repos/fixture/app/commits/release%2Fbranch':
+                return {'sha':'abcdef1234567890abcdef1234567890abcdef12'}
+            if method=='GET' and '/actions/workflows/ci.yml/runs?' in path:
+                return {'workflow_runs':[{'id':55,'status':'completed','conclusion':'success','html_url':'https://github.com/fixture/app/actions/runs/55'}]}
             if method=='POST' and path=='/repos/fixture/app/actions/workflows/release.yml/dispatches':return None
             if method=='GET' and '/actions/workflows/release.yml/runs?' in path:
                 return {'workflow_runs':[{'id':987,'run_number':12,'head_sha':'abcdef1234567','html_url':'https://github.com/fixture/app/actions/runs/987','created_at':now}]}
@@ -245,9 +259,79 @@ class Releases(unittest.TestCase):
             return type('Result',(),{'returncode':0,'stdout':'gh-token-xyz\n'})()
         with patch.object(release,'api',api),patch.object(release.shutil,'which',return_value='/usr/local/bin/gh'),patch.object(release.subprocess,'run',side_effect=fake_run),patch.dict(os.environ,{},clear=True),patch.object(sys,'argv',['release.py','dispatch','--repo','fixture/app','--ref','release/branch','--watch']):
             release.main()
-        self.assertEqual(calls[0],('POST','/repos/fixture/app/actions/workflows/release.yml/dispatches',{'ref':'release/branch'},'gh-token-xyz'))
-        self.assertIn('branch=release%2Fbranch',calls[1][1])
+        post_idx=next(i for i,c in enumerate(calls) if c[0]=='POST')
+        self.assertEqual(calls[post_idx],('POST','/repos/fixture/app/actions/workflows/release.yml/dispatches',{'ref':'release/branch'},'gh-token-xyz'))
+        self.assertIn('branch=release%2Fbranch',calls[post_idx+1][1])
         self.assertEqual(subproc,[['/usr/local/bin/gh','auth','token'],['/usr/local/bin/gh','run','watch','987','--repo','fixture/app','--exit-status']])
+    def test_classify_ci_runs_precedence(self):
+        self.assertEqual(release.classify_ci_runs([]),('missing',None))
+        state,run=release.classify_ci_runs([
+            {'id':1,'created_at':'2026-11-21T01:00:00Z','status':'completed','conclusion':'failure'},
+            {'id':2,'created_at':'2026-11-21T02:00:00Z','status':'completed','conclusion':'success'},
+        ])
+        self.assertEqual((state,run['id']),('success',2))
+        state,run=release.classify_ci_runs([
+            {'id':1,'created_at':'2026-11-21T01:00:00Z','status':'completed','conclusion':'failure'},
+            {'id':3,'created_at':'2026-11-21T03:00:00Z','status':'in_progress','conclusion':None},
+        ])
+        self.assertEqual((state,run['id']),('pending',3))
+        state,run=release.classify_ci_runs([
+            {'id':1,'created_at':'2026-11-21T01:00:00Z','status':'completed','conclusion':'failure'},
+            {'id':4,'created_at':'2026-11-21T04:00:00Z','status':'completed','conclusion':'cancelled'},
+        ])
+        self.assertEqual((state,run['id']),('failure',4))
+    def test_wait_for_ci_handles_pending_failure_and_missing(self):
+        t=[0.0];sleeps=[]
+        def clock():return t[0]
+        def sleep(d):sleeps.append(d);t[0]+=d
+        responses=[
+            [{'id':11,'status':'in_progress','conclusion':None,'html_url':'https://github.com/fixture/app/actions/runs/11'}],
+            [{'id':11,'status':'completed','conclusion':'success','html_url':'https://github.com/fixture/app/actions/runs/11'}],
+        ]
+        with patch.object(release,'ci_runs',side_effect=responses):
+            run=release.wait_for_ci('fixture/app','a'*40,poll=30,sleep=sleep,clock=clock)
+        self.assertEqual(run['id'],11)
+        self.assertEqual(sleeps,[30])
+        with patch.object(release,'ci_runs',return_value=[{'id':22,'status':'completed','conclusion':'failure','html_url':'https://github.com/fixture/app/actions/runs/22'}]):
+            with self.assertRaisesRegex(RuntimeError,'gh run rerun --failed 22'):
+                release.wait_for_ci('fixture/app','a'*40,sleep=sleep,clock=clock)
+        t[0]=0.0
+        with patch.object(release,'ci_runs',return_value=[]):
+            with self.assertRaisesRegex(RuntimeError,'No CI run found for aaaaaaa'):
+                release.wait_for_ci('fixture/app','a'*40,missing_grace=50,poll=30,sleep=sleep,clock=clock)
+    def test_dispatch_ci_checks_and_ci_gate_command(self):
+        calls=[]
+        def api_fail(method,path,body=None,**kwargs):
+            calls.append((method,path))
+            if '/commits/' in path:return {'sha':'b'*40}
+            if '/actions/workflows/ci.yml/runs?' in path:
+                return {'workflow_runs':[{'id':77,'status':'completed','conclusion':'failure','html_url':'https://github.com/fixture/app/actions/runs/77'}]}
+            raise AssertionError((method,path))
+        with patch.object(release,'api',api_fail),patch.object(release,'resolve_gh_token',return_value='tok'):
+            with self.assertRaisesRegex(RuntimeError,'gh run rerun --failed 77'):
+                release.dispatch('fixture/app',ref='main')
+        self.assertFalse(any(m=='POST' for m,_ in calls))
+
+        now=release.datetime.datetime.now(release.datetime.timezone.utc).isoformat().replace('+00:00','Z')
+        pending_calls=[]
+        def api_pending(method,path,body=None,**kwargs):
+            pending_calls.append((method,path))
+            if '/commits/' in path:return {'sha':'b'*40}
+            if '/actions/workflows/ci.yml/runs?' in path:
+                return {'workflow_runs':[{'id':88,'status':'queued','conclusion':None,'html_url':'https://github.com/fixture/app/actions/runs/88'}]}
+            if method=='POST' and path.endswith('/dispatches'):return None
+            if '/actions/workflows/release.yml/runs?' in path:
+                return {'workflow_runs':[{'id':99,'run_number':1,'head_sha':'b'*40,'html_url':'https://github.com/fixture/app/actions/runs/99','created_at':now}]}
+            raise AssertionError((method,path))
+        with patch.object(release,'api',api_pending),patch.object(release,'resolve_gh_token',return_value='tok'):
+            run=release.dispatch('fixture/app',ref='main')
+        self.assertEqual(run['id'],99)
+        self.assertTrue(any(m=='POST' and p.endswith('/dispatches') for m,p in pending_calls))
+
+        with patch.object(release,'wait_for_ci',return_value={'html_url':'https://github.com/fixture/app/actions/runs/88'}) as gate:
+            with patch.dict(os.environ,{'CANBAN_RELEASE_COMMIT':'c'*40}),patch.object(sys,'argv',['release.py','ci-gate','--repo','fixture/app']):
+                release.main()
+        gate.assert_called_once_with('fixture/app','c'*40)
     def test_package_creates_tar_zst_and_tar_gz_with_manifest_digests(self):
         with tempfile.TemporaryDirectory(prefix='cb-release-pkg-') as directory:
             root=pathlib.Path(directory)

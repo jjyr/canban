@@ -255,9 +255,10 @@ def prepare_candidate_fixture(
             f"Building versioned candidate CLI/updater ({synth_version} @ {synth_commit[:7]})...",
             flush=True,
         )
+        fixture_target = ROOT / "target/upgrade-fixture"
         build_env = {
             **os.environ,
-            "CARGO_TARGET_DIR": str(work_dir / "cargo-target"),
+            "CARGO_TARGET_DIR": str(fixture_target),
             "CANBAN_RELEASE_VERSION": synth_version,
             "CANBAN_RELEASE_COMMIT": synth_commit,
         }
@@ -267,8 +268,8 @@ def prepare_candidate_fixture(
             env=build_env,
             check=True,
         )
-        shutil.copy2(work_dir / "cargo-target/debug/canban", staged / "Contents/MacOS/canban")
-        shutil.copy2(work_dir / "cargo-target/debug/canban-updater", staged / "Contents/MacOS/canban-updater")
+        shutil.copy2(fixture_target / "debug/canban", staged / "Contents/MacOS/canban")
+        shutil.copy2(fixture_target / "debug/canban-updater", staged / "Contents/MacOS/canban-updater")
         info = json.loads(subprocess.check_output([str(cli), "build-info"], text=True))
 
     artifact = work_dir / f"Canban-{info['platform']}.tar.zst"

@@ -8,7 +8,22 @@ concurrency:
   group: release
   cancel-in-progress: false
 jobs:
+  ci-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    env:
+      CANBAN_RELEASE_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+      - name: Wait for green CI on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release.py ci-gate
+
   macos:
+    needs: ci-gate
     runs-on: macos-15
     timeout-minutes: 60
     outputs:
@@ -26,6 +41,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-directories: ~/Library/Caches/canban
+          shared-key: release-macos
       - name: Install build and integration test dependencies
         env:
           HC_VERSION: '0.1.21'
@@ -36,20 +52,6 @@ jobs:
           mkdir -p "$HOME/.local/bin"
           curl --retry 3 --retry-all-errors -fsSL https://releases.herdr.dev/core/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: Run unit and packaging tests
-        run: |
-          mise run test
-          mise run test-release
-          mise run test-package
-          mise run test-dev
-      - name: Run integration and installer tests
-        run: |
-          mise run test-integration
-          /usr/bin/python3 scripts/test-install.py
-      - name: Validate candidate upgrade from latest published release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: /usr/bin/python3 scripts/test-release-upgrade.py
       - name: Reserve immutable release identity
         id: identity
         env:
@@ -67,7 +69,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CANBAN_RELEASE_VERSION: ${{ steps.identity.outputs.version }}
-        run: /usr/bin/python3 scripts/test-release-upgrade.py --dist dist
+        run: /usr/bin/python3 scripts/run-acceptance.py --retries 1 -- scripts/test-release-upgrade.py --dist dist
       - uses: actions/upload-artifact@v7
         with:
           name: canban-macos-${{ steps.identity.outputs.version }}
@@ -97,6 +99,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-directories: ~/.cache/canban
+          shared-key: release-linux
       - name: Install Linux desktop build and test dependencies
         env:
           HC_VERSION: '0.1.21'
@@ -112,15 +115,10 @@ jobs:
           mkdir -p "$HOME/.local/bin"
           curl --retry 3 --retry-all-errors -fsSL https://releases.herdr.dev/core/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: Run Linux script and packaging tests
-        run: |
-          mise run test-release
-          mise run test-package
-          mise run test-dev
       - name: Build Linux desktop release bundle and headless CLI
         run: mise run build-release
       - name: Run Linux installer regression tests
-        run: python3 scripts/test-install.py --bundle .local/canban
+        run: python3 scripts/run-acceptance.py --retries 1 -- scripts/test-install.py --bundle .local/canban
       - name: Package verified Linux desktop and CLI artifacts
         run: |
           python3 scripts/release.py package --directory dist

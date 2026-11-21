@@ -157,18 +157,7 @@ run = "python3 scripts/test-release-upgrade.py"
 
 [tasks.test-integration]
 depends = ["build"]
-run = [
-  "python3 scripts/acceptance.py",
-  "python3 scripts/acceptance-interactive.py",
-  "python3 scripts/acceptance-adoption.py",
-  "python3 scripts/acceptance-workflows.py",
-  "python3 scripts/acceptance-github-workspace.py",
-  "python3 scripts/acceptance-notifications.py",
-  "python3 scripts/acceptance-scheduling.py",
-  "python3 scripts/acceptance-events.py",
-  "python3 scripts/acceptance-dev.py",
-  "python3 scripts/acceptance-backend.py",
-]
+run = "python3 scripts/run-acceptance.py --suite integration"
 
 [tasks.acceptance-github-workspace]
 depends = ["build"]

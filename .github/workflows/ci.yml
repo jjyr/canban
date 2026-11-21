@@ -1,0 +1,130 @@
+name: CI
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 75
+    env:
+      CANBAN_UPDATES_DISABLED: '1'
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+      NEXTEST_PROFILE: ci
+      CANBAN_ACCEPTANCE_RETRIES: '1'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: jdx/mise-action@v5
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-directories: ~/Library/Caches/canban
+          shared-key: ci-macos
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - name: Install build and integration test dependencies
+        env:
+          HC_VERSION: '0.1.21'
+        run: |
+          if ! command -v rsvg-convert >/dev/null 2>&1; then
+            brew install librsvg
+          fi
+          mkdir -p "$HOME/.local/bin"
+          curl --retry 3 --retry-all-errors -fsSL https://releases.herdr.dev/core/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Run unit tests
+        run: mise run test
+      - name: Run script and packaging tests
+        if: ${{ !cancelled() }}
+        run: |
+          mise run test-release
+          mise run test-package
+          mise run test-dev
+      - name: Run integration tests
+        if: ${{ !cancelled() }}
+        run: mise run test-integration
+      - name: Run installer tests
+        if: ${{ !cancelled() }}
+        run: /usr/bin/python3 scripts/run-acceptance.py -- scripts/test-install.py
+      - name: Validate candidate upgrade from latest published release
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: /usr/bin/python3 scripts/run-acceptance.py -- scripts/test-release-upgrade.py
+      - name: Summarize unit test JUnit report
+        if: always()
+        run: python3 scripts/run-acceptance.py --junit-summary target/nextest/ci/junit.xml
+      - name: Upload CI failure logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-macos-logs-${{ github.run_attempt }}
+          path: |
+            target/acceptance-logs/
+            target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+
+  linux:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    env:
+      CANBAN_UPDATES_DISABLED: '1'
+      CANBAN_ACCEPTANCE_RETRIES: '1'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: jdx/mise-action@v5
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-directories: ~/.cache/canban
+          shared-key: ci-linux
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - name: Install Linux desktop build and test dependencies
+        env:
+          HC_VERSION: '0.1.21'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libgtk-4-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            librsvg2-bin \
+            zstd
+          mkdir -p "$HOME/.local/bin"
+          curl --retry 3 --retry-all-errors -fsSL https://releases.herdr.dev/core/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Run Linux script and packaging tests
+        run: |
+          mise run test-release
+          mise run test-package
+          mise run test-dev
+      - name: Build Linux desktop bundle
+        if: ${{ !cancelled() }}
+        run: mise run build
+      - name: Run Linux installer regression tests
+        if: ${{ !cancelled() }}
+        run: python3 scripts/run-acceptance.py -- scripts/test-install.py --bundle .local/canban
+      - name: Upload CI failure logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-linux-${{ matrix.arch }}-logs-${{ github.run_attempt }}
+          path: target/acceptance-logs/
+          if-no-files-found: ignore
