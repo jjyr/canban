@@ -3639,7 +3639,7 @@ mod tests {
     fn schema_20_creates_schedule_tables_and_round_trips_cleanly() {
         let home = tempfile::tempdir().unwrap();
         let store = crate::Store::open(home.path()).unwrap();
-        assert_eq!(version(&store.conn).unwrap(), 20);
+        assert_eq!(version(&store.conn).unwrap(), CURRENT);
         let state = canban_types::ScheduleState {
             id: "schedule:p1:wf1:nightly".into(),
             project_id: "p1".into(),
@@ -3675,7 +3675,7 @@ mod tests {
     fn schema_21_creates_activity_segments_and_round_trips_cleanly() {
         let home = tempfile::tempdir().unwrap();
         let store = crate::Store::open(home.path()).unwrap();
-        assert_eq!(version(&store.conn).unwrap(), 21);
+        assert_eq!(version(&store.conn).unwrap(), CURRENT);
         let seg = canban_types::ActivitySegment {
             id: None,
             kind: canban_types::ActivityKind::Dwell,
