@@ -296,8 +296,6 @@ pub fn is_default_host_terminal_env_mode(v: &HostTerminalEnvMode) -> bool {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Config {
-    #[serde(default = "local_machine")]
-    pub default_machine: String,
     /// Client-only relay to AppServer; never used by its own Core adapter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_endpoint: Option<String>,
@@ -329,7 +327,6 @@ impl Default for Config {
             ..Default::default()
         };
         Self {
-            default_machine: "local".into(),
             relay_endpoint: None,
             relay_token: None,
             scheduler: SchedulerSettings::default(),
@@ -499,23 +496,10 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub directory: String,
-    /// Current execution default. `directory` remains a compatibility mirror.
-    #[serde(default)]
-    pub location: Option<WorkLocation>,
     pub workflow: Workflow,
     #[serde(default)]
     pub target_branch: Option<String>,
     pub created_at: u64,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct WorkLocation {
-    /// `local` means AppServer's Core; remote values are owning Core IDs.
-    #[serde(default = "local_machine")]
-    pub machine: String,
-    pub directory: String,
-}
-pub fn local_machine() -> String {
-    "local".into()
 }
 pub const MAX_TAG_CHARS: usize = 48;
 /// Normalize a `#tag` or `tag` token when it is a valid indexing tag name.
@@ -536,14 +520,6 @@ pub fn normalize_tag(raw: &str) -> Option<String> {
     }
     Some(trimmed.to_owned())
 }
-impl Project {
-    pub fn work_location(&self) -> WorkLocation {
-        self.location.clone().unwrap_or_else(|| WorkLocation {
-            machine: local_machine(),
-            directory: self.directory.clone(),
-        })
-    }
-}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ManagedWorktree {
     pub id: String,
@@ -553,12 +529,12 @@ pub struct ManagedWorktree {
     #[serde(default)]
     pub base_commit: Option<String>,
     pub path: String,
-    pub location: WorkLocation,
+    pub directory: String,
     pub created_at: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct WorkspaceBinding {
-    pub location: WorkLocation,
+    pub directory: String,
     pub path: String,
     pub branch: Option<String>,
     pub base_commit: Option<String>,
@@ -823,13 +799,9 @@ pub struct AgentRun {
     #[serde(default)]
     pub require_human_review: bool,
     #[serde(default)]
-    pub runtime_home: Option<String>,
-    #[serde(default)]
     pub workspace: Option<WorkspaceBinding>,
     #[serde(default)]
-    pub location: Option<WorkLocation>,
-    #[serde(default)]
-    pub owner_core_id: Option<String>,
+    pub directory: Option<String>,
     #[serde(default)]
     pub lifecycle: Lifecycle,
     pub project_id: String,
@@ -966,7 +938,6 @@ impl AgentRun {
         self.close_requested_at = None;
         if stopped {
             self.core_id = None;
-            self.owner_core_id = None;
             self.terminal = None;
             self.observed = None;
             self.output_path = None;
@@ -1514,10 +1485,6 @@ pub fn friendly_agent_engine(engine: &str) -> String {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TerminalRuntime {
-    #[serde(default = "local_machine")]
-    pub machine: String,
-    #[serde(default)]
-    pub owner_core_id: Option<String>,
     pub core_id: Option<String>,
     pub terminal: Option<String>,
     pub state: String,
@@ -1758,8 +1725,6 @@ impl TerminalEntry {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct TerminalContext {
-    #[serde(default = "local_machine")]
-    pub machine: String,
     pub terminal_id: String,
     pub core_id: String,
     pub terminal: String,
@@ -2254,8 +2219,6 @@ mod tests {
             origin_card_id: None,
             agent_engine: None,
             runtime: Some(TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: None,
                 core_id: Some("c1".into()),
                 terminal: Some("t1".into()),
                 state: state.into(),

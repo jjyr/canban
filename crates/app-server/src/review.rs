@@ -111,11 +111,9 @@ impl AppServer {
             let warning = activity_warning(db, &c)?;
             (c, project, warning)
         };
-        let mut plan = self.ops(&project.work_location().machine).review_preview(
-            &project,
-            &card,
-            p["target_branch"].as_str(),
-        )?;
+        let mut plan = self
+            .ops()
+            .review_preview(&project, &card, p["target_branch"].as_str())?;
         plan.warning = warning;
         Ok(serde_json::to_value(plan)?)
     }
@@ -159,7 +157,7 @@ impl AppServer {
             ensure!(card.pull_request.as_ref().is_none_or(|pr|pr.merged),"Resolve the existing PR delivery before local merge");
             let project:Project=db.get(&card.project_id)?;let project=self.bound_project(&project,&card);
             let strategy=match requested_strategy{Some(s)=>s,None=>default_project_merge_strategy(db,&card)?};
-            let plan=self.ops(&project.work_location().machine).review_preview(&project,&card,p["target_branch"].as_str())?;
+            let plan=self.ops().review_preview(&project,&card,p["target_branch"].as_str())?;
             ensure!(plan.token==strp(&p,"token")?,"Review is stale; refresh the diff before accepting");
             ensure!(plan.merge_allowed,"{}",plan.reason.as_deref().unwrap_or("Merge unavailable"));
             log(db,&card,"review.merge_started","user","Accepted reviewed changes for commit/merge",None,json!({"request_key":key,"target_branch":plan.target_branch,"target_head":plan.target_head,"card_head":plan.card_head,"strategy":strategy,"token":plan.token}))?;
@@ -180,17 +178,15 @@ impl AppServer {
         let message_customized = p["message_customized"]
             .as_bool()
             .unwrap_or_else(|| p["message"].as_str().is_some() && message.trim() != default_msg);
-        let result = self
-            .ops(&project.work_location().machine)
-            .review_merge_with_strategy(
-                &project,
-                &card,
-                Some(&plan.target_branch),
-                &plan.token,
-                &message,
-                strategy,
-                message_customized,
-            );
+        let result = self.ops().review_merge_with_strategy(
+            &project,
+            &card,
+            Some(&plan.target_branch),
+            &plan.token,
+            &message,
+            strategy,
+            message_customized,
+        );
         let value=self.store.lock().unwrap().write(|db|{
             let mut current:Card=db.get(&card.id)?;
             let value=match result {
@@ -242,7 +238,7 @@ impl AppServer {
             db.conn.execute("UPDATE operations SET result=?2 WHERE id=?1",params![key,serde_json::to_string(&value)?])?;
             Ok(value)
         })?;
-        self.git_changed(&project.work_location().machine);
+        self.git_changed();
         drop(_merging);
         drop(_gate);
         if value["state"] == "merged" {
@@ -332,9 +328,7 @@ impl AppServer {
             if self.terminal_retains_worktree(&card).unwrap_or(true) {
                 return Ok(false);
             }
-            if let Ok(info) = self
-                .ops(&project.work_location().machine)
-                .info(&project, &card)
+            if let Ok(info) = self.ops().info(&project, &card)
                 && (info.dirty || info.state == "conflict")
             {
                 return Ok(false);
@@ -644,7 +638,7 @@ impl AppServer {
         let sync_upstream = run.inputs["sync_upstream"].as_bool().unwrap_or(true);
         let mut workspace_project = project.clone();
         workspace_project.workflow.workspace = run.definition.workspace.clone();
-        let ops = self.ops(&project.work_location().machine);
+        let ops = self.ops();
         let holder = self.checkout_holder_label(
             &format!("Code delivery (Card #{})", card.number),
             &workspace_project,
@@ -965,7 +959,7 @@ impl AppServer {
             }
             Ok(())
         })?;
-        self.git_changed(&project.work_location().machine);
+        self.git_changed();
         drop(_merging);
         if merged_and_completed {
             let _ = self.try_auto_archive_resolved(&card.id);
@@ -990,9 +984,8 @@ impl AppServer {
             }
         };
         let project = ctx.project;
-        let machine = project.work_location().machine;
-        let _permit = self.check(&machine);
-        let ops = self.ops(&machine);
+        let _permit = self.check();
+        let ops = self.ops();
         let three_dot = p["three_dot"].as_bool().unwrap_or(true);
 
         if p["use_card_worktree"].as_bool().unwrap_or(false)
@@ -1344,12 +1337,11 @@ impl AppServer {
                 .map(str::trim)
                 .filter(|s| !s.is_empty()),
         )?;
-        let machine = project.work_location().machine;
         let compare_ref = p["compare_ref"].as_str().unwrap_or("WORKDIR");
         let isolate = p["create_worktree"].as_bool().unwrap_or(false);
         let run_slug = &id()[..8];
         let cwd = if isolate {
-            self.ops(&machine)
+            self.ops()
                 .prepare_review_worktree(&self.home, &project, compare_ref, run_slug)?
                 .to_string_lossy()
                 .into_owned()
@@ -1360,10 +1352,10 @@ impl AppServer {
                 .unwrap_or(&project.directory)
                 .to_owned()
         };
-        let host = canban_herdr::host::Host::new(self.config(), &machine);
+        let host = canban_herdr::host::Host::new(self.config());
         ensure!(
             Path::new(&cwd).is_absolute() && host.is_dir(Path::new(&cwd)),
-            "Working directory is unavailable on machine '{machine}': {cwd}"
+            "Working directory is unavailable: {cwd}"
         );
         let agent_engine = {
             let cmd = profile.command_name();
@@ -1393,8 +1385,6 @@ impl AppServer {
                 agent_engine: Some(agent_engine),
                 created_at: now(),
                 runtime: Some(TerminalRuntime {
-                    machine: machine.clone(),
-                    owner_core_id: None,
                     core_id: None,
                     terminal: None,
                     state: "starting".into(),
@@ -1454,7 +1444,7 @@ impl AppServer {
                 .preset
                 .as_deref()
                 .is_some_and(|s| s.starts_with("herdr:"));
-            if machine == "local" && !argv.is_empty() && !is_herdr_template {
+            if !argv.is_empty() && !is_herdr_template {
                 argv[0] = canban_profiles::executable_with_env(&argv[0], &client.config.hc_env);
             }
             let env = std::collections::BTreeMap::from([
@@ -1474,8 +1464,7 @@ impl AppServer {
                 env,
                 cwd: cwd.clone(),
             })?;
-            let receipt = client.launch_on(
-                &machine,
+            let receipt = client.launch(
                 spec.argv,
                 &spec.cwd,
                 spec.env,
@@ -1485,19 +1474,13 @@ impl AppServer {
                 ]),
             )?;
             let address = strp(&receipt, "address")?.to_owned();
-            runtime.owner_core_id = if machine == "local" {
-                Some(core.clone())
-            } else {
-                Some(machine.clone())
-            };
             runtime.terminal = Some(address.clone());
             {
                 let mut inv = self.inventory.lock().unwrap();
                 if inv.core == core {
-                    let key = inv.address(&address);
-                    inv.records.entry(key.clone()).or_insert_with(|| {
+                    inv.records.entry(address.clone()).or_insert_with(|| {
                         let mut seeded = receipt.clone();
-                        seeded["address"] = json!(key);
+                        seeded["address"] = json!(address);
                         if seeded["state"].is_null() {
                             seeded["state"] = json!("live");
                         }
@@ -1527,7 +1510,6 @@ impl AppServer {
                 (runtime.core_id.clone(), runtime.terminal.clone())
         {
             let ctx = TerminalContext {
-                machine: machine.clone(),
                 terminal_id: item.id.clone(),
                 core_id,
                 terminal,
@@ -1685,13 +1667,9 @@ impl AppServer {
     }
 
     pub(super) fn review_draft_set(&self, p: Value) -> Result<Value> {
-        let (card, project) = {
+        let card = {
             let store = self.store.lock().unwrap();
-            let db = store.db();
-            let card = super::resolve_card(db, &p)?;
-            let proj: Project = db.get(&card.project_id)?;
-            let bound = self.bound_project(&proj, &card);
-            (card, bound)
+            super::resolve_card(store.db(), &p)?
         };
         let summary = p["summary"].as_str().unwrap_or("").trim().to_owned();
         let verdict = normalize_review_verdict(p["verdict"].as_str())?;
@@ -1822,10 +1800,9 @@ impl AppServer {
                 }
             })
             .or_else(|| {
-                card.worktree.as_deref().and_then(|wt| {
-                    self.ops(&project.work_location().machine)
-                        .head_sha(Path::new(wt))
-                })
+                card.worktree
+                    .as_deref()
+                    .and_then(|wt| self.ops().head_sha(Path::new(wt)))
             });
 
         let draft = ReviewDraft {
@@ -1910,19 +1887,14 @@ impl AppServer {
             (c, bound, profile)
         };
 
-        let location = card
-            .workspace
-            .as_ref()
-            .map(|w| w.location.clone())
-            .unwrap_or_else(|| bound_project.work_location());
         let has_ready_worktree = card.worktree.as_deref().is_some_and(|wt| {
             !wt.is_empty()
                 && card.branch.as_deref().is_some_and(|b| !b.is_empty())
                 && card
                     .workspace
                     .as_ref()
-                    .is_some_and(|w| w.location == location && w.path == wt)
-                && self.ops(&location.machine).host.is_dir(Path::new(wt))
+                    .is_some_and(|w| w.directory == bound_project.directory && w.path == wt)
+                && self.ops().host.is_dir(Path::new(wt))
         });
         let (prepared_card, prepared_project) = if has_ready_worktree {
             (card, bound_project)
@@ -1965,10 +1937,7 @@ impl AppServer {
                 .and_then(|v| v["head"]["sha"].as_str().map(str::to_owned))
         });
         let compare_sha = pr_head_sha
-            .or_else(|| {
-                self.ops(&prepared_project.work_location().machine)
-                    .head_sha(Path::new(&cwd))
-            })
+            .or_else(|| self.ops().head_sha(Path::new(&cwd)))
             .unwrap_or_else(|| "HEAD".into());
 
         let context_label = if let Some((repo, num)) = &pr_info {

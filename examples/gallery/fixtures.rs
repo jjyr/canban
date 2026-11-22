@@ -584,7 +584,6 @@ pub fn workspace() -> canban_types::Snapshot {
             "terminal".into(),
             "bug".into(),
         ],
-        location: None,
         id: "gallery-project".into(),
         name: "Canban workspace".into(),
         directory: "/example/project".into(),
@@ -655,10 +654,7 @@ pub fn workspace() -> canban_types::Snapshot {
                     failed_checks: vec![],
                 }),
                 workspace: canban_types::WorkspaceBinding {
-                    location: canban_types::WorkLocation {
-                        machine: "local".into(),
-                        directory: "/preview".into(),
-                    },
+                    directory: "/preview".into(),
                     path: format!("/preview/worktrees/card-{i}"),
                     branch: Some(format!("canban/gallery/{i}")),
                     base_commit: Some("abcdef0123".into()),
@@ -693,10 +689,7 @@ pub fn workspace() -> canban_types::Snapshot {
                     }],
                 }),
                 workspace: canban_types::WorkspaceBinding {
-                    location: canban_types::WorkLocation {
-                        machine: "local".into(),
-                        directory: "/preview".into(),
-                    },
+                    directory: "/preview".into(),
                     path: format!("/preview/worktrees/card-{i}"),
                     branch: Some(format!("canban/gallery/{i}")),
                     base_commit: Some("abcdef0123".into()),
@@ -726,10 +719,7 @@ pub fn workspace() -> canban_types::Snapshot {
                     failed_checks: vec![],
                 }),
                 workspace: canban_types::WorkspaceBinding {
-                    location: canban_types::WorkLocation {
-                        machine: "local".into(),
-                        directory: "/preview".into(),
-                    },
+                    directory: "/preview".into(),
                     path: format!("/preview/worktrees/card-{i}"),
                     branch: Some(format!("canban/gallery/{i}")),
                     base_commit: Some("abcdef0123".into()),
@@ -899,8 +889,6 @@ pub fn workspace_with_card_terminals() -> canban_types::Snapshot {
         origin_card_id: Some("card-2".into()),
         agent_engine: None,
         runtime: Some(TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: None,
             core_id: Some("gallery".into()),
             terminal: Some("card-2-shell-pty".into()),
             state: "running".into(),
@@ -923,8 +911,6 @@ pub fn workspace_with_card_terminals() -> canban_types::Snapshot {
         origin_card_id: Some("card-2".into()),
         agent_engine: Some("agy".into()),
         runtime: Some(TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: None,
             core_id: Some("gallery".into()),
             terminal: Some("card-2-agy-pty".into()),
             state: "running".into(),
@@ -1321,8 +1307,6 @@ pub fn overview() -> canban_types::Snapshot {
         origin_card_id: None,
         agent_engine: None,
         runtime: Some(TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: None,
             core_id: Some("gallery-core".into()),
             terminal: Some("manual-pty-2".into()),
             state: "running".into(),
@@ -1337,7 +1321,6 @@ pub fn overview() -> canban_types::Snapshot {
         created_at: now() - 60_000,
     });
     s.terminal_contexts.push(TerminalContext {
-        machine: "local".into(),
         terminal_id: "overview-manual-agent".into(),
         core_id: "gallery-core".into(),
         terminal: "manual-pty-2".into(),
@@ -1471,8 +1454,6 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         origin_card_id: None,
         agent_engine: None,
         runtime: Some(canban_types::TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: None,
             core_id: Some("gallery".into()),
             terminal: Some("shell".into()),
             state: "running".into(),
@@ -1491,7 +1472,6 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
     remote.number += 2;
     remote.name = Some("Remote shell with a long custom name for layout checks".into());
     let runtime = remote.runtime.as_mut().unwrap();
-    runtime.machine = "gallery-remote".into();
     runtime.terminal = Some("gallery-remote/shell".into());
     runtime.connection = "unavailable".into();
     let mut linked = s.terminals.last().unwrap().clone();
@@ -1535,10 +1515,7 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
             && attempt.card_id == "overview-card-2"
             && attempt.terminal.is_some()
         {
-            attempt.location = Some(canban_types::WorkLocation {
-                machine: "local".into(),
-                directory: "/remote/workspaces/canban".into(),
-            });
+            attempt.directory = Some("/remote/workspaces/canban".into());
             attempt.terminal = Some("gallery-remote/t3".into());
             s.entity_hosts.insert(t.id.clone(), "gallery-remote".into());
         }
@@ -1548,7 +1525,6 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
     let card_id = card.id.clone();
     s.terminal_contexts.push(canban_types::TerminalContext {
         directory_root: None,
-        machine: "local".into(),
         terminal_id: "gallery-linked-shell".into(),
         core_id: "gallery".into(),
         terminal: "linked-shell".into(),
@@ -1575,8 +1551,6 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         origin_card_id: None,
         agent_engine: None,
         runtime: Some(canban_types::TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: None,
             core_id: Some("gallery".into()),
             terminal: Some("root-shell".into()),
             state: "running".into(),
@@ -1592,7 +1566,6 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
     });
     s.terminal_contexts.push(canban_types::TerminalContext {
         directory_root: None,
-        machine: "local".into(),
         terminal_id: "gallery-project-root-shell".into(),
         core_id: "gallery".into(),
         terminal: "root-shell".into(),
@@ -1614,10 +1587,7 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         base_branch: "main".into(),
         base_commit: None,
         path: "/tmp/gallery/worktrees/standalone-spike".into(),
-        location: canban_types::WorkLocation {
-            machine: "local".into(),
-            directory: "/tmp/gallery/worktrees/standalone-spike".into(),
-        },
+        directory: "/tmp/gallery/worktrees/standalone-spike".into(),
         created_at: canban_types::now(),
     });
     s.worktrees.push(canban_types::ManagedWorktree {
@@ -1627,10 +1597,7 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         base_branch: "main".into(),
         base_commit: None,
         path: "/tmp/gallery/worktrees/retained-experiment".into(),
-        location: canban_types::WorkLocation {
-            machine: "local".into(),
-            directory: "/tmp/gallery/worktrees/retained-experiment".into(),
-        },
+        directory: "/tmp/gallery/worktrees/retained-experiment".into(),
         created_at: canban_types::now(),
     });
     s.terminals.push(canban_types::TerminalEntry {
@@ -1642,8 +1609,6 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         origin_card_id: None,
         agent_engine: None,
         runtime: Some(canban_types::TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: None,
             core_id: Some("gallery".into()),
             terminal: Some("wt-shell".into()),
             state: "running".into(),
@@ -1659,7 +1624,6 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
     });
     s.terminal_contexts.push(canban_types::TerminalContext {
         directory_root: None,
-        machine: "local".into(),
         terminal_id: "gallery-wt-shell".into(),
         core_id: "gallery".into(),
         terminal: "wt-shell".into(),
@@ -1683,8 +1647,6 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         origin_card_id: None,
         agent_engine: None,
         runtime: Some(canban_types::TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: None,
             core_id: Some("gallery".into()),
             terminal: Some("wt-shell-2".into()),
             state: "running".into(),
@@ -1713,8 +1675,6 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         origin_card_id: None,
         agent_engine: Some("agy".into()),
         runtime: Some(canban_types::TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: None,
             core_id: Some("gallery".into()),
             terminal: Some("ephemeral-agy".into()),
             state: "running".into(),
@@ -1730,7 +1690,6 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
     });
     s.terminal_contexts.push(canban_types::TerminalContext {
         directory_root: None,
-        machine: "local".into(),
         terminal_id: "gallery-ephemeral-agent".into(),
         core_id: "gallery".into(),
         terminal: "ephemeral-agy".into(),
@@ -1747,7 +1706,6 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
     });
     s.terminal_contexts.push(canban_types::TerminalContext {
         directory_root: None,
-        machine: "local".into(),
         terminal_id: "gallery-wt-shell-2".into(),
         core_id: "gallery".into(),
         terminal: "wt-shell-2".into(),
@@ -1766,7 +1724,6 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         id: "gallery-empty-project".into(),
         name: "Docs & Website".into(),
         directory: "/tmp/gallery/docs-site".into(),
-        location: None,
         github: None,
         detected_github: None,
         github_disconnected: false,
@@ -1899,8 +1856,6 @@ pub fn board_cards() -> canban_types::Snapshot {
         origin_card_id: Some("card-1".into()),
         agent_engine: Some("agy".into()),
         runtime: Some(TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: None,
             core_id: Some("gallery".into()),
             terminal: Some("gallery-card-1-agy".into()),
             state: "running".into(),
@@ -2636,7 +2591,6 @@ pub fn multi_host_workspace(
     remote_proj.id = "remote-linux-core".into();
     remote_proj.name = "Core Service".into();
     remote_proj.directory = "/home/builder/workspaces/core-service".into();
-    remote_proj.location = None;
     remote.projects.push(remote_proj);
 
     let mut remote_card = local.cards[0].clone();
@@ -3828,8 +3782,6 @@ steps:
         origin_card_id: None,
         agent_engine: Some("agy".into()),
         runtime: Some(TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: Some("local".into()),
             core_id: Some("local".into()),
             terminal: Some("pty-sched-42".into()),
             state: "running".into(),
@@ -3853,8 +3805,6 @@ steps:
         origin_card_id: None,
         agent_engine: Some("agy".into()),
         runtime: Some(TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: Some("local".into()),
             core_id: Some("local".into()),
             terminal: Some("pty-sched-gc12".into()),
             state: "running".into(),

@@ -809,7 +809,6 @@ mod tests {
             tags: Vec::new(),
             id: "proj-git-client".into(),
             name: "Git Client Demo".into(),
-            location: None,
             directory: repo.to_string_lossy().into_owned(),
             workflow: Default::default(),
             target_branch: Some("main".into()),

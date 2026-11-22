@@ -102,21 +102,10 @@ impl Ops {
         if !self.host.exists(&p) {
             return None;
         }
-        if !self.host.remote() {
-            std::fs::read_to_string(&p)
-                .ok()
-                .map(|s| s.trim().to_owned())
-                .filter(|s| !s.is_empty())
-        } else {
-            self.host
-                .python(
-                    "import json,sys;print(json.dumps(open(sys.argv[1]).read().strip()))",
-                    &[&p.to_string_lossy()],
-                )
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_owned))
-                .filter(|s| !s.is_empty())
-        }
+        std::fs::read_to_string(&p)
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
     }
 
     /// If an Agent or user resolved a paused rebase conflict by running `git commit` directly
@@ -978,7 +967,6 @@ mod tests {
                 tags: Default::default(),
                 id: "p".into(),
                 name: "Test".into(),
-                location: None,
                 directory: source.to_str().unwrap().into(),
                 workflow,
                 target_branch: Some("main".into()),

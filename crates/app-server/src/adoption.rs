@@ -4,7 +4,6 @@ use super::*;
 pub(super) struct AdoptTerminal {
     source: TerminalEntry,
     observed: Value,
-    home: String,
 }
 
 impl AppServer {
@@ -21,29 +20,16 @@ impl AppServer {
                 "Caller terminal identity is not a local Core address"
             );
             let config = self.config();
-            // Remote spool requests receive their machine from the authenticated bridge.
-            let machine = p["runtime_machine"].as_str().unwrap_or("local");
-            if machine == "local"
-                && let Some(session) = p["runtime_session"].as_str()
-            {
+            if let Some(session) = p["runtime_session"].as_str() {
                 ensure!(
                     session == config.hc_session,
                     "Caller uses a different Core session"
                 );
             }
-            let routed = if machine == "local" {
-                address.to_owned()
-            } else {
-                format!("{machine}/{address}")
-            };
             let (core, records) = self.runtime_inventory()?;
-            ensure!(
-                self.remote_connected(&routed),
-                "Caller Core is disconnected"
-            );
             let observed = records
                 .into_iter()
-                .find(|r| r["address"] == routed)
+                .find(|r| r["address"] == address)
                 .context("Caller terminal is absent from the Core inventory")?;
             ensure!(observed["state"] == "live", "Caller terminal is not live");
             let candidates: Vec<_> = self
@@ -56,17 +42,11 @@ impl AppServer {
                 .filter(|t| {
                     if let Some(a) = &t.agent {
                         a.core_id.as_deref() == Some(&core)
-                            && a.terminal.as_deref() == Some(&routed)
-                            && a.location
-                                .as_ref()
-                                .map(|l| l.machine.as_str())
-                                .unwrap_or("local")
-                                == machine
+                            && a.terminal.as_deref() == Some(address)
                     } else {
                         t.runtime.as_ref().is_some_and(|r| {
-                            r.machine == machine
-                                && r.core_id.as_deref() == Some(&core)
-                                && r.terminal.as_deref() == Some(&routed)
+                            r.core_id.as_deref() == Some(&core)
+                                && r.terminal.as_deref() == Some(address)
                         })
                     }
                 })
@@ -76,11 +56,7 @@ impl AppServer {
                 "Caller terminal binding is missing or ambiguous"
             );
             let source = candidates.into_iter().next().unwrap();
-            Ok(AdoptTerminal {
-                source,
-                observed,
-                home: self.execution_home(machine)?.to_string_lossy().into_owned(),
-            })
+            Ok(AdoptTerminal { source, observed })
         };
         match prepare() {
             Ok(value) => Some(value),
@@ -103,15 +79,12 @@ pub(super) fn bind(
     let attempt = || -> Result<TerminalEntry> {
         let source: TerminalEntry = db.get(&prepared.source.id)?;
         ensure!(
-            source
-                .runtime
-                .as_ref()
-                .map(|r| (&r.machine, &r.core_id, &r.terminal))
+            source.runtime.as_ref().map(|r| (&r.core_id, &r.terminal))
                 == prepared
                     .source
                     .runtime
                     .as_ref()
-                    .map(|r| (&r.machine, &r.core_id, &r.terminal))
+                    .map(|r| (&r.core_id, &r.terminal))
                 && source
                     .agent
                     .as_ref()
@@ -169,21 +142,18 @@ pub(super) fn bind(
         );
         let cwd =
             canban_herdr::cwd(&prepared.observed).context("Caller directory is unavailable")?;
-        let workspace = card.workspace.clone().unwrap_or_else(|| {
-            let location = project.work_location();
-            WorkspaceBinding {
-                path: card
-                    .worktree
-                    .clone()
-                    .unwrap_or_else(|| location.directory.clone()),
-                location,
-                branch: card.branch.clone(),
-                base_commit: card.base_commit.clone(),
-                target_branch: project.target_branch.clone(),
-            }
+        let workspace = card.workspace.clone().unwrap_or_else(|| WorkspaceBinding {
+            directory: project.directory.clone(),
+            path: card
+                .worktree
+                .clone()
+                .unwrap_or_else(|| project.directory.clone()),
+            branch: card.branch.clone(),
+            base_commit: card.base_commit.clone(),
+            target_branch: project.target_branch.clone(),
         });
         ensure!(
-            workspace.location.machine == runtime.machine && path_within(&workspace.path, cwd),
+            path_within(&workspace.path, cwd),
             "Caller terminal is outside the Card workspace"
         );
         if let Some(caller_cwd) = p["cwd"].as_str() {
@@ -224,12 +194,10 @@ pub(super) fn bind(
         run.state = "running".into();
         run.card_number = card.number;
         run.core_id = runtime.core_id.clone();
-        run.owner_core_id = runtime.owner_core_id.clone();
         run.terminal = runtime.terminal.clone();
         run.cwd = cwd.to_owned();
-        run.location = Some(workspace.location.clone());
+        run.directory = Some(workspace.directory.clone());
         run.workspace = Some(workspace);
-        run.runtime_home = Some(prepared.home.clone());
         run.provider_session_id = context.provider_session_id;
         run.observed = Some(canban_herdr::observation(&prepared.observed));
         run.connection_state = "connected".into();

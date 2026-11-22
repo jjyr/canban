@@ -43,9 +43,9 @@ def sample(n,batched):
     nonlocal amount
     result,size=r.call(m,p) if r else one(m,p);amount+=size;return result
    if batched:
-    call('server.status',{});call('terminal.list',{'all':True});call('machine.list',{});call('server.status',{})
+    call('server.status',{});call('terminal.list',{'all':True});call('server.status',{})
    else:
-    call('server.status',{});call('terminal.list',{'all':True});call('machine.list',{});call('server.status',{})
+    call('server.status',{});call('terminal.list',{'all':True});call('server.status',{})
     if n:
      call('server.status',{})
      for address in addresses[:n]:call('terminal.get',{'terminal':address})
@@ -53,7 +53,7 @@ def sample(n,batched):
    if r:r.close()
   elapsed.append((time.monotonic()-start)*1000);sizes.append(amount)
  used=(cpu()-cpu_start)*1000/20
- return {'median_ms':round(statistics.median(elapsed),2),'p95_ms':round(sorted(elapsed)[18],2),'client_cpu_ms_per_round':round(used,2),'reply_bytes_per_round':round(statistics.mean(sizes)),'hc_processes_per_round':1 if batched else 4+(1+n if n else 0),'samples':20}
+ return {'median_ms':round(statistics.median(elapsed),2),'p95_ms':round(sorted(elapsed)[18],2),'client_cpu_ms_per_round':round(used,2),'reply_bytes_per_round':round(statistics.mean(sizes)),'hc_processes_per_round':1 if batched else 3+(1+n if n else 0),'samples':20}
 addresses=[];results=[]
 try:
  status,_=one('server.status',{});print('CORE_READY '+str(base),flush=True)

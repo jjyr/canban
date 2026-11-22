@@ -168,11 +168,7 @@ pub fn refresh_catalog_for_host(ui: Ui, host_id: &str) {
     ui.spawn(async move {
         let req_host = target_host.clone();
         let result = blocking(move || {
-            crate::routed_call(
-                "agent.catalog",
-                json!({"machine": "local", "host_id": req_host}),
-                None,
-            )
+            crate::routed_call("agent.catalog", json!({"host_id": req_host}), None)
         })
         .await;
         if ui.agent_catalog_epoch.try_get() != Some(catalog_epoch) {

@@ -945,8 +945,6 @@ mod tests {
             origin_card_id: Some("c-live".into()),
             agent_engine: None,
             runtime: Some(TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: None,
                 core_id: Some("core".into()),
                 terminal: Some("pty-live".into()),
                 state: "running".into(),
@@ -969,8 +967,6 @@ mod tests {
             origin_card_id: Some("c-attention".into()),
             agent_engine: Some("agy".into()),
             runtime: Some(TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: None,
                 core_id: Some("core".into()),
                 terminal: Some("pty-attention".into()),
                 state: "running".into(),

@@ -557,7 +557,6 @@ mod host_tests {
             id: "proj-rem".into(),
             name: "Linux Core".into(),
             directory: "/home/dev/core".into(),
-            location: None,
             workflow: Workflow::default(),
             target_branch: Some("main".into()),
             created_at: 1,

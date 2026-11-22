@@ -502,13 +502,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                                     .on_press(move |_: &()| ui.select_project(project.clone())),
                             );
                         } else if let Some(cwd) = e.cwd() {
-                            let machine = e
-                                .location
-                                .as_ref()
-                                .map(|l| l.machine.as_str())
-                                .unwrap_or("local");
-                            let title =
-                                super::worktrees::display_directory_path(&cwd, &e.host_id, machine);
+                            let title = super::worktrees::display_directory_path(&cwd, &e.host_id);
                             context_bar = context_bar.child(
                                 view()
                                     .flex_1()

@@ -338,7 +338,7 @@ impl AppServer {
             workspaces.push(w.clone())
         } else if let Some(path) = &card.worktree {
             workspaces.push(WorkspaceBinding {
-                location: project.work_location(),
+                directory: project.directory.clone(),
                 path: path.clone(),
                 branch: card.branch.clone(),
                 base_commit: card.base_commit.clone(),
@@ -348,7 +348,7 @@ impl AppServer {
         let mut seen = std::collections::HashSet::new();
         let mut notes = Vec::new();
         for w in workspaces {
-            if !seen.insert((w.location.machine.clone(), w.path.clone())) {
+            if !seen.insert(w.path.clone()) {
                 continue;
             }
             let mut c = card.clone();
@@ -364,9 +364,6 @@ impl AppServer {
                     .any(|a| {
                         a.card_id == card.id
                             && a.cwd == w.path
-                            && a.location
-                                .as_ref()
-                                .is_some_and(|l| l.machine == w.location.machine)
                             && a.terminal.is_some()
                             && a.observed.as_ref().is_none_or(|v| v["state"] != "finished")
                     })
@@ -375,15 +372,11 @@ impl AppServer {
                     return Ok(Some("A terminal may still be using this worktree".into()));
                 }
                 let p = self.bound_project(project, &c);
-                self.ops(&w.location.machine).archive(
-                    &self.execution_home(&w.location.machine)?,
-                    &p,
-                    &c,
-                )
+                self.ops().archive(&self.home, &p, &c)
             })();
             match result {
-                Ok(Some(message)) => notes.push(format!("{}: {message}", w.location.machine)),
-                Err(e) => notes.push(format!("{}: {e:#}", w.location.machine)),
+                Ok(Some(message)) => notes.push(message),
+                Err(e) => notes.push(format!("{e:#}")),
                 _ => {}
             }
         }
@@ -556,7 +549,7 @@ impl AppServer {
             warnings.push(w.clone());
         }
         if card.worktree.is_some() && !card.merged() {
-            let ops = self.ops(&project.work_location().machine);
+            let ops = self.ops();
             if let Some(warning) = ops.resolve_worktree_warning(&project, &card) {
                 warnings.push(warning);
             }

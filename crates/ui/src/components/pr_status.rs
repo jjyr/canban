@@ -371,7 +371,7 @@ pub fn pill(ui: Ui, info: &CardPrView, compact: bool) -> Option<View> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use canban_types::{GitHubPr, GitHubPrCheck, WorkLocation, WorkspaceBinding};
+    use canban_types::{GitHubPr, GitHubPrCheck, WorkspaceBinding};
 
     #[test]
     fn pr_view_normalizes_ci_states_and_prefers_single_failed_check_url() {
@@ -415,10 +415,7 @@ mod tests {
                 }],
             }),
             workspace: WorkspaceBinding {
-                location: WorkLocation {
-                    machine: "local".into(),
-                    directory: "/tmp".into(),
-                },
+                directory: "/tmp".into(),
                 path: "/tmp/wt".into(),
                 branch: Some("canban-0afd/143".into()),
                 base_commit: None,

@@ -856,8 +856,6 @@ fn configuration_sessions_have_project_ownership_reuse_and_exact_history_resume(
             db.save(&c)?;
             let mut t: TerminalEntry = db.get(&c.id)?;
             t.runtime = Some(TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: None,
                 core_id: Some("isolated".into()),
                 terminal: Some("local/closed".into()),
                 state: "finished".into(),
@@ -913,8 +911,6 @@ fn configuration_open_uses_configured_default_agent_and_auto_fresh_fallback() {
             db.save(&s)?;
             let mut t: TerminalEntry = db.get(&expected_key)?;
             t.runtime = Some(TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: None,
                 core_id: Some("isolated".into()),
                 terminal: Some("local/closed".into()),
                 state: "finished".into(),
@@ -1038,8 +1034,6 @@ fn stale_configuration_observation_never_overwrites_newly_queued_generation() {
             let mut t: TerminalEntry = db.get(&key)?;
             t.created_at = 1_000;
             t.runtime = Some(TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: Some("isolated".into()),
                 core_id: Some("isolated".into()),
                 terminal: Some("local/gen1".into()),
                 state: "finished".into(),

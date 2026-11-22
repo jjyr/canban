@@ -22,7 +22,6 @@ impl AppServer {
     }
     pub(super) fn detect_project_github(
         &self,
-        machine: &str,
         directory: &str,
         preferred_remote: &str,
     ) -> Option<DetectedGitHub> {
@@ -30,13 +29,12 @@ impl AppServer {
         if dir.is_empty() || !Path::new(dir).is_absolute() {
             return None;
         }
-        let machine = self.resolve_machine(machine, true).ok()?;
         let preferred = if preferred_remote.trim().is_empty() || preferred_remote.starts_with('-') {
             "origin"
         } else {
             preferred_remote.trim()
         };
-        let urls = self.ops(&machine).remote_urls(dir, preferred);
+        let urls = self.ops().remote_urls(dir, preferred);
         if let Some((remote, repo)) =
             urls.iter()
                 .filter(|(r, _)| r == preferred)
@@ -104,12 +102,8 @@ impl AppServer {
             if self.stopped() {
                 break;
             }
-            let loc = project.work_location();
-            let detected = self.detect_project_github(
-                &loc.machine,
-                &loc.directory,
-                &project.workflow.workspace.remote,
-            );
+            let dir = project.directory.clone();
+            let detected = self.detect_project_github(&dir, &project.workflow.workspace.remote);
             let next_detected = detected.or_else(|| project.detected_github.clone());
             let auto_source = if project.github.is_none() && !project.github_disconnected {
                 next_detected
@@ -124,7 +118,7 @@ impl AppServer {
             let account_generation = self.github.generation();
             let saved = self.store.lock().unwrap().write(|db| {
                 let mut current: Project = db.get(&project.id)?;
-                if current.work_location() != loc {
+                if current.directory != dir {
                     return Ok(false);
                 }
                 let mut dirty = false;
@@ -229,11 +223,9 @@ impl AppServer {
             }
             "github.installations" => self.github_client()?.get("/user/installations"),
             "project.detect_github" => {
-                let raw = p.get("location").filter(|v| v.is_object()).unwrap_or(&p);
-                let machine = raw["machine"].as_str().unwrap_or("local");
-                let directory = raw["directory"].as_str().unwrap_or("");
+                let directory = p["directory"].as_str().unwrap_or("");
                 let remote = p["remote"].as_str().unwrap_or("origin");
-                let detected = self.detect_project_github(machine, directory, remote);
+                let detected = self.detect_project_github(directory, remote);
                 Ok(json!({ "detected": detected }))
             }
             "project.github" => {
@@ -294,13 +286,8 @@ impl AppServer {
                     let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;
                     db.get::<Project>(&pid)?
                 };
-                let loc = existing.work_location();
                 let detected = self
-                    .detect_project_github(
-                        &loc.machine,
-                        &loc.directory,
-                        &existing.workflow.workspace.remote,
-                    )
+                    .detect_project_github(&existing.directory, &existing.workflow.workspace.remote)
                     .or_else(|| existing.detected_github.clone());
                 self.mutate(method, &p, |db| {
                     let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;
@@ -471,12 +458,10 @@ impl AppServer {
                     let pid = super::resolve_project_id(store.db(), strp(&p, "project_id")?)?;
                     store.db().get::<Project>(&pid)?
                 };
-                let loc = project.work_location();
-                let machine = self.resolve_machine(&loc.machine, true)?;
                 let mut candidates = Vec::new();
                 for (remote, url) in self
-                    .ops(&machine)
-                    .remote_urls(&loc.directory, &project.workflow.workspace.remote)
+                    .ops()
+                    .remote_urls(&project.directory, &project.workflow.workspace.remote)
                 {
                     if let Ok(repository) = canban_github::remote_repository(&url) {
                         candidates.push(json!({"remote":remote,"repository":repository}));

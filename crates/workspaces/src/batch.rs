@@ -655,7 +655,6 @@ mod tests {
                 delivery_mode: Default::default(),
                 agent_overrides: Default::default(),
                 tags: Default::default(),
-                location: None,
                 target_branch: Some("main".into()),
                 created_at: 1,
             };

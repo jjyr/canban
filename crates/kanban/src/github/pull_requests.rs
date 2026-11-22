@@ -179,7 +179,7 @@ pub fn build_linked_pr(
     let state = pr["state"].as_str().unwrap_or("open").to_owned();
     let merged = pr["merged"].as_bool().unwrap_or(false) || pr["merged_at"].is_string();
     let workspace = card.workspace.clone().unwrap_or_else(|| WorkspaceBinding {
-        location: project.work_location(),
+        directory: project.directory.clone(),
         path: card.worktree.clone().unwrap_or_default(),
         branch: card.branch.clone(),
         base_commit: card.base_commit.clone(),

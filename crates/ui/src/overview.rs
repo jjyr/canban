@@ -2690,8 +2690,6 @@ mod tests {
             origin_card_id: None,
             agent_engine: None,
             runtime: Some(canban_types::TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: None,
                 core_id: Some("core".into()),
                 terminal: Some("pty-1".into()),
                 state: "running".into(),
@@ -2715,8 +2713,6 @@ mod tests {
             origin_card_id: None,
             agent_engine: None,
             runtime: Some(canban_types::TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: None,
                 core_id: Some("core".into()),
                 terminal: Some("pty-2".into()),
                 state: "running".into(),
@@ -2740,8 +2736,6 @@ mod tests {
             origin_card_id: None,
             agent_engine: None,
             runtime: Some(canban_types::TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: None,
                 core_id: Some("core".into()),
                 terminal: Some("pty-3".into()),
                 state: "running".into(),
@@ -2857,8 +2851,6 @@ mod tests {
                 origin_card_id: None,
                 agent_engine: None,
                 runtime: Some(canban_types::TerminalRuntime {
-                    machine: "local".into(),
-                    owner_core_id: None,
                     core_id: Some("core".into()),
                     terminal: Some("pty-2".into()),
                     state: "running".into(),
@@ -2883,8 +2875,6 @@ mod tests {
                 origin_card_id: None,
                 agent_engine: Some("agy".into()),
                 runtime: Some(canban_types::TerminalRuntime {
-                    machine: "local".into(),
-                    owner_core_id: None,
                     core_id: Some("core".into()),
                     terminal: Some("pty-3".into()),
                     state: "running".into(),
@@ -2909,8 +2899,6 @@ mod tests {
                 origin_card_id: None,
                 agent_engine: None,
                 runtime: Some(canban_types::TerminalRuntime {
-                    machine: "local".into(),
-                    owner_core_id: None,
                     core_id: Some("core".into()),
                     terminal: Some("pty-4".into()),
                     state: "running".into(),

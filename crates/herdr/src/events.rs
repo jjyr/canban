@@ -4,7 +4,6 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 
 pub struct Subscription {
     pub core: String,
-    pub machines: Value,
     pub snapshot: Value,
     receiver: Receiver<Result<Value>>,
     _transport: transport::Transport,
@@ -48,9 +47,8 @@ impl Client {
                     json!({"generation":1}),
                 )?;
                 let status = request(&mut *input, &mut reader, 2, "server.status", json!({}))?;
-                let machines = request(&mut *input, &mut reader, 3, "machine.list", json!({}))?;
-                let snapshot = request(&mut *input, &mut reader, 4, "events.subscribe", json!({}))?;
-                Ok(json!({"core":status["core"]["id"],"machines":machines,"snapshot":snapshot}))
+                let snapshot = request(&mut *input, &mut reader, 3, "events.subscribe", json!({}))?;
+                Ok(json!({"core":status["core"]["id"],"snapshot":snapshot}))
             })();
             if setup.is_err() {
                 let _ = tx.send(setup);
@@ -78,7 +76,6 @@ impl Client {
                 .as_str()
                 .context("Core identity unavailable")?
                 .into(),
-            machines: setup["machines"].clone(),
             snapshot: setup["snapshot"].clone(),
             receiver: rx,
             _transport: transport,

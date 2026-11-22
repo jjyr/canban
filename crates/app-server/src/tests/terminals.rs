@@ -640,7 +640,6 @@ fn first_terminal_accepts_empty_inheritance_without_a_project_or_conversation() 
         .call("terminal.create", json!({"inherit_terminal_id":""}))
         .unwrap();
     assert_eq!(first["runtime"]["state"], "running");
-    assert_eq!(first["runtime"]["machine"], "local");
     assert_eq!(first["name"], "Terminal 1");
     assert!(first["runtime"]["terminal"].is_string());
     let s = app.snapshot().unwrap();

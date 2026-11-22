@@ -480,25 +480,6 @@ fn gallery_create_entry(ui: Ui, params: serde_json::Value) -> String {
     let resolved_name = ui.snapshot.with_untracked(|s| {
         s.next_terminal_label(origin_project.as_deref(), agent_engine.as_deref(), None)
     });
-    let machine = params["machine"]
-        .as_str()
-        .map(str::to_owned)
-        .or_else(|| {
-            inherited
-                .as_ref()?
-                .location
-                .as_ref()
-                .map(|l| l.machine.clone())
-        })
-        .or_else(|| {
-            ui.snapshot.with_untracked(|s| {
-                s.projects
-                    .iter()
-                    .find(|p| Some(&p.id) == origin_project.as_ref())
-                    .map(|p| p.work_location().machine)
-            })
-        })
-        .unwrap_or_else(|| "local".into());
     let saved = canban_types::TerminalEntry {
         id: id.clone(),
         conversation_id: None,
@@ -513,8 +494,6 @@ fn gallery_create_entry(ui: Ui, params: serde_json::Value) -> String {
         agent: None,
         created_at: 0,
         runtime: Some(canban_types::TerminalRuntime {
-            machine,
-            owner_core_id: None,
             core_id: Some("gallery".into()),
             terminal: Some(id.clone()),
             state: "running".into(),
@@ -844,9 +823,7 @@ pub fn machine_menu(ui: Ui) {
                         "New Terminal ($HOME · {})",
                         crate::platform::LOCAL_HOST_NAME
                     ))
-                    .on_select(move || {
-                        launch(ui, json!({ "host_id": "local", "machine": "local" }))
-                    }),
+                    .on_select(move || launch(ui, json!({ "host_id": "local" }))),
                 );
             } else if h.is_connected() {
                 let hid = h.id.clone();

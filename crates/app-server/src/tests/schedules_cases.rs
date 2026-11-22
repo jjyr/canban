@@ -316,8 +316,6 @@ steps:
             db.save(&cur)?;
             let mut entry: TerminalEntry = db.get(&run.id)?;
             entry.runtime = Some(TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: Some("offline-core".into()),
                 core_id: Some("offline-core".into()),
                 terminal: Some("pty-sched-1".into()),
                 state: "running".into(),
@@ -656,8 +654,6 @@ fn cardless_blocked_report_keeps_pty_alive_until_completed() {
             db.save(&cur)?;
             let mut entry: TerminalEntry = db.get(&run.id)?;
             entry.runtime = Some(TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: Some("offline-core".into()),
                 core_id: Some("offline-core".into()),
                 terminal: Some("pty-blocked-1".into()),
                 state: "running".into(),

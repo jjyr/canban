@@ -304,7 +304,7 @@ fn host_registry_merges_multi_host_routes_mutations_caches_offline_and_recovers(
     let offline_non_queueable = registry
         .call_routed(
             "terminal.create",
-            json!({"project_id": remote_p.id, "machine": "local", "directory": "/tmp"}),
+            json!({"project_id": remote_p.id, "directory": "/tmp"}),
             None,
         )
         .unwrap_err();

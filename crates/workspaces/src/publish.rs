@@ -140,7 +140,6 @@ mod tests {
             tags: Default::default(),
             id: "project".into(),
             name: "Test".into(),
-            location: None,
             directory: source.to_string_lossy().into_owned(),
             workflow: Workflow {
                 workspace: WorkspaceSettings {

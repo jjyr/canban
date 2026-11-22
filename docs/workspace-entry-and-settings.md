@@ -58,7 +58,7 @@ The shared `ui-kit::path_combobox` (with standalone local helper `ui-kit::direct
 - Typing a path that does not yet exist offers a `Use "<path>" · New directory` candidate so new directories can be confirmed and created seamlessly on submit.
 - Choosing or confirming a path does not create a Project immediately. The explicit Create Project / Save location action remains the commit point.
 
-The UI Kit owns path query parsing, filtering, keyboard navigation and overlay presentation; AppServer `directory.list` fetching, Project-name policy and `project.create` / `project.location` stay in product UI. The backend expands `~` / `~/`, creates missing directories and canonicalizes the saved path.
+The UI Kit owns path query parsing, filtering, keyboard navigation and overlay presentation; AppServer `directory.list` fetching, Project-name policy and `project.create` / `project.update` stay in product UI. The backend expands `~` / `~/`, creates missing directories and canonicalizes the saved path.
 
 ## Overview
 

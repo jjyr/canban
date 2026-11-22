@@ -288,8 +288,7 @@ impl Ops {
             },
         }
     }
-    /// Probe all candidate paths in one remote operation; then use one matching
-    /// algorithm for both hosts. Never apply this machine's filesystem to another.
+    /// Resolve directory context against local Projects, Cards, and managed worktrees.
     pub fn directory_context(
         &self,
         s: &Snapshot,
@@ -317,27 +316,22 @@ impl Ops {
         cwd: &str,
         cache: &mut ContextCache,
     ) -> Result<ResolvedContext> {
-        let machine = &self.host.machine;
         let mut roots: Vec<(String, String)> = s
             .projects
             .iter()
-            .filter(|p| p.work_location().machine == *machine)
-            .map(|p| (p.work_location().directory.clone(), p.id.clone()))
+            .map(|p| (p.directory.clone(), p.id.clone()))
             .collect();
         let mut checkouts: Vec<(String, String)> = Vec::new();
         let mut managed_checkouts: Vec<(String, String)> = Vec::new();
         let mut branches: Vec<(String, String, String, String)> = Vec::new();
         for c in s.cards.iter().filter(|c| c.archived_at.is_none()) {
-            if c.workspace.is_none() && machine == "local" {
+            if c.workspace.is_none() {
                 if let Some(path) = &c.worktree {
                     roots.push((path.clone(), c.project_id.clone()));
                     checkouts.push((path.clone(), c.id.clone()));
                 }
                 if let Some(branch) = &c.branch
-                    && let Some(p) = s
-                        .projects
-                        .iter()
-                        .find(|p| p.id == c.project_id && p.work_location().machine == *machine)
+                    && let Some(p) = s.projects.iter().find(|p| p.id == c.project_id)
                 {
                     branches.push((
                         c.id.clone(),
@@ -347,38 +341,27 @@ impl Ops {
                     ));
                 }
             }
-            for w in c
-                .workspace
-                .iter()
-                .chain(c.workspace_history.iter())
-                .filter(|w| w.location.machine == *machine)
-            {
+            for w in c.workspace.iter().chain(c.workspace_history.iter()) {
                 roots.push((w.path.clone(), c.project_id.clone()));
-                roots.push((w.location.directory.clone(), c.project_id.clone()));
+                roots.push((w.directory.clone(), c.project_id.clone()));
                 checkouts.push((w.path.clone(), c.id.clone()));
                 if let Some(branch) = &w.branch {
                     branches.push((
                         c.id.clone(),
                         c.project_id.clone(),
-                        w.location.directory.clone(),
+                        w.directory.clone(),
                         branch.clone(),
                     ));
                 }
             }
         }
-        for wt in s
-            .worktrees
-            .iter()
-            .filter(|wt| wt.location.machine == *machine)
-        {
+        for wt in &s.worktrees {
             roots.push((wt.path.clone(), wt.project_id.clone()));
-            roots.push((wt.location.directory.clone(), wt.project_id.clone()));
+            roots.push((wt.directory.clone(), wt.project_id.clone()));
             managed_checkouts.push((wt.path.clone(), wt.id.clone()));
         }
-        if machine == "local" {
-            for batch in s.merge_batches.iter().filter(|b| b.active()) {
-                roots.push((batch.worktree.clone(), batch.project_id.clone()));
-            }
+        for batch in s.merge_batches.iter().filter(|b| b.active()) {
+            roots.push((batch.worktree.clone(), batch.project_id.clone()));
         }
         let mut paths = roots
             .iter()
@@ -403,182 +386,63 @@ impl Ops {
         };
         if !missing.is_empty() || status_missing {
             cache.probes += 1;
-            if self.host.remote() {
-                let known_statuses: Vec<&String> = cache.statuses.keys().collect();
-                let probe = self.host.python(
-                    r#"import os,sys,json,subprocess
-rows={}
-for p in json.loads(sys.argv[1]):
- if not os.path.exists(p):rows[p]=None;continue
- def git(args):
-  r=subprocess.run(['git','--no-optional-locks','-C',p]+args,capture_output=True,text=True)
-  return r.stdout.strip() if r.returncode==0 else None
- dirs=git(['rev-parse','--path-format=absolute','--git-common-dir','--git-dir','--show-toplevel'])
- parts=dirs.splitlines() if dirs else []
- rows[p]={'path':os.path.realpath(p),'repo':os.path.realpath(parts[0]) if parts else None,'git_dir':os.path.realpath(parts[1]) if len(parts)>1 else None,'top':os.path.realpath(parts[2]) if len(parts)>2 else None}
-cwd=sys.argv[2]
-gd=sys.argv[3] or ((rows.get(cwd) or {}).get('git_dir') if cwd in rows else '')
-top=sys.argv[4] or ((rows.get(cwd) or {}).get('top') if cwd in rows else '')
-known=set(json.loads(sys.argv[5]))
-def rebase_br():
- for rel in ('rebase-merge/head-name','rebase-apply/head-name'):
-  hp=os.path.join(gd,rel)
-  if os.path.isfile(hp):
-   try:
-    raw=open(hp).read().strip()
-    if raw.startswith('refs/heads/') and len(raw)>11:return raw[11:]
-   except OSError:pass
- return None
-def sum_numstat(txt):
- a=0;d=0
- for ln in txt.splitlines():
-  cols=ln.split('\t')
-  if len(cols)>=2:
-   try:a+=int(cols[0])
-   except ValueError:pass
-   try:d+=int(cols[1])
-   except ValueError:pass
- return a,d
-st=None
-if gd and gd not in known:
- r=subprocess.run(['git','--no-optional-locks','-C',cwd,'status','--porcelain=v2','-z','--branch','--untracked-files=all'],capture_output=True)
- if r.returncode==0:
-  br=None;dirty=False;ahead=0;behind=0;untracked=[]
-  recs=r.stdout.split(b'\x00')
-  i=0
-  while i<len(recs):
-   rec=recs[i];i+=1
-   if not rec:continue
-   if rec.startswith(b'# '):
-    rest=rec[2:].decode('utf-8','replace')
-    if rest.startswith('branch.head '):
-     h=rest[len('branch.head '):].strip()
-     if h and h!='(detached)':br=h
-    elif rest.startswith('branch.ab '):
-     for tok in rest[len('branch.ab '):].split():
-      if tok.startswith('+'):
-       try:ahead=int(tok[1:])
-       except ValueError:pass
-      elif tok.startswith('-'):
-       try:behind=int(tok[1:])
-       except ValueError:pass
-   elif rec.startswith(b'! '):
-    continue
-   else:
-    dirty=True
-    if rec.startswith(b'2 '):i+=1
-    elif rec.startswith(b'? ') and len(untracked)<512:untracked.append(rec[2:])
-  adds=0;dels=0
-  if dirty:
-   nd=subprocess.run(['git','--no-optional-locks','-C',cwd,'diff','HEAD','--numstat'],capture_output=True,text=True)
-   if nd.returncode==0:
-    adds,dels=sum_numstat(nd.stdout)
-   else:
-    for ex in (['diff','--cached','--numstat'],['diff','--numstat']):
-     nx=subprocess.run(['git','--no-optional-locks','-C',cwd]+ex,capture_output=True,text=True)
-     if nx.returncode==0:
-      ca,cd=sum_numstat(nx.stdout);adds+=ca;dels+=cd
-   if untracked:
-    if not top:
-     rt=subprocess.run(['git','--no-optional-locks','-C',cwd,'rev-parse','--path-format=absolute','--show-toplevel'],capture_output=True,text=True)
-     if rt.returncode==0:top=rt.stdout.strip()
-    if top:
-     tb=os.fsencode(top);tot=0
-     for rel in untracked:
-      fp=os.path.join(tb,rel)
-      try:
-       if os.path.islink(fp) or not os.path.isfile(fp):continue
-       sz=os.path.getsize(fp)
-       if sz<=0 or sz>2097152 or tot+sz>16777216:continue
-       data=open(fp,'rb').read();tot+=len(data)
-       if data and b'\x00' not in data[:8192]:
-        adds+=data.count(b'\n')+(0 if data.endswith(b'\n') else 1)
-      except OSError:pass
-  st={'branch':br or rebase_br(),'dirty':dirty,'additions':adds,'deletions':dels,'ahead':ahead,'behind':behind}
- else:
-  r2=subprocess.run(['git','--no-optional-locks','-C',cwd,'symbolic-ref','--quiet','--short','HEAD'],capture_output=True,text=True)
-  st={'branch':(r2.stdout.strip() if r2.returncode==0 else None) or rebase_br(),'dirty':False,'additions':0,'deletions':0,'ahead':0,'behind':0}
-print(json.dumps({'paths':rows,'git_dir':gd or None,'status':st}))"#,
-                    &[
-                        &serde_json::to_string(&missing)?,
-                        cwd,
-                        cached_git_dir.as_deref().unwrap_or(""),
-                        cache
-                            .paths
-                            .get(cwd)
-                            .and_then(|v| v["top"].as_str())
-                            .unwrap_or(""),
-                        &serde_json::to_string(&known_statuses)?,
-                    ],
-                )?;
-                for p in missing {
-                    cache.paths.insert(p.clone(), probe["paths"][&p].clone());
-                }
-                if let Some(gd) = probe["git_dir"].as_str()
-                    && !probe["status"].is_null()
-                    && let Ok(st) = serde_json::from_value::<GitStatus>(probe["status"].clone())
-                {
-                    cache.statuses.insert(gd.to_owned(), st);
-                }
-            } else {
-                for p in &missing {
-                    let row = if let Ok(path) = self.host.canonical(Path::new(p)) {
-                        let probe_dirs = || {
-                            self.checked(
-                                Path::new(p),
-                                &[
-                                    "--no-optional-locks",
-                                    "rev-parse",
-                                    "--path-format=absolute",
-                                    "--git-common-dir",
-                                    "--git-dir",
-                                    "--show-toplevel",
-                                ],
-                            )
-                            .ok()
-                        };
-                        let mut dirs = probe_dirs();
-                        // If `.git` was just created by an in-flight `git init`, `rev-parse`
-                        // can briefly fail before `HEAD`/`objects`/`refs` are written.
-                        if dirs.is_none() && path.join(".git").is_dir() {
-                            for _ in 0..5 {
-                                std::thread::sleep(std::time::Duration::from_millis(25));
-                                dirs = probe_dirs();
-                                if dirs.is_some() {
-                                    break;
-                                }
+            for p in &missing {
+                let row = if let Ok(path) = self.host.canonical(Path::new(p)) {
+                    let probe_dirs = || {
+                        self.checked(
+                            Path::new(p),
+                            &[
+                                "--no-optional-locks",
+                                "rev-parse",
+                                "--path-format=absolute",
+                                "--git-common-dir",
+                                "--git-dir",
+                                "--show-toplevel",
+                            ],
+                        )
+                        .ok()
+                    };
+                    let mut dirs = probe_dirs();
+                    // If `.git` was just created by an in-flight `git init`, `rev-parse`
+                    // can briefly fail before `HEAD`/`objects`/`refs` are written.
+                    if dirs.is_none() && path.join(".git").is_dir() {
+                        for _ in 0..5 {
+                            std::thread::sleep(std::time::Duration::from_millis(25));
+                            dirs = probe_dirs();
+                            if dirs.is_some() {
+                                break;
                             }
                         }
-                        let parts = dirs
-                            .as_deref()
-                            .map(|d| d.lines().collect::<Vec<_>>())
-                            .unwrap_or_default();
-                        json!({
-                            "path": path,
-                            "repo": parts.first().and_then(|p| self.host.canonical(Path::new(p)).ok()),
-                            "git_dir": parts.get(1).and_then(|p| self.host.canonical(Path::new(p)).ok()),
-                            "top": parts.get(2).and_then(|p| self.host.canonical(Path::new(p)).ok())
-                        })
-                    } else {
-                        Value::Null
-                    };
-                    cache.paths.insert(p.clone(), row);
-                }
-                if let Some(gd) = cache
+                    }
+                    let parts = dirs
+                        .as_deref()
+                        .map(|d| d.lines().collect::<Vec<_>>())
+                        .unwrap_or_default();
+                    json!({
+                        "path": path,
+                        "repo": parts.first().and_then(|p| self.host.canonical(Path::new(p)).ok()),
+                        "git_dir": parts.get(1).and_then(|p| self.host.canonical(Path::new(p)).ok()),
+                        "top": parts.get(2).and_then(|p| self.host.canonical(Path::new(p)).ok())
+                    })
+                } else {
+                    Value::Null
+                };
+                cache.paths.insert(p.clone(), row);
+            }
+            if let Some(gd) = cache
+                .paths
+                .get(cwd)
+                .and_then(|v| v["git_dir"].as_str())
+                .map(str::to_owned)
+                && !cache.statuses.contains_key(&gd)
+            {
+                let top_hint = cache
                     .paths
                     .get(cwd)
-                    .and_then(|v| v["git_dir"].as_str())
-                    .map(str::to_owned)
-                    && !cache.statuses.contains_key(&gd)
-                {
-                    let top_hint = cache
-                        .paths
-                        .get(cwd)
-                        .and_then(|v| v["top"].as_str())
-                        .map(str::to_owned);
-                    let st = self.probe_git_status(cwd, top_hint.as_deref());
-                    cache.statuses.insert(gd, st);
-                }
+                    .and_then(|v| v["top"].as_str())
+                    .map(str::to_owned);
+                let st = self.probe_git_status(cwd, top_hint.as_deref());
+                cache.statuses.insert(gd, st);
             }
         }
         let rows = &cache.paths;
@@ -749,7 +613,6 @@ mod tests {
             tags: Default::default(),
             id: "p".into(),
             name: "Project".into(),
-            location: None,
             directory: source.to_str().unwrap().into(),
             workflow: Workflow::default(),
             target_branch: None,
@@ -833,7 +696,6 @@ mod cache_tests {
             delivery_mode: Default::default(),
             agent_overrides: Default::default(),
             tags: Default::default(),
-            location: None,
             id: "p".into(),
             name: "p".into(),
             directory: cwd.into(),
@@ -927,7 +789,6 @@ mod cache_tests {
                 delivery_mode: Default::default(),
                 agent_overrides: Default::default(),
                 tags: Default::default(),
-                location: None,
                 id: "p1".into(),
                 name: "Project 1".into(),
                 directory: source.to_str().unwrap().into(),
@@ -942,10 +803,7 @@ mod cache_tests {
                 base_branch: "main".into(),
                 base_commit: None,
                 path: wt_path.to_str().unwrap().into(),
-                location: canban_types::WorkLocation {
-                    machine: "local".into(),
-                    directory: wt_path.to_str().unwrap().into(),
-                },
+                directory: wt_path.to_str().unwrap().into(),
                 created_at: 0,
             }],
             ..Default::default()

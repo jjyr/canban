@@ -1,39 +1,31 @@
-//! Machine-aware process/filesystem operations. Remote effects use Core's API.
+//! Local process and filesystem operations honoring configured `hc_env`.
 use super::*;
-use base64::{Engine, engine::general_purpose::STANDARD};
-use std::os::unix::process::ExitStatusExt;
 use std::{
     path::{Path, PathBuf},
-    process::{ExitStatus, Output},
+    process::Output,
 };
-#[derive(Clone)]
+
+#[derive(Clone, Default)]
 pub struct Host {
-    pub client: Client,
-    pub machine: String,
+    pub hc_env: BTreeMap<String, String>,
 }
+
 impl Host {
     pub fn local() -> Self {
+        Self::default()
+    }
+
+    pub fn new(config: Config) -> Self {
         Self {
-            client: Client {
-                config: Config::default(),
-            },
-            machine: "local".into(),
+            hc_env: config.hc_env,
         }
     }
-    pub fn new(config: Config, machine: &str) -> Self {
-        Self {
-            client: Client { config },
-            machine: machine.into(),
-        }
-    }
-    pub fn remote(&self) -> bool {
-        self.machine != "local"
-    }
+
     pub fn run(&self, dir: &Path, args: &[&str], input: Option<&str>) -> Result<Output> {
         self.run_env(dir, &[], args, input)
     }
 
-    /// Execute a command on `local` or a remote Herdr machine with explicit environment overrides.
+    /// Execute a local command with explicit environment overrides.
     pub fn run_env(
         &self,
         dir: &Path,
@@ -42,37 +34,10 @@ impl Host {
         input: Option<&str>,
     ) -> Result<Output> {
         ensure!(!args.is_empty(), "Empty program");
-        if self.remote() {
-            let env_pairs: Vec<String> = envs.iter().map(|(k, v)| format!("{k}={v}")).collect();
-            let mut argv = vec![
-                "env",
-                "-u",
-                "GIT_DIR",
-                "-u",
-                "GIT_WORK_TREE",
-                "-u",
-                "GIT_INDEX_FILE",
-            ];
-            argv.extend(env_pairs.iter().map(String::as_str));
-            argv.extend(args);
-            let value=self.client.call("machine.exec",json!({"on":self.machine,"argv":argv,"cwd":dir,"input":input.map(|s|STANDARD.encode(s)),"timeout":60.0}))?;
-            ensure!(
-                value["timed_out"] != true && value["truncated"] != true,
-                "Remote command timed out or output was truncated"
-            );
-            let code = value["code"]
-                .as_i64()
-                .context("Remote command ended without an exit code")?;
-            return Ok(Output {
-                status: ExitStatus::from_raw(code as i32 * 256),
-                stdout: STANDARD.decode(value["stdout"].as_str().unwrap_or(""))?,
-                stderr: STANDARD.decode(value["stderr"].as_str().unwrap_or(""))?,
-            });
-        }
         let mut cmd = if envs.iter().any(|(k, _)| *k == "PATH") {
             canban_exec::raw_command(args[0])
         } else {
-            canban_exec::command_with_env(args[0], &self.client.config.hc_env)
+            canban_exec::command_with_env(args[0], &self.hc_env)
         };
         cmd.args(&args[1..])
             .current_dir(dir)
@@ -92,6 +57,7 @@ impl Host {
             Ok(cmd.output()?)
         }
     }
+
     pub fn python(&self, script: &str, args: &[&str]) -> Result<Value> {
         let mut argv = vec!["python3", "-c", script];
         argv.extend(args);
@@ -103,122 +69,53 @@ impl Host {
         );
         Ok(serde_json::from_slice(&out.stdout)?)
     }
+
     pub fn exists(&self, p: &Path) -> bool {
-        if !self.remote() {
-            return p.exists();
-        }
-        self.python(
-            "import os,json,sys;print(json.dumps(os.path.exists(sys.argv[1])))",
-            &[&p.to_string_lossy()],
-        )
-        .ok()
-            == Some(json!(true))
+        p.exists()
     }
+
     pub fn is_dir(&self, p: &Path) -> bool {
-        if !self.remote() {
-            return p.is_dir();
-        }
-        self.python(
-            "import os,json,sys;print(json.dumps(os.path.isdir(sys.argv[1])))",
-            &[&p.to_string_lossy()],
-        )
-        .ok()
-            == Some(json!(true))
+        p.is_dir()
     }
+
     pub fn canonical(&self, p: &Path) -> Result<PathBuf> {
-        if !self.remote() {
-            return Ok(p.canonicalize()?);
-        }
-        let v=self.python("import os,json,sys;assert os.path.exists(sys.argv[1]), 'Directory no longer exists';print(json.dumps(os.path.realpath(sys.argv[1])))",&[&p.to_string_lossy()])?;
-        Ok(PathBuf::from(v.as_str().context("Invalid path")?))
+        Ok(p.canonicalize()?)
     }
+
     pub fn mkdir(&self, p: &Path) -> Result<()> {
-        if !self.remote() {
-            std::fs::create_dir_all(p)?;
-            return Ok(());
-        }
-        self.python(
-            "import os,json,sys;os.makedirs(sys.argv[1],exist_ok=True);print('true')",
-            &[&p.to_string_lossy()],
-        )?;
+        std::fs::create_dir_all(p)?;
         Ok(())
     }
+
     pub fn home(&self) -> Result<String> {
-        if !self.remote() {
-            return std::env::var("HOME").context("HOME unavailable");
-        }
-        Ok(self
-            .python(
-                "import os,json;print(json.dumps(os.path.expanduser('~')))",
-                &[],
-            )?
-            .as_str()
-            .context("No home")?
-            .into())
+        std::env::var("HOME").context("HOME unavailable")
     }
+
     pub fn write_bytes(&self, p: &str, bytes: &[u8]) -> Result<()> {
-        if !self.remote() {
-            let path = Path::new(p);
-            std::fs::create_dir_all(path.parent().context("Missing parent")?)?;
-            std::fs::write(path, bytes)?;
-            return Ok(());
-        }
-        if bytes.len() > 8 * 1024 * 1024 {
-            self.client
-                .call("file.write", json!({"on":self.machine,"path":p,"data":""}))?;
-            for chunk in bytes.chunks(1024 * 1024) {
-                let out=self.run(Path::new("/"),&["python3","-c","import base64,sys;open(sys.argv[1],'ab').write(base64.b64decode(sys.stdin.buffer.read()))",p],Some(&STANDARD.encode(chunk)))?;
-                ensure!(
-                    out.status.success(),
-                    "Remote file transfer failed: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                );
-            }
-            return Ok(());
-        }
-        self.client.call(
-            "file.write",
-            json!({"on":self.machine,"path":p,"data":STANDARD.encode(bytes)}),
-        )?;
+        let path = Path::new(p);
+        std::fs::create_dir_all(path.parent().context("Missing parent")?)?;
+        std::fs::write(path, bytes)?;
         Ok(())
     }
+
     pub fn write(&self, p: &str, text: &str) -> Result<()> {
         self.write_bytes(p, text.as_bytes())
     }
-    /// Batch-probe executable availability on `local` or a remote Herdr machine.
+
+    /// Batch-probe executable availability on the local host.
     pub fn probe_binaries(&self, binaries: &[&str]) -> Result<BTreeMap<String, String>> {
-        if !self.remote() {
-            let mut found = BTreeMap::new();
-            let dirs = crate::local_search_paths(&self.client.config.hc_env);
-            for &bin in binaries {
-                if Path::new(bin).components().count() != 1 {
-                    let p = Path::new(bin);
-                    if p.is_file() {
-                        found.insert(bin.to_owned(), bin.to_owned());
-                    }
-                    continue;
-                }
-                if let Some(hit) = dirs.iter().map(|d| d.join(bin)).find(|p| p.is_file()) {
-                    found.insert(bin.to_owned(), hit.to_string_lossy().into_owned());
-                }
-            }
-            return Ok(found);
-        }
-        let script = concat!(
-            "import os,shutil,json,sys;",
-            "h=os.path.expanduser('~');",
-            "extra=[os.path.join(h,'.local/bin'),os.path.join(h,'.cargo/bin'),os.path.join(h,'.bun/bin'),os.path.join(h,'bin'),'/opt/homebrew/bin','/usr/local/bin'];",
-            "p=os.environ.get('PATH','')+os.pathsep+os.pathsep.join(extra);",
-            "out={b:w for b in sys.argv[1:] if (w:=shutil.which(b,path=p))};",
-            "print(json.dumps(out))"
-        );
-        let value = self.python(script, binaries)?;
         let mut found = BTreeMap::new();
-        if let Some(obj) = value.as_object() {
-            for (k, v) in obj {
-                if let Some(path) = v.as_str() {
-                    found.insert(k.clone(), path.to_owned());
+        let dirs = crate::local_search_paths(&self.hc_env);
+        for &bin in binaries {
+            if Path::new(bin).components().count() != 1 {
+                let p = Path::new(bin);
+                if p.is_file() {
+                    found.insert(bin.to_owned(), bin.to_owned());
                 }
+                continue;
+            }
+            if let Some(hit) = dirs.iter().map(|d| d.join(bin)).find(|p| p.is_file()) {
+                found.insert(bin.to_owned(), hit.to_string_lossy().into_owned());
             }
         }
         Ok(found)

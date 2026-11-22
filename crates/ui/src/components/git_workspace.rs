@@ -89,21 +89,21 @@ pub fn panel(ui: Ui) -> impl IntoElement {
                 .as_ref()
                 .map(|c| ui.snapshot.with(|s| s.card_host(&c.id).to_owned()))
                 .unwrap_or_else(|| ui.active_project_host());
-            let location = current_card
-                .and_then(|c| c.workspace.map(|w| w.location))
-                .or_else(|| ui.current_project().map(|p| p.work_location()));
+            let directory = current_card
+                .and_then(|c| c.workspace.map(|w| w.directory))
+                .or_else(|| ui.current_project().map(|p| p.directory));
             view()
                 .flex_row()
                 .items_center()
                 .gap_1()
                 .child(
                     muted(
-                        location
-                            .map(|l| {
+                        directory
+                            .map(|dir| {
                                 format!(
                                     "{} · {}",
                                     crate::hosts::host_name(ui, &host_id),
-                                    compact(&l.directory, 48)
+                                    compact(&dir, 48)
                                 )
                             })
                             .unwrap_or_default(),

@@ -509,8 +509,6 @@ fn unfinished_idle_turns_and_ephemeral_cli_agents_keep_visual_reminders_silent_w
         origin_card_id: Some("c".into()),
         agent_engine: Some("agy".into()),
         runtime: Some(TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: None,
             core_id: Some("core".into()),
             terminal: Some("pty-ephemeral".into()),
             state: "running".into(),
@@ -555,8 +553,6 @@ fn unfinished_idle_turns_and_ephemeral_cli_agents_keep_visual_reminders_silent_w
         origin_card_id: None,
         agent_engine: None,
         runtime: Some(TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: None,
             core_id: Some("core".into()),
             terminal: Some("pty-shell".into()),
             state: "running".into(),

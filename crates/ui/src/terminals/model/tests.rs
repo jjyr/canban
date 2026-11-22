@@ -22,7 +22,6 @@ fn observe_fixture_locations(s: &mut Snapshot) {
         });
         s.terminal_contexts.push(TerminalContext {
             terminal_id: t.id.clone(),
-            machine: "local".into(),
             cwd: Some(path.clone()),
             directory_root: Some(path),
             project_id: pid.cloned(),
@@ -56,7 +55,7 @@ fn adoption_keeps_the_selected_pty_and_tab_instead_of_falling_back_to_a_neighbor
         let mut manual: TerminalEntry = serde_json::from_value(json!({
             "id":"manual-to-adopt","conversation_id":null,"number":managed.number,
             "name":null,"created_at":1,"origin_card_id":"c1",
-            "runtime":{"machine":"local","core_id":run.core_id,"terminal":run.terminal,
+            "runtime":{"core_id":run.core_id,"terminal":run.terminal,
                 "state":"running","connection":"connected","error":null}
         }))
         .unwrap();
@@ -287,8 +286,6 @@ fn unified_entries_keep_numeric_names_across_agent_resume_and_shell_lifetimes() 
         origin_card_id: None,
         agent_engine: None,
         runtime: Some(TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: None,
             core_id: Some("core".into()),
             terminal: Some("shell-pty".into()),
             state: "running".into(),
@@ -346,8 +343,6 @@ fn directory_regrouping_changes_hints_without_changing_terminal_identity_or_agen
         origin_card_id: None,
         agent_engine: None,
         runtime: Some(TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: None,
             core_id: Some("core".into()),
             terminal: Some("pty".into()),
             state: "running".into(),
@@ -372,7 +367,6 @@ fn directory_regrouping_changes_hints_without_changing_terminal_identity_or_agen
     );
     for id in ["shell", agent.as_str()] {
         s.terminal_contexts.push(TerminalContext {
-            machine: "local".into(),
             terminal_id: id.into(),
             core_id: "core".into(),
             terminal: "pty".into(),
@@ -605,8 +599,6 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
         origin_card_id: Some("c1".into()),
         agent_engine: Some("agy".into()),
         runtime: Some(TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: None,
             core_id: Some("core".into()),
             terminal: Some("pty-agy".into()),
             state: "running".into(),
@@ -629,8 +621,6 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: Some(TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: None,
             core_id: Some("core".into()),
             terminal: Some("pty-shell".into()),
             state: "running".into(),
@@ -653,8 +643,6 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: Some(TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: None,
             core_id: Some("core".into()),
             terminal: Some("pty-ended".into()),
             state: "finished".into(),
@@ -693,7 +681,6 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
 
     // Moving the shell into another project detaches it from the origin card tab bar.
     s.terminal_contexts.push(TerminalContext {
-        machine: "local".into(),
         terminal_id: "shell-backlog".into(),
         core_id: "core".into(),
         terminal: "pty-shell".into(),
@@ -724,8 +711,6 @@ fn default_card_terminal_prefers_recent_live_otherwise_first_active_entry() {
         origin_card_id: Some("c1".into()),
         agent_engine: Some("agy".into()),
         runtime: Some(TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: None,
             core_id: Some("core".into()),
             terminal: Some("pty-agy".into()),
             state: "running".into(),
@@ -748,8 +733,6 @@ fn default_card_terminal_prefers_recent_live_otherwise_first_active_entry() {
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: Some(TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: None,
             core_id: Some("core".into()),
             terminal: Some("pty-ended".into()),
             state: "finished".into(),
@@ -800,8 +783,6 @@ fn manual_terminals_never_participate_in_inactive_and_ephemeral_cli_agents_surfa
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: Some(TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: None,
             core_id: Some("core".into()),
             terminal: Some("pty-shell".into()),
             state: "running".into(),
@@ -824,8 +805,6 @@ fn manual_terminals_never_participate_in_inactive_and_ephemeral_cli_agents_surfa
         origin_card_id: Some("c1".into()),
         agent_engine: Some("agy".into()),
         runtime: Some(TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: None,
             core_id: Some("core".into()),
             terminal: Some("pty-agy".into()),
             state: "running".into(),
@@ -935,8 +914,6 @@ fn card_open_collapses_terminal_by_default_while_terminal_and_pill_entries_expan
             origin_card_id: Some("c1".into()),
             agent_engine: None,
             runtime: Some(TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: None,
                 core_id: Some("core".into()),
                 terminal: Some("pty-shell".into()),
                 state: "running".into(),
@@ -1095,8 +1072,6 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
             origin_card_id: Some("c1".into()),
             agent_engine: None,
             runtime: Some(TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: None,
                 core_id: Some("core".into()),
                 terminal: Some("pty-plain".into()),
                 state: "running".into(),
@@ -1119,8 +1094,6 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
             origin_card_id: Some("c1".into()),
             agent_engine: Some("agy".into()),
             runtime: Some(TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: None,
                 core_id: Some("core".into()),
                 terminal: Some("pty-ephemeral".into()),
                 state: "running".into(),
@@ -1153,8 +1126,6 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
             origin_card_id: None,
             agent_engine: None,
             runtime: Some(TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: None,
                 core_id: Some("core".into()),
                 terminal: Some("pty-cfg".into()),
                 state: "running".into(),
@@ -1292,8 +1263,6 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
                 origin_card_id: None,
                 agent_engine: None,
                 runtime: Some(TerminalRuntime {
-                    machine: "local".into(),
-                    owner_core_id: None,
                     core_id: Some("core".into()),
                     terminal: Some("pty-manual-agent".into()),
                     state: "running".into(),
@@ -1358,8 +1327,6 @@ fn optimistic_close_removes_tab_immediately_and_rolls_back_on_unknown_or_error()
                 origin_card_id: Some("c1".into()),
                 agent_engine: None,
                 runtime: Some(TerminalRuntime {
-                    machine: "local".into(),
-                    owner_core_id: Some("core-1".into()),
                     core_id: Some("core-1".into()),
                     terminal: Some("pty-1".into()),
                     state: "running".into(),
@@ -1382,8 +1349,6 @@ fn optimistic_close_removes_tab_immediately_and_rolls_back_on_unknown_or_error()
                 origin_card_id: Some("c1".into()),
                 agent_engine: None,
                 runtime: Some(TerminalRuntime {
-                    machine: "local".into(),
-                    owner_core_id: Some("core-1".into()),
                     core_id: Some("core-1".into()),
                     terminal: Some("pty-2".into()),
                     state: "running".into(),
@@ -1499,10 +1464,7 @@ fn worktree_scopes_isolate_tabs_and_cycle_hide_empty_branches_and_regroup_on_cd(
             base_branch: "main".into(),
             base_commit: None,
             path: "/repo/p1-worktrees/feat-active".into(),
-            location: WorkLocation {
-                machine: "local".into(),
-                directory: "/repo/p1-worktrees/feat-active".into(),
-            },
+            directory: "/repo/p1-worktrees/feat-active".into(),
             created_at: 3,
         });
         s.worktrees.push(ManagedWorktree {
@@ -1512,10 +1474,7 @@ fn worktree_scopes_isolate_tabs_and_cycle_hide_empty_branches_and_regroup_on_cd(
             base_branch: "main".into(),
             base_commit: None,
             path: "/repo/p1-worktrees/chore-idle".into(),
-            location: WorkLocation {
-                machine: "local".into(),
-                directory: "/repo/p1-worktrees/chore-idle".into(),
-            },
+            directory: "/repo/p1-worktrees/chore-idle".into(),
             created_at: 4,
         });
 
@@ -1528,8 +1487,6 @@ fn worktree_scopes_isolate_tabs_and_cycle_hide_empty_branches_and_regroup_on_cd(
             origin_card_id: origin.map(str::to_owned),
             agent_engine: None,
             runtime: Some(TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: None,
                 core_id: Some("core".into()),
                 terminal: Some(format!("pty-{id}")),
                 state: "running".into(),
@@ -1552,7 +1509,6 @@ fn worktree_scopes_isolate_tabs_and_cycle_hide_empty_branches_and_regroup_on_cd(
         ]);
         s.terminal_contexts.extend([
             TerminalContext {
-                machine: "local".into(),
                 terminal_id: "root-1".into(),
                 core_id: "core".into(),
                 terminal: "pty-root-1".into(),
@@ -1565,7 +1521,6 @@ fn worktree_scopes_isolate_tabs_and_cycle_hide_empty_branches_and_regroup_on_cd(
                 ..Default::default()
             },
             TerminalContext {
-                machine: "local".into(),
                 terminal_id: "root-2".into(),
                 core_id: "core".into(),
                 terminal: "pty-root-2".into(),
@@ -1575,7 +1530,6 @@ fn worktree_scopes_isolate_tabs_and_cycle_hide_empty_branches_and_regroup_on_cd(
                 ..Default::default()
             },
             TerminalContext {
-                machine: "local".into(),
                 terminal_id: "card-shell".into(),
                 core_id: "core".into(),
                 terminal: "pty-card-shell".into(),
@@ -1586,7 +1540,6 @@ fn worktree_scopes_isolate_tabs_and_cycle_hide_empty_branches_and_regroup_on_cd(
                 ..Default::default()
             },
             TerminalContext {
-                machine: "local".into(),
                 terminal_id: "wt-shell".into(),
                 core_id: "core".into(),
                 terminal: "pty-wt-shell".into(),
@@ -1737,8 +1690,6 @@ fn close_terminal_fallback_prefers_same_worktree_prev_then_same_project_prev_the
             origin_card_id: None,
             agent_engine: None,
             runtime: Some(TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: None,
                 core_id: Some("core".into()),
                 terminal: Some(format!("pty-{id}")),
                 state: "running".into(),
@@ -1766,15 +1717,11 @@ fn close_terminal_fallback_prefers_same_worktree_prev_then_same_project_prev_the
             base_branch: "main".into(),
             base_commit: None,
             path: "/repo/p1-wt/feat-x".into(),
-            location: WorkLocation {
-                machine: "local".into(),
-                directory: "/repo/p1-wt/feat-x".into(),
-            },
+            directory: "/repo/p1-wt/feat-x".into(),
             created_at: 1,
         });
         s.terminal_contexts.extend([
             TerminalContext {
-                machine: "local".into(),
                 terminal_id: "r1".into(),
                 core_id: "core".into(),
                 terminal: "pty-r1".into(),
@@ -1783,7 +1730,6 @@ fn close_terminal_fallback_prefers_same_worktree_prev_then_same_project_prev_the
                 ..Default::default()
             },
             TerminalContext {
-                machine: "local".into(),
                 terminal_id: "c1-a".into(),
                 core_id: "core".into(),
                 terminal: "pty-c1-a".into(),
@@ -1793,7 +1739,6 @@ fn close_terminal_fallback_prefers_same_worktree_prev_then_same_project_prev_the
                 ..Default::default()
             },
             TerminalContext {
-                machine: "local".into(),
                 terminal_id: "c1-b".into(),
                 core_id: "core".into(),
                 terminal: "pty-c1-b".into(),
@@ -1803,7 +1748,6 @@ fn close_terminal_fallback_prefers_same_worktree_prev_then_same_project_prev_the
                 ..Default::default()
             },
             TerminalContext {
-                machine: "local".into(),
                 terminal_id: "c1-c".into(),
                 core_id: "core".into(),
                 terminal: "pty-c1-c".into(),
@@ -1813,7 +1757,6 @@ fn close_terminal_fallback_prefers_same_worktree_prev_then_same_project_prev_the
                 ..Default::default()
             },
             TerminalContext {
-                machine: "local".into(),
                 terminal_id: "wt1".into(),
                 core_id: "core".into(),
                 terminal: "pty-wt1".into(),
@@ -1975,8 +1918,6 @@ fn merge_batch_terminal_uses_its_actual_checkout_and_git_summary() {
         origin_card_id: None,
         agent_engine: Some("agy".into()),
         runtime: Some(canban_types::TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: Some("core".into()),
             core_id: Some("core".into()),
             terminal: Some("pty-merger".into()),
             state: "running".into(),
@@ -1991,7 +1932,6 @@ fn merge_batch_terminal_uses_its_actual_checkout_and_git_summary() {
         created_at: 2,
     });
     s.terminal_contexts.push(TerminalContext {
-        machine: "local".into(),
         terminal_id: batch_id.clone(),
         core_id: "core".into(),
         terminal: "pty-merger".into(),
@@ -2033,8 +1973,6 @@ fn manual_shell_observed_agent_exposes_icon_only_without_changing_title_or_close
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: Some(TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: Some("core".into()),
             core_id: Some("core".into()),
             terminal: Some("pty-shell".into()),
             state: "running".into(),
@@ -2100,10 +2038,7 @@ fn mounted_tabs_header_updates_across_project_root_and_worktree_selection_and_ma
             base_branch: "main".into(),
             base_commit: None,
             path: "/repo/p1-worktrees/feat-isolated".into(),
-            location: WorkLocation {
-                machine: "local".into(),
-                directory: "/repo/p1-worktrees/feat-isolated".into(),
-            },
+            directory: "/repo/p1-worktrees/feat-isolated".into(),
             created_at: 3,
         });
 
@@ -2116,8 +2051,6 @@ fn mounted_tabs_header_updates_across_project_root_and_worktree_selection_and_ma
             origin_card_id: origin.map(str::to_owned),
             agent_engine: None,
             runtime: Some(TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: None,
                 core_id: Some("core".into()),
                 terminal: Some(format!("pty-{id}")),
                 state: "running".into(),
@@ -2140,7 +2073,6 @@ fn mounted_tabs_header_updates_across_project_root_and_worktree_selection_and_ma
         ]);
         s.terminal_contexts.extend([
             TerminalContext {
-                machine: "local".into(),
                 terminal_id: "root-shell".into(),
                 core_id: "core".into(),
                 terminal: "pty-root-shell".into(),
@@ -2150,7 +2082,6 @@ fn mounted_tabs_header_updates_across_project_root_and_worktree_selection_and_ma
                 ..Default::default()
             },
             TerminalContext {
-                machine: "local".into(),
                 terminal_id: "card-shell".into(),
                 core_id: "core".into(),
                 terminal: "pty-card-shell".into(),
@@ -2164,7 +2095,6 @@ fn mounted_tabs_header_updates_across_project_root_and_worktree_selection_and_ma
                 ..Default::default()
             },
             TerminalContext {
-                machine: "local".into(),
                 terminal_id: "wt-shell-1".into(),
                 core_id: "core".into(),
                 terminal: "pty-wt-shell-1".into(),
@@ -2178,7 +2108,6 @@ fn mounted_tabs_header_updates_across_project_root_and_worktree_selection_and_ma
                 ..Default::default()
             },
             TerminalContext {
-                machine: "local".into(),
                 terminal_id: "wt-shell-2".into(),
                 core_id: "core".into(),
                 terminal: "pty-wt-shell-2".into(),
@@ -2598,10 +2527,7 @@ fn sidebar_rows_render_single_line_compact_layout_with_dedup_and_remote_host_onl
         renamed_run.profile.preset = Some("claude".into());
         renamed_run.stage = "review".into();
         renamed_run.terminal = Some("t-renamed".into());
-        renamed_run.location = Some(WorkLocation {
-            machine: "local".into(),
-            directory: "/remote/c1".into(),
-        });
+        renamed_run.directory = Some("/remote/c1".into());
         renamed_run.observed = Some(json!({"state": "live", "status": {"state": "working"}}));
         renamed_run.lifecycle.waiting = None;
         let renamed_id = Conversation::key("c1", "reviewer");
@@ -2654,8 +2580,6 @@ fn sidebar_rows_render_single_line_compact_layout_with_dedup_and_remote_host_onl
             origin_card_id: Some("c1".into()),
             agent_engine: Some("agy".into()),
             runtime: Some(TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: None,
                 core_id: Some("core".into()),
                 terminal: Some("pty-standalone".into()),
                 state: "running".into(),
@@ -2680,8 +2604,6 @@ fn sidebar_rows_render_single_line_compact_layout_with_dedup_and_remote_host_onl
             origin_card_id: Some("c1".into()),
             agent_engine: None,
             runtime: Some(TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: None,
                 core_id: Some("core".into()),
                 terminal: Some("pty-codex-shell".into()),
                 state: "running".into(),
@@ -2706,8 +2628,6 @@ fn sidebar_rows_render_single_line_compact_layout_with_dedup_and_remote_host_onl
             origin_card_id: Some("c1".into()),
             agent_engine: None,
             runtime: Some(TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: None,
                 core_id: Some("core".into()),
                 terminal: Some("pty-plain".into()),
                 state: "running".into(),
@@ -3089,7 +3009,7 @@ fn two_level_folding_hides_children_preserves_summary_badges_and_supports_option
         root_shell.origin_card_id = None;
         root_shell.runtime = Some(
             serde_json::from_value(json!({
-                "machine":"local","state":"running","connection":"connected","core_id":"core","terminal":"pty-root"
+                "state":"running","connection":"connected","core_id":"core","terminal":"pty-root"
             }))
             .unwrap(),
         );
@@ -3455,8 +3375,6 @@ fn top_right_project_card_and_cwd_context_labels_are_vertically_centered_in_term
             origin_card_id: card.map(str::to_owned),
             agent_engine: None,
             runtime: Some(TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: None,
                 core_id: Some("core".into()),
                 terminal: Some(format!("pty-{id}")),
                 state: "running".into(),
@@ -3478,7 +3396,6 @@ fn top_right_project_card_and_cwd_context_labels_are_vertically_centered_in_term
         ]);
         s.terminal_contexts.extend([
             TerminalContext {
-                machine: "local".into(),
                 terminal_id: "project-shell".into(),
                 core_id: "core".into(),
                 terminal: "pty-project-shell".into(),
@@ -3488,7 +3405,6 @@ fn top_right_project_card_and_cwd_context_labels_are_vertically_centered_in_term
                 ..Default::default()
             },
             TerminalContext {
-                machine: "local".into(),
                 terminal_id: "card-shell".into(),
                 core_id: "core".into(),
                 terminal: "pty-card-shell".into(),
@@ -3499,7 +3415,6 @@ fn top_right_project_card_and_cwd_context_labels_are_vertically_centered_in_term
                 ..Default::default()
             },
             TerminalContext {
-                machine: "local".into(),
                 terminal_id: "external-shell".into(),
                 core_id: "core".into(),
                 terminal: "pty-external-shell".into(),
@@ -3774,7 +3689,6 @@ fn live_directory_projection_moves_agents_without_reassigning_tasks() {
     let task_card = s.terminals[0].agent.as_ref().unwrap().card_id.clone();
     s.terminal_contexts = vec![TerminalContext {
         terminal_id: terminal.clone(),
-        machine: "local".into(),
         cwd: Some("/external/src".into()),
         directory_root: Some("/external".into()),
         ..Default::default()
@@ -3814,11 +3728,10 @@ fn shell_origin_does_not_override_observed_external_directory_and_status_does_no
     shell.conversation_id = None;
     shell.origin_card_id = None;
     shell.origin_project_id = Some("p1".into());
-    shell.runtime = Some(serde_json::from_value(json!({"machine":"local", "state":"running", "connection":"connected", "core_id":"core", "terminal":"shell"})).unwrap());
+    shell.runtime = Some(serde_json::from_value(json!({"state":"running", "connection":"connected", "core_id":"core", "terminal":"shell"})).unwrap());
     s.terminals.push(shell);
     s.terminal_contexts.push(TerminalContext {
         terminal_id: "external-shell".into(),
-        machine: "local".into(),
         cwd: Some("/outside".into()),
         directory_root: Some("/outside".into()),
         ..Default::default()
@@ -3835,7 +3748,7 @@ fn shell_origin_does_not_override_observed_external_directory_and_status_does_no
     updated.saved.runtime.as_mut().unwrap().agent_status = Some("working".into());
     updated.location.as_mut().unwrap().dirty = true;
     assert_eq!(project_tree(&s, std::slice::from_ref(&updated)), before);
-    updated.location.as_mut().unwrap().machine = "another-machine".into();
+    updated.host_id = "another-host".into();
     assert_ne!(entry_scope(&s, &updated), entry_scope(&s, &e));
 }
 
@@ -3890,7 +3803,7 @@ fn worktree_merge_badge_follows_observed_card_and_delivery_target() {
             "repository":"owner/repo", "repository_id":1, "number":42,
             "url":"https://github.com/owner/repo/pull/42", "state":"closed", "head":"abc",
             "head_branch":"feature", "base_branch":"stable", "merged":true, "checks":"",
-            "workspace":{"location":{"machine":"local","directory":"/repo"},"path":"/wt"}
+            "workspace":{"directory":"/repo","path":"/wt"}
         }))
         .unwrap(),
     );
@@ -4105,7 +4018,6 @@ fn external_directories_render_under_other_section_header_and_compact_local_home
     local_shell.origin_project_id = None;
     local_shell.runtime = Some(
         serde_json::from_value(json!({
-            "machine": "local",
             "state": "running",
             "connection": "connected",
             "core_id": "core",
@@ -4116,7 +4028,6 @@ fn external_directories_render_under_other_section_header_and_compact_local_home
     s.terminals.push(local_shell);
     s.terminal_contexts.push(TerminalContext {
         terminal_id: "local-home-shell".into(),
-        machine: "local".into(),
         cwd: Some(scratch_path.clone()),
         directory_root: Some(scratch_path.clone()),
         branch: Some("spike".into()),
@@ -4131,18 +4042,18 @@ fn external_directories_render_under_other_section_header_and_compact_local_home
     remote_shell.origin_project_id = None;
     remote_shell.runtime = Some(
         serde_json::from_value(json!({
-            "machine": "devbox",
             "state": "running",
             "connection": "connected",
             "core_id": "core",
-            "terminal": "devbox/pty-remote"
+            "terminal": "pty-remote"
         }))
         .unwrap(),
     );
     s.terminals.push(remote_shell);
+    s.entity_hosts
+        .insert("remote-shell".into(), "devbox".into());
     s.terminal_contexts.push(TerminalContext {
         terminal_id: "remote-shell".into(),
-        machine: "devbox".into(),
         cwd: Some(scratch_path.clone()),
         directory_root: Some(scratch_path.clone()),
         ..Default::default()
@@ -4178,7 +4089,7 @@ fn external_directories_render_under_other_section_header_and_compact_local_home
         );
     }
 
-    // Remote machine paths must NOT rewrite using the local Mac's $HOME.
+    // Remote host paths must NOT rewrite using the local Mac's $HOME.
     let remote_entry = rows.iter().find(|e| e.saved.id == "remote-shell").unwrap();
     let remote_scope = entry_scope(&s, remote_entry);
     assert_eq!(
@@ -4303,8 +4214,6 @@ fn compact_terminal_tabs_never_push_notifications_or_hosts_out_of_header_bounds(
                     origin_card_id: Some("c1".into()),
                     agent_engine: None,
                     runtime: Some(TerminalRuntime {
-                        machine: "local".into(),
-                        owner_core_id: None,
                         core_id: Some("core".into()),
                         terminal: Some(format!("pty-{id}")),
                         state: "running".into(),
@@ -4319,7 +4228,6 @@ fn compact_terminal_tabs_never_push_notifications_or_hosts_out_of_header_bounds(
                     created_at: idx + 10,
                 });
                 s.terminal_contexts.push(TerminalContext {
-                    machine: "local".into(),
                     terminal_id: id.clone(),
                     core_id: "core".into(),
                     terminal: format!("pty-{id}"),

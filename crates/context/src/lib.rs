@@ -148,17 +148,6 @@ pub fn capture(
     snapshot: &Snapshot,
     card_events: &[Event],
 ) -> Result<String> {
-    capture_for(home, project, card, entry, snapshot, card_events, home)
-}
-pub fn capture_for(
-    home: &Path,
-    project: &Project,
-    card: &Card,
-    entry: &TerminalEntry,
-    snapshot: &Snapshot,
-    card_events: &[Event],
-    execution_home: &Path,
-) -> Result<String> {
     let run = entry
         .agent
         .as_ref()
@@ -281,7 +270,7 @@ pub fn capture_for(
                 prompt.push_str(&format!(
                     "- @{role} ({}): {summary} — file: {}\n",
                     r.state,
-                    execution_home.join(rel).display()
+                    home.join(rel).display()
                 ));
             } else {
                 prompt.push_str(&format!("- @{role} ({}): {summary}\n", r.state));
@@ -296,7 +285,7 @@ pub fn capture_for(
                 "- {} ({}): {}\n",
                 a.name,
                 a.media_type,
-                execution_home.join(&a.path).display()
+                home.join(&a.path).display()
             ));
         }
     }

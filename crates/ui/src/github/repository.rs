@@ -627,7 +627,6 @@ mod tests {
                 id: "proj-1".into(),
                 name: "Canban".into(),
                 directory: "/tmp/canban".into(),
-                location: None,
                 github: None,
                 detected_github: Some(DetectedGitHub {
                     repository: "jjyr/canban".into(),
@@ -672,7 +671,6 @@ mod tests {
                 id: "proj-1".into(),
                 name: "Canban".into(),
                 directory: "/tmp/canban".into(),
-                location: None,
                 github: Some(GitHubSource {
                     pr_intake: GitHubPrIntake::Off,
                     authors: Vec::new(),
@@ -728,7 +726,6 @@ mod tests {
                 id: id.into(),
                 name: name.into(),
                 directory: format!("/tmp/{id}"),
-                location: None,
                 github: Some(GitHubSource {
                     pr_intake: GitHubPrIntake::Off,
                     authors: Vec::new(),

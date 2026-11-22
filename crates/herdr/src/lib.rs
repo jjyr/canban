@@ -155,28 +155,10 @@ impl Client {
         env: BTreeMap<String, String>,
         labels: BTreeMap<String, String>,
     ) -> Result<Value> {
-        self.launch_on("local", argv, cwd, env, labels)
+        self.launch_with_policy(argv, cwd, env, labels, LocalEnvPolicy::MinimalPathOnly)
     }
-    pub fn launch_on(
+    pub fn launch_with_policy(
         &self,
-        machine: &str,
-        argv: Vec<String>,
-        cwd: &str,
-        env: BTreeMap<String, String>,
-        labels: BTreeMap<String, String>,
-    ) -> Result<Value> {
-        self.launch_on_with_policy(
-            machine,
-            argv,
-            cwd,
-            env,
-            labels,
-            LocalEnvPolicy::MinimalPathOnly,
-        )
-    }
-    pub fn launch_on_with_policy(
-        &self,
-        machine: &str,
         argv: Vec<String>,
         cwd: &str,
         mut env: BTreeMap<String, String>,
@@ -185,43 +167,12 @@ impl Client {
     ) -> Result<Value> {
         ensure!(!argv.is_empty(), "Agent profile has no launch command");
         merge_default_terminal_env(&mut env, &self.config.hc_env);
-        if machine == "local" {
-            merge_local_env_with_policy(&mut env, &self.config.hc_env, env_policy);
-        }
-        let mut p = json!({"argv":argv,"cwd":cwd,"env":env,"labels":labels,"no_parent":true,"no_notify":true,"outlive_parent":true,"wait":false});
-        if machine != "local" {
-            p["on"] = json!(machine);
-        }
-        let mut result = self.call("terminal.run", p)?;
-        // Stable owner prefix survives route rename and cannot follow a reused alias.
-        if machine != "local" {
-            let address = result["address"].as_str().context("No terminal address")?;
-            let local = address.rsplit('/').next().unwrap();
-            result["address"] = json!(format!("{machine}/{local}"));
-        }
-        Ok(result)
+        merge_local_env_with_policy(&mut env, &self.config.hc_env, env_policy);
+        let p = json!({"argv":argv,"cwd":cwd,"env":env,"labels":labels,"no_parent":true,"no_notify":true,"outlive_parent":true,"wait":false});
+        self.call("terminal.run", p)
     }
     pub fn terminals(&self) -> Result<Value> {
-        let mut list = self.call("terminal.list", json!({"all":true}))?;
-        let machines = self
-            .call("machine.list", json!({}))
-            .unwrap_or(json!({"machines":[]}));
-        if let Some(rows) = list["terminals"].as_array_mut() {
-            for row in rows {
-                if let Some((prefix, local)) =
-                    row["address"].as_str().and_then(|v| v.split_once('/'))
-                    && let Some(m) = machines["machines"]
-                        .as_array()
-                        .and_then(|ms| ms.iter().find(|m| m["name"] == prefix))
-                {
-                    row["address"] = json!(format!(
-                        "{}/{local}",
-                        m["id"].as_str().context("No owner ID")?
-                    ));
-                }
-            }
-        }
-        Ok(list)
+        self.call("terminal.list", json!({"all":true}))
     }
     pub fn get(&self, terminal: &str) -> Result<Value> {
         self.call("terminal.get", json!({"terminal":terminal}))

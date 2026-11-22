@@ -243,7 +243,6 @@ impl CommittedWrites {
                             (runtime.core_id.as_ref(), runtime.terminal.as_ref())
                     {
                         self.record_terminal_hint(TerminalContext {
-                            machine: wt.location.machine.clone(),
                             terminal_id: terminal.id.clone(),
                             core_id: core_id.clone(),
                             terminal: pty_id.clone(),
@@ -551,7 +550,6 @@ fn hint_applies(snapshot: &Snapshot, hint: &TerminalContext) -> bool {
         t.id == hint.terminal_id
             && t.runtime.as_ref().is_some_and(|r| {
                 r.state != "finished"
-                    && r.machine == hint.machine
                     && r.core_id.as_deref() == Some(hint.core_id.as_str())
                     && r.terminal.as_deref() == Some(hint.terminal.as_str())
             })
@@ -576,7 +574,7 @@ mod tests {
         assert!(immediate("terminal.create"));
         let terminal: TerminalEntry = serde_json::from_value(json!({
             "id":"shell-new", "number":1, "name":"Terminal 1", "created_at":1,
-            "runtime":{"machine":"local", "core_id":"core-1", "terminal":"pty-1",
+            "runtime":{"core_id":"core-1", "terminal":"pty-1",
                 "state":"running", "connection":"connected"}
         }))
         .unwrap();
@@ -612,13 +610,12 @@ mod tests {
     fn creation_placement_survives_unknown_context_then_yields_to_observation() {
         let terminal: TerminalEntry = serde_json::from_value(json!({
             "id":"new", "number":1, "created_at":1,
-            "runtime":{"machine":"local", "core_id":"core", "terminal":"pty",
+            "runtime":{"core_id":"core", "terminal":"pty",
                 "state":"running", "connection":"connected"}
         }))
         .unwrap();
         let hint = TerminalContext {
             terminal_id: "new".into(),
-            machine: "local".into(),
             core_id: "core".into(),
             terminal: "pty".into(),
             cwd: Some("/known".into()),
@@ -944,13 +941,12 @@ mod tests {
         // 2. review.send_agent (terminal) overlays terminal + terminal_context.
         let review_term: TerminalEntry = serde_json::from_value(json!({
             "id":"review-agent-1", "number":2, "origin_project_id":"p1", "created_at":10,
-            "runtime":{"machine":"local", "core_id":"core-1", "terminal":"pty-9",
+            "runtime":{"core_id":"core-1", "terminal":"pty-9",
                 "state":"running", "connection":"connected"}
         }))
         .unwrap();
         let review_ctx = TerminalContext {
             terminal_id: "review-agent-1".into(),
-            machine: "local".into(),
             core_id: "core-1".into(),
             terminal: "pty-9".into(),
             cwd: Some("/repo".into()),
@@ -1037,7 +1033,7 @@ mod tests {
                     "branch": "feat/wt",
                     "base_branch": "main",
                     "path": "/tmp/wt1",
-                    "location": {"machine": "local", "directory": "/repo"},
+                    "directory": "/repo",
                     "created_at": 10
                 },
                 "terminal": null

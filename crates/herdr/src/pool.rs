@@ -175,7 +175,7 @@ fn put_idle(key: PoolKey, mut conn: PooledConn) {
 fn is_idempotent_read(method: &str) -> bool {
     matches!(
         method,
-        "server.status" | "terminal.get" | "terminal.list" | "terminal.read" | "machine.list"
+        "server.status" | "terminal.get" | "terminal.list" | "terminal.read"
     )
 }
 

@@ -30,8 +30,6 @@ impl AppServer {
         let sync_base = p["sync_base"].as_bool().unwrap_or(false);
 
         let project: Project = self.store.lock().unwrap().db().get(project_id)?;
-        let location = project.work_location();
-        self.resolve_machine(&location.machine, true)?;
 
         // Check duplicate managed worktree branch in same project
         {
@@ -46,11 +44,10 @@ impl AppServer {
             );
         }
 
-        let exec_home = self.execution_home(&location.machine)?;
-        let ops = self.ops(&location.machine);
+        let ops = self.ops();
         let (path_buf, resolved_base, base_commit) = {
-            let _permit = self.check(&location.machine);
-            ops.create_branch_worktree(&exec_home, &project, branch, base_branch, sync_base)?
+            let _permit = self.check();
+            ops.create_branch_worktree(&self.home, &project, branch, base_branch, sync_base)?
         };
         let path_str = path_buf.to_string_lossy().into_owned();
         let wt = ManagedWorktree {
@@ -60,7 +57,7 @@ impl AppServer {
             base_branch: resolved_base,
             base_commit: Some(base_commit),
             path: path_str.clone(),
-            location: location.clone(),
+            directory: project.directory.clone(),
             created_at: now(),
         };
 
@@ -69,7 +66,7 @@ impl AppServer {
                 db.save(&wt)?;
                 Ok(serde_json::to_value(&wt)?)
             })?)?;
-        self.git_changed(&location.machine);
+        self.git_changed();
 
         let launch_mode = p["launch"].as_str().unwrap_or("shell");
         let terminal = if launch_mode == "none" {
@@ -77,7 +74,6 @@ impl AppServer {
         } else {
             let mut launch_params = json!({
                 "project_id": project.id,
-                "machine": location.machine,
                 "cwd": path_str,
             });
             if launch_mode == "agent" {
@@ -103,10 +99,8 @@ impl AppServer {
     fn managed_worktree_status(&self, p: Value) -> Result<Value> {
         let wt_id = strp(&p, "worktree_id")?;
         let wt: ManagedWorktree = self.store.lock().unwrap().db().get(wt_id)?;
-        let _permit = self.check(&wt.location.machine);
-        let (state, dirty, branch) = self
-            .ops(&wt.location.machine)
-            .worktree_status(Path::new(&wt.path))?;
+        let _permit = self.check();
+        let (state, dirty, branch) = self.ops().worktree_status(Path::new(&wt.path))?;
         Ok(json!({
             "worktree_id": wt.id,
             "state": state,
@@ -137,7 +131,7 @@ impl AppServer {
             card.base_commit = wt.base_commit.clone();
             card.worktree = Some(wt.path.clone());
             card.workspace = Some(WorkspaceBinding {
-                location: wt.location.clone(),
+                directory: wt.directory.clone(),
                 path: wt.path.clone(),
                 branch: Some(wt.branch.clone()),
                 base_commit: wt.base_commit.clone(),
@@ -176,10 +170,9 @@ impl AppServer {
         };
 
         // Ensure no live terminal PTY is currently inside this worktree
-        let ops = self.ops(&wt.location.machine);
+        let ops = self.ops();
         for ctx in &snapshot.terminal_contexts {
-            if ctx.machine == wt.location.machine
-                && let Some(cwd) = &ctx.cwd
+            if let Some(cwd) = &ctx.cwd
                 && ops.c_contains(&wt.path, cwd)
             {
                 let live = snapshot.terminals.iter().any(|t| {
@@ -194,12 +187,11 @@ impl AppServer {
             }
         }
 
-        let exec_home = self.execution_home(&wt.location.machine)?;
         {
-            let _permit = self.check(&wt.location.machine);
+            let _permit = self.check();
             ops.remove_worktree(
-                &exec_home,
-                Path::new(&wt.location.directory),
+                &self.home,
+                Path::new(&wt.directory),
                 Path::new(&wt.path),
                 force,
             )?;
@@ -210,7 +202,7 @@ impl AppServer {
                 .execute("DELETE FROM managed_worktrees WHERE id=?1", params![wt.id])?;
             Ok(json!({"removed": true, "worktree_id": wt.id}))
         })?;
-        self.git_changed(&wt.location.machine);
+        self.git_changed();
         Ok(res)
     }
 
@@ -272,15 +264,13 @@ impl AppServer {
         let mut skipped = Vec::<Value>::new();
         let mut cleared_card_ids = Vec::<String>::new();
         let mut removed_wt_ids = Vec::<String>::new();
-        let mut changed_machines = std::collections::BTreeSet::<String>::new();
+        let mut changed = false;
 
-        let has_live_terminal = |machine: &str, path: &str, ops: &canban_workspaces::Ops| -> bool {
+        let has_live_terminal = |path: &str, ops: &canban_workspaces::Ops| -> bool {
             snapshot.terminal_contexts.iter().any(|ctx| {
-                ctx.machine == machine
-                    && ctx
-                        .cwd
-                        .as_deref()
-                        .is_some_and(|cwd| ops.c_contains(path, cwd))
+                ctx.cwd
+                    .as_deref()
+                    .is_some_and(|cwd| ops.c_contains(path, cwd))
                     && snapshot.terminals.iter().any(|t| {
                         t.id == ctx.terminal_id
                             && t.runtime.as_ref().is_some_and(|r| r.state != "finished")
@@ -319,16 +309,13 @@ impl AppServer {
             let Some(project) = snapshot.projects.iter().find(|pr| pr.id == card.project_id) else {
                 continue;
             };
-            let loc = card
+            let source_dir = card
                 .workspace
                 .as_ref()
-                .map(|w| w.location.clone())
-                .unwrap_or_else(|| project.work_location());
-            if loc.machine != "local" {
-                continue;
-            }
-            let ops = self.ops(&loc.machine);
-            if has_live_terminal(&loc.machine, wt_path, &ops) {
+                .map(|w| w.directory.as_str())
+                .unwrap_or(project.directory.as_str());
+            let ops = self.ops();
+            if has_live_terminal(wt_path, &ops) {
                 dirty.push(json!({
                     "kind": "card",
                     "card_id": card.id,
@@ -372,11 +359,10 @@ impl AppServer {
                 }));
                 continue;
             }
-            let exec_home = self.execution_home(&loc.machine)?;
             if !dry_run {
                 if let Err(err) = ops.remove_worktree(
-                    &exec_home,
-                    Path::new(&loc.directory),
+                    &self.home,
+                    Path::new(source_dir),
                     Path::new(wt_path),
                     false,
                 ) {
@@ -393,7 +379,7 @@ impl AppServer {
                     continue;
                 }
                 cleared_card_ids.push(card.id.clone());
-                changed_machines.insert(loc.machine.clone());
+                changed = true;
             }
             removed.push(json!({
                 "kind": "card",
@@ -414,10 +400,10 @@ impl AppServer {
             {
                 continue;
             }
-            if wt.location.machine != "local" || wt.created_at > cutoff {
+            if wt.created_at > cutoff {
                 continue;
             }
-            let ops = self.ops(&wt.location.machine);
+            let ops = self.ops();
             let (state, is_dirty, branch) = ops.worktree_status(Path::new(&wt.path))?;
             if state == "missing" {
                 if !dry_run {
@@ -435,15 +421,12 @@ impl AppServer {
                 continue;
             }
             // Only collect standalone managed worktrees whose HEAD is already merged into base_branch.
-            let merged_into_base = ops.branch_merged(
-                Path::new(&wt.location.directory),
-                &wt.branch,
-                &wt.base_branch,
-            );
+            let merged_into_base =
+                ops.branch_merged(Path::new(&wt.directory), &wt.branch, &wt.base_branch);
             if !merged_into_base {
                 continue;
             }
-            if has_live_terminal(&wt.location.machine, &wt.path, &ops) {
+            if has_live_terminal(&wt.path, &ops) {
                 dirty.push(json!({
                     "kind": "managed_worktree",
                     "worktree_id": wt.id,
@@ -465,11 +448,10 @@ impl AppServer {
                 }));
                 continue;
             }
-            let exec_home = self.execution_home(&wt.location.machine)?;
             if !dry_run {
                 if let Err(err) = ops.remove_worktree(
-                    &exec_home,
-                    Path::new(&wt.location.directory),
+                    &self.home,
+                    Path::new(&wt.directory),
                     Path::new(&wt.path),
                     false,
                 ) {
@@ -484,7 +466,7 @@ impl AppServer {
                     continue;
                 }
                 removed_wt_ids.push(wt.id.clone());
-                changed_machines.insert(wt.location.machine.clone());
+                changed = true;
             }
             removed.push(json!({
                 "kind": "managed_worktree",
@@ -510,8 +492,8 @@ impl AppServer {
                 }
                 Ok(())
             })?;
-            for m in changed_machines {
-                self.git_changed(&m);
+            if changed {
+                self.git_changed();
             }
             self.emit("application", None);
         }

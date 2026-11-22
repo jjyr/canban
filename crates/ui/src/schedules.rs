@@ -3208,7 +3208,6 @@ mod tests {
             id: pid.clone(),
             name: "Scheduled Demo".into(),
             directory: "/tmp/proj-sched".into(),
-            location: None,
             workflow: Workflow::default(),
             target_branch: Some("main".into()),
             created_at: 1,

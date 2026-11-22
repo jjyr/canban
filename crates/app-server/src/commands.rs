@@ -101,7 +101,6 @@ impl AppServer {
                     | "diagnostics.logs"
                     | "update.state"
                     | "utilities.state"
-                    | "machine.list"
                     | "usage.status"
                     | "config.get"
                     | "profile.presets"
@@ -196,23 +195,8 @@ impl AppServer {
                 }))
             }
             "host.discover" => Ok(serde_json::to_value(network::discover_all())?),
-            "machine.list" => self.machines(),
-            "machine.default" => {
-                let machine = self.resolve_machine(strp(&p, "machine")?, false)?;
-                let mut active = self.config.write().unwrap();
-                let path = self.home.join("config/agents.json");
-                let mut raw: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
-                raw["default_machine"] = json!(machine);
-                canban_context::atomic(&path, &serde_json::to_vec_pretty(&raw)?)?;
-                active.default_machine = machine.clone();
-                drop(active);
-                self.emit("configuration", None);
-                Ok(json!({"machine":machine}))
-            }
-            "machine.add" => self.add_machine(p),
-            "machine.remove" => self.remove_machine(p),
             "directory.list" => self.browse_directory(p),
-            "project.location" => self.update_location(p),
+            "project.update" => self.update_project(p),
             "project.agents" => self.update_project_agents(p),
             "agent.catalog" => self.agent_catalog(p),
             "agent.setup" => self.agent_setup(p),
@@ -235,7 +219,7 @@ impl AppServer {
                 };
                 let q = self.contexts.lock().unwrap();
                 Ok(
-                    json!({"core_id":core,"generation":generation,"connected":connected,"terminal_count":terminals,"context_probes":q.probes(),"pending_contexts":q.pending_count(),"refine_probes":self.refine_probes(),"refined_working":self.refined_working_count(),"check_limit":4,"checks_running":self.check_slots.lock().unwrap().len()}),
+                    json!({"core_id":core,"generation":generation,"connected":connected,"terminal_count":terminals,"context_probes":q.probes(),"pending_contexts":q.pending_count(),"refine_probes":self.refine_probes(),"refined_working":self.refined_working_count(),"check_limit":1,"checks_running":usize::from(*self.check_slots.lock().unwrap())}),
                 )
             }
             "app.ping" => Ok(
@@ -486,17 +470,14 @@ impl AppServer {
                     })?
                 };
                 workflow.workspace.remote = effective_remote;
-                let location = self.work_location(&p)?;
+                let directory = self.resolve_project_directory(&p)?;
                 let agent_overrides =
                     self.parse_agent_overrides(&config, p.get("agent_overrides"))?;
                 let name = strp(&p, "name")?.trim();
                 ensure!(!name.is_empty(), "Project name is required");
                 let auto_link = p["github_auto_link"].as_bool().unwrap_or(true);
-                let detected_github = self.detect_project_github(
-                    &location.machine,
-                    &location.directory,
-                    &workflow.workspace.remote,
-                );
+                let detected_github =
+                    self.detect_project_github(&directory, &workflow.workspace.remote);
                 let github = if auto_link {
                     detected_github
                         .as_ref()
@@ -514,13 +495,12 @@ impl AppServer {
                     tags: Default::default(),
                     id: id(),
                     name: name.into(),
-                    directory: location.directory.clone(),
-                    location: Some(location.clone()),
+                    directory: directory.clone(),
                     workflow,
-                    target_branch: p["target_branch"].as_str().map(str::to_owned).or_else(|| {
-                        self.ops(&location.machine)
-                            .current_branch(&location.directory)
-                    }),
+                    target_branch: p["target_branch"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .or_else(|| self.ops().current_branch(&directory)),
                     created_at: now(),
                 };
                 let result = self.mutate(method, &p, |db| {
@@ -1166,10 +1146,7 @@ impl AppServer {
                     (card, project)
                 };
                 let project = self.bound_project(&project, &card);
-                Ok(serde_json::to_value(
-                    self.ops(&project.work_location().machine)
-                        .info(&project, &card)?,
-                )?)
+                Ok(serde_json::to_value(self.ops().info(&project, &card)?)?)
             }
             "card.context.update" => self.mutate(method, &p, |db| {
                 let mut card: Card = db.get(strp(&p, "card_id")?)?;

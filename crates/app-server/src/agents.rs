@@ -170,21 +170,18 @@ fn probe_agy_models(agy_path: &str, defaults: &[ModelOption]) -> Vec<ModelOption
 
 fn models_for_entry(
     entry: &canban_profiles::CatalogEntry,
-    machine: &str,
     installed_path: Option<&str>,
 ) -> Vec<ModelOption> {
-    if machine == "local" {
-        match entry.id.as_str() {
-            "agy" => {
-                if let Some(path) = installed_path {
-                    return probe_agy_models(path, &entry.default_models);
-                }
+    match entry.id.as_str() {
+        "agy" => {
+            if let Some(path) = installed_path {
+                return probe_agy_models(path, &entry.default_models);
             }
-            "codex" => {
-                return probe_codex_cached_models(&entry.default_models);
-            }
-            _ => {}
         }
+        "codex" => {
+            return probe_codex_cached_models(&entry.default_models);
+        }
+        _ => {}
     }
     entry.default_models.clone()
 }
@@ -228,13 +225,7 @@ fn default_role_instruction(id: &str) -> &'static str {
 }
 
 impl AppServer {
-    pub(super) fn agent_catalog(&self, p: Value) -> Result<Value> {
-        let machine = match p["machine"].as_str().filter(|s| !s.trim().is_empty()) {
-            Some(m) => self
-                .resolve_machine(m, false)
-                .unwrap_or_else(|_| "local".into()),
-            None => "local".into(),
-        };
+    pub(super) fn agent_catalog(&self, _p: Value) -> Result<Value> {
         let config = self.config();
         let catalog = canban_profiles::builtin_catalog();
         let mut bins: Vec<&str> = catalog.iter().map(|e| e.binary.as_str()).collect();
@@ -246,10 +237,8 @@ impl AppServer {
                 bins.push(cmd.as_str());
             }
         }
-        if machine == "local" {
-            canban_herdr::refresh_local_shell_path_if_stale(Duration::from_secs(2));
-        }
-        let host = canban_herdr::host::Host::new(config.clone(), &machine);
+        canban_herdr::refresh_local_shell_path_if_stale(Duration::from_secs(2));
+        let host = canban_herdr::host::Host::new(config.clone());
         let (probed, probe_error) = match host.probe_binaries(&bins) {
             Ok(map) => (map, None),
             Err(e) => (BTreeMap::new(), Some(format!("{e:#}"))),
@@ -291,7 +280,7 @@ impl AppServer {
                 .get(effective_bin)
                 .or_else(|| probed.get(&entry.binary))
                 .map(String::as_str);
-            let models = models_for_entry(entry, &machine, probe_for_models);
+            let models = models_for_entry(entry, probe_for_models);
             agents.push(json!({
                 "id": entry.id,
                 "display_name": existing.and_then(|p| p.name.clone()).unwrap_or_else(|| entry.display_name.clone()),
@@ -327,7 +316,7 @@ impl AppServer {
             let meta = canban_profiles::catalog_entry_for_profile(preset_prof);
             let models = meta
                 .as_ref()
-                .map(|m| models_for_entry(m, &machine, installed_path.as_deref()))
+                .map(|m| models_for_entry(m, installed_path.as_deref()))
                 .unwrap_or_default();
             let supported_efforts = meta
                 .as_ref()
@@ -385,7 +374,7 @@ impl AppServer {
             let meta = canban_profiles::catalog_entry_for_profile(prof);
             let models = meta
                 .as_ref()
-                .map(|m| models_for_entry(m, &machine, installed_path.as_deref()))
+                .map(|m| models_for_entry(m, installed_path.as_deref()))
                 .unwrap_or_default();
             let supported_efforts = meta
                 .as_ref()
@@ -426,7 +415,6 @@ impl AppServer {
         }
 
         Ok(json!({
-            "machine": machine,
             "probe_error": probe_error,
             "agents": agents,
             "herdr_templates": herdr_templates,

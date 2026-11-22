@@ -512,11 +512,6 @@ impl AppServer {
             return Ok(());
         }
 
-        if self.remote_health_due.swap(false, Ordering::SeqCst)
-            && let Err(e) = self.machines()
-        {
-            self.inventory.lock().unwrap().remote_error = Some(format!("{e:#}"));
-        }
         self.store
             .lock()
             .unwrap()
@@ -573,14 +568,6 @@ impl AppServer {
                 let run = entry.agent.as_ref().unwrap();
                 if run.core_id.as_deref() != Some(core_id.as_str()) {
                     self.connection_lost(&entry,"replaced","Original Herdr core identity changed; inspect the original runtime before starting a replacement")?;
-                    continue;
-                }
-                if !self.remote_connected(run.terminal.as_deref().unwrap_or("")) {
-                    self.connection_lost(
-                        &entry,
-                        "unavailable",
-                        "Remote machine connection is unavailable; exit is unconfirmed",
-                    )?;
                     continue;
                 }
                 let Some(value) = values
@@ -803,65 +790,10 @@ impl AppServer {
         self.close_idle(&client)?;
         let _ = self.pump_admissions();
         let snapshot = self.snapshot()?;
-        let mut available = snapshot.clone();
-        if snapshot
-            .projects
-            .iter()
-            .any(|p| p.work_location().machine != "local")
-            || snapshot
-                .terminals
-                .iter()
-                .any(|t| t.agent.as_ref().is_some_and(|a| a.resume_session))
-        {
-            let target_machine = |entry: &TerminalEntry| -> String {
-                let Some(a) = entry.agent.as_ref() else {
-                    return "local".into();
-                };
-                if (a.resume_session || a.pending.is_some())
-                    && let Some(loc) = a
-                        .location
-                        .as_ref()
-                        .or_else(|| a.workspace.as_ref().map(|w| &w.location))
-                {
-                    return loc.machine.clone();
-                }
-                snapshot
-                    .projects
-                    .iter()
-                    .find(|p| p.id == a.project_id)
-                    .map(|p| p.work_location().machine)
-                    .unwrap_or_else(|| "local".into())
-            };
-            let queued_remote =
-                canban_scheduler::next(&snapshot, self.config().scheduler.max_agents)
-                    .is_some_and(|t| target_machine(&t) != "local");
-            let catalog = if queued_remote {
-                self.machines().ok()
-            } else {
-                Some(self.inventory.lock().unwrap().machines.clone())
-            };
-            available.terminals.retain(|t| {
-                let Some(a) = t.agent.as_ref() else {
-                    return true;
-                };
-                if a.state != "queued" && a.pending.is_none() {
-                    return true;
-                }
-                let machine = target_machine(t);
-                machine == "local"
-                    || catalog
-                        .as_ref()
-                        .and_then(|v| v["machines"].as_array())
-                        .is_some_and(|ms| {
-                            ms.iter()
-                                .any(|m| m["id"] == machine && m["state"] == "connected")
-                        })
-            });
-        }
         if self.observer_running.load(Ordering::SeqCst) && self.runtime_inventory().is_err() {
             return Ok(());
         }
-        let next_entry = canban_scheduler::next(&available, self.config().scheduler.max_agents);
+        let next_entry = canban_scheduler::next(&snapshot, self.config().scheduler.max_agents);
         if let Some(next_entry) = next_entry {
             let admitted = self.store.lock().unwrap().write(|db| {
                 let mut entry: TerminalEntry = db.get(&next_entry.id)?;
@@ -903,14 +835,12 @@ impl AppServer {
                     agent.number = number;
                     agent.resume_session = had_session && !agent.trigger.is_automatic();
                     if !agent.resume_session {
-                        agent.runtime_home = None;
                         agent.workspace = None;
                         agent.cwd.clear();
                         agent.provider_session_id = None;
                     }
                     agent.terminal = None;
                     agent.core_id = None;
-                    agent.owner_core_id = None;
                     agent.observed = None;
                     agent.output_path = None;
                     agent.response_path = None;
@@ -918,15 +848,15 @@ impl AppServer {
                     agent.connection_state.clear();
                 }
                 let project: Project = db.get(&agent.project_id)?;
-                agent.location = Some(if agent.resume_session {
+                agent.directory = Some(if agent.resume_session {
                     agent
-                        .location
+                        .directory
                         .clone()
-                        .or_else(|| agent.workspace.as_ref().map(|w| w.location.clone()))
-                        .or_else(|| card.workspace.as_ref().map(|w| w.location.clone()))
-                        .unwrap_or_else(|| project.work_location())
+                        .or_else(|| agent.workspace.as_ref().map(|w| w.directory.clone()))
+                        .or_else(|| card.workspace.as_ref().map(|w| w.directory.clone()))
+                        .unwrap_or_else(|| project.directory.clone())
                 } else {
-                    project.work_location()
+                    project.directory.clone()
                 });
                 if agent.started_at.is_none() {
                     agent.started_at = Some(now());
@@ -1159,23 +1089,12 @@ impl AppServer {
             .iter()
             .find(|c| c.id == att.card_id)
             .context("Card missing")?;
-        let location = att
-            .location
+        let directory = att
+            .directory
             .clone()
-            .context("Execution location was not admitted")?;
-        self.resolve_machine(&location.machine, true)?;
-        let ops = self.ops(&location.machine);
-        let remote = location.machine != "local";
+            .context("Execution directory was not admitted")?;
+        let ops = self.ops();
         let resuming = att.resume_session;
-        let home = if resuming {
-            att.runtime_home
-                .as_ref()
-                .map(PathBuf::from)
-                .map(Ok)
-                .unwrap_or_else(|| self.execution_home(&location.machine))?
-        } else {
-            self.execution_home(&location.machine)?
-        };
         let mut project = project.clone();
         let wf_run = if let Some(id) = &att.workflow_run_id {
             let wf = self.store.lock().unwrap().db().get::<WorkflowRun>(id)?;
@@ -1184,8 +1103,7 @@ impl AppServer {
         } else {
             None
         };
-        project.directory = location.directory.clone();
-        project.location = Some(location.clone());
+        project.directory = directory.clone();
         let mut prepared = card.clone();
         if resuming && !att.cwd.is_empty() {
             prepared.worktree = Some(att.cwd.clone());
@@ -1197,11 +1115,11 @@ impl AppServer {
         } else if prepared
             .workspace
             .as_ref()
-            .is_some_and(|w| w.location != location)
+            .is_some_and(|w| w.directory != directory)
         {
             ensure!(
                 card.delivery.is_some(),
-                "This Card has undelivered work in its previous environment. Accept/hand off that work before starting a stage in the new location; Resume still uses the original environment."
+                "This Card has undelivered work in its previous directory. Accept/hand off that work before starting a stage in the new directory; Resume still uses the original workspace."
             );
             prepared.worktree = None;
             prepared.branch = None;
@@ -1209,25 +1127,25 @@ impl AppServer {
         }
         let mut pr_tracking = None;
         let cwd = if resuming && !att.cwd.is_empty() {
-            ops.resume(&home, &project, &prepared)?
+            ops.resume(&self.home, &project, &prepared)?
         } else {
             pr_tracking = self.prepare_pr_card_source(&prepared, &mut project, &ops)?;
-            ops.prepare(&home, &project, &prepared)?
+            ops.prepare(&self.home, &project, &prepared)?
         };
         let cwd_str = cwd.to_string_lossy().into_owned();
         if !resuming && card.worktree.as_deref() != Some(cwd_str.as_str()) {
-            self.git_changed(&location.machine);
+            self.git_changed();
         }
         prepared.worktree = Some(cwd_str.clone());
         let (branch, base_commit) = ops.workspace_head_meta(&cwd, &prepared);
         if let Some(target) = &pr_tracking
-            && cwd != Path::new(&location.directory)
+            && cwd != Path::new(&directory)
             && let Some(branch) = branch.as_deref().filter(|b| !b.is_empty())
         {
             ops.configure_pr_tracking(&cwd, branch, target)?;
         }
         let workspace = WorkspaceBinding {
-            location: location.clone(),
+            directory: directory.clone(),
             path: cwd_str,
             branch,
             base_commit,
@@ -1237,13 +1155,13 @@ impl AppServer {
             || card
                 .workspace
                 .as_ref()
-                .is_none_or(|w| w.location == location)
+                .is_none_or(|w| w.directory == directory)
         {
             self.store.lock().unwrap().write(|db| {
                 let mut current: Card = db.get(&card.id)?;
                 if current.workspace.as_ref() != Some(&workspace) {
                     if let Some(old) = current.workspace.replace(workspace.clone())
-                        && old.location != workspace.location
+                        && old.directory != workspace.directory
                     {
                         current.workspace_history.push(old);
                         current.delivery = None;
@@ -1265,34 +1183,20 @@ impl AppServer {
                 Ok(())
             })?;
         }
-        let endpoint = if remote {
-            format!("spool:{}", home.join("rpc").display())
-        } else {
-            self.endpoint().to_string_lossy().into_owned()
-        };
-        let cli = if remote {
-            home.join("bin/canban")
-        } else {
-            self.cli.clone()
-        };
         let card_events = self
             .store
             .lock()
             .unwrap()
             .db()
             .events_for_card(&prepared.id)?;
-        let input = canban_context::capture_for(
+        let input = canban_context::capture(
             &self.home,
             &project,
             &prepared,
             entry,
             snapshot,
             &card_events,
-            &home,
         )?;
-        if remote {
-            self.stage_remote(&ops.host, &home, card)?;
-        }
         let (mut context, fresh) = self.store.lock().unwrap().write(|db| {
             let mut c = crate::sessions::conversation(db, card, &att.profile)?;
             if resuming && att.provider_session_id.is_some() {
@@ -1303,8 +1207,8 @@ impl AppServer {
                     .iter()
                     .find(|t| t.id == c.id)
                     .and_then(|t| t.agent.as_ref())
-                    .and_then(|a| a.location.as_ref())
-                    .is_some_and(|l| l != &location)
+                    .and_then(|a| a.directory.as_deref())
+                    .is_some_and(|d| d != directory)
             {
                 c.provider_session_id = None;
             }
@@ -1323,9 +1227,7 @@ impl AppServer {
         })?;
         let mut updated_entry = entry.clone();
         let mut run = att.clone();
-        run.runtime_home = Some(home.to_string_lossy().into_owned());
         run.workspace = Some(workspace);
-        run.owner_core_id = None;
         run.lifecycle = Lifecycle::default();
         if run.started_at.is_none() {
             run.started_at = Some(now());
@@ -1347,11 +1249,12 @@ impl AppServer {
         run.close_requested_at = None;
         run.connection_state.clear();
         updated_entry.agent = Some(run.clone());
-        let run_dir_path = canban_context::run_dir(&home, &updated_entry);
+        let run_dir_path = canban_context::run_dir(&self.home, &updated_entry);
+        let endpoint = self.endpoint().to_string_lossy().into_owned();
         let (mut env, custom_env) =
             crate::scripts::build_step_env(crate::scripts::StepEnvContext {
-                cli: &cli,
-                exec_home: &home,
+                cli: &self.cli,
+                exec_home: &self.home,
                 endpoint: &endpoint,
                 project: &project,
                 card: Some(card),
@@ -1399,11 +1302,11 @@ impl AppServer {
             context.provider_session_id.as_deref(),
             fresh,
             &[
-                ("home", &home.to_string_lossy()),
+                ("home", &self.home.to_string_lossy()),
                 ("cwd", &run.cwd),
                 ("project_dir", &project.directory),
                 ("prompt", &prompt),
-                ("cli", &cli.to_string_lossy()),
+                ("cli", &self.cli.to_string_lossy()),
             ],
         )?;
         let is_herdr_template = att
@@ -1412,12 +1315,7 @@ impl AppServer {
             .as_deref()
             .is_some_and(|s| s.starts_with("herdr:"));
         if !is_herdr_template {
-            if !remote {
-                argv[0] = canban_profiles::executable_with_env(&argv[0], &client.config.hc_env);
-            } else if Path::new(&argv[0]).components().count() == 1 {
-                let program=ops.host.python("import os,shutil,json,sys;h=os.path.expanduser('~');p=os.environ.get('PATH','')+os.pathsep+os.path.join(h,'.local/bin')+os.pathsep+os.path.join(h,'.cargo/bin');print(json.dumps(shutil.which(sys.argv[1],path=p) or sys.argv[1]))",&[&argv[0]])?;
-                argv[0] = program.as_str().context("No remote executable")?.into();
-            }
+            argv[0] = canban_profiles::executable_with_env(&argv[0], &client.config.hc_env);
         }
         let spec = canban_profiles::prepare_launch(canban_profiles::LaunchRequest {
             profile: Some(&att.profile),
@@ -1429,20 +1327,9 @@ impl AppServer {
             client.config.terminal_env_mode.is_inherit(),
             Some(card.trust_level()),
         );
-        let terminal = client.launch_on_with_policy(
-            &location.machine,
-            spec.argv,
-            &spec.cwd,
-            spec.env,
-            labels,
-            env_policy,
-        )?;
+        let terminal =
+            client.launch_with_policy(spec.argv, &spec.cwd, spec.env, labels, env_policy)?;
         let terminal_address = strp(&terminal, "address")?.to_owned();
-        run.owner_core_id = if remote {
-            Some(location.machine.clone())
-        } else {
-            Some(core_id.clone())
-        };
         run.core_id = Some(core_id.clone());
         run.terminal = Some(terminal_address.clone());
         let delivery_error=terminal.get("first_message").filter(|v|v["sent"]==false).map(|v|format!("Herdr did not deliver the initial task: {v}. Inspect this terminal before retrying."));
@@ -1456,18 +1343,19 @@ impl AppServer {
         {
             let mut inv = self.inventory.lock().unwrap();
             if inv.core == core_id {
-                let key = inv.address(&terminal_address);
-                inv.records.entry(key.clone()).or_insert_with(|| {
-                    let mut seeded = terminal.clone();
-                    seeded["address"] = json!(key);
-                    if seeded["state"].is_null() {
-                        seeded["state"] = json!("live");
-                    }
-                    if seeded["cwd"].is_null() {
-                        seeded["cwd"] = json!(run.cwd);
-                    }
-                    seeded
-                });
+                inv.records
+                    .entry(terminal_address.clone())
+                    .or_insert_with(|| {
+                        let mut seeded = terminal.clone();
+                        seeded["address"] = json!(terminal_address);
+                        if seeded["state"].is_null() {
+                            seeded["state"] = json!("live");
+                        }
+                        if seeded["cwd"].is_null() {
+                            seeded["cwd"] = json!(run.cwd);
+                        }
+                        seeded
+                    });
             }
         }
         self.store.lock().unwrap().write(|db| {
@@ -1501,7 +1389,7 @@ impl AppServer {
                 "system",
                 &format!("@{} started", att.profile.id),
                 Some(entry.id.clone()),
-                json!({"run_number":run.number,"terminal":run.terminal,"core_id":run.core_id,"owner_core_id":run.owner_core_id,"location":run.location,"cwd":run.cwd}),
+                json!({"run_number":run.number,"terminal":run.terminal,"core_id":run.core_id,"directory":run.directory,"cwd":run.cwd}),
             )
         })?;
         self.store.lock().unwrap().write(|db| {
@@ -1697,10 +1585,6 @@ impl AppServer {
                         id: GLOBAL_PROJECT_ID.into(),
                         name: "Global".into(),
                         directory: self.home.to_string_lossy().into_owned(),
-                        location: Some(WorkLocation {
-                            machine: "local".into(),
-                            directory: self.home.to_string_lossy().into_owned(),
-                        }),
                         target_branch: None,
                         workflow: Workflow::default(),
                         github: None,
@@ -1718,26 +1602,12 @@ impl AppServer {
                     }
                 }
             };
-            let location = project.work_location();
-            let remote = location.machine != "local";
-            let Ok(exec_home) = self.execution_home(&location.machine) else {
-                continue;
-            };
-            let endpoint = if remote {
-                format!("spool:{}", exec_home.join("rpc").display())
-            } else {
-                self.endpoint().to_string_lossy().into_owned()
-            };
-            let cli = if remote {
-                exec_home.join("bin/canban")
-            } else {
-                self.cli.clone()
-            };
-            let run_dir = crate::scripts::cardless_run_dir(&exec_home, &run.project_id, &run.id);
+            let run_dir = crate::scripts::cardless_run_dir(&self.home, &run.project_id, &run.id);
             let _ = std::fs::create_dir_all(&run_dir);
+            let endpoint = self.endpoint().to_string_lossy().into_owned();
             let (mut env, _) = crate::scripts::build_step_env(crate::scripts::StepEnvContext {
-                cli: &cli,
-                exec_home: &exec_home,
+                cli: &self.cli,
+                exec_home: &self.home,
                 endpoint: &endpoint,
                 project: &project,
                 card: None,
@@ -1755,11 +1625,11 @@ impl AppServer {
                 None,
                 true,
                 &[
-                    ("home", &exec_home.to_string_lossy()),
-                    ("cwd", &location.directory),
+                    ("home", &self.home.to_string_lossy()),
+                    ("cwd", &project.directory),
                     ("project_dir", &project.directory),
                     ("prompt", instruction),
-                    ("cli", &cli.to_string_lossy()),
+                    ("cli", &self.cli.to_string_lossy()),
                 ],
             ) else {
                 continue;
@@ -1768,14 +1638,14 @@ impl AppServer {
                 .preset
                 .as_deref()
                 .is_some_and(|s| s.starts_with("herdr:"));
-            if !is_herdr_template && !remote {
+            if !is_herdr_template {
                 argv[0] = canban_profiles::executable_with_env(&argv[0], &config.hc_env);
             }
             let Ok(spec) = canban_profiles::prepare_launch(canban_profiles::LaunchRequest {
                 profile: Some(&profile),
                 argv,
                 env,
-                cwd: location.directory.clone(),
+                cwd: project.directory.clone(),
             }) else {
                 continue;
             };
@@ -1788,14 +1658,7 @@ impl AppServer {
                 ("canban.workflow_run".into(), run.id.clone()),
                 ("canban.workflow_step".into(), step_id.clone()),
             ]);
-            match client.launch_on_with_policy(
-                &location.machine,
-                spec.argv,
-                &spec.cwd,
-                spec.env,
-                labels,
-                env_policy,
-            ) {
+            match client.launch_with_policy(spec.argv, &spec.cwd, spec.env, labels, env_policy) {
                 Ok(launched) => {
                     let addr = launched["address"].as_str().unwrap_or("").to_owned();
                     let _ = self.store.lock().unwrap().write(|db| {
@@ -1807,7 +1670,6 @@ impl AppServer {
                         {
                             current.inputs["agent_terminal"] = json!({
                                 "address": addr,
-                                "machine": location.machine,
                                 "step_id": step_id,
                                 "visit": run.visit,
                                 "started_at": now(),

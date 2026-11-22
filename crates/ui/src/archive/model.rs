@@ -197,7 +197,6 @@ mod tests {
                 delivery_mode: Default::default(),
                 agent_overrides: Default::default(),
                 tags: Default::default(),
-                location: None,
                 target_branch: None,
                 created_at: 1,
             });

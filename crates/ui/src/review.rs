@@ -1556,7 +1556,7 @@ mod tests {
                             "url":"https://github.com/org/repo/pull/42","state":"open",
                             "head":"abc123","head_branch":"pr-head","base_branch":"main",
                             "merged":false,"checks":"",
-                            "workspace":{"location":{"machine":"local","directory":"/repo/p1"},"path":"/repo/p1-wt-pr"}
+                            "workspace":{"directory":"/repo/p1","path":"/repo/p1-wt-pr"}
                         }
                     }))
                     .unwrap(),

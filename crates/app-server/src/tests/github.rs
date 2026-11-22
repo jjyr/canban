@@ -215,10 +215,7 @@ fn project_auto_detects_github_remote_links_with_intake_off_and_respects_manual_
     );
 
     let probe = app
-        .call(
-            "project.detect_github",
-            json!({ "machine": "local", "directory": source }),
-        )
+        .call("project.detect_github", json!({ "directory": source }))
         .unwrap();
     assert_eq!(probe["detected"]["repository"], "jjyr/canban");
     assert_eq!(probe["detected"]["remote"], "origin");
@@ -1381,10 +1378,7 @@ fn github_receipt_marks_self_action_and_pr_card_avoids_double_fire() {
                 checks: String::new(),
                 checks_summary: None,
                 workspace: WorkspaceBinding {
-                    location: WorkLocation {
-                        machine: "local".into(),
-                        directory: repo_dir.to_string_lossy().into_owned(),
-                    },
+                    directory: repo_dir.to_string_lossy().into_owned(),
                     path: repo_dir.to_string_lossy().into_owned(),
                     branch: Some("feat/77".into()),
                     base_commit: None,

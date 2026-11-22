@@ -3504,7 +3504,6 @@ mod tests {
             id: id.into(),
             name: name.into(),
             directory: format!("/tmp/{id}"),
-            location: None,
             github: None,
             detected_github: None,
             github_disconnected: false,

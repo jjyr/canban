@@ -92,7 +92,6 @@ pub fn project(name: &str, directory: &str, workflow: Workflow) -> Result<Projec
         delivery_mode: Default::default(),
         agent_overrides: Default::default(),
         tags: Default::default(),
-        location: None,
         id: id(),
         name: name.trim().into(),
         directory: std::fs::canonicalize(path)?.to_string_lossy().into_owned(),

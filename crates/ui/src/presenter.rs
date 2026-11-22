@@ -1604,7 +1604,7 @@ pub fn dispatch_complete(
                         }
                         "project.agents" => ui.notify("Project Agent overrides saved"),
                         "scheduler.configure" => ui.notify("Scheduling settings saved"),
-                        "project.location" => ui.notify("Work location updated"),
+                        "project.update" => ui.notify("Project updated"),
                         "project.delete" => {
                             let name = value["name"].as_str().unwrap_or("Project");
                             ui.notify(format!("Deleted project \"{name}\""));

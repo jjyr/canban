@@ -404,25 +404,12 @@ pub(crate) fn resolve_working_directory(
     Ok(target)
 }
 
-fn read_host_text(host: &canban_herdr::host::Host, path: &Path) -> Result<String> {
-    if !host.remote() {
-        return match std::fs::read(path) {
-            Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-            Err(e) => Err(e.into()),
-        };
+fn read_local_text(path: &Path) -> Result<String> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e.into()),
     }
-    if !host.exists(path) {
-        return Ok(String::new());
-    }
-    let out = host.run(Path::new("/"), &["cat", &path.to_string_lossy()], None)?;
-    ensure!(
-        out.status.success(),
-        "Failed reading remote file {}: {}",
-        path.display(),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 pub(crate) fn log_tail(text: &str) -> String {
@@ -440,8 +427,6 @@ pub(crate) fn log_tail(text: &str) -> String {
 }
 
 struct PreparedScript {
-    machine: String,
-    exec_home: PathBuf,
     cwd: PathBuf,
     env: BTreeMap<String, String>,
     env_policy: canban_exec::shell_env::LocalEnvPolicy,
@@ -449,7 +434,7 @@ struct PreparedScript {
     script_file: PathBuf,
     env_file: PathBuf,
     output_file: PathBuf,
-    remote_log_file: PathBuf,
+    raw_log_file: PathBuf,
     timeout_secs: u64,
     continue_on_error: bool,
 }
@@ -540,7 +525,6 @@ struct ScriptOutcome<'a> {
     run_id: &'a str,
     step_id: &'a str,
     visit: u32,
-    machine: &'a str,
     env_file: &'a Path,
     output_file: &'a Path,
     script_file: &'a Path,
@@ -605,10 +589,6 @@ impl AppServer {
                     id: GLOBAL_PROJECT_ID.into(),
                     name: "Global".into(),
                     directory: self.home.to_string_lossy().into_owned(),
-                    location: Some(WorkLocation {
-                        machine: "local".into(),
-                        directory: self.home.to_string_lossy().into_owned(),
-                    }),
                     target_branch: None,
                     workflow: Workflow::default(),
                     github: None,
@@ -625,50 +605,44 @@ impl AppServer {
             (project, card)
         };
 
-        let location = card
+        let directory = card
             .as_ref()
-            .and_then(|c| c.workspace.as_ref().map(|w| w.location.clone()))
-            .unwrap_or_else(|| project.work_location());
-        if self.observer_running.load(Ordering::SeqCst) {
-            self.resolve_machine(&location.machine, true)?;
-        }
-        let ops = self.ops(&location.machine);
-        let remote = location.machine != "local";
-        let exec_home = self.execution_home(&location.machine)?;
+            .and_then(|c| c.workspace.as_ref().map(|w| w.directory.clone()))
+            .unwrap_or_else(|| project.directory.clone());
+        let ops = self.ops();
 
         let mut bound = project.clone();
         bound.workflow.workspace = run.definition.workspace.clone();
-        bound.directory = location.directory.clone();
-        bound.location = Some(location.clone());
+        bound.directory = directory.clone();
 
         let (ws_path, workspace) = if let Some(card) = &card {
             let mut prepared = card.clone();
             if let Some(existing) = &card.workspace
-                && existing.location == location
+                && existing.directory == directory
             {
                 let path = if bound.workflow.workspace.create_worktree || card.worktree.is_some() {
-                    ops.resume(&exec_home, &bound, &prepared)?
+                    ops.resume(&self.home, &bound, &prepared)?
                 } else {
                     PathBuf::from(&existing.path)
                 };
                 (path, Some(existing.clone()))
             } else {
                 let pr_tracking = self.prepare_pr_card_source(&prepared, &mut bound, &ops)?;
-                let path = ops.prepare(&exec_home, &bound, &prepared)?;
+                let path = ops.prepare(&self.home, &bound, &prepared)?;
                 let path_str = path.to_string_lossy().into_owned();
                 if card.worktree.as_deref() != Some(path_str.as_str()) {
-                    self.git_changed(&location.machine);
+                    self.git_changed();
                 }
                 prepared.worktree = Some(path_str.clone());
                 let (branch, base_commit) = ops.workspace_head_meta(&path, &prepared);
                 if let Some(target) = &pr_tracking
-                    && path != Path::new(&location.directory)
+                    && path != Path::new(&directory)
                     && let Some(branch) = branch.as_deref().filter(|b| !b.is_empty())
                 {
                     ops.configure_pr_tracking(&path, branch, target)?;
                 }
                 let binding = WorkspaceBinding {
-                    location: location.clone(),
+                    directory: directory.clone(),
                     path: path_str,
                     branch,
                     base_commit,
@@ -678,7 +652,7 @@ impl AppServer {
                     let mut current: Card = db.get(&card.id)?;
                     if current.workspace.as_ref() != Some(&binding) {
                         if let Some(old) = current.workspace.replace(binding.clone())
-                            && old.location != binding.location
+                            && old.directory != binding.directory
                         {
                             current.workspace_history.push(old);
                             current.delivery = None;
@@ -702,48 +676,33 @@ impl AppServer {
                 (path, Some(binding))
             }
         } else {
-            (PathBuf::from(&location.directory), None)
+            (PathBuf::from(&directory), None)
         };
 
         let cwd = resolve_working_directory(&ops.host, &ws_path, working_directory.as_deref())?;
         let scripts_dir = if let Some(card) = &card {
-            canban_context::card_dir(&exec_home, &card.project_id, card.number).join("scripts")
+            canban_context::card_dir(&self.home, &card.project_id, card.number).join("scripts")
         } else {
-            cardless_run_dir(&exec_home, &run.project_id, &run.id).join("scripts")
+            cardless_run_dir(&self.home, &run.project_id, &run.id).join("scripts")
         };
-        ops.host.mkdir(&scripts_dir)?;
+        std::fs::create_dir_all(&scripts_dir)?;
 
         let slug = sanitized_step_slug(step_id);
         let stem = format!("{slug}-v{}-{}", run.visit, id());
         let script_file = scripts_dir.join(format!("{stem}.sh"));
         let env_file = scripts_dir.join(format!("{stem}.env"));
         let output_file = scripts_dir.join(format!("{stem}.output"));
-        let remote_log_file = scripts_dir.join(format!("{stem}.raw.log"));
+        let raw_log_file = scripts_dir.join(format!("{stem}.raw.log"));
 
-        ops.host
-            .write(&script_file.to_string_lossy(), command_body)?;
-        ops.host.write(&env_file.to_string_lossy(), "")?;
-        ops.host.write(&output_file.to_string_lossy(), "")?;
-        ops.host.write(&remote_log_file.to_string_lossy(), "")?;
-
-        let endpoint = if remote {
-            format!("spool:{}", exec_home.join("rpc").display())
-        } else {
-            self.endpoint().to_string_lossy().into_owned()
-        };
-        let cli = if remote {
-            exec_home.join("bin/canban")
-        } else {
-            self.cli.clone()
-        };
-        if remote && let Some(card) = &card {
-            self.stage_remote(&ops.host, &exec_home, card)?;
-        }
+        canban_context::atomic(&script_file, command_body.as_bytes())?;
+        canban_context::atomic(&env_file, b"")?;
+        canban_context::atomic(&output_file, b"")?;
+        canban_context::atomic(&raw_log_file, b"")?;
 
         let (env, _) = build_step_env(StepEnvContext {
-            cli: &cli,
-            exec_home: &exec_home,
-            endpoint: &endpoint,
+            cli: &self.cli,
+            exec_home: &self.home,
+            endpoint: &self.endpoint().to_string_lossy(),
             project: &bound,
             card: card.as_ref(),
             workspace: workspace.as_ref(),
@@ -765,8 +724,6 @@ impl AppServer {
         let argv = shell_argv(shell.as_deref(), &script_file)?;
 
         Ok(PreparedScript {
-            machine: location.machine,
-            exec_home,
             cwd,
             env,
             env_policy,
@@ -774,7 +731,7 @@ impl AppServer {
             script_file,
             env_file,
             output_file,
-            remote_log_file,
+            raw_log_file,
             timeout_secs: script_timeout_secs(*timeout_minutes, *timeout_seconds),
             continue_on_error: *continue_on_error,
         })
@@ -793,11 +750,10 @@ impl AppServer {
             run_id: &run.id,
             step_id,
             visit: run.visit,
-            machine: &prep.machine,
             env_file: &prep.env_file,
             output_file: &prep.output_file,
             script_file: &prep.script_file,
-            raw_log_path: Some(&prep.remote_log_file),
+            raw_log_path: Some(&prep.raw_log_file),
             fallback_text,
             exit_code,
             timed_out,
@@ -807,14 +763,13 @@ impl AppServer {
     }
 
     fn finalize_script_run(&self, out: ScriptOutcome<'_>) -> Result<()> {
-        let host = canban_herdr::host::Host::new(self.config(), out.machine);
         let raw_log = out
             .raw_log_path
-            .and_then(|p| read_host_text(&host, p).ok())
+            .and_then(|p| read_local_text(p).ok())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| out.fallback_text.to_owned());
-        let env_raw = read_host_text(&host, out.env_file).unwrap_or_default();
-        let out_raw = read_host_text(&host, out.output_file).unwrap_or_default();
+        let env_raw = read_local_text(out.env_file).unwrap_or_default();
+        let out_raw = read_local_text(out.output_file).unwrap_or_default();
 
         // Best-effort scratch file cleanup on execution host.
         for f in [
@@ -826,11 +781,7 @@ impl AppServer {
         .into_iter()
         .flatten()
         {
-            if !host.remote() {
-                let _ = std::fs::remove_file(f);
-            } else {
-                let _ = host.run(Path::new("/"), &["rm", "-f", &f.to_string_lossy()], None);
-            }
+            let _ = std::fs::remove_file(f);
         }
 
         let parse_env_res = parse_key_value_file(&env_raw);
@@ -1040,7 +991,6 @@ impl AppServer {
                     continue;
                 };
                 let started_at = meta["started_at"].as_u64().unwrap_or(run.updated_at);
-                let machine = meta["machine"].as_str().unwrap_or("local");
                 let env_file = PathBuf::from(meta["env_file"].as_str().unwrap_or(""));
                 let out_file = PathBuf::from(meta["output_file"].as_str().unwrap_or(""));
                 let script_file = PathBuf::from(meta["script_file"].as_str().unwrap_or(""));
@@ -1052,7 +1002,6 @@ impl AppServer {
                             run_id: &run.id,
                             step_id: &step_id,
                             visit: run.visit,
-                            machine,
                             env_file: &env_file,
                             output_file: &out_file,
                             script_file: &script_file,
@@ -1133,9 +1082,8 @@ impl AppServer {
             if let Some(cid) = &run.card_id {
                 labels.insert("canban.card_id".into(), cid.clone());
             }
-            let wrapped = wrapped_herdr_argv(&prep.remote_log_file, &prep.argv);
-            match client.launch_on_with_policy(
-                &prep.machine,
+            let wrapped = wrapped_herdr_argv(&prep.raw_log_file, &prep.argv);
+            match client.launch_with_policy(
                 wrapped,
                 &prep.cwd.to_string_lossy(),
                 prep.env.clone(),
@@ -1153,12 +1101,10 @@ impl AppServer {
                             current.inputs["script_terminal"] = json!({
                                 "address": addr,
                                 "core_id": core_id,
-                                "machine": prep.machine,
-                                "exec_home": prep.exec_home,
                                 "env_file": prep.env_file,
                                 "output_file": prep.output_file,
                                 "script_file": prep.script_file,
-                                "raw_log_file": prep.remote_log_file,
+                                "raw_log_file": prep.raw_log_file,
                                 "started_at": now(),
                             });
                             current.updated_at = now();
@@ -1230,7 +1176,7 @@ impl AppServer {
                 &prep.env,
                 &hc_env,
                 prep.env_policy,
-                &prep.remote_log_file,
+                &prep.raw_log_file,
                 prep.timeout_secs,
             )?;
             self.finalize_prepared_script(&run, &step_id, &prep, "", exit_code, timed_out)?;

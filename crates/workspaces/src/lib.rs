@@ -591,8 +591,7 @@ impl Ops {
     }
 
     /// Lightweight worktree check for `card.resolve.preview`.
-    /// Avoids the full `info()` probe chain and uses `--no-optional-locks` / `--untracked-files=normal`
-    /// (plus a single batched remote probe when targeting a remote host).
+    /// Avoids the full `info()` probe chain and uses `--no-optional-locks` / `--untracked-files=normal`.
     pub fn resolve_worktree_warning(&self, project: &Project, card: &Card) -> Option<String> {
         let path = card.worktree.as_deref()?;
         let target = card
@@ -603,60 +602,6 @@ impl Ops {
             .or(project.workflow.workspace.base_branch.as_deref())
             .unwrap_or("");
         let fallback_branch = card.branch.as_deref().unwrap_or("");
-        if self.host.remote() {
-            let probe = self
-                .host
-                .python(
-                    r#"import os,sys,json,subprocess
-wt,proj,target,fallback=sys.argv[1:5]
-if not os.path.isdir(wt):
- print(json.dumps({'kind':'missing'}))
- sys.exit(0)
-r=subprocess.run(['git','--no-optional-locks','-C',wt,'status','--porcelain=v1','--branch','--untracked-files=normal'],capture_output=True,text=True)
-if r.returncode!=0:
- print(json.dumps({'kind':'not_repo'}))
- sys.exit(0)
-lines=r.stdout.splitlines()
-header=lines[0] if lines else ''
-if any(ln.strip() for ln in lines[1:]):
- print(json.dumps({'kind':'dirty'}))
- sys.exit(0)
-gd=subprocess.run(['git','--no-optional-locks','-C',wt,'rev-parse','--path-format=absolute','--git-dir'],capture_output=True,text=True)
-if gd.returncode==0:
- d=gd.stdout.strip()
- if any(os.path.exists(os.path.join(d,f)) for f in ('MERGE_HEAD','rebase-merge','rebase-apply')):
-  print(json.dumps({'kind':'dirty'}))
-  sys.exit(0)
-branch=''
-if header.startswith('## '):
- h=header[3:]
- for pref in ('No commits yet on ','Initial commit on '):
-  if h.startswith(pref):
-   h=h[len(pref):]
-   break
- if not h.startswith('HEAD ('):
-  branch=h.split('...',1)[0].strip()
-branch=branch or fallback
-if target and branch and branch!=target:
- m=subprocess.run(['git','--no-optional-locks','-C',proj,'merge-base','--is-ancestor',branch,target],capture_output=True,text=True)
- if m.returncode!=0:
-  print(json.dumps({'kind':'unmerged','branch':branch}))
-  sys.exit(0)
-print(json.dumps({'kind':'clean'}))"#,
-                    &[path, &project.directory, target, fallback_branch],
-                )
-                .ok()?;
-            return match probe["kind"].as_str() {
-                Some("dirty") => Some("Worktree has uncommitted changes".into()),
-                Some("unmerged") => {
-                    let branch = probe["branch"].as_str().unwrap_or(fallback_branch);
-                    Some(format!(
-                        "Branch {branch} has unmerged changes against {target}"
-                    ))
-                }
-                _ => None,
-            };
-        }
         let cwd = Path::new(path);
         if !cwd.is_dir() {
             return None;
@@ -907,7 +852,6 @@ mod tests {
             tags: Default::default(),
             id: "project".into(),
             name: "Test".into(),
-            location: None,
             directory: source.to_str().unwrap().into(),
             workflow,
             target_branch: None,
@@ -1104,7 +1048,6 @@ mod sync_tests {
                 tags: Default::default(),
                 id: "p".into(),
                 name: "Test".into(),
-                location: None,
                 directory: source.to_string_lossy().into(),
                 workflow: Default::default(),
                 target_branch: Some("main".into()),

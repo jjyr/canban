@@ -310,7 +310,6 @@ mod tests {
             delivery_mode: Default::default(),
             agent_overrides: Default::default(),
             tags: vec![],
-            location: None,
             id: "p1".into(),
             name: "Proj".into(),
             directory: "/tmp/proj".into(),

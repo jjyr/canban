@@ -1224,41 +1224,22 @@ impl Ops {
         let bytes = match source {
             "workdir" => {
                 let target = dir.join(rel_path);
-                if !self.host.remote() {
-                    let canon_dir = dir
-                        .canonicalize()
-                        .with_context(|| format!("Invalid directory {}", dir.display()))?;
-                    let canon_file = target
-                        .canonicalize()
-                        .with_context(|| format!("File not found: {rel}"))?;
-                    ensure!(
-                        canon_file.starts_with(&canon_dir),
-                        "File path escapes checkout directory"
-                    );
-                    let meta = std::fs::metadata(&canon_file)?;
-                    ensure!(
-                        meta.len() <= MAX_CONTEXT_FILE_BYTES as u64,
-                        "File exceeds 4 MiB context limit"
-                    );
-                    std::fs::read(&canon_file)?
-                } else {
-                    let value = self.host.python(
-                        concat!(
-                            "import base64,json,os,sys;",
-                            "d=os.path.realpath(sys.argv[1]);",
-                            "f=os.path.realpath(os.path.join(d,sys.argv[2]));",
-                            "assert f==d or f.startswith(d+os.sep), 'File path escapes checkout directory';",
-                            "assert os.path.isfile(f), 'File not found';",
-                            "sz=os.path.getsize(f);",
-                            "assert sz<=4*1024*1024, 'File exceeds 4 MiB context limit';",
-                            "data=open(f,'rb').read();",
-                            "print(json.dumps(base64.b64encode(data).decode('ascii')))"
-                        ),
-                        &[&dir.to_string_lossy(), rel],
-                    )?;
-                    use base64::{Engine, engine::general_purpose::STANDARD};
-                    STANDARD.decode(value.as_str().unwrap_or_default())?
-                }
+                let canon_dir = dir
+                    .canonicalize()
+                    .with_context(|| format!("Invalid directory {}", dir.display()))?;
+                let canon_file = target
+                    .canonicalize()
+                    .with_context(|| format!("File not found: {rel}"))?;
+                ensure!(
+                    canon_file.starts_with(&canon_dir),
+                    "File path escapes checkout directory"
+                );
+                let meta = std::fs::metadata(&canon_file)?;
+                ensure!(
+                    meta.len() <= MAX_CONTEXT_FILE_BYTES as u64,
+                    "File exceeds 4 MiB context limit"
+                );
+                std::fs::read(&canon_file)?
             }
             "index" => {
                 let spec = format!(":{rel}");
@@ -1392,7 +1373,6 @@ mod tests {
             tags: Default::default(),
             id: "proj1".into(),
             name: "Demo".into(),
-            location: None,
             directory: repo.to_string_lossy().into_owned(),
             workflow: Default::default(),
             target_branch: Some("main".into()),
@@ -1611,7 +1591,6 @@ mod tests {
             tags: Default::default(),
             id: "projpr123".into(),
             name: "PR Demo".into(),
-            location: None,
             directory: source.to_string_lossy().into_owned(),
             workflow,
             target_branch: Some("main".into()),

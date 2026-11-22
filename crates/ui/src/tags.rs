@@ -460,7 +460,6 @@ mod tests {
             id: "p1".into(),
             name: "Canban".into(),
             directory: "/example".into(),
-            location: None,
             workflow: Workflow::default(),
             target_branch: None,
             created_at: 1,

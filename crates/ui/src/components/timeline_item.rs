@@ -1295,7 +1295,6 @@ mod tests {
                 id: "proj-1".into(),
                 name: "Canban".into(),
                 directory: "/tmp/proj".into(),
-                location: None,
                 workflow: Workflow::default(),
                 target_branch: None,
                 created_at: 0,

@@ -423,7 +423,7 @@ fn a_closing_idle_terminal_cannot_receive_a_new_assignment_and_reserves_its_slot
     {
         let run = entry.agent.as_mut().unwrap();
         run.state = "completed".into();
-        run.location = Some(s.projects[0].work_location());
+        run.directory = Some(s.projects[0].directory.clone());
         run.pending = Some(QueuedAssignment {
             stage: "develop".into(),
             trigger: ExecutionTrigger::StageEntry,
@@ -747,8 +747,6 @@ for line in sys.stdin:
         agent_engine: None,
         created_at: now().saturating_sub(5_000),
         runtime: Some(TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: Some("core-refine".into()),
             core_id: Some("core-refine".into()),
             terminal: Some("t2".into()),
             state: "running".into(),

@@ -1,12 +1,13 @@
-//! Machine-scoped subscription snapshots. Never returns or persists credentials.
+//! Local subscription quota readings. Never returns or persists credentials.
 use canban_types::Config;
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+
 const PROBE: &str = include_str!("probe.py");
+
 #[derive(Default)]
 struct Entry {
     readings: Vec<Value>,
@@ -17,19 +18,16 @@ struct Entry {
     due: Option<Instant>,
     requested: Option<Instant>,
 }
+
 #[derive(Clone, Default)]
 pub struct Service {
-    entries: Arc<Mutex<HashMap<String, Entry>>>,
+    entry: Arc<Mutex<Entry>>,
 }
+
 impl Service {
-    pub fn request(&self, config: Config, machine: String, refresh: bool) -> Value {
+    pub fn request(&self, config: Config, refresh: bool) -> Value {
         let now = Instant::now();
-        let mut entries = self.entries.lock().unwrap();
-        // Machine inventory is already bounded by the application; cache only active selections.
-        if entries.len() >= 32 && !entries.contains_key(&machine) {
-            entries.retain(|_, e| e.busy);
-        }
-        let e = entries.entry(machine.clone()).or_default();
+        let mut e = self.entry.lock().unwrap();
         let due = e.due.is_none_or(|t| now >= t);
         let spaced = e
             .requested
@@ -37,12 +35,10 @@ impl Service {
         if !e.busy && spaced && (due || refresh) && (!e.access_blocked || refresh) {
             e.busy = true;
             e.requested = Some(now);
-            let shared = self.entries.clone();
-            let target = machine.clone();
+            let shared = self.entry.clone();
             std::thread::spawn(move || {
-                let result = canban_herdr::host::Host::new(config, &target).python(PROBE, &[]);
-                let mut entries = shared.lock().unwrap();
-                let e = entries.entry(target).or_default();
+                let result = canban_herdr::host::Host::new(config).python(PROBE, &[]);
+                let mut e = shared.lock().unwrap();
                 e.busy = false;
                 match result {
                     Ok(v) if v.is_array() => {
@@ -67,7 +63,7 @@ impl Service {
                         );
                     }
                     _ => {
-                        e.error = Some("Usage machine unavailable".into());
+                        e.error = Some("Usage unavailable".into());
                         for r in &mut e.readings {
                             r["stale"] = json!(true);
                         }
@@ -76,9 +72,10 @@ impl Service {
                 }
             });
         }
-        json!({"machine":machine,"readings":e.readings,"busy":e.busy,"updated_at":e.updated,"error":e.error})
+        json!({"readings": e.readings, "busy": e.busy, "updated_at": e.updated, "error": e.error})
     }
 }
+
 fn reconcile(old: &[Value], incoming: &[Value]) -> Vec<Value> {
     let mut rows = Vec::new();
     for r in incoming {
@@ -108,9 +105,11 @@ fn reconcile(old: &[Value], incoming: &[Value]) -> Vec<Value> {
     }
     rows
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn logout_hides_but_errors_preserve_known_readings_and_never_expose_credentials() {
         let old = vec![

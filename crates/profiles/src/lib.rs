@@ -519,10 +519,15 @@ pub fn executable_with_env(program: &str, env: &BTreeMap<String, String>) -> Str
 /// Explicit, one-time old configuration conversion. Historical request snapshots
 /// are not rewritten. The caller backs up the original bytes before publication.
 pub fn migrate(value: &mut Value) -> Result<bool> {
+    let mut changed = false;
+    if let Some(obj) = value.as_object_mut()
+        && obj.remove("default_machine").is_some()
+    {
+        changed = true;
+    }
     let profiles = value["profiles"]
         .as_array_mut()
         .context("profiles must be an array")?;
-    let mut changed = false;
     for p in profiles {
         ensure!(p.is_object(), "Profile must be an object");
         if let Some((old_role, new_role)) = match p["id"].as_str() {
@@ -1042,7 +1047,6 @@ mod tests {
             id: "p1".into(),
             name: "Demo".into(),
             directory: "/tmp".into(),
-            location: None,
             workflow: Default::default(),
             target_branch: None,
             created_at: 0,
@@ -1366,7 +1370,6 @@ mod tests {
             id: "p1".into(),
             name: "Demo".into(),
             directory: "/tmp".into(),
-            location: None,
             workflow: Default::default(),
             target_branch: None,
             created_at: 0,
@@ -1596,6 +1599,17 @@ mod tests {
         );
         // Idempotent on second pass.
         assert!(!migrate(&mut onboarded).unwrap());
+    }
+
+    #[test]
+    fn migrate_strips_legacy_default_machine_key() {
+        let mut legacy = json!({
+            "default_machine": "remote-box",
+            "profiles": []
+        });
+        assert!(migrate(&mut legacy).unwrap());
+        assert!(legacy.get("default_machine").is_none());
+        assert!(!migrate(&mut legacy).unwrap());
     }
 
     #[test]

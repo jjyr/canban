@@ -4355,7 +4355,6 @@ mod tests {
             id: "p1".into(),
             name: "Canban".into(),
             directory: "/tmp/canban".into(),
-            location: None,
             github: None,
             detected_github: None,
             github_disconnected: false,

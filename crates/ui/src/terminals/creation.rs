@@ -42,9 +42,9 @@ pub(crate) fn location_hint(
     }
     // Mirror known launch inputs conservatively. Unknown homes, new worktrees and
     // symlink aliases are left to the existing background discovery path.
-    let location = card
-        .and_then(|c| c.workspace.as_ref().map(|w| w.location.clone()))
-        .or_else(|| project.map(|p| p.work_location()));
+    let directory = card
+        .and_then(|c| c.workspace.as_ref().map(|w| w.directory.as_str()))
+        .or_else(|| project.map(|p| p.directory.as_str()));
     let cwd = params["cwd"]
         .as_str()
         .filter(|s| !s.is_empty())
@@ -52,23 +52,13 @@ pub(crate) fn location_hint(
             card.and_then(|c| c.worktree.as_deref())
                 .filter(|s| !s.is_empty())
         })
-        .or_else(|| {
-            location
-                .as_ref()
-                .filter(|l| l.machine == runtime.machine)
-                .map(|l| l.directory.as_str())
-        })
-        .or_else(|| {
-            params["machine"]
-                .is_null()
-                .then(|| inherited.and_then(|c| c.cwd.as_deref()))
-                .flatten()
-        })?;
+        .or(directory)
+        .or_else(|| inherited.and_then(|c| c.cwd.as_deref()))?;
     let known = rows
         .iter()
         .filter(|e| e.listed() && e.host_id == host)
         .filter_map(|e| e.location.as_ref())
-        .filter(|c| c.machine == runtime.machine && c.cwd.is_some())
+        .filter(|c| c.cwd.is_some())
         .filter_map(|c| {
             let root = c.directory_root.as_deref().or(c.cwd.as_deref())?;
             let same = Path::new(cwd) == Path::new(root);
@@ -94,7 +84,7 @@ mod tests {
     fn fixture() -> (Snapshot, TerminalEntry) {
         let terminal: TerminalEntry = serde_json::from_value(json!({
             "id":"new", "number":2, "created_at":1,
-            "runtime":{"machine":"local", "core_id":"new-core", "terminal":"new-pty",
+            "runtime":{"core_id":"new-core", "terminal":"new-pty",
                 "state":"running", "connection":"connected"}
         }))
         .unwrap();
@@ -110,7 +100,6 @@ mod tests {
             terminals: vec![old],
             terminal_contexts: vec![TerminalContext {
                 terminal_id: "old".into(),
-                machine: "local".into(),
                 cwd: Some("/repo/src".into()),
                 directory_root: Some("/repo".into()),
                 project_id: Some("p".into()),
@@ -143,7 +132,7 @@ mod tests {
 
     #[test]
     fn misses_and_other_hosts_machines_or_closed_rows_stay_unassigned() {
-        let (mut s, mut terminal) = fixture();
+        let (mut s, terminal) = fixture();
         for params in [
             json!({"cwd":"/repo-other"}),
             json!({"cwd":"/unknown"}),
@@ -158,11 +147,6 @@ mod tests {
         assert!(
             location_hint(&s, &super::super::entries(&s), &params, &terminal, "remote").is_none()
         );
-        terminal.runtime.as_mut().unwrap().machine = "ssh".into();
-        assert!(
-            location_hint(&s, &super::super::entries(&s), &params, &terminal, "local").is_none()
-        );
-        terminal.runtime.as_mut().unwrap().machine = "local".into();
         s.terminals[0].runtime.as_mut().unwrap().state = "finished".into();
         assert!(
             location_hint(&s, &super::super::entries(&s), &params, &terminal, "local").is_none()
@@ -195,7 +179,7 @@ mod tests {
 
     #[test]
     fn card_launch_matches_its_worktree_and_remote_directories_keep_their_owner() {
-        let (mut s, mut terminal) = fixture();
+        let (mut s, terminal) = fixture();
         s.cards.push(
             serde_json::from_value(json!({
                 "id":"c", "project_id":"p", "number":1, "title":"Card", "body":"",
@@ -239,9 +223,7 @@ mod tests {
         s.cards[0].worktree = Some("/repo/card".into());
 
         s.entity_hosts.insert("old".into(), "backend-remote".into());
-        s.terminal_contexts[0].machine = "ssh-core".into();
         s.terminal_contexts[0].worktree_id = Some("managed".into());
-        terminal.runtime.as_mut().unwrap().machine = "ssh-core".into();
         let hint = location_hint(
             &s,
             &super::super::entries(&s),
@@ -250,7 +232,6 @@ mod tests {
             "backend-remote",
         )
         .unwrap();
-        assert_eq!(hint.machine, "ssh-core");
         assert_eq!(hint.worktree_id.as_deref(), Some("managed"));
     }
 }

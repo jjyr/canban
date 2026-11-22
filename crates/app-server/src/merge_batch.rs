@@ -296,19 +296,13 @@ impl AppServer {
         };
         let (head_pending, head_settling) =
             card_agent_busy_or_settling(&terminals, &head_card.id, head.updated_at, now_ms);
-        let head_local = self
-            .bound_project(&project, head_card)
-            .work_location()
-            .machine
-            == "local";
-        let ops = self.ops("local");
+        let ops = self.ops();
         let head_cfg = deliver_config(head, &config);
         if !head_card.active()
             || head_card.hold_auto_merge
             || head_card.worktree.is_none()
             || head_pending
             || head_settling
-            || !head_local
             || !ops.card_worktree_ready_for_batch(&project, head_card)
             || (head_cfg.batch_size == 1 && head_cfg.test_command.is_none())
         {
@@ -333,7 +327,6 @@ impl AppServer {
             if !card.active()
                 || card.hold_auto_merge
                 || card.worktree.is_none()
-                || self.bound_project(&project, card).work_location().machine != "local"
                 || !ops.card_worktree_ready_for_batch(&project, card)
             {
                 break;
@@ -397,7 +390,7 @@ impl AppServer {
         let cfg = deliver_config(&candidates[0].1, &config);
         let head_card_id = candidates[0].0.id.clone();
         let head_run_id = candidates[0].1.id.clone();
-        let ops = self.ops("local");
+        let ops = self.ops();
 
         let mut committed_any = false;
         for (card, _) in &candidates {
@@ -413,7 +406,7 @@ impl AppServer {
             }
         }
         if committed_any {
-            self.git_changed("local");
+            self.git_changed();
         }
 
         let (resolved_branch, target_head) = {
@@ -680,7 +673,7 @@ impl AppServer {
         candidates: &[(Card, WorkflowRun)],
     ) -> Result<bool> {
         let config = self.config();
-        let ops = self.ops("local");
+        let ops = self.ops();
         let is_conflict = batch.failure_kind.as_deref() == Some("conflict");
 
         let offending = if is_conflict {
@@ -993,7 +986,7 @@ impl AppServer {
         for cid in merged_cards {
             let _ = self.try_auto_archive_resolved(&cid);
         }
-        self.git_changed("local");
+        self.git_changed();
         self.request_scripts();
         self.emit("review", None);
         self.wake_runtime();
@@ -1127,8 +1120,6 @@ impl AppServer {
         ]);
 
         let mut runtime = TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: Some(core.clone()),
             core_id: Some(core.clone()),
             terminal: None,
             state: "starting".into(),
@@ -1145,7 +1136,7 @@ impl AppServer {
             env,
             cwd: batch.worktree.clone(),
         })?;
-        match client.launch_on("local", spec.argv, &spec.cwd, spec.env, labels) {
+        match client.launch(spec.argv, &spec.cwd, spec.env, labels) {
             Ok(receipt) => {
                 let address = strp(&receipt, "address")?.to_owned();
                 runtime.terminal = Some(address.clone());
@@ -1158,10 +1149,9 @@ impl AppServer {
                 {
                     let mut inv = self.inventory.lock().unwrap();
                     if inv.core == core {
-                        let key = inv.address(&address);
-                        inv.records.entry(key.clone()).or_insert_with(|| {
+                        inv.records.entry(address.clone()).or_insert_with(|| {
                             let mut seeded = receipt.clone();
-                            seeded["address"] = json!(key);
+                            seeded["address"] = json!(address);
                             if seeded["state"].is_null() {
                                 seeded["state"] = json!("live");
                             }
@@ -1222,7 +1212,7 @@ impl AppServer {
         if exited.is_empty() {
             return Ok(());
         }
-        let ops = self.ops("local");
+        let ops = self.ops();
         for (mut batch, _) in exited {
             if let Ok(project) = self
                 .store
@@ -1392,8 +1382,6 @@ impl AppServer {
                 r.state = "finished".into();
             } else {
                 current.runtime = Some(TerminalRuntime {
-                    machine: "local".into(),
-                    owner_core_id: None,
                     core_id: None,
                     terminal: None,
                     state: "finished".into(),
@@ -1604,7 +1592,7 @@ impl AppServer {
             );
         }
 
-        let ops = self.ops("local");
+        let ops = self.ops();
         if state == "completed" {
             let card_ids: Vec<String> = updated_batch
                 .items
@@ -1850,8 +1838,6 @@ impl AppServer {
     ) -> Result<()> {
         if batch.state == "queued" {
             item.runtime = Some(TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: None,
                 core_id: None,
                 terminal: None,
                 state: "finished".into(),
@@ -1869,7 +1855,7 @@ impl AppServer {
         batch.updated_at = now();
         db.save(batch)?;
         if let Ok(project) = db.get::<Project>(&batch.project_id) {
-            let ops = self.ops("local");
+            let ops = self.ops();
             let _ = ops.ensure_merge_queue_worktree(&self.home, &project, &batch.target_head);
             ops.cleanup_batch_refs(&project, batch.short_id());
         }

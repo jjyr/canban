@@ -13,7 +13,7 @@ struct Job {
     signature: String,
     generation: u64,
 }
-type Key = (String, String);
+type Key = String;
 struct Cached {
     context: TerminalContext,
     signature: String,
@@ -24,10 +24,10 @@ pub(super) struct ContextQueue {
     generation: u64,
     targets: BTreeMap<String, Job>,
     pending: BTreeMap<Key, Job>,
-    running: BTreeSet<String>,
+    running: bool,
     results: BTreeMap<Key, Cached>,
-    caches: BTreeMap<String, Arc<Mutex<canban_workspaces::context::ContextCache>>>,
-    mappings: BTreeMap<String, (String, Arc<Snapshot>)>,
+    cache: Arc<Mutex<canban_workspaces::context::ContextCache>>,
+    mapping: Option<(String, Arc<Snapshot>)>,
     watcher: Option<RecommendedWatcher>,
     watched: BTreeSet<PathBuf>,
     pending_watches: BTreeSet<PathBuf>,
@@ -39,36 +39,31 @@ impl ContextQueue {
         let keys = self
             .targets
             .values()
-            .filter_map(|t| {
-                t.context
-                    .cwd
-                    .as_ref()
-                    .map(|cwd| (t.context.machine.clone(), cwd.clone()))
-            })
+            .filter_map(|t| t.context.cwd.clone())
             .collect::<BTreeSet<_>>();
         self.pending.retain(|key, _| keys.contains(key));
     }
     pub fn probes(&self) -> u64 {
-        self.caches.values().map(|c| c.lock().unwrap().probes).sum()
+        self.cache.lock().unwrap().probes
     }
     pub fn pending_count(&self) -> usize {
-        self.pending.len() + self.running.len()
+        self.pending.len() + usize::from(self.running)
     }
     pub fn reset(&mut self) {
         self.generation += 1;
         self.targets.clear();
         self.pending.clear();
         self.results.clear();
-        self.caches.clear();
-        self.mappings.clear();
+        self.cache = Default::default();
+        self.mapping = None;
         self.pending_watches.clear();
     }
 }
-fn signature(s: &Snapshot, machine: &str) -> String {
+fn signature(s: &Snapshot) -> String {
     let projects = s
         .projects
         .iter()
-        .map(|p| json!([p.id, p.work_location()]))
+        .map(|p| json!([p.id, p.directory]))
         .collect::<Vec<_>>();
     let cards = s
         .cards
@@ -88,43 +83,86 @@ fn signature(s: &Snapshot, machine: &str) -> String {
     let worktrees = s
         .worktrees
         .iter()
-        .map(|wt| json!([wt.id, wt.project_id, wt.path, wt.branch, wt.location]))
+        .map(|wt| json!([wt.id, wt.project_id, wt.path, wt.branch, wt.directory]))
         .collect::<Vec<_>>();
-    canban_context::digest(
-        &serde_json::to_vec(&json!([machine, projects, cards, worktrees])).unwrap(),
-    )
+    canban_context::digest(&serde_json::to_vec(&json!([projects, cards, worktrees])).unwrap())
 }
-pub(super) struct CheckPermit<'a>(&'a AppServer, String);
+pub(super) struct CheckPermit<'a>(&'a AppServer);
 impl Drop for CheckPermit<'_> {
     fn drop(&mut self) {
-        self.0.check_slots.lock().unwrap().remove(&self.1);
+        *self.0.check_slots.lock().unwrap() = false;
         self.0.check_signal.notify_all();
     }
 }
 impl AppServer {
-    pub(super) fn check(&self, machine: &str) -> CheckPermit<'_> {
-        let mut slots = self.check_slots.lock().unwrap();
-        while slots.len() >= 4 || slots.contains(machine) {
-            slots = self.check_signal.wait(slots).unwrap();
+    pub(super) fn check(&self) -> CheckPermit<'_> {
+        let mut busy = self.check_slots.lock().unwrap();
+        while *busy {
+            busy = self.check_signal.wait(busy).unwrap();
         }
-        slots.insert(machine.into());
-        CheckPermit(self, machine.into())
+        *busy = true;
+        CheckPermit(self)
     }
-    pub(super) fn remote_connected(&self, terminal: &str) -> bool {
-        let Some((machine, _)) = terminal.split_once('/') else {
-            return true;
+    pub(super) fn browse_directory(&self, p: Value) -> Result<Value> {
+        let host = canban_herdr::host::Host::new(self.config());
+        let raw = p["path"].as_str().map(str::trim).filter(|v| !v.is_empty());
+        let path = match raw {
+            Some("~") => host.home()?,
+            Some(rest) if rest.starts_with("~/") => {
+                let home = host.home()?;
+                if home == "/" {
+                    format!("/{}", &rest[2..])
+                } else {
+                    format!("{home}/{}", &rest[2..])
+                }
+            }
+            Some(other) => other.to_owned(),
+            None => host.home()?,
         };
-        #[cfg(test)]
-        if !self.observer_running.load(Ordering::SeqCst) {
-            return true;
+        ensure!(
+            Path::new(&path).is_absolute(),
+            "An absolute directory is required"
+        );
+        let home = host.home().unwrap_or_default();
+        let target = Path::new(&path);
+        if !target.is_dir() {
+            return Ok(json!({
+                "path": path,
+                "parent": target.parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or_else(|| "/".into()),
+                "home": home,
+                "exists": false,
+                "directories": [],
+            }));
         }
-        let inv = self.inventory.lock().unwrap();
-        inv.remote_error.is_none()
-            && inv.machines["machines"].as_array().is_some_and(|ms| {
-                ms.iter().any(|m| {
-                    (m["id"] == machine || m["name"] == machine) && m["state"] == "connected"
-                })
-            })
+        let real = target
+            .canonicalize()
+            .unwrap_or_else(|_| target.to_path_buf());
+        let mut directories = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&real) {
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                if entry_path.is_dir()
+                    && let Some(name) = entry.file_name().to_str()
+                {
+                    directories.push((name.to_owned(), entry_path.to_string_lossy().into_owned()));
+                }
+            }
+        }
+        directories.sort_by(|a, b| a.0.cmp(&b.0));
+        let parent = real
+            .parent()
+            .map(|d| d.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "/".into());
+        Ok(json!({
+            "path": real.to_string_lossy(),
+            "parent": parent,
+            "home": home,
+            "exists": true,
+            "directories": directories
+                .into_iter()
+                .map(|(name, p)| json!({"name": name, "path": p}))
+                .collect::<Vec<_>>(),
+        }))
     }
     pub(super) fn queue_context(
         &self,
@@ -137,18 +175,10 @@ impl AppServer {
         let Some(cwd) = canban_herdr::cwd(value) else {
             return;
         };
-        let machine = terminal
-            .split_once('/')
-            .map(|(m, _)| m)
-            .unwrap_or("local")
-            .to_owned();
-        let key = (machine.clone(), cwd.to_owned());
+        let key = cwd.to_owned();
         let mut q = self.contexts.lock().unwrap();
-        let digest = signature(s, &machine);
-        if q.mappings
-            .get(&machine)
-            .is_none_or(|(old, _)| old != &digest)
-        {
+        let digest = signature(s);
+        if q.mapping.as_ref().is_none_or(|(old, _)| old != &digest) {
             // Share only association inputs. Never retain a full Timeline/report
             // snapshot once per Terminal in the background discovery queue.
             let mapping = Snapshot {
@@ -177,15 +207,13 @@ impl AppServer {
                 worktrees: s.worktrees.clone(),
                 ..Default::default()
             };
-            q.mappings
-                .insert(machine.clone(), (digest.clone(), Arc::new(mapping)));
+            q.mapping = Some((digest.clone(), Arc::new(mapping)));
         }
         let job = Job {
-            snapshot: q.mappings[&machine].1.clone(),
+            snapshot: q.mapping.as_ref().unwrap().1.clone(),
             signature: digest,
             generation: q.generation,
             context: TerminalContext {
-                machine,
                 terminal_id: id.into(),
                 core_id: core.into(),
                 terminal: terminal.into(),
@@ -287,11 +315,11 @@ impl AppServer {
                 }
                 q.pending_watches.extend(dot_git_dirs);
                 if structural {
-                    q.caches.remove("local");
-                } else if let Some(cache) = q.caches.get("local") {
-                    cache.lock().unwrap().invalidate_branches();
+                    q.cache = Default::default();
+                } else {
+                    q.cache.lock().unwrap().invalidate_branches();
                 }
-                q.results.retain(|(machine, _), _| machine != "local");
+                q.results.clear();
                 q.generation += 1;
                 drop(q);
                 server.wake_runtime();
@@ -320,15 +348,12 @@ impl AppServer {
                                 eprintln!("Canban context watcher {}: {e}", path.display());
                             }
                         }
-                        let key = q
-                            .pending
-                            .keys()
-                            .find(|(m, _)| !q.running.contains(m))
-                            .cloned();
-                        if let Some(key) = key {
+                        if !q.running
+                            && let Some(key) = q.pending.keys().next().cloned()
+                        {
                             let job = q.pending.remove(&key).unwrap();
-                            q.running.insert(key.0.clone());
-                            let cache = q.caches.entry(key.0.clone()).or_default().clone();
+                            q.running = true;
+                            let cache = q.cache.clone();
                             Some((key, job, cache))
                         } else {
                             let _ = server
@@ -341,15 +366,15 @@ impl AppServer {
                     let Some((key, job, cache)) = next else {
                         continue;
                     };
-                    let permit = server.check(&key.0);
-                    let result = server.ops(&key.0).directory_context_full_cached(
+                    let permit = server.check();
+                    let result = server.ops().directory_context_full_cached(
                         &job.snapshot,
-                        &key.1,
+                        &key,
                         &mut cache.lock().unwrap(),
                     );
                     drop(permit);
                     let mut q = server.contexts.lock().unwrap();
-                    q.running.remove(&key.0);
+                    q.running = false;
                     let mut changed = false;
                     if job.generation == q.generation
                         && let Ok(resolved) = result
@@ -383,8 +408,7 @@ impl AppServer {
                             .targets
                             .values()
                             .filter(|t| {
-                                t.context.machine == key.0
-                                    && t.context.cwd.as_ref() == Some(&key.1)
+                                t.context.cwd.as_ref() == Some(&key)
                                     && t.signature == job.signature
                                     && t.generation == job.generation
                             })
@@ -399,14 +423,12 @@ impl AppServer {
                             contexts.retain(|c| c.terminal_id != context.terminal_id);
                             contexts.push(context);
                         }
-                        if key.0 == "local" {
-                            for path in cache.lock().unwrap().watch_paths() {
-                                if q.watched.insert(path.clone())
-                                    && let Some(w) = &mut q.watcher
-                                    && let Err(e) = w.watch(&path, RecursiveMode::NonRecursive)
-                                {
-                                    eprintln!("Canban context watcher {}: {e}", path.display());
-                                }
+                        for path in cache.lock().unwrap().watch_paths() {
+                            if q.watched.insert(path.clone())
+                                && let Some(w) = &mut q.watcher
+                                && let Err(e) = w.watch(&path, RecursiveMode::NonRecursive)
+                            {
+                                eprintln!("Canban context watcher {}: {e}", path.display());
                             }
                         }
                     }
@@ -419,13 +441,11 @@ impl AppServer {
             });
         }
     }
-    pub(super) fn git_changed(&self, machine: &str) {
+    pub(super) fn git_changed(&self) {
         let mut q = self.contexts.lock().unwrap();
         q.generation += 1;
-        q.results.retain(|(m, _), _| m != machine);
-        if let Some(cache) = q.caches.get(machine) {
-            cache.lock().unwrap().invalidate_branches();
-        }
+        q.results.clear();
+        q.cache.lock().unwrap().invalidate_branches();
         drop(q);
         self.wake_runtime();
     }
@@ -433,7 +453,7 @@ impl AppServer {
         let mut q = self.contexts.lock().unwrap();
         q.generation += 1;
         q.results.clear();
-        q.caches.clear();
+        q.cache = Default::default();
         drop(q);
         self.wake_runtime();
     }
@@ -446,16 +466,11 @@ impl AppServer {
         value: &Value,
     ) -> Result<TerminalContext> {
         let cwd = canban_herdr::cwd(value).context("Current directory unavailable")?;
-        let machine = terminal.split_once('/').map(|(m, _)| m).unwrap_or("local");
-        let key = (machine.into(), cwd.into());
-        let ttl = if machine == "local" {
-            Duration::from_secs(15)
-        } else {
-            Duration::from_secs(30)
-        };
+        let key: Key = cwd.into();
+        let ttl = Duration::from_secs(15);
         let mut q = self.contexts.lock().unwrap();
         if let Some(r) = q.results.get(&key)
-            && r.signature == signature(s, machine)
+            && r.signature == signature(s)
             && r.at.elapsed() < ttl
         {
             let mut context = r.context.clone();
@@ -465,9 +480,7 @@ impl AppServer {
             return Ok(context);
         }
         q.results.remove(&key);
-        if let Some(cache) = q.caches.get(machine) {
-            cache.lock().unwrap().invalidate_branches();
-        }
+        q.cache.lock().unwrap().invalidate_branches();
         drop(q);
         self.queue_context(s, id, core, terminal, value);
         self.cached_context(id, core, terminal, Some(cwd))
@@ -479,34 +492,31 @@ impl AppServer {
 mod tests {
     use super::*;
     #[test]
-    fn check_budget_bounds_parallel_machines_and_serializes_one_machine() {
+    fn check_serializes_concurrent_checks() {
         let dir = tempfile::tempdir().unwrap();
         let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
         let (tx, rx) = mpsc::channel();
         let (release, wait) = mpsc::channel();
         let wait = Arc::new(Mutex::new(wait));
         let mut joins = vec![];
-        for machine in ["a", "b", "c", "d", "a", "e"] {
+        for i in 0..3 {
             let app = app.clone();
             let tx = tx.clone();
             let wait = wait.clone();
             joins.push(std::thread::spawn(move || {
-                let _permit = app.check(machine);
-                tx.send(machine).unwrap();
+                let _permit = app.check();
+                tx.send(i).unwrap();
                 wait.lock().unwrap().recv().unwrap();
             }));
         }
-        let first = (0..4)
-            .map(|_| rx.recv_timeout(Duration::from_secs(2)).unwrap())
-            .collect::<BTreeSet<_>>();
-        assert_eq!(first.len(), 4);
+        let _first = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(rx.recv_timeout(Duration::from_millis(30)).is_err());
-        for _ in 0..6 {
+        for _ in 0..3 {
             release.send(()).unwrap();
         }
         for j in joins {
             j.join().unwrap();
         }
-        assert!(app.check_slots.lock().unwrap().is_empty());
+        assert!(!*app.check_slots.lock().unwrap());
     }
 }

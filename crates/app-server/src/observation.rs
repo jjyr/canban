@@ -23,30 +23,17 @@ pub(super) struct ClosedAgentWork {
 #[derive(Default)]
 pub(super) struct Inventory {
     pub core: String,
-    pub machines: Value,
     pub records: BTreeMap<String, Value>,
     pub working: std::collections::HashMap<String, OpenAgentWork>,
     pub closed_work: Vec<ClosedAgentWork>,
     pub last_at: u64,
     pub generation: u64,
     pub error: Option<String>,
-    pub remote_error: Option<String>,
     seq: u64,
 }
 impl Inventory {
     pub(super) fn is_working(record: &Value) -> bool {
         record["status"]["state"] == "working" && record["state"] != "finished"
-    }
-    pub(super) fn address(&self, address: &str) -> String {
-        let Some((name, local)) = address.split_once('/') else {
-            return address.into();
-        };
-        let owner = self.machines["machines"]
-            .as_array()
-            .and_then(|ms| ms.iter().find(|m| m["name"] == name || m["id"] == name))
-            .and_then(|m| m["id"].as_str())
-            .unwrap_or(name);
-        format!("{owner}/{local}")
     }
     fn snapshot(&mut self, snapshot: &Value) {
         self.snapshot_at(snapshot, now());
@@ -56,10 +43,9 @@ impl Inventory {
         let mut next_records = BTreeMap::new();
         for value in snapshot["terminals"].as_array().into_iter().flatten() {
             if let Some(address) = value["address"].as_str() {
-                let address = self.address(address);
                 let mut v = value.clone();
                 v["address"] = json!(address);
-                next_records.insert(address, v);
+                next_records.insert(address.to_owned(), v);
             }
         }
         let mut next_working = std::collections::HashMap::new();
@@ -164,10 +150,9 @@ impl Inventory {
             return false;
         }
         self.seq = seq; // Filters can legitimately skip sequence numbers.
-        let Some(raw) = p["terminal"].as_str() else {
+        let Some(key) = p["terminal"].as_str().map(str::to_owned) else {
             return false;
         };
-        let key = self.address(raw);
         let data = &p["data"];
         let kind = p["type"].as_str().unwrap_or("");
         if kind == "removed" {
@@ -335,7 +320,6 @@ impl AppServer {
                                 inv.close_all_working(now());
                             }
                             inv.core = subscription.core.clone();
-                            inv.machines = subscription.machines.clone();
                             inv.generation += 1;
                             inv.snapshot(&subscription.snapshot);
                             inv.last_at = now();
@@ -366,40 +350,6 @@ impl AppServer {
                             match subscription.recv_timeout(Duration::from_secs(1)) {
                                 Ok(Ok(message)) => {
                                     let changed = server.inventory.lock().unwrap().apply(&message);
-                                    let remote = message["params"]["terminal"]
-                                        .as_str()
-                                        .is_some_and(|t| t.contains('/'));
-                                    if remote || message["method"] == "heartbeat" {
-                                        let s = server
-                                            .store
-                                            .lock()
-                                            .unwrap()
-                                            .db()
-                                            .admission_snapshot()
-                                            .unwrap_or_default();
-                                        if s.terminals.iter().any(|t| {
-                                            t.agent.as_ref().is_some_and(|a| {
-                                                !a.finished()
-                                                    && a.terminal
-                                                        .as_deref()
-                                                        .is_some_and(|addr| addr.contains('/'))
-                                            }) || t.runtime.as_ref().is_some_and(|r| {
-                                                r.state != "finished"
-                                                    && r.terminal
-                                                        .as_deref()
-                                                        .is_some_and(|addr| addr.contains('/'))
-                                            })
-                                        }) || s.workflow_runs.iter().any(|r| {
-                                            r.active()
-                                                && r.state == "waiting_script"
-                                                && r.inputs["script_terminal"]["address"]
-                                                    .as_str()
-                                                    .is_some_and(|addr| addr.contains('/'))
-                                        }) {
-                                            server.remote_health_due.store(true, Ordering::SeqCst);
-                                            server.wake_runtime();
-                                        }
-                                    }
                                     if changed {
                                         server.wake_runtime();
                                     }
@@ -526,13 +476,6 @@ impl AppServer {
         if run.finished() {
             return Ok(());
         } // Retention cannot erase an already confirmed exit.
-        if run.terminal.as_deref().is_some_and(|t| t.contains('/')) {
-            return self.connection_lost(
-                entry,
-                "unavailable",
-                "Remote terminal is not in the current mirror; its exit is unconfirmed",
-            );
-        }
         self.observe_lifecycle(entry, &json!({"state":"missing"}))?;
         let card_id = run.card_id.clone();
         self.store.lock().unwrap().write(|db| {
@@ -711,7 +654,6 @@ impl AppServer {
                 if server.stopped() {
                     break;
                 }
-                server.start_remote_workers();
                 if let Err(e) = server.tick() {
                     eprintln!("Canban runtime: {e:#}");
                 }
@@ -801,7 +743,7 @@ impl AppServer {
                         }
                     }
                 }
-                // Only queued work awaiting an unavailable machine or slot needs retry admission.
+                // Only queued work awaiting a scheduler slot needs retry admission.
                 let retry_needed = canban_scheduler::next(&s, server.config().scheduler.max_agents)
                     .is_some()
                     || canban_scheduler::timers::next_scheduled_run(
@@ -876,17 +818,16 @@ mod tests {
     fn ordered_events_replace_snapshots_and_ignore_duplicates_without_inventing_exits() {
         let mut inv = Inventory {
             core: "core-a".into(),
-            machines: json!({"machines":[{"id":"owner","name":"box"}]}),
             ..Default::default()
         };
-        inv.snapshot(&json!({"seq":10,"terminals":[{"address":"box/t1","state":"live","status":{"state":"blocked"}}]}));
-        assert!(inv.records.contains_key("owner/t1"));
-        assert!(!inv.apply(&json!({"method":"event","params":{"seq":10,"type":"removed","terminal":"box/t1","data":{}}})));
-        inv.apply(&json!({"method":"event","params":{"seq":14,"type":"finished","terminal":"box/t1","data":{"exit_code":1,"reason":"exited"}}}));
-        assert_eq!(inv.records["owner/t1"]["state"], "finished");
-        assert_eq!(inv.records["owner/t1"]["exit_code"], 1);
+        inv.snapshot(&json!({"seq":10,"terminals":[{"address":"t1","state":"live","status":{"state":"blocked"}}]}));
+        assert!(inv.records.contains_key("t1"));
+        assert!(!inv.apply(&json!({"method":"event","params":{"seq":10,"type":"removed","terminal":"t1","data":{}}})));
+        inv.apply(&json!({"method":"event","params":{"seq":14,"type":"finished","terminal":"t1","data":{"exit_code":1,"reason":"exited"}}}));
+        assert_eq!(inv.records["t1"]["state"], "finished");
+        assert_eq!(inv.records["t1"]["exit_code"], 1);
         inv.apply(&json!({"method":"missed","params":{"seq":20,"terminals":[{"address":"t9","state":"live"}]}}));
-        assert!(!inv.records.contains_key("owner/t1"));
+        assert!(!inv.records.contains_key("t1"));
         assert_eq!(inv.records["t9"]["state"], "live");
         assert!(!inv.apply(&json!({"method":"heartbeat","params":{"seq":20}})));
     }
@@ -895,24 +836,23 @@ mod tests {
     fn working_transitions_record_closed_segments_and_drop_short_bursts() {
         let mut inv = Inventory {
             core: "core-a".into(),
-            machines: json!({"machines":[{"id":"owner","name":"box"}]}),
             ..Default::default()
         };
         inv.snapshot_at(
-            &json!({"seq":1,"terminals":[{"address":"box/t1","state":"live","status":{"state":"idle"}}]}),
+            &json!({"seq":1,"terminals":[{"address":"t1","state":"live","status":{"state":"idle"}}]}),
             10_000,
         );
         assert!(inv.working.is_empty());
 
         // Short working burst (< 2s) is dropped when stopped.
         inv.apply_at(
-            &json!({"method":"event","params":{"seq":2,"type":"status","terminal":"box/t1","data":{"status":{"state":"working","app":"claude"}}}}),
+            &json!({"method":"event","params":{"seq":2,"type":"status","terminal":"t1","data":{"status":{"state":"working","app":"claude"}}}}),
             11_000,
         );
-        assert_eq!(inv.working["owner/t1"].since, 11_000);
-        assert_eq!(inv.working["owner/t1"].engine.as_deref(), Some("claude"));
+        assert_eq!(inv.working["t1"].since, 11_000);
+        assert_eq!(inv.working["t1"].engine.as_deref(), Some("claude"));
         inv.apply_at(
-            &json!({"method":"event","params":{"seq":3,"type":"status","terminal":"box/t1","data":{"status":{"state":"idle"}}}}),
+            &json!({"method":"event","params":{"seq":3,"type":"status","terminal":"t1","data":{"status":{"state":"idle"}}}}),
             12_500,
         );
         assert!(inv.working.is_empty());
@@ -920,11 +860,11 @@ mod tests {
 
         // Working >= 2s through finished closes and records a segment.
         inv.apply_at(
-            &json!({"method":"event","params":{"seq":4,"type":"status","terminal":"box/t1","data":{"status":{"state":"working","app":"codex"}}}}),
+            &json!({"method":"event","params":{"seq":4,"type":"status","terminal":"t1","data":{"status":{"state":"working","app":"codex"}}}}),
             20_000,
         );
         inv.apply_at(
-            &json!({"method":"event","params":{"seq":5,"type":"finished","terminal":"box/t1","data":{"exit_code":0}}}),
+            &json!({"method":"event","params":{"seq":5,"type":"finished","terminal":"t1","data":{"exit_code":0}}}),
             25_000,
         );
         assert!(inv.working.is_empty());

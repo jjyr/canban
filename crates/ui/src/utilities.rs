@@ -382,7 +382,7 @@ pub fn usage(ui: Ui, host_id: String, force: bool) {
                 } else {
                     "usage.status"
                 },
-                json!({"host_id":req_host,"machine":"local"}),
+                json!({"host_id":req_host}),
                 None,
             )
         })

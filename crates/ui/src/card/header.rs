@@ -947,7 +947,6 @@ mod tests {
             delivery_mode: Default::default(),
             agent_overrides: Default::default(),
             tags: Default::default(),
-            location: None,
             id: "p1".into(),
             name: "Canban".into(),
             directory: "/example/canban".into(),

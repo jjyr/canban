@@ -137,11 +137,11 @@ impl AppServer {
         // finishes its turn without running `git commit` itself (never fails the report).
         if state == "completed" && card.worktree.is_some() {
             let commit_msg = format!("Canban #{}: {}", card.number, card.title);
-            if let Ok(Some(_)) = self
-                .ops(&project.work_location().machine)
-                .commit_card_worktree_if_dirty(&project, &card, &commit_msg)
+            if let Ok(Some(_)) =
+                self.ops()
+                    .commit_card_worktree_if_dirty(&project, &card, &commit_msg)
             {
-                self.git_changed(&project.work_location().machine);
+                self.git_changed();
             }
         }
         let report_id = id();

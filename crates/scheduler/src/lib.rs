@@ -63,10 +63,8 @@ pub fn agent_run(
         instruction,
         on_completed,
         require_human_review: false,
-        runtime_home: None,
         workspace: None,
-        location: None,
-        owner_core_id: None,
+        directory: None,
         lifecycle: Lifecycle::default(),
         project_id: project.into(),
         card_id: card.into(),
@@ -175,12 +173,12 @@ pub fn can_continue_in_place(snapshot: &canban_types::Snapshot, entry: &Terminal
     }
     let agent = entry.agent.as_ref().unwrap();
     let pending = agent.pending.as_ref().unwrap();
-    let expected_location = agent.location.clone().or_else(|| {
+    let expected_directory = agent.directory.as_deref().or_else(|| {
         snapshot
             .projects
             .iter()
             .find(|p| p.id == agent.project_id)
-            .map(|p| p.work_location())
+            .map(|p| p.directory.as_str())
     });
     let expected_env = pending
         .workflow_run_id
@@ -188,7 +186,7 @@ pub fn can_continue_in_place(snapshot: &canban_types::Snapshot, entry: &Terminal
         .and_then(|id| snapshot.workflow_runs.iter().find(|r| r.id == id))
         .map(|run| run.custom_env_for_step(pending.workflow_step.as_deref()))
         .unwrap_or_default();
-    agent.location == expected_location
+    agent.directory.as_deref() == expected_directory
         && agent.profile.id == pending.profile.id
         && agent.profile.command_name() == pending.profile.command_name()
         && agent.applied_env == expected_env
@@ -425,7 +423,6 @@ mod tests {
             id: "p".into(),
             name: "P".into(),
             directory: "/tmp".into(),
-            location: None,
             workflow: Default::default(),
             target_branch: None,
             created_at: 0,

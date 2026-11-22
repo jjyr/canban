@@ -142,7 +142,7 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                                         attention: 0,
                                         id: p.id.clone(),
                                         title: p.name.clone(),
-                                        detail: p.work_location().directory,
+                                        detail: p.directory.clone(),
                                         icon: Icon::Projects,
                                         selected: ui.card_target.get() == p.id,
                                     })

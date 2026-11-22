@@ -50,7 +50,6 @@ pub struct AppServer {
     checkout_gates: delivery_gates::KeyedGateTable<delivery_gates::CheckoutGateKey>,
     queue_gates: delivery_gates::KeyedGateTable<String>,
     card_delivery_gates: delivery_gates::KeyedGateTable<String>,
-    remote_canonical_dirs: Mutex<std::collections::HashMap<(String, String), PathBuf>>,
     github_action_gate: (Mutex<bool>, std::sync::Condvar),
     merging_cards: Mutex<std::collections::BTreeSet<String>>,
     terminal_gate: Mutex<()>,
@@ -60,15 +59,13 @@ pub struct AppServer {
     observer_running: AtomicBool,
     herdr_wake: AtomicBool,
     herdr_install: Arc<Mutex<herdr_setup::HerdrInstallState>>,
-    remote_health_due: AtomicBool,
-    check_slots: Mutex<std::collections::BTreeSet<String>>,
+    check_slots: Mutex<bool>,
     check_signal: std::sync::Condvar,
     runtime_wake: Mutex<Option<mpsc::SyncSender<()>>>,
     delivery_wake: Mutex<Option<mpsc::SyncSender<()>>>,
     script_wake: Mutex<Option<mpsc::SyncSender<()>>>,
     contexts: Mutex<directory::ContextQueue>,
     context_signal: std::sync::Condvar,
-    remote_workers: Mutex<std::collections::HashSet<String>>,
 }
 // A concurrently spawned child can briefly inherit the open file description
 // before exec closes it. Closing just our descriptor would leave its flock held.
@@ -357,7 +354,7 @@ pub(crate) fn resolve_card(db: Db<'_>, p: &Value) -> Result<Card> {
         }
         let mut best_proj: Option<(usize, String)> = None;
         for proj in db.list::<Project>()? {
-            let dir = proj.work_location().directory;
+            let dir = proj.directory;
             if path_within(&dir, cwd) {
                 let len = dir.len();
                 if best_proj.as_ref().is_none_or(|(b, _)| len > *b) {
@@ -478,10 +475,9 @@ fn enqueue(
             && prev.provider_session_id == context.provider_session_id
         {
             run.resume_session = true;
-            run.runtime_home = prev.runtime_home;
             run.workspace = prev.workspace.or_else(|| {
-                prev.location.map(|location| WorkspaceBinding {
-                    location,
+                prev.directory.map(|directory| WorkspaceBinding {
+                    directory,
                     path: prev.cwd.clone(),
                     branch: None,
                     base_commit: None,
@@ -549,49 +545,6 @@ impl AppServer {
         );
         // Existing attention is a real pause after upgrading, not merely a badge.
         store.write(|db| {
-            for mut project in db.list::<Project>()? {
-                if project.location.is_none() {
-                    project.location = Some(project.work_location());
-                    db.save(&project)?;
-                }
-            }
-            for mut card in db.list::<Card>()? {
-                if card.workspace.is_none()
-                    && let Some(path) = &card.worktree
-                {
-                    let p: Project = db.get(&card.project_id)?;
-                    card.workspace = Some(WorkspaceBinding {
-                        location: p.work_location(),
-                        path: path.clone(),
-                        branch: card.branch.clone(),
-                        base_commit: card.base_commit.clone(),
-                        target_branch: p.target_branch.clone(),
-                    });
-                    db.save(&card)?;
-                }
-            }
-            for mut t in db.list::<TerminalEntry>()? {
-                if let Some(a) = &mut t.agent
-                    && a.location.is_none()
-                    && a.state != "queued"
-                {
-                    let p: Project = db.get(&a.project_id)?;
-                    let location = WorkLocation {
-                        machine: "local".into(),
-                        directory: p.directory.clone(),
-                    };
-                    a.location = Some(location.clone());
-                    a.owner_core_id = a.core_id.clone();
-                    a.workspace = Some(WorkspaceBinding {
-                        location,
-                        path: a.cwd.clone(),
-                        branch: None,
-                        base_commit: None,
-                        target_branch: p.target_branch.clone(),
-                    });
-                    db.save(&t)?;
-                }
-            }
             let terminals = db.list::<TerminalEntry>()?;
             for mut card in db.list::<Card>()? {
                 if let Some(reason) = card.attention.clone()
@@ -730,7 +683,6 @@ impl AppServer {
             checkout_gates: Default::default(),
             queue_gates: Default::default(),
             card_delivery_gates: Default::default(),
-            remote_canonical_dirs: Mutex::new(Default::default()),
             github_action_gate: (Mutex::new(false), std::sync::Condvar::new()),
             merging_cards: Mutex::new(Default::default()),
             terminal_gate: Mutex::new(()),
@@ -740,15 +692,13 @@ impl AppServer {
             observer_running: AtomicBool::new(false),
             herdr_wake: AtomicBool::new(false),
             herdr_install: Arc::new(Mutex::new(Default::default())),
-            remote_health_due: AtomicBool::new(false),
-            check_slots: Mutex::new(Default::default()),
+            check_slots: Mutex::new(false),
             check_signal: std::sync::Condvar::new(),
             runtime_wake: Mutex::new(None),
             delivery_wake: Mutex::new(None),
             script_wake: Mutex::new(None),
             contexts: Mutex::new(Default::default()),
             context_signal: std::sync::Condvar::new(),
-            remote_workers: Mutex::new(Default::default()),
         }))
     }
     fn read_config(home: &Path) -> Result<(Config, Option<Vec<u8>>)> {
@@ -1160,9 +1110,8 @@ mod authoring;
 mod configuration;
 mod events;
 mod herdr_setup;
-mod machines;
 mod merge_batch;
-mod remote;
+mod projects;
 mod workflow;
 
 mod directory;

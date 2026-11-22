@@ -108,7 +108,7 @@ os.execv(str(Path(__file__).with_name('canban-real')),[str(Path(__file__).with_n
         project=call('project.create',{'workspace':{'sync_base':False},'name':'Self update acceptance','directory':str(source)})
         card=call('card.create',{'project_id':project['id'],'title':'Keep the Agent alive across update','body':'Disposable update acceptance.'});call('card.move',{'card_id':card['id'],'revision':card['revision'],'stage':'develop'})
         attempt=wait(lambda:next(({'id':t['id'],**t['agent']} for t in call('app.snapshot')['terminals'] if (t.get('agent') or {}).get('provider_session_id')),None),'provider binding')
-        core_id=attempt['owner_core_id'];terminal=attempt['terminal'];worktree=call('card.get',{'card_id':card['id']})['worktree']
+        core_id=attempt['core_id'];terminal=attempt['terminal'];worktree=call('card.get',{'card_id':card['id']})['worktree']
         wait(lambda:call('update.state')['state'].get('available'),'automatic release discovery')
         assert call('update.state')['state']['available']['manifest']['version']==candidate_info['version']
         agent_install=subprocess.run([str(cli),"--full",'call','update.install',json.dumps({'version':candidate_info['version']})],env={**env,'CANBAN_PROFILE_ID':'developer','CANBAN_CARD':str(card['number']),'CANBAN_PROJECT':project['id']},capture_output=True,text=True,timeout=15)
@@ -142,7 +142,7 @@ os.execv(str(Path(__file__).with_name('canban-real')),[str(Path(__file__).with_n
             assert sent.is_set()
             if expected!='manual_recovery':
                 wait(lambda:any((t.get('agent') or {}).get('card_id')==card['id'] and t['agent']['stage']=='develop' and t['agent']['state']=='completed' for t in call('app.snapshot')['terminals']),'queued completion delivered')
-                state=call('app.snapshot');original=next(t['agent'] for t in state['terminals'] if t['id']==attempt['id']);assert original['terminal']==terminal and original['owner_core_id']==core_id
+                state=call('app.snapshot');original=next(t['agent'] for t in state['terminals'] if t['id']==attempt['id']);assert original['terminal']==terminal and original['core_id']==core_id
                 assert call('card.get',{'card_id':card['id']})['worktree']==worktree
                 assert len([r for r in state['reports'] if r['terminal_id']==attempt['id'] and r['state']=='completed'])==1
                 if expected=='complete':assert call('app.ping')['build']==candidate_info

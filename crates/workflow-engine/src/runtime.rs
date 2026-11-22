@@ -2159,7 +2159,6 @@ mod cardless_runtime_tests {
             id: "proj-1".into(),
             name: "Demo".into(),
             directory: "/tmp/demo".into(),
-            location: None,
             github: None,
             detected_github: None,
             github_disconnected: false,
@@ -2406,7 +2405,6 @@ steps:
         // Simulate `pump_cardless_agents` recording a launched terminal for step 1.
         run.inputs["agent_terminal"] = json!({
             "address": "local/term-1",
-            "machine": "local",
             "step_id": "triage",
             "visit": run.visit,
             "started_at": now(),
@@ -2440,7 +2438,6 @@ steps:
         // Simulate launching step 2 and failing it -> `agent_terminal` is also cleared.
         run.inputs["agent_terminal"] = json!({
             "address": "local/term-2",
-            "machine": "local",
             "step_id": "respond",
             "visit": run.visit,
             "started_at": now(),

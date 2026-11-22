@@ -8,8 +8,8 @@
 //! - If no `running` background task is present (`RefineDecision::Keep`), the result is
 //!   cached for that fingerprint with `next_check_at = None` (zero timers, zero further RPCs).
 //! - Only while a terminal is actively refined to `Working` does AppServer schedule a bounded
-//!   re-probe (`LOCAL_RECHECK_MS` / `REMOTE_RECHECK_MS`) so background tasks that exit or get
-//!   dismissed without waking the root turn promptly revert to `idle` / `done`.
+//!   re-probe (`RECHECK_MS`) so background tasks that exit or get dismissed without waking the root
+//!   turn promptly revert to `idle` / `done`.
 
 use super::*;
 use canban_herdr::refine::{RefineDecision, RefineInput};
@@ -18,8 +18,7 @@ use std::{
     sync::atomic::AtomicU64,
 };
 
-const LOCAL_RECHECK_MS: u64 = 2_500;
-const REMOTE_RECHECK_MS: u64 = 5_000;
+const RECHECK_MS: u64 = 2_500;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SourceFingerprint {
@@ -239,9 +238,6 @@ impl AppServer {
                 let Some(addr) = record["address"].as_str() else {
                     continue;
                 };
-                if !self.remote_connected(addr) {
-                    continue;
-                }
                 let hint = hints_by_addr.get(addr).map(String::as_str);
                 let agent_id = resolve_record_agent_id(record, hint);
                 let term_state = record["state"].as_str();
@@ -281,11 +277,6 @@ impl AppServer {
                 Vec::with_capacity(to_probe.len());
             for probe in to_probe {
                 let key = (core_id.to_owned(), probe.address.clone());
-                let interval = if probe.address.contains('/') {
-                    REMOTE_RECHECK_MS
-                } else {
-                    LOCAL_RECHECK_MS
-                };
                 match client.read_screen(&probe.address) {
                     Ok(reply) => {
                         self.refinements.probes.fetch_add(1, Ordering::SeqCst);
@@ -298,7 +289,7 @@ impl AppServer {
                         let checked_at = now();
                         let next_check_at = decision
                             .is_working()
-                            .then(|| checked_at.saturating_add(interval));
+                            .then(|| checked_at.saturating_add(RECHECK_MS));
                         updates.push((
                             key,
                             CachedRefinement {
@@ -323,7 +314,7 @@ impl AppServer {
                         let checked_at = now();
                         let next_check_at = previous
                             .is_working()
-                            .then(|| checked_at.saturating_add(interval));
+                            .then(|| checked_at.saturating_add(RECHECK_MS));
                         updates.push((
                             key,
                             CachedRefinement {

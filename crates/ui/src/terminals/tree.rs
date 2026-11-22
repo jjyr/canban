@@ -97,7 +97,7 @@ fn scope_header(
         .filter(|rid| children.iter().any(|e| e.saved.id == *rid))
         .or_else(|| children.first().map(|e| e.saved.id.clone()));
     let launch_params = children.first().and_then(|e| e.location.as_ref().map(|l| json!({
-        "host_id": e.host_id, "machine": l.machine, "cwd": l.directory_root.as_ref().or(l.cwd.as_ref()), "project_id": l.project_id
+        "host_id": e.host_id, "cwd": l.directory_root.as_ref().or(l.cwd.as_ref()), "project_id": l.project_id
     })));
     let is_active_scope = computed(move || {
         let sel = ui.terminal_selection.get();

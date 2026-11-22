@@ -193,10 +193,9 @@ pub(super) fn retry_agent(db: Db<'_>, card: &Card, entry: &mut TerminalEntry) ->
     next.require_human_review = previous.require_human_review;
     next.resume_session = previous.provider_session_id.is_some() || previous.resume_session;
     if next.resume_session {
-        next.runtime_home = previous.runtime_home;
         next.workspace = previous.workspace.or_else(|| {
-            previous.location.map(|location| WorkspaceBinding {
-                location,
+            previous.directory.map(|directory| WorkspaceBinding {
+                directory,
                 path: previous.cwd.clone(),
                 branch: None,
                 base_commit: None,
@@ -290,13 +289,6 @@ impl AppServer {
                     "Provider conversation changed unexpectedly; inspect the selected terminal"
                 );
             }
-            let machine = entry_opt
-                .as_ref()
-                .and_then(|e| e.agent.as_ref())
-                .and_then(|r| r.location.as_ref())
-                .map(|l| l.machine.as_str())
-                .or_else(|| card.workspace.as_ref().map(|w| w.location.machine.as_str()))
-                .unwrap_or("local");
             ensure!(
                 !db.list::<Conversation>()?.iter().any(|c| c.id != context.id
                     && c.provider == context.provider
@@ -306,13 +298,8 @@ impl AppServer {
                         .any(|t| t.conversation_id.as_deref() == Some(&c.id)
                             && t.agent.as_ref().is_some_and(|a| {
                                 a.provider_session_id.as_deref() == Some(session)
-                                    && a.location
-                                        .as_ref()
-                                        .map(|l| l.machine.as_str())
-                                        .unwrap_or("local")
-                                        == machine
                             }))),
-                "Provider session is already bound to another Card/profile on this machine"
+                "Provider session is already bound to another Card/profile"
             );
             context.provider_session_id = Some(session.into());
             db.save(&context)?;
@@ -415,13 +402,6 @@ impl AppServer {
             .iter()
             .find(|c| c.id == old.card_id)
             .context("Card missing")?;
-        let location = old
-            .location
-            .as_ref()
-            .context("Retained execution location missing")?;
-        let runtime_home =
-            PathBuf::from(old.runtime_home.as_ref().context("Runtime home missing")?);
-        let remote = location.machine != "local";
         let client = canban_herdr::Client {
             config: self.config(),
         };
@@ -467,19 +447,15 @@ impl AppServer {
             run.lifecycle.close_reason.clear();
         }
         let card_events = self.store.lock().unwrap().db().events_for_card(&card.id)?;
-        let input = canban_context::capture_for(
+        let input = canban_context::capture(
             &self.home,
             project,
             card,
             &promoted_entry,
             snapshot,
             &card_events,
-            &runtime_home,
         )?;
         promoted_entry.agent.as_mut().unwrap().input_path = input.clone();
-        if remote {
-            self.stage_remote(&self.ops(&location.machine).host, &runtime_home, card)?;
-        }
         let _ = pending;
         self.store.lock().unwrap().write(|db| {
             let mut current: TerminalEntry = db.get(&entry.id)?;

@@ -10,7 +10,6 @@ fn fixture() -> Snapshot {
             delivery_mode: Default::default(),
             agent_overrides: Default::default(),
             tags: Default::default(),
-            location: None,
             id: id.into(),
             name: name.into(),
             directory: format!("/example/{id}"),
@@ -240,7 +239,7 @@ fn quick_open_excludes_archived_removed_and_merged_cards_and_their_sessions() {
             "merged": true,
             "checks": "success",
             "workspace": {
-                "location": {"machine": "local", "directory": "/example/p1"},
+                "directory": "/example/p1",
                 "path": "/example/p1"
             }
         }
@@ -289,8 +288,6 @@ fn quick_open_excludes_archived_removed_and_merged_cards_and_their_sessions() {
             origin_card_id: Some(card.id.clone()),
             agent_engine: None,
             runtime: Some(TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: None,
                 core_id: Some("core".into()),
                 terminal: Some(format!("pty-{idx}")),
                 state: "live".into(),
@@ -315,8 +312,6 @@ fn quick_open_excludes_archived_removed_and_merged_cards_and_their_sessions() {
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: Some(TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: None,
             core_id: Some("core".into()),
             terminal: Some("pty-ended".into()),
             state: "finished".into(),
@@ -340,8 +335,6 @@ fn quick_open_excludes_archived_removed_and_merged_cards_and_their_sessions() {
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: Some(TerminalRuntime {
-            machine: "local".into(),
-            owner_core_id: None,
             core_id: Some("core".into()),
             terminal: Some("pty-live".into()),
             state: "live".into(),
@@ -449,10 +442,7 @@ fn quick_open_indexes_standalone_managed_worktrees() {
         base_branch: "main".into(),
         base_commit: None,
         path: "/example/p1-wt".into(),
-        location: WorkLocation {
-            machine: "local".into(),
-            directory: "/example/p1-wt".into(),
-        },
+        directory: "/example/p1-wt".into(),
         created_at: 2,
     });
     let rows = candidates(&s);

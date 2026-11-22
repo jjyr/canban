@@ -115,7 +115,6 @@ impl AppServer {
                     .to_string_lossy()
                     .into_owned();
                 self.create_terminal(json!({
-                    "machine": "local",
                     "setup_argv": [gh, "auth", "login", "--hostname", "github.com"],
                     "request_key": p["request_key"],
                 }))

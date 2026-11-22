@@ -3,8 +3,7 @@
 pub(crate) mod selection;
 use crate::presenter::*;
 use canban_types::{
-    DEFAULT_WORKFLOW_TEMPLATE_ID, DetectedGitHub, Project, Snapshot, WorkLocation,
-    WorkflowTemplateFile,
+    DEFAULT_WORKFLOW_TEMPLATE_ID, DetectedGitHub, Project, Snapshot, WorkflowTemplateFile,
 };
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
@@ -115,7 +114,7 @@ fn browse_directory(
         let value = blocking(move || {
             crate::routed_call(
                 "directory.list",
-                json!({"host_id": req_host, "machine": "local", "path": req_path}),
+                json!({"host_id": req_host, "path": req_path}),
                 None,
             )
         })
@@ -220,16 +219,10 @@ pub fn directory_picker_for_host(
 
 pub fn project_location(ui: Ui) -> impl IntoElement {
     let p = ui.current_project();
-    let initial = p
-        .as_ref()
-        .map(Project::work_location)
-        .unwrap_or(WorkLocation {
-            machine: "local".into(),
-            directory: String::new(),
-        });
+    let initial = p.as_ref().map(|p| p.directory.clone()).unwrap_or_default();
     let host_id = signal(ui.active_project_host());
-    let directory = signal(initial.directory.clone());
-    let expected = initial.clone();
+    let directory = signal(initial.clone());
+    let expected = initial;
     let id = p.as_ref().map(|p| p.id.clone()).unwrap_or_default();
     let delete_id = id.clone();
     let project_name = p
@@ -271,20 +264,17 @@ pub fn project_location(ui: Ui) -> impl IntoElement {
                                         let id = id.clone();
                                         dispatch_then(
                                             ui,
-                                            "project.location",
+                                            "project.update",
                                             json!({
                                                 "project_id": id,
-                                                "expected_location": expected,
-                                                "location": {
-                                                    "machine": "local",
-                                                    "directory": directory.get_untracked().trim()
-                                                }
+                                                "expected_directory": expected,
+                                                "directory": directory.get_untracked().trim(),
                                             }),
                                             move |_| ui.navigate("board"),
                                         );
                                     })
                                     .disabled(move || {
-                                        ui.is_method_pending("project.location")
+                                        ui.is_method_pending("project.update")
                                             || directory.get().trim().is_empty()
                                     }),
                                 ),
@@ -881,10 +871,7 @@ pub fn new_project_form(
                     "project.detect_github",
                     json!({
                         "host_id": req_host,
-                        "location": {
-                            "machine": "local",
-                            "directory": target_path,
-                        }
+                        "directory": target_path,
                     }),
                     None,
                 )
@@ -1066,10 +1053,7 @@ pub fn new_project_form(
                                 let mut payload = json!({
                                     "host_id": chosen_host,
                                     "name": name.get_untracked().trim(),
-                                    "location": {
-                                        "machine": "local",
-                                        "directory": directory.get_untracked().trim(),
-                                    },
+                                    "directory": directory.get_untracked().trim(),
                                     "github_auto_link": auto_link,
                                     "agent_overrides": agent_overrides.get_untracked(),
                                 });
@@ -1306,8 +1290,6 @@ mod tests {
                     origin_card_id: None,
                     agent_engine: None,
                     runtime: Some(canban_types::TerminalRuntime {
-                        machine: "local".into(),
-                        owner_core_id: None,
                         core_id: None,
                         terminal: Some("h-1".into()),
                         state: "running".into(),

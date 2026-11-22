@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 pub const BASELINE: u32 = 8;
-pub const CURRENT: u32 = 21;
+pub const CURRENT: u32 = 22;
 pub struct Migration {
     pub version: u32,
     pub up: fn(&Transaction<'_>) -> Result<()>,
@@ -79,7 +79,268 @@ const STEPS: &[Migration] = &[
         up: activity_up,
         down: activity_down,
     },
+    Migration {
+        version: 22,
+        up: remove_legacy_remote_machine_up,
+        down: remove_legacy_remote_machine_down,
+    },
 ];
+
+fn flatten_workspace_binding(v: &mut Value) -> bool {
+    let Some(obj) = v.as_object_mut() else {
+        return false;
+    };
+    let Some(loc) = obj.remove("location") else {
+        return false;
+    };
+    if obj
+        .get("directory")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+        && let Some(dir) = loc.get("directory").and_then(Value::as_str)
+    {
+        obj.insert("directory".into(), Value::String(dir.to_owned()));
+    }
+    true
+}
+
+fn wrap_workspace_binding(v: &mut Value) -> bool {
+    let Some(obj) = v.as_object_mut() else {
+        return false;
+    };
+    if obj.contains_key("location") {
+        return false;
+    }
+    let Some(dir) = obj.remove("directory").and_then(|d| match d {
+        Value::String(s) => Some(s),
+        _ => None,
+    }) else {
+        return false;
+    };
+    obj.insert(
+        "location".into(),
+        serde_json::json!({"machine": "local", "directory": dir}),
+    );
+    true
+}
+
+fn rewrite_json_table(
+    tx: &Transaction<'_>,
+    table: &str,
+    mut transform: impl FnMut(&mut Value) -> bool,
+) -> Result<()> {
+    if !table_exists(tx, table)? {
+        return Ok(());
+    }
+    let rows: Vec<(String, String)> = {
+        let mut q = tx.prepare(&format!("SELECT id, data FROM {table}"))?;
+        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (id, raw) in rows {
+        let mut value: Value = serde_json::from_str(&raw)?;
+        if transform(&mut value) {
+            tx.execute(
+                &format!("UPDATE {table} SET data=?2 WHERE id=?1"),
+                params![id, serde_json::to_string(&value)?],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_legacy_remote_machine_up(tx: &Transaction<'_>) -> Result<()> {
+    rewrite_json_table(tx, "projects", |value| {
+        let Some(obj) = value.as_object_mut() else {
+            return false;
+        };
+        let Some(loc) = obj.remove("location") else {
+            return false;
+        };
+        if obj
+            .get("directory")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+            && let Some(dir) = loc.get("directory").and_then(Value::as_str)
+        {
+            obj.insert("directory".into(), Value::String(dir.to_owned()));
+        }
+        true
+    })?;
+
+    rewrite_json_table(tx, "cards", |value| {
+        let Some(obj) = value.as_object_mut() else {
+            return false;
+        };
+        let mut changed = false;
+        if let Some(ws) = obj.get_mut("workspace") {
+            changed |= flatten_workspace_binding(ws);
+        }
+        if let Some(history) = obj
+            .get_mut("workspace_history")
+            .and_then(Value::as_array_mut)
+        {
+            for ws in history {
+                changed |= flatten_workspace_binding(ws);
+            }
+        }
+        if let Some(ws) = obj
+            .get_mut("pull_request")
+            .and_then(|pr| pr.get_mut("workspace"))
+        {
+            changed |= flatten_workspace_binding(ws);
+        }
+        if let Some(prs) = obj
+            .get_mut("pull_request_history")
+            .and_then(Value::as_array_mut)
+        {
+            for pr in prs {
+                if let Some(ws) = pr.get_mut("workspace") {
+                    changed |= flatten_workspace_binding(ws);
+                }
+            }
+        }
+        changed
+    })?;
+
+    rewrite_json_table(tx, "managed_worktrees", flatten_workspace_binding)?;
+
+    rewrite_json_table(tx, "terminals", |value| {
+        let Some(obj) = value.as_object_mut() else {
+            return false;
+        };
+        let mut changed = false;
+        if let Some(rt) = obj.get_mut("runtime").and_then(Value::as_object_mut) {
+            changed |= rt.remove("machine").is_some();
+            changed |= rt.remove("owner_core_id").is_some();
+        }
+        if let Some(agent) = obj.get_mut("agent").and_then(Value::as_object_mut) {
+            if let Some(loc) = agent.remove("location") {
+                changed = true;
+                if agent
+                    .get("directory")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+                    && let Some(dir) = loc.get("directory").and_then(Value::as_str)
+                {
+                    agent.insert("directory".into(), Value::String(dir.to_owned()));
+                }
+            }
+            changed |= agent.remove("runtime_home").is_some();
+            changed |= agent.remove("owner_core_id").is_some();
+            if let Some(ws) = agent.get_mut("workspace") {
+                changed |= flatten_workspace_binding(ws);
+            }
+        }
+        changed
+    })?;
+
+    Ok(())
+}
+
+fn remove_legacy_remote_machine_down(tx: &Transaction<'_>) -> Result<()> {
+    rewrite_json_table(tx, "projects", |value| {
+        let Some(obj) = value.as_object_mut() else {
+            return false;
+        };
+        if obj.contains_key("location") {
+            return false;
+        }
+        let dir = obj
+            .get("directory")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        obj.insert(
+            "location".into(),
+            serde_json::json!({"machine": "local", "directory": dir}),
+        );
+        true
+    })?;
+
+    rewrite_json_table(tx, "cards", |value| {
+        let Some(obj) = value.as_object_mut() else {
+            return false;
+        };
+        let mut changed = false;
+        if let Some(ws) = obj.get_mut("workspace") {
+            changed |= wrap_workspace_binding(ws);
+        }
+        if let Some(history) = obj
+            .get_mut("workspace_history")
+            .and_then(Value::as_array_mut)
+        {
+            for ws in history {
+                changed |= wrap_workspace_binding(ws);
+            }
+        }
+        if let Some(ws) = obj
+            .get_mut("pull_request")
+            .and_then(|pr| pr.get_mut("workspace"))
+        {
+            changed |= wrap_workspace_binding(ws);
+        }
+        if let Some(prs) = obj
+            .get_mut("pull_request_history")
+            .and_then(Value::as_array_mut)
+        {
+            for pr in prs {
+                if let Some(ws) = pr.get_mut("workspace") {
+                    changed |= wrap_workspace_binding(ws);
+                }
+            }
+        }
+        changed
+    })?;
+
+    rewrite_json_table(tx, "managed_worktrees", wrap_workspace_binding)?;
+
+    rewrite_json_table(tx, "terminals", |value| {
+        let Some(obj) = value.as_object_mut() else {
+            return false;
+        };
+        let mut changed = false;
+        if let Some(rt) = obj.get_mut("runtime").and_then(Value::as_object_mut) {
+            if !rt.contains_key("machine") {
+                rt.insert("machine".into(), Value::String("local".into()));
+                changed = true;
+            }
+            if !rt.contains_key("owner_core_id") {
+                let owner = rt.get("core_id").cloned().unwrap_or(Value::Null);
+                rt.insert("owner_core_id".into(), owner);
+                changed = true;
+            }
+        }
+        if let Some(agent) = obj.get_mut("agent").and_then(Value::as_object_mut) {
+            if !agent.contains_key("location") {
+                let loc = match agent.remove("directory") {
+                    Some(Value::String(dir)) => {
+                        serde_json::json!({"machine": "local", "directory": dir})
+                    }
+                    _ => Value::Null,
+                };
+                agent.insert("location".into(), loc);
+                changed = true;
+            } else {
+                changed |= agent.remove("directory").is_some();
+            }
+            if !agent.contains_key("runtime_home") {
+                agent.insert("runtime_home".into(), Value::Null);
+                changed = true;
+            }
+            if !agent.contains_key("owner_core_id") {
+                let owner = agent.get("core_id").cloned().unwrap_or(Value::Null);
+                agent.insert("owner_core_id".into(), owner);
+                changed = true;
+            }
+            if let Some(ws) = agent.get_mut("workspace") {
+                changed |= wrap_workspace_binding(ws);
+            }
+        }
+        changed
+    })?;
+
+    Ok(())
+}
 
 fn activity_up(tx: &Transaction<'_>) -> Result<()> {
     tx.execute_batch(
@@ -3702,5 +3963,231 @@ mod tests {
 
         assert_eq!(migrate(home.path(), 20).unwrap(), 20);
         assert_eq!(migrate(home.path(), 21).unwrap(), 21);
+    }
+
+    #[test]
+    fn schema_22_removes_legacy_remote_machine_fields_and_round_trips_cleanly() {
+        use serde_json::json;
+        let home = tempfile::tempdir().unwrap();
+        let store = crate::Store::open(home.path()).unwrap();
+        assert_eq!(version(&store.conn).unwrap(), CURRENT);
+        drop(store);
+
+        assert_eq!(migrate(home.path(), 21).unwrap(), 21);
+        let conn = Connection::open(home.path().join("canban.sqlite")).unwrap();
+        let project_v21 = json!({
+            "id": "p1",
+            "name": "Demo",
+            "directory": "/repo/p1",
+            "location": {"machine": "local", "directory": "/repo/p1"},
+            "workflow": canban_types::Workflow::default(),
+            "created_at": 1
+        });
+        conn.execute(
+            "INSERT INTO projects(id, project_id, card_id, state, number, data) VALUES('p1', NULL, NULL, '', 0, ?1)",
+            [serde_json::to_string(&project_v21).unwrap()],
+        )
+        .unwrap();
+
+        let ws_v21 = json!({
+            "location": {"machine": "local", "directory": "/repo/p1"},
+            "path": "/wt/1",
+            "branch": "card/1",
+            "base_commit": "abc",
+            "target_branch": "main"
+        });
+        let pr_v21 = json!({
+            "repository": "org/repo",
+            "repository_id": 42,
+            "number": 7,
+            "url": "https://github.com/org/repo/pull/7",
+            "state": "open",
+            "head": "def",
+            "head_branch": "card/1",
+            "base_branch": "main",
+            "merged": false,
+            "checks": "success",
+            "workspace": ws_v21
+        });
+        let card_v21 = json!({
+            "id": "c1",
+            "project_id": "p1",
+            "number": 1,
+            "title": "Card 1",
+            "body": "",
+            "stage": "review",
+            "revision": 2,
+            "workspace": ws_v21,
+            "workspace_history": [ws_v21],
+            "pull_request": pr_v21,
+            "pull_request_history": [pr_v21],
+            "attention": null,
+            "archived_at": null,
+            "archive": null,
+            "archive_error": null,
+            "worktree": "/wt/1",
+            "created_at": 2
+        });
+        conn.execute(
+            "INSERT INTO cards(id, project_id, card_id, state, number, data) VALUES('c1', 'p1', NULL, 'review', 1, ?1)",
+            [serde_json::to_string(&card_v21).unwrap()],
+        )
+        .unwrap();
+
+        let wt_v21 = json!({
+            "id": "wt1",
+            "project_id": "p1",
+            "branch": "feat/x",
+            "base_branch": "main",
+            "base_commit": "abc",
+            "path": "/wt/managed",
+            "location": {"machine": "local", "directory": "/repo/p1"},
+            "created_at": 3
+        });
+        conn.execute(
+            "INSERT INTO managed_worktrees(id, project_id, card_id, state, number, data) VALUES('wt1', 'p1', NULL, '', 0, ?1)",
+            [serde_json::to_string(&wt_v21).unwrap()],
+        )
+        .unwrap();
+
+        let agent_term_v21 = json!({
+            "id": "c1:developer",
+            "conversation_id": "c1:developer",
+            "number": 1,
+            "name": null,
+            "runtime": null,
+            "agent": {
+                "project_id": "p1",
+                "card_id": "c1",
+                "number": 1,
+                "state": "completed",
+                "core_id": "core-1",
+                "owner_core_id": "core-1",
+                "runtime_home": "/home/user/.canban",
+                "location": {"machine": "local", "directory": "/repo/p1"},
+                "workspace": ws_v21,
+                "terminal": "pty-1",
+                "cwd": "/wt/1",
+                "input_path": "in.md",
+                "updated_at": 4
+            },
+            "created_at": 4
+        });
+        let shell_term_v21 = json!({
+            "id": "shell-1",
+            "conversation_id": null,
+            "number": 2,
+            "name": "Shell",
+            "runtime": {
+                "machine": "local",
+                "owner_core_id": "core-1",
+                "core_id": "core-1",
+                "terminal": "pty-2",
+                "state": "running",
+                "connection": "connected",
+                "error": null
+            },
+            "agent": null,
+            "created_at": 5
+        });
+        for (tid, num, state, row) in [
+            ("c1:developer", 1, "completed", agent_term_v21),
+            ("shell-1", 2, "running", shell_term_v21),
+        ] {
+            conn.execute(
+                "INSERT INTO terminals(id, project_id, card_id, state, number, data) VALUES(?1, 'p1', NULL, ?2, ?3, ?4)",
+                params![tid, state, num, serde_json::to_string(&row).unwrap()],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        assert_eq!(migrate(home.path(), 22).unwrap(), 22);
+        let store = crate::Store::open(home.path()).unwrap();
+        let snap = store.snapshot().unwrap();
+        assert_eq!(snap.projects.len(), 1);
+        assert_eq!(snap.projects[0].directory, "/repo/p1");
+        assert_eq!(
+            snap.cards[0].workspace.as_ref().unwrap().directory,
+            "/repo/p1"
+        );
+        assert_eq!(snap.cards[0].workspace_history[0].directory, "/repo/p1");
+        assert_eq!(
+            snap.cards[0]
+                .pull_request
+                .as_ref()
+                .unwrap()
+                .workspace
+                .directory,
+            "/repo/p1"
+        );
+        assert_eq!(
+            snap.cards[0].pull_request_history[0].workspace.directory,
+            "/repo/p1"
+        );
+        assert_eq!(snap.worktrees[0].directory, "/repo/p1");
+        assert_eq!(
+            snap.terminals[0]
+                .agent
+                .as_ref()
+                .unwrap()
+                .directory
+                .as_deref(),
+            Some("/repo/p1")
+        );
+        assert_eq!(
+            snap.terminals[0]
+                .agent
+                .as_ref()
+                .unwrap()
+                .workspace
+                .as_ref()
+                .unwrap()
+                .directory,
+            "/repo/p1"
+        );
+        for (tbl, id) in [
+            ("projects", "p1"),
+            ("cards", "c1"),
+            ("managed_worktrees", "wt1"),
+            ("terminals", "c1:developer"),
+            ("terminals", "shell-1"),
+        ] {
+            let raw: String = store
+                .conn
+                .query_row(&format!("SELECT data FROM {tbl} WHERE id=?1"), [id], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            let v: Value = serde_json::from_str(&raw).unwrap();
+            let text = v.to_string();
+            assert!(!text.contains("\"location\""), "{tbl}/{id}: {text}");
+            assert!(!text.contains("\"machine\""), "{tbl}/{id}: {text}");
+            assert!(!text.contains("\"owner_core_id\""), "{tbl}/{id}: {text}");
+            assert!(!text.contains("\"runtime_home\""), "{tbl}/{id}: {text}");
+        }
+        drop(store);
+
+        assert_eq!(migrate(home.path(), 21).unwrap(), 21);
+        let conn = Connection::open(home.path().join("canban.sqlite")).unwrap();
+        let p_raw: String = conn
+            .query_row("SELECT data FROM projects WHERE id='p1'", [], |r| r.get(0))
+            .unwrap();
+        let p_val: Value = serde_json::from_str(&p_raw).unwrap();
+        assert_eq!(
+            p_val["location"],
+            json!({"machine": "local", "directory": "/repo/p1"})
+        );
+        let t_raw: String = conn
+            .query_row("SELECT data FROM terminals WHERE id='shell-1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let t_val: Value = serde_json::from_str(&t_raw).unwrap();
+        assert_eq!(t_val["runtime"]["machine"], json!("local"));
+        assert_eq!(t_val["runtime"]["owner_core_id"], json!("core-1"));
+        drop(conn);
+
+        assert_eq!(migrate(home.path(), 22).unwrap(), 22);
     }
 }

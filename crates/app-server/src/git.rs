@@ -64,8 +64,7 @@ impl AppServer {
             (proj, card_opt, cards, managed)
         };
 
-        let machine = project.work_location().machine;
-        let ops = self.ops(&machine);
+        let ops = self.ops();
 
         let mut checkouts = Vec::<Value>::new();
         checkouts.push(json!({
@@ -79,12 +78,6 @@ impl AppServer {
             vec![(project.directory.clone(), None)];
 
         for c in &cards {
-            if c.workspace
-                .as_ref()
-                .is_some_and(|w| w.location.machine != machine)
-            {
-                continue;
-            }
             if let Some(wt_path) = c.worktree.as_deref().filter(|s| !s.is_empty()) {
                 allowed_paths.push((wt_path.to_owned(), Some(c.id.clone())));
                 if c.active() {
@@ -242,9 +235,8 @@ impl AppServer {
 
     fn git_refs_rpc(&self, p: Value) -> Result<Value> {
         let mut ctx = self.resolve_project_checkout(&p)?;
-        let machine = ctx.project.work_location().machine;
-        let _permit = self.check(&machine);
-        let ops = self.ops(&machine);
+        let _permit = self.check();
+        let ops = self.ops();
         let mut resp = ops.git_refs_in(&ctx.project, Some(&ctx.cwd))?;
         for wt in ops.list_git_worktrees(Path::new(&ctx.project.directory)) {
             let label = wt
@@ -301,36 +293,33 @@ impl AppServer {
 
     fn git_log_rpc(&self, p: Value) -> Result<Value> {
         let ctx = self.resolve_project_checkout(&p)?;
-        let machine = ctx.project.work_location().machine;
-        let _permit = self.check(&machine);
+        let _permit = self.check();
         let rev = p["rev"].as_str();
         let skip = p["skip"].as_u64().unwrap_or(0) as usize;
         let limit = p["limit"].as_u64().unwrap_or(40) as usize;
         let query = p["query"].as_str();
-        self.ops(&machine)
+        self.ops()
             .git_log(Path::new(&ctx.cwd), rev, skip, limit, query)
     }
 
     fn git_commit_detail_rpc(&self, p: Value) -> Result<Value> {
         let ctx = self.resolve_project_checkout(&p)?;
-        let machine = ctx.project.work_location().machine;
-        let _permit = self.check(&machine);
+        let _permit = self.check();
         let sha = strp(&p, "sha")?;
         let parent_index = p["parent_index"].as_u64().unwrap_or(0) as usize;
-        self.ops(&machine)
+        self.ops()
             .git_commit_detail(&ctx.project, Some(&ctx.cwd), sha, parent_index)
     }
 
     fn git_file_lines_rpc(&self, p: Value) -> Result<Value> {
         let ctx = self.resolve_project_checkout(&p)?;
-        let machine = ctx.project.work_location().machine;
-        let _permit = self.check(&machine);
+        let _permit = self.check();
         let path = strp(&p, "path")?;
         let source = p["source"].as_str().unwrap_or("workdir");
         let rev = p["rev"].as_str();
         let start_line = p["start_line"].as_u64().map(|n| n as usize);
         let end_line = p["end_line"].as_u64().map(|n| n as usize);
-        self.ops(&machine)
+        self.ops()
             .git_file_lines(canban_workspaces::compare::FileLinesRequest {
                 project: &ctx.project,
                 cwd_override: Some(&ctx.cwd),
@@ -352,16 +341,14 @@ impl AppServer {
             return Ok(res);
         }
         let ctx = self.resolve_project_checkout(&p)?;
-        let machine = ctx.project.work_location().machine;
         let paths = strings(&p, "paths");
         let all = p["all"].as_bool().unwrap_or(false);
         let res = {
-            let _permit = self.check(&machine);
-            self.ops(&machine)
-                .git_stage(Path::new(&ctx.cwd), &paths, all)?
+            let _permit = self.check();
+            self.ops().git_stage(Path::new(&ctx.cwd), &paths, all)?
         };
         self.save_idempotent_operation(idem, &res)?;
-        self.git_changed(&machine);
+        self.git_changed();
         self.emit("review", ctx.card_id);
         Ok(res)
     }
@@ -376,16 +363,14 @@ impl AppServer {
             return Ok(res);
         }
         let ctx = self.resolve_project_checkout(&p)?;
-        let machine = ctx.project.work_location().machine;
         let paths = strings(&p, "paths");
         let all = p["all"].as_bool().unwrap_or(false);
         let res = {
-            let _permit = self.check(&machine);
-            self.ops(&machine)
-                .git_unstage(Path::new(&ctx.cwd), &paths, all)?
+            let _permit = self.check();
+            self.ops().git_unstage(Path::new(&ctx.cwd), &paths, all)?
         };
         self.save_idempotent_operation(idem, &res)?;
-        self.git_changed(&machine);
+        self.git_changed();
         self.emit("review", ctx.card_id);
         Ok(res)
     }
@@ -400,15 +385,13 @@ impl AppServer {
             return Ok(res);
         }
         let ctx = self.resolve_project_checkout(&p)?;
-        let machine = ctx.project.work_location().machine;
         let paths = strings(&p, "paths");
         let res = {
-            let _permit = self.check(&machine);
-            self.ops(&machine)
-                .git_discard(Path::new(&ctx.cwd), &paths)?
+            let _permit = self.check();
+            self.ops().git_discard(Path::new(&ctx.cwd), &paths)?
         };
         self.save_idempotent_operation(idem, &res)?;
-        self.git_changed(&machine);
+        self.git_changed();
         self.request_deliveries();
         self.emit("review", ctx.card_id);
         Ok(res)
@@ -437,15 +420,14 @@ impl AppServer {
         } else {
             None
         };
-        let machine = ctx.project.work_location().machine;
         let message = strp(&p, "message")?;
         let amend = p["amend"].as_bool().unwrap_or(false);
         let stage_all = p["stage_all"].as_bool().unwrap_or(false);
         let and_push = p["push"].as_bool().unwrap_or(false);
 
         let mut res = {
-            let _permit = self.check(&machine);
-            let ops = self.ops(&machine);
+            let _permit = self.check();
+            let ops = self.ops();
             let mut commit_res = ops.git_commit(Path::new(&ctx.cwd), message, amend, stage_all)?;
             if and_push {
                 match ops.git_push(
@@ -471,7 +453,7 @@ impl AppServer {
         }
 
         self.save_idempotent_operation(idem, &res)?;
-        self.git_changed(&machine);
+        self.git_changed();
         drop(_gate);
         self.request_deliveries();
         self.emit("review", ctx.card_id);
@@ -488,11 +470,10 @@ impl AppServer {
             return Ok(res);
         }
         let ctx = self.resolve_project_checkout(&p)?;
-        let machine = ctx.project.work_location().machine;
         let prune = p["prune"].as_bool().unwrap_or(true);
         let res = {
-            let _permit = self.check(&machine);
-            self.ops(&machine).git_fetch(
+            let _permit = self.check();
+            self.ops().git_fetch(
                 &ctx.project,
                 Path::new(&ctx.cwd),
                 p["remote"].as_str(),
@@ -500,7 +481,7 @@ impl AppServer {
             )?
         };
         self.save_idempotent_operation(idem, &res)?;
-        self.git_changed(&machine);
+        self.git_changed();
         self.request_deliveries();
         self.emit("review", ctx.card_id);
         Ok(res)
@@ -528,10 +509,9 @@ impl AppServer {
         } else {
             None
         };
-        let machine = ctx.project.work_location().machine;
         let res = {
-            let _permit = self.check(&machine);
-            self.ops(&machine).git_pull(
+            let _permit = self.check();
+            self.ops().git_pull(
                 &ctx.project,
                 Path::new(&ctx.cwd),
                 p["remote"].as_str(),
@@ -539,7 +519,7 @@ impl AppServer {
             )?
         };
         self.save_idempotent_operation(idem, &res)?;
-        self.git_changed(&machine);
+        self.git_changed();
         drop(_gate);
         self.request_deliveries();
         self.emit("review", ctx.card_id);
@@ -556,11 +536,10 @@ impl AppServer {
             return Ok(res);
         }
         let ctx = self.resolve_project_checkout(&p)?;
-        let machine = ctx.project.work_location().machine;
         let set_upstream = p["set_upstream"].as_bool().unwrap_or(false);
         let res = {
-            let _permit = self.check(&machine);
-            self.ops(&machine).git_push(
+            let _permit = self.check();
+            self.ops().git_push(
                 &ctx.project,
                 Path::new(&ctx.cwd),
                 p["remote"].as_str(),
@@ -568,7 +547,7 @@ impl AppServer {
             )?
         };
         self.save_idempotent_operation(idem, &res)?;
-        self.git_changed(&machine);
+        self.git_changed();
         self.emit("review", ctx.card_id);
         Ok(res)
     }

@@ -69,16 +69,6 @@ fn conflicts(heads: &[String], candidate: &str) -> bool {
 }
 impl Ops {
     fn occupied(&self, path: &Path) -> Result<bool> {
-        if self.host.remote() {
-            return self
-                .host
-                .python(
-                    "import os,json,sys;print(json.dumps(os.path.lexists(sys.argv[1])))",
-                    &[path.to_str().context("Invalid worktree path")?],
-                )?
-                .as_bool()
-                .context("Invalid path availability response");
-        }
         match std::fs::symlink_metadata(path) {
             Ok(_) => Ok(true),
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
@@ -86,12 +76,6 @@ impl Ops {
         }
     }
     fn reserve_directory(&self, path: &Path) -> Result<bool> {
-        if self.host.remote() {
-            return self.host.python(
-                "import os,json,sys\ntry:\n os.mkdir(sys.argv[1]);print('true')\nexcept FileExistsError:\n print('false')",
-                &[path.to_str().context("Invalid worktree path")?],
-            )?.as_bool().context("Invalid directory reservation response");
-        }
         match std::fs::create_dir(path) {
             Ok(()) => Ok(true),
             Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(false),
@@ -99,12 +83,6 @@ impl Ops {
         }
     }
     fn release_empty_directory(&self, path: &Path) -> bool {
-        if self.host.remote() {
-            return self.host.python(
-                "import os,json,sys\ntry:\n os.rmdir(sys.argv[1]);print('true')\nexcept OSError:\n print('false')",
-                &[&path.to_string_lossy()],
-            ).ok() == Some(serde_json::json!(true));
-        }
         std::fs::remove_dir(path).is_ok()
     }
     fn heads(&self, source: &Path) -> Result<Vec<String>> {

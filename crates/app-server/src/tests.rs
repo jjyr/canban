@@ -996,7 +996,7 @@ fn remote_pr_merge_defers_archive_while_agent_live_then_archives_and_handles_pr_
                 checks_summary: None,
                 review_summary: "approved".into(),
                 workspace: WorkspaceBinding {
-                    location: project.work_location(),
+                    directory: project.directory.clone(),
                     path: run.agent.as_ref().unwrap().cwd.clone(),
                     branch: Some("canban/1".into()),
                     base_commit: None,
@@ -1867,7 +1867,7 @@ mod lifecycle_cases;
 #[path = "tests/terminals.rs"]
 mod terminal_cases;
 
-mod machines_cases;
+mod projects_cases;
 
 #[test]
 fn explicit_comment_recipients_override_prose_scanning() {
@@ -2560,9 +2560,7 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
     );
     assert_eq!(dev_inherited.effort.as_deref(), Some("medium"));
 
-    let cat_after_agy = app
-        .call("agent.catalog", json!({"machine": "local"}))
-        .unwrap();
+    let cat_after_agy = app.call("agent.catalog", json!({})).unwrap();
     let raw_dev = cat_after_agy["raw_profiles"]
         .as_array()
         .unwrap()
@@ -2801,9 +2799,7 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
     );
     assert_eq!(rev_custom.resume_command()[0], "/bin/agy-modified");
 
-    let cat_custom = app
-        .call("agent.catalog", json!({"machine": "local"}))
-        .unwrap();
+    let cat_custom = app.call("agent.catalog", json!({})).unwrap();
     let raw_agy = cat_custom["raw_profiles"]
         .as_array()
         .unwrap()
@@ -2877,9 +2873,7 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
         .unwrap();
     assert_eq!(agy_reset.command()[0], "agy");
     assert_eq!(agy_reset.resume_command()[0], "agy");
-    let cat_reset = app
-        .call("agent.catalog", json!({"machine": "local"}))
-        .unwrap();
+    let cat_reset = app.call("agent.catalog", json!({})).unwrap();
     let raw_agy_reset = cat_reset["raw_profiles"]
         .as_array()
         .unwrap()
@@ -4696,9 +4690,7 @@ fn agent_catalog_and_diagnostics_detect_custom_prefix_pi_via_hc_env_path() {
     canban_context::atomic(&cfg_path, &serde_json::to_vec_pretty(&cfg_val).unwrap()).unwrap();
     app.call("config.reload", json!({})).unwrap();
 
-    let catalog = app
-        .call("agent.catalog", json!({"machine": "local"}))
-        .unwrap();
+    let catalog = app.call("agent.catalog", json!({})).unwrap();
     let pi_entry = catalog["agents"]
         .as_array()
         .unwrap()
@@ -4731,7 +4723,7 @@ fn resolve_pr_remote_matches_upstream_and_falls_back_to_github_urls() {
 
     let (_dir, app, project, _card) = setup();
     let repo_dir = PathBuf::from(&project.directory);
-    let ops = app.ops("local");
+    let ops = app.ops();
     let run_git = |args: &[&str]| {
         let out = canban_exec::raw_command("git")
             .args(args)
@@ -4884,10 +4876,7 @@ fn project_delete_removes_canban_data_and_preserves_user_repo_and_worktrees() {
                 base_branch: "main".into(),
                 base_commit: None,
                 path: worktree1.to_string_lossy().into_owned(),
-                location: WorkLocation {
-                    machine: "local".into(),
-                    directory: repo1.to_string_lossy().into_owned(),
-                },
+                directory: repo1.to_string_lossy().into_owned(),
                 created_at: 1,
             })?;
             db.save(&TerminalEntry {
@@ -4899,8 +4888,6 @@ fn project_delete_removes_canban_data_and_preserves_user_repo_and_worktrees() {
                 origin_card_id: None,
                 agent_engine: None,
                 runtime: Some(TerminalRuntime {
-                    machine: "local".into(),
-                    owner_core_id: None,
                     core_id: None,
                     terminal: Some("h-live".into()),
                     state: "running".into(),

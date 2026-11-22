@@ -315,21 +315,10 @@ impl AppServer {
                 self.emit("desktop", None);
                 Ok(self.utilities.state())
             }
-            "usage.status" | "usage.refresh" => {
-                let machine = p["machine"].as_str().unwrap_or("local");
-                ensure!(
-                    machine.len() <= 128
-                        && machine
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)),
-                    "Invalid usage machine"
-                );
-                Ok(self.utilities.usage.request(
-                    self.config(),
-                    machine.into(),
-                    method == "usage.refresh",
-                ))
-            }
+            "usage.status" | "usage.refresh" => Ok(self
+                .utilities
+                .usage
+                .request(self.config(), method == "usage.refresh")),
             _ => anyhow::bail!("Unknown utility operation"),
         }
     }

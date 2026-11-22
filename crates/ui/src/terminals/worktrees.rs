@@ -5,8 +5,8 @@ use canban_types::{ManagedWorktree, Snapshot};
 use canban_ui_kit::compact_home;
 use nsh_core::element::desktop::{MenuItem, popup_menu, popup_menu_at};
 
-pub fn display_directory_path(path: &str, host: &str, machine: &str) -> String {
-    if (host.is_empty() || host == "local") && (machine.is_empty() || machine == "local") {
+pub fn display_directory_path(path: &str, host: &str) -> String {
+    if host.is_empty() || host == "local" {
         let home = std::env::var("HOME").unwrap_or_default();
         return compact_home(path, &home);
     }
@@ -21,7 +21,6 @@ pub enum WorktreeScope {
     Unassigned(String),
     Directory {
         host: String,
-        machine: String,
         path: String,
         project: Option<String>,
     },
@@ -74,12 +73,7 @@ pub fn format_git_indicators(dirty: bool, ahead: u32, behind: u32) -> Vec<String
 impl WorktreeScope {
     pub fn recent_key(&self) -> String {
         match self {
-            Self::Directory {
-                host,
-                machine,
-                path,
-                ..
-            } => format!("scope:directory:{host}:{machine}:{path}"),
+            Self::Directory { host, path, .. } => format!("scope:directory:{host}:{path}"),
             Self::ProjectRoot(pid) => format!("scope:project:{pid}"),
             Self::CardWorktree(cid) => format!("scope:card:{cid}"),
             Self::ManagedWorktree(wid) => format!("scope:worktree:{wid}"),
@@ -139,13 +133,8 @@ impl WorktreeScope {
                         .map(|w| w.branch.clone())
                 })
                 .unwrap_or_else(|| "worktree".into()),
-            Self::Directory {
-                host,
-                machine,
-                path,
-                ..
-            } => {
-                let short = display_directory_path(path, host, machine);
+            Self::Directory { host, path, .. } => {
+                let short = display_directory_path(path, host);
                 git.branch
                     .map(|b| format!("{short} · {b}"))
                     .unwrap_or(short)
@@ -191,13 +180,12 @@ pub fn entry_scope(s: &Snapshot, e: &Entry) -> WorktreeScope {
     if let Some(pid) = loc.project_id.as_ref()
         && s.projects
             .iter()
-            .any(|p| &p.id == pid && p.work_location().directory == path)
+            .any(|p| &p.id == pid && p.directory == path)
     {
         return WorktreeScope::ProjectRoot(pid.clone());
     }
     WorktreeScope::Directory {
         host: e.host_id.clone(),
-        machine: loc.machine.clone(),
         path,
         project: loc.project_id.clone(),
     }
@@ -234,9 +222,8 @@ pub fn scope_resolution_label(s: &Snapshot, scope: &WorktreeScope) -> Option<Str
 pub fn location_key(e: &Entry) -> String {
     match &e.location {
         Some(l) => format!(
-            "location:{}:{}:{}",
+            "location:{}:{}",
             e.host_id,
-            l.machine,
             l.directory_root
                 .as_deref()
                 .or(l.cwd.as_deref())
@@ -345,17 +332,16 @@ pub fn create_in_scope(ui: Ui, scope: &WorktreeScope) {
         }
         WorktreeScope::Directory {
             host,
-            machine,
             path,
             project,
         } => {
             super::launch_custom(
                 ui,
-                json!({ "host_id": host, "machine": machine, "cwd": path, "project_id": project }),
+                json!({ "host_id": host, "cwd": path, "project_id": project }),
             );
         }
         WorktreeScope::Unassigned(host_id) => {
-            super::launch_custom(ui, json!({ "host_id": host_id, "machine": "local" }));
+            super::launch_custom(ui, json!({ "host_id": host_id }));
         }
     }
 }
@@ -440,8 +426,6 @@ pub fn open_shell(ui: Ui, wt: &ManagedWorktree) {
             agent: None,
             created_at: canban_types::now(),
             runtime: Some(canban_types::TerminalRuntime {
-                machine: wt.location.machine.clone(),
-                owner_core_id: None,
                 core_id: Some("gallery".into()),
                 terminal: Some(id.clone()),
                 state: "running".into(),
@@ -455,7 +439,6 @@ pub fn open_shell(ui: Ui, wt: &ManagedWorktree) {
         };
         let ctx = canban_types::TerminalContext {
             terminal_id: id.clone(),
-            machine: wt.location.machine.clone(),
             core_id: "gallery".into(),
             terminal: id.clone(),
             cwd: Some(wt.path.clone()),
@@ -476,7 +459,6 @@ pub fn open_shell(ui: Ui, wt: &ManagedWorktree) {
         ui,
         json!({
             "project_id": wt.project_id,
-            "machine": wt.location.machine,
             "cwd": wt.path,
             "name": wt.branch,
         }),
@@ -492,7 +474,6 @@ pub fn open_agent(ui: Ui, wt: &ManagedWorktree, profile_id: &str) {
         ui,
         json!({
             "project_id": wt.project_id,
-            "machine": wt.location.machine,
             "cwd": wt.path,
             "profile_id": profile_id,
             "name": format!("{} · @{profile_id}", wt.branch),
@@ -731,10 +712,7 @@ fn create_modal(ui: Ui) -> impl IntoElement {
                         base_branch: if base.is_empty() { "main".into() } else { base },
                         base_commit: Some("0123456789abcdef".into()),
                         path: format!("/preview/worktrees/{br}"),
-                        location: canban_types::WorkLocation {
-                            machine: "local".into(),
-                            directory: "/preview/source".into(),
-                        },
+                        directory: "/preview/source".into(),
                         created_at: canban_types::now(),
                     };
                     let wt_open = wt.clone();

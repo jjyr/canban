@@ -130,7 +130,6 @@ fn submissions_finish_before_refresh_and_refresh_failure_does_not_fail_the_write
                                     std::thread::sleep(Duration::from_millis(2));
                                 }
                                 json!({
-                                    "machine": "local",
                                     "agents": [{"id":"codex","enabled":true,"configured":true,"installed":true}],
                                     "raw_profiles": [
                                         {"id":"codex","enabled":true,"identity":false,"preset":"codex","model":"gpt-5.4"},

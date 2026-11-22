@@ -1,7 +1,7 @@
 //! Fine-grained concurrency gates for code delivery and main checkout operations.
 //!
 //! Main checkout mutations (`git.pull`, `git.commit`, `review.merge`, single-card delivery, and
-//! batch fast-forward/push) are sharded by `(machine, canonical_dir)` so unrelated repositories
+//! batch fast-forward/push) are sharded by canonical checkout directory so unrelated repositories
 //! never block each other, while symlinked paths to the same physical checkout serialize safely.
 //! Project merge-queue execution is serialized per `project_id` so `_merge_queue` integration and
 //! test runs do not hold any main-checkout lock. Remote GitHub PR actions serialize per `card_id`.
@@ -10,11 +10,7 @@ use super::*;
 use std::collections::HashMap;
 use std::hash::Hash;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct CheckoutGateKey {
-    pub machine: String,
-    pub canonical_dir: PathBuf,
-}
+pub(crate) type CheckoutGateKey = PathBuf;
 
 #[derive(Default)]
 struct GateState {
@@ -113,38 +109,8 @@ pub(crate) fn format_checkout_busy_message(holder: Option<&str>) -> String {
 
 impl AppServer {
     pub(crate) fn checkout_gate_key(&self, project: &Project) -> CheckoutGateKey {
-        let loc = project.work_location();
-        let canonical_dir = if loc.machine == "local" {
-            std::fs::canonicalize(&loc.directory).unwrap_or_else(|_| PathBuf::from(&loc.directory))
-        } else {
-            let cache_key = (loc.machine.clone(), loc.directory.clone());
-            if let Some(cached) = self
-                .remote_canonical_dirs
-                .lock()
-                .unwrap()
-                .get(&cache_key)
-                .cloned()
-            {
-                cached
-            } else if self.remote_connected(&format!("{}/_", loc.machine))
-                && let Ok(canon) = self
-                    .ops(&loc.machine)
-                    .host
-                    .canonical(Path::new(&loc.directory))
-            {
-                self.remote_canonical_dirs
-                    .lock()
-                    .unwrap()
-                    .insert(cache_key, canon.clone());
-                canon
-            } else {
-                PathBuf::from(&loc.directory)
-            }
-        };
-        CheckoutGateKey {
-            machine: loc.machine,
-            canonical_dir,
-        }
+        std::fs::canonicalize(&project.directory)
+            .unwrap_or_else(|_| PathBuf::from(&project.directory))
     }
 
     pub(crate) fn checkout_holder_label(

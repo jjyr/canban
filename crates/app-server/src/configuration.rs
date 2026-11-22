@@ -185,8 +185,6 @@ impl AppServer {
                     current.provider_session_id = Some(super::runtime::uuid_session_id());
                 }
                 terminal.runtime = Some(TerminalRuntime {
-                    machine: "local".into(),
-                    owner_core_id: None,
                     core_id: None,
                     terminal: None,
                     state: "starting".into(),
@@ -271,8 +269,7 @@ impl AppServer {
                     env,
                     cwd: cwd_str.clone(),
                 })?;
-                let receipt = client.launch_on(
-                    "local",
+                let receipt = client.launch(
                     spec.argv,
                     &spec.cwd,
                     spec.env,
@@ -284,17 +281,15 @@ impl AppServer {
                 let address = strp(&receipt, "address")?.to_owned();
                 let runtime = terminal.runtime.as_mut().unwrap();
                 runtime.core_id = Some(core.clone());
-                runtime.owner_core_id = Some(core.clone());
                 runtime.terminal = Some(address.clone());
                 runtime.state = "running".into();
                 runtime.connection = "connected".into();
                 {
                     let mut inv = self.inventory.lock().unwrap();
                     if inv.core == core {
-                        let key = inv.address(&address);
-                        inv.records.entry(key.clone()).or_insert_with(|| {
+                        inv.records.entry(address.clone()).or_insert_with(|| {
                             let mut seeded = receipt.clone();
-                            seeded["address"] = json!(key);
+                            seeded["address"] = json!(address);
                             if seeded["state"].is_null() {
                                 seeded["state"] = json!("live");
                             }

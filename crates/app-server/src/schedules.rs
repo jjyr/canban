@@ -426,7 +426,7 @@ pub(super) fn fire_schedule(
             profile_id: None,
             provider_session_id: None,
             terminal_id: wf_run.terminal_id,
-            cwd: project.work_location().directory,
+            cwd: project.directory.clone(),
             state: initial_state,
             summary: Some(format!("Created Card #{} ({})", card.number, card.title)),
             report_path: None,
@@ -462,13 +462,6 @@ pub(super) fn fire_schedule(
         } else {
             None
         };
-        let location = project_opt
-            .as_ref()
-            .map(Project::work_location)
-            .unwrap_or_else(|| WorkLocation {
-                machine: "local".into(),
-                directory: home.to_string_lossy().into_owned(),
-            });
         let terminal_id = if let Some(prof) = selected_profile.as_ref() {
             let entry = TerminalEntry {
                 id: run_id.clone(),
@@ -484,8 +477,6 @@ pub(super) fn fire_schedule(
                 agent_engine: Some(profile_agent_engine(prof)),
                 created_at: now_ms,
                 runtime: Some(TerminalRuntime {
-                    machine: location.machine.clone(),
-                    owner_core_id: None,
                     core_id: None,
                     terminal: None,
                     state: "queued".into(),
@@ -523,7 +514,10 @@ pub(super) fn fire_schedule(
             profile_id: selected_profile.map(|p| p.id),
             provider_session_id: None,
             terminal_id,
-            cwd: location.directory,
+            cwd: project_opt
+                .as_ref()
+                .map(|p| p.directory.clone())
+                .unwrap_or_else(|| home.to_string_lossy().into_owned()),
             state: "queued".into(),
             summary: None,
             report_path: None,
@@ -647,12 +641,6 @@ impl AppServer {
     ) -> Result<()> {
         if run.state == "queued" {
             item.runtime = Some(TerminalRuntime {
-                machine: item
-                    .runtime
-                    .as_ref()
-                    .map(|r| r.machine.clone())
-                    .unwrap_or_else(|| "local".into()),
-                owner_core_id: None,
                 core_id: None,
                 terminal: None,
                 state: "finished".into(),
@@ -1210,38 +1198,14 @@ impl AppServer {
         project: Option<&Project>,
         rev: &WorkflowRevision,
     ) -> Result<()> {
-        let mut location = project
-            .map(Project::work_location)
-            .unwrap_or_else(|| WorkLocation {
-                machine: "local".into(),
-                directory: self.home.to_string_lossy().into_owned(),
-            });
-        if self.observer_running.load(Ordering::SeqCst) {
-            self.resolve_machine(&location.machine, true)?;
-        }
-        let remote = location.machine != "local";
-        let exec_home = self.execution_home(&location.machine)?;
-        if project.is_none() {
-            location.directory = exec_home.to_string_lossy().into_owned();
-        }
-        let ops = self.ops(&location.machine);
-        let run_dir_local = self.schedule_run_dir(&self.home, run);
-        std::fs::create_dir_all(run_dir_local.join("reports"))?;
-        let run_dir_exec = self.schedule_run_dir(&exec_home, run);
-        ops.host.mkdir(&run_dir_exec)?;
+        let directory = project
+            .map(|p| p.directory.clone())
+            .unwrap_or_else(|| self.home.to_string_lossy().into_owned());
+        let ops = self.ops();
+        let run_dir = self.schedule_run_dir(&self.home, run);
+        std::fs::create_dir_all(run_dir.join("reports"))?;
 
-        let endpoint = if remote {
-            format!("spool:{}", exec_home.join("rpc").display())
-        } else {
-            self.endpoint().to_string_lossy().into_owned()
-        };
-        let cli = if remote {
-            exec_home.join("bin/canban")
-        } else {
-            self.cli.clone()
-        };
-
-        let handoff_path = run_dir_local.join("handoff.json");
+        let handoff_path = run_dir.join("handoff.json");
         let (mut shared_env, mut script_notes) = if handoff_path.exists()
             && let Ok(raw) = std::fs::read_to_string(&handoff_path)
             && let Ok(v) = serde_json::from_str::<Value>(&raw)
@@ -1315,33 +1279,24 @@ impl AppServer {
                     });
                     self.emit("schedules", None);
 
-                    let base = Path::new(&location.directory);
+                    let base = Path::new(&directory);
                     let script_cwd = crate::scripts::resolve_working_directory(
                         &ops.host,
                         base,
                         working_directory.as_deref(),
                     )?;
                     let slug = crate::scripts::sanitized_step_slug(&step_id);
-                    let scripts_dir = run_dir_exec.join("scripts");
-                    ops.host.mkdir(&scripts_dir)?;
+                    let scripts_dir = run_dir.join("scripts");
+                    std::fs::create_dir_all(&scripts_dir)?;
                     let script_file = scripts_dir.join(format!("{slug}.sh"));
                     let env_file = scripts_dir.join(format!("{slug}.env"));
                     let output_file = scripts_dir.join(format!("{slug}.output"));
-                    let log_file = run_dir_local.join("scripts").join(format!("{slug}.log"));
-                    std::fs::create_dir_all(log_file.parent().unwrap())?;
-                    ops.host.write(&script_file.to_string_lossy(), body)?;
-                    ops.host.write(&env_file.to_string_lossy(), "")?;
-                    ops.host.write(&output_file.to_string_lossy(), "")?;
+                    let log_file = scripts_dir.join(format!("{slug}.log"));
+                    canban_context::atomic(&script_file, body.as_bytes())?;
+                    canban_context::atomic(&env_file, b"")?;
+                    canban_context::atomic(&output_file, b"")?;
 
-                    let mut env = self.base_schedule_env(
-                        &cli,
-                        &exec_home,
-                        &endpoint,
-                        project,
-                        run,
-                        &run_dir_exec,
-                        Some(&step_id),
-                    );
+                    let mut env = self.base_schedule_env(project, run, &run_dir, Some(&step_id));
                     env.insert("CANBAN_ENV".into(), env_file.to_string_lossy().into_owned());
                     env.insert(
                         "CANBAN_OUTPUT".into(),
@@ -1356,38 +1311,22 @@ impl AppServer {
                     let argv = crate::scripts::shell_argv(shell.as_deref(), &script_file)?;
                     let timeout_secs =
                         crate::scripts::script_timeout_secs(*timeout_minutes, *timeout_seconds);
-                    let (exit_code, timed_out) = if !remote {
-                        let cfg = self.config();
-                        let env_policy = canban_exec::shell_env::LocalEnvPolicy::for_source_trust(
-                            cfg.terminal_env_mode.is_inherit(),
-                            Some("local"),
-                        );
-                        crate::scripts::run_local_process_with_policy(
-                            &argv,
-                            &script_cwd,
-                            &env,
-                            &cfg.hc_env,
-                            env_policy,
-                            &log_file,
-                            timeout_secs,
-                        )?
-                    } else {
-                        let mut wrapped_argv = Vec::with_capacity(env.len() + argv.len() + 1);
-                        wrapped_argv.push("env".to_owned());
-                        for (k, v) in &env {
-                            wrapped_argv.push(format!("{k}={v}"));
-                        }
-                        wrapped_argv.extend(argv.iter().cloned());
-                        let args_ref: Vec<&str> = wrapped_argv.iter().map(String::as_str).collect();
-                        let out = ops.host.run(&script_cwd, &args_ref, None)?;
-                        let mut combined = out.stdout;
-                        combined.extend_from_slice(&out.stderr);
-                        canban_context::atomic(&log_file, &combined)?;
-                        (out.status.code().map(i64::from), false)
-                    };
+                    let cfg = self.config();
+                    let env_policy = canban_exec::shell_env::LocalEnvPolicy::for_source_trust(
+                        cfg.terminal_env_mode.is_inherit(),
+                        Some("local"),
+                    );
+                    let (exit_code, timed_out) = crate::scripts::run_local_process_with_policy(
+                        &argv,
+                        &script_cwd,
+                        &env,
+                        &cfg.hc_env,
+                        env_policy,
+                        &log_file,
+                        timeout_secs,
+                    )?;
                     let duration_ms = now().saturating_sub(step_started_at);
-                    if !remote
-                        && let Ok(raw_env) = std::fs::read_to_string(&env_file)
+                    if let Ok(raw_env) = std::fs::read_to_string(&env_file)
                         && let Ok(parsed) = crate::scripts::parse_key_value_file(&raw_env)
                     {
                         for (k, v) in parsed {
@@ -1495,8 +1434,6 @@ impl AppServer {
                                 agent_engine: Some(profile_agent_engine(&prof)),
                                 created_at: now(),
                                 runtime: Some(TerminalRuntime {
-                                    machine: location.machine.clone(),
-                                    owner_core_id: None,
                                     core_id: None,
                                     terminal: None,
                                     state: if slot_free { "starting" } else { "queued" }.into(),
@@ -1540,14 +1477,8 @@ impl AppServer {
                     return self.launch_cardless_agent_step(
                         run,
                         project,
-                        &location,
-                        remote,
-                        &exec_home,
-                        &ops,
-                        &run_dir_local,
-                        &run_dir_exec,
-                        &cli,
-                        &endpoint,
+                        &directory,
+                        &run_dir,
                         &step_id,
                         step_prof.as_deref(),
                         Some(instruction.as_str()),
@@ -1573,14 +1504,8 @@ impl AppServer {
         &self,
         run: &mut ScheduledRun,
         project: Option<&Project>,
-        location: &WorkLocation,
-        remote: bool,
-        exec_home: &Path,
-        ops: &canban_workspaces::Ops,
-        run_dir_local: &Path,
-        run_dir_exec: &Path,
-        cli: &Path,
-        endpoint: &str,
+        directory: &str,
+        run_dir: &Path,
         step_id: &str,
         step_prof: Option<&str>,
         instruction: Option<&str>,
@@ -1599,15 +1524,7 @@ impl AppServer {
         } else {
             None
         };
-        let mut env = self.base_schedule_env(
-            cli,
-            exec_home,
-            endpoint,
-            project,
-            run,
-            run_dir_exec,
-            Some(step_id),
-        );
+        let mut env = self.base_schedule_env(project, run, run_dir, Some(step_id));
         env.insert("CANBAN_PROFILE_ID".into(), prof.id.clone());
         env.insert(
             "CANBAN_SESSION_ID".into(),
@@ -1622,22 +1539,22 @@ impl AppServer {
 
         let prompt = self.render_cardless_schedule_prompt(
             project,
-            location,
+            directory,
             run,
             &prof,
             step_id,
             instruction,
             script_notes,
         );
-        canban_context::atomic(&run_dir_local.join("prompt.md"), prompt.as_bytes())?;
+        canban_context::atomic(&run_dir.join("prompt.md"), prompt.as_bytes())?;
         canban_context::atomic(
-            &run_dir_local.join("context.json"),
+            &run_dir.join("context.json"),
             &serde_json::to_vec_pretty(&json!({
                 "schedule_run_id": run.id,
                 "schedule_id": run.schedule_id,
                 "scope": if project.is_some() { "project" } else { "global" },
-                "project": project.map(|p| json!({ "id": p.id, "name": p.name, "directory": location.directory })).unwrap_or(Value::Null),
-                "cwd": location.directory,
+                "project": project.map(|p| json!({ "id": p.id, "name": p.name, "directory": directory })).unwrap_or(Value::Null),
+                "cwd": directory,
                 "workflow_id": run.workflow_id,
                 "workflow_name": run.workflow_name,
                 "rule_id": run.rule_id,
@@ -1654,10 +1571,10 @@ impl AppServer {
             session_id.as_deref(),
             true,
             &[
-                ("home", &exec_home.to_string_lossy()),
-                ("cwd", &location.directory),
-                ("project_dir", &location.directory),
-                ("cli", &cli.to_string_lossy()),
+                ("home", &self.home.to_string_lossy()),
+                ("cwd", directory),
+                ("project_dir", directory),
+                ("cli", &self.cli.to_string_lossy()),
                 ("prompt", &prompt),
             ],
         )?;
@@ -1666,15 +1583,7 @@ impl AppServer {
             .as_deref()
             .is_some_and(|s| s.starts_with("herdr:"));
         if !is_herdr_template {
-            if !remote {
-                argv[0] = canban_profiles::executable_with_env(&argv[0], &config.hc_env);
-            } else if Path::new(&argv[0]).components().count() == 1 {
-                let program = ops.host.python(
-                    "import os,shutil,json,sys;h=os.path.expanduser('~');p=os.environ.get('PATH','')+os.pathsep+os.path.join(h,'.local/bin')+os.pathsep+os.path.join(h,'.cargo/bin');print(json.dumps(shutil.which(sys.argv[1],path=p) or sys.argv[1]))",
-                    &[&argv[0]],
-                )?;
-                argv[0] = program.as_str().context("No remote executable")?.into();
-            }
+            argv[0] = canban_profiles::executable_with_env(&argv[0], &config.hc_env);
         }
 
         let client = canban_herdr::Client { config };
@@ -1692,36 +1601,31 @@ impl AppServer {
             profile: Some(&prof),
             argv,
             env,
-            cwd: location.directory.clone(),
+            cwd: directory.to_owned(),
         })?;
         let env_policy = canban_exec::shell_env::LocalEnvPolicy::for_source_trust(
             client.config.terminal_env_mode.is_inherit(),
             Some("local"),
         );
-        let receipt = client.launch_on_with_policy(
-            &location.machine,
-            spec.argv,
-            &spec.cwd,
-            spec.env,
-            labels,
-            env_policy,
-        )?;
+        let receipt =
+            client.launch_with_policy(spec.argv, &spec.cwd, spec.env, labels, env_policy)?;
         let terminal_address = strp(&receipt, "address")?.to_owned();
         {
             let mut inv = self.inventory.lock().unwrap();
             if inv.core == core_id {
-                let key = inv.address(&terminal_address);
-                inv.records.entry(key.clone()).or_insert_with(|| {
-                    let mut seeded = receipt.clone();
-                    seeded["address"] = json!(key);
-                    if seeded["state"].is_null() {
-                        seeded["state"] = json!("live");
-                    }
-                    if seeded["cwd"].is_null() {
-                        seeded["cwd"] = json!(location.directory);
-                    }
-                    seeded
-                });
+                inv.records
+                    .entry(terminal_address.clone())
+                    .or_insert_with(|| {
+                        let mut seeded = receipt.clone();
+                        seeded["address"] = json!(terminal_address);
+                        if seeded["state"].is_null() {
+                            seeded["state"] = json!("live");
+                        }
+                        if seeded["cwd"].is_null() {
+                            seeded["cwd"] = json!(directory);
+                        }
+                        seeded
+                    });
             }
         }
         let prev_out = run.output_path.clone();
@@ -1752,19 +1656,13 @@ impl AppServer {
             if cur.state == "starting" {
                 cur.state = "running".into();
             }
-            cur.cwd = location.directory.clone();
+            cur.cwd = directory.to_owned();
             db.save(&cur)?;
 
             let tid = cur.terminal_id.clone().unwrap_or_else(|| run.id.clone());
             let mut entry: TerminalEntry = db.get(&tid)?;
             entry.agent_engine = Some(profile_agent_engine(&prof));
             entry.runtime = Some(TerminalRuntime {
-                machine: location.machine.clone(),
-                owner_core_id: if remote {
-                    Some(location.machine.clone())
-                } else {
-                    Some(core_id.clone())
-                },
                 core_id: Some(core_id),
                 terminal: Some(terminal_address),
                 state: "running".into(),
@@ -1822,24 +1720,23 @@ impl AppServer {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn base_schedule_env(
         &self,
-        cli: &Path,
-        exec_home: &Path,
-        endpoint: &str,
         project: Option<&Project>,
         run: &ScheduledRun,
         run_dir: &Path,
         step_id: Option<&str>,
     ) -> BTreeMap<String, String> {
         let mut env = BTreeMap::from([
-            ("CANBAN_CLI".into(), cli.to_string_lossy().into_owned()),
+            ("CANBAN_CLI".into(), self.cli.to_string_lossy().into_owned()),
             (
                 "CANBAN_HOME".into(),
-                exec_home.to_string_lossy().into_owned(),
+                self.home.to_string_lossy().into_owned(),
             ),
-            ("CANBAN_ENDPOINT".into(), endpoint.to_owned()),
+            (
+                "CANBAN_ENDPOINT".into(),
+                self.endpoint().to_string_lossy().into_owned(),
+            ),
             ("CANBAN_SCHEDULE_ID".into(), run.schedule_id.clone()),
             ("CANBAN_SCHEDULE_RUN_ID".into(), run.id.clone()),
             ("CANBAN_WORKFLOW".into(), run.workflow_id.clone()),
@@ -1849,16 +1746,15 @@ impl AppServer {
             ),
         ]);
         if let Some(proj) = project {
-            let loc = proj.work_location();
             env.insert("CANBAN_SCOPE".into(), "project".into());
             env.insert("CANBAN_PROJECT".into(), proj.id.clone());
-            env.insert("CANBAN_PROJECT_DIR".into(), loc.directory.clone());
-            env.insert("CANBAN_WORKSPACE".into(), loc.directory);
+            env.insert("CANBAN_PROJECT_DIR".into(), proj.directory.clone());
+            env.insert("CANBAN_WORKSPACE".into(), proj.directory.clone());
         } else {
             env.insert("CANBAN_SCOPE".into(), "global".into());
             env.insert(
                 "CANBAN_WORKSPACE".into(),
-                exec_home.to_string_lossy().into_owned(),
+                self.home.to_string_lossy().into_owned(),
             );
         }
         if let Some(sid) = step_id {
@@ -1871,7 +1767,7 @@ impl AppServer {
     fn render_cardless_schedule_prompt(
         &self,
         project: Option<&Project>,
-        location: &WorkLocation,
+        directory: &str,
         run: &ScheduledRun,
         profile: &Profile,
         step_id: &str,
@@ -1898,7 +1794,7 @@ impl AppServer {
              - Run ID: `{}`\n",
             run.workflow_name,
             run.number,
-            location.directory,
+            directory,
             run.rule_id,
             run.cron,
             run.workflow_id,

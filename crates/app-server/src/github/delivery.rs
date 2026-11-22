@@ -50,7 +50,7 @@ impl AppServer {
             client.repo(&repository)?.id == repository_id,
             "Delivery repository identity changed"
         );
-        let ops = self.ops(&project.work_location().machine);
+        let ops = self.ops();
         let push_repo = canban_github::remote_repository(&ops.push_remote(&project, &card)?)?;
         let push_info: Value = client.get(&format!("/repos/{push_repo}"))?;
         ensure!(
@@ -696,9 +696,7 @@ impl AppServer {
                 if card.worktree.is_none() || !self.should_probe_branch_history(&card.id, branch) {
                     return None;
                 }
-                let local_head_sha = self
-                    .ops(&project.work_location().machine)
-                    .card_head_sha(project, &card)?;
+                let local_head_sha = self.ops().card_head_sha(project, &card)?;
                 let head_owner = push_owner
                     .as_deref()
                     .or_else(|| source.repository.split('/').next())?;
@@ -824,9 +822,7 @@ impl AppServer {
         )
         .cloned();
         if matched.is_none() {
-            let local_head_sha = self
-                .ops(&project.work_location().machine)
-                .card_head_sha(&project, card);
+            let local_head_sha = self.ops().card_head_sha(&project, card);
             if let Some(sha) = local_head_sha {
                 let all_prs: Vec<Value> = client.get(&format!(
                     "/repos/{}/pulls?state=all&head={}&per_page=10",
@@ -906,15 +902,12 @@ impl AppServer {
     }
 
     fn project_push_owner(&self, project: &Project, default_repo: &str) -> Option<String> {
-        let loc = project.work_location();
         let remote_name = if project.workflow.workspace.remote.trim().is_empty() {
             "origin"
         } else {
             project.workflow.workspace.remote.trim()
         };
-        let urls = self
-            .ops(&loc.machine)
-            .remote_urls(&loc.directory, remote_name);
+        let urls = self.ops().remote_urls(&project.directory, remote_name);
         urls.into_iter()
             .find(|(name, _)| name == remote_name)
             .and_then(|(_, url)| canban_github::remote_repository(&url).ok())
@@ -946,10 +939,8 @@ impl AppServer {
             let Ok(_gate) = self.try_lock_checkout(&project, holder) else {
                 return;
             };
-            let _ = self
-                .ops(&project.work_location().machine)
-                .sync_target(&project, target_branch);
-            self.git_changed(&project.work_location().machine);
+            let _ = self.ops().sync_target(&project, target_branch);
+            self.git_changed();
         }
     }
     pub(crate) fn reconcile_remote_pr_merge(
@@ -1076,8 +1067,7 @@ impl AppServer {
             .find(|c| Some(c.id.as_str()) == p["card_id"].as_str())
             .context("Card not found")?;
         let pr = policy::validate_merge(&card, strp(&p, "head")?)?;
-        self.ops(&pr.workspace.location.machine)
-            .verify_clean_head(&pr.workspace.path, &pr.head)?;
+        self.ops().verify_clean_head(&pr.workspace.path, &pr.head)?;
         let mut execute = false;
         let mut saved_pr = None;
         let receipt=self.mutate("github.pr.merge",&p,|db|{
