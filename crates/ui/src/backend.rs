@@ -8,7 +8,7 @@
 //! subprocess crates.
 
 use anyhow::Result;
-use canban_types::{AppEvent, Config, HostSummary, SavedHost, Snapshot};
+use canban_types::{AppEvent, Config, HostSummary, SavedHost, Snapshot, SyncAction, SyncItemView};
 use serde_json::{Value, json};
 use std::{
     path::PathBuf,
@@ -140,6 +140,14 @@ pub trait UiBackend: Send + Sync + 'static {
     fn update_remote_daemon(&self, _host_id: &str) -> Result<Value> {
         anyhow::bail!("Remote daemon updates are not supported by this backend")
     }
+
+    fn sync_items(&self) -> Vec<SyncItemView> {
+        Vec::new()
+    }
+
+    fn sync_action(&self, _host_id: &str, _mutation_id: &str, _action: SyncAction) -> Result<()> {
+        anyhow::bail!("Offline sync is not supported by this backend")
+    }
 }
 
 static BACKEND: OnceLock<Arc<dyn UiBackend>> = OnceLock::new();
@@ -239,6 +247,17 @@ pub fn home_for(host_id: &str) -> String {
 
 pub fn local_home() -> Option<PathBuf> {
     BACKEND.get().and_then(|b| b.local_home())
+}
+
+pub fn sync_items() -> Vec<SyncItemView> {
+    BACKEND.get().map(|b| b.sync_items()).unwrap_or_default()
+}
+
+pub fn sync_action(host_id: &str, mutation_id: &str, action: SyncAction) -> Result<()> {
+    let backend = BACKEND
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("Gallery preview: no AppServer connected"))?;
+    backend.sync_action(host_id, mutation_id, action)
 }
 
 /// Desktop API version used for compatibility displays and fixture metadata.
@@ -553,6 +572,21 @@ impl UiBackend for LocalBackend {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Host registry unavailable"))?;
         hosts.update_remote_daemon(host_id)
+    }
+
+    fn sync_items(&self) -> Vec<SyncItemView> {
+        self.hosts
+            .as_ref()
+            .map(|h| h.sync_items())
+            .unwrap_or_default()
+    }
+
+    fn sync_action(&self, host_id: &str, mutation_id: &str, action: SyncAction) -> Result<()> {
+        let hosts = self
+            .hosts
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Host registry unavailable"))?;
+        hosts.sync_action(host_id, mutation_id, action)
     }
 }
 

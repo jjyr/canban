@@ -50,6 +50,7 @@ canban-scheduler = { path = "crates/scheduler" }
 canban-herdr = { path = "crates/herdr" }
 canban-workspaces = { path = "crates/workspaces" }
 canban-app-server = { path = "crates/app-server" }
+canban-sync = { path = "crates/sync" }
 canban-ui-kit = { path = "crates/ui-kit" }
 canban-terminal = { path = "crates/terminal" }
 

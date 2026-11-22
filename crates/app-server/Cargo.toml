@@ -36,6 +36,7 @@ canban-workspaces.workspace = true
 
 canban-github.workspace = true
 canban-usage.workspace = true
+canban-sync.workspace = true
 keepawake = { version = "0.6.1", default-features = false }
 
 [dev-dependencies]

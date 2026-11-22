@@ -702,12 +702,18 @@ impl AppServer {
                 );
                 let project: Project =
                     db.get(&super::resolve_project_id(db, strp(&p, "project_id")?)?)?;
-                let mut c = canban_kanban::create(
+                let explicit_id = p
+                    .get("id")
+                    .filter(|v| !v.is_null())
+                    .map(|v| v.as_str().context("Card id must be a string"))
+                    .transpose()?;
+                let mut c = canban_kanban::create_with_id(
                     db,
                     &project,
                     strp(&p, "title")?,
                     p["body"].as_str().unwrap_or(""),
                     "user",
+                    explicit_id,
                 )?;
                 c.created_by = self
                     .github
@@ -1209,14 +1215,33 @@ impl AppServer {
                 let before = c.clone();
                 let body = strp(&p, "body")?;
                 ensure!(!body.trim().is_empty(), "Comment is empty");
-                let event = db.append(canban_timeline::event(
+                let explicit_id = p
+                    .get("id")
+                    .filter(|v| !v.is_null())
+                    .map(|v| v.as_str().context("Comment id must be a string"))
+                    .transpose()?;
+                let mut ev = canban_timeline::event(
                     &c.project_id,
                     &c.id,
                     "comment.created",
                     "user",
                     body,
                     json!({"body":body}),
-                ))?;
+                );
+                if let Some(custom_id) = explicit_id {
+                    ensure!(
+                        canban_types::is_valid_client_id(custom_id),
+                        "Invalid comment ID: expected 1..=64 ASCII alphanumeric, '_' or '-' characters"
+                    );
+                    let exists = db
+                        .conn
+                        .query_row("SELECT 1 FROM events WHERE id=?1", [custom_id], |_| Ok(()))
+                        .optional()?
+                        .is_some();
+                    ensure!(!exists, "Event '{custom_id}' already exists");
+                    ev.id = custom_id.to_owned();
+                }
+                let event = db.append(ev)?;
                 let project: Project = db.get(&c.project_id)?;
                 let stage = canban_workflow_engine::stage(&project.workflow, &c.stage)?;
                 let mut mentions = strings(&p, "mentions");

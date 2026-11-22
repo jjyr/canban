@@ -26,6 +26,25 @@ fn sanitize_host_id(raw: &str) -> String {
     format!("{base}-{}", &canban_types::id()[..6])
 }
 
+pub(crate) fn sync_chip_spec(mark: SyncMark) -> (&'static str, Tone) {
+    match mark {
+        SyncMark::Pending => ("Not synced", Tone::Neutral),
+        SyncMark::Conflict | SyncMark::Failed => ("Sync issue", Tone::Attention),
+    }
+}
+
+fn format_sync_counts(pending: usize, conflicts: usize) -> String {
+    match (pending, conflicts) {
+        (0, 0) => String::new(),
+        (p, 0) => format!("{p} pending"),
+        (0, c) => format!("{c} sync issue{}", if c == 1 { "" } else { "s" }),
+        (p, c) => format!(
+            "{p} pending · {c} sync issue{}",
+            if c == 1 { "" } else { "s" }
+        ),
+    }
+}
+
 /// Effective list of `HostSummary` rows (`This Mac` first, followed by saved remote hosts),
 /// supporting both live `HostRegistry` sessions and deterministic Gallery fixtures.
 pub fn effective_hosts(ui: Ui) -> Vec<HostSummary> {
@@ -66,6 +85,8 @@ pub fn effective_hosts(ui: Ui) -> Vec<HostSummary> {
         project_count: projects,
         reconnect_count: 0,
         last_synced_at: None,
+        pending_mutations: 0,
+        sync_conflicts: 0,
     }]
 }
 
@@ -93,9 +114,13 @@ pub fn open_connect_modal(ui: Ui) {
     crate::utilities::open(ui, "connect-host");
 }
 
+pub fn open_sync_modal(ui: Ui) {
+    crate::utilities::open(ui, "sync");
+}
+
 pub fn close_overlays(ui: Ui) {
     let cur = ui.utility_popup.get_untracked();
-    if cur == "hosts" || cur == "connect-host" {
+    if cur == "hosts" || cur == "connect-host" || cur == "sync" {
         crate::utilities::close(ui);
     }
 }
@@ -401,6 +426,16 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                 .iter()
                 .filter(|h| !h.is_local && h.is_connected())
                 .count();
+            let pending_total: usize = list
+                .iter()
+                .filter(|h| !h.is_local)
+                .map(|h| h.pending_mutations)
+                .sum();
+            let conflict_total: usize = list
+                .iter()
+                .filter(|h| !h.is_local)
+                .map(|h| h.sync_conflicts)
+                .sum();
             (
                 remote_count,
                 any_attention,
@@ -408,12 +443,14 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                 any_offline,
                 online_remotes,
                 updating_count,
+                pending_total,
+                conflict_total,
             )
         })
     });
     let is_open = computed(move || {
         let p = ui.utility_popup.get();
-        p == "hosts" || p == "connect-host"
+        p == "hosts" || p == "connect-host" || p == "sync"
     });
 
     view()
@@ -421,7 +458,14 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
         .window_drag(false)
         .tooltip(
             hint_tooltip(move || {
-                let (remote_count, _, _, _, online, updating) = pill_summary.get();
+                let (remote_count, _, _, _, online, updating, pending_total, conflict_total) =
+                    pill_summary.get();
+                let sync_tip = format_sync_counts(pending_total, conflict_total);
+                let sync_suffix = if sync_tip.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n{sync_tip}")
+                };
                 if remote_count == 0 {
                     format!(
                         "Connected Hosts\n{} (local) · Click to connect a remote machine",
@@ -429,7 +473,7 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                     )
                 } else if updating > 0 {
                     format!(
-                        "Connected Hosts\n{} + {} / {} remote online ({} updating…)",
+                        "Connected Hosts\n{} + {} / {} remote online ({} updating…){sync_suffix}",
                         crate::platform::LOCAL_HOST_NAME,
                         online,
                         remote_count,
@@ -437,7 +481,7 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                     )
                 } else {
                     format!(
-                        "Connected Hosts\n{} + {} / {} remote online",
+                        "Connected Hosts\n{} + {} / {} remote online{sync_suffix}",
                         crate::platform::LOCAL_HOST_NAME,
                         online,
                         remote_count
@@ -453,24 +497,26 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                 .rounded(px(RADIUS))
                 .border_1()
                 .border_color(move || {
-                    let (_, any_attention, any_updating, any_offline, _, _) = pill_summary.get();
+                    let (_, any_attention, any_updating, any_offline, _, _, _, conflict_total) =
+                        pill_summary.get();
                     if is_open.get() {
                         ACCENT
                     } else if any_attention {
                         DANGER
                     } else if any_updating {
                         ACCENT
-                    } else if any_offline {
+                    } else if any_offline || conflict_total > 0 {
                         ATTENTION
                     } else {
                         BORDER
                     }
                 })
                 .bg(move || {
-                    let (_, any_attention, any_updating, any_offline, _, _) = pill_summary.get();
+                    let (_, any_attention, any_updating, any_offline, _, _, _, conflict_total) =
+                        pill_summary.get();
                     if is_open.get() {
                         SELECTED
-                    } else if any_attention || any_offline {
+                    } else if any_attention || any_offline || conflict_total > 0 {
                         ATTENTION_SURFACE
                     } else if any_updating {
                         SELECTED
@@ -484,18 +530,33 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                 .items_center()
                 .gap_1p5()
                 .accessibility_label(move || {
-                    let (remote_count, _, any_updating, _, online_remotes, _) = pill_summary.get();
+                    let (
+                        remote_count,
+                        _,
+                        any_updating,
+                        _,
+                        online_remotes,
+                        _,
+                        pending_total,
+                        conflict_total,
+                    ) = pill_summary.get();
+                    let sync_note = format_sync_counts(pending_total, conflict_total);
+                    let suffix = if sync_note.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", {sync_note}")
+                    };
                     Some(
                         if remote_count == 0 {
                             format!("Connected Hosts, {} only", crate::platform::LOCAL_HOST_NAME)
                         } else if any_updating {
                             format!(
-                                "Connected Hosts, updating remote daemon ({} of {} online)",
+                                "Connected Hosts, updating remote daemon ({} of {} online){suffix}",
                                 online_remotes, remote_count
                             )
                         } else {
                             format!(
-                                "Connected Hosts, {} of {} remote online",
+                                "Connected Hosts, {} of {} remote online{suffix}",
                                 online_remotes, remote_count
                             )
                         }
@@ -505,7 +566,7 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                 .on_press(move |_: &()| toggle_popover(ui))
                 .child(
                     icon_tinted(Icon::Server, move || {
-                        let (_, any_attention, any_updating, any_offline, _, _) =
+                        let (_, any_attention, any_updating, any_offline, _, _, _, conflict_total) =
                             pill_summary.get();
                         if is_open.get() {
                             ACCENT
@@ -513,7 +574,7 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                             DANGER
                         } else if any_updating {
                             ACCENT
-                        } else if any_offline {
+                        } else if any_offline || conflict_total > 0 {
                             ATTENTION
                         } else {
                             MUTED
@@ -533,13 +594,21 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                                 move || pill_summary.get().2,
                                 move || {
                                     live_dot({
-                                        let (_, any_attention, any_updating, any_offline, _, _) =
-                                            pill_summary.get_untracked();
+                                        let (
+                                            _,
+                                            any_attention,
+                                            any_updating,
+                                            any_offline,
+                                            _,
+                                            _,
+                                            _,
+                                            conflict_total,
+                                        ) = pill_summary.get_untracked();
                                         if any_attention {
                                             DANGER
                                         } else if any_updating {
                                             ACCENT
-                                        } else if any_offline {
+                                        } else if any_offline || conflict_total > 0 {
                                             ATTENTION
                                         } else {
                                             SUCCESS
@@ -558,12 +627,14 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                                             any_offline,
                                             _,
                                             _,
+                                            _,
+                                            conflict_total,
                                         ) = pill_summary.get();
                                         if any_attention {
                                             DANGER
                                         } else if any_updating {
                                             ACCENT
-                                        } else if any_offline {
+                                        } else if any_offline || conflict_total > 0 {
                                             ATTENTION
                                         } else if remote_count > 0 {
                                             SUCCESS
@@ -575,13 +646,32 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                             ))
                             .child(
                                 muted(move || {
-                                    let (remote_count, _, _, _, online_remotes, _) =
+                                    let (remote_count, _, _, _, online_remotes, _, _, _) =
                                         pill_summary.get();
                                     format!("{}/{}", online_remotes + 1, remote_count + 1)
                                 })
                                 .text_size(px(11.5))
                                 .font_family(MONO_FONT),
                             )
+                            .child(when(
+                                move || pill_summary.get().7 > 0,
+                                move || {
+                                    status(
+                                        move || {
+                                            SharedString::from(format!("{}!", pill_summary.get().7))
+                                        },
+                                        Tone::Attention,
+                                    )
+                                },
+                            ))
+                            .child(when(
+                                move || pill_summary.get().6 > 0 && pill_summary.get().7 == 0,
+                                move || {
+                                    muted(move || format!("· {}", pill_summary.get().6))
+                                        .text_size(px(11.))
+                                        .font_family(MONO_FONT)
+                                },
+                            ))
                     },
                 )),
         )
@@ -635,6 +725,8 @@ impl PartialEq for PopoverHostRow {
             && self.summary.project_count == other.summary.project_count
             && self.summary.active_agents == other.summary.active_agents
             && self.summary.max_agents == other.summary.max_agents
+            && self.summary.pending_mutations == other.summary.pending_mutations
+            && self.summary.sync_conflicts == other.summary.sync_conflicts
             && self.err_opt == other.err_opt
             && self.status_key == other.status_key
             && self.is_conn == other.is_conn
@@ -818,13 +910,12 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                             )
                                             .child(status_chip),
                                     )
-                                    .child(
-                                        view()
+                                    .child({
+                                        let mut meta = view()
                                             .flex_row()
                                             .flex_wrap()
                                             .items_center()
-                                            .justify_between()
-                                            .gap_2()
+                                            .gap_1p5()
                                             .child(
                                                 muted(format!(
                                                     "{} · {} project{} · {}/{} agents",
@@ -835,9 +926,32 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                                     h.max_agents
                                                 ))
                                                 .text_size(px(11.5)),
-                                            )
-                                            .child(actions),
-                                    );
+                                            );
+                                        if h.pending_mutations > 0 {
+                                            meta = meta.child(badge(format!(
+                                                "{} pending",
+                                                h.pending_mutations
+                                            )));
+                                        }
+                                        if h.sync_conflicts > 0 {
+                                            meta = meta.child(status(
+                                                format!(
+                                                    "{} sync issue{}",
+                                                    h.sync_conflicts,
+                                                    if h.sync_conflicts == 1 { "" } else { "s" }
+                                                ),
+                                                Tone::Attention,
+                                            ));
+                                        }
+                                        view()
+                                            .flex_row()
+                                            .flex_wrap()
+                                            .items_center()
+                                            .justify_between()
+                                            .gap_2()
+                                            .child(meta)
+                                            .child(actions)
+                                    });
 
                                 if let Some(err) = err_opt {
                                     row = row.child(
@@ -878,6 +992,23 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                         .flex_row()
                                         .items_center()
                                         .gap_1p5()
+                                        .child(when(
+                                            move || {
+                                                rows_memo.with(|list| {
+                                                    list.iter().any(|r| {
+                                                        r.summary.pending_mutations > 0
+                                                            || r.summary.sync_conflicts > 0
+                                                    })
+                                                })
+                                            },
+                                            move || {
+                                                compact_action(
+                                                    "Sync…",
+                                                    Variant::Quiet,
+                                                    move |_| open_sync_modal(ui),
+                                                )
+                                            },
+                                        ))
                                         .child(compact_action(
                                             "Reconnect All",
                                             Variant::Quiet,
@@ -1003,6 +1134,8 @@ pub fn offline_banner(ui: Ui) -> impl IntoElement {
                             .with(|s| s.host_display_name(&host_id).to_owned())
                     });
                 let is_updating = host_sum.as_ref().is_some_and(HostSummary::is_updating);
+                let pending_mutations = host_sum.as_ref().map(|h| h.pending_mutations).unwrap_or(0);
+                let sync_conflicts = host_sum.as_ref().map(|h| h.sync_conflicts).unwrap_or(0);
                 let detail = host_sum
                     .as_ref()
                     .map(|h| h.connection.short_status())
@@ -1012,6 +1145,12 @@ pub fn offline_banner(ui: Ui) -> impl IntoElement {
                 let hid_rec = host_id.clone();
                 let hid_diag = host_id;
                 let mut trailing = view().flex_row().items_center().gap_1p5();
+                if pending_mutations > 0 || sync_conflicts > 0 {
+                    trailing =
+                        trailing.child(compact_action("Sync…", Variant::Secondary, move |_| {
+                            open_sync_modal(ui)
+                        }));
+                }
                 if is_updating {
                     trailing = trailing.child(
                         compact_action("Updating…", Variant::Secondary, |_| {}).disabled(|| true),
@@ -1042,13 +1181,19 @@ pub fn offline_banner(ui: Ui) -> impl IntoElement {
                     ATTENTION_SURFACE
                 };
                 let banner_border = if is_updating { ACCENT } else { ATTENTION };
+                let sync_counts = format_sync_counts(pending_mutations, sync_conflicts);
+                let suffix = if sync_counts.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {sync_counts}")
+                };
                 let banner_text = if is_updating {
                     format!(
-                        "{host_name} is updating ({detail}) — viewing cached Kanban state read-only while the remote daemon restarts."
+                        "{host_name} is updating ({detail}) · showing cached data · edits sync when it reconnects{suffix}"
                     )
                 } else {
                     format!(
-                        "{host_name} is offline ({detail}) — viewing last cached Kanban state read-only while remote Agents continue on the host."
+                        "{host_name} is offline ({detail}) · showing cached data · edits sync when it reconnects{suffix}"
                     )
                 };
                 view()
@@ -1104,6 +1249,8 @@ fn finish_host_registration(
             project_count: 0,
             reconnect_count: 0,
             last_synced_at: Some(canban_types::now()),
+            pending_mutations: 0,
+            sync_conflicts: 0,
         };
         ui.hosts.update(|list| {
             if list.is_empty() {
@@ -1950,6 +2097,510 @@ fn connect_uri_tab(
         )
 }
 
+/// Sync queue & conflict resolution modal (`popup == "sync"`).
+pub fn sync_modal(ui: Ui) -> impl IntoElement {
+    let refresh = signal(0u64);
+    let items = signal(if crate::backend::is_connected() {
+        crate::backend::sync_items()
+    } else {
+        ui.sync_preview.get_untracked()
+    });
+    let busy_id = signal(None::<String>);
+    let feedback = signal(None::<(String, Tone)>);
+    let editing_id = signal(None::<String>);
+    let edit_title = signal(String::new());
+    let edit_body = signal(String::new());
+
+    effect(move || {
+        let _ = refresh.get();
+        let _ = ui.hosts.get();
+        let _ = ui.snapshot_epoch.get();
+        if crate::backend::is_connected() {
+            ui.spawn(async move {
+                if let Ok(loaded) = blocking(crate::backend::sync_items).await {
+                    let _ = items.try_set(loaded);
+                }
+            });
+        } else {
+            items.set(ui.sync_preview.get());
+        }
+    });
+
+    let dispatch_sync_action = move |host_id: String,
+                                     mutation_id: String,
+                                     sync_action: SyncAction| {
+        if busy_id.get_untracked().is_some() {
+            return;
+        }
+        feedback.set(None);
+        if !crate::backend::is_connected() {
+            ui.sync_preview.update(|list| {
+                list.retain(|entry| {
+                    !(entry.host_id == host_id && entry.mutation_id == mutation_id)
+                });
+            });
+            if editing_id.get_untracked().as_deref() == Some(mutation_id.as_str()) {
+                editing_id.set(None);
+            }
+            return;
+        }
+        busy_id.set(Some(mutation_id.clone()));
+        ui.spawn(async move {
+            let res =
+                blocking(move || crate::backend::sync_action(&host_id, &mutation_id, sync_action))
+                    .await;
+            let _ = busy_id.try_set(None);
+            match res {
+                Ok(Ok(())) => {
+                    let _ = editing_id.try_set(None);
+                    refresh.update(|v| *v += 1);
+                    crate::presenter::refresh(ui);
+                }
+                Ok(Err(e)) => {
+                    let msg = format!("Sync action failed: {e}");
+                    let _ = feedback.try_set(Some((msg.clone(), Tone::Danger)));
+                    ui.notify(msg);
+                }
+                Err(e) => {
+                    let msg = format!("Sync action failed: {e}");
+                    let _ = feedback.try_set(Some((msg.clone(), Tone::Danger)));
+                    ui.notify(msg);
+                }
+            }
+        });
+    };
+
+    nsh_base::dialog()
+        .animation(canban_ui_kit::motion::modal)
+        .close_on_escape(true)
+        .close_on_backdrop_press(true)
+        .on_cancel(move || close_overlays(ui))
+        .child(
+            view()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .p_6()
+                .bg(rgba(0x00000055))
+                .child(
+                    view()
+                        .absolute()
+                        .inset_0()
+                        .label("Close Sync")
+                        .on_press(move || close_overlays(ui)),
+                )
+                .child(
+                    panel()
+                        .w(px(560.))
+                        .max_w(Percentage(0.95))
+                        .max_h(Percentage(0.88))
+                        .p_0()
+                        .gap_0()
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(BORDER)
+                        .bg(SURFACE)
+                        .child(
+                            view()
+                                .px_4()
+                                .py_3()
+                                .border_b_1()
+                                .border_color(BORDER)
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    view()
+                                        .gap_0p5()
+                                        .child(
+                                            label("Sync")
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_size(px(15.)),
+                                        )
+                                        .child(muted(
+                                            "Pending offline changes and conflicts waiting to sync cleanly.",
+                                        )),
+                                )
+                                .child(chrome_button(Icon::Close, "Close", move |_| {
+                                    close_overlays(ui)
+                                })),
+                        )
+                        .child(
+                            scroll()
+                                .p_4()
+                                .max_h(px(480.))
+                                .child(dynamic(move || {
+                                    let list = items.get();
+                                    let fb = feedback.get();
+                                    let mut body = view().gap_2p5().min_w(px(0.));
+                                    if let Some((msg, tone)) = fb {
+                                        body = body.child(notice(msg, tone));
+                                    }
+                                    if list.is_empty() {
+                                        return body.child(muted("Everything is synced"));
+                                    }
+                                    for item in list {
+                                        let state_chip = match item.state {
+                                            SyncItemState::Queued => {
+                                                status("Pending", Tone::Neutral).into_element()
+                                            }
+                                            SyncItemState::InFlight => {
+                                                live_status("Syncing", Tone::Info).into_element()
+                                            }
+                                            SyncItemState::Conflict => {
+                                                status("Conflict", Tone::Attention).into_element()
+                                            }
+                                            SyncItemState::Failed => {
+                                                status("Failed", Tone::Danger).into_element()
+                                            }
+                                        };
+                                        let title_text = if item.card_title.is_empty() {
+                                            item.card_id.clone()
+                                        } else {
+                                            item.card_title.clone()
+                                        };
+                                        let mut row = view()
+                                            .p_3()
+                                            .rounded(px(RADIUS))
+                                            .border_1()
+                                            .border_color(BORDER)
+                                            .bg(INSET)
+                                            .gap_2()
+                                            .min_w(px(0.))
+                                            .child(
+                                                view()
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .gap_2()
+                                                    .child(
+                                                        view()
+                                                            .flex_row()
+                                                            .flex_1()
+                                                            .min_w(px(0.))
+                                                            .flex_wrap()
+                                                            .items_center()
+                                                            .gap_1p5()
+                                                            .child(
+                                                                label(title_text)
+                                                                    .font_weight(
+                                                                        FontWeight::SEMIBOLD,
+                                                                    )
+                                                                    .truncate(),
+                                                            )
+                                                            .child(badge(item.host_name.clone()))
+                                                            .child(badge(item.kind.clone())),
+                                                    )
+                                                    .child(state_chip),
+                                            );
+                                        if !item.message.is_empty() {
+                                            row = row.child(
+                                                muted(item.message.clone())
+                                                    .text_size(px(12.))
+                                                    .text_color(
+                                                        if item.state == SyncItemState::Failed {
+                                                            DANGER
+                                                        } else {
+                                                            MUTED
+                                                        },
+                                                    ),
+                                            );
+                                        }
+                                        if item.state == SyncItemState::Conflict
+                                            && !item.conflict_fields.is_empty()
+                                        {
+                                            let mut diffs = view()
+                                                .p_2p5()
+                                                .rounded(px(RADIUS))
+                                                .bg(SURFACE)
+                                                .border_1()
+                                                .border_color(BORDER)
+                                                .gap_1p5()
+                                                .min_w(px(0.));
+                                            for field_name in &item.conflict_fields {
+                                                let mine_val = item
+                                                    .mine
+                                                    .get(field_name)
+                                                    .cloned()
+                                                    .unwrap_or_default();
+                                                let srv_val = item
+                                                    .server
+                                                    .get(field_name)
+                                                    .cloned()
+                                                    .unwrap_or_default();
+                                                diffs = diffs
+                                                    .child(
+                                                        muted(format!(
+                                                            "{field_name} · Mine: {mine_val}"
+                                                        ))
+                                                        .text_size(px(11.5))
+                                                        .truncate(),
+                                                    )
+                                                    .child(
+                                                        muted(format!(
+                                                            "{field_name} · Server: {srv_val}"
+                                                        ))
+                                                        .text_size(px(11.5))
+                                                        .truncate(),
+                                                    );
+                                            }
+                                            row = row.child(diffs);
+                                        }
+
+                                        let mut actions = view()
+                                            .flex_row()
+                                            .flex_wrap()
+                                            .items_center()
+                                            .gap_1p5();
+                                        match item.state {
+                                            SyncItemState::Queued => {
+                                                let hid = item.host_id.clone();
+                                                let mid = item.mutation_id.clone();
+                                                let mid_dis = mid.clone();
+                                                actions = actions.child(
+                                                    compact_action(
+                                                        "Discard",
+                                                        Variant::Quiet,
+                                                        move |_| {
+                                                            dispatch_sync_action(
+                                                                hid.clone(),
+                                                                mid.clone(),
+                                                                SyncAction::Discard,
+                                                            );
+                                                        },
+                                                    )
+                                                    .disabled(move || {
+                                                        busy_id.get().as_deref()
+                                                            == Some(mid_dis.as_str())
+                                                    }),
+                                                );
+                                            }
+                                            SyncItemState::InFlight => {}
+                                            SyncItemState::Failed => {
+                                                let hid_r = item.host_id.clone();
+                                                let mid_r = item.mutation_id.clone();
+                                                let mid_r_dis = mid_r.clone();
+                                                let hid_d = item.host_id.clone();
+                                                let mid_d = item.mutation_id.clone();
+                                                let mid_d_dis = mid_d.clone();
+                                                actions = actions
+                                                    .child(
+                                                        compact_action(
+                                                            "Retry",
+                                                            Variant::Primary,
+                                                            move |_| {
+                                                                dispatch_sync_action(
+                                                                    hid_r.clone(),
+                                                                    mid_r.clone(),
+                                                                    SyncAction::Retry,
+                                                                );
+                                                            },
+                                                        )
+                                                        .disabled(move || {
+                                                            busy_id.get().as_deref()
+                                                                == Some(mid_r_dis.as_str())
+                                                        }),
+                                                    )
+                                                    .child(
+                                                        compact_action(
+                                                            "Discard",
+                                                            Variant::Quiet,
+                                                            move |_| {
+                                                                dispatch_sync_action(
+                                                                    hid_d.clone(),
+                                                                    mid_d.clone(),
+                                                                    SyncAction::Discard,
+                                                                );
+                                                            },
+                                                        )
+                                                        .disabled(move || {
+                                                            busy_id.get().as_deref()
+                                                                == Some(mid_d_dis.as_str())
+                                                        }),
+                                                    );
+                                            }
+                                            SyncItemState::Conflict => {
+                                                let hid_m = item.host_id.clone();
+                                                let mid_m = item.mutation_id.clone();
+                                                let mid_m_dis = mid_m.clone();
+                                                let hid_s = item.host_id.clone();
+                                                let mid_s = item.mutation_id.clone();
+                                                let mid_s_dis = mid_s.clone();
+                                                let mid_e = item.mutation_id.clone();
+                                                let mine_title = item
+                                                    .mine
+                                                    .get("title")
+                                                    .or_else(|| item.server.get("title"))
+                                                    .cloned()
+                                                    .unwrap_or_default();
+                                                let mine_body = item
+                                                    .mine
+                                                    .get("body")
+                                                    .or_else(|| item.server.get("body"))
+                                                    .cloned()
+                                                    .unwrap_or_default();
+                                                actions = actions
+                                                    .child(
+                                                        compact_action(
+                                                            "Use mine",
+                                                            Variant::Primary,
+                                                            move |_| {
+                                                                dispatch_sync_action(
+                                                                    hid_m.clone(),
+                                                                    mid_m.clone(),
+                                                                    SyncAction::UseMine,
+                                                                );
+                                                            },
+                                                        )
+                                                        .disabled(move || {
+                                                            busy_id.get().as_deref()
+                                                                == Some(mid_m_dis.as_str())
+                                                        }),
+                                                    )
+                                                    .child(
+                                                        compact_action(
+                                                            "Use server",
+                                                            Variant::Secondary,
+                                                            move |_| {
+                                                                dispatch_sync_action(
+                                                                    hid_s.clone(),
+                                                                    mid_s.clone(),
+                                                                    SyncAction::Discard,
+                                                                );
+                                                            },
+                                                        )
+                                                        .disabled(move || {
+                                                            busy_id.get().as_deref()
+                                                                == Some(mid_s_dis.as_str())
+                                                        }),
+                                                    )
+                                                    .child(compact_action(
+                                                        "Edit merged",
+                                                        Variant::Secondary,
+                                                        move |_| {
+                                                            if editing_id.get_untracked().as_deref()
+                                                                == Some(mid_e.as_str())
+                                                            {
+                                                                editing_id.set(None);
+                                                            } else {
+                                                                edit_title.set(mine_title.clone());
+                                                                edit_body.set(mine_body.clone());
+                                                                editing_id.set(Some(mid_e.clone()));
+                                                            }
+                                                        },
+                                                    ));
+                                            }
+                                        }
+                                        row = row.child(actions);
+
+                                        if item.state == SyncItemState::Conflict {
+                                            let mid_edit = item.mutation_id.clone();
+                                            let hid_save = item.host_id.clone();
+                                            let mid_save = item.mutation_id.clone();
+                                            let mid_save_dis = mid_save.clone();
+                                            let conflict_fields = item.conflict_fields.clone();
+                                            row = row.child(when(
+                                                move || {
+                                                    editing_id.get().as_deref()
+                                                        == Some(mid_edit.as_str())
+                                                },
+                                                move || {
+                                                    let mut form = view()
+                                                        .p_2p5()
+                                                        .rounded(px(RADIUS))
+                                                        .bg(SURFACE)
+                                                        .border_1()
+                                                        .border_color(BORDER)
+                                                        .gap_2()
+                                                        .min_w(px(0.));
+                                                    let has_title = conflict_fields
+                                                        .iter()
+                                                        .any(|f| f == "title");
+                                                    let has_body = conflict_fields
+                                                        .iter()
+                                                        .any(|f| f == "body");
+                                                    if has_title {
+                                                        form = form
+                                                            .child(muted("Title"))
+                                                            .child(
+                                                                field(edit_title, "Merged title")
+                                                                    .label("Merged title"),
+                                                            );
+                                                    }
+                                                    if has_body {
+                                                        form = form
+                                                            .child(muted("Body"))
+                                                            .child(
+                                                                field(edit_body, "Merged body")
+                                                                    .label("Merged body"),
+                                                            );
+                                                    }
+                                                    let save_fields = conflict_fields.clone();
+                                                    let hid_apply = hid_save.clone();
+                                                    let mid_apply = mid_save.clone();
+                                                    let mid_apply_dis = mid_save_dis.clone();
+                                                    form.child(
+                                                        view()
+                                                            .flex_row()
+                                                            .items_center()
+                                                            .gap_1p5()
+                                                            .child(
+                                                                compact_action(
+                                                                    "Save merged",
+                                                                    Variant::Primary,
+                                                                    move |_| {
+                                                                        let mut fields =
+                                                                            std::collections::BTreeMap::new();
+                                                                        for f in &save_fields {
+                                                                            match f.as_str() {
+                                                                                "title" => {
+                                                                                    fields.insert(
+                                                                                        "title".into(),
+                                                                                        edit_title.get_untracked(),
+                                                                                    );
+                                                                                }
+                                                                                "body" => {
+                                                                                    fields.insert(
+                                                                                        "body".into(),
+                                                                                        edit_body.get_untracked(),
+                                                                                    );
+                                                                                }
+                                                                                _ => {}
+                                                                            }
+                                                                        }
+                                                                        dispatch_sync_action(
+                                                                            hid_apply.clone(),
+                                                                            mid_apply.clone(),
+                                                                            SyncAction::UseEdited { fields },
+                                                                        );
+                                                                    },
+                                                                )
+                                                                .disabled(move || {
+                                                                    busy_id.get().as_deref()
+                                                                        == Some(
+                                                                            mid_apply_dis.as_str(),
+                                                                        )
+                                                                }),
+                                                            )
+                                                            .child(compact_action(
+                                                                "Cancel",
+                                                                Variant::Quiet,
+                                                                move |_| editing_id.set(None),
+                                                            )),
+                                                    )
+                                                },
+                                            ));
+                                        }
+                                        body = body.child(row);
+                                    }
+                                    body
+                                })),
+                        ),
+                ),
+        )
+}
+
 /// `Settings -> Hosts` section: manage connected `canband` machines (Rename, Enable/Disable, Reconnect, Remove).
 pub fn settings_section_view(ui: Ui) -> impl IntoElement {
     let renaming_id = signal(Option::<String>::None);
@@ -2271,6 +2922,8 @@ mod tests {
                 project_count: 0,
                 reconnect_count: 0,
                 last_synced_at: None,
+                pending_mutations: 0,
+                sync_conflicts: 0,
             };
             let remote_summary = HostSummary {
                 id: "home-linux".into(),
@@ -2289,6 +2942,8 @@ mod tests {
                 project_count: 1,
                 reconnect_count: 2,
                 last_synced_at: Some(1_700_000_000_000),
+                pending_mutations: 0,
+                sync_conflicts: 0,
             };
             snapshot
                 .entity_hosts
@@ -2320,10 +2975,9 @@ mod tests {
             "expected trigger pill online ratio `1/2` (This Mac online + 1 remote offline), got {texts:?}"
         );
         assert!(
-            texts
-                .iter()
-                .any(|t| t.contains("Home Linux is offline") && t.contains("read-only")),
-            "expected offline read-only banner for Home Linux, got {texts:?}"
+            texts.iter().any(|t| t.contains("Home Linux is offline")
+                && t.contains("edits sync when it reconnects")),
+            "expected offline cached-edit banner for Home Linux, got {texts:?}"
         );
     }
 
@@ -2402,6 +3056,8 @@ mod tests {
                 project_count: 0,
                 reconnect_count: 0,
                 last_synced_at: None,
+                pending_mutations: 0,
+                sync_conflicts: 0,
             };
             let mismatch_summary = HostSummary {
                 id: "home-linux".into(),
@@ -2421,6 +3077,8 @@ mod tests {
                 project_count: 1,
                 reconnect_count: 0,
                 last_synced_at: None,
+                pending_mutations: 0,
+                sync_conflicts: 0,
             };
             ui.hosts.set(vec![local_summary, mismatch_summary]);
             ui.utility_popup.set("hosts".into());
@@ -2484,6 +3142,8 @@ mod tests {
                 project_count: 0,
                 reconnect_count: 0,
                 last_synced_at: None,
+                pending_mutations: 0,
+                sync_conflicts: 0,
             };
             let updating_summary = HostSummary {
                 id: "home-linux".into(),
@@ -2501,6 +3161,8 @@ mod tests {
                 project_count: 1,
                 reconnect_count: 0,
                 last_synced_at: Some(1_700_000_000_000),
+                pending_mutations: 0,
+                sync_conflicts: 0,
             };
             snapshot
                 .entity_hosts
@@ -2579,6 +3241,8 @@ mod tests {
                 project_count: 0,
                 reconnect_count: 0,
                 last_synced_at: None,
+                pending_mutations: 0,
+                sync_conflicts: 0,
             };
             let mismatch = HostSummary {
                 id: "home-linux".into(),
@@ -2598,6 +3262,8 @@ mod tests {
                 project_count: 1,
                 reconnect_count: 0,
                 last_synced_at: None,
+                pending_mutations: 0,
+                sync_conflicts: 0,
             };
             let mut snap = Snapshot::default();
             snap.host_summaries
@@ -2660,6 +3326,8 @@ mod tests {
                     project_count: 1,
                     reconnect_count: 0,
                     last_synced_at: Some(synced_at),
+                    pending_mutations: 0,
+                    sync_conflicts: 0,
                 },
                 HostSummary {
                     id: "home-linux".into(),
@@ -2680,6 +3348,8 @@ mod tests {
                     project_count: 1,
                     reconnect_count: 0,
                     last_synced_at: Some(synced_at),
+                    pending_mutations: 0,
+                    sync_conflicts: 0,
                 },
             ]
         }
@@ -2745,6 +3415,60 @@ mod tests {
                     MountItem::Text { text, .. } if text.text == "Manage Hosts…" || text.text == "Settings"
                 )),
                 "Manage Hosts… and Settings must not be re-emitted as new Text nodes when only rtt_ms/last_synced_at change"
+            );
+        }
+    }
+
+    #[test]
+    fn sync_modal_renders_failed_and_conflict_actions() {
+        #[component]
+        fn ProbeSyncModal() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let mut mine = std::collections::BTreeMap::new();
+            mine.insert("title".into(), "Offline edited title".into());
+            let mut server = std::collections::BTreeMap::new();
+            server.insert("title".into(), "Server concurrent title".into());
+            ui.sync_preview.set(vec![
+                SyncItemView {
+                    host_id: "home-linux".into(),
+                    host_name: "Home Linux".into(),
+                    mutation_id: "m-fail".into(),
+                    card_id: "c1".into(),
+                    card_title: "Move Stage Offline".into(),
+                    kind: "Move Card".into(),
+                    state: SyncItemState::Failed,
+                    message: "Stage no longer exists".into(),
+                    conflict_fields: Vec::new(),
+                    mine: std::collections::BTreeMap::new(),
+                    server: std::collections::BTreeMap::new(),
+                },
+                SyncItemView {
+                    host_id: "home-linux".into(),
+                    host_name: "Home Linux".into(),
+                    mutation_id: "m-conflict".into(),
+                    card_id: "c2".into(),
+                    card_title: "Autonomous Sync Spec".into(),
+                    kind: "Edit Card".into(),
+                    state: SyncItemState::Conflict,
+                    message: "Conflict on title".into(),
+                    conflict_fields: vec!["title".into()],
+                    mine,
+                    server,
+                },
+            ]);
+            ui.utility_popup.set("sync".into());
+            view().w(px(900.)).h(px(700.)).child(sync_modal(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(900.), px(700.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<ProbeSyncModal>());
+        let texts = collect_mounted_texts(core.commit().expect("mount sync modal"));
+        for expected in ["Retry", "Discard", "Use mine", "Use server", "Edit merged"] {
+            assert!(
+                texts.iter().any(|t| t == expected),
+                "expected `{expected}` button in sync modal, got {texts:?}"
             );
         }
     }

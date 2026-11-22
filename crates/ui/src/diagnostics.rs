@@ -838,6 +838,8 @@ mod tests {
                 project_count: 1,
                 reconnect_count: 0,
                 last_synced_at: None,
+                pending_mutations: 0,
+                sync_conflicts: 0,
             };
             let remote = HostSummary {
                 id: "home-linux".into(),
@@ -858,6 +860,8 @@ mod tests {
                 project_count: 2,
                 reconnect_count: 0,
                 last_synced_at: Some(1_700_000_000_000),
+                pending_mutations: 0,
+                sync_conflicts: 0,
             };
             let (diag, logs) = fixture_diagnostics("home-linux");
             ui.hosts.set(vec![local, remote]);
@@ -923,6 +927,8 @@ mod tests {
                 project_count: 1,
                 reconnect_count: 0,
                 last_synced_at: None,
+                pending_mutations: 0,
+                sync_conflicts: 0,
             };
             let remote = HostSummary {
                 id: "home-linux".into(),
@@ -940,6 +946,8 @@ mod tests {
                 project_count: 2,
                 reconnect_count: 0,
                 last_synced_at: Some(1_700_000_000_000),
+                pending_mutations: 0,
+                sync_conflicts: 0,
             };
             ui.hosts.set(vec![local, remote]);
             ui.settings_host.set("home-linux".into());

@@ -216,6 +216,9 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                 if popup == "connect-host" {
                     return crate::hosts::connect_modal(ui).into_element();
                 }
+                if popup == "sync" {
+                    return crate::hosts::sync_modal(ui).into_element();
+                }
                 if popup != "theme" {
                     return view().into_element();
                 }

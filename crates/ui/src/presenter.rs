@@ -199,6 +199,7 @@ pub struct Ui {
     pub worktree_remove_confirm: Signal<Option<String>>,
     pub project_delete_confirm: Signal<Option<String>>,
     pub hosts: Signal<Vec<HostSummary>>,
+    pub sync_preview: Signal<Vec<SyncItemView>>,
     pub settings_host: Signal<String>,
     pub installed_fonts: Signal<Option<canban_terminal::InstalledFonts>>,
     pub installed_fonts_loading: Signal<bool>,
@@ -599,6 +600,7 @@ impl Ui {
             worktree_remove_confirm: signal(None),
             project_delete_confirm: signal(None),
             hosts: signal(crate::host_summaries()),
+            sync_preview: signal(Vec::new()),
             settings_host: signal("local".into()),
             installed_fonts: signal(canban_terminal::try_installed_fonts()),
             installed_fonts_loading: signal(false),
@@ -1570,6 +1572,9 @@ pub fn dispatch_complete(
                     );
                     ui.status.set(msg.clone());
                     ui.operation_error.set(msg);
+                } else if value["offline_queued"] == true {
+                    let host_name = crate::hosts::host_name(ui, &target_host);
+                    ui.notify(format!("Saved offline · will sync when {host_name} reconnects"));
                 } else {
                     match method {
                         "herdr.status" => ui.notify(format!(
@@ -1986,6 +1991,15 @@ fn merge_events_by_id(target: &mut Vec<Event>, incoming: Vec<Event>) {
     target.sort_by_key(|e| e.sequence);
 }
 
+pub(crate) fn confirmed_max_sequence(events: &[Event]) -> u64 {
+    events
+        .iter()
+        .filter(|e| e.data["pending"] != true)
+        .map(|e| e.sequence)
+        .max()
+        .unwrap_or(0)
+}
+
 pub(crate) fn apply_tail_page(
     state: &mut CardTimelineState,
     mut events: Vec<Event>,
@@ -1997,11 +2011,16 @@ pub(crate) fn apply_tail_page(
 ) {
     writes.reconcile_card_events(card_id, &events);
     writes.overlay_card_events(card_id, &mut events);
-    state.oldest_seq = oldest_seq.or_else(|| events.first().map(|e| e.sequence));
+    state.oldest_seq = oldest_seq.or_else(|| {
+        events
+            .iter()
+            .find(|e| e.data["pending"] != true)
+            .map(|e| e.sequence)
+    });
     state.highwater = state
         .highwater
         .max(highwater)
-        .max(events.last().map(|e| e.sequence).unwrap_or(0));
+        .max(confirmed_max_sequence(&events));
     state.has_more_before = has_more_before;
     state.events = events;
     state.loading = false;
@@ -2050,12 +2069,16 @@ pub(crate) fn apply_incremental_page(
     merge_events_by_id(&mut state.events, events);
     writes.overlay_card_events(card_id, &mut state.events);
     if state.oldest_seq.is_none() {
-        state.oldest_seq = state.events.first().map(|e| e.sequence);
+        state.oldest_seq = state
+            .events
+            .iter()
+            .find(|e| e.data["pending"] != true)
+            .map(|e| e.sequence);
     }
     state.highwater = state
         .highwater
         .max(highwater)
-        .max(state.events.last().map(|e| e.sequence).unwrap_or(0));
+        .max(confirmed_max_sequence(&state.events));
     state.loading = false;
     state.initialized = true;
 }
@@ -2181,7 +2204,7 @@ mod tests {
             actor: "user".into(),
             message: msg.into(),
             data,
-            created_at: seq * 1000,
+            created_at: seq.saturating_mul(1000),
         };
 
         let mut writes = submission::CommittedWrites::default();
@@ -2293,5 +2316,66 @@ mod tests {
         assert_eq!(state.oldest_seq, Some(1));
         assert_eq!(state.events.first().unwrap().sequence, 1);
         assert_eq!(state.events.last().unwrap().sequence, 15);
+    }
+
+    #[test]
+    fn pending_synthetic_events_do_not_advance_timeline_highwater() {
+        let mut state = CardTimelineState::default();
+        let mut writes = submission::CommittedWrites::default();
+        let ev = |seq: u64, id: &str, kind: &str, msg: &str, data: Value| Event {
+            id: id.into(),
+            sequence: seq,
+            project_id: "p1".into(),
+            card_id: "c1".into(),
+            kind: kind.into(),
+            actor: "human".into(),
+            created_at: seq.saturating_mul(1000),
+            message: msg.into(),
+            data,
+        };
+        apply_tail_page(
+            &mut state,
+            vec![
+                ev(5, "e5", "card.created", "Created", json!({})),
+                ev(
+                    u64::MAX,
+                    "pending-c1",
+                    "comment.created",
+                    "Offline comment",
+                    json!({"body": "Offline comment", "pending": true}),
+                ),
+            ],
+            5,
+            false,
+            Some(5),
+            &mut writes,
+            "c1",
+        );
+        assert_eq!(state.highwater, 5);
+        assert_eq!(state.events.len(), 2);
+
+        apply_incremental_page(
+            &mut state,
+            vec![ev(
+                6,
+                "pending-c1",
+                "comment.created",
+                "Offline comment",
+                json!({"body": "Offline comment"}),
+            )],
+            6,
+            &mut writes,
+            "c1",
+        );
+        assert_eq!(state.highwater, 6);
+        assert_eq!(
+            state
+                .events
+                .iter()
+                .find(|e| e.id == "pending-c1")
+                .unwrap()
+                .sequence,
+            6
+        );
     }
 }

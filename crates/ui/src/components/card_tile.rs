@@ -27,6 +27,7 @@ pub(crate) struct CardTileModel {
     pub review_draft: Option<canban_types::ReviewDraft>,
     pub review_running: bool,
     pub pr_view: Option<crate::components::pr_status::CardPrView>,
+    pub sync_mark: Option<canban_types::SyncMark>,
 }
 
 impl CardTileModel {
@@ -110,7 +111,7 @@ impl CardTileModel {
             let known_tags = known_index.for_project(Some(&card.project_id));
             crate::tags::card_tags(&card, &known_tags)
         };
-        let (status_specs, running) = if matches_indexed
+        let (mut status_specs, running) = if matches_indexed
             && let Some(digest) = idx.card_status.get(&card.id)
         {
             let specs = if ui_merging {
@@ -130,6 +131,11 @@ impl CardTileModel {
                 .collect();
             (specs, running)
         };
+        let sync_mark = snapshot.pending_sync.get(&card.id).cloned();
+        if let Some(mark) = sync_mark {
+            let (label, tone) = crate::hosts::sync_chip_spec(mark);
+            status_specs.insert(0, (label.to_owned(), tone, false));
+        }
         let ephemeral_agents = live_entries
             .iter()
             .filter(|e| e.agent.is_none() && e.saved.has_active_agent())
@@ -158,6 +164,7 @@ impl CardTileModel {
             review_draft,
             review_running,
             pr_view,
+            sync_mark,
         }
     }
 }
@@ -181,7 +188,9 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
         review_draft,
         review_running,
         pr_view,
+        sync_mark,
     } = model;
+    let _ = sync_mark;
     let reminder_id = card.id.clone();
     let count = computed(move || {
         ui.reminder_counts
@@ -232,7 +241,14 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
                     .gap_1p5()
                     .items_start()
                     .pt_0p5()
-                    .child(muted(format!("#{}", card.number)).flex_shrink_0())
+                    .child(
+                        muted(if card.number == 0 {
+                            "Local".to_owned()
+                        } else {
+                            format!("#{}", card.number)
+                        })
+                        .flex_shrink_0(),
+                    )
                     .child(
                         text(card.title.clone())
                             .text_size(px(BODY_SIZE))
@@ -1118,6 +1134,67 @@ mod tests {
         assert_eq!(
             reply_svgs, 2,
             "quiet Card with replies renders [>_] + MessageSquare SVGs"
+        );
+    }
+
+    #[test]
+    fn card_tile_renders_local_number_and_sync_chips() {
+        fn collect_texts(s: Snapshot, card_id: &str) -> Vec<String> {
+            thread_local! {
+                static SNAPSHOT: std::cell::RefCell<Snapshot> = std::cell::RefCell::new(Snapshot::default());
+                static CARD_ID: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+            }
+            SNAPSHOT.with(|slot| *slot.borrow_mut() = s);
+            CARD_ID.with(|slot| *slot.borrow_mut() = card_id.to_owned());
+
+            #[component]
+            fn SyncChipProbe() -> impl IntoElement {
+                canban_ui_kit::tokens::install_theme();
+                let ui = Ui::new();
+                let snap = SNAPSHOT.with(|slot| slot.borrow().clone());
+                let cid = CARD_ID.with(|slot| slot.borrow().clone());
+                let card = snap.cards.iter().find(|c| c.id == cid).unwrap().clone();
+                ui.snapshot.set(snap);
+                ui.project.set("p1".into());
+                view().child(card_tile(ui, card))
+            }
+
+            let mut core = Core::new(ApproxTextEngine, size(px(400.0), px(300.0)));
+            core.mount_root(&nsh_core::element::Root::of::<SyncChipProbe>());
+            let batch = core.commit().expect("initial mount batch");
+            batch
+                .items
+                .into_iter()
+                .filter_map(|item| match item {
+                    MountItem::Text { text, .. } => Some(text.text.to_string()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut pending = sample_snapshot();
+        pending.cards[0].number = 0;
+        pending
+            .pending_sync
+            .insert("c-idle".into(), canban_types::SyncMark::Pending);
+        let pending_texts = collect_texts(pending, "c-idle");
+        assert!(
+            pending_texts.iter().any(|t| t == "Local"),
+            "expected 'Local' for number == 0, got {pending_texts:?}"
+        );
+        assert!(
+            pending_texts.iter().any(|t| t == "Not synced"),
+            "expected 'Not synced' chip, got {pending_texts:?}"
+        );
+
+        let mut conflict = sample_snapshot();
+        conflict
+            .pending_sync
+            .insert("c-idle".into(), canban_types::SyncMark::Conflict);
+        let conflict_texts = collect_texts(conflict, "c-idle");
+        assert!(
+            conflict_texts.iter().any(|t| t == "Sync issue"),
+            "expected 'Sync issue' chip, got {conflict_texts:?}"
         );
     }
 }

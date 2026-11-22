@@ -54,6 +54,9 @@ synthetic 62-operation comparison separating wire, CLI and candidate-context byt
 | [Multi-host daemons and Diagnostics](multi-host.md) | Simultaneous local + remote `canband` connections, Tailscale/SSH discovery, offline snapshot cache, per-host Settings and Diagnostics |
 | [Multi-machine execution](multi-machine.md) | Single-server Project work locations, remote Herdr Core routing and Terminal byte relay |
 | [Multi-machine acceptance](multi-machine-acceptance.md) | Isolated local/remote verification, limits and reproduction |
+| [Mobile interaction design](mobile-interaction.md) | Proposal: iOS/Android client navigation, NSH mapping, QR multi-address pairing, Terminals and Diff views |
+| [Offline editing and synchronization](offline-sync.md) | Proposal: cross-platform offline Card creation/editing/moves/archives, standalone `canban-sync` replay and field-level conflict merge |
+| [Cross-platform Terminal portability](terminal-portability.md) | Proposal: shared `canban-terminal` core, A+B rendering split across macOS/Linux/iOS/Android and remote `PtyTransport` |
 | [Product discussion and decisions](product/product-log.md) | Rationale, superseded proposals, and open questions |
 | [Unified workflow engine, Studio and implementation](product/workflow-engine.md) | Canonical Workflow contract: 7 design principles, Project/Board ownership, default Queue Merge flow, graph-derived Studio options, YAML schema, CLI/RPC operations and workspaces |
 | [Board dragging and placement](board-interaction.md) | Whole-Card dragging, animated placeholders/peers, durable ordering and workflow boundary |

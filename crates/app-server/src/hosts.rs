@@ -1,9 +1,15 @@
 //! Multi-host connection registry (`This Mac` + remote Tailscale/TCP and SSH `canband`s),
 //! offline snapshot caching, SSH Unix-socket tunneling, and host-aware RPC routing.
 use super::*;
+use canban_sync::{
+    DEFAULT_READ_CACHE_BUDGET_BYTES, DrainReport, Mutation, MutationKind, MutationState, Outbox,
+    QueueDecision, ReadCache, UpdateBase,
+    replay::{FinishOutcome, StepAction, finish_step, prepare_next_step},
+};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     process::{Child, Stdio},
+    sync::{OnceLock, Weak},
 };
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -154,6 +160,67 @@ struct RemoteSlot {
     reconnect_count: u32,
     consecutive_failures: u32,
     next_retry_at: std::time::Instant,
+    outbox: Arc<Mutex<Outbox>>,
+    read_cache: Arc<Mutex<ReadCache>>,
+    draining: Arc<AtomicBool>,
+    prefetching: Arc<AtomicBool>,
+}
+
+struct AtomicFlagGuard(Arc<AtomicBool>);
+
+impl Drop for AtomicFlagGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+fn is_connection_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::WouldBlock
+            )
+        })
+    })
+}
+
+fn enrich_timeline_with_pending(
+    val: &mut Value,
+    ops: &[Mutation],
+    card_id: &str,
+    snapshot: &Snapshot,
+) {
+    let pending = canban_sync::pending_comment_events(ops, card_id, snapshot);
+    if pending.is_empty() {
+        return;
+    }
+    let Some(arr) = val["events"].as_array_mut() else {
+        return;
+    };
+    let existing: BTreeSet<String> = arr
+        .iter()
+        .filter_map(|v| v["id"].as_str().map(str::to_owned))
+        .collect();
+    for ev in pending {
+        if existing.contains(&ev.id) {
+            continue;
+        }
+        if let Ok(mut ev_val) = serde_json::to_value(ev) {
+            if let Some(obj) = ev_val.as_object_mut()
+                && let Some(msg) = obj.remove("message")
+            {
+                obj.insert("body".into(), msg);
+            }
+            arr.push(ev_val);
+        }
+    }
 }
 
 /// Window-side event provenance. This envelope never crosses the AppServer RPC
@@ -214,6 +281,7 @@ impl Drop for UpdatingGuard<'_> {
 pub struct HostRegistry {
     local_home: PathBuf,
     local: Arc<AppClient>,
+    self_weak: OnceLock<Weak<HostRegistry>>,
     local_summary_counts: Mutex<Option<(usize, usize, u64)>>,
     remotes: Mutex<BTreeMap<String, RemoteSlot>>,
     entity_hosts: RwLock<BTreeMap<String, String>>,
@@ -246,8 +314,23 @@ impl HostRegistry {
         let local_home = local.home.clone();
         let hosts_file = Self::load_hosts_file(&local_home);
         let mut map = BTreeMap::new();
+        let mut initial_entity_hosts = BTreeMap::new();
         for saved in hosts_file.hosts {
-            let cached = Self::load_cache(&local_home, &saved.id);
+            let mut cached = Self::load_cache(&local_home, &saved.id);
+            if let Some(c) = &mut cached {
+                c.snapshot.register_host_entities(&saved.id);
+                for (k, v) in &c.snapshot.entity_hosts {
+                    initial_entity_hosts.insert(k.clone(), v.clone());
+                }
+            }
+            let outbox = Arc::new(Mutex::new(Outbox::load(Self::outbox_path(
+                &local_home,
+                &saved.id,
+            ))));
+            let read_cache = Arc::new(Mutex::new(ReadCache::open(
+                Self::reads_dir(&local_home, &saved.id),
+                DEFAULT_READ_CACHE_BUDGET_BYTES,
+            )));
             let initial_conn = if !saved.enabled {
                 HostConnectionState::Offline {
                     error: "Disabled".into(),
@@ -269,6 +352,10 @@ impl HostRegistry {
                     reconnect_count: 0,
                     consecutive_failures: 0,
                     next_retry_at: std::time::Instant::now(),
+                    outbox,
+                    read_cache,
+                    draining: Arc::new(AtomicBool::new(false)),
+                    prefetching: Arc::new(AtomicBool::new(false)),
                 },
             );
         }
@@ -277,14 +364,16 @@ impl HostRegistry {
         let registry = Arc::new(Self {
             local_home,
             local: local.clone(),
+            self_weak: OnceLock::new(),
             local_summary_counts: Mutex::new(None),
             remotes: Mutex::new(map),
-            entity_hosts: RwLock::new(BTreeMap::new()),
+            entity_hosts: RwLock::new(initial_entity_hosts),
             acknowledged_owners: Mutex::new(BTreeMap::new()),
             listeners: Mutex::new(Vec::new()),
             wake_tx,
             stop: AtomicBool::new(false),
         });
+        let _ = registry.self_weak.set(Arc::downgrade(&registry));
 
         // Forward local AppClient subscription events into unified listeners.
         let local_rx = local.subscribe();
@@ -327,6 +416,15 @@ impl HostRegistry {
 
     fn cache_path(home: &Path, host_id: &str) -> PathBuf {
         home.join("cache/hosts").join(format!("{host_id}.json"))
+    }
+
+    fn outbox_path(home: &Path, host_id: &str) -> PathBuf {
+        home.join("cache/hosts")
+            .join(format!("{host_id}.outbox.json"))
+    }
+
+    fn reads_dir(home: &Path, host_id: &str) -> PathBuf {
+        home.join("cache/hosts").join(host_id).join("reads")
     }
 
     fn tunnels_dir(home: &Path) -> PathBuf {
@@ -438,17 +536,31 @@ impl HostRegistry {
             && let Ok(snap) = serde_json::from_value::<Snapshot>(val["snapshot"].take())
             && let Ok(cfg) = serde_json::from_value::<Config>(val["config"].take())
         {
-            let data = CachedHostData {
-                saved_at: now(),
-                snapshot: snap,
-                config: cfg,
-            };
-            Self::save_cache(&self.local_home, &host.id, &data);
-            Some(data)
+            Some(Self::store_cached_snapshot(
+                &self.local_home,
+                &host.id,
+                snap,
+                cfg,
+            ))
         } else {
-            Self::load_cache(&self.local_home, &host.id)
+            Self::load_cache(&self.local_home, &host.id).map(|mut c| {
+                c.snapshot.register_host_entities(&host.id);
+                c
+            })
         };
+        let initial_entities = cached
+            .as_ref()
+            .map(|c| c.snapshot.entity_hosts.clone())
+            .unwrap_or_default();
 
+        let outbox = Arc::new(Mutex::new(Outbox::load(Self::outbox_path(
+            &self.local_home,
+            &host.id,
+        ))));
+        let read_cache = Arc::new(Mutex::new(ReadCache::open(
+            Self::reads_dir(&self.local_home, &host.id),
+            DEFAULT_READ_CACHE_BUDGET_BYTES,
+        )));
         let summary = {
             let mut guard = self.remotes.lock().unwrap();
             let slot = RemoteSlot {
@@ -462,6 +574,10 @@ impl HostRegistry {
                 reconnect_count: 0,
                 consecutive_failures: 0,
                 next_retry_at: std::time::Instant::now(),
+                outbox,
+                read_cache,
+                draining: Arc::new(AtomicBool::new(false)),
+                prefetching: Arc::new(AtomicBool::new(false)),
             };
             let sum = Self::slot_summary(&slot);
             guard.insert(slot.saved.id.clone(), slot);
@@ -470,7 +586,13 @@ impl HostRegistry {
             self.save_hosts_file(&all_saved)?;
             sum
         };
+        if !initial_entities.is_empty() {
+            self.replace_host_entity_owners(&summary.id, &initial_entities);
+        }
 
+        if summary.connection.is_connected() {
+            self.spawn_drain_and_prefetch(&summary.id);
+        }
         self.emit(
             &summary.id,
             AppEvent::Changed {
@@ -494,6 +616,8 @@ impl HostRegistry {
             guard.values().map(|s| s.saved.clone()).collect::<Vec<_>>()
         };
         let _ = std::fs::remove_file(Self::cache_path(&self.local_home, host_id));
+        let _ = std::fs::remove_file(Self::outbox_path(&self.local_home, host_id));
+        let _ = std::fs::remove_dir_all(self.local_home.join("cache/hosts").join(host_id));
         self.save_hosts_file(&all_saved)?;
         self.emit(
             host_id,
@@ -590,58 +714,85 @@ impl HostRegistry {
         self.wake();
     }
 
+    fn store_cached_snapshot(
+        local_home: &Path,
+        host_id: &str,
+        mut snap: Snapshot,
+        config: Config,
+    ) -> CachedHostData {
+        snap.register_host_entities(host_id);
+        let data = CachedHostData {
+            saved_at: now(),
+            snapshot: snap,
+            config,
+        };
+        Self::save_cache(local_home, host_id, &data);
+        data
+    }
+
+    fn replace_host_entity_owners(&self, host_id: &str, snap_entities: &BTreeMap<String, String>) {
+        let mut eh = self.entity_hosts.write().unwrap();
+        eh.retain(|k, v| v != host_id || snap_entities.contains_key(k));
+        for (k, v) in snap_entities {
+            eh.insert(k.clone(), v.clone());
+        }
+    }
+
     fn apply_established_slot(
         &self,
         host_id: &str,
         established: EstablishedConnection,
     ) -> (bool, bool) {
         let (client_opt, tunnel, conn_state, state_val, server_id) = established;
-        let mut guard = self.remotes.lock().unwrap();
-        let Some(slot) = guard.get_mut(host_id) else {
-            return (false, false);
-        };
-        let previous = slot.connection.clone();
-        let data_changed = state_val
-            .as_ref()
-            .is_some_and(|v| super::state::state_marker(v) != slot.last_state_marker);
-        slot.client = client_opt;
-        slot.tunnel = tunnel;
-        slot.connection = conn_state;
-        slot.consecutive_failures = 0;
-        // A reachable but incompatible daemon needs a slower probe, not an
-        // immediate retry on every supervisor pass. Explicit reconnect bypasses it.
-        slot.next_retry_at = std::time::Instant::now()
-            + if slot.connection.is_connected() {
-                Duration::ZERO
-            } else {
-                Duration::from_secs(30)
+        let mut updated_entities = None;
+        let (changed, became_connected) = {
+            let mut guard = self.remotes.lock().unwrap();
+            let Some(slot) = guard.get_mut(host_id) else {
+                return (false, false);
             };
-        if let Some(sid) = server_id
-            && slot.saved.server_id.is_none()
-        {
-            slot.saved.server_id = Some(sid);
-        }
-        if let Some(mut val) = state_val {
-            let marker = super::state::state_marker(&val);
-            if let (Ok(snap), Ok(cfg)) = (
-                serde_json::from_value::<Snapshot>(val["snapshot"].take()),
-                serde_json::from_value::<Config>(val["config"].take()),
-            ) {
-                let data = CachedHostData {
-                    saved_at: now(),
-                    snapshot: snap,
-                    config: cfg,
+            let previous = slot.connection.clone();
+            let data_changed = state_val
+                .as_ref()
+                .is_some_and(|v| super::state::state_marker(v) != slot.last_state_marker);
+            slot.client = client_opt;
+            slot.tunnel = tunnel;
+            slot.connection = conn_state;
+            slot.consecutive_failures = 0;
+            // A reachable but incompatible daemon needs a slower probe, not an
+            // immediate retry on every supervisor pass. Explicit reconnect bypasses it.
+            slot.next_retry_at = std::time::Instant::now()
+                + if slot.connection.is_connected() {
+                    Duration::ZERO
+                } else {
+                    Duration::from_secs(30)
                 };
-                Self::save_cache(&self.local_home, host_id, &data);
-                slot.cached = Some(data);
+            if let Some(sid) = server_id
+                && slot.saved.server_id.is_none()
+            {
+                slot.saved.server_id = Some(sid);
             }
-            slot.last_state_marker = marker;
+            if let Some(mut val) = state_val {
+                let marker = super::state::state_marker(&val);
+                if let (Ok(snap), Ok(cfg)) = (
+                    serde_json::from_value::<Snapshot>(val["snapshot"].take()),
+                    serde_json::from_value::<Config>(val["config"].take()),
+                ) {
+                    let data = Self::store_cached_snapshot(&self.local_home, host_id, snap, cfg);
+                    updated_entities = Some(data.snapshot.entity_hosts.clone());
+                    slot.cached = Some(data);
+                }
+                slot.last_state_marker = marker;
+            }
+            let became_connected = !previous.is_connected() && slot.connection.is_connected();
+            (
+                previous != slot.connection || data_changed,
+                became_connected,
+            )
+        };
+        if let Some(entities) = updated_entities {
+            self.replace_host_entity_owners(host_id, &entities);
         }
-        let became_connected = !previous.is_connected() && slot.connection.is_connected();
-        (
-            previous != slot.connection || data_changed,
-            became_connected,
-        )
+        (changed, became_connected)
     }
 
     /// Upgrade a remote host's `canband` daemon over its authenticated transport (`update.daemon`),
@@ -814,7 +965,11 @@ impl HostRegistry {
                                 }
                             }
                         }
-                        let _ = self.apply_established_slot(host_id, est);
+                        let (_changed, became_connected) =
+                            self.apply_established_slot(host_id, est);
+                        if became_connected {
+                            self.spawn_drain_and_prefetch(host_id);
+                        }
                         connected = true;
                         break;
                     }
@@ -1015,39 +1170,48 @@ impl HostRegistry {
                 match client.call("app.state", json!({"after":after})) {
                     Ok(mut state_val) => {
                         let rtt_ms = start.elapsed().as_millis() as u64;
-                        let mut guard = self.remotes.lock().unwrap();
-                        if let Some(slot) = guard.get_mut(&id)
-                            && !slot.updating
+                        let mut updated_entities = None;
                         {
-                            if state_val["changed"] == true
-                                && let (Ok(snap), Ok(cfg)) = (
-                                    serde_json::from_value::<Snapshot>(
-                                        state_val["snapshot"].take(),
-                                    ),
-                                    serde_json::from_value::<Config>(state_val["config"].take()),
-                                )
+                            let mut guard = self.remotes.lock().unwrap();
+                            if let Some(slot) = guard.get_mut(&id)
+                                && !slot.updating
                             {
-                                client.set_cached_config(cfg.clone());
-                                let data = CachedHostData {
-                                    saved_at: now(),
-                                    snapshot: snap,
-                                    config: cfg,
-                                };
-                                Self::save_cache(&self.local_home, &id, &data);
-                                slot.cached = Some(data);
-                                topic = Some(client::change_topic(
-                                    true,
-                                    &slot.last_state_marker,
-                                    &state_val,
-                                ));
-                                slot.last_state_marker = super::state::state_marker(&state_val);
+                                if state_val["changed"] == true
+                                    && let (Ok(snap), Ok(cfg)) = (
+                                        serde_json::from_value::<Snapshot>(
+                                            state_val["snapshot"].take(),
+                                        ),
+                                        serde_json::from_value::<Config>(
+                                            state_val["config"].take(),
+                                        ),
+                                    )
+                                {
+                                    client.set_cached_config(cfg.clone());
+                                    let data = Self::store_cached_snapshot(
+                                        &self.local_home,
+                                        &id,
+                                        snap,
+                                        cfg,
+                                    );
+                                    updated_entities = Some(data.snapshot.entity_hosts.clone());
+                                    slot.cached = Some(data);
+                                    topic = Some(client::change_topic(
+                                        true,
+                                        &slot.last_state_marker,
+                                        &state_val,
+                                    ));
+                                    slot.last_state_marker = super::state::state_marker(&state_val);
+                                }
+                                if let HostConnectionState::Connected {
+                                    rtt_ms: prev_rtt, ..
+                                } = &mut slot.connection
+                                {
+                                    *prev_rtt = rtt_ms;
+                                }
                             }
-                            if let HostConnectionState::Connected {
-                                rtt_ms: prev_rtt, ..
-                            } = &mut slot.connection
-                            {
-                                *prev_rtt = rtt_ms;
-                            }
+                        }
+                        if let Some(entities) = updated_entities {
+                            self.replace_host_entity_owners(&id, &entities);
                         }
                     }
                     Err(err) => {
@@ -1082,6 +1246,9 @@ impl HostRegistry {
                         },
                     );
                 }
+                if self.has_drainable_outbox(&id) {
+                    self.spawn_drain_and_prefetch(&id);
+                }
                 continue;
             }
 
@@ -1092,6 +1259,9 @@ impl HostRegistry {
             match self.establish_connection(&id, &saved.transport) {
                 Ok(established) => {
                     let (changed, connected) = self.apply_established_slot(&id, established);
+                    if connected {
+                        self.spawn_drain_and_prefetch(&id);
+                    }
                     if changed {
                         topic = Some(if connected { "resync" } else { "host" });
                     }
@@ -1152,6 +1322,10 @@ impl HostRegistry {
             ),
             None => (0, 8, 0, None),
         };
+        let (pending_mutations, sync_conflicts) = {
+            let ob = slot.outbox.lock().unwrap();
+            (ob.pending_count(), ob.conflict_count())
+        };
         HostSummary {
             id: slot.saved.id.clone(),
             name: slot.saved.name.clone(),
@@ -1173,6 +1347,8 @@ impl HostRegistry {
             project_count,
             reconnect_count: slot.reconnect_count,
             last_synced_at,
+            pending_mutations,
+            sync_conflicts,
         }
     }
 
@@ -1210,6 +1386,8 @@ impl HostRegistry {
             project_count: local_projects,
             reconnect_count: 0,
             last_synced_at,
+            pending_mutations: 0,
+            sync_conflicts: 0,
         }];
         let guard = self.remotes.lock().unwrap();
         for slot in guard.values() {
@@ -1219,7 +1397,8 @@ impl HostRegistry {
     }
 
     /// Build the unified `Snapshot` across `This Mac` and all enabled remote hosts
-    /// (live when connected, cached read-only when offline) and refresh the O(1) routing table.
+    /// (live when connected, cached read-only when offline, with optimistic queued sync projection)
+    /// and refresh the O(1) routing table.
     pub fn merged_snapshot(&self) -> Result<Snapshot> {
         let mut combined = self.local.snapshot()?;
         let local_cfg = self.local.config();
@@ -1255,6 +1434,8 @@ impl HostRegistry {
                 project_count: local_projects,
                 reconnect_count: 0,
                 last_synced_at: Some(synced_at),
+                pending_mutations: 0,
+                sync_conflicts: 0,
             },
         );
 
@@ -1264,7 +1445,20 @@ impl HostRegistry {
                 .values()
                 .filter(|slot| slot.saved.enabled)
                 .map(|slot| {
-                    let snap = slot.cached.as_ref().map(|c| c.snapshot.clone());
+                    let ops = slot.outbox.lock().unwrap().ops.clone();
+                    let snap = if let Some(c) = &slot.cached {
+                        let mut s = c.snapshot.clone();
+                        if !ops.is_empty() {
+                            canban_sync::apply(&mut s, &slot.saved.id, &ops);
+                        }
+                        Some(s)
+                    } else if !ops.is_empty() {
+                        let mut s = Snapshot::default();
+                        canban_sync::apply(&mut s, &slot.saved.id, &ops);
+                        Some(s)
+                    } else {
+                        None
+                    };
                     (snap, Self::slot_summary(slot))
                 })
                 .collect()
@@ -1416,21 +1610,8 @@ impl HostRegistry {
             )
         {
             client.set_cached_config(cfg.clone());
-            let mut snap = snap;
-            snap.register_host_entities(host_id);
-            {
-                let mut eh = self.entity_hosts.write().unwrap();
-                eh.retain(|k, v| v != host_id || snap.entity_hosts.contains_key(k));
-                for (k, v) in &snap.entity_hosts {
-                    eh.insert(k.clone(), v.clone());
-                }
-            }
-            let data = CachedHostData {
-                saved_at: now(),
-                snapshot: snap,
-                config: cfg,
-            };
-            Self::save_cache(&self.local_home, host_id, &data);
+            let data = Self::store_cached_snapshot(&self.local_home, host_id, snap, cfg);
+            self.replace_host_entity_owners(host_id, &data.snapshot.entity_hosts);
             let mut guard = self.remotes.lock().unwrap();
             if let Some(slot) = guard.get_mut(host_id) {
                 slot.cached = Some(data);
@@ -1470,8 +1651,261 @@ impl HostRegistry {
         if let Some(obj) = params.as_object_mut() {
             obj.remove("host_id");
         }
-        let client = self.client_for(&host_id)?;
-        let res = client.call(method, params)?;
+        if host_id == "local" {
+            return self.local.call(method, params);
+        }
+
+        let (host_name, client_opt, outbox_arc, read_cache_arc, base_snap, status_str) = {
+            let guard = self.remotes.lock().unwrap();
+            let slot = guard
+                .get(&host_id)
+                .with_context(|| format!("Unknown Canban host '{host_id}'"))?;
+            (
+                slot.saved.name.clone(),
+                slot.client.clone(),
+                slot.outbox.clone(),
+                slot.read_cache.clone(),
+                slot.cached.as_ref().map(|c| c.snapshot.clone()),
+                slot.connection.short_status(),
+            )
+        };
+        let unavailable_err =
+            || anyhow::anyhow!("Host '{host_name}' is currently unavailable ({status_str})");
+
+        if method == "card.resolve.preview" {
+            if let Some(client) = client_opt {
+                match client.call(method, params.clone()) {
+                    Ok(res) => return Ok(res),
+                    Err(err) if is_connection_error(&err) => {
+                        self.mark_host_reconnecting(&host_id, &err);
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+            let card_id = strp(&params, "card_id")?;
+            let ops = outbox_arc.lock().unwrap().ops.clone();
+            let mut snap = base_snap.unwrap_or_default();
+            canban_sync::apply(&mut snap, &host_id, &ops);
+            return canban_sync::offline_resolve_preview(&snap, card_id, &host_name);
+        }
+
+        if canban_sync::is_read_cacheable_method(method) {
+            let card_id_opt = params["card_id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+            let mut conn_err: Option<anyhow::Error> = None;
+            if let Some(client) = client_opt {
+                match client.call(method, params.clone()) {
+                    Ok(mut val) => {
+                        let card_rev = if method == "timeline.list"
+                            && params["tail"] == true
+                            && params.get("before_sequence").is_none()
+                            && params.get("after_sequence").is_none()
+                        {
+                            card_id_opt.as_deref().and_then(|cid| {
+                                base_snap
+                                    .as_ref()
+                                    .and_then(|s| s.cards.iter().find(|c| c.id == cid))
+                                    .map(|c| c.revision)
+                            })
+                        } else {
+                            None
+                        };
+                        let _ = read_cache_arc.lock().unwrap().put(
+                            method,
+                            &params,
+                            &val,
+                            card_id_opt.as_deref(),
+                            card_rev,
+                            now(),
+                        );
+                        if method == "timeline.list"
+                            && let Some(cid) = card_id_opt.as_deref()
+                        {
+                            let ops = outbox_arc.lock().unwrap().ops.clone();
+                            let snap = base_snap.unwrap_or_default();
+                            enrich_timeline_with_pending(&mut val, &ops, cid, &snap);
+                        }
+                        return Ok(val);
+                    }
+                    Err(err) if is_connection_error(&err) => {
+                        self.mark_host_reconnecting(&host_id, &err);
+                        conn_err = Some(err);
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+            let mut cached = read_cache_arc.lock().unwrap().get(method, &params, now());
+            if method == "timeline.list" {
+                let ops = outbox_arc.lock().unwrap().ops.clone();
+                if cached.is_none()
+                    && card_id_opt.as_deref().is_some_and(|cid| {
+                        ops.iter()
+                            .any(|m| m.card_id == cid && m.kind == MutationKind::CreateCard)
+                    })
+                {
+                    cached = Some(json!({
+                        "events": [],
+                        "next_cursor": Value::Null,
+                        "last_sequence": 0,
+                        "highwater": 0,
+                        "has_more_before": false,
+                        "oldest_sequence": Value::Null,
+                    }));
+                }
+                if let Some(mut val) = cached {
+                    if let Some(cid) = card_id_opt.as_deref() {
+                        let snap = base_snap.unwrap_or_default();
+                        enrich_timeline_with_pending(&mut val, &ops, cid, &snap);
+                    }
+                    return Ok(val);
+                }
+            } else if let Some(val) = cached {
+                return Ok(val);
+            }
+            return Err(conn_err.unwrap_or_else(unavailable_err));
+        }
+
+        let res = match canban_sync::classify_remote_mutation(method, &params) {
+            QueueDecision::RejectOffline(msg) => {
+                if let Some(client) = client_opt {
+                    match client.call(method, params) {
+                        Ok(res) => res,
+                        Err(err) if is_connection_error(&err) => {
+                            self.mark_host_reconnecting(&host_id, &err);
+                            bail!("{msg} ({host_name})");
+                        }
+                        Err(err) => return Err(err),
+                    }
+                } else {
+                    bail!("{msg} ({host_name})");
+                }
+            }
+            QueueDecision::NotQueueable => {
+                let client = client_opt.ok_or_else(unavailable_err)?;
+                client.call(method, params)?
+            }
+            QueueDecision::Queue(kind) => {
+                let request_key = params["request_key"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(canban_types::uuid_v4);
+                params["request_key"] = json!(request_key);
+                if matches!(kind, MutationKind::CreateCard | MutationKind::AddComment)
+                    && params
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .is_none_or(str::is_empty)
+                {
+                    params["id"] = json!(canban_types::id());
+                }
+                let card_id = if kind == MutationKind::CreateCard {
+                    params["id"].as_str().unwrap_or_default().to_owned()
+                } else {
+                    params["card_id"].as_str().unwrap_or_default().to_owned()
+                };
+
+                // Duplicate `mutation_id`: return synthetic receipt without duplicating.
+                {
+                    let ob = outbox_arc.lock().unwrap();
+                    if let Some(existing) = ob.ops.iter().find(|m| m.id == request_key).cloned() {
+                        let base = base_snap.unwrap_or_default();
+                        return canban_sync::synthetic_receipt(&existing, &base, &ob.ops, &host_id);
+                    }
+                }
+
+                let has_pending_for_card = outbox_arc
+                    .lock()
+                    .unwrap()
+                    .ops
+                    .iter()
+                    .any(|m| m.card_id == card_id);
+
+                let (live_reply, sent_before_drop) =
+                    if let (Some(client), false) = (client_opt.as_ref(), has_pending_for_card) {
+                        match client.call(method, params.clone()) {
+                            Ok(res) => (Some(res), false),
+                            Err(err) if is_connection_error(&err) => {
+                                self.mark_host_reconnecting(&host_id, &err);
+                                (None, true)
+                            }
+                            Err(err) => return Err(err),
+                        }
+                    } else {
+                        (None, false)
+                    };
+
+                if let Some(res) = live_reply {
+                    res
+                } else {
+                    let base = if kind == MutationKind::UpdateCard {
+                        let mut projected = base_snap.clone().unwrap_or_default();
+                        let existing_ops = outbox_arc.lock().unwrap().ops.clone();
+                        canban_sync::apply(&mut projected, &host_id, &existing_ops);
+                        projected
+                            .cards
+                            .iter()
+                            .find(|c| c.id == card_id)
+                            .map(|c| UpdateBase {
+                                title: Some(c.title.clone()),
+                                body: Some(c.body.clone()),
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        UpdateBase::default()
+                    };
+                    let mutation = Mutation {
+                        id: request_key,
+                        host_id: host_id.clone(),
+                        card_id: card_id.clone(),
+                        kind,
+                        params: params.clone(),
+                        base,
+                        sent_params: if sent_before_drop {
+                            params.clone()
+                        } else {
+                            Value::Null
+                        },
+                        retry_same_params: sent_before_drop,
+                        state: MutationState::Queued,
+                        created_at: now(),
+                        attempts: u32::from(sent_before_drop),
+                    };
+                    let (stored, ops_snapshot) = {
+                        let mut ob = outbox_arc.lock().unwrap();
+                        let (stored, _) = ob.enqueue(mutation)?;
+                        (stored, ob.ops.clone())
+                    };
+                    if kind == MutationKind::CreateCard && !card_id.is_empty() {
+                        self.acknowledged_owners
+                            .lock()
+                            .unwrap()
+                            .insert(card_id.clone(), host_id.clone());
+                        self.entity_hosts
+                            .write()
+                            .unwrap()
+                            .insert(card_id.clone(), host_id.clone());
+                    }
+                    self.emit(
+                        &host_id,
+                        AppEvent::Changed {
+                            topic: "application",
+                            card_id: (!card_id.is_empty()).then_some(card_id),
+                        },
+                    );
+                    if client_opt.is_some() {
+                        self.spawn_drain_and_prefetch(&host_id);
+                    }
+                    let base = base_snap.unwrap_or_default();
+                    return canban_sync::synthetic_receipt(&stored, &base, &ops_snapshot, &host_id);
+                }
+            }
+        };
         if host_id != "local"
             && !matches!(
                 method,
@@ -1585,6 +2019,442 @@ impl HostRegistry {
             results.push((hid, client.call(method, params.clone())));
         }
         results
+    }
+
+    fn mark_host_reconnecting(&self, host_id: &str, err: &anyhow::Error) {
+        let msg = format!("{err:#}");
+        let mut changed = false;
+        {
+            let mut guard = self.remotes.lock().unwrap();
+            if let Some(slot) = guard.get_mut(host_id)
+                && !slot.updating
+            {
+                slot.client = None;
+                slot.tunnel = None;
+                slot.reconnect_count = slot.reconnect_count.saturating_add(1);
+                slot.consecutive_failures = 1;
+                slot.next_retry_at = std::time::Instant::now() + Duration::from_secs(1);
+                slot.connection = HostConnectionState::Reconnecting {
+                    attempt: 1,
+                    error: msg,
+                };
+                changed = true;
+            }
+        }
+        if changed {
+            self.emit(
+                host_id,
+                AppEvent::Changed {
+                    topic: "host",
+                    card_id: None,
+                },
+            );
+            self.wake();
+        }
+    }
+
+    fn cached_snapshot_for(&self, host_id: &str) -> Option<Snapshot> {
+        self.remotes
+            .lock()
+            .unwrap()
+            .get(host_id)
+            .and_then(|s| s.cached.as_ref().map(|c| c.snapshot.clone()))
+    }
+
+    fn has_drainable_outbox(&self, host_id: &str) -> bool {
+        let Some(ob_arc) = self
+            .remotes
+            .lock()
+            .unwrap()
+            .get(host_id)
+            .map(|s| s.outbox.clone())
+        else {
+            return false;
+        };
+        let ob = ob_arc.lock().unwrap();
+        let blocked = ob.blocked_cards();
+        ob.ops.iter().any(|m| {
+            !blocked.contains(&m.card_id)
+                && matches!(m.state, MutationState::Queued | MutationState::InFlight)
+        })
+    }
+
+    fn spawn_drain_and_prefetch(&self, host_id: &str) {
+        let Some(reg) = self.self_weak.get().and_then(Weak::upgrade) else {
+            return;
+        };
+        let hid = host_id.to_owned();
+        let _ = std::thread::Builder::new()
+            .name(format!("canban-sync-{hid}"))
+            .spawn(move || {
+                reg.run_drain_and_prefetch(&hid);
+            });
+    }
+
+    fn run_drain_and_prefetch(&self, host_id: &str) {
+        if self.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        let (outbox_arc, read_cache_arc, draining_flag, prefetching_flag) = {
+            let guard = self.remotes.lock().unwrap();
+            let Some(slot) = guard.get(host_id) else {
+                return;
+            };
+            if slot.client.is_none() {
+                return;
+            }
+            (
+                slot.outbox.clone(),
+                slot.read_cache.clone(),
+                slot.draining.clone(),
+                slot.prefetching.clone(),
+            )
+        };
+
+        if draining_flag
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            let drain_guard = AtomicFlagGuard(draining_flag.clone());
+            if self.has_drainable_outbox(host_id) {
+                self.sync_host_now(host_id);
+                let mut snapshot = self.cached_snapshot_for(host_id).unwrap_or_default();
+                let mut report = DrainReport::default();
+                let mut blocked = BTreeSet::new();
+                let mut rebuilt_ids = BTreeSet::new();
+
+                loop {
+                    if self.stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let client = {
+                        let guard = self.remotes.lock().unwrap();
+                        guard.get(host_id).and_then(|s| s.client.clone())
+                    };
+                    let Some(client) = client else {
+                        break;
+                    };
+
+                    let step = {
+                        let mut ob = outbox_arc.lock().unwrap();
+                        prepare_next_step(&mut ob, &snapshot, &mut blocked, &mut report)
+                    };
+                    let StepAction::Send {
+                        mutation_id,
+                        method,
+                        sent_params,
+                        was_retry_same_params,
+                    } = step
+                    else {
+                        break;
+                    };
+
+                    let allow_rebuild = !rebuilt_ids.contains(&mutation_id);
+                    let result = client.call(method, sent_params);
+                    let (is_conn_err, refreshed) = match &result {
+                        Ok(_) => (false, None),
+                        Err(err) => {
+                            let conn = is_connection_error(err);
+                            if conn {
+                                self.mark_host_reconnecting(host_id, err);
+                            }
+                            let msg = format!("{err:#}");
+                            let need_refresh = !conn
+                                && ((msg.contains("revision_conflict")
+                                    && !was_retry_same_params
+                                    && allow_rebuild)
+                                    || msg.contains("request_key_conflict"));
+                            let snap = if need_refresh {
+                                self.sync_host_now(host_id);
+                                self.cached_snapshot_for(host_id)
+                            } else {
+                                None
+                            };
+                            (conn, snap)
+                        }
+                    };
+                    let outcome = {
+                        let mut ob = outbox_arc.lock().unwrap();
+                        finish_step(
+                            &mut ob,
+                            &mut snapshot,
+                            &mutation_id,
+                            result,
+                            was_retry_same_params,
+                            is_conn_err,
+                            refreshed,
+                            allow_rebuild,
+                            &mut blocked,
+                            &mut report,
+                        )
+                    };
+                    match outcome {
+                        FinishOutcome::Continue => {}
+                        FinishOutcome::RetryImmediate => {
+                            rebuilt_ids.insert(mutation_id);
+                        }
+                        FinishOutcome::StopConnection => break,
+                    }
+                }
+
+                if report.applied > 0 || report.conflicts > 0 || report.failed > 0 {
+                    self.sync_host_now(host_id);
+                    self.emit(
+                        host_id,
+                        AppEvent::Changed {
+                            topic: "application",
+                            card_id: None,
+                        },
+                    );
+                }
+            }
+            drop(drain_guard);
+        }
+
+        // Sequential timeline prefetch for active Cards when not draining.
+        if prefetching_flag
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        let _prefetch_guard = AtomicFlagGuard(prefetching_flag);
+        let Some(snap) = self.cached_snapshot_for(host_id) else {
+            return;
+        };
+        let targets: Vec<(String, u64)> = snap
+            .cards
+            .iter()
+            .filter(|c| c.active())
+            .map(|c| (c.id.clone(), c.revision))
+            .collect();
+        for (card_id, rev) in targets {
+            if self.stop.load(Ordering::SeqCst)
+                || draining_flag.load(Ordering::SeqCst)
+                || self.has_drainable_outbox(host_id)
+            {
+                break;
+            }
+            let client = {
+                let guard = self.remotes.lock().unwrap();
+                guard.get(host_id).and_then(|s| s.client.clone())
+            };
+            let Some(client) = client else {
+                break;
+            };
+            if read_cache_arc
+                .lock()
+                .unwrap()
+                .has_fresh_timeline(&card_id, rev)
+            {
+                continue;
+            }
+            let params = json!({"card_id": card_id, "tail": true, "limit": 200, "view": "full"});
+            match client.call("timeline.list", params.clone()) {
+                Ok(val) => {
+                    let _ = read_cache_arc.lock().unwrap().put(
+                        "timeline.list",
+                        &params,
+                        &val,
+                        Some(&card_id),
+                        Some(rev),
+                        now(),
+                    );
+                }
+                Err(err) if is_connection_error(&err) => break,
+                Err(_) => {}
+            }
+        }
+    }
+
+    pub fn sync_items(&self) -> Vec<SyncItemView> {
+        let slots: Vec<(String, String, Option<Snapshot>, Vec<Mutation>)> = {
+            let guard = self.remotes.lock().unwrap();
+            guard
+                .values()
+                .map(|slot| {
+                    (
+                        slot.saved.id.clone(),
+                        slot.saved.name.clone(),
+                        slot.cached.as_ref().map(|c| c.snapshot.clone()),
+                        slot.outbox.lock().unwrap().ops.clone(),
+                    )
+                })
+                .collect()
+        };
+        let mut items = Vec::new();
+        for (host_id, host_name, cached_snap, ops) in slots {
+            let mut projected = cached_snap.clone().unwrap_or_default();
+            canban_sync::apply(&mut projected, &host_id, &ops);
+            for op in &ops {
+                let server_card = cached_snap
+                    .as_ref()
+                    .and_then(|s| s.cards.iter().find(|c| c.id == op.card_id));
+                let card_title = op
+                    .params
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        projected
+                            .cards
+                            .iter()
+                            .find(|c| c.id == op.card_id)
+                            .map(|c| c.title.clone())
+                    })
+                    .unwrap_or_else(|| op.card_id.clone());
+                let (state, message, conflict_fields, mine, server) = match &op.state {
+                    MutationState::Queued => (
+                        SyncItemState::Queued,
+                        "Waiting to sync".to_owned(),
+                        Vec::new(),
+                        BTreeMap::new(),
+                        BTreeMap::new(),
+                    ),
+                    MutationState::InFlight => (
+                        SyncItemState::InFlight,
+                        "Syncing…".to_owned(),
+                        Vec::new(),
+                        BTreeMap::new(),
+                        BTreeMap::new(),
+                    ),
+                    MutationState::Conflict { fields } => {
+                        let (cf, mine, srv) = canban_sync::conflict_details(op, server_card);
+                        (
+                            SyncItemState::Conflict,
+                            format!("Conflict on {}", fields.join(", ")),
+                            cf,
+                            mine,
+                            srv,
+                        )
+                    }
+                    MutationState::Failed { message } => (
+                        SyncItemState::Failed,
+                        message.clone(),
+                        Vec::new(),
+                        BTreeMap::new(),
+                        BTreeMap::new(),
+                    ),
+                };
+                items.push(SyncItemView {
+                    host_id: host_id.clone(),
+                    host_name: host_name.clone(),
+                    mutation_id: op.id.clone(),
+                    card_id: op.card_id.clone(),
+                    card_title,
+                    kind: op.kind.label().to_owned(),
+                    state,
+                    message,
+                    conflict_fields,
+                    mine,
+                    server,
+                });
+            }
+        }
+        items
+    }
+
+    pub fn sync_action(&self, host_id: &str, mutation_id: &str, action: SyncAction) -> Result<()> {
+        let (outbox_arc, connected) = {
+            let guard = self.remotes.lock().unwrap();
+            let slot = guard
+                .get(host_id)
+                .with_context(|| format!("Unknown Canban host '{host_id}'"))?;
+            (slot.outbox.clone(), slot.connection.is_connected())
+        };
+        {
+            let mut ob = outbox_arc.lock().unwrap();
+            match action {
+                SyncAction::Discard => {
+                    ob.remove_by_id(mutation_id)?
+                        .with_context(|| format!("Unknown mutation '{mutation_id}'"))?;
+                }
+                SyncAction::Retry => {
+                    let op = ob
+                        .ops
+                        .iter_mut()
+                        .find(|m| m.id == mutation_id)
+                        .with_context(|| format!("Unknown mutation '{mutation_id}'"))?;
+                    if matches!(op.state, MutationState::Failed { .. }) {
+                        op.retry_same_params = false;
+                    }
+                    op.state = MutationState::Queued;
+                    ob.save()?;
+                }
+                SyncAction::UseMine => {
+                    let op = ob
+                        .ops
+                        .iter_mut()
+                        .find(|m| m.id == mutation_id)
+                        .with_context(|| format!("Unknown mutation '{mutation_id}'"))?;
+                    if let Some(obj) = op.params.as_object_mut() {
+                        if let Some(base_t) = op.base.title.as_deref()
+                            && obj
+                                .get("title")
+                                .and_then(Value::as_str)
+                                .is_some_and(|t| t.trim() == base_t.trim())
+                        {
+                            obj.remove("title");
+                        }
+                        if let Some(base_b) = op.base.body.as_deref()
+                            && obj.get("body").and_then(Value::as_str) == Some(base_b)
+                        {
+                            obj.remove("body");
+                        }
+                        obj.insert("force".into(), json!(true));
+                    }
+                    op.retry_same_params = false;
+                    op.state = MutationState::Queued;
+                    ob.save()?;
+                }
+                SyncAction::UseEdited { fields } => {
+                    let op = ob
+                        .ops
+                        .iter_mut()
+                        .find(|m| m.id == mutation_id)
+                        .with_context(|| format!("Unknown mutation '{mutation_id}'"))?;
+                    if let Some(obj) = op.params.as_object_mut() {
+                        if !fields.contains_key("title")
+                            && let Some(base_t) = op.base.title.as_deref()
+                            && obj
+                                .get("title")
+                                .and_then(Value::as_str)
+                                .is_some_and(|t| t.trim() == base_t.trim())
+                        {
+                            obj.remove("title");
+                        }
+                        if !fields.contains_key("body")
+                            && let Some(base_b) = op.base.body.as_deref()
+                            && obj.get("body").and_then(Value::as_str) == Some(base_b)
+                        {
+                            obj.remove("body");
+                        }
+                        for (k, v) in fields {
+                            if matches!(k.as_str(), "title" | "body") {
+                                obj.insert(k, Value::String(v));
+                            }
+                        }
+                        obj.insert("force".into(), json!(true));
+                    }
+                    op.retry_same_params = false;
+                    op.state = MutationState::Queued;
+                    ob.save()?;
+                }
+            }
+        }
+        self.emit(
+            host_id,
+            AppEvent::Changed {
+                topic: "application",
+                card_id: None,
+            },
+        );
+        if connected {
+            self.spawn_drain_and_prefetch(host_id);
+        }
+        Ok(())
     }
 }
 

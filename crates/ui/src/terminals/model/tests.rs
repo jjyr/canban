@@ -2627,6 +2627,8 @@ fn sidebar_rows_render_single_line_compact_layout_with_dedup_and_remote_host_onl
                 project_count: 1,
                 reconnect_count: 0,
                 last_synced_at: None,
+                pending_mutations: 0,
+                sync_conflicts: 0,
             },
         );
         s.terminals.push(TerminalEntry {
@@ -4266,6 +4268,8 @@ fn compact_terminal_tabs_never_push_notifications_or_hosts_out_of_header_bounds(
                     project_count: 1,
                     reconnect_count: 0,
                     last_synced_at: None,
+                    pending_mutations: 0,
+                    sync_conflicts: 0,
                 },
             );
 

@@ -408,7 +408,12 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     .index
                     .with(|idx| idx.projects.get(&c.project_id).map(|p| p.name.clone()))
                     .unwrap_or_default();
-                row = row.child(muted(format!("{project} / Card #{}", c.number)));
+                let crumb = if c.number == 0 {
+                    format!("{project} / Local")
+                } else {
+                    format!("{project} / Card #{}", c.number)
+                };
+                row = row.child(muted(crumb));
                 if let Some(sched) = &c.schedule_source {
                     let sid = sched.schedule_id.clone();
                     row = row
@@ -586,6 +591,10 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             }
             if c.active() && !c.resolved() && has_deliver_in_project && c.hold_auto_merge {
                 row = row.child(status("Auto-merge held", Tone::Attention));
+            }
+            if let Some(mark) = ui.snapshot.with(|s| s.pending_sync.get(&c.id).cloned()) {
+                let (chip_label, chip_tone) = crate::hosts::sync_chip_spec(mark);
+                row = row.child(status(chip_label, chip_tone));
             }
             if let Some(branch) = c.branch.clone().filter(|b| !b.is_empty()) {
                 row = row.child(changes::button(ui, branch, summary));

@@ -280,3 +280,8 @@ See [Insights](insights.md) for the counting and interaction contract.
   independent full-width annual grid, and collapsible timing samples.
 - `examples/gallery`: Fixed-clock `insights`, `insights-weekly`, `insights-empty`,
   `insights-efficiency` and `insights-short-history` production-component scenes.
+
+## Offline Sync chrome and conflict modal (2026-11-22)
+
+- `components/card_tile.rs` & `card/header.rs`: Display `Local` in place of `#0` for un-synced offline-created Cards (`number == 0`) and prepend `Not synced` (`Tone::Neutral`) / `Sync issue` (`Tone::Attention`) status chips driven directly from `Snapshot.pending_sync`.
+- `hosts.rs` & `utilities/panel.rs`: Surface pending mutation and conflict counts on the `Hosts` top-chrome trigger pill tooltip/badge, per-host popover rows (`N pending`, `N sync issues`), offline banner copy (`edits sync when it reconnects`), and the interactive `Sync` modal (`popup == "sync"`) supporting `Retry`, `Discard`, `Use mine`, `Use server`, and inline `Edit merged` (`Save merged`), with `Multi-host · Offline Edits` and `Multi-host · Sync Issues` scenes in `examples/gallery`.

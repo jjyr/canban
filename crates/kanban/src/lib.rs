@@ -12,7 +12,18 @@ pub fn create(
     body: &str,
     actor: &str,
 ) -> Result<Card> {
-    create_at(db, project, title, body, actor, None)
+    create_at_with_id(db, project, title, body, actor, None, None)
+}
+/// Create a Card with an optional client-supplied identifier (`1..=64` `[A-Za-z0-9_-]`).
+pub fn create_with_id(
+    db: canban_storage::Db<'_>,
+    project: &Project,
+    title: &str,
+    body: &str,
+    actor: &str,
+    explicit_id: Option<&str>,
+) -> Result<Card> {
+    create_at_with_id(db, project, title, body, actor, None, explicit_id)
 }
 /// Intake can supply an append rank from its transaction-local Board index.
 pub(crate) fn create_at(
@@ -23,8 +34,32 @@ pub(crate) fn create_at(
     actor: &str,
     rank: Option<i64>,
 ) -> Result<Card> {
+    create_at_with_id(db, project, title, body, actor, rank, None)
+}
+fn create_at_with_id(
+    db: canban_storage::Db<'_>,
+    project: &Project,
+    title: &str,
+    body: &str,
+    actor: &str,
+    rank: Option<i64>,
+    explicit_id: Option<&str>,
+) -> Result<Card> {
+    if let Some(custom_id) = explicit_id {
+        ensure!(
+            canban_types::is_valid_client_id(custom_id),
+            "Invalid Card ID: expected 1..=64 ASCII alphanumeric, '_' or '-' characters"
+        );
+        ensure!(
+            db.get::<Card>(custom_id).is_err(),
+            "Card '{custom_id}' already exists"
+        );
+    }
     let number = db.counter(&format!("cards:{}", project.id))?;
     let mut c = card(project, number, title, body)?;
+    if let Some(custom_id) = explicit_id {
+        c.id = custom_id.to_owned();
+    }
     if let Some(rank) = rank {
         c.board_order = Some(rank);
     } else {
@@ -110,4 +145,38 @@ pub fn check_revision(card: &Card, expected: u64) -> Result<()> {
         card.revision
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_with_id_accepts_valid_id_and_rejects_invalid_or_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = canban_storage::Store::open(dir.path()).unwrap();
+        let repo = dir.path().join("repo");
+        let p = project("Test", repo.to_str().unwrap(), Workflow::default()).unwrap();
+        store.write(|db| db.save(&p)).unwrap();
+
+        let created = store
+            .write(|db| {
+                create_with_id(db, &p, "Client ID Card", "Body", "user", Some("abc_12-XYZ"))
+            })
+            .unwrap();
+        assert_eq!(created.id, "abc_12-XYZ");
+        assert_eq!(created.number, 1);
+
+        let dup = store
+            .write(|db| create_with_id(db, &p, "Duplicate", "", "user", Some("abc_12-XYZ")))
+            .unwrap_err();
+        assert!(dup.to_string().contains("already exists"));
+
+        for bad in ["", "bad/id", "has space", &"a".repeat(65)] {
+            let err = store
+                .write(|db| create_with_id(db, &p, "Bad", "", "user", Some(bad)))
+                .unwrap_err();
+            assert!(err.to_string().contains("Invalid Card ID"), "{bad}: {err}");
+        }
+    }
 }

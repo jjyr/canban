@@ -3168,6 +3168,56 @@ pub fn Gallery() -> impl IntoElement {
                     canban_ui::hosts::close_overlays(ui);
                     ui.navigate("board");
                 }))
+                .child(action("Multi-host · Offline Edits", Variant::Quiet, move |_| {
+                    let (mut snap, mut hosts) = fixtures::multi_host_workspace(true);
+                    if let Some(h) = hosts.iter_mut().find(|h| h.id == "home-linux") {
+                        h.pending_mutations = 2;
+                        h.sync_conflicts = 1;
+                        snap.host_summaries.insert(h.id.clone(), h.clone());
+                    }
+                    let mut draft_card = snap
+                        .cards
+                        .iter()
+                        .find(|c| c.project_id == "remote-linux-core")
+                        .expect("remote card")
+                        .clone();
+                    draft_card.id = "local-draft-card".into();
+                    draft_card.number = 0;
+                    draft_card.title = "Drafted offline".into();
+                    draft_card.body = "Created while Home Linux was unreachable.".into();
+                    snap.entity_hosts
+                        .insert(draft_card.id.clone(), "home-linux".into());
+                    snap.pending_sync
+                        .insert(draft_card.id.clone(), canban_types::SyncMark::Pending);
+                    snap.pending_sync
+                        .insert("remote-card-1".into(), canban_types::SyncMark::Conflict);
+                    snap.cards.push(draft_card);
+                    ui.discovery.set(fixtures::discovery_catalog());
+                    ui.hosts.set(hosts);
+                    ui.snapshot.set(snap);
+                    ui.select_project("remote-linux-core".into());
+                    scene.set("workspace".into());
+                    canban_ui::hosts::close_overlays(ui);
+                    ui.navigate("board");
+                }))
+                .child(action("Multi-host · Sync Issues", Variant::Quiet, move |_| {
+                    let (mut snap, mut hosts) = fixtures::multi_host_workspace(true);
+                    if let Some(h) = hosts.iter_mut().find(|h| h.id == "home-linux") {
+                        h.pending_mutations = 2;
+                        h.sync_conflicts = 1;
+                        snap.host_summaries.insert(h.id.clone(), h.clone());
+                    }
+                    snap.pending_sync
+                        .insert("remote-card-1".into(), canban_types::SyncMark::Conflict);
+                    ui.discovery.set(fixtures::discovery_catalog());
+                    ui.hosts.set(hosts);
+                    ui.snapshot.set(snap);
+                    ui.sync_preview.set(fixtures::sync_preview_items());
+                    ui.select_project("remote-linux-core".into());
+                    scene.set("workspace".into());
+                    ui.navigate("board");
+                    canban_ui::hosts::open_sync_modal(ui);
+                }))
                 .child(action("Multi-host · API Mismatch", Variant::Quiet, move |_| {
                     let (mut snap, mut hosts) = fixtures::multi_host_workspace(false);
                     if let Some(h) = hosts.iter_mut().find(|h| h.id == "home-linux") {

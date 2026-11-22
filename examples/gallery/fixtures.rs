@@ -1526,6 +1526,8 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
             project_count: 1,
             reconnect_count: 0,
             last_synced_at: None,
+            pending_mutations: 0,
+            sync_conflicts: 0,
         },
     );
     for t in &mut s.terminals {
@@ -2663,6 +2665,8 @@ pub fn multi_host_workspace(
         project_count: local.projects.len(),
         reconnect_count: 0,
         last_synced_at: Some(now()),
+        pending_mutations: 0,
+        sync_conflicts: 0,
     };
 
     let remote_summary = HostSummary {
@@ -2691,6 +2695,8 @@ pub fn multi_host_workspace(
         project_count: 1,
         reconnect_count: if offline_remote { 2 } else { 0 },
         last_synced_at: Some(now().saturating_sub(if offline_remote { 300_000 } else { 800 })),
+        pending_mutations: 0,
+        sync_conflicts: 0,
     };
 
     local
@@ -2699,6 +2705,48 @@ pub fn multi_host_workspace(
     local.merge_remote_snapshot(remote, remote_summary.clone());
 
     (local, vec![local_summary, remote_summary])
+}
+
+pub fn sync_preview_items() -> Vec<canban_types::SyncItemView> {
+    use std::collections::BTreeMap;
+    let mut mine = BTreeMap::new();
+    mine.insert(
+        "title".into(),
+        "Offline edited title · keep local workflow changes".into(),
+    );
+    let mut server = BTreeMap::new();
+    server.insert(
+        "title".into(),
+        "Autonomous overnight workflow execution on Home Linux".into(),
+    );
+    vec![
+        canban_types::SyncItemView {
+            host_id: "home-linux".into(),
+            host_name: "Home Linux".into(),
+            mutation_id: "gallery-sync-fail-1".into(),
+            card_id: "remote-card-move".into(),
+            card_title: "Drafted offline".into(),
+            kind: "Move Card".into(),
+            state: canban_types::SyncItemState::Failed,
+            message: "Target stage `qa` was removed on Home Linux".into(),
+            conflict_fields: Vec::new(),
+            mine: BTreeMap::new(),
+            server: BTreeMap::new(),
+        },
+        canban_types::SyncItemView {
+            host_id: "home-linux".into(),
+            host_name: "Home Linux".into(),
+            mutation_id: "gallery-sync-conflict-1".into(),
+            card_id: "remote-card-1".into(),
+            card_title: "Autonomous overnight workflow execution on Home Linux".into(),
+            kind: "Edit Card".into(),
+            state: canban_types::SyncItemState::Conflict,
+            message: "Conflict on title".into(),
+            conflict_fields: vec!["title".into()],
+            mine,
+            server,
+        },
+    ]
 }
 
 pub const INSIGHTS_NOW: u64 = 1_794_900_600_000;

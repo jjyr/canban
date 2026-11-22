@@ -512,6 +512,7 @@ dependencies = [
  "canban-profiles",
  "canban-scheduler",
  "canban-storage",
+ "canban-sync",
  "canban-themes",
  "canban-timeline",
  "canban-types",
@@ -652,6 +653,19 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "canban-sync"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "canban-context",
+ "canban-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]

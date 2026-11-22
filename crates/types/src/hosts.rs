@@ -223,6 +223,10 @@ pub struct HostSummary {
     pub reconnect_count: u32,
     #[serde(default)]
     pub last_synced_at: Option<u64>,
+    #[serde(default)]
+    pub pending_mutations: usize,
+    #[serde(default)]
+    pub sync_conflicts: usize,
 }
 
 impl HostSummary {
@@ -450,6 +454,7 @@ impl Snapshot {
         self.conversations.extend(remote.conversations);
         self.questions.extend(remote.questions);
         self.note_events.extend(remote.note_events);
+        self.pending_sync.extend(remote.pending_sync);
     }
 
     pub fn host_of<'a>(&'a self, entity_id: &str) -> &'a str {
@@ -575,6 +580,8 @@ mod host_tests {
             project_count: 1,
             reconnect_count: 1,
             last_synced_at: Some(12345),
+            pending_mutations: 0,
+            sync_conflicts: 0,
         };
         local.merge_remote_snapshot(remote, summary);
 
@@ -621,6 +628,8 @@ mod host_tests {
             project_count: 1,
             reconnect_count: 0,
             last_synced_at: None,
+            pending_mutations: 0,
+            sync_conflicts: 0,
         };
         assert!(summary.is_updating());
         assert!(summary.is_offline());

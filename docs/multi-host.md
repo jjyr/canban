@@ -52,7 +52,7 @@ This contract defines how one native `Canban.app` client connects simultaneously
   }
   ```
   `canban serve --tailscale [--port 7680]` or `canban serve --listen <ip>:<port>` persists or overrides the TCP listener configuration so service restarts (`systemd --user` / `launchd`) retain network reachability.
-- **Tailscale interface binding:** When `tailscale: true` is active, `canband` resolves the host's Tailscale IPv4 address (`100.64.0.0/10` via `tailscale ip -4` or local interface inspection) and binds `<tailscale-ip>:<port>` (default port `7680`). Unscoped `0.0.0.0` binding is rejected unless explicitly requested alongside token authentication.
+- **Tailscale interface binding:** When `tailscale: true` is active, `canband` resolves the host's Tailscale IPv4 address (`100.64.0.0/10` via `tailscale ip -4` or local interface inspection) and binds `<tailscale-ip>:<port>` (default port `7680`). Unscoped `0.0.0.0` binding is rejected unless explicitly requested alongside token authentication. The TCP listener carries no application-layer encryption; confidentiality relies on the network path the user chooses (Tailscale, their own VPN, or SSH); see [Transport security](mobile-interaction.md#transport-security).
 - **Bearer Token authentication (`<home>/server.token`):**
   - On first TCP-enabled startup or `canban pair`, `canband` generates a 256-bit random hex secret in `<home>/server.token` (`0600`).
   - **Public pre-auth probe (`host.probe`):** Unauthenticated TCP clients may send `{"jsonrpc":"2.0","id":1,"method":"host.probe","params":{}}` (frame capped at 4 KiB) and receive non-sensitive identity metadata:
@@ -68,7 +68,7 @@ This contract defines how one native `Canban.app` client connects simultaneously
     ```
   - **Authenticated RPC and Terminal relay:** Every other method over TCP—including `app.state`, mutations, and `herdr.connect` PTY stream upgrades—must supply `"auth": "<token>"` in the JSON-RPC request envelope, verified in constant time against `server.token`.
 - **CLI pairing & service commands:**
-  - `canban pair [--port 7680] [--json]`: Ensures TCP/Tailscale listening and `server.token` are configured, prints a copyable `canban://<addr>:<port>#<token>` pairing URI (or structured JSON for automated SSH pairing).
+  - `canban pair [--port 7680] [--json]`: Ensures TCP/Tailscale listening and `server.token` are configured, prints a copyable `canban://<addr>:<port>#<token>` pairing URI (or structured JSON for automated SSH pairing). See [Mobile interaction design](mobile-interaction.md#multi-address-pairing) for the proposed v2 multi-address pairing URI and concurrent probe flow.
   - `canban service install [--tailscale] [--port 7680]` / `canban service status`: Installs and starts `~/.config/systemd/user/canban.service` on Linux (attempting `loginctl enable-linger`) or `~/Library/LaunchAgents/com.canban.daemon.plist` on macOS.
 
 ### 2.2 Client `HostRegistry`, routing and offline snapshot cache
@@ -93,7 +93,7 @@ Project and known worktree invalidation as described in [Git workbench](git-work
 - **Connection state machine & offline cache:**
   - States per host: `Connecting`, `Connected { rtt_ms, api_version }`, `Updating { version }`, `Reconnecting { attempt, last_error }`, `ApiMismatch { server_api, app_api }`, `AuthFailed`, `Offline { last_error }`.
   - Triggering `update.daemon` immediately transitions the host into `Updating`, guards concurrent duplicate update calls and background polling from clobbering status, extends client RPC read timeout to 20 minutes for slow archive downloads, and polls bounded post-restart reconnection (`systemctl --user restart` / `launchctl kickstart`) so status progresses seamlessly from `ApiMismatch` → `Updating` → `Connected`.
-  - Each successful remote `Snapshot` is cached atomically under `<local-home>/cache/hosts/<host_id>.json`. When the laptop starts offline or loses Tailscale connectivity, `HostRegistry` hydrates the cached snapshot in read-only offline mode (`Offline · Cached`) so remote Boards, Card descriptions, and reports remain inspectable without blocking local work.
+  - Each successful remote `Snapshot` is cached atomically under `<local-home>/cache/hosts/<host_id>.json`. When the laptop starts offline or loses connectivity, `HostRegistry` serves the cached snapshot with editable offline outbox projection and a 64 MiB per-host LRU read cache for Card timelines and read-only Git Diffs ([Offline editing and synchronization](offline-sync.md)), syncing queued edits automatically on reconnect.
 - **Host-tagged entities and O(1) operation routing:**
   - `Project`, `Card`, `TerminalEntry`, `WorkflowRun`, `WorkflowSource`, `WorkflowRevision`, `ManagedWorktree`, `ConfigurationSession`, and `MergeBatch` carry `#[serde(default)] pub host_id: String` (`"local"` by default; stamped with the owning `host.id` when merged from a remote `AppClient`). Raw entity IDs are preserved unchanged so nested payloads (`timeline.list`, `review.preview`, `execution.output`, `workflow.sources`) require no brittle ID translation.
   - Presenter `dispatch` routes operations automatically by explicit `host_id` -> `card_id` / `project_id` / `terminal_id` / `worktree_id` ownership -> active Project's `host_id` -> `local`.
@@ -130,7 +130,7 @@ Accessible from the `Hosts` popover, `Settings → Hosts`, `+ New Project` host 
 
 ### 3.3 Board, Activity & Notifications, Quick Open and Terminals
 
-- **Board & Project Switcher:** Mixes Projects across all hosts. Remote Projects show a quiet host suffix/badge (`· home-linux` or offline badge when disconnected). When viewing an offline remote Project's Board, a calm top notice (`home-linux is offline — showing cached snapshot; reconnects automatically`) disables mutations cleanly instead of failing with socket errors. `+ New Project` includes a **Host** selector (`This Mac` vs connected remote hosts) and browses directories on that selected `canband`.
+- **Board & Project Switcher:** Mixes Projects across all hosts. Remote Projects show a quiet host suffix/badge (`· home-linux` or offline badge when disconnected). When viewing an offline remote Project's Board, a calm top banner (`<host> is offline (...) · showing cached data · edits sync when it reconnects`, plus pending/conflict counts and a `Sync…` button) keeps Card creation, title/body editing, comments, stage moves, and resolves available via the client outbox while online-only actions (gates, delivery, live Terminals) stay disabled ([Offline editing and synchronization](offline-sync.md)). `+ New Project` includes a **Host** selector (`This Mac` vs connected remote hosts) and browses directories on that selected `canband`.
 - **Activity & Notifications (`Command+I`):** Aggregates `Needs you`, `Updates`, and `Running` across all connected hosts, displaying the host name alongside Project context on remote items and routing `Card & Terminal →` / `Review →` / `✓ Read` to the owning host.
 - **Terminals:** Lists Agent PTYs and manual Shells across all connected hosts, grouped/badged by host. `+` inherits the selected Terminal's host and live cwd; `+ ▾` creates a new shell on any connected host.
 

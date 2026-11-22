@@ -1004,3 +1004,86 @@ fn insights_activity_and_activity_buckets_have_exact_parity_for_same_window() {
     assert_eq!(scoped_buckets[0].dwell.card, 90_000);
     assert_eq!(scoped_buckets[0].agent_ms, 120_000);
 }
+
+#[test]
+fn client_chosen_card_and_comment_ids_validate_reject_duplicates_and_replay_idempotently() {
+    let (_dir, app, project, card) = setup();
+
+    // 1. Explicit Card ID works and replays identically under the same request_key.
+    let create_params = json!({
+        "view": "full",
+        "project_id": project.id,
+        "id": "client-card-1",
+        "title": "Offline created",
+        "body": "Initial body",
+        "request_key": "req-create-1",
+    });
+    let created = app.call("card.create", create_params.clone()).unwrap();
+    assert_eq!(created["id"], "client-card-1");
+    assert_eq!(created["number"], 2);
+    let replayed = app.call("card.create", create_params).unwrap();
+    assert_eq!(replayed["id"], "client-card-1");
+    assert_eq!(replayed["number"], 2);
+
+    // Duplicate Card ID without matching request_key is rejected.
+    let dup_card = app
+        .call(
+            "card.create",
+            json!({
+                "project_id": project.id,
+                "id": "client-card-1",
+                "title": "Duplicate",
+                "request_key": "req-create-2",
+            }),
+        )
+        .unwrap_err();
+    assert!(dup_card.to_string().contains("already exists"));
+
+    // Invalid Card ID is rejected.
+    assert!(
+        app.call(
+            "card.create",
+            json!({"project_id": project.id, "id": "bad/card", "title": "Bad"}),
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("Invalid Card ID")
+    );
+
+    // 2. Explicit Comment ID works, rejects duplicates, and replays idempotently.
+    let comment_params = json!({
+        "view": "full",
+        "card_id": card.id,
+        "id": "client-comment-1",
+        "body": "Queued comment",
+        "request_key": "req-comment-1",
+    });
+    let c1 = app.call("comment.add", comment_params.clone()).unwrap();
+    assert_eq!(c1["id"], "client-comment-1");
+    let c1_replay = app.call("comment.add", comment_params).unwrap();
+    assert_eq!(c1_replay["id"], "client-comment-1");
+    assert_eq!(c1_replay["sequence"], c1["sequence"]);
+
+    let dup_comment = app
+        .call(
+            "comment.add",
+            json!({
+                "card_id": card.id,
+                "id": "client-comment-1",
+                "body": "Another",
+                "request_key": "req-comment-2",
+            }),
+        )
+        .unwrap_err();
+    assert!(dup_comment.to_string().contains("already exists"));
+
+    assert!(
+        app.call(
+            "comment.add",
+            json!({"card_id": card.id, "id": "bad id", "body": "x"}),
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("Invalid comment ID")
+    );
+}

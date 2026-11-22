@@ -15,6 +15,14 @@ pub fn token_id() -> String {
 pub fn uuid_v4() -> String {
     uuid::Uuid::new_v4().hyphenated().to_string()
 }
+/// Validate a client-supplied entity identifier (`1..=64` chars of `[A-Za-z0-9_-]`).
+pub fn is_valid_client_id(raw: &str) -> bool {
+    !raw.is_empty()
+        && raw.len() <= 64
+        && raw
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
 pub fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1177,6 +1185,50 @@ pub struct ReviewDraft {
     #[serde(default)]
     pub updated_at: u64,
 }
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncMark {
+    Pending,
+    Conflict,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncItemState {
+    Queued,
+    InFlight,
+    Conflict,
+    Failed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncItemView {
+    pub host_id: String,
+    pub host_name: String,
+    pub mutation_id: String,
+    pub card_id: String,
+    pub card_title: String,
+    pub kind: String,
+    pub state: SyncItemState,
+    pub message: String,
+    #[serde(default)]
+    pub conflict_fields: Vec<String>,
+    #[serde(default)]
+    pub mine: BTreeMap<String, String>,
+    #[serde(default)]
+    pub server: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum SyncAction {
+    Retry,
+    Discard,
+    UseMine,
+    UseEdited { fields: BTreeMap<String, String> },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
 pub struct Snapshot {
     #[serde(default)]
@@ -1241,6 +1293,9 @@ pub struct Snapshot {
     pub note_events: Vec<NoteEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub review_drafts: Vec<ReviewDraft>,
+    /// Client-only bounded sync status markers per Card ID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pending_sync: BTreeMap<String, SyncMark>,
 }
 impl Snapshot {
     pub fn terminal_project_id<'a>(&'a self, t: &'a TerminalEntry) -> Option<&'a str> {
