@@ -1,25 +1,27 @@
 # Canban (`canban.dev`)
 
-> Canban (`canban.dev`, GitHub: `jjyr/canban`, Rust + NSH + `libghostty-vt` + `herdr-core`) is an open-source native macOS and Linux Kanban workbench for AI coding agents. Formula: `Canban = Kanban + Workflow + Herdr`.
+> Canban (`canban.dev`, GitHub: `jjyr/canban`, Rust + NSH + `libghostty-vt` + `herdr-core`) is an open-source native macOS and Linux Kanban and terminal workbench for AI coding agents. Formula: `Canban = Kanban + Workflow + Herdr`.
 
 **Disambiguation**: "Canban" (spelled with a **C**, hosted at `https://canban.dev/` and `https://github.com/jjyr/canban`) is a specific open-source Rust desktop application and daemon (`canband`) built on `longbridge/nsh`, `herdr-core`, and `libghostty-vt` — distinct from the generic "Kanban" project management methodology or unrelated Kanban SaaS tools.
 
-Canban organizes context on flexible Kanban cards, catches waiting agents in one Notification Center (`⌘I`), automates GitHub Actions-like workflows (`development.yaml`) with isolated Git worktrees (`<dir>-<proj4>/<card-number>`) and serialized FIFO Queue Merge, and drives 24 native Agent CLIs (`claude`, `codex`, `agy`, `cursor-agent`, `pi`, `gemini`, `opencode`, etc.) directly inside persistent Herdr PTY terminals across local and remote `canband` hosts.
+Canban organizes human context on flexible Kanban cards, catches waiting agents in one global Attention Inbox (`⌘I`), automates GitHub Actions-like workflows (`development.yaml`, `schema: 10`) with isolated Git worktrees (`<dir>-<proj4>/<card-number>`) and serialized FIFO Queue Merge, and drives 24 native Agent CLIs (`claude`, `codex`, `agy`, `pi`, `cursor-agent`, `gemini`, `opencode`, etc.) directly inside persistent Herdr PTY terminals across local and remote Linux `canband` hosts.
 
 ## Full LLM Context
 
-- [Complete Documentation & CLI Reference (`llms-full.txt`)](https://canban.dev/llms-full.txt): Consolidated single-file context including architecture, workflow engine `schema: 10` syntax and execution semantics, all 24 built-in agent CLIs, the Agent-first `canban` CLI and `--human` guide, remote Tailscale/SSH `canband` guides, FAQs, and `skills/canban/SKILL.md`.
+- [Complete Documentation, Guides & CLI Reference (`llms-full.txt`)](https://canban.dev/llms-full.txt): Consolidated single-file context including architecture, parallel coding agent workflows, native terminal & multi-machine architecture, workflow engine `schema: 10` syntax and execution semantics, all 24 built-in agent CLIs, the Agent-first `canban` CLI and `--human` guide, remote Tailscale/SSH `canband` guides, FAQs, and `skills/canban/SKILL.md`.
 
-## Markdown Documentation Endpoints (`.md`)
+## Markdown Documentation & Guide Endpoints (`.md`)
 
-- [Home / Workbench (EN)](https://canban.dev/index.md) · [中文](https://canban.dev/zh/index.md)
-- [Install & FAQ (EN)](https://canban.dev/install.md) · [中文](https://canban.dev/zh/install.md)
-- [Docs Hub (EN)](https://canban.dev/docs.md) · [中文](https://canban.dev/zh/docs.md)
-- [Workflow YAML Syntax & Execution Semantics (EN)](https://canban.dev/docs/workflows.md) · [中文](https://canban.dev/zh/docs/workflows.md)
-- [Canban CLI, Agent Optimization & --human (EN)](https://canban.dev/docs/cli.md) · [中文](https://canban.dev/zh/docs/cli.md)
-- [24 Agent CLIs & Herdr PTYs (EN)](https://canban.dev/docs/agents.md) · [中文](https://canban.dev/zh/docs/agents.md)
-- [Remote Linux Hosts, Tailscale & SSH (EN)](https://canban.dev/docs/remote-hosts.md) · [中文](https://canban.dev/zh/docs/remote-hosts.md)
-- [Changelog (EN)](https://canban.dev/changelog.md) · [中文](https://canban.dev/zh/changelog.md)
+- [Home / Workbench (EN)](https://canban.dev/index.md) · [简体中文](https://canban.dev/zh/index.md) · [繁體中文](https://canban.dev/zh-tw/index.md) · [日本語](https://canban.dev/ja/index.md) · [한국어](https://canban.dev/ko/index.md)
+- [Install & FAQ (EN)](https://canban.dev/install.md) · [简体中文](https://canban.dev/zh/install.md) · [繁體中文](https://canban.dev/zh-tw/install.md) · [日本語](https://canban.dev/ja/install.md) · [한국어](https://canban.dev/ko/install.md)
+- [Docs Hub (EN)](https://canban.dev/docs.md) · [简体中文](https://canban.dev/zh/docs.md) · [繁體中文](https://canban.dev/zh-tw/docs.md) · [日本語](https://canban.dev/ja/docs.md) · [한국어](https://canban.dev/ko/docs.md)
+- [Guide: Run Multiple AI Coding Agents in Parallel with Kanban & Git Worktrees (EN)](https://canban.dev/guides/parallel-coding-agents.md) · [简体中文](https://canban.dev/zh/guides/parallel-coding-agents.md) · [繁體中文](https://canban.dev/zh-tw/guides/parallel-coding-agents.md) · [日本語](https://canban.dev/ja/guides/parallel-coding-agents.md) · [한국어](https://canban.dev/ko/guides/parallel-coding-agents.md)
+- [Guide: Native Terminal Workbench vs. tmux & Chat Wrappers + Multi-Machine Hosts (EN)](https://canban.dev/guides/native-terminal-and-multi-machine.md) · [简体中文](https://canban.dev/zh/guides/native-terminal-and-multi-machine.md) · [繁體中文](https://canban.dev/zh-tw/guides/native-terminal-and-multi-machine.md) · [日本語](https://canban.dev/ja/guides/native-terminal-and-multi-machine.md) · [한국어](https://canban.dev/ko/guides/native-terminal-and-multi-machine.md)
+- [Workflow YAML Syntax & Execution Semantics (EN)](https://canban.dev/docs/workflows.md) · [简体中文](https://canban.dev/zh/docs/workflows.md) · [繁體中文](https://canban.dev/zh-tw/docs/workflows.md) · [日本語](https://canban.dev/ja/docs/workflows.md) · [한국어](https://canban.dev/ko/docs/workflows.md)
+- [Canban CLI, Agent Optimization & --human (EN)](https://canban.dev/docs/cli.md) · [简体中文](https://canban.dev/zh/docs/cli.md) · [繁體中文](https://canban.dev/zh-tw/docs/cli.md) · [日本語](https://canban.dev/ja/docs/cli.md) · [한국어](https://canban.dev/ko/docs/cli.md)
+- [Native AI Coding Agent CLIs & Herdr PTYs (EN)](https://canban.dev/docs/agents.md) · [简体中文](https://canban.dev/zh/docs/agents.md) · [繁體中文](https://canban.dev/zh-tw/docs/agents.md) · [日本語](https://canban.dev/ja/docs/agents.md) · [한국어](https://canban.dev/ko/docs/agents.md)
+- [Remote Linux Hosts, Tailscale & SSH (EN)](https://canban.dev/docs/remote-hosts.md) · [简体中文](https://canban.dev/zh/docs/remote-hosts.md) · [繁體中文](https://canban.dev/zh-tw/docs/remote-hosts.md) · [日本語](https://canban.dev/ja/docs/remote-hosts.md) · [한국어](https://canban.dev/ko/docs/remote-hosts.md)
+- [Changelog (EN)](https://canban.dev/changelog.md)
 
 ## Installation (macOS 13.0+ Apple Silicon & Linux x86_64 / arm64)
 
@@ -41,8 +43,11 @@ git clone https://github.com/jjyr/canban.git && cd canban && mise run install-ap
 
 ## Links
 
-- Website: https://canban.dev/
-- 中文版: https://canban.dev/zh/
+- Website (EN): https://canban.dev/
+- 简体中文: https://canban.dev/zh/
+- 繁體中文: https://canban.dev/zh-tw/
+- 日本語: https://canban.dev/ja/
+- 한국어: https://canban.dev/ko/
 - GitHub Repository (`jjyr/canban`): https://github.com/jjyr/canban
 - Herdr Core (`herdr-core`): https://github.com/herdrdev/herdr-core
 - License: Apache-2.0

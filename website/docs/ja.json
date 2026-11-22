@@ -1,0 +1,417 @@
+{
+  "docs": {
+    "eyebrow": "CANBAN // ドキュメント",
+    "title": "Canban ドキュメント＆実践ガイド",
+    "meta_title": "Canban ドキュメント — カンバン・ワークフロー・CLI・ネイティブ Agent・マルチマシン",
+    "description": "Canban のアーキテクチャ、実践ガイド、リファレンス：カンバンと Git Worktree による複数 AI コーディングエージェント並列実行、tmux やチャットラッパーとの比較＆リモート Linux ホスト、schema 10 ワークフロー構文、Agent ファースト canban CLI、組み込み CLI 一覧。",
+    "intro": "Canban（canban.dev）は、Human Context をまとめるカンバンカード、宣言的 schema 10 ワークフローエンジン、Agent ファーストな `canban` CLI、そしてネイティブ AI コーディングエージェント CLI を動かす Herdr 永続 PTY ターミナルを 1 つのネイティブワークベンチに統合します。",
+    "date_published": "2026-11-19",
+    "updated": "2026-11-23",
+    "breadcrumbs": [["ドキュメント", "docs"]],
+    "cards": [
+      {
+        "title": "ガイド：複数エージェント並列運用",
+        "summary": "Claude Code、Codex、Antigravity (agy)、Pi、Cursor CLI などを同時稼働。カードの文脈管理、独立 Git Worktree、通知インボックス（⌘I）、FIFO マージキューでタブ地獄を解消します。",
+        "href": "/ja/guides/parallel-coding-agents/"
+      },
+      {
+        "title": "ガイド：ネイティブ端末＆マルチマシン",
+        "summary": "Rust + libghostty-vt + Herdr PTY が tmux やチャット型 IDE に優れる理由と、Tailscale / SSH による 24 時間リモート Linux 運用を解説。",
+        "href": "/ja/guides/native-terminal-and-multi-machine/"
+      },
+      {
+        "title": "Workflow YAML ＆実行セマンティクス",
+        "summary": "実装コードと一致した schema 10 Document/Step 構文、全 9 種の uses: ステップ、condition ポインタ、admit ゲート、差し戻し・失敗処理、FIFO Queue Merge。",
+        "href": "/ja/docs/workflows/"
+      },
+      {
+        "title": "Canban CLI ＆ --human",
+        "summary": "主要 CLI サブコマンド、コンパクト JSON とサーバー側 --fields 絞り込み、環境変数自動注入、request_key 冪等性、--human の使い方。",
+        "href": "/ja/docs/cli/"
+      },
+      {
+        "title": "ネイティブ Agent CLI ＆ Herdr PTY",
+        "summary": "24 種の組み込み CLI エージェント、libghostty-vt によるネイティブ TUI・MCP・スキル保持、canban card adopt によるセッション引き継ぎ。",
+        "href": "/ja/docs/agents/"
+      },
+      {
+        "title": "リモート Linux ホスト (canband)",
+        "summary": "Headless Linux canband デーモン、Bearer 認証付き Tailscale TCP 直結、SSH 起動/フォールバック、オフラインキャッシュ、診断画面。",
+        "href": "/ja/docs/remote-hosts/"
+      },
+      {
+        "title": "インストール＆FAQ",
+        "summary": "macOS / Linux デスクトップとヘッドレスサーバーへの導入手順、Linux GTK4/GStreamer 依存パッケージ、よくある質問。",
+        "href": "/ja/install/"
+      },
+      {
+        "title": "変更履歴",
+        "summary": "公開済みの Canban リリース一覧とオリジナルのリリースノート。",
+        "href": "/ja/changelog/"
+      }
+    ],
+    "sections": [
+      {
+        "id": "architecture",
+        "heading": "システムアーキテクチャ",
+        "markdown": "Canban は Rust で構築されており、ネイティブ UI（`longbridge/nsh` — macOS 13.0+ Apple Silicon では AppKit/Metal、Linux `x86_64` / `arm64` では GTK4）とターミナルエミュレーションに `libghostty-vt` を採用しています。\n\n- **Canban UI (`canban-ui`)**: ローカルの `AppServer` には Unix ソケット（`~/.canban/app.sock`）で接続し、同時に Tailscale TCP または SSH トンネル経由で複数のリモート `canband` ホストへ接続します。\n- **AppServer (`canban serve` / `canband`)**: SQLite WAL ストレージ、カード、ワークフローエンジン、スケジューラ、Git Worktree 管理、マージキューを統括します。デスクトップウィンドウを閉じてもバックグラウンド処理は止まりません。\n- **Herdr Core (`hc`)**: 永続 PTY セッションスーパーバイザとしてネイティブ Agent CLI（`claude`、`codex`、`agy`、`pi`、`gemini`、`opencode`、`cursor-agent` など）を実行し、UI の再起動やアップデートをまたいでセッションを維持します。"
+      },
+      {
+        "id": "formula",
+        "heading": "なぜ Canban = Kanban + Workflow + Herdr なのか",
+        "markdown": "1. **Kanban が Human Context を保持**: 機能仕様、貼り付けたスクリーンショット、`#Card` や GitHub Issue/PR 参照、`@Agent` との議論、構造化レポート、コード差分をカード単位で一元管理します。\n2. **Workflow が Worktree と配送を自動化**: カードを `Develop` に動かすと独立した Git Worktree（`<dir>-<proj4>/<card-number>`）が割り当てられ、`Review` では直列 FIFO Queue Merge で安全に統合されます。\n3. **Herdr がネイティブ Agent CLI を無改造で稼働**: 各 CLI 本来の TUI、MCP サーバー、スキル、権限確認プロンプト、正確なセッション ID 再開をそのまま利用できます。",
+        "screenshot": {
+          "src": "/screenshots/review-diff.png",
+          "alt": "Canban Card #1 の Worktree Git Diff インスペクタ画面：コミット履歴、変更された Rust ファイル、インライン差分、Copy Markdown、Review & Send to @Agent ボタンを表示。",
+          "caption": "Canban 内蔵の Worktree Diff レビュー：コミットと行単位の差分を確認し、行コメントを付けて Review & Send to @Agent でそのまま修正を依頼できます。",
+          "width": 2880,
+          "height": 1800,
+          "lazy": true
+        }
+      },
+      {
+        "id": "cli-quickstart",
+        "heading": "コア CLI クイックスタート",
+        "markdown": "Canban が起動するターミナルや自動スケジュールされたエージェントセッションには、`CANBAN_CLI`、`CANBAN_ENDPOINT`、`CANBAN_CARD`、`CANBAN_PROJECT`、`CANBAN_RUN_DIR` が自動注入されます。人間が対話的に読む際は `--human` を付けると余分なフィールドを取得せず整形表示できます。\n\n```sh\n\"$CANBAN_CLI\" card show --fields number,title,body,stage,revision\n\"$CANBAN_CLI\" card adopt --stage develop\n\"$CANBAN_CLI\" report --state completed --message '実装とテスト検証を完了' --file \"$CANBAN_RUN_DIR/report.md\"\ncanban --human --fields number,title,stage card show\n```\n\n詳細は [Canban CLI・Agent 最適化・--human](/ja/docs/cli/) ガイドをご覧ください。"
+      }
+    ]
+  },
+  "docs/workflows": {
+    "eyebrow": "CANBAN // ドキュメント // ワークフロー",
+    "title": "ローカル AI エージェントワークフロー・Git Worktree・Queue Merge",
+    "meta_title": "ローカル AI エージェントワークフロー — Git Worktree・YAML パイプライン・FIFO マージキュー | Canban",
+    "description": "crates/workflow-engine schema 10 の実装と一致したワークフロー解説：GitHub Actions 風ローカルパイプライン、Visual Studio の Stage マッピング、全 9 種の uses: ステップ、condition ポインタ、admit ゲート、差し戻し・失敗処理、直列 FIFO Queue Merge。",
+    "intro": "Canban のワークフローは SQLite（`workflow_sources` とイミュータブルな `workflow_revisions`）を単一ソースとする宣言的 YAML 1.2 実行グラフ（現行 `CURRENT = 10`）です。Visual Studio、YAML 直接編集、Edit with agent のすべてが同一の Rust エンジンで検証・コンパイルされます。",
+    "date_published": "2026-11-19",
+    "updated": "2026-11-23",
+    "breadcrumbs": [["ドキュメント", "docs"], ["ワークフロー", "docs/workflows"]],
+    "sections": [
+      {
+        "id": "visual-studio",
+        "heading": "Visual Studio、SQLite 単一ソース＆Stage 投影",
+        "markdown": "任意のプロジェクトヘッダーから **Workflows** を開くと、**Visual Studio**、**YAML Source**、**History**、**Edit with agent** を切り替えられます。\n\n- **SQLite 単一ソース**: ワークフロー定義と不変リビジョンは `~/.canban` の隠しファイルではなく `canban.sqlite`（`workflow_sources` と `workflow_revisions`）に保存されます。実行中の `WorkflowRun` は作成時の `definition` と `definition_revision` を凍結するため、YAML を更新しても稼働中のタスクを壊しません。\n- **線形 Schema マイグレーション（`1..=10`）**: `crates/workflow-engine/src/migrations.rs` が `BASELINE = 1`・`CURRENT = 10` を定義し、古い YAML をパース時に順次アップグレードします。\n- **Visual Studio の Stage マッピング（`stages.rs`）**: YAML トップレベルに `stages:` ブロックはなく、`canban_workflow_engine::stages` が `columns`・`on` エントリ規則・`card.move`（`column: $next` / `next: $entry`）からボード列ごとの `StageView` レーン（`column`、`name`、`steps`、`entry_rule`、`exit`）を自動投影します。各 `Step` には `stage: <column_id>` や `enabled: false` も指定できます。",
+        "screenshot": {
+          "src": "/screenshots/workflow-studio.png",
+          "alt": "Canban Workflows Visual Studio 画面：development.yaml の Backlog、Develop（@developer Implement）、Review（External PR check 分岐、Human approval、Queue merge）レーンを表示。",
+          "caption": "development.yaml の Visual Studio ビュー：Backlog・Develop・Review レーンと /card/source_trust == external_pr 分岐、承認ゲート、Rebase・Sync Queue merge を可視化。",
+          "width": 2880,
+          "height": 1800,
+          "lazy": true
+        }
+      },
+      {
+        "id": "yaml-structure",
+        "heading": "検証済み YAML 構造（schema: 10）",
+        "markdown": "`serde_yaml_ng` によるパース時に `Document`、`Step`、`WorkflowColumn`、`WorkflowRule`、`EventSelector`、`ScheduleCardConfig` すべてで `#[serde(deny_unknown_fields)]` が有効になっており、未知のフィールドは公開前に拒否されます。\n\n### トップレベル `Document` キー（`crates/workflow-engine/src/source.rs`）\n\n| キー | 型・デフォルト | 役割 |\n| --- | --- | --- |\n| `schema` | `u32`（必須・現行 `10`） | Schema バージョン（`1..=10` を受け付け `10` へ自動移行）。 |\n| `id` | `String`（必須） | 空でないワークフロー ID（例: `delivery:default`）。 |\n| `name` | `String`（必須） | Studio やボードに表示する名称。 |\n| `scope` | `project`（既定）または `global` | `global`（`__global`）はボード列や `card:` 生成を持たないホスト全体の定期/スクリプト用ワークフロー。 |\n| `enabled` | `bool`（既定 `true`） | イベント一致とスケジューリングの有効/無効。 |\n| `columns` | `{ id, name }` の配列 | ボード列を宣言（`id` は ASCII 英数字・`-`・`_`）。省略時はプロジェクトの列を使用。 |\n| `env` | `{ KEY: VALUE }` マップ | すべての `agent` / `script` ステップへ引き継ぐスカラー環境変数。 |\n| `on` | `{ <rule_id>: WorkflowRule }`（空不可） | イベントトリガー（`event`、`start_at`、`match`、`enabled`）または Cron スケジュール（`cron`、`timezone`、`overlap`、`card`）。GitHub Actions 風の `on: { schedule: [{ cron: ... }] }` にも対応。 |\n| `steps` | `Step` 配列（`1..=256`） | 非循環有向グラフ（DAG）を構成する順序付きステップ群。 |\n| `workspace` | `WorkspaceSettings` | `create_worktree`（既定 `true`）、`base_branch`、`sync_base`（`create_worktree: true` が必要）、`remote`（既定 `origin`）。 |\n| `max_steps` | `u32`（`1..=1000`、既定 `100`） | 1 つの `WorkflowRun` あたりの最大ステップ訪問数ガード。 |\n\n### `on.<rule_id>` トリガーとスケジュール規則\n\n- **イベント規則**: `event`（`card.column_entered`、`card.column_left`、`card.created`、`card.updated`、`manual` 等）、`start_at`、`match`（`EventSelector`: `column`、`actor`、`origin`、`source_kind`、`reason`、`changed_fields`、`repository`、`subject`、`reply_to`、`include_related`、`include_initial`）、`enabled`。\n- **スケジュール規則**: `cron`（5 フィールド POSIX cron または `@hourly` / `@daily` / `@weekly` / `@monthly`）を指定すると `event: schedule` になります。`timezone`（既定 `Local`、`UTC`、`+08:00`、IANA 名）、`overlap`（`skip` 既定、`queue`、`allow`）、`card: { column, title, body }`（`{{date}}`、`{{datetime}}`、`{{run_number}}`、`{{workflow}}`、`{{rule}}` 置換に対応。`card` 省略でカードなし実行）。\n\n### `steps[]` フィールド\n\n- 共通キー: `id`、`name`、`uses`（トップレベル `run:` 指定時は省略可）、`with`、`next`（`condition` と `complete` 以外は次要素が既定、`card.move` は `$entry` 指定可）、`stage`、`enabled`（既定 `true`）、`on_changes_requested`（`approval` / `deliver` 用の差し戻し先）、`on_failure`（`script` 用の初回限定自動フォールバック先）。\n- `script` 専用キー（トップレベルまたは `with:` 内、競合不可）: `run`、`shell`（既定 `bash -eo pipefail`、代替 `sh -e`）、`working_directory`（`..` 禁止）、`timeout_minutes`（`1..=1440`）、`timeout_seconds`（`1..=86400`）、`continue_on_error`（既定 `false`）。\n- `env`: `agent` と `script` のみ指定可能。優先順: ホスト & `CANBAN_*` < ワークフロー `env` < `$CANBAN_ENV` < ステップ `env`。\n\n### 標準デフォルト `development.yaml` (`default_document`)\n\n```yaml\nschema: 10\nid: delivery:default\nname: Development\nenabled: true\ncolumns:\n  - id: backlog\n    name: Backlog\n  - id: develop\n    name: Develop\n  - id: review\n    name: Review\non:\n  develop:\n    event: card.column_entered\n    start_at: agent:develop\n    match:\n      column: develop\n  review:\n    event: card.column_entered\n    start_at: condition:external_pr\n    match:\n      column: review\nsteps:\n  - id: agent:develop\n    name: Implement\n    uses: agent\n    with:\n      profile: developer\n    next: move:develop\n  - id: move:develop\n    name: Move to Review\n    uses: card.move\n    with:\n      column: review\n    next: condition:external_pr\n  - id: condition:external_pr\n    name: External PR check\n    uses: condition\n    with:\n      pointer: /card/source_trust\n      equals: external_pr\n      then: approval:review\n      otherwise: deliver:review\n  - id: deliver:review\n    name: Queue merge\n    uses: deliver\n    with:\n      sync_upstream: true\n    next: __end\n    on_changes_requested: agent:develop\n  - id: approval:review\n    name: Human approval\n    uses: approval\n    with:\n      title: External PR; human approval is required before merging\n    next: __end\n    on_changes_requested: agent:develop\n  - id: __end\n    uses: complete\nworkspace:\n  create_worktree: true\n  sync_base: true\n  remote: origin\n```"
+      },
+      {
+        "id": "step-types",
+        "heading": "全 9 種類のステップタイプ（uses:）",
+        "markdown": "| `uses` | `with`・ステップ項目 | ランタイム動作 |\n| --- | --- | --- |\n| `agent` | `with.profile`（任意）、`with.instruction`（省略時は標準プロンプト）、`env`、`next` | カード Worktree で Agent PTY を起動（`waiting_agent`）。`canban report --state completed` でのみ次へ進みます。 |\n| `script`（または `run:`） | `run`、`shell`、`working_directory`、`timeout_minutes`、`timeout_seconds`、`continue_on_error`、`env`、`on_failure`、`next` | Herdr Core 経由で実行し **`scheduler.max_agents` 枠を消費しません**。`$CANBAN_ENV` と `$CANBAN_OUTPUT` を利用可能。 |\n| `admit` | `with.agent_slot`（既定 `true`）、`with.max_ready`（`1..=100`）、`next` | `waiting_capacity` に入り、空きが出ると AppServer がボード順で解放します。 |\n| `card.move` | `with.column`（列名または `$next`）、`next`（ステップ ID または `$entry`） | 二重トリガーを防ぐため `origin: \"workflow\"` でカード移動。`$entry` で移動先列の開始ステップへ接続。 |\n| `condition` | `with.pointer`（JSON Pointer）、`with.equals`、`with.then`、`with.otherwise` | `{inputs, outputs, card}` を評価し即座に分岐。`next` は無視されます。 |\n| `approval` | `with.title`（必須）、`on_changes_requested`、`next` | `waiting_approval` で一時停止し `Card.human_gate` を設定。承認または差し戻しを待ちます。 |\n| `deliver` | `with.profile`（既定 `@merger`）、`with.target_branch`、`with.strategy`（既定 `rebase`、`squash`、`merge`）、`with.sync_upstream`（既定 `true`）、`with.batch_size`（`1..=50`、既定 `5`）、`with.test_command`、`with.max_conflict_attempts`（既定 `3`、`0` で無効）、`on_changes_requested`、`next` | 直列 FIFO Queue Merge（`waiting_delivery`）へ投入。`hold_auto_merge` が有効なら即座に承認待ちで停止。 |\n| `notify` | `with.message`、`next` | `workflow.notified` タイムラインイベントと通知を発行して続行。 |\n| `complete` | *(なし)* | `WorkflowRun` を `completed` にする終端ステップ。 |"
+      },
+      {
+        "id": "conditions-admit",
+        "heading": "条件分岐（condition）と同時実行ゲート（admit）",
+        "markdown": "### 条件評価（`condition`）\n\n実行時（`crates/workflow-engine/src/runtime.rs`）、`condition` は `{ \"inputs\": run.inputs, \"outputs\": run.outputs, \"card\": card }`（`card.source_trust` には `\"local\"`、`\"collaborator\"`、`\"external_pr\"` が格納）を組み立て、`with.pointer`（空または `/` 始まり）を評価します。\n\n- **比較ルール**: 厳密な JSON 一致に加え、`\"true\"`/`\"false\"` 文字列と真偽値、数値文字列と数値、未定義ポインタと `null` が一致します。\n- **外部 PR ゲート**: `pointer: /card/source_trust` + `equals: external_pr` で未検証の外部 PR だけを `approval:review` へ送り、信頼できるブランチは `deliver:review` へ流します。\n- **スクリプト出力による分岐**: 先行する `script` が `$CANBAN_OUTPUT` に書いた `KEY=VALUE` は `/outputs/<step_id>/<KEY>` で参照できます（例: `pointer: /outputs/script:check/gate`、`equals: ok`）。\n\n### キャパシティ＆レディ数ゲート（`admit`）\n\n`admit` は `agent_slot: true` または `max_ready: 1..=100` のいずれかが必須です（`definition.rs`）。到達したランは `waiting_capacity` に入り、`canban_scheduler::admissions` が各列の**ボード順**で厳密に解放します。\n\n- `agent_slot: true`（既定）: グローバル並列枠（`scheduler.max_agents`、既定 `8`）が空くまで待機。\n- `max_ready: K`: その列でゲート通過後に滞留できるカード上限（例: `Backlog` の計画済みカードを最大 `2` 枚に制限）。\n- `canban card adopt`: 既存のライブ端末から `start_adopted` で引き継ぐ場合は `admit` 待ちをスキップします。"
+      },
+      {
+        "id": "rework-failure",
+        "heading": "静的検証・差し戻しループ・失敗ハンドリング",
+        "markdown": "### 公開前バリデーション（`definition.rs`）\n\n保存・公開前に `validate_definition` が列名、Profile ID、遷移先、`sync_base` 条件（`create_worktree: true`）、`working_directory` の相対パス境界、および**循環の不在**（`next`、`condition.then`、`condition.otherwise` による自動ループ禁止）を検証します。\n\n### 差し戻し・フォールバックエッジ\n\nループは明示的な判断または失敗エッジでのみ許可されます。\n\n- **人間による差し戻し（`on_changes_requested`）**: `approval` と `deliver` で指定可能。`workflow.decide`（`decision: \"rework\"`）でレビュー指摘を `inputs.rework_feedback` に記録し、`agent:develop` などへ戻します。\n- **スクリプト失敗時の単回フォールバック（`on_failure`）**: `script` 失敗時に終了コードとログ末尾を `inputs` に保存して `on_failure` へ**1 ランにつき 1 回だけ**遷移します（`script_failures[step_id] == 0`）。連続失敗または未設定時は `waiting_approval` で人間の Retry / Rework / Stop を待ちます。\n- **明示報告と Stale 検知**: プロセス終了やアイドル状態では決して前進しません。`canban report --state completed` で前進し、実行中にカード本文を変更すると `input_digest` により `stale` 検知されます。"
+      },
+      {
+        "id": "queue-merge",
+        "heading": "直列 FIFO Queue Merge（deliver）",
+        "markdown": "`deliver` に入ると並列ワークツリーからの統合が厳密に直列化され、ターゲットブランチでの競合を防ぎます。\n\n1. **厳密 FIFO キュー**: `(inputs.queued_at, storage_index)` 順で設定が互換する `waiting_delivery` カードを最大 `batch_size`（`1..=50`、既定 `5`）件取り出し、`<home>/worktrees/<project-ns>/_merge_queue` へまとめます。\n2. **Agent Turn 完了待機ガード**: Agent がターン終了直前に `completed` を報告した場合、Herdr がターン完了を示すまで最大 3 分間待機してから統合します。\n3. **バッチ統合＆テスト**: `strategy`（既定 `rebase`、`squash`、`merge`）を適用後、`test_command` が設定されていれば統合結果に対して 1 回実行します。\n4. **Fast-Forward・Push・アーカイブ**: 検証成功後、ターゲットブランチを 1 回だけ進めて `sync_upstream: true` なら Push し、`refs/canban/cards/<card-id>` を保存してカードを自動アーカイブします。\n5. **コンフリクト解決（`@merger`）**: 競合やテスト失敗時は `refs/canban/batch/<short_id>/{target,card-<N>}` を保存し、プロジェクト単位の `@merger` セッションを `_merge_queue` で起動して修復または `canban batch report --state completed --evict <CARD_NUMBER>` による問題カードの除外を行います。"
+      },
+      {
+        "id": "cli-workflows",
+        "heading": "CLI からのワークフロー管理",
+        "markdown": "ターミナルからライブスキーマの確認、エクスポート、ドライラン検証（`--check`）、公開、グローバル既定の設定を行えます。\n\n```sh\ncanban call workflow.schema '{}'\ncanban workflow sources --project-id <PROJECT_ID>\ncanban workflow export --project-id <PROJECT_ID> --name development.yaml --output development.yaml\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml --check\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml\ncanban workflow set-default --project-id <PROJECT_ID>\n```\n\n`--global` フラグ、`schedule` コマンド、`--human` 出力は [Canban CLI・Agent 最適化・--human](/ja/docs/cli/) をご参照ください。"
+      }
+    ],
+    "faq_items": [
+      [
+        "同じ Git リポジトリ上で並列稼働するエージェントがファイルを上書きし合うことはありませんか？",
+        "workspace.create_worktree が有効なステージに入ると、AppServer がカードごとに専用の Git Worktree（<dir>-<proj4>/<card-number>）を割り当てるため、作業ディレクトリとブランチが完全に分離されます。"
+      ],
+      [
+        "シェルの終了検知ではなく明示的な canban report が必要なのはなぜですか？",
+        "対話型 CLI は常駐 PTY 内で待機したりサブコマンドを実行し続けたりするため、プロセス終了やアイドル判定は誤爆しがちです。canban report --state completed を明示することで、成果物とテスト完了後にのみ確実に次の段階へ進みます。"
+      ],
+      [
+        "複数カードが同時に完了しても FIFO Queue Merge が main ブランチを守れる仕組みは？",
+        "deliver ステップは到着したブランチを単一の _merge_queue Worktree に FIFO 順でキューイングし、統合後に test_command を一度実行して通った場合のみ Fast-Forward と Push を行います。失敗時は @merger が自動修復または問題のカードを切り離します。"
+      ],
+      [
+        "Cron 定期実行ワークフローでボードに不要なカードが増え続けませんか？",
+        "用途に応じて選べます。cron ルールに card: { column, title, body } を書けば実行ごとにカードが生成され、省略すればカードなしのバックグラウンド実行（skip / queue / allow 制御付き）になります。"
+      ]
+    ]
+  },
+  "docs/cli": {
+    "eyebrow": "CANBAN // ドキュメント // CLI",
+    "title": "Canban CLI、Agent 最適化＆ --human",
+    "meta_title": "Canban CLI — コアコマンド・Agent ファースト JSON 整形・組み込み Skill・--human | Canban",
+    "description": "canban CLI 完全リファレンス：主要コマンド、コンパクト単一行 JSON とサーバー側 --fields/--full 絞り込み、環境変数自動注入、request_key 冪等性、組み込み Skill、--human 整形出力。",
+    "intro": "`canban` バイナリ（`crates/cli/src/main.rs`）はネイティブデスクトップ UI と同一の `AppServer` JSON-RPC 権限と通信します。デフォルトは Agent のコンテキスト節約に特化したコンパクト契約ですが、`--human` を付けるだけで人間にも読みやすい形式になります。",
+    "date_published": "2026-11-19",
+    "updated": "2026-11-23",
+    "breadcrumbs": [["ドキュメント", "docs"], ["CLI", "docs/cli"]],
+    "sections": [
+      {
+        "id": "core-commands",
+        "heading": "主要 CLI コマンド一覧",
+        "markdown": "グローバルオプション `--home <PATH>`（`CANBAN_HOME`）、`--endpoint <PATH>`（`CANBAN_ENDPOINT`）、`--human`、`--fields <COLS>`、`--full` は全サブコマンドで使えます：\n\n| コマンド | 用途 |\n| --- | --- |\n| `canban snapshot`, `canban status` | `app.snapshot` 全状態または `herdr.status` ランタイム状態を取得。 |\n| `canban call <METHOD> '<JSON>'` | 公開 `AppServer` JSON-RPC メソッドを呼び出し（ファイル入力は `@/path/to/params.json`）。 |\n| `canban card show`, `card update`, `card adopt` | カード閲覧、`--title` / `--file` 更新、重複 Agent を起動せず `--stage develop` で既存ライブ PTY を引き継ぎ。 |\n| `canban report` | カードまたは `--schedule-run-id` の実行結果（`--state`: `completed`, `backlog`, `blocked`, `failed`, `working`）を報告。 |\n| `canban reply` | 実行中のタスクを終了せず追加質問（`--to <QUESTION_ID> --file <PATH>`）へ回答。 |\n| `canban bind-session` | プロバイダの `--session-id <ID>` をカード・スケジュールラン・マージバッチ等へ紐付け。 |\n| `canban review draft`, `review clear` | Card Diff UI 用のローカル未公開レビュー JSON（`{ summary, verdict, comments }`）を一時保存・削除。 |\n| `canban workflow sources`, `export`, `submit`, `set-default` | SQLite 管理の `workflow_sources`（`--project-id` / `--global`、`--check` 検証、グローバル既定）を操作。 |\n| `canban schedule` | `list`, `runs`, `create`, `trigger`, `toggle`（`--on` / `--off`）, `delete`, `artifact` で Cron ワークフローを管理。 |\n| `canban worktree gc` | マージ済みのクリーンな Worktree を整理（`--merged-before 7d`, `--dry-run`, `--env-dirty`, `--fail-on-dirty`）。 |\n| `canban batch report` | `_merge_queue` の `@merger` 解決結果を報告（`--state`, `--evict <CARD_NUMBER>`）。 |\n| `canban serve`, `pair`, `service` | Headless `AppServer` 起動（`--tailscale`, `--port 7680`, `--listen`）、`canban://` ペアリング URI 表示、`systemd` / `launchd` 管理。 |\n| `canban skill`, `--skill`, `build-info` | アプリデータを開かずに内蔵 `SKILL.md` やビルド情報を出力。 |"
+      },
+      {
+        "id": "agent-optimizations",
+        "heading": "Agent ファースト設計と最適化",
+        "markdown": "CLI と RPC 層（`crates/app-server/src/representation.rs`）は、コンテキストトークンの浪費や不整合を防ぐよう設計されています：\n\n- **標準でコンパクト単一行 JSON**: 出力先が端末かパイプかにかかわらず 1 行のコンパクト JSON を返し、エラー時は構造化 `{\"error\":{\"message\":...}}` を stderr へ出して非 0 で終了します。\n- **サーバー側レスポンス整形（`--fields` と `--full`）**: `card.show`・`card.get`・`card.list` の既定値は軽量サマリー（`id`, `number`, `title`, `stage`, `revision`）のみ。`--fields number,title,body,stage,revision` で必要列だけ取得でき、全体が必要なら `--full`（`view: \"full\"`）を指定します。\n- **有界カーソルページネーション**: `card.list`（`limit` 1..500、既定 50）は不透明 `cursor` と `cursor_stale` / `cursor_scope_mismatch` 保護を備え、`timeline.list` は SQL 側で `kinds` を絞り込みます。\n- **ゼロ設定の環境変数注入**: 起動セッションに `CANBAN_CLI`, `CANBAN_ENDPOINT`, `CANBAN_HOME`, `CANBAN_CARD`, `CARD_ID`, `CANBAN_PROJECT`, `CANBAN_PROFILE_ID`, `CANBAN_RUN_DIR`（および該当時は `CANBAN_SCHEDULE_RUN_ID`, `CANBAN_SCHEDULE_ID`, `CANBAN_BATCH_ID`）を自動注入します。\n- **`request_key` 冪等性とアップデート引き継ぎ**: 変更系コマンドは `request_key` を付与し、ライブアップグレード中に実行された `report` / `batch report` / `reply` は `canban_updater::handoff` に永続キューイングされます。\n- **明示的な `report --state` ゲート**: プロセス終了や待機状態では進行せず、明示報告でのみ遷移します。\n- **バイナリ内蔵 `canban skill`（`SKILL.md`）**: `canban skill` で出力でき、`AppServer::open` が `<CANBAN_HOME>/skills/canban/SKILL.md` に自動展開します。\n- **ローカル未公開 `review draft`**: エージェントが直接 GitHub へ投稿せず、まずローカル SQLite に下書きを保存して人間が Diff UI から確認・公開できます。"
+      },
+      {
+        "id": "human-usage",
+        "heading": "人間向けの整形出力（--human）",
+        "markdown": "人間がステータス確認やスクリプト検証を行う際はグローバルフラグ `--human` を付けてください。`crates/cli/src/main.rs`（`Output::encode`）の実装通り、`--human` はサーバーからのレスポンスを**見やすくインデント整形（pretty-print）するだけ**で、勝手に取得フィールドを増やしたりはしません：\n\n```sh\n# ボード全体のスナップショットを整形表示\ncanban --human snapshot\n\n# 必要なカードフィールドだけを取得して整形表示\ncanban --human --fields number,title,stage card show\n\n# 任意の JSON-RPC メソッドを読みやすく対話呼び出し\ncanban --human call project.list '{}'\n\n# --card / --full との併用や jq とのパイプ連携\ncanban --human --full card show --card 42\ncanban call card.list '{\"stage\":\"develop\",\"limit\":20}' | jq '.items[] | [.number, .title]'\n```\n\nヒント: 開発用インスタンスやリモートソケットを調べる際は `--home <PATH>` や `--endpoint <PATH>` と `--human` を併用できます。"
+      },
+      {
+        "id": "canban-skill",
+        "heading": "内蔵 Canban Skill（canban skill）",
+        "markdown": "Canban はバージョンに紐付いた Agent Skill（`skills/canban/SKILL.md`、`crates/context/src/lib.rs` で `canban_context::SKILL_MD` として埋め込み）をバイナリに内蔵しており、ユーザーのグローバル設定ディレクトリを勝手に書き換えません：\n\n- **副作用なしの参照と Home 展開**: `canban skill` / `canban --skill` は SQLite やソケットを開かず `SKILL.md` を標準出力に出します。`AppServer::open` 起動時（および `stage_remote` 同期時）には `<CANBAN_HOME>/skills/canban/SKILL.md` へ安全に展開されます。\n- **エージェントへの導入・更新**: デスクトップの **Agent Setup** や **Settings → Agents & Identities** から `npx skills add` コマンドをコピーするか、`canban skill` の出力を直接書き出せます：\n\n```sh\n# Canban Home からグローバル Skill をインストール・更新\nnpx skills add ~/.canban/skills --skill canban -g\n\n# またはバイナリ内蔵の最新 Skill を直接ファイルへ書き出す\ncanban skill > ~/.agents/skills/canban/SKILL.md\n```\n\n- **Skill が定義する運用ルール**: 起動時プリフライトチェック、作業一時ファイルの `$CANBAN_RUN_DIR` 隔離、軽量 `card show` と `card adopt`、明示的な `report --state` 完了報告、`reply --to`、ローカル `review draft`、`workflow submit --check`、`worktree gc`。"
+      }
+    ]
+  },
+  "docs/agents": {
+    "eyebrow": "CANBAN // ドキュメント // エージェント",
+    "title": "ネイティブ AI コーディングエージェント CLI ＆ Herdr PTY",
+    "meta_title": "ネイティブ AI コーディングエージェント CLI — Claude Code・Codex・Antigravity (agy)・Pi・Herdr PTY | Canban",
+    "description": "Canban が標準対応するネイティブコーディングエージェント CLI（Claude Code、Codex、Antigravity agy、Pi、Cursor CLI、Gemini CLI、OpenCode など）一覧、Herdr Core と libghostty-vt による TUI/MCP/スキル保持、canban card adopt、CLI リファレンス。",
+    "intro": "Canban は `herdr-core` の永続 PTY ターミナル上でネイティブのコーディングエージェント CLI を実行し、`libghostty-vt` で描画することで、各ツール本来の TUI・MCP サーバー・スキル・権限モデル・会話再開を損なわず維持します。",
+    "date_published": "2026-11-19",
+    "updated": "2026-11-23",
+    "breadcrumbs": [["ドキュメント", "docs"], ["ネイティブ Agent と PTY", "docs/agents"]],
+    "sections": [
+      {
+        "id": "herdr-preservation",
+        "heading": "ネイティブ TUI・MCP・スキルへの干渉ゼロ設計",
+        "markdown": "チャット風の簡易ラッパーや壊れやすい `Stop` フックに頼るのではなく、Canban は `herdr-core`（`hc`）が管理する本物の PTY で CLI を起動します：\n\n- **ネイティブ TUI と操作性**: `libghostty-vt` により macOS では AppKit/CoreText、Linux では GTK4 でネイティブ描画。SGR/ピクセル単位のマウス操作、OSC 8 ハイパーリンク、Monokai を含む 17 種のダークテーマに対応。\n- **MCP・スキル・権限設定をそのまま維持**: カード専用の Worktree 上で実バイナリが動くため、既存の MCP サーバー、カスタムスキル、サンドボックス、認証状態がそのまま機能します。\n- **再起動耐性と正確なセッション再開**: Canban のウィンドウを閉じたり `canband` を再起動・アップグレードしても `herdr-core` 上のセッションは生存し、終了後も正確なプロバイダセッション ID で再開できます。\n- **グローバル並列予算**: 自動ワークフローの `agent` ステップは `scheduler.max_agents`（既定 `8`）を共有し、手動シェルや `script` はその枠を消費しません。",
+        "screenshot": {
+          "src": "/screenshots/board-terminal.png",
+          "alt": "Canban Card #2 の隔離 Git Worktree 内で稼働中の Herdr @developer ターミナル（cargo test 実行中）とカードタイムライン・ワークフロー進捗の並列表示。",
+          "caption": "Card #2 の隔離 Git Worktree（acme-api-f4c9/2）内で cargo test を実行する @developer のライブ Herdr PTY。明示的な canban report で次の段階へ進みます。",
+          "width": 2880,
+          "height": 1800,
+          "lazy": true
+        }
+      },
+      {
+        "id": "catalog-24",
+        "heading": "標準対応 CLI エージェント一覧とカスタム設定",
+        "markdown": "`crates/profiles/src/catalog.rs` に Herdr の状態検知・再開プランナと一致した 24 種の公式対話 CLI プリセットを内蔵するほか、`config/agents.json` での独自 CLI 追加や `herdr:<template>` 動的プロファイルにも対応しています：\n\n| ID | Agent | バイナリ | 正確なセッション再開 | モデル / 推論引数 |\n| --- | --- | --- | --- | --- |\n| `codex` | Codex | `codex` | 対応 (`resume`) | `-m`, reasoning effort |\n| `claude` | Claude Code | `claude` | 対応 (`--resume`) | `--model`, `--effort` |\n| `agy` | Antigravity | `agy` | 対応 (`--conversation`) | `--model`, `--effort` |\n| `gemini` | Gemini CLI | `gemini` | 対応 (`--resume`) | `-m` |\n| `opencode` | OpenCode | `opencode` | 対応 (`--session`) | `-m`, `--variant` |\n| `cursor` | Cursor Agent | `cursor-agent` | 対応 (`--resume`) | `--model` |\n| `pi` | Pi | `pi` | 対応 (`--session`) | `--model`, `--thinking` |\n| `omp` | Omp | `omp` | 対応 (`--resume=`) | `--model` |\n| `copilot` | GitHub Copilot | `copilot` | 対応 (`--resume=`) | `--model` |\n| `droid` | Droid | `droid` | 対応 (`--resume`) | `-m` |\n| `amp` | Amp | `amp` | 新規起動 | — |\n| `kimi` | Kimi | `kimi` | 対応 (`--session`) | `--model` |\n| `kiro` | Kiro | `kiro-cli` | 新規起動 | `--model` |\n| `qwen` | Qwen Code | `qwen` | 対応 (`--resume`) | `-m` |\n| `devin` | Devin | `devin` | 対応 (`--resume`) | — |\n| `cline` | Cline | `cline` | 新規起動 | — |\n| `grok` | Grok | `grok` | 対応 (`--resume`) | `-m` |\n| `hermes` | Hermes | `hermes` | 対応 (`--resume`) | `-m` |\n| `kilo` | Kilo | `kilo` | 対応 (`--session`) | `-m` |\n| `qodercli` | Qoder | `qodercli` | 対応 (`--resume`) | `--model` |\n| `letta` | Letta | `letta` | 対応 (`--conversation`) | `-m` |\n| `mastracode` | Mastra Code | `mastracode` | 対応 (`--thread`) | `--model` |\n| `maki` | Maki | `maki` | 新規起動 | — |\n| `muse` | Muse | `muse` | 新規起動 | — |"
+      },
+      {
+        "id": "card-adopt",
+        "heading": "canban card adopt で対話セッションからそのままワークフローへ移行",
+        "markdown": "`Backlog` カードの対話端末や `@mention` セッションで方針を詰め、その同じ会話のまま実装へ入りたいときは、文脈を失ったり重複エージェントを立ち上げたりする必要はありません：\n\n```sh\n\"$CANBAN_CLI\" card update --file \"$CANBAN_RUN_DIR/card.md\"\n\"$CANBAN_CLI\" card adopt --stage develop\n```\n\n- `card adopt` は継承された `HC_TERMINAL_ID` と `HC_SESSION` を自動的に `AppServer` へ渡します。\n- `AppServer` が Core・マシン・ライブ PTY・プロファイル・ワークスペースを検証した上でカードを `develop`（`reason: \"agent_adopted_stage\"`）へ進め、既存のライブ PTY をそのまま `WorkflowRun` に結び付けます。\n- 後ほどエージェントが `canban report --state completed` を実行すると、そのまま `Review` と `Queue Merge` へ流れていきます。"
+      },
+      {
+        "id": "canban-cli",
+        "heading": "自動注入される canban CLI リファレンス",
+        "markdown": "起動されたすべてのセッションには `CANBAN_CLI`, `CANBAN_ENDPOINT`, `CANBAN_HOME`, `CANBAN_CARD`, `CARD_ID`, `CANBAN_PROJECT`, `CANBAN_PROFILE_ID`, `CANBAN_RUN_DIR` が設定されます：\n\n```sh\n# 現在のカードを確認または更新\n\"$CANBAN_CLI\" card show --fields number,title,body,stage,revision\n\"$CANBAN_CLI\" card update [--title '新しいタイトル'] --file \"$CANBAN_RUN_DIR/card.md\"\n\n# 実行結果を報告 (completed | backlog | blocked | failed | working)\n\"$CANBAN_CLI\" report --state completed --message '概要' --file \"$CANBAN_RUN_DIR/report.md\"\n\n# 実行中タスクを終了せず追加質問へ返信\n\"$CANBAN_CLI\" reply --to <QUESTION_ID> --file \"$CANBAN_RUN_DIR/reply.md\"\n\n# GitHub へ直接投稿せずローカルに Diff レビュー下書きを保存\n\"$CANBAN_CLI\" review draft --file \"$CANBAN_RUN_DIR/review_draft.json\"\n\n# 任意の AppServer JSON-RPC メソッドを呼び出し\n\"$CANBAN_CLI\" call card.list '{\"project_id\":\"<PROJECT_ID>\",\"stage\":\"develop\",\"limit\":50}'\n```\n\nコマンド全体、`--fields` / `request_key` 仕様、`--human` の例は [Canban CLI・Agent 最適化・--human](/ja/docs/cli/) をご覧ください。"
+      }
+    ],
+    "faq_items": [
+      [
+        "Canban は Claude Code、Codex、Antigravity (agy)、Pi をラップしたり改造したりしますか？",
+        "いいえ。Canban は Herdr Core が管理する本物の PTY 上で公式バイナリを直接起動し libghostty-vt で描画するため、ネイティブ TUI・MCP サーバー・スキル・認証・権限プロンプトが普段の端末と全く同じように動作します。"
+      ],
+      [
+        "同じカンバンボード上で複数の異なるコーディングエージェントを混在させられますか？",
+        "はい。ステージや @mention ごとに異なるプロファイルを割り当てられます（例: Claude Code で設計、Codex / Antigravity agy / Pi で実装、Gemini CLI や OpenCode でレビュー）。"
+      ],
+      [
+        "Canban.app を終了したりアップデートしたりすると実行中のエージェントは止まりますか？",
+        "止まりません。Herdr Core（hc）が GUI とは独立して全 PTY プロセスを生かし続けるため、再起動すればライブ端末に即座に再接続でき、終了済みセッションも正確なプロバイダ ID で再開可能です。"
+      ],
+      [
+        "組み込みリストにない社内 CLI やカスタムエージェントも追加できますか？",
+        "はい。24 種の組み込みプリセットと動的 herdr:<template> に加え、config/agents.json で任意のコマンド・引数・環境変数を定義できます。"
+      ]
+    ]
+  },
+  "docs/remote-hosts": {
+    "eyebrow": "CANBAN // ドキュメント // リモートホスト",
+    "title": "リモート Linux サーバーで AI コーディングエージェントを動かす",
+    "meta_title": "リモート Linux サーバーで AI コーディングエージェントを動かす — Tailscale・SSH・Headless canband | Canban",
+    "description": "デスクトップ環境なしの Linux サーバーで Claude Code、Codex、Antigravity (agy)、Pi 等を 24 時間稼働させる canband の導入と、Canban.app からの Tailscale 直結 TCP / SSH トンネル同時接続ガイド。",
+    "intro": "1 つの Canban.app デスクトップクライアントから、ローカルの Mac（`This Mac`）と 1 台または複数のリモート Linux / macOS `canband` ホストへ Tailscale TCP または SSH で同時に接続できます。",
+    "date_published": "2026-11-19",
+    "updated": "2026-11-23",
+    "breadcrumbs": [["ドキュメント", "docs"], ["リモートホスト", "docs/remote-hosts"]],
+    "sections": [
+      {
+        "id": "multi-host-model",
+        "heading": "複数ホスト同時接続とオフライン耐性",
+        "markdown": "各ホストは自己完結型の `canband` とローカル `herdr-core`（`hc`）を実行し、独自の SQLite WAL・プロジェクト・カード・ワークフロー・スケジューラ・Git Worktree を保持します：\n\n- **24 時間自律進行**: 手元のノート PC を閉じたりオフラインになっても、リモート `canband` はエージェントの実行、結果収集、FIFO Queue Merge、GitHub 連携を継続します。\n- **統合ボード＆通知**: `Canban.app` はローカルとリモートのプロジェクトを 1 つの `HostRegistry` に統合し、全ホストの `Needs you` や更新を `⌘I` に集約します。\n- **オフラインキャッシュ**: 取得に成功したリモートスナップショットは `<local-home>/cache/hosts/<host_id>.json` に保存され、回線切断中も `Offline · Cached` 読み取り専用モードで閲覧できます。"
+      },
+      {
+        "id": "headless-install",
+        "heading": "Headless Linux canband の導入",
+        "markdown": "GUI のない Linux（`x86_64` / `aarch64`）サーバーには GTK4/GStreamer 不要のスタンドアロン `canban` を入れ、`systemd --user` サービスとして常駐させます：\n\n```sh\ncurl -fsSL https://canban.dev/install.sh | bash -s -- --headless\ncanban service install --tailscale --port 7680\ncanban service status\n```\n\n`canban service install` は利用可能な場合に `loginctl enable-linger` を有効化し、SSH ログアウト後もサービスと `herdr-core` PTY が生存し続けるようにします。"
+      },
+      {
+        "id": "tailscale-ssh-pairing",
+        "heading": "Tailscale 直結 TCP と SSH ペアリング",
+        "markdown": "Canban は Tailscale 優先のデータプレーンと SSH による自動ブートストラップ/フォールバックを備えています：\n\n- **Tailscale 直結 TCP（推奨）**: `canban serve --tailscale` はホストの Tailscale IPv4（`100.64.0.0/10`、既定ポート `7680`）にバインドし、設定を `<home>/config/server.json`、256-bit Bearer トークンを `<home>/server.token`（`0600`）に保存します。認証前の `host.probe` は最小限の識別情報のみを返し、全 RPC と `herdr.connect` PTY ストリームはトークンで保護されます。\n- **ペアリング URI**: サーバー側で `canban pair [--port 7680]` を実行して `canban://<addr>:<port>#<token>` を取得するか、デスクトップの **Connect a Machine** ウィザードで `tailscale status --json` から自動検出・SSH セットアップできます。\n- **SSH トンネルフォールバック**: Tailscale のない SSH ホスト向けには、`Canban.app` がバックグラウンドの `ssh -L` Unix ソケット転送を自動管理します。"
+      },
+      {
+        "id": "diagnostics",
+        "heading": "内蔵診断ツール＆リモートデーモン更新",
+        "markdown": "**Settings → Diagnostics** を開くと、ローカルおよび接続済みリモートホストをエンドツーエンドで診断できます：\n\n- **トランスポート＆遅延**: ソケット / Tailscale TCP / SSH トンネルの状態、RTT（`ms`）、再接続履歴。\n- **Canban サービス＆ストレージ**: デーモン PID、プラットフォーム、`DESKTOP_API` 互換性、`systemd --user` / `launchd` 状態、SQLite WAL サイズ。\n- **Herdr ＆ツールチェーン**: `hc` バイナリ、Core ID、稼働中 PTY 数、`git`・`python3`・`tailscale`・有効化された各 Agent CLI のパス解決。\n- **ライブログ＆更新**: `server.log` / `updater.log` を確認し、`ApiMismatch` 検出時は UI から直接リモート `update.daemon` を実行できます。"
+      }
+    ],
+    "faq_items": [
+      [
+        "ノート PC を閉じるとリモートサーバー上のエージェントも停止しますか？",
+        "いいえ。各リモート Linux ホストが独自の canband デーモンと herdr-core (hc) を動かしているため、MacBook をスリープさせてもテスト実行・FIFO Queue Merge・GitHub 同期は 24 時間止まりません。"
+      ],
+      [
+        "Tailscale 経由の接続はどのように認証されますか？",
+        "canban serve --tailscale は Tailscale IPv4 インターフェース（100.64.0.0/10）にのみバインドし、<home>/server.token（パーミッション 0600）の 256-bit Bearer トークンですべての JSON-RPC と herdr.connect PTY ストリームを検証します。"
+      ],
+      [
+        "Tailscale を入れていない SSH のみのサーバーにも接続できますか？",
+        "はい。Canban はバックグラウンドの ssh -L Unix ソケット転送によるフォールバックを内蔵しており、Connect a Machine ウィザードから SSH 越しに Headless 導入とペアリングを自動実行できます。"
+      ]
+    ]
+  },
+  "guides/parallel-coding-agents": {
+    "eyebrow": "CANBAN // ガイド // 並列エージェント",
+    "title": "カンバンと Git Worktree で複数 AI コーディングエージェントを並列稼働させる",
+    "meta_title": "カンバンと Git Worktree で複数 AI コーディングエージェントを並列稼働させる | Canban",
+    "description": "Claude Code、Codex、Antigravity (agy)、Pi、Cursor CLI、OpenCode を同時に動かしてもターミナルタブ迷子にならない方法。カンバンカードで Human Context を守り、独立 Git Worktree・通知インボックス（⌘I）・直列 FIFO Queue Merge で安全に並列開発する実践ガイド。",
+    "intro": "**結論**: 生のターミナルタブで 5〜10 個のコーディングエージェントを並列起動すると、文脈喪失・作業ツリーの競合・`[Y/n]` 確認の見落としで破綻します。Canban はカンバンカード（`Human Context`）、カード単位の Git Worktree（`<dir>-<proj4>/<card-number>`）、グローバル通知インボックス（`⌘I`）、直列 FIFO マージキューを統合し、複数 CLI が互いに干渉せず並列完走できるようにします。",
+    "date_published": "2026-11-23",
+    "updated": "2026-11-23",
+    "breadcrumbs": [["ドキュメント", "docs"], ["並列エージェントガイド", "guides/parallel-coding-agents"]],
+    "sections": [
+      {
+        "id": "why-tabs-break",
+        "heading": "5 つ以上のエージェントを並列するとターミナルタブが破綻する理由",
+        "markdown": "`claude`、`codex`、`agy`、`pi`、`cursor-agent` を別々のタブで開く運用は 1〜2 タスクなら回りますが、並列数が増えるとすぐ限界が来ます：\n\n- **Human Context の霧散**: 仕様・スクリーンショット・レビュー指摘がターミナルのスクロール履歴に埋もれ、後から追えなくなります。\n- **作業ディレクトリの衝突**: 同じチェックアウト上で 2 つのエージェントが動くと互いの変更を上書きし、`git status` が破綻します。\n- **無言の `[Y/n]` 停止**: あるエージェントが権限承認待ちで 20 分止まっていても、別タブを見ていると気づけません。\n- **手動マージ地獄**: 手動で `git worktree` を切っても、完了した 5 ブランチを順番にリベースしてテストする後処理がボトルネックになります。",
+        "screenshot": {
+          "src": "/screenshots/board-terminal.png",
+          "alt": "Canban デスクトップボード上で Card #2 が独立 Git Worktree、タイムライン、ワークフロー進捗、ライブ @developer Herdr ターミナルとともに稼働している画面。",
+          "caption": "すべてのカードが Markdown 仕様、隔離 Git Worktree、ワークフロー状態、本物のネイティブ Agent CLI 端末を 1 画面に束ねます。",
+          "width": 2880,
+          "height": 1800,
+          "lazy": true
+        }
+      },
+      {
+        "id": "card-context-worktrees",
+        "heading": "カードで Human Context を管理し、ブランチごとに Git Worktree を隔離",
+        "markdown": "Canban（`Canban = Kanban + Workflow + Herdr`）では、各タスクが構造化された**カード**になり、Markdown 仕様・スクリーンショット・`#Card` / GitHub Issue/PR リンク・`@Agent` 履歴を 1 箇所に保持します。\n\nカードが `Develop` に入る（または対話端末から `canban card adopt --stage develop` を実行する）と、ワークフローエンジン（`crates/workflow-engine`）が自動で以下を実行します：\n\n1. **決定論的な Git Worktree 割り当て**: `<dir>-<proj4>/<card-number>` に独立ワークツリーを作成し、ベースブランチを同期（`workspace.sync_base: true`）。\n2. **ゼロ設定の環境注入**: `CANBAN_CLI`、`CANBAN_CARD`、`CANBAN_PROJECT`、`CANBAN_RUN_DIR` を渡し、エージェントは `canban card show --fields number,title,body,stage,revision` で必要最小限の列だけを取得します。\n3. **ボード順の同時実行制限**: `admit` ゲート（`scheduler.max_agents`、既定 `8`）によりボードの優先順で整然と投入します。"
+      },
+      {
+        "id": "attention-inbox-and-review",
+        "heading": "通知インボックス（⌘I）で待ちを即検知し、アプリ内で差分レビュー",
+        "markdown": "10 個のタブを巡回する代わりに **`⌘I`** を押すだけで、プロジェクト・ホスト横断の**Attention Inbox**が開きます：\n\n- **詰まりを即把握**: ツール実行承認、追質問、人間レビュー待ち（`Needs you`）と完了報告・実行中セッションを一箇所で一覧できます。\n- **ワンクリックで現場へ移動**: 通知を選ぶと、該当カードの議論ドロワーまたはライブ Herdr PTY へ直接ジャンプします。\n- **内蔵インライン Diff レビュー**: 外部エディタを開かずに Worktree のコミットと差分を確認し、特定の行にコメントを付けて `Review & Send to @Agent` で返せます。",
+        "screenshot": {
+          "src": "/screenshots/review-diff.png",
+          "alt": "Canban 内蔵 Git Diff レビュー画面：コミット履歴、変更ファイル、行コメント入力、Review & Send to @Agent ボタンを表示。",
+          "caption": "独立 Worktree のコミット差分をその場でレビューし、行レベルの指摘を直接 @Agent へ差し戻せます。",
+          "width": 2880,
+          "height": 1800,
+          "lazy": true
+        }
+      },
+      {
+        "id": "serialized-merge-queue",
+        "heading": "FIFO Queue Merge で並列ブランチを壊さず統合",
+        "markdown": "エージェントが実装を終えて `canban report --state completed` を実行すると、カードはいきなり `main` を書き換えず `Review`（`deliver` ステップ）へ進みます：\n\n- **外部 PR 保護**: 外部 GitHub PR（`source_trust == external_pr`）は `approval:review` で自動的に人間承認を要求します。\n- **直列バッチ検証**: 信頼済みカードは `(queued_at, storage_index)` 順で `<home>/worktrees/<project-ns>/_merge_queue` に集約され（`batch_size` 1..=50、既定 `5`）、`rebase`（または `squash` / `merge`）後に `test_command` を一括実行し、成功したら 1 回だけ Fast-Forward＆Push してカードをアーカイブします。\n- **`@merger` による自動調停**: 競合やテスト失敗時は専用の `@merger` が `_merge_queue` で修正または `--evict <CARD_NUMBER>` で原因カードを切り離します。"
+      },
+      {
+        "id": "quickstart-parallel",
+        "heading": "クイックスタート：2 分で 3+ エージェントを並列実行",
+        "markdown": "```sh\n# 1. Canban デスクトップを導入（macOS 13+ Apple Silicon または Linux x86_64/arm64）\ncurl -fsSL https://canban.dev/install.sh | bash\n\n# 2. （任意）バージョン固定された Canban Agent Skill を導入\nnpx skills add ~/.canban/skills --skill canban -g\n\n# 3. Backlog にカードを 3 枚作成し（Claude Code・Codex・Antigravity agy・Pi 等を割り当て）、\n#    Develop へドラッグ — またはライブ対話端末からそのまま引き継ぎ：\n\"$CANBAN_CLI\" card adopt --stage develop\n```"
+      }
+    ],
+    "faq_items": [
+      [
+        "Canban では何個のコーディングエージェントを同時に動かせますか？",
+        "自動ワークフローステップは設定可能な scheduler.max_agents（既定 8）で制御され、手動対話端末や script ステップはその枠外で動作するため、ローカルと複数リモートホストにわたり 10+ の並列セッションを運用できます。"
+      ],
+      [
+        "設計に Claude Code、実装に Codex や Pi、レビューに Gemini CLI を組み合わせられますか？",
+        "はい。development.yaml の各ステップに任意の Profile を指定でき、カード内から claude、codex、agy、pi、cursor、gemini、opencode など有効化した任意の CLI を @mention で呼び出せます。"
+      ],
+      [
+        "Backlog での相談から文脈を保ったまま実装ステージへ移るにはどうしますか？",
+        "稼働中の端末内から canban card adopt --stage develop を実行してください。重複エージェントを起動せず、現在の Herdr PTY をそのまま WorkflowRun に紐付けて Develop へ移行します。"
+      ],
+      [
+        "CLI JSON 出力でエージェントのコンテキストトークンが圧迫されませんか？",
+        "すべての canban CLI クエリは単一行のコンパクト JSON と軽量カードサマリーを既定とし、--fields number,title,body,stage,revision のように必要な列だけをサーバー側で抽出して返します。"
+      ]
+    ]
+  },
+  "guides/native-terminal-and-multi-machine": {
+    "eyebrow": "CANBAN // ガイド // ネイティブ端末＆マルチマシン",
+    "title": "ネイティブ端末ワークベンチ vs. tmux ＆チャット型 IDE — 永続 PTY と複数マシン運用",
+    "meta_title": "ネイティブ端末ワークベンチ vs. tmux ＆チャット型 IDE — 永続 PTY と複数マシン運用 | Canban",
+    "description": "Canban（Rust + libghostty-vt + Herdr 永続 PTY）と tmux タブ・チャットラッパー IDE のアーキテクチャ比較、および Tailscale TCP と SSH を使ったリモート Linux サーバー 24 時間運用の実践解説。",
+    "intro": "**結論**: 生の `tmux` は CLI の機能を損なわない反面、タスク文脈やマージワークフロー、ホスト横断通知がありません。一方、チャットラッパー型 IDE は見た目と引き換えにネイティブ TUI・MCP・正確な再開機能を失いがちです。Canban は Rust + `libghostty-vt` + `herdr-core`（`hc`）でネイティブ端末を無改造のまま永続化し、ローカル Mac と複数のリモート Linux `canband` サーバーを一画面に統合します。",
+    "date_published": "2026-11-23",
+    "updated": "2026-11-23",
+    "breadcrumbs": [["ドキュメント", "docs"], ["ネイティブ端末とマルチマシン", "guides/native-terminal-and-multi-machine"]],
+    "sections": [
+      {
+        "id": "architecture-comparison",
+        "heading": "徹底比較：Canban vs. tmux・端末タブ vs. チャットラッパー IDE",
+        "markdown": "| 比較項目 | Canban (`Rust + libghostty-vt + Herdr`) | 生の `tmux` / 端末タブ | チャットラッパー IDE / Web UI |\n| --- | --- | --- | --- |\n| **ネイティブ CLI TUI・MCP・スキル** | **100% そのまま** — 実バイナリ `claude`, `codex`, `agy`, `pi`, `cursor-agent`, `gemini`, `opencode` を直接実行 | **100% そのまま** | 制限・プロキシ・独自再実装になりがち |\n| **アプリ再起動・更新時の PTY 生存** | **対応** — `herdr-core` (`hc`) が GUI 終了・更新中も TTY を維持 | **対応**（各マシン上の `tmux` サーバー依存） | ウィンドウ終了やリロードで停止しがち |\n| **タスク仕様・Worktree・マージキュー** | **標準内蔵** — カンバンカード、`<dir>-<proj4>/<card>`、YAML ワークフロー、FIFO Queue Merge | 手動ブランチ＆自作スクリプトが必要 | 部分的または単一リポジトリ前提 |\n| **複数プロジェクト横断 通知インボックス（`⌘I`）** | **標準内蔵** — ローカル＆リモート全ホストの `[Y/n]` や進捗を即通知 | 各ペインを手動巡回 | タブ単位のバッジのみ |\n| **リモート Linux 24 時間マルチマシン** | **標準内蔵** — Tailscale TCP 直結 + SSH フォールバック + `Offline · Cached` | 手動 SSH ＋ 各自で `tmux` 管理 | リモート IDE 拡張やクラウド固定 |\n| **UI ランタイム** | ネイティブ AppKit/Metal（macOS）＆ GTK4（Linux） | ターミナルエミュレータ | Electron / ブラウザ DOM |",
+        "screenshot": {
+          "src": "/screenshots/workflow-studio.png",
+          "alt": "Canban Visual Workflow Studio 画面：Backlog・Develop・Review の各レーンと外部 PR 分岐・承認ゲート・Queue merge を表示。",
+          "caption": "宣言的 YAML ワークフロー（schema: 10）はローカル Mac でもリモート Headless Linux canband ホストでもネイティブ PTY を駆動します。",
+          "width": 2880,
+          "height": 1800,
+          "lazy": true
+        }
+      },
+      {
+        "id": "native-pty-preservation",
+        "heading": "なぜ Canban は Agent CLI をラップしないのか",
+        "markdown": "コーディング CLI は権限承認 UI、スラッシュコマンド、MCP 連携、スキル、サンドボックス設定が毎週のように進化しています。チャット UI で包んでしまうと、CLI 側の新機能がラッパーの更新待ちになってしまいます。\n\nCanban は真のネイティブターミナルに徹します：\n\n- **`libghostty-vt` による忠実な VT 描画**: macOS では AppKit/CoreText、Linux では GTK4 で描画し、SGR/ピクセルマウス操作、OSC 8 ハイパーリンク、Monokai など 17 種のダークテーマをサポート。\n- **プロバイダ純正のセッション再開**: 対応 CLI のセッション ID と再開フラグ（`resume`, `--resume`, `--session`, `--conversation`, `--thread`）を保持し、途中から正確に再開できます。\n- **推測ではなく明示的な完了報告**: PTY の無通信時間や外部フックで完了を推測せず、`canban report --state completed` による明示宣言で次のステージへ進みます。"
+      },
+      {
+        "id": "multi-machine-remote",
+        "heading": "Tailscale と SSH による 24 時間マルチマシン開発",
+        "markdown": "重い Rust のビルド、Linux 専用のテストスイート、長時間の夜間バッチは、スリープするノート PC ではなく専用の Linux サーバー（`x86_64` / `aarch64`）に任せるのが合理的です。\n\n各リモートホストには Headless の `canband` とローカル `herdr-core`（`hc`）が常駐し、独自の SQLite WAL と Git Worktree を管理します：\n\n```sh\n# リモート Linux サーバーに Headless 導入（GTK4 / GUI 不要）\ncurl -fsSL https://canban.dev/install.sh | bash -s -- --headless\ncanban service install --tailscale --port 7680\ncanban pair --port 7680\n```\n\n- **Tailscale 直結 TCP + 256-bit Bearer 認証**: `Canban.app` が `tailscale status --json` からノードを自動検出し、`<home>/server.token`（`0600`）で全 RPC と `herdr.connect` ライブ端末ストリームを暗号化通信します。\n- **SSH トンネルフォールバック**: Tailscale がない環境でも **Connect a Machine** から SSH 経由で導入とバックグラウンド `ssh -L` 転送を自動化できます。\n- **統合ボード＆オフラインキャッシュ**: ローカル Mac（`This Mac`）と複数 Linux ホストを 1 つの `HostRegistry` と `⌘I` に統合。切断中も `Offline · Cached` モードで最新スナップショットを確認できます。"
+      },
+      {
+        "id": "diagnostics-and-upgrades",
+        "heading": "エンドツーエンド診断とリモートデーモン更新",
+        "markdown": "`Canban.app` の **Settings → Diagnostics** を開けば、接続中の全マシンの RTT（`ms`）、`DESKTOP_API` 互換性、`systemd --user` / `launchd` 稼働状況、アクティブ Herdr PTY 数、各 Agent CLI バイナリの解決パスを一覧で確認でき、API 不一致時は `update.daemon` でリモートから即座に更新できます。"
+      }
+    ],
+    "faq_items": [
+      [
+        "tmux + git worktree の自作スクリプトと比べた Canban の利点は何ですか？",
+        "本物の永続 PTY とネイティブ CLI の利点はそのままに、タスク仕様・スクリーンショットのカード管理、Worktree 自動作成/GC、全プロジェクト横断の ⌘I 待ち検知、行レベル Diff レビュー、FIFO Queue Merge までを最初から統合して使えます。"
+      ],
+      [
+        "長時間の実行中にノート PC を閉じてもリモートホストの作業は続きますか？",
+        "はい。リモート Linux 上のワークフロー、エージェント、テスト、FIFO Queue Merge はサーバー側の canband と herdr-core が自律実行するため、MacBook がスリープしても止まりません。"
+      ],
+      [
+        "複数ホスト接続に root 権限や Docker は必要ですか？",
+        "いいえ。Headless canban はユーザー空間に導入され systemd --user サービスとして常駐（可能な場合は loginctl enable-linger を有効化）するため、Docker 不要で動きます。"
+      ],
+      [
+        "macOS とリモート Linux 間ではどの通信経路が使われますか？",
+        "256-bit Bearer トークンで保護された Tailscale IPv4 直結 TCP（100.64.0.0/10、既定ポート 7680）を優先し、SSH のみの環境ではバックグラウンドの ssh -L Unix ソケット転送に自動フォールバックします。"
+      ]
+    ]
+  }
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the bilingual, JavaScript-optional product website using the stdlib."""
+"""Build the 5-language, JavaScript-optional product website using the stdlib."""
 # Copyright 2026 JJy <jjyruby@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
@@ -21,8 +21,60 @@ REPOSITORY = "https://github.com/jjyr/canban"
 DESKTOP = "curl -fsSL https://canban.dev/install.sh | bash"
 HEADLESS = "curl -fsSL https://canban.dev/install.sh | bash -s -- --headless"
 
+LANGUAGES = (
+    {
+        "code": "en",
+        "prefix": "",
+        "html_lang": "en",
+        "hreflang": "en",
+        "og_locale": "en_US",
+        "short": "EN",
+        "label": "English",
+    },
+    {
+        "code": "zh",
+        "prefix": "zh",
+        "html_lang": "zh-CN",
+        "hreflang": "zh-CN",
+        "og_locale": "zh_CN",
+        "short": "简中",
+        "label": "简体中文",
+    },
+    {
+        "code": "zh-tw",
+        "prefix": "zh-tw",
+        "html_lang": "zh-TW",
+        "hreflang": "zh-TW",
+        "og_locale": "zh_TW",
+        "short": "繁中",
+        "label": "繁體中文",
+    },
+    {
+        "code": "ja",
+        "prefix": "ja",
+        "html_lang": "ja",
+        "hreflang": "ja",
+        "og_locale": "ja_JP",
+        "short": "日本語",
+        "label": "日本語",
+    },
+    {
+        "code": "ko",
+        "prefix": "ko",
+        "html_lang": "ko",
+        "hreflang": "ko",
+        "og_locale": "ko_KR",
+        "short": "한국어",
+        "label": "한국어",
+    },
+)
+LANGUAGE_CODES = tuple(item["code"] for item in LANGUAGES)
+LANGUAGE_BY_CODE = {item["code"]: item for item in LANGUAGES}
+
 DOC_PAGES = ("docs", "docs/workflows", "docs/agents", "docs/cli", "docs/remote-hosts")
-PAGES = ("", "install", *DOC_PAGES, "changelog")
+GUIDE_PAGES = ("guides/parallel-coding-agents", "guides/native-terminal-and-multi-machine")
+ARTICLE_PAGES = (*DOC_PAGES, *GUIDE_PAGES)
+PAGES = ("", "install", *ARTICLE_PAGES, "changelog")
 NAV_PAGES = (
     ("", "home"),
     ("install", "install"),
@@ -37,13 +89,24 @@ def load(name):
     return json.loads((SOURCE / name).read_text())
 
 
+def load_docs(lang):
+    return json.loads((SOURCE / "docs" / f"{lang}.json").read_text())
+
+
 def route(lang, page=""):
-    return ("/zh/" if lang == "zh" else "/") + (page + "/" if page else "")
+    prefix = LANGUAGE_BY_CODE[lang]["prefix"]
+    base = f"/{prefix}/" if prefix else "/"
+    return base + (page + "/" if page else "")
 
 
 def md_route(lang, page=""):
-    prefix = "/zh/" if lang == "zh" else "/"
-    return prefix + (f"{page}.md" if page else "index.md")
+    prefix = LANGUAGE_BY_CODE[lang]["prefix"]
+    base = f"/{prefix}/" if prefix else "/"
+    return base + (f"{page}.md" if page else "index.md")
+
+
+def is_indexable(lang, page):
+    return not (page == "changelog" and lang != "en")
 
 
 def script_json(value):
@@ -271,6 +334,30 @@ def doc_markdown(text, labels):
     return "\n".join(blocks)
 
 
+def lang_switcher(lang, page):
+    current = LANGUAGE_BY_CODE[lang]
+    items = []
+    for info in LANGUAGES:
+        code = info["code"]
+        attrs = [
+            'class="lang-btn"',
+            f'href="{route(code, page)}"',
+            f'lang="{info["html_lang"]}"',
+            'role="menuitem"',
+        ]
+        if page != "changelog":
+            attrs.append(f'hreflang="{info["hreflang"]}"')
+        if code == lang:
+            attrs.append('aria-current="page"')
+        items.append(f'<a {" ".join(attrs)}>{html.escape(info["label"])}</a>')
+    return (
+        '<details class="lang-menu">'
+        f'<summary class="lang-trigger" aria-label="Language">{html.escape(current["short"])} <span class="lang-caret" aria-hidden="true">▾</span></summary>'
+        f'<div class="lang-dropdown lang-switch" role="menu">{"".join(items)}</div>'
+        '</details>'
+    )
+
+
 def localize_home(lang, strings):
     body = (SOURCE / "templates/home.html").read_text()
     pattern = r'(<(?P<tag>[\w-]+)\b[^>]*\bdata-i18n="(?P<key>[^"]+)"[^>]*>)(.*?)(</(?P=tag)>)'
@@ -283,23 +370,23 @@ def localize_home(lang, strings):
 
     body = re.sub(pattern, replace, body, flags=re.DOTALL)
     for key, value in {
-        "en_url": route("en"),
-        "zh_url": route("zh"),
+        "lang_switcher": lang_switcher(lang, ""),
         "install_url": route(lang, "install"),
         "docs_url": route(lang, "docs"),
         "workflows_url": route(lang, "docs/workflows"),
         "cli_url": route(lang, "docs/cli"),
+        "guide_parallel_url": route(lang, "guides/parallel-coding-agents"),
+        "guide_native_url": route(lang, "guides/native-terminal-and-multi-machine"),
         "changelog_url": route(lang, "changelog"),
     }.items():
         body = body.replace("{{" + key + "}}", value)
-    body = body.replace(f'data-language="{lang}"', f'data-language="{lang}" aria-current="page"')
     return body
 
 
 def nav_active(page, key):
     if page == key:
         return True
-    return key == "docs" and page.startswith("docs/") and not any(
+    return key == "docs" and (page.startswith("docs/") or page.startswith("guides/")) and not any(
         nav_key == page for nav_key, _ in NAV_PAGES
     )
 
@@ -310,22 +397,18 @@ def header(lang, page, labels):
         + f'>{html.escape(labels[name])}</a>'
         for key, name in NAV_PAGES
     )
-    languages = "".join(
-        f'<a class="lang-btn" href="{route(code, page)}" lang="{code}" hreflang="{code}"'
-        + (' aria-current="page"' if code == lang else "") + f'>{name}</a>'
-        for code, name in (("en", "EN"), ("zh", "中文"))
-    )
+    nav_label = html.escape(labels.get("nav_aria", "Main navigation"))
     return f'''<header class="doc-header">
       <a class="crt-brand" href="{route(lang)}"><span class="power-led" aria-hidden="true"></span>
       <img src="/favicon.svg" width="20" height="20" alt="">CANBAN</a>
-      <nav class="doc-nav" aria-label="{'主导航' if lang == 'zh' else 'Main navigation'}">{links}</nav>
-      <nav class="lang-switch" aria-label="Language">{languages}</nav></header>'''
+      <nav class="doc-nav" aria-label="{nav_label}">{links}</nav>
+      {lang_switcher(lang, page)}</header>'''
 
 
 def command(text, labels):
     return f'''<div class="doc-command"><pre><code>{html.escape(text)}</code></pre>
       <button class="copy-btn" type="button" data-copy-btn data-copy-value="{html.escape(text, quote=True)}">
-      <span class="copy-text">{labels['copy']}</span></button></div>'''
+      <span class="copy-text">{html.escape(labels['copy'])}</span></button></div>'''
 
 
 def render_screenshot(shot):
@@ -351,16 +434,24 @@ def footer(lang, page, labels):
       <a href="{route(lang, 'docs')}">{html.escape(labels['docs'])}</a>
       <a href="{route(lang, 'docs/workflows')}">{html.escape(labels['workflows'])}</a>
       <a href="{route(lang, 'docs/cli')}">{html.escape(labels['cli'])}</a>
+      <a href="{route(lang, 'guides/parallel-coding-agents')}">{html.escape(labels['guide_parallel'])}</a>
+      <a href="{route(lang, 'guides/native-terminal-and-multi-machine')}">{html.escape(labels['guide_native'])}</a>
       <a href="{route(lang, 'changelog')}">{html.escape(labels['changelog'])}</a>
       <a href="{md_route(lang, page)}">{html.escape(labels['markdown_mirror'])}</a>
       <a href="/llms-full.txt">{html.escape(labels['llms_full'])}</a>
       <a href="{REPOSITORY}">GitHub</a></nav></footer>'''
 
 
+def render_faq_section(faq_heading, faq_items):
+    items_html = "".join(
+        f'<article class="faq-item"><h3>{html.escape(q)}</h3><p>{html.escape(a)}</p></article>'
+        for q, a in faq_items
+    )
+    return f'<section id="faq"><h2>{html.escape(faq_heading)}</h2>{items_html}</section>'
+
+
 def install_body(lang, labels):
     t = lambda key: html.escape(labels[key])
-    faq = "".join(f'<article class="faq-item"><h3>{html.escape(q)}</h3><p>{html.escape(a)}</p></article>'
-                  for q, a in labels["faq_items"])
     dependencies = "".join(f'<h3>{name}</h3><pre><code>{html.escape(cmd)}</code></pre>' for name, cmd in (
         ("Ubuntu / Debian", "sudo apt install libgtk-4-1 libgstreamer1.0-0 libgstreamer-plugins-base1.0-0"),
         ("Arch Linux", "sudo pacman -S gtk4 gstreamer gst-plugins-base"),
@@ -380,7 +471,7 @@ def install_body(lang, labels):
       <a class="text-link" href="{route(lang, 'changelog')}">{t('releases_link')} →</a></section>
     <section><h2>{t('source')}</h2><p>{t('source_text')}</p>
       <a class="text-link" href="{REPOSITORY}#build-from-source">GitHub README →</a></section>
-    <section id="faq"><h2>{t('faq')}</h2>{faq}</section></main>{footer(lang, 'install', labels)}</div>'''
+    {render_faq_section(labels['faq'], labels['faq_items'])}</main>{footer(lang, 'install', labels)}</div>'''
 
 
 def changelog_body(lang, labels, releases):
@@ -390,16 +481,16 @@ def changelog_body(lang, labels, releases):
         url = html.escape(release["html_url"], quote=True)
         stamp = release["published_at"]
         date = stamp[:10]
-        badge = f'<span class="release-badge">{labels["prerelease"]}</span>' if release["prerelease"] else ""
+        badge = f'<span class="release-badge">{html.escape(labels["prerelease"])}</span>' if release["prerelease"] else ""
         title = html.escape(release["name"] or release["tag_name"])
         notes = release_markdown(release["body"] or labels["no_notes"])
         entries.append(f'''<article class="release" id="{tag}"><div class="release-heading">
           <h2><a href="{url}">{title}</a></h2>{badge}<time datetime="{stamp}" title="{stamp}">{date}</time></div>
-          <div class="release-notes">{notes}</div><a class="text-link" href="{url}">{labels['github_release']} →</a></article>''')
+          <div class="release-notes">{notes}</div><a class="text-link" href="{url}">{html.escape(labels['github_release'])} →</a></article>''')
     return f'''<div class="doc-shell">{header(lang, 'changelog', labels)}
       <main id="main" class="doc-main"><div class="doc-intro"><p class="eyebrow">CANBAN // CHANGELOG</p>
-      <h1>{labels['changelog']}</h1><p>{labels['release_intro']}</p><p class="muted">{labels['release_note']}</p></div>
-      {''.join(entries)}<a class="text-link" href="{REPOSITORY}/releases">{labels['all_releases']} →</a>
+      <h1>{html.escape(labels['changelog'])}</h1><p>{html.escape(labels['release_intro'])}</p><p class="muted">{html.escape(labels['release_note'])}</p></div>
+      {''.join(entries)}<a class="text-link" href="{REPOSITORY}/releases">{html.escape(labels['all_releases'])} →</a>
       </main>{footer(lang, 'changelog', labels)}</div>'''
 
 
@@ -428,10 +519,11 @@ def doc_body(lang, page, spec, labels):
         f'{doc_markdown(sec["markdown"], labels)}{render_screenshot(sec.get("screenshot"))}</section>'
         for sec in spec["sections"]
     )
+    faq_html = render_faq_section(labels["faq"], spec["faq_items"]) if spec.get("faq_items") else ""
     return f'''<div class="doc-shell">{header(lang, page, labels)}
       <main id="main" class="doc-main"><div class="doc-intro">{breadcrumb_nav}<p class="eyebrow">{html.escape(spec['eyebrow'])}</p>
       <h1>{html.escape(spec['title'])}</h1><p>{inline_markdown(spec['intro'], allow_relative=True)}</p>{intro_shot}</div>
-      {cards_html}{sections_html}</main>{footer(lang, page, labels)}</div>'''
+      {cards_html}{sections_html}{faq_html}</main>{footer(lang, page, labels)}</div>'''
 
 
 def breadcrumb_items(lang, page, labels, docs_spec=None):
@@ -450,42 +542,67 @@ def breadcrumb_items(lang, page, labels, docs_spec=None):
     return items
 
 
-def structured_data(lang, page, title, description, strings, labels, docs_spec=None, latest_release=None):
-    """Build page-scoped Schema.org JSON-LD without invisible FAQ claims."""
-    language = "zh-CN" if lang == "zh" else "en"
+def article_image_src(docs_spec):
+    if docs_spec.get("screenshot"):
+        return docs_spec["screenshot"]["src"]
+    for sec in docs_spec.get("sections", ()):
+        if sec.get("screenshot"):
+            return sec["screenshot"]["src"]
+    return "/og-image.png"
+
+
+def structured_data(lang, page, title, description, labels, docs_spec=None, latest_release=None):
+    """Build page-scoped Schema.org JSON-LD with localized properties and visible FAQs."""
+    language = LANGUAGE_BY_CODE[lang]["hreflang"]
     home_url = ORIGIN + route(lang)
     page_url = ORIGIN + route(lang, page)
     schema = copy.deepcopy(load("schema.json"))
+    localized = schema.pop("localized")[lang]
     graph = schema["@graph"]
     for item in graph:
         item["@id"] = home_url + ("#website" if item["@type"] == "WebSite" else "#software")
         item["url"] = home_url
         item["inLanguage"] = language
-        item["description"] = strings["meta_desc"]
-        if item["@type"] == "SoftwareApplication":
+        if item["@type"] == "WebSite":
+            item["description"] = localized["website_desc"]
+        else:
+            item["description"] = localized["software_desc"]
+            item["applicationSubCategory"] = localized["application_sub_category"]
+            item["softwareRequirements"] = localized["software_requirements"]
+            item["keywords"] = localized["keywords"]
             item["installUrl"] = ORIGIN + route(lang, "install")
             item["releaseNotes"] = ORIGIN + route(lang, "changelog")
-            if page:
+            if not page:
+                item["featureList"] = localized["feature_list"]
+            else:
                 item.pop("featureList", None)
             if latest_release:
                 item["softwareVersion"] = latest_release["tag_name"]
                 item["dateModified"] = latest_release["published_at"]
 
-    if page in DOC_PAGES:
+    if page in ARTICLE_PAGES:
         article = {
             "@type": "TechArticle",
             "@id": page_url + "#webpage",
             "url": page_url,
+            "mainEntityOfPage": {"@type": "WebPage", "@id": page_url},
             "headline": title,
             "name": title,
             "description": description,
+            "image": ORIGIN + article_image_src(docs_spec),
             "inLanguage": language,
             "author": {"@type": "Person", "name": "JJy", "url": "https://github.com/jjyr"},
+            "publisher": {
+                "@type": "Organization",
+                "name": "Canban",
+                "url": ORIGIN + "/",
+                "logo": {"@type": "ImageObject", "url": ORIGIN + "/icon-512.png"},
+            },
+            "datePublished": docs_spec["date_published"],
+            "dateModified": docs_spec["updated"],
             "isPartOf": {"@id": home_url + "#website"},
             "about": {"@id": home_url + "#software"},
         }
-        if latest_release:
-            article["dateModified"] = latest_release["published_at"]
         graph.append(article)
     else:
         graph.append({
@@ -505,7 +622,13 @@ def structured_data(lang, page, title, description, strings, labels, docs_spec=N
             "@id": page_url + "#breadcrumb",
             "itemListElement": breadcrumb_items(lang, page, labels, docs_spec),
         })
-    if page == "install":
+
+    faq_items = (
+        labels["faq_items"] if page == "install"
+        else docs_spec.get("faq_items") if docs_spec
+        else None
+    )
+    if faq_items:
         graph.append({
             "@type": "FAQPage",
             "@id": page_url + "#faq",
@@ -517,7 +640,7 @@ def structured_data(lang, page, title, description, strings, labels, docs_spec=N
                     "name": question,
                     "acceptedAnswer": {"@type": "Answer", "text": answer},
                 }
-                for question, answer in labels["faq_items"]
+                for question, answer in faq_items
             ],
         })
     return schema
@@ -533,32 +656,59 @@ def page_meta(page, strings, labels, docs_spec=None):
     return docs_spec["meta_title"], docs_spec["description"]
 
 
+def page_updated(lang, page, locales, pages, docs, latest_release):
+    if not page:
+        return locales[lang]["updated"]
+    if page == "install":
+        return pages[lang]["install_updated"]
+    if page == "changelog":
+        return latest_release["published_at"][:10] if latest_release else ""
+    return docs[lang][page]["updated"]
+
+
 def document(lang, page, body, strings, labels, docs_spec=None, latest_release=None):
+    info = LANGUAGE_BY_CODE[lang]
     path = route(lang, page)
     title, description = page_meta(page, strings, labels, docs_spec)
-    locale, language = ("zh_CN", "zh-CN") if lang == "zh" else ("en_US", "en")
-    schema = structured_data(lang, page, title, description, strings, labels, docs_spec, latest_release)
-    alternates = "\n".join(f'<link rel="alternate" hreflang="{code}" href="{ORIGIN + route(value, page)}">'
-                            for code, value in (("en", "en"), ("zh-CN", "zh"), ("x-default", "en")))
+    locale, language = info["og_locale"], info["html_lang"]
+    schema = structured_data(lang, page, title, description, labels, docs_spec, latest_release)
+    robots = (
+        "index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1"
+        if is_indexable(lang, page)
+        else "noindex, follow"
+    )
+    if page != "changelog":
+        alternates = "\n".join([
+            *(f'<link rel="alternate" hreflang="{item["hreflang"]}" href="{ORIGIN + route(item["code"], page)}">' for item in LANGUAGES),
+            f'<link rel="alternate" hreflang="x-default" href="{ORIGIN + route("en", page)}">',
+        ])
+        og_alternates = "".join(
+            f'<meta property="og:locale:alternate" content="{item["og_locale"]}">'
+            for item in LANGUAGES
+            if item["code"] != lang
+        )
+    else:
+        alternates = ""
+        og_alternates = ""
     md_alternate = f'<link rel="alternate" type="text/markdown" href="{ORIGIN + md_route(lang, page)}">'
     # A tiny early redirect preserves legacy bookmarks, other parameters and channel hashes.
     legacy = '''<script>(function(){var u=new URL(location.href),l=u.searchParams.get("lang");
-      if(l!=="en"&&l!=="zh"&&l!=="zh-CN")return;u.searchParams.delete("lang");
-      var p=u.pathname.replace(/^\\/zh(?=\\/)/,"");
-      location.replace((l==="en"?p:"/zh"+p)+u.search+u.hash);})();</script>'''
+      if(!l)return;var m={"en":"","zh":"/zh","zh-cn":"/zh","zh-tw":"/zh-tw","zh-hk":"/zh-tw","ja":"/ja","ja-jp":"/ja","ko":"/ko","ko-kr":"/ko"}[l.toLowerCase()];
+      if(m===undefined)return;u.searchParams.delete("lang");
+      var p=u.pathname.replace(/^\\/(?:zh-tw|zh|ja|ko)(?=\\/|$)/,"")||"/";
+      location.replace(m+p+u.search+u.hash);})();</script>'''
     return f'''<!DOCTYPE html>
 <html lang="{language}" data-lang="{lang}" class="{'home-root' if not page else 'document-root'}"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(title)}</title><meta name="description" content="{html.escape(description, quote=True)}">
 <meta name="application-name" content="Canban"><meta name="apple-mobile-web-app-title" content="Canban">
-<meta name="author" content="JJy"><meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+<meta name="author" content="JJy"><meta name="robots" content="{robots}">
 <meta name="theme-color" content="#141511"><link rel="canonical" href="{ORIGIN + path}">{alternates}
 {md_alternate}
 <meta property="og:site_name" content="Canban"><meta property="og:type" content="website">
 <meta property="og:title" content="{html.escape(title, quote=True)}"><meta property="og:description" content="{html.escape(description, quote=True)}">
 <meta property="og:url" content="{ORIGIN + path}"><meta property="og:locale" content="{locale}">
-<meta property="og:locale:alternate" content="{'en_US' if lang == 'zh' else 'zh_CN'}">
-<meta property="og:image" content="{ORIGIN}/og-image.png"><meta property="og:image:type" content="image/png">
+{og_alternates}<meta property="og:image" content="{ORIGIN}/og-image.png"><meta property="og:image:type" content="image/png">
 <meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="{html.escape(strings['hero_title'], quote=True)}">
 <meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="{html.escape(title, quote=True)}">
@@ -612,6 +762,8 @@ def render_home_markdown(lang, strings):
         f"- {strings['nav_docs']}: {ORIGIN + route(lang, 'docs')}",
         f"- {strings['nav_workflows']}: {ORIGIN + route(lang, 'docs/workflows')}",
         f"- {strings['nav_cli']}: {ORIGIN + route(lang, 'docs/cli')}",
+        f"- {strings['nav_guide_parallel']}: {ORIGIN + route(lang, 'guides/parallel-coding-agents')}",
+        f"- {strings['nav_guide_native']}: {ORIGIN + route(lang, 'guides/native-terminal-and-multi-machine')}",
         f"- {strings['nav_changelog']}: {ORIGIN + route(lang, 'changelog')}",
         f"- GitHub: {REPOSITORY}",
     ]
@@ -702,7 +854,7 @@ def render_changelog_markdown(lang, labels, releases):
     return "\n".join(lines)
 
 
-def render_doc_markdown_mirror(lang, spec):
+def render_doc_markdown_mirror(lang, spec, labels):
     lines = [f"# {spec['title']}", "", f"> {spec['intro']}", ""]
     lines.extend(screenshot_markdown(spec.get("screenshot")))
     if spec.get("cards"):
@@ -712,6 +864,10 @@ def render_doc_markdown_mirror(lang, spec):
     for sec in spec["sections"]:
         lines.extend([f"## {sec['heading']}", "", sec["markdown"].strip(), ""])
         lines.extend(screenshot_markdown(sec.get("screenshot")))
+    if spec.get("faq_items"):
+        lines.extend([f"## {labels['faq']}", ""])
+        for question, answer in spec["faq_items"]:
+            lines.extend([f"### {question}", "", answer, ""])
     return "\n".join(lines)
 
 
@@ -741,8 +897,8 @@ def render_llms_full(locales, pages, docs, releases):
         render_install_markdown("en", pages["en"]).strip(),
         "",
     ]
-    for slug in DOC_PAGES:
-        parts.extend(["---", "", render_doc_markdown_mirror("en", docs["en"][slug]).strip(), ""])
+    for slug in ARTICLE_PAGES:
+        parts.extend(["---", "", render_doc_markdown_mirror("en", docs["en"][slug], pages["en"]).strip(), ""])
 
     parts.extend(["---", "", "## Agent CLI Skill Reference (`skills/canban/SKILL.md`)", "", skill_text, ""])
 
@@ -766,13 +922,14 @@ def build(output, releases):
         for shot in sorted(screenshots_src.glob("*.png")):
             shutil.copyfile(shot, screenshots_dst / shot.name)
     shutil.copyfile(ROOT / "scripts/install.sh", output / "install.sh")
-    locales, pages, docs = load("locales.json"), load("pages.json"), load("docs.json")
+    locales = load("locales.json")
+    pages = load("pages.json")
+    docs = {lang: load_docs(lang) for lang in LANGUAGE_CODES}
     latest_release = releases[0] if releases else None
-    lastmod = f'<lastmod>{latest_release["published_at"][:10]}</lastmod>' if latest_release else ""
 
-    for lang in ("en", "zh"):
+    for lang in LANGUAGE_CODES:
         for page in PAGES:
-            docs_spec = docs[lang][page] if page in DOC_PAGES else None
+            docs_spec = docs[lang][page] if page in ARTICLE_PAGES else None
             if not page:
                 body = localize_home(lang, locales[lang])
                 md_text = render_home_markdown(lang, locales[lang])
@@ -784,7 +941,7 @@ def build(output, releases):
                 md_text = render_changelog_markdown(lang, pages[lang], releases)
             else:
                 body = doc_body(lang, page, docs_spec, pages[lang])
-                md_text = render_doc_markdown_mirror(lang, docs_spec)
+                md_text = render_doc_markdown_mirror(lang, docs_spec, pages[lang])
 
             destination = output / route(lang, page).lstrip("/") / "index.html"
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -798,11 +955,25 @@ def build(output, releases):
 
     urls = []
     for page in PAGES:
-        alternates = "".join(f'<xhtml:link rel="alternate" hreflang="{code}" href="{ORIGIN + route(lang, page)}" />'
-                             for code, lang in (("en", "en"), ("zh-CN", "zh"), ("x-default", "en")))
-        for lang in ("en", "zh"):
+        if page == "changelog":
+            stamp = page_updated("en", page, locales, pages, docs, latest_release)
+            lastmod = f"<lastmod>{stamp}</lastmod>" if stamp else ""
+            urls.append(f'<url><loc>{ORIGIN + route("en", page)}</loc>{lastmod}</url>')
+            continue
+        alternates = "".join([
+            *(f'<xhtml:link rel="alternate" hreflang="{info["hreflang"]}" href="{ORIGIN + route(info["code"], page)}" />' for info in LANGUAGES),
+            f'<xhtml:link rel="alternate" hreflang="x-default" href="{ORIGIN + route("en", page)}" />',
+        ])
+        for lang in LANGUAGE_CODES:
+            stamp = page_updated(lang, page, locales, pages, docs, latest_release)
+            lastmod = f"<lastmod>{stamp}</lastmod>" if stamp else ""
             urls.append(f'<url><loc>{ORIGIN + route(lang, page)}</loc>{lastmod}{alternates}</url>')
-    (output / "sitemap.xml").write_text('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">\n' + "\n".join(urls) + "\n</urlset>\n")
+    (output / "sitemap.xml").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">\n'
+        + "\n".join(urls)
+        + "\n</urlset>\n"
+    )
 
 
 def main():
@@ -812,7 +983,8 @@ def main():
     args = parser.parse_args()
     releases = fetch_releases() if args.refresh_releases else published_releases(load("releases.json"))
     build(args.output, releases)
-    print(f"Built {len(PAGES) * 2} HTML pages, {len(PAGES) * 2} Markdown mirrors, and {len(releases)} published releases in {args.output}")
+    total_pages = len(PAGES) * len(LANGUAGE_CODES)
+    print(f"Built {total_pages} HTML pages, {total_pages} Markdown mirrors, and {len(releases)} published releases in {args.output}")
 
 
 if __name__ == "__main__":

@@ -26,7 +26,8 @@
     "CH 04 // INSTALL",
   ];
 
-  const currentLang = document.documentElement.getAttribute("data-lang") === "zh" ? "zh" : "en";
+  const rawLang = document.documentElement.getAttribute("data-lang") || "en";
+  const currentLang = ["en", "zh", "zh-tw", "ja", "ko"].includes(rawLang) ? rawLang : "en";
   let currentChannel = 0;
   let wheelLockUntil = 0;
   let wheelAccum = 0;
@@ -45,6 +46,12 @@
     const id = window.setTimeout(fn, delayMs);
     sceneTimers.push(id);
     return id;
+  }
+
+  function closeLangMenus() {
+    document.querySelectorAll("details.lang-menu[open]").forEach((menu) => {
+      menu.removeAttribute("open");
+    });
   }
 
   function closeNotifPopover() {
@@ -98,11 +105,50 @@
 
   /* CH 02: Full-Width Visual Workflow Studio Traversal */
   const WF_TRAVERSAL = [
-    { node: 0, en: "1/5 · Backlog · @planner drafting steps", zh: "1/5 · Backlog · @planner 生成实施步骤" },
-    { node: 1, vwire: 0, en: "2/5 · Backlog · Free Agent slot granted (4/6)", zh: "2/5 · Backlog · 获得空闲并发槽位 (4/6)" },
-    { node: 2, wire: 0, en: "3/5 · Develop · @developer running in worktree", zh: "3/5 · Develop · @developer 在独立分支编码" },
-    { node: 3, wire: 1, en: "4/5 · Review · Trusted branch verified", zh: "4/5 · Review · 本地受信任分支校验通过" },
-    { node: 4, vwire: 1, en: "5/5 · Review · Queue Merge Rebase ×5 & Sync ✓", zh: "5/5 · Review · Queue Merge 批量变基同步 ✓" },
+    {
+      node: 0,
+      en: "1/5 · Backlog · @planner drafting steps",
+      zh: "1/5 · Backlog · @planner 生成实施步骤",
+      "zh-tw": "1/5 · Backlog · @planner 產生實作步驟",
+      ja: "1/5 · Backlog · @planner が実装手順を作成中",
+      ko: "1/5 · Backlog · @planner 구현 단계 작성 중",
+    },
+    {
+      node: 1,
+      vwire: 0,
+      en: "2/5 · Backlog · Free Agent slot granted (4/6)",
+      zh: "2/5 · Backlog · 获得空闲并发槽位 (4/6)",
+      "zh-tw": "2/5 · Backlog · 取得空閒並行槽位 (4/6)",
+      ja: "2/5 · Backlog · 空きエージェント枠を確保 (4/6)",
+      ko: "2/5 · Backlog · 유휴 에이전트 슬롯 확보 (4/6)",
+    },
+    {
+      node: 2,
+      wire: 0,
+      en: "3/5 · Develop · @developer running in worktree",
+      zh: "3/5 · Develop · @developer 在独立分支编码",
+      "zh-tw": "3/5 · Develop · @developer 於獨立 Worktree 開發",
+      ja: "3/5 · Develop · @developer が独立 Worktree で実装中",
+      ko: "3/5 · Develop · @developer 독립 Worktree에서 구현 중",
+    },
+    {
+      node: 3,
+      wire: 1,
+      en: "4/5 · Review · Trusted branch verified",
+      zh: "4/5 · Review · 本地受信任分支校验通过",
+      "zh-tw": "4/5 · Review · 本地受信任分支校驗通過",
+      ja: "4/5 · Review · 信頼済みブランチの検証完了",
+      ko: "4/5 · Review · 신뢰된 브랜치 검증 완료",
+    },
+    {
+      node: 4,
+      vwire: 1,
+      en: "5/5 · Review · Queue Merge Rebase ×5 & Sync ✓",
+      zh: "5/5 · Review · Queue Merge 批量变基同步 ✓",
+      "zh-tw": "5/5 · Review · Queue Merge 批次變基同步 ✓",
+      ja: "5/5 · Review · Queue Merge で一括リベース＆同期 ✓",
+      ko: "5/5 · Review · Queue Merge 일괄 리베이스 및 동기화 ✓",
+    },
   ];
 
   function playWorkflowScene(reduced) {
@@ -135,7 +181,7 @@
         const vw = document.querySelector(`[data-wf-vwire="${s.vwire}"]`);
         if (vw) vw.classList.add("is-lit");
       }
-      if (banner) banner.textContent = currentLang === "zh" ? s.zh : s.en;
+      if (banner) banner.textContent = s[currentLang] || s.en;
     };
 
     if (reduced) {
@@ -150,6 +196,14 @@
       if (currentChannel === 1 && !document.hidden) playWorkflowScene(false);
     }, 9200);
   }
+
+  const TERMINAL_REASONING = {
+    en: "Promoted Kanban, Workflow, and Native Agent CLI to dedicated channels with interactive Notification Center.",
+    zh: "已将 Kanban、Workflow 与原生 Agent CLI 拆分为三个独立频道，并接入可展开的通知中心。",
+    "zh-tw": "已將 Kanban、Workflow 與原生 Agent CLI 拆分為三個獨立頻道，並接入可展開的通知中心。",
+    ja: "Kanban・Workflow・ネイティブ Agent CLI を専用チャンネルに分離し、対話型の通知センターを接続しました。",
+    ko: "Kanban, Workflow, 네이티브 Agent CLI를 전용 채널로 분리하고 대화형 알림 센터를 연결했습니다.",
+  };
 
   /* CH 03: Native Agent CLI TUI Stream (Thoughts + Tool Calls + Diff) */
   function playTerminalScene(reduced) {
@@ -175,11 +229,7 @@
       {
         delay: 3200,
         html: `<div class="tui-tool-head"><span class="tui-bullet">✦</span><span class="vt-purple">Agent reasoning</span></div>
-               <div class="tui-thought">${
-                 currentLang === "zh"
-                   ? "已将 Kanban、Workflow 与原生 Agent CLI 拆分为三个独立频道，并接入可展开的通知中心。"
-                   : "Promoted Kanban, Workflow, and Native Agent CLI to dedicated channels with interactive Notification Center."
-               }</div>`,
+               <div class="tui-thought">${TERMINAL_REASONING[currentLang] || TERMINAL_REASONING.en}</div>`,
       },
       {
         delay: 5000,
@@ -208,7 +258,8 @@
   function playChannelScene(chIndex) {
     clearSceneTimers();
     const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (chIndex === 0) playKanbanScene(reduced);
+    const mobile = window.matchMedia("(max-width: 720px)").matches;
+    if (chIndex === 0) playKanbanScene(reduced || mobile);
     else if (chIndex === 1) playWorkflowScene(reduced);
     else if (chIndex === 2) playTerminalScene(reduced);
   }
@@ -220,6 +271,7 @@
 
     currentChannel = clamped;
     closeNotifPopover();
+    closeLangMenus();
 
     if (syncHash !== false && window.history && window.history.replaceState) {
       const hash = window.location.pathname + window.location.search + (currentChannel === 0 ? "" : `#ch-${currentChannel}`);
@@ -349,14 +401,14 @@
       { passive: true }
     );
 
-    /* Keyboard ArrowUp/Down, PageUp/PageDown, 1-4, Escape */
+    /* Keyboard ArrowUp/Down, PageUp/PageDown, 1-4 */
     window.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         closeNotifPopover();
         return;
       }
       if (window.matchMedia("(max-width: 720px)").matches) return;
-      if (e.target && ["INPUT", "TEXTAREA", "BUTTON", "A"].includes(e.target.tagName)) return;
+      if (e.target && ["INPUT", "TEXTAREA", "BUTTON", "A", "SUMMARY"].includes(e.target.tagName)) return;
       if (e.key === "ArrowDown" || e.key === "PageDown" || e.key === " ") {
         e.preventDefault();
         switchChannel(currentChannel + 1);
@@ -408,6 +460,22 @@
       if (!pop || pop.hidden) return;
       if (!pop.contains(e.target) && (!btn || !btn.contains(e.target))) {
         closeNotifPopover();
+      }
+    });
+  }
+
+  function setupLangMenus() {
+    document.addEventListener("click", (e) => {
+      document.querySelectorAll("details.lang-menu[open]").forEach((menu) => {
+        if (!menu.contains(e.target)) {
+          menu.removeAttribute("open");
+        }
+      });
+    });
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        closeLangMenus();
       }
     });
   }
@@ -509,6 +577,7 @@
 
   document.addEventListener("DOMContentLoaded", () => {
     const isHome = document.body.classList.contains("home-page");
+    setupLangMenus();
     if (isHome) {
       setupChannelNavigation();
       setupNotifPopover();

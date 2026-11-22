@@ -1,0 +1,417 @@
+{
+  "docs": {
+    "eyebrow": "CANBAN // DOCS",
+    "title": "Canban Documentation & Guides",
+    "meta_title": "Canban Documentation — Kanban, Workflows, CLI, Native Agents & Multi-Machine",
+    "description": "Architecture, guides, and reference docs for Canban: running parallel AI coding agents with Kanban & Git worktrees, native terminal vs. tmux & remote Linux hosts, schema 10 workflows, Agent-first canban CLI, and built-in CLIs.",
+    "intro": "Canban (canban.dev) unifies Kanban cards for Human Context, declarative schema 10 Workflows, an Agent-first CLI, and Herdr persistent PTY terminals for native AI coding agent CLIs across local and remote hosts.",
+    "date_published": "2026-11-19",
+    "updated": "2026-11-23",
+    "breadcrumbs": [["Docs", "docs"]],
+    "cards": [
+      {
+        "title": "Guide: Parallel Coding Agents",
+        "summary": "Run Claude Code, Codex, Antigravity (agy), Pi, and Cursor CLI simultaneously with Kanban context, Git worktrees, Attention Inbox (⌘I), and FIFO Queue Merge.",
+        "href": "/guides/parallel-coding-agents/"
+      },
+      {
+        "title": "Guide: Native Terminal & Multi-Machine",
+        "summary": "Why Rust + libghostty-vt + Herdr PTYs beat terminal tabs, tmux, and chat wrappers — plus 24/7 remote Linux execution over Tailscale and SSH.",
+        "href": "/guides/native-terminal-and-multi-machine/"
+      },
+      {
+        "title": "Workflow YAML & Semantics",
+        "summary": "Verified schema 10 Document/Step syntax, all 9 uses: types, condition pointers, admit gates, rework/failure handling, and FIFO Queue Merge.",
+        "href": "/docs/workflows/"
+      },
+      {
+        "title": "Canban CLI & --human",
+        "summary": "Core CLI subcommands, compact JSON & server-side --fields shaping, zero-config env injection, request_key idempotency, and --human usage.",
+        "href": "/docs/cli/"
+      },
+      {
+        "title": "Native Agent CLIs & Herdr PTYs",
+        "summary": "All 24 built-in CLI agents, libghostty-vt terminal preservation, canban card adopt, and zero-interference native TUIs/MCPs.",
+        "href": "/docs/agents/"
+      },
+      {
+        "title": "Remote Linux Hosts (canband)",
+        "summary": "Headless Linux canband daemons, Tailscale direct TCP with bearer auth, SSH bootstrap/fallback, offline cache, and Diagnostics.",
+        "href": "/docs/remote-hosts/"
+      },
+      {
+        "title": "Install & FAQ",
+        "summary": "Desktop macOS/Linux and headless server installation, Linux GTK4/GStreamer dependencies, and answers to common questions.",
+        "href": "/install/"
+      },
+      {
+        "title": "Changelog",
+        "summary": "Published Canban releases, latest versions first, with original release notes.",
+        "href": "/changelog/"
+      }
+    ],
+    "sections": [
+      {
+        "id": "architecture",
+        "heading": "System architecture",
+        "markdown": "Canban is built in Rust with native UI (`longbridge/nsh` — AppKit/Metal on macOS 13.0+ Apple Silicon, GTK4 on Linux `x86_64` / `arm64`) and `libghostty-vt` for terminal emulation.\n\n- **Canban UI (`canban-ui`)**: Connects over Unix socket (`~/.canban/app.sock`) to local `AppServer`, and simultaneously over Tailscale TCP or SSH tunnels to remote `canband` hosts.\n- **AppServer (`canban serve` / `canband`)**: Owns SQLite WAL storage, Cards, the Workflow Engine, Scheduler, Git worktree management, and Merge Queue coordination. Closing the desktop window leaves background scheduling active.\n- **Herdr Core (`hc`)**: Persistent PTY session supervisor running native Agent CLIs (`claude`, `codex`, `agy`, `pi`, `gemini`, `opencode`, `cursor-agent`, etc.) so running agent sessions survive UI restarts and upgrades."
+      },
+      {
+        "id": "formula",
+        "heading": "Why Canban = Kanban + Workflow + Herdr",
+        "markdown": "1. **Kanban maintains Human Context**: Feature specs, pasted screenshots, `#Card` and GitHub Issue/PR references, `@Agent` discussions, structured reports, and diffs stay together on each Card.\n2. **Workflow automates worktrees and delivery**: Dragging a Card into `Develop` allocates an isolated Git worktree (`<dir>-<proj4>/<card-number>`) and runs your workflow graph; `Review` integrates changes through a serialized FIFO Queue Merge.\n3. **Herdr runs native Agent CLIs without interference**: Keep your CLI's native TUI, MCP servers, skills, permissions, and exact-ID session resume intact.",
+        "screenshot": {
+          "src": "/screenshots/review-diff.png",
+          "alt": "Canban Git diff inspector for Card #1 worktree showing commit history, changed Rust files, inline diff lines, Copy Markdown, and the Review & Send to @Agent button.",
+          "caption": "Built-in worktree diff review in Canban: inspect commits and inline hunks, add line comments, and hand off findings directly with Review & Send to @Agent.",
+          "width": 2880,
+          "height": 1800,
+          "lazy": true
+        }
+      },
+      {
+        "id": "cli-quickstart",
+        "heading": "Core CLI quickstart",
+        "markdown": "Inside any Canban-launched terminal or scheduled agent session, Canban injects `CANBAN_CLI`, `CANBAN_ENDPOINT`, `CANBAN_CARD`, `CANBAN_PROJECT`, and `CANBAN_RUN_DIR`. Add `--human` for pretty-printed JSON without fetching extra fields.\n\n```sh\n\"$CANBAN_CLI\" card show --fields number,title,body,stage,revision\n\"$CANBAN_CLI\" card adopt --stage develop\n\"$CANBAN_CLI\" report --state completed --message 'Implemented and verified tests' --file \"$CANBAN_RUN_DIR/report.md\"\ncanban --human --fields number,title,stage card show\n```\n\nSee the full [Canban CLI, Agent Optimization & --human](/docs/cli/) guide."
+      }
+    ]
+  },
+  "docs/workflows": {
+    "eyebrow": "CANBAN // DOCS // WORKFLOWS",
+    "title": "Local AI Agent Workflows, Git Worktrees & Queue Merge",
+    "meta_title": "Local AI Agent Workflows — Git Worktrees, YAML Pipelines & FIFO Merge Queue | Canban",
+    "description": "Verified schema 10 Workflow YAML syntax and execution semantics in Canban: local GitHub Actions-like pipelines, Studio Stage mapping, all 9 uses: step types, condition pointers, admit gates, rework/failure handling, and serialized FIFO Queue Merge.",
+    "intro": "Canban workflows are declarative YAML 1.2 graphs (`schema: 10`, `CURRENT` in `crates/workflow-engine`) stored in SQLite (`workflow_sources` and immutable `workflow_revisions`). Visual Studio, manual YAML edits, and Edit with agent all compile and validate through the exact same Rust engine.",
+    "date_published": "2026-11-19",
+    "updated": "2026-11-23",
+    "breadcrumbs": [["Docs", "docs"], ["Workflows", "docs/workflows"]],
+    "sections": [
+      {
+        "id": "visual-studio",
+        "heading": "Visual Studio, SQLite source of truth & Stage projection",
+        "markdown": "Open **Workflows** in any Project header to switch between **Visual Studio**, **YAML Source**, **History**, and **Edit with agent**:\n\n- **SQLite Single Source of Truth**: Workflows live inside `canban.sqlite` (`workflow_sources` + immutable `workflow_revisions`) rather than hidden YAML files in `~/.canban`. Each `WorkflowRun` freezes its `definition` and `definition_revision` at creation so publishing new YAML never mutates in-flight runs.\n- **Linear Schema Migrations (`1..=10`)**: `crates/workflow-engine/src/migrations.rs` sets `BASELINE = 1` and `CURRENT = 10`, sequentially upgrading older YAML documents on parse.\n- **How Visual Studio Maps Stages (`stages.rs`)**: YAML files do not have a top-level `stages:` block; instead, `canban_workflow_engine::stages` derives one Stage swimlane (`StageView`) per Board column (`column`, `name`, ordered `steps`, `entry_rule`, and `exit` via `card.move` using `column: $next` / `next: $entry` or `Stay`). Each `Step` can set `stage: <column_id>` explicitly (or let Studio infer it from `on` column entry rules and `card.move` transitions) and `enabled: false` to skip a step at compile time without breaking links.",
+        "screenshot": {
+          "src": "/screenshots/workflow-studio.png",
+          "alt": "Canban Workflows Visual Studio showing development.yaml with Backlog, Develop (@developer Implement), and Review (External PR check condition, Human approval, and Queue merge) lanes.",
+          "caption": "Visual Studio for development.yaml: Backlog, Develop (@developer), and Review stages with the /card/source_trust == external_pr branch, Human approval gate, and Rebase · Sync Queue merge.",
+          "width": 2880,
+          "height": 1800,
+          "lazy": true
+        }
+      },
+      {
+        "id": "yaml-structure",
+        "heading": "Verified YAML structure (schema: 10)",
+        "markdown": "Parsing uses `serde_yaml_ng` with `#[serde(deny_unknown_fields)]` on `Document`, `Step`, `WorkflowColumn`, `WorkflowRule`, `EventSelector`, and `ScheduleCardConfig`. Unknown fields are rejected before publication.\n\n### Top-level `Document` keys (`crates/workflow-engine/src/source.rs`)\n\n| Key | Type & Default | Purpose |\n| --- | --- | --- |\n| `schema` | `u32` (required; `10` is `CURRENT`) | Schema version (`1..=10` accepted and migrated to `10`). |\n| `id` | `String` (required) | Non-empty workflow identifier (e.g., `delivery:default`). |\n| `name` | `String` (required) | Display name shown in Studio and Boards. |\n| `scope` | `project` (default) or `global` | `global` (`__global`) runs host-level schedules/scripts without Board `columns` or `card:` creation rules. |\n| `enabled` | `bool` (default `true`) | Enables or disables rule matching for this workflow source. |\n| `columns` | list of `{ id, name }` | Declares Board columns (`id` allows ASCII alphanumeric, `-`, `_`). Defaults to Project columns when omitted. |\n| `env` | `{ KEY: VALUE }` map | Scalar environment variables inherited by all `agent` and `script` steps. |\n| `on` | `{ <rule_id>: WorkflowRule }` (non-empty) | Event triggers (`event`, `start_at`, `match`, `enabled`) and cron schedules (`cron`, `timezone`, `overlap`, `card`). Also accepts GitHub Actions `on: { schedule: [{ cron: ... }] }` shorthand. |\n| `steps` | list of `Step` (1..=256) | Ordered step definitions forming a directed acyclic automatic graph. |\n| `workspace` | `WorkspaceSettings` | `create_worktree` (default `true`), `base_branch`, `sync_base` (requires `create_worktree: true`), `remote` (default `origin`). |\n| `max_steps` | `u32` (`1..=1000`, default `100`) | Guardrail cap on total step visits per `WorkflowRun`. |\n\n### `on.<rule_id>` triggers & scheduled rules\n\n- **Event triggers**: `event` (`card.column_entered`, `card.column_left`, `card.created`, `card.updated`, `manual`, etc.), `start_at` (target step ID), `match` (`EventSelector`: `column`, `actor`, `origin`, `source_kind`, `reason`, `changed_fields`, `repository`, `subject`, `reply_to`, `include_related`, `include_initial`), and `enabled` (`bool`, default `true`).\n- **Schedule triggers**: Set `cron` (5-field POSIX cron or `@hourly` / `@daily` / `@weekly` / `@monthly`) to mark a rule as `event: schedule`. Optional `timezone` (`Local` default, `UTC`, fixed offset like `+08:00`, or IANA name), `overlap` (`skip` default, `queue`, `allow`), and `card: { column, title, body }` (with `{{date}}`, `{{datetime}}`, `{{run_number}}`, `{{workflow}}`, `{{rule}}` placeholders; omit `card` for Cardless runs).\n\n### `steps[]` fields\n\n- Common keys: `id` (unique non-empty string), `name`, `uses` (optional when top-level `run:` is present), `with`, `next` (defaults to next list item except for `condition` and `complete`; `card.move` may use `$entry`), `stage` (optional column ID), `enabled` (`bool`, default `true`), `on_changes_requested` (top-level rework target on `approval` / `deliver`), `on_failure` (top-level single-use automatic fallback step ID on `script` steps).\n- `script`-only keys accepted at step top-level or inside `with:` (without conflicting values): `run`, `shell` (default `bash -eo pipefail`, fallback `sh -e`), `working_directory` (relative to Card workspace, no `..`), `timeout_minutes` (`1..=1440`), `timeout_seconds` (`1..=86400`), `continue_on_error` (`bool`, default `false`).\n- `env`: `{ KEY: VALUE }` map, valid only on `agent` and `script` steps. Precedence order: host & `CANBAN_*` context < workflow `env` < `$CANBAN_ENV` exports < step `env`.\n\n### Canonical `development.yaml` (`default_document`)\n\n```yaml\nschema: 10\nid: delivery:default\nname: Development\nenabled: true\ncolumns:\n  - id: backlog\n    name: Backlog\n  - id: develop\n    name: Develop\n  - id: review\n    name: Review\non:\n  develop:\n    event: card.column_entered\n    start_at: agent:develop\n    match:\n      column: develop\n  review:\n    event: card.column_entered\n    start_at: condition:external_pr\n    match:\n      column: review\nsteps:\n  - id: agent:develop\n    name: Implement\n    uses: agent\n    with:\n      profile: developer\n    next: move:develop\n  - id: move:develop\n    name: Move to Review\n    uses: card.move\n    with:\n      column: review\n    next: condition:external_pr\n  - id: condition:external_pr\n    name: External PR check\n    uses: condition\n    with:\n      pointer: /card/source_trust\n      equals: external_pr\n      then: approval:review\n      otherwise: deliver:review\n  - id: deliver:review\n    name: Queue merge\n    uses: deliver\n    with:\n      sync_upstream: true\n    next: __end\n    on_changes_requested: agent:develop\n  - id: approval:review\n    name: Human approval\n    uses: approval\n    with:\n      title: External PR; human approval is required before merging\n    next: __end\n    on_changes_requested: agent:develop\n  - id: __end\n    uses: complete\nworkspace:\n  create_worktree: true\n  sync_base: true\n  remote: origin\n```"
+      },
+      {
+        "id": "step-types",
+        "heading": "All 9 step types (uses:)",
+        "markdown": "| `uses` | `with` & step fields | Runtime behavior |\n| --- | --- | --- |\n| `agent` | `with.profile` (optional Profile ID), `with.instruction` (optional; resolves built-in prompt when omitted), `env`, `next` | Dispatches an Agent PTY in the Card worktree (`waiting_agent`). Advances only on `canban report --state completed`. |\n| `script` (or `run:`) | `run`, `shell`, `working_directory`, `timeout_minutes`, `timeout_seconds`, `continue_on_error`, `env`, `on_failure`, `next` | Runs via Herdr Core without consuming `scheduler.max_agents`. Reads `$CANBAN_ENV` (`inputs.env`) and `$CANBAN_OUTPUT` (`outputs.<step_id>`). |\n| `admit` | `with.agent_slot` (`bool`, default `true`), `with.max_ready` (`1..=100`, optional), `next` | Enters `waiting_capacity`; AppServer releases runs in Board order when capacity is available. |\n| `card.move` | `with.column` (column ID or `$next`), `next` (step ID or `$entry`) | Moves Card (`origin: \"workflow\"`) without re-firing duplicate entry triggers; `$entry` jumps to target column's `on` start. |\n| `condition` | `with.pointer` (JSON Pointer), `with.equals` (JSON value), `with.then` (step ID), `with.otherwise` (step ID) | Evaluates pointer against `{inputs, outputs, card}` and branches immediately. Ignores `next` (compiled `condition` has no `next` field). |\n| `approval` | `with.title` (non-empty string), `on_changes_requested` (optional rework step ID), `next` | Pauses in `waiting_approval` and sets `Card.human_gate` until approved or sent for rework. |\n| `deliver` | `with.profile` (default `@merger`), `with.target_branch`, `with.strategy` (`rebase` default, `squash`, `merge`), `with.sync_upstream` (`true` default), `with.batch_size` (`1..=50`, default `5`), `with.test_command`, `with.max_conflict_attempts` (default `3`, `0` disables), `on_changes_requested`, `next` | Enters serialized FIFO Queue Merge (`waiting_delivery`). Pauses in `waiting_approval` immediately if `card.hold_auto_merge` is set. |\n| `notify` | `with.message`, `next` | Emits `workflow.notified` timeline event and attention notification, then continues to `next`. |\n| `complete` | *(none)* | Terminal step marking the `WorkflowRun` `completed`. |"
+      },
+      {
+        "id": "conditions-admit",
+        "heading": "Conditions, source_trust & admit gates",
+        "markdown": "### Condition evaluation (`condition`)\n\nDuring execution (`crates/workflow-engine/src/runtime.rs`), `condition` builds `{ \"inputs\": run.inputs, \"outputs\": run.outputs, \"card\": card }` (with `card.source_trust` populated from `Card::trust_level()` — `\"local\"`, `\"collaborator\"` for GitHub Issues, or `\"external_pr\"` for external GitHub PRs) and resolves `with.pointer` (must be empty or start with `/`):\n\n- **Equality rules**: Matches exact JSON equality, string `\"true\"` / `\"false\"` against booleans, numeric strings against numbers, and an absent pointer against `null`.\n- **External PR gate**: `pointer: /card/source_trust` with `equals: external_pr` routes untrusted PRs to `approval:review` while sending trusted branches to `deliver:review`.\n- **Script output branching**: Any `KEY=VALUE` written to `$CANBAN_OUTPUT` in a prior `script` step is stored at `/outputs/<step_id>/<KEY>`, e.g., `pointer: /outputs/script:check/gate` with `equals: ok`.\n\n### Capacity & ready-queue gates (`admit`)\n\n`admit` validates that at least one of `agent_slot: true` or `max_ready: 1..=100` is enabled (`definition.rs`). Waiting runs enter `waiting_capacity` and are released by AppServer's admission pump (`canban_scheduler::admissions`) strictly in **Board order** within their column:\n\n- `agent_slot: true` (default): Holds the Card until a global automatic Agent slot (`scheduler.max_agents`, default `8`) is free.\n- `max_ready: K`: Caps how many Cards that already passed this gate may remain in that column (for example, gating Backlog planning at `max_ready: 2`).\n- `canban card adopt`: Claiming a live interactive session via `start_adopted` bypasses `admit` gates so an active user terminal is never queued behind pending capacity."
+      },
+      {
+        "id": "rework-failure",
+        "heading": "Validation, rework loops & failure handling",
+        "markdown": "### Static validation rules (`definition.rs`)\n\nBefore saving or publishing, `validate_definition` verifies all column IDs, profile IDs, step targets, `sync_base` prerequisites (`create_worktree: true`), relative `working_directory` bounds, and **cycle freedom**: automatic cycles through `next`, `condition.then`, and `condition.otherwise` are rejected.\n\n### Rework & failure edges\n\nLoops are only permitted across explicit decision or failure boundaries:\n\n- **Human rework (`on_changes_requested`)**: Available on `approval` and `deliver` steps (compiles to `rework`). Requesting changes (`workflow.decide` with `decision: \"rework\"`) clears `human_gate`, saves optional reviewer notes into `inputs.rework_feedback`, and routes back to the target step (e.g., `agent:develop`).\n- **Script fallback (`on_failure`)**: When a `script` step fails (`continue_on_error: false`), `fail_script` records exit code and log tail feedback (`rework_origin: \"script_failure\"`) and jumps to `on_failure` **at most once per run** (`script_failures[step_id] == 0`). A second consecutive failure (or unconfigured `on_failure`) pauses in `waiting_approval` for human Retry, Rework, or Stop.\n- **Agent reporting & stale detection**: Terminal exit or idle never advances `agent` steps. `canban report --state completed` advances to `next`; `blocked` / `failed` moves the run to `blocked`; `backlog` cancels the run. Modifying Card title/body/content mid-run changes `input_digest` and marks completion `stale` until human rework or stop."
+      },
+      {
+        "id": "queue-merge",
+        "heading": "Serialized FIFO Queue Merge (deliver)",
+        "markdown": "Entering `deliver` serializes delivery across parallel Card worktrees so branches never race against the target branch:\n\n1. **Strict FIFO Queue Order**: Drains `waiting_delivery` runs in `(inputs.queued_at, storage_index)` order, grouping up to `batch_size` (`1..=50`, default `5`) compatible queue-head Cards (`target_branch`, `strategy`, `sync_upstream`, `test_command`, and conflict `profile`) into `<home>/worktrees/<project-ns>/_merge_queue`.\n2. **Agent Turn-Settle Guard**: If an Agent invoked `canban report --state completed` mid-turn while Herdr still reports active work, Canban waits for the turn to settle (bounded by a 3-minute grace window) before integrating.\n3. **Integrate & Verify**: Applies `strategy` (`rebase` default, `squash`, or `--first-parent` `merge`), then runs `test_command` once on the integrated batch if configured (skipped when unset).\n4. **Fast-Forward, Push & Archive**: Clean batches fast-forward the target branch once, push once when `sync_upstream: true`, and auto-archive merged Cards after saving `refs/canban/cards/<card-id>`.\n5. **Conflict Resolution (`@merger`)**: On batch conflict or test failure, Canban persists `MergeBatch` and `refs/canban/batch/<short_id>/{target,card-<N>}`, marks participating runs `waiting_batch`, and dispatches one Project-scoped `@merger` session in `_merge_queue` (which can fix in place or evict a failing Card via `canban batch report --state completed --evict <CARD_NUMBER>`). Single-Card deliveries without `test_command` resolve directly in the Card worktree up to `max_conflict_attempts` (default `3`, `0` disables)."
+      },
+      {
+        "id": "cli-workflows",
+        "heading": "Managing workflows via CLI",
+        "markdown": "Inspect, validate, export, and publish workflows from the terminal (or query the live schema contract via `workflow.schema`):\n\n```sh\ncanban call workflow.schema '{}'\ncanban workflow sources --project-id <PROJECT_ID>\ncanban workflow export --project-id <PROJECT_ID> --name development.yaml --output development.yaml\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml --check\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml\ncanban workflow set-default --project-id <PROJECT_ID>\n```\n\nSee [Canban CLI, Agent Optimization & --human](/docs/cli/) for `--global` workflow flags, `schedule` commands, and `--human` formatting."
+      }
+    ],
+    "faq_items": [
+      [
+        "How does Canban isolate parallel coding agents on the same Git repository?",
+        "When a Card enters a workflow with workspace.create_worktree enabled, AppServer allocates a dedicated Git worktree at <dir>-<proj4>/<card-number> so multiple agents never edit or overwrite the same working directory simultaneously."
+      ],
+      [
+        "Why does Canban require explicit canban report instead of detecting shell exit?",
+        "Interactive coding CLIs frequently run inside long-lived PTYs or wait between sub-tasks, so shell exit or prompt idle is ambiguous. Explicit canban report --state completed guarantees a stage only advances when the agent confirms its deliverables and tests."
+      ],
+      [
+        "How does FIFO Queue Merge prevent broken main branches when multiple cards finish together?",
+        "The deliver step queues parallel Card branches in strict FIFO order into a single _merge_queue worktree, integrates batches via rebase, squash, or merge, runs test_command once on the combined result, and invokes a project-scoped @merger agent only if a conflict or test failure occurs."
+      ],
+      [
+        "Can I schedule recurring coding agent tasks without creating Kanban clutter?",
+        "Yes. Any workflow rule with a cron expression runs on schedule; include card: { column, title, body } to generate a Card per run or omit card for Cardless background execution, with overlap controls (skip, queue, or allow)."
+      ]
+    ]
+  },
+  "docs/cli": {
+    "eyebrow": "CANBAN // DOCS // CLI",
+    "title": "Canban CLI, Agent Optimization & --human",
+    "meta_title": "Canban CLI — Agent-First JSON Commands, Bundled Skill & --human | Canban",
+    "description": "Complete reference for the canban CLI: core commands, compact single-line JSON and --fields/--full server-side shaping, zero-config env injection, request_key idempotency, bundled skill, and --human pretty-printing.",
+    "intro": "The `canban` binary (`crates/cli/src/main.rs`) talks to the exact same `AppServer` JSON-RPC authority as the native desktop UI. Its response contract is Agent-first by default to minimize context tokens, while `--human` makes the same commands comfortable to read and script interactively.",
+    "date_published": "2026-11-19",
+    "updated": "2026-11-23",
+    "breadcrumbs": [["Docs", "docs"], ["CLI", "docs/cli"]],
+    "sections": [
+      {
+        "id": "core-commands",
+        "heading": "Core CLI commands",
+        "markdown": "Global options `--home <PATH>` (`CANBAN_HOME`), `--endpoint <PATH>` (`CANBAN_ENDPOINT`), `--human`, `--fields <COLS>`, and `--full` work across subcommands:\n\n| Command | Purpose |\n| --- | --- |\n| `canban snapshot`, `canban status` | Fetch full `app.snapshot` state or `herdr.status` runtime health. |\n| `canban call <METHOD> '<JSON>'` | Invoke any public `AppServer` JSON-RPC method (pass `@/path/to/params.json` for file payloads). |\n| `canban card show`, `card update`, `card adopt` | Inspect the Card, update `--title` / `--file`, or adopt `--stage develop` onto the live PTY without spawning a duplicate Agent. |\n| `canban report` | Report execution outcome (`--state`: `completed`, `backlog`, `blocked`, `failed`, `working`; `--message`, `--file`) for a Card or `--schedule-run-id`. |\n| `canban reply` | Answer a follow-up question (`--to <QUESTION_ID> --file <PATH>`) without ending the active task. |\n| `canban bind-session` | Bind provider `--session-id <ID>` onto the active Card, schedule run, merge batch, or configuration session. |\n| `canban review draft`, `review clear` | Stage or discard local unpublished diff review JSON (`{ summary, verdict, comments }`) for the Card Diff UI. |\n| `canban workflow sources`, `export`, `submit`, `set-default` | Manage SQLite-backed `workflow_sources` (`--project-id` or `--global`, `--check` dry-run, and global defaults). |\n| `canban schedule` | `list`, `runs`, `create`, `trigger`, `toggle` (`--on` / `--off`), `delete`, and `artifact` for Global or Project cron workflows. |\n| `canban worktree gc` | Clean up merged clean worktrees (`--merged-before 7d`, `--dry-run`, `--env-dirty`, `--fail-on-dirty`). |\n| `canban batch report` | Report `_merge_queue` `@merger` resolution (`--state`, `--evict <CARD_NUMBER>`). |\n| `canban serve`, `pair`, `service` | Run headless `AppServer` (`--tailscale`, `--port 7680`, `--listen`), print `canban://` pairing URIs, or manage `systemd` / `launchd` services. |\n| `canban skill`, `--skill`, `build-info` | Print bundled `SKILL.md` or immutable release build metadata without opening application data. |"
+      },
+      {
+        "id": "agent-optimizations",
+        "heading": "Agent-first optimizations",
+        "markdown": "Canban designs its CLI and RPC layer (`crates/app-server/src/representation.rs`) specifically to prevent wasted tokens, stale writes, and fragile lifecycle heuristics:\n\n- **Compact single-line JSON default**: Every query and mutation prints a single compact JSON line to stdout regardless of whether stdout is a terminal, and emits structured `{\"error\":{\"message\":...}}` on stderr with a non-zero exit code.\n- **Server-side response shaping (`--fields` vs. `--full`)**: `card.show`, `card.get`, and `card.list` default to slim summaries (`id`, `number`, `title`, `stage`, `revision`), and writes return small `accepted` receipts without echoing Card bodies. Pass `--fields number,title,body,stage,revision` to project exact top-level `CARD_FIELDS` / `EVENT_FIELDS` on the server, or `--full` (`view: \"full\"`) for the complete business view. Invalid field names fail pre-dispatch validation before any mutation runs.\n- **Bounded keyset pagination**: `card.list` (`limit` 1..500, default 50) uses an opaque `cursor` with `cursor_stale` / `cursor_scope_mismatch` guards; `timeline.list` filters `kinds` in SQL, normalizes comment text once into `body`, and exposes `next_cursor`, `last_sequence`, and `highwater`.\n- **Zero-config environment injection**: Launched sessions automatically receive `CANBAN_CLI`, `CANBAN_ENDPOINT`, `CANBAN_HOME`, `CANBAN_CARD`, `CARD_ID`, `CANBAN_PROJECT`, `CANBAN_PROFILE_ID`, and `CANBAN_RUN_DIR` (plus `CANBAN_SCHEDULE_RUN_ID`, `CANBAN_SCHEDULE_ID`, and `CANBAN_BATCH_ID` when applicable), and infer `project_id` from the worktree CWD when omitted.\n- **`request_key` idempotency & updater handoff**: Mutating CLI commands attach a `request_key` (or accept `--request-key` for safe retries, unaffected by `--fields` / `--full`). During live daemon restarts, `report`, `batch report`, and `reply` queue via `canban_updater::handoff` and emit `{\"queued\":true,\"request_key\":...}`.\n- **Explicit `report --state` gates**: Terminal exit or idle never advances workflow steps; agents advance only by declaring `completed`, `blocked`, `failed`, `backlog`, or `working`.\n- **Bundled `canban skill` (`SKILL.md`)**: `canban skill` / `canban --skill` prints the binary-locked `skills/canban/SKILL.md` instructions directly, while `AppServer::open` materializes `<CANBAN_HOME>/skills/canban/SKILL.md`.\n- **Local unpublished `review draft`**: `canban review draft --file \"$CANBAN_RUN_DIR/review_draft.json\"` stores inline review findings locally in SQLite so humans inspect and publish from the Diff UI rather than letting agents post directly to GitHub."
+      },
+      {
+        "id": "human-usage",
+        "heading": "Human usage (--human)",
+        "markdown": "Humans can inspect, debug, and script the exact same CLI comfortably using the global `--human` flag. As verified in `crates/cli/src/main.rs` (`Output::encode`), `--human` **only** pretty-prints (`serde_json::to_string_pretty`) the response—it never triggers extra RPC fields or alters server-side selection:\n\n```sh\n# Pretty-print the full Board snapshot for inspection\ncanban --human snapshot\n\n# Pretty-print only the selected Card fields (no wasted payload)\ncanban --human --fields number,title,stage card show\n\n# Call any JSON-RPC method interactively with readable formatting\ncanban --human call project.list '{}'\n\n# Combine with --card / --full or pipe compact JSON into jq\ncanban --human --full card show --card 42\ncanban call card.list '{\"stage\":\"develop\",\"limit\":20}' | jq '.items[] | [.number, .title]'\n```\n\nTip: Use `--home <PATH>` or `--endpoint <PATH>` alongside `--human` when inspecting an isolated development instance or remote socket."
+      },
+      {
+        "id": "canban-skill",
+        "heading": "Bundled Canban Skill (canban skill)",
+        "markdown": "Canban embeds a version-locked Agent Skill (`skills/canban/SKILL.md`, compiled into `canban_context::SKILL_MD` in `crates/context/src/lib.rs`) so any coding agent learns the exact CLI contract without Canban silently mutating user-global agent folders:\n\n- **Zero-side-effect inspection & home materialization**: Running `canban skill` or `canban --skill` (`crates/cli/src/main.rs`) prints the compiled `SKILL.md` directly to stdout without opening SQLite or sockets. When `AppServer::open` starts (or `stage_remote` syncs a remote host), it atomically materializes `<CANBAN_HOME>/skills/canban/SKILL.md` via `materialize_skill` whenever bytes differ—keeping user-global agent directories untouched.\n- **Install or refresh into your agent**: In desktop **Agent Setup** and **Settings → Agents & Identities** (`crates/ui/src/agents_setup.rs`), Canban surfaces the `npx skills add` command for your active home, or you can write `canban skill` directly into any agent's `canban/SKILL.md` directory:\n\n```sh\n# Install or refresh from the materialized Canban home directory\nnpx skills add ~/.canban/skills --skill canban -g\n\n# Or print and write the exact binary-locked skill file directly\ncanban skill > ~/.agents/skills/canban/SKILL.md\n```\n\n- **What the Skill teaches Agents**: Session preflight (`CANBAN_CLI` and `CANBAN_ENDPOINT` checks), keeping payloads in `$CANBAN_RUN_DIR` outside Git, slim `card show` and `card adopt`, explicit `report --state` completion gates, `reply --to` for live follow-ups, local unpublished `review draft`, `workflow submit --check`, and `worktree gc`."
+      }
+    ]
+  },
+  "docs/agents": {
+    "eyebrow": "CANBAN // DOCS // AGENTS",
+    "title": "Native AI Coding Agent CLIs & Herdr PTYs",
+    "meta_title": "Native AI Coding Agent CLIs — Claude Code, Codex, Antigravity (agy), Pi & Herdr PTYs | Canban",
+    "description": "Built-in CLI coding agents in Canban (Claude Code, Codex, Antigravity agy, Pi, Cursor CLI, Gemini CLI, OpenCode & more), how Herdr Core and libghostty-vt preserve native TUIs/MCPs/skills, canban card adopt, and CLI reference.",
+    "intro": "Canban runs native coding agent CLIs inside persistent Herdr PTY terminals (`herdr-core`) rendered with `libghostty-vt`, preserving every tool's native TUI, MCP servers, skills, permissions, and conversation resume.",
+    "date_published": "2026-11-19",
+    "updated": "2026-11-23",
+    "breadcrumbs": [["Docs", "docs"], ["Agents", "docs/agents"]],
+    "sections": [
+      {
+        "id": "herdr-preservation",
+        "heading": "Zero-interference native TUI, MCP & skill preservation",
+        "markdown": "Rather than reimplementing provider chat wrappers or injecting fragile `Stop` hooks, Canban launches your chosen CLI inside a `herdr-core` (`hc`) supervised PTY:\n\n- **Native TUIs & Controls**: Interact directly with the agent's own terminal UI via `libghostty-vt` (rendered in native AppKit/CoreText on macOS and GTK4 on Linux, with SGR/pixel mouse reporting, OSC 8 hyperlinks, and 17 dark themes including Monokai).\n- **MCPs, Skills & Permissions Intact**: Because the real CLI binary executes in the Card worktree with your home configuration, existing MCP servers, custom skills, sandbox flags, and auth logins work unchanged.\n- **Restart-Safe PTYs & Exact Resume**: Closing Canban, restarting `canband`, or live-upgrading the app leaves running `herdr-core` sessions alive. Finished sessions can resume exact provider conversation IDs (`--resume`, `--session`, or `--conversation`) when supported.\n- **Global Scheduler Budget**: Automatic workflow steps share a configurable concurrency limit (`scheduler.max_agents`, default `8`), while manual shells and `script` steps run outside the agent budget.",
+        "screenshot": {
+          "src": "/screenshots/board-terminal.png",
+          "alt": "Canban Card #2 running a native @developer CLI session inside a persistent Herdr PTY terminal alongside card activity, Hold auto-merge, and workflow progress.",
+          "caption": "Live @developer Herdr PTY running cargo test inside Card #2's isolated Git worktree (acme-api-f4c9/2), waiting for explicit canban report completion.",
+          "width": 2880,
+          "height": 1800,
+          "lazy": true
+        }
+      },
+      {
+        "id": "catalog-24",
+        "heading": "Built-in CLI agents & custom profiles",
+        "markdown": "Canban's catalog (`crates/profiles/src/catalog.rs`) ships 24 official interactive CLI presets matching Herdr's terminal detector and resume planner, plus custom profiles in `config/agents.json` and dynamic `herdr:<template>` profiles:\n\n| ID | Agent | Binary | Exact Resume | Model / Effort Args |\n| --- | --- | --- | --- | --- |\n| `codex` | Codex | `codex` | Yes (`resume`) | `-m`, reasoning effort |\n| `claude` | Claude Code | `claude` | Yes (`--resume`) | `--model`, `--effort` |\n| `agy` | Antigravity | `agy` | Yes (`--conversation`) | `--model`, `--effort` |\n| `gemini` | Gemini CLI | `gemini` | Yes (`--resume`) | `-m` |\n| `opencode` | OpenCode | `opencode` | Yes (`--session`) | `-m`, `--variant` |\n| `cursor` | Cursor Agent | `cursor-agent` | Yes (`--resume`) | `--model` |\n| `pi` | Pi | `pi` | Yes (`--session`) | `--model`, `--thinking` |\n| `omp` | Omp | `omp` | Yes (`--resume=`) | `--model` |\n| `copilot` | GitHub Copilot | `copilot` | Yes (`--resume=`) | `--model` |\n| `droid` | Droid | `droid` | Yes (`--resume`) | `-m` |\n| `amp` | Amp | `amp` | Fresh launch | — |\n| `kimi` | Kimi | `kimi` | Yes (`--session`) | `--model` |\n| `kiro` | Kiro | `kiro-cli` | Fresh launch | `--model` |\n| `qwen` | Qwen Code | `qwen` | Yes (`--resume`) | `-m` |\n| `devin` | Devin | `devin` | Yes (`--resume`) | — |\n| `cline` | Cline | `cline` | Fresh launch | — |\n| `grok` | Grok | `grok` | Yes (`--resume`) | `-m` |\n| `hermes` | Hermes | `hermes` | Yes (`--resume`) | `-m` |\n| `kilo` | Kilo | `kilo` | Yes (`--session`) | `-m` |\n| `qodercli` | Qoder | `qodercli` | Yes (`--resume`) | `--model` |\n| `letta` | Letta | `letta` | Yes (`--conversation`) | `-m` |\n| `mastracode` | Mastra Code | `mastracode` | Yes (`--thread`) | `--model` |\n| `maki` | Maki | `maki` | Fresh launch | — |\n| `muse` | Muse | `muse` | Fresh launch | — |"
+      },
+      {
+        "id": "card-adopt",
+        "heading": "Interactive takeover with canban card adopt",
+        "markdown": "When you start exploring a `Backlog` Card in an interactive terminal or `@mention` session and decide to move ahead with implementation in that same conversation, the agent does not need to lose its context or spawn a duplicate session:\n\n```sh\n\"$CANBAN_CLI\" card update --file \"$CANBAN_RUN_DIR/card.md\"\n\"$CANBAN_CLI\" card adopt --stage develop\n```\n\n- `card adopt` automatically passes inherited `HC_TERMINAL_ID` and `HC_SESSION` context to `AppServer`.\n- `AppServer` verifies the Core, machine, live PTY, Profile, and Card workspace, transitions the Card to `develop` (`reason: \"agent_adopted_stage\"`) without launching a second Agent, and binds the existing live PTY directly to the `WorkflowRun` step.\n- When the agent later runs `canban report --state completed`, the workflow proceeds seamlessly to `Review` and `Queue Merge`."
+      },
+      {
+        "id": "canban-cli",
+        "heading": "Injected canban CLI reference",
+        "markdown": "Canban injects `CANBAN_CLI`, `CANBAN_ENDPOINT`, `CANBAN_HOME`, `CANBAN_CARD`, `CARD_ID`, `CANBAN_PROJECT`, `CANBAN_PROFILE_ID`, and `CANBAN_RUN_DIR` into every launched session:\n\n```sh\n# Inspect or update the current Card\n\"$CANBAN_CLI\" card show --fields number,title,body,stage,revision\n\"$CANBAN_CLI\" card update [--title 'Updated title'] --file \"$CANBAN_RUN_DIR/card.md\"\n\n# Report execution outcome (completed | backlog | blocked | failed | working)\n\"$CANBAN_CLI\" report --state completed --message 'Summary' --file \"$CANBAN_RUN_DIR/report.md\"\n\n# Reply to a follow-up question without ending the active task\n\"$CANBAN_CLI\" reply --to <QUESTION_ID> --file \"$CANBAN_RUN_DIR/reply.md\"\n\n# Stage local diff review comments without publishing directly to GitHub\n\"$CANBAN_CLI\" review draft --file \"$CANBAN_RUN_DIR/review_draft.json\"\n\n# Call any AppServer JSON-RPC method\n\"$CANBAN_CLI\" call card.list '{\"project_id\":\"<PROJECT_ID>\",\"stage\":\"develop\",\"limit\":50}'\n```\n\nFor the full command matrix, Agent-first `--fields` / `request_key` contract, and `--human` examples, see [Canban CLI, Agent Optimization & --human](/docs/cli/)."
+      }
+    ],
+    "faq_items": [
+      [
+        "Does Canban wrap or modify my Claude Code, Codex, Antigravity (agy), or Pi CLI?",
+        "No. Canban executes your real CLI binary inside a Herdr Core supervised PTY with libghostty-vt rendering, so native TUIs, MCP servers, skills, auth sessions, and tool permission prompts work identically to your terminal."
+      ],
+      [
+        "Can I mix different coding agents on the same Kanban board?",
+        "Yes. You can assign different profiles per workflow stage or @mention (for example @planner on Claude Code, @developer on Codex, Antigravity agy, or Pi, and @reviewer on Gemini CLI or OpenCode) within the same Project."
+      ],
+      [
+        "What happens to running agent sessions if I quit Canban.app or upgrade?",
+        "Herdr Core keeps every supervised PTY process running independently of the GUI window. Reopening Canban reattaches live terminals immediately, and finished sessions preserve exact provider resume IDs."
+      ],
+      [
+        "Can I add a custom or internal coding CLI not in the built-in catalog?",
+        "Yes. In addition to the 24 built-in presets and dynamic herdr:<template> profiles, you can declare custom CLI commands, arguments, and environment settings in config/agents.json."
+      ]
+    ]
+  },
+  "docs/remote-hosts": {
+    "eyebrow": "CANBAN // DOCS // REMOTE HOSTS",
+    "title": "Run AI Coding Agents on Remote Linux Servers",
+    "meta_title": "Run AI Coding Agents on Remote Linux Servers — Tailscale, SSH & Headless canband | Canban",
+    "description": "Run headless Linux canband servers 24/7 for Claude Code, Codex, Antigravity (agy), Pi, and custom CLIs, and connect simultaneously from Canban.app over direct Tailscale TCP or managed SSH tunnels.",
+    "intro": "A single Canban.app desktop client connects simultaneously to your local Mac (`This Mac`) and one or more remote Linux or macOS `canband` hosts over Tailscale TCP or SSH.",
+    "date_published": "2026-11-19",
+    "updated": "2026-11-23",
+    "breadcrumbs": [["Docs", "docs"], ["Remote Hosts", "docs/remote-hosts"]],
+    "sections": [
+      {
+        "id": "multi-host-model",
+        "heading": "Simultaneous multi-host & offline-resilient execution",
+        "markdown": "Each host runs a self-contained `canband` + local `herdr-core` (`hc`) pair owning its own SQLite WAL database, Projects, Cards, Workflows, Scheduler, and Git worktrees:\n\n- **24/7 Autonomous Progression**: When your laptop sleeps or goes offline, remote `canband` hosts keep running agents, collecting reports, executing FIFO Queue Merge, and polling linked GitHub repositories.\n- **Unified Board & Notifications**: `Canban.app` merges local and remote Projects into one `HostRegistry`, routing operations by owning `host_id` and surfacing remote `Needs you` / `Updates` items in `⌘I`.\n- **Offline Snapshot Cache**: Successful remote snapshots are cached under `<local-home>/cache/hosts/<host_id>.json`. If Tailscale disconnects, remote boards remain inspectable in `Offline · Cached` read-only mode."
+      },
+      {
+        "id": "headless-install",
+        "heading": "Installing headless Linux canband",
+        "markdown": "On headless Linux (`x86_64` or `aarch64`) servers without a desktop session, install standalone `canban` (no GTK4 or GStreamer required) and register a persistent `systemd --user` service:\n\n```sh\ncurl -fsSL https://canban.dev/install.sh | bash -s -- --headless\ncanban service install --tailscale --port 7680\ncanban service status\n```\n\n`canban service install` enables `loginctl enable-linger` when available so user services and active `herdr-core` PTYs persist across logouts."
+      },
+      {
+        "id": "tailscale-ssh-pairing",
+        "heading": "Tailscale direct TCP vs. SSH pairing",
+        "markdown": "Canban uses a Tailscale-first direct data plane with SSH bootstrap and fallback:\n\n- **Tailscale Direct TCP (Recommended)**: `canban serve --tailscale` binds the host's Tailscale IPv4 (`100.64.0.0/10`, default port `7680`) and persists settings in `<home>/config/server.json`. A 256-bit Bearer secret is stored in `<home>/server.token` (`0600`). Pre-auth `host.probe` exposes only non-sensitive identity (`server_id`, `hostname`, `platform`, `version`, `api_version`), while all RPCs and `herdr.connect` PTY streams authenticate against `server.token`.\n- **Pairing URI**: Run `canban pair [--port 7680]` on the remote host to print a copyable `canban://<addr>:<port>#<token>` URI, or use the desktop **Connect a Machine** wizard to discover Tailscale peers (`tailscale status --json`) and auto-pair or bootstrap over SSH.\n- **Managed SSH Tunnel Fallback**: For pure-SSH hosts without Tailscale, `Canban.app` manages a background `ssh -L` Unix-socket forwarder into a mode-`0600` local socket directory."
+      },
+      {
+        "id": "diagnostics",
+        "heading": "Built-in Diagnostics & remote daemon upgrades",
+        "markdown": "Open **Settings → Diagnostics** to verify and repair local or remote hosts end to end:\n\n- **Transport & Latency**: Socket, Tailscale TCP, or SSH tunnel state, RTT (`ms`), and reconnect history.\n- **Canban Service & Storage**: Daemon PID, platform, version, `DESKTOP_API` compatibility, `systemd --user` / `launchd` state, and SQLite DB/WAL sizes.\n- **Herdr & Toolchain**: Resolved `hc` binary, Core ID, active PTY count, `git`, `python3`, `tailscale`, and resolved paths for enabled Agent profiles.\n- **Live Logs & Updates**: Stream `server.log` and `updater.log`, or trigger a remote `update.daemon` directly from the UI when `ApiMismatch` is detected."
+      }
+    ],
+    "faq_items": [
+      [
+        "Do remote coding agents pause when I close my laptop?",
+        "No. Each remote Linux host runs its own canband daemon and local herdr-core (hc) supervisor, so coding agents, tests, FIFO Queue Merge, and GitHub polling continue 24/7 while your laptop sleeps."
+      ],
+      [
+        "How does Canban authenticate remote Tailscale connections?",
+        "canban serve --tailscale binds to the Tailscale IPv4 interface (100.64.0.0/10) and enforces a 256-bit Bearer token stored in <home>/server.token (0600) across all JSON-RPC calls and herdr.connect PTY streams."
+      ],
+      [
+        "Can I connect to a Linux server that does not have Tailscale installed?",
+        "Yes. Canban includes a managed SSH tunnel fallback using background ssh -L Unix-socket forwarding and can bootstrap headless canband installation directly over SSH from the Connect a Machine wizard."
+      ]
+    ]
+  },
+  "guides/parallel-coding-agents": {
+    "eyebrow": "CANBAN // GUIDES // PARALLEL AGENTS",
+    "title": "Run Multiple AI Coding Agents in Parallel with Kanban & Git Worktrees",
+    "meta_title": "Run Multiple AI Coding Agents in Parallel with Kanban & Git Worktrees | Canban",
+    "description": "How to run Claude Code, Codex, Antigravity (agy), Pi, Cursor CLI, and OpenCode simultaneously without terminal tab chaos — using Kanban cards for Human Context, isolated Git worktrees, Attention Inbox (⌘I), and serialized FIFO Queue Merge.",
+    "intro": "**TL;DR**: Running 5–10 coding agents inside raw terminal tabs breaks on context switching, dirty Git checkouts, and missed `[Y/n]` prompts. Canban pairs a Kanban board (`Human Context`) with per-card Git worktrees (`<dir>-<proj4>/<card-number>`), a global Attention Inbox (`⌘I`), and a serialized FIFO Merge Queue so multiple native Agent CLIs work in parallel without stepping on each other.",
+    "date_published": "2026-11-23",
+    "updated": "2026-11-23",
+    "breadcrumbs": [["Docs", "docs"], ["Parallel Coding Agents", "guides/parallel-coding-agents"]],
+    "sections": [
+      {
+        "id": "why-tabs-break",
+        "heading": "Why terminal tabs break at 5+ parallel coding agents",
+        "markdown": "Opening separate tabs for `claude`, `codex`, `agy`, `pi`, or `cursor-agent` works for one task, then collapses once several run concurrently:\n\n- **Lost Human Context**: Specifications, screenshots, design notes, and review feedback get buried across scrollback buffers instead of staying pinned to the task.\n- **Working-tree collisions**: Two agents editing files in the same checkout overwrite each other's changes and pollute `git status`.\n- **Silent `[Y/n]` stalls**: One agent sits blocked waiting for tool permission or clarification for 20 minutes while you watch another pane.\n- **Merge races**: Even with manual `git worktree`, rebasing and testing 5 finished branches into `main` one by one becomes manual release chores.",
+        "screenshot": {
+          "src": "/screenshots/board-terminal.png",
+          "alt": "Canban desktop board running Card #2 in Develop with an isolated Git worktree, discussion timeline, workflow status, and live @developer Herdr terminal.",
+          "caption": "Every Card binds its Markdown spec, isolated Git worktree, workflow stage, and live native Agent CLI terminal in one place.",
+          "width": 2880,
+          "height": 1800,
+          "lazy": true
+        }
+      },
+      {
+        "id": "card-context-worktrees",
+        "heading": "Organize Human Context on Cards & isolate every branch in a Git worktree",
+        "markdown": "In Canban (`Canban = Kanban + Workflow + Herdr`), each task starts as a structured **Card** containing your Markdown spec, pasted screenshots, `#Card` or GitHub Issue/PR links, and `@Agent` discussion history.\n\nWhen a Card enters `Develop` (or when an interactive session runs `canban card adopt --stage develop`), Canban's Workflow Engine (`crates/workflow-engine`) automatically:\n\n1. **Allocates a deterministic Git worktree** at `<dir>-<proj4>/<card-number>` synced against your configured base branch (`workspace.sync_base: true`).\n2. **Injects zero-config context** (`CANBAN_CLI`, `CANBAN_CARD`, `CANBAN_PROJECT`, `CANBAN_RUN_DIR`) so the agent reads only the fields it needs via `canban card show --fields number,title,body,stage,revision`.\n3. **Enforces concurrency budgets** via `admit` gates (`scheduler.max_agents`, default `8`) in strict Board priority order."
+      },
+      {
+        "id": "attention-inbox-and-review",
+        "heading": "Catch blocked prompts in Attention Inbox (⌘I) & review diffs inline",
+        "markdown": "Instead of clicking through 10 tabs, press **`⌘I`** to open Canban's global **Attention Inbox**:\n\n- **Instant triage across all projects and hosts**: See every agent waiting on tool approval, a follow-up question, or human review (`Needs you`), recent completions (`Updates`), and active runs (`Running`).\n- **One-keystroke jump**: Select any notification to jump directly to that Card's discussion drawer or live Herdr PTY terminal.\n- **Built-in line-level diff review**: Inspect commits and hunks inside Canban's Git workbench, leave inline comments on changed lines, and dispatch `Review & Send to @Agent` without leaving the app.",
+        "screenshot": {
+          "src": "/screenshots/review-diff.png",
+          "alt": "Canban built-in Git diff inspector displaying commit history, changed files, inline line comments, and Review & Send to @Agent.",
+          "caption": "Inspect isolated Card worktree commits and send inline line-level feedback directly back to @Agent.",
+          "width": 2880,
+          "height": 1800,
+          "lazy": true
+        }
+      },
+      {
+        "id": "serialized-merge-queue",
+        "heading": "Deliver parallel branches safely with FIFO Queue Merge",
+        "markdown": "When an agent finishes implementation and declares `canban report --state completed`, the Card moves to `Review` (`deliver` step) instead of blindly pushing to `main`:\n\n- **Untrusted PR guard**: External GitHub PRs (`source_trust == external_pr`) automatically pause at `approval:review` for explicit human sign-off.\n- **Batch FIFO integration**: Trusted Cards enter `<home>/worktrees/<project-ns>/_merge_queue` in strict `(queued_at, storage_index)` order (`batch_size` 1..=50, default `5`), apply `rebase` (or `squash` / `merge`), run your configured `test_command` once on the combined batch, fast-forward once, push if `sync_upstream: true`, and archive merged Cards.\n- **Automatic `@merger` resolution**: If a batch hits a merge conflict or test failure, Canban dispatches a dedicated `@merger` session in `_merge_queue` to fix or evict (`--evict <CARD_NUMBER>`) the conflicting branch."
+      },
+      {
+        "id": "quickstart-parallel",
+        "heading": "Quickstart: run 3+ agents in parallel in 2 minutes",
+        "markdown": "```sh\n# 1. Install Canban desktop (macOS 13+ Apple Silicon or Linux x86_64/arm64)\ncurl -fsSL https://canban.dev/install.sh | bash\n\n# 2. (Optional) Materialize or update the version-locked Canban Agent Skill\nnpx skills add ~/.canban/skills --skill canban -g\n\n# 3. Create 3 Cards in Backlog, assign profiles (Claude Code, Codex, Antigravity agy, Pi, etc.),\n#    and drag them into Develop — or adopt an interactive terminal straight into Develop:\n\"$CANBAN_CLI\" card adopt --stage develop\n```"
+      }
+    ],
+    "faq_items": [
+      [
+        "How many coding agents can run concurrently in Canban?",
+        "Automatic workflow steps share a configurable scheduler.max_agents concurrency limit (default 8) while manual interactive terminals and script steps run outside that cap, allowing 10+ terminals and scheduled tasks to run across local and remote hosts."
+      ],
+      [
+        "Can I assign Claude Code to planning, Codex or Pi to coding, and Gemini CLI to review?",
+        "Yes. Each Agent step in development.yaml specifies a profile (and optional instruction), and you can @mention any enabled CLI profile (claude, codex, agy, pi, cursor, gemini, opencode, etc.) directly inside a Card."
+      ],
+      [
+        "How do I avoid losing context when a Backlog chat turns into a real implementation?",
+        "Run canban card adopt --stage develop from inside that live terminal. AppServer moves the Card to Develop and binds the existing Herdr PTY to the WorkflowRun without spawning a duplicate agent."
+      ],
+      [
+        "What keeps agent CLI stdout from wasting tokens when inspecting Cards?",
+        "Every canban CLI query defaults to compact single-line JSON with slim Card summaries, and --fields lets agents request only specific columns (such as number,title,body,stage,revision)."
+      ]
+    ]
+  },
+  "guides/native-terminal-and-multi-machine": {
+    "eyebrow": "CANBAN // GUIDES // NATIVE TERMINAL & MULTI-MACHINE",
+    "title": "Native Terminal Workbench vs. tmux & Chat Wrappers — Persistent PTYs & Multi-Machine",
+    "meta_title": "Native Terminal Workbench vs. tmux & Chat Wrappers — Persistent PTYs & Multi-Machine | Canban",
+    "description": "Compare Canban's native Rust + libghostty-vt + Herdr persistent PTY workbench against tmux tabs and chat-wrapper IDEs, and learn how to run 24/7 coding agents on remote Linux hosts over Tailscale TCP and SSH.",
+    "intro": "**TL;DR**: Raw `tmux` panes preserve your CLI's capabilities but lack task state, diff workflows, and cross-machine attention routing; chat-wrapper UIs add structure at the cost of stripping native TUIs, MCPs, and provider resume. Canban gives you native Rust + `libghostty-vt` terminals supervised by `herdr-core` (`hc`) locally and across remote Linux `canband` servers over Tailscale or SSH.",
+    "date_published": "2026-11-23",
+    "updated": "2026-11-23",
+    "breadcrumbs": [["Docs", "docs"], ["Native Terminal & Multi-Machine", "guides/native-terminal-and-multi-machine"]],
+    "sections": [
+      {
+        "id": "architecture-comparison",
+        "heading": "Canban vs. tmux / terminal tabs vs. chat-wrapper IDEs",
+        "markdown": "| Capability | Canban (`Rust + libghostty-vt + Herdr`) | Raw `tmux` / Terminal Tabs | Chat-Wrapper IDE / Web UI |\n| --- | --- | --- | --- |\n| **Native CLI TUI, MCPs & Skills** | **100% intact** — runs real `claude`, `codex`, `agy`, `pi`, `cursor-agent`, `gemini`, `opencode` binaries | **100% intact** | Often stripped, proxied, or reimplemented |\n| **PTY Persistence Across App Restarts** | **Yes** — `herdr-core` (`hc`) keeps live TTYs alive across GUI quit/upgrades | **Yes** (per machine via `tmux` server) | Typically stops on window/process reload |\n| **Task Specs, Worktrees & Merge Queue** | **Built in** — Kanban Cards, `<dir>-<proj4>/<card>`, YAML Workflows, FIFO Queue Merge | Manual branches & scripting | Partial or single-repo only |\n| **Cross-Project Attention Inbox (`⌘I`)** | **Built in** — catches `[Y/n]` prompts & stage updates across local + remote hosts | Manual pane scanning | Per-tab badges only |\n| **Multi-Machine Linux Execution** | **Built in** — Tailscale Direct TCP + SSH fallback + `Offline · Cached` snapshots | Manual SSH + separate `tmux` sessions | Remote SSH IDE plugins or cloud lock-in |\n| **UI Runtime** | Native AppKit/Metal (macOS) & GTK4 (Linux) | Terminal emulator | Electron / browser DOM |",
+        "screenshot": {
+          "src": "/screenshots/workflow-studio.png",
+          "alt": "Canban Visual Workflow Studio showing Backlog, Develop (@developer), and Review stages with external PR check, Human approval, and Queue merge.",
+          "caption": "Declarative YAML workflows (schema: 10) drive native Agent CLI PTYs locally or on remote headless Linux canband hosts.",
+          "width": 2880,
+          "height": 1800,
+          "lazy": true
+        }
+      },
+      {
+        "id": "native-pty-preservation",
+        "heading": "Why Canban refuses to wrap your Agent CLI",
+        "markdown": "Coding CLIs ship rapid updates to interactive tool approvals, slash commands, MCP integrations, skills, and sandbox flags. Wrapping those CLIs behind a custom chat input forces every new CLI feature to wait on wrapper support.\n\nCanban takes the opposite approach:\n\n- **`libghostty-vt` VT fidelity**: Native CoreText/AppKit rendering on macOS and GTK4 on Linux with SGR/pixel mouse tracking, OSC 8 hyperlinks, and 17 dark themes (including Monokai).\n- **Exact provider session resume**: Finished sessions store exact resume arguments (`resume`, `--resume`, `--session`, `--conversation`, `--thread`) for supported CLIs so resuming a Card restores the provider's native conversation.\n- **Explicit completion contracts instead of fragile hooks**: Canban never guesses completion from PTY idle time or provider-specific hooks; agents call `canban report --state completed` when work is actually ready."
+      },
+      {
+        "id": "multi-machine-remote",
+        "heading": "24/7 Multi-Machine execution over Tailscale & SSH",
+        "markdown": "Heavy Rust builds, Linux-only test suites, or long overnight runs belong on dedicated Linux servers (`x86_64` / `aarch64`), not on a sleeping laptop.\n\nEach remote host runs standalone headless `canband` + `herdr-core` (`hc`) with its own SQLite WAL database and Git worktrees:\n\n```sh\n# On your Linux server (no GTK4/GUI needed)\ncurl -fsSL https://canban.dev/install.sh | bash -s -- --headless\ncanban service install --tailscale --port 7680\ncanban pair --port 7680\n```\n\n- **Tailscale Direct TCP + 256-bit Bearer Auth**: `Canban.app` discovers Tailscale peers (`tailscale status --json`), authenticates RPCs and `herdr.connect` live PTY streams with `<home>/server.token` (`0600`), and streams interactive terminals smoothly from anywhere.\n- **Managed SSH Tunnel Fallback**: Without Tailscale, **Connect a Machine** can bootstrap `canband` over SSH and maintain a background `ssh -L` Unix-socket tunnel.\n- **Unified Board & Offline Cache**: Local Mac (`This Mac`) and multiple remote Linux boxes merge into one `HostRegistry` and one `⌘I` Attention Inbox. When a host goes offline, Canban keeps its last snapshot browseable in `Offline · Cached` read-only mode."
+      },
+      {
+        "id": "diagnostics-and-upgrades",
+        "heading": "End-to-end Diagnostics & remote upgrades",
+        "markdown": "Open **Settings → Diagnostics** in `Canban.app` to verify transport RTT (`ms`), `DESKTOP_API` compatibility, `systemd --user` / `launchd` service health, active Herdr PTY counts, and resolved agent binary paths on every connected machine — and trigger remote `update.daemon` directly when a newer desktop client detects an API mismatch."
+      }
+    ],
+    "faq_items": [
+      [
+        "Why use Canban instead of tmux + git worktree scripts?",
+        "You get all the benefits of real PTY persistence and native Agent CLIs without writing custom tmux status-bar scripts: Canban automatically allocates worktrees, attaches task specs and screenshots to Cards, notifies you via ⌘I when any pane stalls, and serializes merges with FIFO Queue Merge."
+      ],
+      [
+        "How does Canban handle sleeping laptops during long remote agent runs?",
+        "Remote Linux hosts execute workflows, agents, tests, and FIFO Queue Merge inside their own canband + herdr-core processes. Closing your MacBook never pauses remote runs, and Canban.app syncs updated state and cached snapshots when reconnected."
+      ],
+      [
+        "Does connecting multiple remote hosts require root or Docker?",
+        "No. Headless canban installs into user space and registers a systemd --user service (enabling loginctl enable-linger when available), with zero Docker requirement."
+      ],
+      [
+        "Which transport does Canban use between macOS and remote Linux hosts?",
+        "Canban prefers direct Tailscale IPv4 TCP (100.64.0.0/10, default port 7680) protected by a 256-bit Bearer token, and falls back to managed background ssh -L Unix-socket forwarding for SSH-only hosts."
+      ]
+    ]
+  }
+}
