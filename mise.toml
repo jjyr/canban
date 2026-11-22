@@ -24,6 +24,16 @@ run = [
   "cargo clippy --workspace --all-targets --locked -- -D warnings",
 ]
 
+[tasks.check-ios]
+description = "Cross-compile canban-terminal (libghostty-vt) for iOS device and simulator"
+depends = ["terminal-deps"]
+env = { IPHONEOS_DEPLOYMENT_TARGET = "14.0" }
+run = [
+  "rustup target add aarch64-apple-ios aarch64-apple-ios-sim",
+  "cargo build -p canban-terminal --no-default-features --locked --target aarch64-apple-ios-sim --example vt_smoke",
+  "cargo build -p canban-terminal --no-default-features --locked --target aarch64-apple-ios --example vt_smoke",
+]
+
 [tasks.test]
 depends = ["terminal-deps"]
 env = { CANBAN_UPDATES_DISABLED = "1", CANBAN_GH_BIN = "/usr/bin/false" }

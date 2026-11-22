@@ -1,6 +1,6 @@
 # Cross-platform Terminal architecture (macOS, Linux, iOS, Android)
 
-Status: Proposal — user-approved direction, 2026-11-22; not implemented.
+Status: Phase 0 (iOS) implemented 2026-11-22; Android pending; later phases proposed.
 
 ## Goal
 
@@ -43,11 +43,13 @@ Share the `libghostty-vt` screen model, PTY session pool, view timing state, tra
 
 ### Phase 0 — Cross-compile spike (`libghostty-vt` for iOS and Android)
 
-- Extend `zig_target` in [crates/terminal/build.rs](../crates/terminal/build.rs#L10-L19) with:
-  - `aarch64-apple-ios` -> `aarch64-ios`
-  - `aarch64-apple-ios-sim` -> `aarch64-ios-simulator`
-  - `aarch64-linux-android` -> `aarch64-linux-android` (plus Android NDK sysroot/API-level/libc++ linkage verification)
-- Validate static library build and symbol linkage for iOS simulator, iOS device, and Android arm64 before building mobile UI chrome. Android NDK sysroot/C++ ABI compatibility is the primary technical risk.
+- **iOS (implemented 2026-11-22):**
+  - Extended `zig_target` in [crates/terminal/build.rs](../crates/terminal/build.rs#L10-L22) with `aarch64-apple-ios` -> `aarch64-ios` and `aarch64-apple-ios-sim` -> `aarch64-ios-simulator`.
+  - Generalized `macos_sdk` into `apple_sdk` (selecting `iphoneos` or `iphonesimulator` via `xcrun --sdk`, tracking `SDKROOT` env changes), updating `cache_key`, and passed `--target=arm64-apple-ios[-simulator]` + `-isysroot{sdk}` to bindgen on iOS. No extra `cargo:rustc-link-lib` entries were needed on iOS beyond Apple system frameworks (`CoreFoundation`, `libiconv.2`, `libSystem.B`).
+  - Added pure-Rust smoke example [vt_smoke.rs](../crates/terminal/examples/vt_smoke.rs) (`Model` parses VT + Unicode without `herdr-local` or macOS UI dependencies) and the `mise run check-ios` task in [mise.toml](../mise.toml#L27-L35) (`IPHONEOS_DEPLOYMENT_TARGET = "14.0"`, building `canban-terminal --no-default-features --locked --example vt_smoke` for `aarch64-apple-ios-sim` and `aarch64-apple-ios`).
+  - **Verification:** `cargo run -p canban-terminal --example vt_smoke` printed `vt_smoke ok: hello ios 世界` on host; `mise run check-ios` succeeded for both iOS targets; `otool -l` reported `LC_BUILD_VERSION platform 7` (`minos 14.0`, `sdk 27.0`) for `aarch64-apple-ios-sim` and `LC_BUILD_VERSION platform 2` (`minos 14.0`, `sdk 27.0`) for `aarch64-apple-ios`; `nm -gU` confirmed statically linked `_ghostty_*` symbols in both `libghostty-vt.a` archives and final Mach-O binaries.
+  - **Simulator runtime limit:** `xcrun simctl list runtimes -v` and `xcrun simctl list devices` report no installed iOS Simulator runtime or device on this host, so `xcrun simctl spawn` execution could not run here.
+- **Android (deferred):** `aarch64-linux-android` cross-compilation (plus NDK sysroot/API-level/libc++ linkage verification) was deferred because no Android NDK is installed on this host (`ANDROID_NDK_HOME` is unset and `~/Library/Android/sdk/ndk` does not exist).
 
 ### Phase 1 — Module reorganization and unified UI entry
 

@@ -13,10 +13,16 @@ fn zig_target(target: &str) -> &'static str {
         "aarch64-unknown-linux-gnu" => "aarch64-linux-gnu",
         "x86_64-apple-darwin" => "x86_64-macos",
         "aarch64-apple-darwin" => "aarch64-macos",
+        "aarch64-apple-ios" => "aarch64-ios",
+        "aarch64-apple-ios-sim" => "aarch64-ios-simulator",
         "x86_64-pc-windows-msvc" => "x86_64-windows-msvc",
         "aarch64-pc-windows-msvc" => "aarch64-windows-msvc",
         other => panic!("ghostty-sys: no Zig target for {other}"),
     }
+}
+
+fn is_ios_simulator(target: &str, target_abi: &str) -> bool {
+    target.ends_with("-sim") || target_abi == "sim"
 }
 
 fn cache_root(manifest: &Path) -> PathBuf {
@@ -71,7 +77,7 @@ fn cache_key(
     target_os: &str,
     target_env: &str,
     zig_version: &[u8],
-    macos_sdk: &[u8],
+    apple_sdk: &[u8],
 ) -> String {
     let mut h = CacheHasher::new();
     h.update(b"format", b"ghostty-vt-v1");
@@ -91,7 +97,7 @@ fn cache_key(
     h.update(b"target_os", target_os.as_bytes());
     h.update(b"target_env", target_env.as_bytes());
     h.update(b"zig_version", zig_version);
-    h.update(b"macos_sdk", macos_sdk);
+    h.update(b"apple_sdk", apple_sdk);
     h.update(
         b"ffi.h",
         &std::fs::read(manifest.join("src/ffi.h")).unwrap_or_default(),
@@ -110,6 +116,7 @@ fn non_empty(path: &Path) -> bool {
 fn main() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let target_abi = std::env::var("CARGO_CFG_TARGET_ABI").unwrap_or_default();
     let target = std::env::var("TARGET").unwrap();
     if target_os == "macos" {
         cc::Build::new()
@@ -139,6 +146,7 @@ fn main() {
     }
     println!("cargo:rerun-if-env-changed=ZIG");
     println!("cargo:rerun-if-env-changed=CANBAN_CACHE_DIR");
+    println!("cargo:rerun-if-env-changed=SDKROOT");
 
     let zig = std::env::var("ZIG").unwrap_or_else(|_| "zig".into());
     let zig_version = Command::new(&zig)
@@ -146,14 +154,25 @@ fn main() {
         .output()
         .map(|o| o.stdout)
         .unwrap_or_default();
-    let macos_sdk = if target_os == "macos" {
-        Command::new("xcrun")
+    let apple_sdk = match target_os.as_str() {
+        "macos" => Command::new("xcrun")
             .args(["--show-sdk-path"])
             .output()
             .map(|o| o.stdout)
-            .unwrap_or_default()
-    } else {
-        Vec::new()
+            .unwrap_or_default(),
+        "ios" => {
+            let sdk_name = if is_ios_simulator(&target, &target_abi) {
+                "iphonesimulator"
+            } else {
+                "iphoneos"
+            };
+            Command::new("xcrun")
+                .args(["--sdk", sdk_name, "--show-sdk-path"])
+                .output()
+                .map(|o| o.stdout)
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
     };
 
     let shared_cache = cache_root(&manifest);
@@ -164,7 +183,7 @@ fn main() {
         &target_os,
         &target_env,
         &zig_version,
-        &macos_sdk,
+        &apple_sdk,
     );
     let archive_name = if target_env == "msvc" {
         "ghostty-vt.lib"
@@ -235,10 +254,18 @@ fn main() {
     let mut builder = bindgen::Builder::default()
         .header(manifest.join("src/ffi.h").to_string_lossy())
         .clang_arg(format!("-I{}", include.display()));
-    if target_os == "macos" {
+    if matches!(target_os.as_str(), "macos" | "ios") {
         // Apple's libclang has its builtin headers but needs the SDK for the C
         // library (Zig's builtin headers clash with it there).
-        let sdk = String::from_utf8_lossy(&macos_sdk).trim().to_owned();
+        if target_os == "ios" {
+            let clang_target = if is_ios_simulator(&target, &target_abi) {
+                "arm64-apple-ios-simulator"
+            } else {
+                "arm64-apple-ios"
+            };
+            builder = builder.clang_arg(format!("--target={clang_target}"));
+        }
+        let sdk = String::from_utf8_lossy(&apple_sdk).trim().to_owned();
         if !sdk.is_empty() {
             builder = builder.clang_arg(format!("-isysroot{sdk}"));
         }

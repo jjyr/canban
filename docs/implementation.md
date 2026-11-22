@@ -21,6 +21,10 @@ Status: native macOS (AppKit/Metal) and Linux (GTK4) desktop workbench with simu
 
 [Desktop utilities](desktop-utilities.md) covers the shared bottom bar, subscription Usage, Caffeine, persisted appearance, command catalog and cross-Project Card creation.
 
+## Terminal core iOS cross-compile (Phase 0, 2026-11-22)
+
+`crates/terminal` (`canban-terminal --no-default-features`) now cross-compiles `libghostty-vt` + bindgen + `nsh-core`/`nsh-base` for `aarch64-apple-ios-sim` (`platform 7`) and `aarch64-apple-ios` (`platform 2`) via `mise run check-ios` using [vt_smoke.rs](../crates/terminal/examples/vt_smoke.rs); Android NDK verification remains pending. See [Cross-platform Terminal architecture](terminal-portability.md).
+
 ## Offline editing and synchronization (2026-11-22)
 
 Remote `canband` Projects remain editable when offline through `crates/sync` (`canban-sync`) and desktop `HostRegistry` integration (DESKTOP_API **77**). `card.create` and `comment.add` accept validated client-chosen IDs (`Local` badge while `number == 0`), offline queueable mutations persist up to 500 ops per host with optimistic snapshot overlays and synthetic receipts (`offline_queued: true`), read-cacheable timelines/diffs use a 64 MiB per-host LRU cache, and reconnect replays FIFO with 3-way `title`/`body` merge plus the desktop `Sync` modal (`Retry`, `Discard`, `Use mine`, `Use server`, `Edit merged`). See [Offline editing and synchronization](offline-sync.md).
