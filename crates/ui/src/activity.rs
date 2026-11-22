@@ -1,7 +1,42 @@
 //! Event-driven UI dwell tracking for Insights ("My time").
 use crate::presenter::Ui;
-use canban_types::DwellLane;
+use canban_types::{DwellLane, Snapshot};
 use nsh_core::{platform::Lifecycle, prelude::*};
+use std::sync::{Mutex, OnceLock};
+
+fn activity_flush_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Returns `true` for Workflow / `@mention` managed Agent terminals and special
+/// automated sessions (`configuration:*`, `merge-queue:*`, `scheduled:*`),
+/// which should be excluded from personal `Me · Terminal` dwell tracking.
+pub fn is_automated_terminal(snapshot: &Snapshot, terminal_id: &str) -> bool {
+    if terminal_id.starts_with("configuration:")
+        || terminal_id.starts_with("merge-queue:")
+        || terminal_id.starts_with("scheduled:")
+    {
+        return true;
+    }
+    if snapshot
+        .terminals
+        .iter()
+        .find(|t| t.id == terminal_id)
+        .is_some_and(|t| t.agent.is_some() || t.is_special_session())
+    {
+        return true;
+    }
+    snapshot
+        .configuration_sessions
+        .iter()
+        .any(|c| c.id == terminal_id)
+        || snapshot.merge_batches.iter().any(|b| b.id == terminal_id)
+        || snapshot
+            .scheduled_runs
+            .iter()
+            .any(|r| r.id == terminal_id || r.terminal_id.as_deref() == Some(terminal_id))
+}
 
 pub const IDLE_THRESHOLD_SECS: u64 = 300;
 pub const IDLE_GRACE_MS: u64 = 60_000;
@@ -213,11 +248,17 @@ fn current_dwell_key(
     card: &str,
     terminal_sel: &str,
     project: &str,
-) -> DwellKey {
+) -> Option<DwellKey> {
     let terminal_card = ui.terminal_card_context.get_untracked();
     ui.snapshot.with_untracked(|s| match page {
         "terminals" | "terminal" => {
             let terminal_id = non_empty(terminal_sel);
+            if terminal_id
+                .as_deref()
+                .is_some_and(|tid| is_automated_terminal(s, tid))
+            {
+                return None;
+            }
             let entry = terminal_id
                 .as_deref()
                 .and_then(|tid| s.terminals.iter().find(|t| t.id == tid));
@@ -236,13 +277,13 @@ fn current_dwell_key(
                     })
                 })
                 .or_else(|| entry.and_then(|t| t.origin_card_id.clone()));
-            DwellKey {
+            Some(DwellKey {
                 lane: DwellLane::Terminal,
                 page: "terminals".into(),
                 project_id,
                 card_id,
                 terminal_id,
-            }
+            })
         }
         "card" | "review" => {
             let card_id = non_empty(card);
@@ -251,22 +292,83 @@ fn current_dwell_key(
                 .and_then(|cid| s.cards.iter().find(|c| c.id == cid))
                 .map(|c| c.project_id.clone())
                 .or_else(|| non_empty(project));
-            DwellKey {
+            Some(DwellKey {
                 lane: DwellLane::Card,
                 page: page.to_owned(),
                 project_id,
                 card_id,
                 terminal_id: None,
-            }
+            })
         }
-        other => DwellKey {
+        other => Some(DwellKey {
             lane: DwellLane::Other,
             page: other.to_owned(),
             project_id: non_empty(project),
             card_id: None,
             terminal_id: None,
-        },
+        }),
     })
+}
+
+/// Serializes `activity.record` flushes on blocking threads so Insights queries
+/// that run right after entering the Insights page always observe committed dwell.
+pub(crate) fn flush_batch_blocking(batch: &[PendingDwell]) -> (bool, u64) {
+    let _guard = activity_flush_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if batch.is_empty() {
+        return (true, 0);
+    }
+    let payload = serde_json::json!({ "segments": batch });
+    match crate::routed_call("activity.record", payload, None) {
+        Ok(val) => {
+            let recorded = val
+                .get("recorded")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(batch.len() as u64);
+            (true, recorded)
+        }
+        Err(_) => (false, 0),
+    }
+}
+
+/// Ensures the active dwell segment has transitioned to the current page and
+/// drains any pending dwell batch so Insights can flush it before querying.
+pub(crate) fn take_pending_for_insights(ui: Ui) -> Vec<PendingDwell> {
+    let page = ui.page.get_untracked();
+    let card = ui.card.get_untracked();
+    let terminal = ui.terminal_selection.get_untracked();
+    let project = ui.project.get_untracked();
+    let key = (lifecycle() == Lifecycle::Active)
+        .then(|| current_dwell_key(ui, &page, &card, &terminal, &project))
+        .flatten();
+    let now = canban_types::now();
+    let wake = wake_count();
+    let idle = system_idle_secs();
+    ui.dwell
+        .try_with(|m| {
+            m.handle_event(now, wake, key, idle);
+            m.take_flush_batch()
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn complete_insights_flush(ui: Ui, batch: Vec<PendingDwell>, ok: bool, recorded: u64) {
+    if batch.is_empty() {
+        return;
+    }
+    let Some(flush_more) = ui.dwell.try_with(|m| m.finish_flush(batch, ok)) else {
+        return;
+    };
+    if ok
+        && recorded >= 1
+        && let Some(cur) = ui.activity_flush_seq.try_get()
+    {
+        let _ = ui.activity_flush_seq.try_set(cur.wrapping_add(1));
+    }
+    if flush_more {
+        flush_pending(ui);
+    }
 }
 
 fn flush_pending(ui: Ui) {
@@ -276,30 +378,11 @@ fn flush_pending(ui: Ui) {
     if batch.is_empty() {
         return;
     }
-    let batch_len = batch.len();
     ui.spawn(async move {
-        let payload = serde_json::json!({ "segments": &batch });
-        let res = blocking(move || crate::routed_call("activity.record", payload, None)).await;
-        let ok = matches!(res, Ok(Ok(_)));
-        let recorded = match &res {
-            Ok(Ok(val)) => val
-                .get("recorded")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(batch_len as u64),
-            _ => 0,
-        };
-        let Some(flush_more) = ui.dwell.try_with(|m| m.finish_flush(batch, ok)) else {
-            return;
-        };
-        if ok
-            && recorded >= 1
-            && let Some(cur) = ui.activity_flush_seq.try_get()
-        {
-            let _ = ui.activity_flush_seq.try_set(cur.wrapping_add(1));
-        }
-        if flush_more {
-            flush_pending(ui);
-        }
+        let batch_for_req = batch.clone();
+        let res = blocking(move || flush_batch_blocking(&batch_for_req)).await;
+        let (ok, recorded) = res.unwrap_or((false, 0));
+        complete_insights_flush(ui, batch, ok, recorded);
     });
 }
 
@@ -315,14 +398,15 @@ pub fn init(ui: Ui) {
         let lc = lifecycle();
         let wake = wake_count();
         let key = (lc == Lifecycle::Active)
-            .then(|| current_dwell_key(ui, &page, &card, &terminal, &project));
+            .then(|| current_dwell_key(ui, &page, &card, &terminal, &project))
+            .flatten();
         let now = canban_types::now();
         let idle = system_idle_secs();
         let should_flush = ui.dwell.with(|m| {
             m.handle_event(now, wake, key, idle);
             !m.pending.is_empty() && !m.flushing
         });
-        if should_flush {
+        if should_flush && page != "insights" {
             flush_pending(ui);
         }
     });
@@ -540,6 +624,76 @@ mod tests {
             assert_eq!(ui.activity_flush_seq.get_untracked(), 0);
             view()
         }
+        let mut core = nsh_core::Core::new(
+            nsh_core::ApproxTextEngine,
+            nsh_core::geometry::size(px(100.), px(100.)),
+        );
+        core.mount_root(&nsh_core::element::Root::of::<Root>());
+        let _ = core.commit();
+    }
+
+    #[test]
+    fn automated_terminals_are_excluded_from_dwell_key() {
+        use canban_types::{AgentRun, TerminalEntry};
+
+        #[component]
+        fn Root() -> impl IntoElement {
+            let ui = Ui::new();
+            let mut snap = Snapshot::default();
+            snap.terminals.push(TerminalEntry {
+                id: "shell-manual-1".into(),
+                conversation_id: None,
+                number: 1,
+                name: Some("Manual Shell".into()),
+                origin_project_id: Some("p1".into()),
+                origin_card_id: None,
+                agent_engine: None,
+                runtime: None,
+                agent: None,
+                created_at: 1,
+            });
+            snap.terminals.push(TerminalEntry {
+                id: "card-1:developer".into(),
+                conversation_id: None,
+                number: 2,
+                name: None,
+                origin_project_id: Some("p1".into()),
+                origin_card_id: Some("card-1".into()),
+                agent_engine: None,
+                runtime: None,
+                agent: Some(
+                    serde_json::from_value::<AgentRun>(serde_json::json!({
+                        "card_id": "card-1",
+                        "project_id": "p1",
+                        "state": "running",
+                        "profile": { "id": "developer" }
+                    }))
+                    .unwrap(),
+                ),
+                created_at: 2,
+            });
+            ui.snapshot.set(snap);
+
+            // Manual terminal is tracked as Me · Terminal
+            let manual = current_dwell_key(ui, "terminals", "", "shell-manual-1", "p1");
+            assert_eq!(
+                manual.as_ref().map(|k| (&k.lane, k.terminal_id.as_deref())),
+                Some((&DwellLane::Terminal, Some("shell-manual-1")))
+            );
+
+            // Managed Agent terminal (entry.agent.is_some()) is excluded
+            assert!(current_dwell_key(ui, "terminals", "", "card-1:developer", "p1").is_none());
+
+            // Special automated sessions are excluded even without a live TerminalEntry
+            assert!(
+                current_dwell_key(ui, "terminals", "", "configuration:p1:workflows:dev", "p1")
+                    .is_none()
+            );
+            assert!(current_dwell_key(ui, "terminals", "", "merge-queue:p1:abcd", "p1").is_none());
+            assert!(current_dwell_key(ui, "terminals", "", "scheduled:p1:ef12", "p1").is_none());
+            view()
+        }
+
         let mut core = nsh_core::Core::new(
             nsh_core::ApproxTextEngine,
             nsh_core::geometry::size(px(100.), px(100.)),

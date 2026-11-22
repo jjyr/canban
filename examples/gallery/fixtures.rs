@@ -3202,7 +3202,7 @@ pub fn insights_activity() -> canban_ui::insights::model::ActivityInput {
             end_ms: dt1_b,
             project_id: Some("herdr-core".into()),
             card_id: Some(card_herdr.clone()),
-            terminal_id: Some(format!("{card_herdr}:reviewer")),
+            terminal_id: Some("shell-herdr-dev".into()),
             open: false,
             data: ActivityDetail::Dwell(DwellData {
                 lane: DwellLane::Terminal,

@@ -33,10 +33,8 @@ pub struct ActivityCacheKey {
     pub range: RangeWindow,
     pub selected_date: Option<chrono::NaiveDate>,
     pub comparison: Comparison,
-    pub clock_minute: u64,
-    pub generation: u64,
     pub want_annual: bool,
-    pub activity_flush_seq: u64,
+    pub visit_seq: u64,
 }
 
 #[derive(Clone, PartialEq)]
@@ -76,7 +74,8 @@ pub struct State {
     pub events_key: Signal<Option<(String, u64)>>,
     pub activity: Signal<Rc<ActivityInput>>,
     pub activity_key: Signal<Option<ActivityCacheKey>>,
-    pub annual_activity_key: Signal<Option<(String, String, u64, u64)>>,
+    pub annual_activity_key: Signal<Option<(String, String, u64)>>,
+    pub manual_refresh_seq: Signal<u64>,
     pub request_seq: Signal<u64>,
     pub loading: Signal<bool>,
     pub heatmap_loading: Signal<bool>,
@@ -116,6 +115,7 @@ impl State {
             activity: signal(Rc::new(ActivityInput::default())),
             activity_key: signal(None),
             annual_activity_key: signal(None),
+            manual_refresh_seq: signal(0),
             request_seq: signal(0),
             loading: signal(false),
             heatmap_loading: signal(false),
@@ -264,9 +264,10 @@ fn fetch_merged_buckets(boundaries: &[u64], scope: &str) -> Vec<ActivityBucket> 
     merge_bucket_lists(per_host, boundaries)
 }
 
-/// Coordinated non-blocking loader fetching events, period/baseline activity,
-/// and optional annual buckets in a single background pass with sequence fencing.
-pub fn refresh_data(ui: Ui) {
+/// Coordinated non-blocking loader flushing pending dwell and fetching events,
+/// period/baseline activity, and optional annual buckets in a single background
+/// pass with sequence fencing.
+pub fn refresh_data(ui: Ui, visit_seq: u64) {
     if !has_backend() || ui.page.get_untracked() != "insights" {
         return;
     }
@@ -286,20 +287,16 @@ pub fn refresh_data(ui: Ui) {
         .with_timezone(&chrono::Local)
         .date_naive()
         .to_string();
-    let generation = ui.index.with_untracked(|idx| idx.generation);
-    let activity_flush_seq = ui.activity_flush_seq.get_untracked();
 
-    let events_cache_key = (scope.clone(), generation);
+    let events_cache_key = (scope.clone(), visit_seq);
     let need_events = ui.insights.events_key.get_untracked().as_ref() != Some(&events_cache_key);
     let key = ActivityCacheKey {
         scope: scope.clone(),
         range,
         selected_date,
         comparison,
-        clock_minute: now / 60_000,
-        generation,
         want_annual,
-        activity_flush_seq,
+        visit_seq,
     };
 
     if !need_events && ui.insights.activity_key.get_untracked().as_ref() == Some(&key) {
@@ -311,12 +308,7 @@ pub fn refresh_data(ui: Ui) {
         return;
     }
 
-    let annual_cache_key = (
-        scope.clone(),
-        actual_today_key,
-        generation,
-        activity_flush_seq,
-    );
+    let annual_cache_key = (scope.clone(), actual_today_key, visit_seq);
     let annual_cached =
         ui.insights.annual_activity_key.get_untracked().as_ref() == Some(&annual_cache_key);
     let fetch_annual = want_annual && !annual_cached;
@@ -333,6 +325,7 @@ pub fn refresh_data(ui: Ui) {
         Vec::new()
     };
 
+    let pending_dwell = crate::activity::take_pending_for_insights(ui);
     let plan: ActivityFetchPlan =
         model::activity_fetch_plan(range, now, &chrono::Local, selected_date, comparison);
     let seq = ui.insights.request_seq.get_untracked().wrapping_add(1);
@@ -346,8 +339,10 @@ pub fn refresh_data(ui: Ui) {
 
     ui.spawn(async move {
         let scope_req = scope.clone();
+        let pending_for_req = pending_dwell.clone();
         let fetched = blocking(
-            move || -> (Option<Vec<canban_types::Event>>, ActivityInput) {
+            move || -> ((bool, u64), Option<Vec<canban_types::Event>>, ActivityInput) {
+                let flush_res = crate::activity::flush_batch_blocking(&pending_for_req);
                 let fetched_events = need_events.then(|| fetch_events_for_scope(&scope_req));
                 let mut input = ActivityInput {
                     loaded: true,
@@ -368,16 +363,22 @@ pub fn refresh_data(ui: Ui) {
                     input.annual_buckets =
                         fetch_merged_buckets(&plan.annual_boundaries, &scope_req);
                 }
-                (fetched_events, input)
+                (flush_res, fetched_events, input)
             },
         )
         .await;
+
+        let (flush_ok, flush_recorded) = match &fetched {
+            Ok((res, _, _)) => *res,
+            Err(_) => (false, 0),
+        };
+        crate::activity::complete_insights_flush(ui, pending_dwell, flush_ok, flush_recorded);
 
         if ui.insights.request_seq.get_untracked() != seq {
             return;
         }
         match fetched {
-            Ok((maybe_events, input)) => {
+            Ok((_, maybe_events, input)) => {
                 let events_rc = maybe_events
                     .map(Rc::new)
                     .or(existing_events)
@@ -593,6 +594,10 @@ pub fn intent(ui: Ui, operation: &str) {
         }
         "timing-prev" => ui.insights.timing_page.update(|p| *p = p.saturating_sub(1)),
         "timing-next" => ui.insights.timing_page.update(|p| *p += 1),
+        "refresh" => ui
+            .insights
+            .manual_refresh_seq
+            .update(|v| *v = v.wrapping_add(1)),
         _ => {}
     }
 }
@@ -890,6 +895,11 @@ pub fn chrome_bar(ui: Ui) -> View {
                 .child(range_bar)
                 .child(view().w(px(1.)).h(px(14.)).bg(BORDER))
                 .child(scope_picker)
+                .child(chrome_button(
+                    Icon::Refresh,
+                    "Refresh Insights",
+                    move |_| intent(ui, "refresh"),
+                ))
                 .child(spinner_slot),
         )
         .child(view().flex_1().h_full().window_drag(true))
@@ -1483,7 +1493,7 @@ fn render_timeline_1d(ui: Ui, dash: &Dashboard, project_order: &[String]) -> Vie
                     continue;
                 }
 
-                let dur = b.end_ms.saturating_sub(b.start_ms);
+                let dur = b.active_ms;
                 let color = project_color(b.project_id.as_deref(), project_order);
                 let tip = format!(
                     "{} · {} · {}–{} ({}){}",
@@ -4092,6 +4102,7 @@ fn dashboard(ui: Ui) -> Option<Dashboard> {
 }
 
 pub fn screen(ui: Ui) -> impl IntoElement {
+    let visit = stored((false, 0u64));
     effect(move || {
         let page = ui.page.get();
         let _scope = ui.insights.scope_project.get();
@@ -4099,11 +4110,17 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         let _date = ui.insights.selected_date.get();
         let _cmp = ui.insights.comparison.get();
         let _hm = ui.insights.heatmap_metric.get();
-        let _clock = ui.utility_clock.get();
-        let _gen = ui.index.with(|idx| idx.generation);
-        let _flush = ui.activity_flush_seq.get();
-        if page == "insights" {
-            refresh_data(ui);
+        let manual = ui.insights.manual_refresh_seq.get();
+        let is_insights = page == "insights";
+        let enter_seq = visit.with(|(was_insights, seq)| {
+            if is_insights && !*was_insights {
+                *seq = seq.wrapping_add(1);
+            }
+            *was_insights = is_insights;
+            *seq
+        });
+        if is_insights {
+            refresh_data(ui, enter_seq.wrapping_add(manual));
         }
     });
     let dashboard = computed(move || dashboard(ui));
@@ -4143,13 +4160,6 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                             let mut body = view()
                                 .gap_4()
                                 .min_w(px(0.))
-                                .opacity(move || {
-                                    if ui.insights.loading.get() {
-                                        0.72_f32
-                                    } else {
-                                        1.0_f32
-                                    }
-                                })
                                 .child(render_summary_and_kpis(ui, &dash, narrow));
 
                             if !ui.insights.drilldown.get().is_empty() {
@@ -4552,6 +4562,15 @@ mod tests {
         assert!(core.component_event(btn_my_time, EventKind::Press, &EventPayload::None));
         pump(&mut core, &mut tree);
         assert!(tree.has_mounted_text("Past year"));
+
+        // Manual refresh button is mounted in Chrome and triggers refresh intent cleanly
+        let btn_refresh = *tree
+            .labels
+            .get("Refresh Insights")
+            .expect("Refresh Insights chrome button");
+        assert!(core.component_event(btn_refresh, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert!(tree.has_mounted_text("Timeline"));
     }
 
     #[test]

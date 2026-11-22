@@ -191,10 +191,19 @@ pub enum TimelineLaneKind {
     Agent,
 }
 
+/// Maximum idle/away gap between consecutive same-target segments that still
+/// merge visually into a single Timeline block (5 minutes).
+pub const TIMELINE_COALESCE_GAP_MS: u64 = 5 * 60_000;
+/// Minimum active dwell duration required for a coalesced Timeline dwell block
+/// to be shown on the 1D Timeline (30 seconds).
+pub const MIN_TIMELINE_DWELL_BLOCK_MS: u64 = 30_000;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TimelineBlock {
     pub start_ms: u64,
     pub end_ms: u64,
+    /// Cumulative active duration within this block (excluding coalesced gaps).
+    pub active_ms: u64,
     pub project_id: Option<String>,
     pub card_id: Option<String>,
     pub terminal_id: Option<String>,
@@ -1673,6 +1682,36 @@ fn time_totals_filtered(
     totals
 }
 
+fn collect_managed_agent_terminals<'a>(
+    segments: impl IntoIterator<Item = &'a ActivitySegment>,
+) -> BTreeSet<&'a str> {
+    segments
+        .into_iter()
+        .filter_map(|seg| match (&seg.kind, &seg.data) {
+            (ActivityKind::Agent, ActivityDetail::Agent(agent)) if !agent.manual => {
+                seg.terminal_id.as_deref()
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn is_excluded_terminal_dwell(
+    seg: &ActivitySegment,
+    snapshot: &Snapshot,
+    managed_terminals: &BTreeSet<&str>,
+) -> bool {
+    let (ActivityKind::Dwell, ActivityDetail::Dwell(dwell)) = (&seg.kind, &seg.data) else {
+        return false;
+    };
+    if dwell.lane != DwellLane::Terminal {
+        return false;
+    }
+    seg.terminal_id.as_deref().is_some_and(|tid| {
+        crate::activity::is_automated_terminal(snapshot, tid) || managed_terminals.contains(tid)
+    })
+}
+
 fn push_timeline_block(blocks: &mut Vec<TimelineBlock>, block: TimelineBlock) {
     if block.end_ms <= block.start_ms {
         return;
@@ -1681,13 +1720,28 @@ fn push_timeline_block(blocks: &mut Vec<TimelineBlock>, block: TimelineBlock) {
         && prev.project_id == block.project_id
         && prev.card_id == block.card_id
         && prev.terminal_id == block.terminal_id
-        && block.start_ms <= prev.end_ms.saturating_add(5_000)
+        && block.start_ms <= prev.end_ms.saturating_add(TIMELINE_COALESCE_GAP_MS)
     {
         prev.end_ms = prev.end_ms.max(block.end_ms);
+        prev.active_ms = prev
+            .active_ms
+            .saturating_add(block.active_ms)
+            .min(prev.end_ms.saturating_sub(prev.start_ms));
         prev.open |= block.open;
         return;
     }
     blocks.push(block);
+}
+
+fn finalize_dwell_blocks(blocks: Vec<TimelineBlock>) -> Vec<TimelineBlock> {
+    let mut out = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        if block.active_ms < MIN_TIMELINE_DWELL_BLOCK_MS {
+            continue;
+        }
+        push_timeline_block(&mut out, block);
+    }
+    out
 }
 
 fn describe_segment_target(seg: &ActivitySegment, snapshot: &Snapshot, fallback: &str) -> String {
@@ -1749,10 +1803,14 @@ pub fn timeline_lanes<Tz: TimeZone>(
     let mut agent_lanes: BTreeMap<String, (Option<String>, Vec<TimelineBlock>, u64)> =
         BTreeMap::new();
 
+    let managed_terminals = collect_managed_agent_terminals(segments.iter());
     let mut sorted: Vec<&ActivitySegment> = segments.iter().collect();
     sorted.sort_by_key(|s| (s.start_ms, s.end_ms));
 
     for seg in sorted {
+        if is_excluded_terminal_dwell(seg, snapshot, &managed_terminals) {
+            continue;
+        }
         let start = seg.start_ms.max(day_start_ms);
         let end = seg.end_ms.min(active_until_ms);
         if end <= start {
@@ -1765,6 +1823,7 @@ pub fn timeline_lanes<Tz: TimeZone>(
                 let block = TimelineBlock {
                     start_ms: start,
                     end_ms: end,
+                    active_ms: dur,
                     project_id: seg.project_id.clone(),
                     card_id: seg.card_id.clone(),
                     terminal_id: seg.terminal_id.clone(),
@@ -1808,6 +1867,7 @@ pub fn timeline_lanes<Tz: TimeZone>(
                     TimelineBlock {
                         start_ms: start,
                         end_ms: end,
+                        active_ms: dur,
                         project_id: seg.project_id.clone(),
                         card_id: seg.card_id.clone(),
                         terminal_id: seg.terminal_id.clone(),
@@ -1819,6 +1879,10 @@ pub fn timeline_lanes<Tz: TimeZone>(
             _ => {}
         }
     }
+
+    me_card.blocks = finalize_dwell_blocks(me_card.blocks);
+    me_terminal.blocks = finalize_dwell_blocks(me_terminal.blocks);
+    me_other.blocks = finalize_dwell_blocks(me_other.blocks);
 
     let mut lanes = vec![me_card, me_terminal, me_other];
     let mut agent_vec: Vec<TimelineLane> = agent_lanes
@@ -2018,6 +2082,12 @@ pub fn compute_dashboard<Tz: TimeZone>(
     let current = |ts: u64| ts > 0 && ts >= from && ts < until;
     let previous = |ts: u64| ts > 0 && ts >= prev_from && ts < prev_until;
 
+    let managed_terminals = collect_managed_agent_terminals(
+        activity
+            .period_segments
+            .iter()
+            .chain(activity.baseline_segments.iter()),
+    );
     let cur_segments: Vec<&ActivitySegment> = activity
         .period_segments
         .iter()
@@ -2025,6 +2095,7 @@ pub fn compute_dashboard<Tz: TimeZone>(
             s.end_ms > from
                 && s.start_ms < until
                 && scope.is_none_or(|pid| s.project_id.as_deref() == Some(pid))
+                && !is_excluded_terminal_dwell(s, snapshot, &managed_terminals)
         })
         .collect();
     let prev_segments: Vec<&ActivitySegment> = activity
@@ -2034,6 +2105,7 @@ pub fn compute_dashboard<Tz: TimeZone>(
             s.end_ms > prev_from
                 && s.start_ms < prev_until
                 && scope.is_none_or(|pid| s.project_id.as_deref() == Some(pid))
+                && !is_excluded_terminal_dwell(s, snapshot, &managed_terminals)
         })
         .collect();
     let cur_buckets: Vec<&ActivityBucket> = activity
@@ -4985,6 +5057,7 @@ mod tests {
                 blocks: vec![TimelineBlock {
                     start_ms: day_start + 11 * hour + 15 * min,
                     end_ms: day_start + 12 * hour + 30 * min,
+                    active_ms: 75 * min,
                     project_id: None,
                     card_id: None,
                     terminal_id: None,
@@ -5009,6 +5082,7 @@ mod tests {
                 blocks: vec![TimelineBlock {
                     start_ms: day_start + 30 * min,
                     end_ms: day_start + 2 * hour + 15 * min,
+                    active_ms: 105 * min,
                     project_id: None,
                     card_id: None,
                     terminal_id: None,
@@ -5044,5 +5118,156 @@ mod tests {
             ],
         };
         assert_eq!(tl_late.visible_hour_window(), (16, 24));
+    }
+
+    #[test]
+    fn timeline_excludes_automated_terminals_filters_short_dwell_and_coalesces_within_five_minutes()
+    {
+        use canban_types::{
+            ActivityDetail, ActivityKind, ActivitySegment, AgentRun, AgentWorkData, DwellData,
+            DwellLane, TerminalEntry,
+        };
+
+        let tz = tz_plus_8();
+        let now = ts_utc8(2026, 11, 22, 15, 0);
+        let t0 = ts_utc8(2026, 11, 22, 10, 0);
+        let sec = 1_000u64;
+        let min = 60_000u64;
+
+        let mut s = Snapshot::default();
+        s.projects.push(sample_project("p1", "Canban"));
+        s.terminals.push(TerminalEntry {
+            id: "shell-1".into(),
+            conversation_id: None,
+            number: 1,
+            name: Some("Dev Shell".into()),
+            origin_project_id: Some("p1".into()),
+            origin_card_id: None,
+            agent_engine: None,
+            runtime: None,
+            agent: None,
+            created_at: t0,
+        });
+        s.terminals.push(TerminalEntry {
+            id: "card-1:developer".into(),
+            conversation_id: None,
+            number: 2,
+            name: None,
+            origin_project_id: Some("p1".into()),
+            origin_card_id: Some("c1".into()),
+            agent_engine: None,
+            runtime: None,
+            agent: Some(
+                serde_json::from_value::<AgentRun>(serde_json::json!({
+                    "card_id": "c1",
+                    "project_id": "p1",
+                    "state": "running",
+                    "profile": { "id": "developer" }
+                }))
+                .unwrap(),
+            ),
+            created_at: t0,
+        });
+
+        let dwell_term = |id: i64, start: u64, end: u64, tid: &str| ActivitySegment {
+            id: Some(id),
+            kind: ActivityKind::Dwell,
+            start_ms: start,
+            end_ms: end,
+            project_id: Some("p1".into()),
+            card_id: None,
+            terminal_id: Some(tid.into()),
+            open: false,
+            data: ActivityDetail::Dwell(DwellData {
+                lane: DwellLane::Terminal,
+                page: "terminals".into(),
+            }),
+        };
+
+        let act = ActivityInput {
+            loaded: true,
+            period_segments: vec![
+                // 1. Automated / managed terminals -> must be excluded from Me · Terminal and KPI totals
+                dwell_term(1, t0, t0 + 3 * min, "card-1:developer"),
+                dwell_term(
+                    2,
+                    t0 + 5 * min,
+                    t0 + 7 * min,
+                    "configuration:p1:workflows:dev",
+                ),
+                dwell_term(3, t0 + 8 * min, t0 + 10 * min, "merge-queue:p1:1234"),
+                dwell_term(4, t0 + 11 * min, t0 + 13 * min, "scheduled:p1:abcd"),
+                dwell_term(5, t0 + 14 * min, t0 + 16 * min, "historical-managed-agent"),
+                ActivitySegment {
+                    id: Some(6),
+                    kind: ActivityKind::Agent,
+                    start_ms: t0 + 14 * min,
+                    end_ms: t0 + 14 * min + 15 * sec, // short 15s Agent run must stay visible
+                    project_id: Some("p1".into()),
+                    card_id: None,
+                    terminal_id: Some("historical-managed-agent".into()),
+                    open: false,
+                    data: ActivityDetail::Agent(AgentWorkData {
+                        profile_id: "reviewer".into(),
+                        provider: "claude".into(),
+                        model: "claude-sonnet-4".into(),
+                        engine: None,
+                        stage: None,
+                        run_number: None,
+                        trigger: None,
+                        manual: false,
+                    }),
+                },
+                // 2. Manual shell-1: 2m active, 10s transient pass-through on shell-2, 3m active within 5m gap -> coalesces into 1 block with 5m active_ms
+                dwell_term(10, t0 + 20 * min, t0 + 22 * min, "shell-1"),
+                dwell_term(11, t0 + 23 * min, t0 + 23 * min + 10 * sec, "shell-2"),
+                dwell_term(12, t0 + 25 * min, t0 + 28 * min, "shell-1"),
+                // 3. Gap > 5m (6m gap: 28m -> 34m) on shell-1 -> separate block, built from two 20s segments (40s >= 30s)
+                dwell_term(13, t0 + 34 * min, t0 + 34 * min + 20 * sec, "shell-1"),
+                dwell_term(14, t0 + 35 * min, t0 + 35 * min + 20 * sec, "shell-1"),
+                // 4. Isolated transient 12s dwell on shell-3 -> filtered from Timeline blocks
+                dwell_term(15, t0 + 50 * min, t0 + 50 * min + 12 * sec, "shell-3"),
+            ],
+            ..Default::default()
+        };
+
+        let dash = compute_dashboard(&s, &[], &act, None, &tz, &[], ViewOptions::with_now(now));
+        let me_term = dash
+            .timeline
+            .lanes
+            .iter()
+            .find(|l| l.kind == TimelineLaneKind::MeTerminal)
+            .expect("Me · Terminal lane");
+
+        // Exact cumulative active duration of all manual terminal dwell (excludes automated terminals and idle gaps):
+        // 2m + 10s + 3m + 20s + 20s + 12s = 5m + 62s = 362s
+        let expected_manual_ms = 2 * min + 10 * sec + 3 * min + 20 * sec + 20 * sec + 12 * sec;
+        assert_eq!(dash.time_totals.dwell_terminal_ms, expected_manual_ms);
+        assert_eq!(me_term.total_ms, expected_manual_ms);
+
+        // Timeline blocks:
+        // Block 0: shell-1 coalesced across the dropped 10s shell-2 pass-through (20m..28m, active 5m)
+        // Block 1: shell-1 after 6m gap, coalesced from two 20s segments (34m..35m20s, active 40s)
+        // shell-3 (12s) and shell-2 (10s) are filtered out; all automated terminals are excluded.
+        assert_eq!(me_term.blocks.len(), 2);
+        assert_eq!(me_term.blocks[0].terminal_id.as_deref(), Some("shell-1"));
+        assert_eq!(me_term.blocks[0].start_ms, t0 + 20 * min);
+        assert_eq!(me_term.blocks[0].end_ms, t0 + 28 * min);
+        assert_eq!(me_term.blocks[0].active_ms, 5 * min);
+
+        assert_eq!(me_term.blocks[1].terminal_id.as_deref(), Some("shell-1"));
+        assert_eq!(me_term.blocks[1].start_ms, t0 + 34 * min);
+        assert_eq!(me_term.blocks[1].end_ms, t0 + 35 * min + 20 * sec);
+        assert_eq!(me_term.blocks[1].active_ms, 40 * sec);
+
+        // Short 15s Agent run must remain visible on Agent lane
+        let agent_lane = dash
+            .timeline
+            .lanes
+            .iter()
+            .find(|l| l.kind == TimelineLaneKind::Agent)
+            .expect("Agent lane");
+        assert_eq!(agent_lane.blocks.len(), 1);
+        assert_eq!(agent_lane.blocks[0].active_ms, 15 * sec);
     }
 }
