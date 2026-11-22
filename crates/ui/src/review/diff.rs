@@ -197,11 +197,379 @@ pub fn workbench(ui: Ui) -> impl IntoElement {
     )
 }
 
+pub(super) const FILES_PANE_WIDTH: f32 = 268.;
+
+pub(super) fn split_file_display(path: &str) -> (&str, Option<String>) {
+    let Some((parent, name)) = path.rsplit_once('/') else {
+        return (path, None);
+    };
+    if parent.is_empty() {
+        return (name, None);
+    }
+    if parent.chars().count() <= 20 {
+        return (name, Some(parent.to_owned()));
+    }
+    let mut parts = parent.rsplit('/');
+    let (Some(last), Some(prev)) = (parts.next(), parts.next()) else {
+        return (name, Some(parent.to_owned()));
+    };
+    if parts.next().is_some() {
+        (name, Some(format!("…/{prev}/{last}")))
+    } else {
+        (name, Some(parent.to_owned()))
+    }
+}
+
+pub(crate) fn file_path_tooltip(path: &str, previous: Option<&str>) -> String {
+    if let Some(prev) = previous.filter(|p| !p.is_empty() && *p != path) {
+        format!("{prev} → {path}")
+    } else {
+        path.to_owned()
+    }
+}
+
+pub(crate) fn diff_header_path(
+    path: String,
+    previous: Option<&str>,
+    font_weight: FontWeight,
+    mono: bool,
+) -> View {
+    let full_tip = file_path_tooltip(&path, previous);
+    let mut name = label(path)
+        .min_w(px(0.))
+        .truncate()
+        .font_weight(font_weight);
+    if mono {
+        name = name.font_family(MONO_FONT).text_size(px(12.));
+    }
+    view()
+        .flex_1()
+        .min_w(px(0.))
+        .flex_row()
+        .items_center()
+        .child(
+            view()
+                .min_w(px(0.))
+                .flex_shrink(1.)
+                .tooltip(hint_tooltip(full_tip).placement(Placement::Bottom))
+                .child(name),
+        )
+}
+
+pub(super) fn diff_stat_counts(stats: Option<(u64, u64)>) -> Option<View> {
+    let (add, del) = stats?;
+    if add == 0 && del == 0 {
+        return None;
+    }
+    let mut row = view().flex_row().items_center().gap_1().flex_shrink_0();
+    if add > 0 {
+        row = row.child(
+            label(format!("+{add}"))
+                .font_family(MONO_FONT)
+                .text_size(px(10.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(SUCCESS),
+        );
+    }
+    if del > 0 {
+        row = row.child(
+            label(format!("−{del}"))
+                .font_family(MONO_FONT)
+                .text_size(px(10.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(DANGER),
+        );
+    }
+    Some(row)
+}
+
+pub(super) fn file_status_badge(code: &str, conflicted: bool) -> View {
+    let (bg_col, fg_col, glyph) = if conflicted {
+        (ATTENTION_SURFACE, ATTENTION, "!")
+    } else {
+        match code {
+            "A" | "added" => (SUCCESS_SURFACE, SUCCESS, "A"),
+            "U" | "?" | "untracked" => (SUCCESS_SURFACE, SUCCESS, "U"),
+            "D" | "removed" | "deleted" => (DANGER_SURFACE, DANGER, "D"),
+            "R" | "renamed" => (HIGHLIGHT_SURFACE, HIGHLIGHT, "R"),
+            "C" | "copied" => (HIGHLIGHT_SURFACE, HIGHLIGHT, "C"),
+            _ => (INSET, MUTED, "M"),
+        }
+    };
+    view()
+        .w(px(16.))
+        .h(px(16.))
+        .flex_shrink_0()
+        .rounded(px(4.))
+        .bg(bg_col)
+        .items_center()
+        .justify_center()
+        .child(
+            text(glyph)
+                .font_family(MONO_FONT)
+                .text_size(px(10.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(fg_col),
+        )
+}
+
+pub(super) fn inline_fold_button(ui: Ui, key: String, title: String) -> impl IntoElement {
+    let st = ui.review_state;
+    let check_key = key.clone();
+    let folded = computed(move || st.collapsed_files.with(|files| files.contains(&check_key)));
+    dynamic(move || {
+        let is_folded = folded.get();
+        let a11y_label = format!(
+            "{} diff for {title}",
+            if is_folded { "Expand" } else { "Collapse" }
+        );
+        let tip = a11y_label.clone();
+        let toggle_key = key.clone();
+        view()
+            .flex_shrink_0()
+            .tooltip(hint_tooltip(tip).placement(Placement::Bottom))
+            .child(
+                canban_ui_kit::press_target()
+                    .w(px(18.))
+                    .h(px(18.))
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.))
+                    .bg(CLEAR)
+                    .hover(|s| s.bg(INSET))
+                    .focus(|s| s.border_1().border_color(ACCENT))
+                    .accessibility_label(move || Some(a11y_label.clone().into()))
+                    .on_press(move |_: &()| super::toggle_file(ui, toggle_key.clone()))
+                    .child(
+                        icon_tinted(
+                            if is_folded {
+                                Icon::Forward
+                            } else {
+                                Icon::ChevronDown
+                            },
+                            MUTED,
+                        )
+                        .w(px(11.))
+                        .h(px(11.)),
+                    ),
+            )
+    })
+}
+
+pub(super) struct FileRowSpec {
+    pub path: String,
+    pub previous_path: Option<String>,
+    pub status_code: String,
+    pub conflicted: bool,
+    pub fold_key: String,
+    pub fold_title: String,
+    pub is_selected: Memo<bool>,
+    pub pending_count: Memo<usize>,
+    pub stats: Option<(u64, u64)>,
+}
+
+pub(super) fn render_file_row(
+    ui: Ui,
+    spec: FileRowSpec,
+    on_select: impl Fn() + 'static,
+    trailing: Option<AnyElement>,
+) -> View {
+    let (short_name, dir_hint) = split_file_display(&spec.path);
+    let short_name = short_name.to_owned();
+    let row_tooltip = file_path_tooltip(&spec.path, spec.previous_path.as_deref());
+    let is_sel = spec.is_selected;
+    let pending_cnt = spec.pending_count;
+
+    let file_label = label(short_name)
+        .text_size(px(12.))
+        .style_with(move |s| {
+            s.font_weight(if is_sel.get() {
+                FontWeight::SEMIBOLD
+            } else {
+                FontWeight::MEDIUM
+            })
+        })
+        .truncate()
+        .min_w(px(0.));
+
+    let mut name_group = view()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .flex_1()
+        .min_w(px(0.))
+        .overflow_hidden();
+    if let Some(dir) = dir_hint {
+        name_group = name_group.child(file_label.flex_shrink(1.)).child(
+            muted(dir)
+                .text_size(px(10.5))
+                .truncate()
+                .flex_1()
+                .min_w(px(0.)),
+        );
+    } else {
+        name_group = name_group.child(file_label.flex_1());
+    }
+
+    let right_meta = view()
+        .flex_row()
+        .items_center()
+        .flex_shrink_0()
+        .child(when(
+            move || pending_cnt.get() > 0,
+            move || {
+                view().pr_1().child(
+                    view()
+                        .min_w(px(16.))
+                        .h(px(16.))
+                        .px_1()
+                        .rounded(px(4.))
+                        .bg(INSET)
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            text(move || pending_cnt.get().to_string())
+                                .text_size(px(10.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(ACCENT),
+                        ),
+                )
+            },
+        ))
+        .children(diff_stat_counts(spec.stats));
+
+    let row_btn = canban_ui_kit::press_target()
+        .w_full()
+        .min_h(px(24.))
+        .px_1()
+        .rounded(px(4.))
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_1p5()
+        .focus(|s| s.border_1().border_color(ACCENT))
+        .on_press(move |_: &()| on_select())
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1p5()
+                .flex_1()
+                .min_w(px(0.))
+                .child(file_status_badge(&spec.status_code, spec.conflicted))
+                .child(name_group),
+        )
+        .child(right_meta);
+
+    let mut row = view()
+        .relative()
+        .min_h(px(28.))
+        .pl_1p5()
+        .pr_1()
+        .py_0p5()
+        .rounded(px(6.))
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .bg(move || if is_sel.get() { SELECTED } else { CLEAR })
+        .hover(move |s| s.bg(move || if is_sel.get() { SELECTED } else { CARD_HOVER }))
+        .child(when(
+            move || is_sel.get(),
+            move || {
+                view()
+                    .absolute()
+                    .left(px(0.))
+                    .top(px(5.))
+                    .bottom(px(5.))
+                    .w(px(2.5))
+                    .rounded_full()
+                    .bg(ACCENT)
+                    .pointer_events(PointerEvents::None)
+            },
+        ))
+        .child(inline_fold_button(ui, spec.fold_key, spec.fold_title))
+        .child(
+            view()
+                .flex_1()
+                .min_w(px(0.))
+                .tooltip(hint_tooltip(row_tooltip).placement(Placement::Right))
+                .child(row_btn),
+        );
+    if let Some(trail) = trailing {
+        row = row.child(trail);
+    }
+    row
+}
+
+pub(super) fn render_all_files_row(
+    title: String,
+    total_add: u64,
+    total_del: u64,
+    all_selected: Memo<bool>,
+    on_press: impl Fn() + 'static,
+) -> View {
+    view()
+        .relative()
+        .child(
+            canban_ui_kit::press_target()
+                .w_full()
+                .min_h(px(28.))
+                .pl_2p5()
+                .pr_2()
+                .py_1()
+                .rounded(px(6.))
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_1p5()
+                .bg(move || if all_selected.get() { SELECTED } else { CLEAR })
+                .hover(move |s| {
+                    s.bg(move || {
+                        if all_selected.get() {
+                            SELECTED
+                        } else {
+                            CARD_HOVER
+                        }
+                    })
+                })
+                .focus(|s| s.border_1().border_color(ACCENT))
+                .on_press(move |_: &()| on_press())
+                .child(
+                    label(title)
+                        .text_size(px(12.))
+                        .style_with(move |s| {
+                            s.font_weight(if all_selected.get() {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::MEDIUM
+                            })
+                        })
+                        .truncate()
+                        .min_w(px(0.)),
+                )
+                .children(diff_stat_counts(Some((total_add, total_del)))),
+        )
+        .child(when(
+            move || all_selected.get(),
+            move || {
+                view()
+                    .absolute()
+                    .left(px(0.))
+                    .top(px(5.))
+                    .bottom(px(5.))
+                    .w(px(2.5))
+                    .rounded_full()
+                    .bg(ACCENT)
+                    .pointer_events(PointerEvents::None)
+            },
+        ))
+}
+
 fn files_pane(ui: Ui, data: Memo<Arc<Value>>) -> impl IntoElement {
     let st = ui.review_state;
     let files_scroll = element_ref();
     view()
-        .w(move || px(if working_tree_mode(ui) { 268. } else { 216. }))
+        .w(px(FILES_PANE_WIDTH))
         .flex_shrink_0()
         .min_h(px(0.))
         .border_r_1()
@@ -244,149 +612,60 @@ fn standard_file_list(ui: Ui, data: &Value) -> AnyElement {
     let files = data["files"].as_array().cloned().unwrap_or_default();
     let total_add = data["total_additions"].as_u64().unwrap_or(0);
     let total_del = data["total_deletions"].as_u64().unwrap_or(0);
-    // Standard file list pane (216px)
     let file_count = files.len();
-    let mut file_list = view().gap_0p5().p_1p5();
+    let mut file_list = view().gap_0p5().p_2();
     let all_selected = computed(move || st.selected_file.with(String::is_empty));
-    file_list = file_list.child(
-        canban_ui_kit::press_target()
-            .w_full()
-            .min_h(px(28.))
-            .px_2()
-            .py_1()
-            .rounded(px(5.))
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .gap_1p5()
-            .bg(move || if all_selected.get() { SELECTED } else { CLEAR })
-            .hover(move |s| {
-                s.bg(move || {
-                    if all_selected.get() {
-                        SELECTED
-                    } else {
-                        CARD_HOVER
-                    }
-                })
-            })
-            .on_press(move |_: &()| {
-                super::show_all_files(ui);
-            })
-            .child(
-                label(format!("All files ({file_count})"))
-                    .text_size(px(12.))
-                    .style_with(move |s| {
-                        s.font_weight(if all_selected.get() {
-                            FontWeight::SEMIBOLD
-                        } else {
-                            FontWeight::MEDIUM
-                        })
-                    }),
-            )
-            .child(
-                muted(format!("+{total_add} −{total_del}"))
-                    .font_family(MONO_FONT)
-                    .text_size(px(10.5)),
-            ),
-    );
+    file_list = file_list.child(render_all_files_row(
+        format!("All files ({file_count})"),
+        total_add,
+        total_del,
+        all_selected,
+        move || {
+            super::show_all_files(ui);
+        },
+    ));
 
     for f in &files {
         let fname = f["filename"].as_str().unwrap_or("").to_owned();
+        let previous_path = f["previous_filename"].as_str().map(str::to_owned);
         let f_add = f["additions"].as_u64().unwrap_or(0);
         let f_del = f["deletions"].as_u64().unwrap_or(0);
-        let f_status = f["status"].as_str().unwrap_or("modified");
+        let f_status = f["status"].as_str().unwrap_or("modified").to_owned();
         let key = super::model::file_key(f);
         let sel_key = key.clone();
         let is_sel = computed(move || st.selected_file.with(|s| s == &sel_key));
         let click_name = key.clone();
-        let fold_key = key;
-        let fold_path = fname.clone();
         let pending_path = fname.clone();
+        let pending_section = f["section"].as_str().unwrap_or("").to_owned();
         let pending_for_file = computed(move || {
-            st.pending_comments
-                .with(|list| list.iter().filter(|c| c.path == pending_path).count())
+            st.pending_comments.with(|list| {
+                list.iter()
+                    .filter(|c| {
+                        c.path == pending_path
+                            && (pending_section.is_empty()
+                                || c.section.is_empty()
+                                || c.section == pending_section)
+                    })
+                    .count()
+            })
         });
-        let short_name = fname.rsplit('/').next().unwrap_or(&fname).to_owned();
-        let status_char = match f_status {
-            "added" => ("A", SUCCESS),
-            "removed" => ("D", DANGER),
-            "renamed" => ("R", ACCENT),
-            _ => ("M", MUTED),
-        };
 
-        let right_meta = view()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .flex_shrink_0()
-            .child(dynamic(move || {
-                let count = pending_for_file.get();
-                if count > 0 {
-                    status(count.to_string(), Tone::Info).into_element()
-                } else {
-                    view().into_element()
-                }
-            }))
-            .child(
-                label(format!("+{f_add}"))
-                    .font_family(MONO_FONT)
-                    .text_size(px(10.5))
-                    .text_color(SUCCESS),
-            )
-            .child(
-                label(format!("−{f_del}"))
-                    .font_family(MONO_FONT)
-                    .text_size(px(10.5))
-                    .text_color(DANGER),
-            );
-
-        file_list = file_list.child(
-            view()
-                .tooltip(hint_tooltip(fname.clone()))
-                .flex_row()
-                .items_center()
-                .child(fold_button(ui, fold_key, fold_path))
-                .child(
-                    canban_ui_kit::press_target()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .min_h(px(27.))
-                        .px_2()
-                        .py_0p5()
-                        .rounded(px(5.))
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .gap_1p5()
-                        .bg(move || if is_sel.get() { SELECTED } else { CLEAR })
-                        .hover(move |s| {
-                            s.bg(move || if is_sel.get() { SELECTED } else { CARD_HOVER })
-                        })
-                        .on_press(move |_: &()| super::focus_file(ui, click_name.clone()))
-                        .child(
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .gap_1p5()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .child(
-                                    label(status_char.0)
-                                        .font_family(MONO_FONT)
-                                        .text_size(px(10.5))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(status_char.1),
-                                )
-                                .child(
-                                    label(short_name)
-                                        .text_size(px(12.))
-                                        .truncate()
-                                        .min_w(px(0.)),
-                                ),
-                        )
-                        .child(right_meta),
-                ),
-        );
+        file_list = file_list.child(render_file_row(
+            ui,
+            FileRowSpec {
+                path: fname.clone(),
+                previous_path,
+                status_code: f_status,
+                conflicted: false,
+                fold_key: key,
+                fold_title: fname,
+                is_selected: is_sel,
+                pending_count: pending_for_file,
+                stats: Some((f_add, f_del)),
+            },
+            move || super::focus_file(ui, click_name.clone()),
+            None,
+        ));
     }
 
     file_list.into_element()
@@ -915,15 +1194,12 @@ fn render_file_card(
             })
             .into_element()
         })
-        .child(
-            label(path.clone())
-                .flex_1()
-                .min_w(px(0.))
-                .truncate()
-                .font_family(MONO_FONT)
-                .text_size(px(12.))
-                .font_weight(FontWeight::SEMIBOLD),
-        )
+        .child(diff_header_path(
+            path.clone(),
+            ctx.file["previous_filename"].as_str(),
+            FontWeight::SEMIBOLD,
+            true,
+        ))
         .child(badge(f_status))
         .child(dynamic(move || {
             let count = file_pending_count.get();
@@ -2253,6 +2529,16 @@ mod tests {
             }
         }
 
+        fn is_descendant(&self, mut id: NodeId, ancestor: NodeId) -> bool {
+            while let Some(&parent) = self.parents.get(&id) {
+                if parent == ancestor {
+                    return true;
+                }
+                id = parent;
+            }
+            false
+        }
+
         fn apply(&mut self, batch: &MountBatch) {
             for item in &batch.items {
                 match item {
@@ -3092,5 +3378,397 @@ mod tests {
             Some(&file0_line1_before),
             "opening an inline comment in file 2 must not remount file 0"
         );
+    }
+
+    #[test]
+    fn split_file_display_and_working_tree_stats_lookup() {
+        assert_eq!(split_file_display("Cargo.toml"), ("Cargo.toml", None));
+        assert_eq!(split_file_display("/Cargo.toml"), ("Cargo.toml", None));
+        assert_eq!(
+            split_file_display("crates/ui/src/review/diff.rs"),
+            ("diff.rs", Some("crates/ui/src/review".into()))
+        );
+        assert_eq!(
+            split_file_display("crates/app-server/src/github/delivery.rs"),
+            ("delivery.rs", Some("…/src/github".into()))
+        );
+
+        assert_eq!(file_path_tooltip("a.rs", None), "a.rs");
+        assert_eq!(file_path_tooltip("a.rs", Some("")), "a.rs");
+        assert_eq!(file_path_tooltip("a.rs", Some("a.rs")), "a.rs");
+        assert_eq!(
+            file_path_tooltip("new.rs", Some("old.rs")),
+            "old.rs → new.rs"
+        );
+
+        let data = json!({
+            "files": [
+                {"filename": "src/a.rs", "section": "staged", "additions": 10, "deletions": 2},
+                {"filename": "src/a.rs", "section": "unstaged", "additions": 3, "deletions": 1},
+                {"filename": "src/b.rs", "section": "", "additions": 7, "deletions": 0},
+            ]
+        });
+        let stats = super::git_ops::build_working_tree_stats(&data);
+        assert_eq!(
+            super::git_ops::lookup_working_tree_stats(&stats, "UNCOMMITTED", true, "src/a.rs"),
+            Some((10, 2))
+        );
+        assert_eq!(
+            super::git_ops::lookup_working_tree_stats(&stats, "UNCOMMITTED", false, "src/a.rs"),
+            Some((3, 1))
+        );
+        assert_eq!(
+            super::git_ops::lookup_working_tree_stats(&stats, "STAGED", true, "src/b.rs"),
+            Some((7, 0))
+        );
+        assert_eq!(
+            super::git_ops::lookup_working_tree_stats(&stats, "STAGED", false, "src/b.rs"),
+            None
+        );
+        assert_eq!(
+            super::git_ops::lookup_working_tree_stats(&stats, "UNSTAGED", true, "src/b.rs"),
+            None
+        );
+        assert_eq!(
+            super::git_ops::lookup_working_tree_stats(&stats, "UNSTAGED", false, "src/b.rs"),
+            Some((7, 0))
+        );
+        assert_eq!(
+            super::git_ops::lookup_working_tree_stats(&stats, "WORKDIR", true, "src/b.rs"),
+            Some((7, 0))
+        );
+        assert_eq!(
+            super::git_ops::lookup_working_tree_stats(&stats, "UNCOMMITTED", true, "missing.rs"),
+            None
+        );
+    }
+
+    #[test]
+    fn working_tree_file_list_renders_stats_parent_hints_and_diff_header_tooltips() {
+        const LONG_PATH: &str = "crates/ui/src/review/components/extremely_long_diff_card_header_filename_for_hover_tooltip_verification.rs";
+
+        #[component]
+        fn WorkingTreeAndTooltipProbe() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let st = ui.review_state;
+            let status_files = json!([
+                {
+                    "path": "crates/ui/src/review/new_helper.rs",
+                    "orig_path": null,
+                    "index_code": "A",
+                    "worktree_code": " ",
+                    "staged": true,
+                    "unstaged": false,
+                    "untracked": false,
+                    "conflicted": false,
+                },
+                {
+                    "path": "crates/ui/src/review/mod.rs",
+                    "orig_path": null,
+                    "index_code": "M",
+                    "worktree_code": "M",
+                    "staged": true,
+                    "unstaged": true,
+                    "untracked": false,
+                    "conflicted": false,
+                },
+                {
+                    "path": "crates/ui/src/review/renamed_placeholder.rs",
+                    "orig_path": "crates/ui/src/review/old_placeholder.rs",
+                    "index_code": "R",
+                    "worktree_code": " ",
+                    "staged": true,
+                    "unstaged": false,
+                    "untracked": false,
+                    "conflicted": false,
+                },
+                {
+                    "path": "crates/kanban/src/mod.rs",
+                    "orig_path": null,
+                    "index_code": " ",
+                    "worktree_code": "M",
+                    "staged": false,
+                    "unstaged": true,
+                    "untracked": false,
+                    "conflicted": false,
+                },
+                {
+                    "path": LONG_PATH,
+                    "orig_path": null,
+                    "index_code": "?",
+                    "worktree_code": "?",
+                    "staged": false,
+                    "unstaged": false,
+                    "untracked": true,
+                    "conflicted": false,
+                }
+            ]);
+            let data = json!({
+                "base_ref": "HEAD",
+                "compare_ref": "UNCOMMITTED",
+                "compare_sha": "abc1234",
+                "total_additions": 187,
+                "total_deletions": 52,
+                "status_files": status_files,
+                "files": [
+                    {
+                        "filename": "crates/ui/src/review/new_helper.rs",
+                        "section": "staged",
+                        "status": "added",
+                        "additions": 45,
+                        "deletions": 0,
+                        "patch": "@@ -0,0 +1 @@\n+pub fn helper() {}",
+                    },
+                    {
+                        "filename": "crates/ui/src/review/mod.rs",
+                        "section": "staged",
+                        "status": "modified",
+                        "additions": 18,
+                        "deletions": 6,
+                        "patch": "@@ -1 +1 @@\n-old\n+staged edit",
+                    },
+                    {
+                        "filename": "crates/ui/src/review/renamed_placeholder.rs",
+                        "previous_filename": "crates/ui/src/review/old_placeholder.rs",
+                        "section": "staged",
+                        "status": "renamed",
+                        "additions": 0,
+                        "deletions": 0,
+                        "patch": "",
+                    },
+                    {
+                        "filename": "crates/ui/src/review/mod.rs",
+                        "section": "unstaged",
+                        "status": "modified",
+                        "additions": 4,
+                        "deletions": 2,
+                        "patch": "@@ -1 +1 @@\n-staged edit\n+working edit",
+                    },
+                    {
+                        "filename": "crates/kanban/src/mod.rs",
+                        "section": "unstaged",
+                        "status": "modified",
+                        "additions": 0,
+                        "deletions": 14,
+                        "patch": "@@ -1 +0,0 @@\n-deleted",
+                    },
+                    {
+                        "filename": LONG_PATH,
+                        "section": "unstaged",
+                        "status": "added",
+                        "additions": 120,
+                        "deletions": 30,
+                        "patch": "@@ -0,0 +1 @@\n+long path file",
+                    }
+                ]
+            });
+            let prepared = super::super::cache::ReadValue::new(data);
+            st.mode.set("git".into());
+            st.base_ref.set("HEAD".into());
+            st.compare_ref.set("UNCOMMITTED".into());
+            st.visible_file_limit.set(10);
+            super::super::apply_compare(ui, &prepared);
+            view().w(px(900.)).h(px(700.)).child(workbench(ui))
+        }
+
+        let clock = nsh_core::time::Clock::manual(std::time::SystemTime::UNIX_EPOCH);
+        let _clock = clock.enter();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let mut core = Core::new(ApproxTextEngine, size(px(900.), px(700.)));
+        core.set_content_culling(false);
+        core.set_environment(nsh_core::element::Environment {
+            window: size(px(900.), px(700.)),
+            os: nsh_core::platform::Os::MacOs,
+            idiom: nsh_core::platform::Idiom::Desktop,
+            ..Default::default()
+        });
+        core.set_components(nsh_base::registry());
+        core.set_task_runtime(runtime.handle().clone());
+        core.mount_root(&nsh_core::element::Root::of::<WorkingTreeAndTooltipProbe>());
+        let mut tree = ProbeTree::new();
+        pump(&mut core, &mut tree);
+
+        let files_scroll = tree.labels["Git files list"];
+        let files_list_texts: Vec<&str> = tree
+            .texts
+            .iter()
+            .filter_map(|(&id, t)| tree.is_descendant(id, files_scroll).then_some(t.as_str()))
+            .collect();
+
+        // 1. Working tree rows show non-zero per-file additions/deletions and omit zero stats.
+        for expected in [
+            "+45", "+18", "−6", "+4", "−2", "−14", "+120", "−30", "+187", "−52",
+        ] {
+            assert!(
+                files_list_texts.contains(&expected),
+                "expected working tree stat {expected} in file list texts; got {files_list_texts:?}"
+            );
+        }
+        assert!(
+            !files_list_texts.iter().any(|&t| t == "+0" || t == "−0"),
+            "zero additions/deletions must be omitted from file list; got {files_list_texts:?}"
+        );
+
+        // 2. Parent directory hints disambiguate duplicate `mod.rs` entries and long paths.
+        for dir in [
+            "crates/ui/src/review",
+            "crates/kanban/src",
+            "…/review/components",
+        ] {
+            assert!(
+                files_list_texts.contains(&dir),
+                "expected directory hint {dir} in file list texts; got {files_list_texts:?}"
+            );
+        }
+
+        // 3. Folding staged vs unstaged entries of the same path stays independent.
+        assert!(tree.texts.values().any(|t| t == "+ staged edit"));
+        assert!(tree.texts.values().any(|t| t == "+ working edit"));
+        let fold_staged = tree.labels["Collapse diff for staged crates/ui/src/review/mod.rs"];
+        assert!(core.component_event(fold_staged, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert!(!tree.texts.values().any(|t| t == "+ staged edit"));
+        assert!(tree.texts.values().any(|t| t == "+ working edit"));
+        assert!(
+            tree.labels
+                .contains_key("Expand diff for staged crates/ui/src/review/mod.rs")
+        );
+
+        // 4. Right-side long filename stays bounded within the Changes pane and mounts a hover tooltip.
+        let header_text_nodes: Vec<NodeId> = tree
+            .texts
+            .iter()
+            .filter_map(|(&id, txt)| (txt == LONG_PATH).then_some(id))
+            .collect();
+        assert_eq!(
+            header_text_nodes.len(),
+            1,
+            "expected exactly one un-hovered header text node for long path"
+        );
+        let header_text_id = header_text_nodes[0];
+        let header_parent = *tree
+            .parents
+            .get(&header_text_id)
+            .expect("header label has tooltip wrapper parent");
+        let diff_code_width = core
+            .measure(tree.labels["Git diff code"])
+            .unwrap()
+            .frame
+            .size
+            .width
+            .0;
+        let header_name_width = core.measure(header_parent).unwrap().frame.size.width.0;
+        assert!(
+            header_name_width > 0. && header_name_width < diff_code_width,
+            "diff header filename wrapper ({header_name_width}) must fit inside Changes pane ({diff_code_width})"
+        );
+
+        let mouse = EventPayload::Mouse(nsh_core::MouseEvent::default());
+        assert!(core.component_event(header_parent, EventKind::MouseEnter, &mouse));
+        clock.advance_to(nsh_core::time::now() + std::time::Duration::from_millis(600));
+        pump(&mut core, &mut tree);
+        let after_hover_count = tree
+            .texts
+            .values()
+            .filter(|txt| txt.as_str() == LONG_PATH)
+            .count();
+        assert_eq!(
+            after_hover_count, 2,
+            "hovering diff card header filename must mount full path hint_tooltip"
+        );
+    }
+
+    #[test]
+    fn standard_and_working_tree_modes_share_consistent_files_pane_width() {
+        #[component]
+        fn ModeWidthProbe() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let st = ui.review_state;
+            st.mode.set("git".into());
+            st.base_ref.set("HEAD".into());
+            st.compare_ref.set("UNCOMMITTED".into());
+            st.compare_data.set(json!({
+                "status_files": [{"path": "crates/ui/src/review/diff.rs", "staged": true}],
+                "total_additions": 5,
+                "total_deletions": 0,
+                "files": [{
+                    "filename": "crates/ui/src/review/diff.rs",
+                    "section": "staged",
+                    "status": "modified",
+                    "additions": 5,
+                    "deletions": 0,
+                    "patch": "@@ -1 +1 @@\n+line"
+                }]
+            }));
+            view()
+                .w(px(1000.))
+                .h(px(700.))
+                .child(
+                    canban_ui_kit::press_target()
+                        .accessibility_label("switch-to-compare")
+                        .on_press(move |_: &()| {
+                            st.compare_ref.set("feat/branch".into());
+                            st.compare_data.set(json!({
+                                "total_additions": 12,
+                                "total_deletions": 0,
+                                "files": [{
+                                    "filename": "crates/ui/src/review/diff.rs",
+                                    "status": "added",
+                                    "additions": 12,
+                                    "deletions": 0,
+                                    "patch": "@@ -0,0 +1 @@\n+line"
+                                }]
+                            }));
+                        }),
+                )
+                .child(workbench(ui))
+        }
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let mut core = Core::new(ApproxTextEngine, size(px(1000.), px(700.)));
+        core.set_content_culling(false);
+        core.set_components(nsh_base::registry());
+        core.set_task_runtime(runtime.handle().clone());
+        core.mount_root(&nsh_core::element::Root::of::<ModeWidthProbe>());
+        let mut tree = ProbeTree::new();
+        pump(&mut core, &mut tree);
+
+        let files_scroll = tree.labels["Git files list"];
+        let wt_width = core.measure(files_scroll).unwrap().frame.size.width.0;
+        let expected_inner_width = FILES_PANE_WIDTH - 1.0; // 1px right border on files_pane
+        assert!(
+            (wt_width - expected_inner_width).abs() < 1.0,
+            "expected working tree files inner width {expected_inner_width}, got {wt_width}"
+        );
+
+        assert!(core.component_event(
+            tree.labels["switch-to-compare"],
+            EventKind::Press,
+            &EventPayload::None
+        ));
+        pump(&mut core, &mut tree);
+
+        let cmp_width = core.measure(files_scroll).unwrap().frame.size.width.0;
+        assert!(
+            (cmp_width - wt_width).abs() < 0.5,
+            "expected compare files width ({cmp_width}) to match working tree width ({wt_width})"
+        );
+        let cmp_list_texts: Vec<&str> = tree
+            .texts
+            .iter()
+            .filter_map(|(&id, t)| tree.is_descendant(id, files_scroll).then_some(t.as_str()))
+            .collect();
+        assert!(cmp_list_texts.contains(&"+12"));
+        assert!(!cmp_list_texts.iter().any(|&t| t == "−0" || t == "+0"));
     }
 }

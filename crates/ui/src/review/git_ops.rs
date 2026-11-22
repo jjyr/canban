@@ -10,6 +10,7 @@ use canban_ui_kit::*;
 use nsh_core::element::desktop::{MenuItem, popup_menu_at};
 use nsh_core::prelude::*;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 
 fn active_checkout_param(ui: Ui) -> Option<String> {
     let cwd = ui.review_state.checkout_cwd.get_untracked();
@@ -598,7 +599,19 @@ pub fn run_stage(ui: Ui, paths: Vec<String>, all: bool) {
             }
         };
         st.refs_data.update(update_fn);
-        st.compare_data.update(update_fn);
+        st.compare_data.update(|v| {
+            update_fn(v);
+            if let Some(arr) = v["files"].as_array_mut() {
+                for f in arr.iter_mut() {
+                    let p = f["filename"].as_str().unwrap_or("");
+                    if (all || paths.iter().any(|t| t == p))
+                        && f["section"].as_str() == Some("unstaged")
+                    {
+                        f["section"] = json!("staged");
+                    }
+                }
+            }
+        });
         ui.notify("Staged changes");
         return;
     }
@@ -633,7 +646,19 @@ pub fn run_unstage(ui: Ui, paths: Vec<String>, all: bool) {
             }
         };
         st.refs_data.update(update_fn);
-        st.compare_data.update(update_fn);
+        st.compare_data.update(|v| {
+            update_fn(v);
+            if let Some(arr) = v["files"].as_array_mut() {
+                for f in arr.iter_mut() {
+                    let p = f["filename"].as_str().unwrap_or("");
+                    if (all || paths.iter().any(|t| t == p))
+                        && f["section"].as_str() == Some("staged")
+                    {
+                        f["section"] = json!("unstaged");
+                    }
+                }
+            }
+        });
         ui.notify("Unstaged changes");
         return;
     }
@@ -1071,6 +1096,46 @@ pub fn render_commit_detail_card(ui: Ui, detail: &Value) -> AnyElement {
     card.into_element()
 }
 
+pub(super) fn build_working_tree_stats(data: &Value) -> HashMap<(String, String), (u64, u64)> {
+    let mut map: HashMap<(String, String), (u64, u64)> = HashMap::new();
+    for f in data["files"].as_array().into_iter().flatten() {
+        let Some(filename) = f["filename"].as_str().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let section = f["section"].as_str().unwrap_or("");
+        let add = f["additions"].as_u64().unwrap_or(0);
+        let del = f["deletions"].as_u64().unwrap_or(0);
+        let entry = map
+            .entry((section.to_owned(), filename.to_owned()))
+            .or_insert((0, 0));
+        entry.0 = entry.0.saturating_add(add);
+        entry.1 = entry.1.saturating_add(del);
+    }
+    map
+}
+
+pub(super) fn lookup_working_tree_stats(
+    stats: &HashMap<(String, String), (u64, u64)>,
+    compare_ref: &str,
+    is_staged_row: bool,
+    filename: &str,
+) -> Option<(u64, u64)> {
+    let section = if is_staged_row { "staged" } else { "unstaged" };
+    if let Some(&pair) = stats.get(&(section.to_owned(), filename.to_owned())) {
+        return Some(pair);
+    }
+    let allow_unsectioned = match compare_ref {
+        "STAGED" => is_staged_row,
+        "UNSTAGED" => !is_staged_row,
+        _ => true,
+    };
+    if allow_unsectioned {
+        stats.get(&(String::new(), filename.to_owned())).copied()
+    } else {
+        None
+    }
+}
+
 /// Renders the Working Tree file rows: Staged Changes, Unstaged/Untracked Changes,
 /// and per-file `+` / `−` / context menu actions.
 pub fn render_working_tree_list(ui: Ui, data: &Value) -> AnyElement {
@@ -1078,6 +1143,8 @@ pub fn render_working_tree_list(ui: Ui, data: &Value) -> AnyElement {
     let files = data["files"].as_array().cloned().unwrap_or_default();
     let total_add = data["total_additions"].as_u64().unwrap_or(0);
     let total_del = data["total_deletions"].as_u64().unwrap_or(0);
+    let stats_by_file = build_working_tree_stats(data);
+    let compare_ref = st.compare_ref.get_untracked();
 
     let status_files: Vec<Value> = data["status_files"]
         .as_array()
@@ -1100,54 +1167,22 @@ pub fn render_working_tree_list(ui: Ui, data: &Value) -> AnyElement {
 
     // All files filter pill
     let all_selected = computed(move || st.selected_file.with(String::is_empty));
-    list = list.child(
-        canban_ui_kit::press_target()
-            .w_full()
-            .min_h(px(28.))
-            .px_2()
-            .py_1()
-            .rounded(px(5.))
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .gap_1p5()
-            .bg(move || if all_selected.get() { SELECTED } else { CLEAR })
-            .hover(move |s| {
-                s.bg(move || {
-                    if all_selected.get() {
-                        SELECTED
-                    } else {
-                        CARD_HOVER
-                    }
-                })
-            })
-            .on_press(move |_: &()| {
-                if matches!(
-                    st.compare_ref.get_untracked().as_str(),
-                    "STAGED" | "UNSTAGED" | "WORKDIR"
-                ) {
-                    select_git_pair(ui, "HEAD", "UNCOMMITTED");
-                } else {
-                    super::show_all_files(ui);
-                }
-            })
-            .child(
-                label(format!("All changes ({})", files.len()))
-                    .text_size(px(12.))
-                    .style_with(move |s| {
-                        s.font_weight(if all_selected.get() {
-                            FontWeight::SEMIBOLD
-                        } else {
-                            FontWeight::MEDIUM
-                        })
-                    }),
-            )
-            .child(
-                muted(format!("+{total_add} −{total_del}"))
-                    .font_family(MONO_FONT)
-                    .text_size(px(10.5)),
-            ),
-    );
+    list = list.child(super::diff::render_all_files_row(
+        format!("All changes ({})", files.len()),
+        total_add,
+        total_del,
+        all_selected,
+        move || {
+            if matches!(
+                st.compare_ref.get_untracked().as_str(),
+                "STAGED" | "UNSTAGED" | "WORKDIR"
+            ) {
+                select_git_pair(ui, "HEAD", "UNCOMMITTED");
+            } else {
+                super::show_all_files(ui);
+            }
+        },
+    ));
 
     // Staged section
     let staged_len = staged_items.len();
@@ -1183,8 +1218,13 @@ pub fn render_working_tree_list(ui: Ui, data: &Value) -> AnyElement {
     } else {
         for sf in staged_items {
             let fname = sf["path"].as_str().unwrap_or("").to_owned();
+            let orig_path = sf["orig_path"].as_str().map(str::to_owned);
+            let conflicted = sf["conflicted"].as_bool().unwrap_or(false);
             let code = sf["index_code"].as_str().unwrap_or("M").to_owned();
-            staged_grp = staged_grp.child(working_file_row(ui, fname, code, true));
+            let stats = lookup_working_tree_stats(&stats_by_file, &compare_ref, true, &fname);
+            staged_grp = staged_grp.child(working_file_row(
+                ui, fname, orig_path, code, conflicted, true, stats,
+            ));
         }
     }
     list = list.child(staged_grp);
@@ -1223,19 +1263,32 @@ pub fn render_working_tree_list(ui: Ui, data: &Value) -> AnyElement {
     } else {
         for sf in unstaged_items {
             let fname = sf["path"].as_str().unwrap_or("").to_owned();
+            let orig_path = sf["orig_path"].as_str().map(str::to_owned);
+            let conflicted = sf["conflicted"].as_bool().unwrap_or(false);
             let code = if sf["untracked"].as_bool().unwrap_or(false) {
                 "U".to_owned()
             } else {
                 sf["worktree_code"].as_str().unwrap_or("M").to_owned()
             };
-            unstaged_grp = unstaged_grp.child(working_file_row(ui, fname, code, false));
+            let stats = lookup_working_tree_stats(&stats_by_file, &compare_ref, false, &fname);
+            unstaged_grp = unstaged_grp.child(working_file_row(
+                ui, fname, orig_path, code, conflicted, false, stats,
+            ));
         }
     }
     list = list.child(unstaged_grp);
     list.into_element()
 }
 
-fn working_file_row(ui: Ui, fname: String, code: String, is_staged_row: bool) -> impl IntoElement {
+fn working_file_row(
+    ui: Ui,
+    fname: String,
+    orig_path: Option<String>,
+    code: String,
+    conflicted: bool,
+    is_staged_row: bool,
+    stats: Option<(u64, u64)>,
+) -> impl IntoElement {
     let st = ui.review_state;
     let section = if st.compare_ref.get_untracked() == "UNCOMMITTED" {
         if is_staged_row { "staged" } else { "unstaged" }
@@ -1246,129 +1299,118 @@ fn working_file_row(ui: Ui, fname: String, code: String, is_staged_row: bool) ->
     let sel_key = key.clone();
     let is_sel = computed(move || st.selected_file.with(|s| s == &sel_key));
     let pending_path = fname.clone();
+    let pending_section = section.to_owned();
     let pending_cnt = computed(move || {
-        st.pending_comments
-            .with(|list| list.iter().filter(|c| c.path == pending_path).count())
+        st.pending_comments.with(|list| {
+            list.iter()
+                .filter(|c| {
+                    c.path == pending_path
+                        && (pending_section.is_empty()
+                            || c.section.is_empty()
+                            || c.section == pending_section)
+                })
+                .count()
+        })
     });
-    let short_name = fname.rsplit('/').next().unwrap_or(&fname).to_owned();
-    let badge_col = match code.as_str() {
-        "A" | "U" => SUCCESS,
-        "D" => DANGER,
-        "R" | "C" => ACCENT,
-        _ => MUTED,
-    };
 
     let click_path = fname.clone();
     let click_key = key.clone();
-    let fold_key = key.clone();
-    let fold_path = fname.clone();
+    let fold_title = if section.is_empty() {
+        fname.clone()
+    } else {
+        format!("{section} {fname}")
+    };
     let action_path = fname.clone();
     let menu_path = fname.clone();
     let action_title = format!(
         "{} file {fname}",
         if is_staged_row { "Unstage" } else { "Stage" }
     );
-
-    view()
-        .tooltip(hint_tooltip(fname.clone()))
-        .flex_row()
-        .items_center()
-        .gap_0p5()
-        .px_1()
-        .rounded(px(5.))
-        .bg(move || if is_sel.get() { SELECTED } else { CLEAR })
-        .hover(move |s| s.bg(move || if is_sel.get() { SELECTED } else { CARD_HOVER }))
-        .on_context_menu(move |ev: &nsh_core::ContextMenuEvent| {
-            let p = menu_path.clone();
-            let pos = ev.page_position;
-            ui.spawn(async move {
-                let p_stage = p.clone();
-                let p_discard = p.clone();
-                let p_copy = p.clone();
-                let items = vec![
-                    if is_staged_row {
-                        MenuItem::new("Unstage file").on_select(move || {
-                            run_unstage(ui, vec![p_stage.clone()], false);
-                        })
-                    } else {
-                        MenuItem::new("Stage file").on_select(move || {
-                            run_stage(ui, vec![p_stage.clone()], false);
-                        })
-                    },
-                    MenuItem::new("Discard changes…").on_select(move || {
-                        request_discard(ui, vec![p_discard.clone()]);
-                    }),
-                    MenuItem::separator(),
-                    MenuItem::new("Copy relative path").on_select(move || {
-                        copy_text(ui, p_copy.clone());
-                    }),
-                ];
-                popup_menu_at(items, pos).await;
-            });
-        })
-        .child(super::diff::fold_button(
-            ui,
-            fold_key,
-            format!("{section} {fold_path}"),
-        ))
+    let trailing = view()
+        .flex_shrink_0()
+        .tooltip(hint_tooltip(action_title.clone()).placement(Placement::Bottom))
         .child(
             canban_ui_kit::press_target()
-                .flex_1()
-                .min_w(px(0.))
-                .min_h(px(26.))
-                .px_1p5()
-                .py_0p5()
-                .flex_row()
+                .w(px(20.))
+                .h(px(20.))
                 .items_center()
-                .gap_1p5()
+                .justify_center()
+                .rounded(px(4.))
+                .bg(CLEAR)
+                .hover(|s| s.bg(INSET))
+                .focus(|s| s.border_1().border_color(ACCENT))
+                .accessibility_label(move || Some(action_title.clone().into()))
                 .on_press(move |_: &()| {
-                    let expected = if is_staged_row { "STAGED" } else { "UNSTAGED" };
-                    if !matches!(st.compare_ref.get_untracked().as_str(), "UNCOMMITTED")
-                        && st.compare_ref.get_untracked() != expected
-                    {
-                        select_git_pair(ui, "HEAD", expected);
-                        super::focus_file(ui, click_path.clone());
-                    } else {
-                        super::focus_file(ui, click_key.clone());
-                    }
-                })
-                .child(
-                    label(code)
-                        .font_family(MONO_FONT)
-                        .text_size(px(10.5))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(badge_col),
-                )
-                .child(
-                    label(short_name)
-                        .text_size(px(12.))
-                        .truncate()
-                        .flex_1()
-                        .min_w(px(0.)),
-                )
-                .child(dynamic(move || {
-                    let count = pending_cnt.get();
-                    if count > 0 {
-                        status(count.to_string(), Tone::Info).into_element()
-                    } else {
-                        view().into_element()
-                    }
-                })),
-        )
-        .child(
-            compact_action(
-                if is_staged_row { "−" } else { "+" },
-                Variant::Quiet,
-                move |_| {
                     if is_staged_row {
                         run_unstage(ui, vec![action_path.clone()], false);
                     } else {
                         run_stage(ui, vec![action_path.clone()], false);
                     }
-                },
-            )
-            .accessibility_label(move || Some(action_title.clone().into())),
+                })
+                .child(
+                    text(if is_staged_row { "−" } else { "+" })
+                        .font_family(MONO_FONT)
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(MUTED),
+                ),
         )
+        .into_element();
+
+    super::diff::render_file_row(
+        ui,
+        super::diff::FileRowSpec {
+            path: fname,
+            previous_path: orig_path,
+            status_code: code,
+            conflicted,
+            fold_key: key,
+            fold_title,
+            is_selected: is_sel,
+            pending_count: pending_cnt,
+            stats,
+        },
+        move || {
+            let expected = if is_staged_row { "STAGED" } else { "UNSTAGED" };
+            if !matches!(st.compare_ref.get_untracked().as_str(), "UNCOMMITTED")
+                && st.compare_ref.get_untracked() != expected
+            {
+                select_git_pair(ui, "HEAD", expected);
+                super::focus_file(ui, click_path.clone());
+            } else {
+                super::focus_file(ui, click_key.clone());
+            }
+        },
+        Some(trailing),
+    )
+    .on_context_menu(move |ev: &nsh_core::ContextMenuEvent| {
+        let p = menu_path.clone();
+        let pos = ev.page_position;
+        ui.spawn(async move {
+            let p_stage = p.clone();
+            let p_discard = p.clone();
+            let p_copy = p.clone();
+            let items = vec![
+                if is_staged_row {
+                    MenuItem::new("Unstage file").on_select(move || {
+                        run_unstage(ui, vec![p_stage.clone()], false);
+                    })
+                } else {
+                    MenuItem::new("Stage file").on_select(move || {
+                        run_stage(ui, vec![p_stage.clone()], false);
+                    })
+                },
+                MenuItem::new("Discard changes…").on_select(move || {
+                    request_discard(ui, vec![p_discard.clone()]);
+                }),
+                MenuItem::separator(),
+                MenuItem::new("Copy relative path").on_select(move || {
+                    copy_text(ui, p_copy.clone());
+                }),
+            ];
+            popup_menu_at(items, pos).await;
+        });
+    })
 }
 
 pub fn render_commit_composer(ui: Ui, data: Memo<std::sync::Arc<Value>>) -> impl IntoElement {

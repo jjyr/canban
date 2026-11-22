@@ -454,6 +454,133 @@ pub fn git_workdir_compare() -> serde_json::Value {
     })
 }
 
+pub fn git_file_list_showcase() -> (serde_json::Value, serde_json::Value) {
+    let mut refs = git_refs();
+    let long_path = "crates/ui/src/review/components/extremely_long_diff_card_header_filename_for_hover_tooltip_verification.rs";
+    let status_files = json!([
+        {
+            "path": "crates/ui/src/review/new_helper.rs",
+            "orig_path": null,
+            "index_code": "A",
+            "worktree_code": " ",
+            "staged": true,
+            "unstaged": false,
+            "untracked": false,
+            "conflicted": false
+        },
+        {
+            "path": "crates/ui/src/review/mod.rs",
+            "orig_path": null,
+            "index_code": "M",
+            "worktree_code": "M",
+            "staged": true,
+            "unstaged": true,
+            "untracked": false,
+            "conflicted": false
+        },
+        {
+            "path": "crates/ui/src/review/renamed_placeholder.rs",
+            "orig_path": "crates/ui/src/review/old_placeholder.rs",
+            "index_code": "R",
+            "worktree_code": " ",
+            "staged": true,
+            "unstaged": false,
+            "untracked": false,
+            "conflicted": false
+        },
+        {
+            "path": "crates/kanban/src/mod.rs",
+            "orig_path": null,
+            "index_code": " ",
+            "worktree_code": "M",
+            "staged": false,
+            "unstaged": true,
+            "untracked": false,
+            "conflicted": false
+        },
+        {
+            "path": long_path,
+            "orig_path": null,
+            "index_code": "?",
+            "worktree_code": "?",
+            "staged": false,
+            "unstaged": false,
+            "untracked": true,
+            "conflicted": false
+        }
+    ]);
+    refs["dirty_count"] = json!(5);
+    refs["staged_count"] = json!(3);
+    refs["unstaged_count"] = json!(3);
+    refs["status_files"] = status_files.clone();
+
+    let compare = json!({
+        "base_ref": "HEAD",
+        "compare_ref": "UNCOMMITTED",
+        "base_sha": "c207c08a91fe001234567890abcdef0123456789",
+        "compare_sha": "c207c08a91fe001234567890abcdef0123456789",
+        "three_dot": false,
+        "total_additions": 187,
+        "total_deletions": 52,
+        "truncated": false,
+        "cwd": "/example/project",
+        "commits": [],
+        "status_files": status_files,
+        "files": [
+            {
+                "filename": "crates/ui/src/review/new_helper.rs",
+                "section": "staged",
+                "status": "added",
+                "additions": 45,
+                "deletions": 0,
+                "patch": "@@ -0,0 +1,2 @@\n+pub fn helper() {}\n+pub fn helper_two() {}"
+            },
+            {
+                "filename": "crates/ui/src/review/mod.rs",
+                "section": "staged",
+                "status": "modified",
+                "additions": 18,
+                "deletions": 6,
+                "patch": "@@ -1,2 +1,2 @@\n-old staged\n+new staged"
+            },
+            {
+                "filename": "crates/ui/src/review/renamed_placeholder.rs",
+                "previous_filename": "crates/ui/src/review/old_placeholder.rs",
+                "section": "staged",
+                "status": "renamed",
+                "additions": 0,
+                "deletions": 0,
+                "patch": ""
+            },
+            {
+                "filename": "crates/ui/src/review/mod.rs",
+                "section": "unstaged",
+                "status": "modified",
+                "additions": 4,
+                "deletions": 2,
+                "patch": "@@ -1,2 +1,2 @@\n-new staged\n+working tree edit"
+            },
+            {
+                "filename": "crates/kanban/src/mod.rs",
+                "section": "unstaged",
+                "status": "modified",
+                "additions": 0,
+                "deletions": 14,
+                "patch": "@@ -1,2 +1 @@\n-removed line"
+            },
+            {
+                "filename": long_path,
+                "section": "unstaged",
+                "status": "added",
+                "additions": 120,
+                "deletions": 30,
+                "patch": "@@ -1,2 +1,2 @@\n-legacy long line\n+updated long path line"
+            }
+        ]
+    });
+    (refs, compare)
+}
+
 pub fn git_compare() -> serde_json::Value {
     json!({
         "base_ref": "main",

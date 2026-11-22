@@ -2503,6 +2503,7 @@ pub fn Gallery() -> impl IntoElement {
         std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
         Ok("review-working-tree"
             | "review-uncommitted"
+            | "review-file-list"
             | "review-async"
             | "review-large-diff"
             | "review-context-expand"
@@ -2566,6 +2567,17 @@ pub fn Gallery() -> impl IntoElement {
             st.prepared_lines.set(prepared.lines);
             st.prepared_hunks.set(prepared.hunks);
             st.compare_data.set(data);
+        }
+        if scene == "review-file-list" {
+            let st = ui.review_state;
+            let (mut refs, compare) = fixtures::git_file_list_showcase();
+            refs["commits"] = ui
+                .review_state
+                .refs_data
+                .with_untracked(|v| v["commits"].clone());
+            st.refs_data.set(refs);
+            let prepared = review::cache::ReadValue::new(compare);
+            review::apply_compare(ui, &prepared);
         }
         if scene == "review-async" {
             let st = ui.review_state;
@@ -2876,6 +2888,25 @@ pub fn Gallery() -> impl IntoElement {
                         refs["commits"].as_array().cloned().unwrap_or_default(),
                     );
                     ui.review_state.compare_data.set(fixtures::git_workdir_compare());
+                    ui.review_state.base_ref.set("HEAD".into());
+                    ui.review_state.compare_ref.set("UNCOMMITTED".into());
+                    ui.page.set("review".into());
+                }))
+                .child(action("Git File List & Tooltips", Variant::Secondary, move |_| {
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::workspace());
+                    ui.select_project("gallery-project".into());
+                    ui.card.set(String::new());
+                    ui.review.set(None);
+                    let (refs, compare) = fixtures::git_file_list_showcase();
+                    ui.review_state.mode.set("git".into());
+                    ui.review_state.refs_data.set(refs.clone());
+                    ui.review_state.log_branch.set("feat/diff-workbench".into());
+                    ui.review_state.log_commits.set(
+                        refs["commits"].as_array().cloned().unwrap_or_default(),
+                    );
+                    let prepared = review::cache::ReadValue::new(compare);
+                    review::apply_compare(ui, &prepared);
                     ui.review_state.base_ref.set("HEAD".into());
                     ui.review_state.compare_ref.set("UNCOMMITTED".into());
                     ui.page.set("review".into());

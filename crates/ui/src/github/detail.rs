@@ -1103,15 +1103,12 @@ fn files(ui: Ui, d: Signal<Draft>, data: &Value, loading: bool) -> AnyElement {
             .bg(INSET)
             .border_b_1()
             .border_color(BORDER)
-            .child(
-                label(path.clone())
-                    .flex_1()
-                    .min_w(px(0.))
-                    .truncate()
-                    .font_family(MONO_FONT)
-                    .text_size(px(12.))
-                    .font_weight(FontWeight::SEMIBOLD),
-            )
+            .child(crate::review::diff::diff_header_path(
+                path.clone(),
+                file["previous_filename"].as_str(),
+                FontWeight::SEMIBOLD,
+                true,
+            ))
             .child(badge(file_status))
             .child(
                 label(format!("+{additions}"))

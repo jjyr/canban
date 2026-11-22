@@ -179,12 +179,12 @@ pub fn diff_panel(p: ReviewPreview) -> impl IntoElement {
                                         "▾"
                                     }
                                 }))
-                                .child(
-                                    label(path.clone())
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .truncate()
-                                        .min_w(px(0.)),
-                                ),
+                                .child(diff::diff_header_path(
+                                    path.clone(),
+                                    None,
+                                    FontWeight::MEDIUM,
+                                    false,
+                                )),
                         )
                         .child(muted(stats))
                         .on_press(move |_: &()| {
