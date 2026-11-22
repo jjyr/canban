@@ -612,5 +612,23 @@ mod tests {
                 "{name} should not inline environment variables or expand raw CLI binary paths"
             );
         }
+
+        for (name, tpl) in [
+            ("reporting_task.txt", REPORTING_TASK_TEMPLATE),
+            ("reporting_mention.txt", REPORTING_MENTION_TEMPLATE),
+            ("reporting_interactive.txt", REPORTING_INTERACTIVE_TEMPLATE),
+        ] {
+            assert!(
+                tpl.contains("## Behavior") && tpl.contains("## Commands"),
+                "{name} should separate ## Behavior and ## Commands"
+            );
+            let (behavior, _) = tpl
+                .split_once("## Commands")
+                .expect("template has ## Commands section");
+            assert!(
+                !behavior.to_ascii_lowercase().contains("adopt"),
+                "{name} ## Behavior section should not leak `adopt` CLI terminology"
+            );
+        }
     }
 }

@@ -3213,10 +3213,11 @@ fn request_trigger_prompts_omit_duplicate_reply_for_comments_and_dedupe_completi
     let comment_prompt = capture_prompt(&card, &comment_attempt);
     assert!(
         comment_prompt.contains(
-            "You were mentioned (@developer) on this Card. Read the Card context, respond to the user's message below"
-        ) && comment_prompt.contains(
-            "Publish your response and complete this `@mention` assignment in a single CLI call"
-        ) && comment_prompt.contains("\"$CANBAN_CLI\" card update")
+            "You were mentioned (@developer) on this Card. Read the Card context and respond to the user's message below."
+        ) && comment_prompt.contains("## Behavior")
+            && comment_prompt.contains("## Commands")
+            && comment_prompt.contains("Finish this `@mention` in one report (no separate `reply`).")
+            && comment_prompt.contains("\"$CANBAN_CLI\" card update")
             && comment_prompt.contains("\"$CANBAN_CLI\" card adopt")
             && comment_prompt.contains("\"$CANBAN_CLI\" report --state")
             && !comment_prompt.contains("CANBAN_ENDPOINT=")
@@ -3311,7 +3312,11 @@ fn request_trigger_prompts_omit_duplicate_reply_for_comments_and_dedupe_completi
     let interactive_attempt = admit(&app, &interactive_req);
     let interactive_prompt = capture_prompt(&c2, &interactive_attempt);
     assert!(
-        interactive_prompt.contains("This is an interactive Card discussion session")
+        interactive_prompt.contains("## Behavior")
+            && interactive_prompt.contains("## Commands")
+            && interactive_prompt.contains(
+                "Interactive discussion: reply in the terminal during discussion; report only when a requested task finishes."
+            )
             && interactive_prompt.contains("\"$CANBAN_CLI\" card update")
             && interactive_prompt.contains("\"$CANBAN_CLI\" card adopt")
             && interactive_prompt.contains("\"$CANBAN_CLI\" report --state")
@@ -3354,7 +3359,9 @@ fn request_trigger_prompts_omit_duplicate_reply_for_comments_and_dedupe_completi
     let task_attempt = admit(&app, &task_req);
     let task_prompt = capture_prompt(&c3, &task_attempt);
     assert!(
-        task_prompt.contains("Report your outcome via CLI")
+        task_prompt.contains("## Behavior")
+            && task_prompt.contains("## Commands")
+            && task_prompt.contains("- Report outcome:")
             && task_prompt.contains("\"$CANBAN_CLI\" report --state")
             && task_prompt.contains("## Pending questions")
             && task_prompt.contains("\"$CANBAN_CLI\" reply --to")
@@ -4510,7 +4517,7 @@ fn card_create_mentions_launch_mention_reply_tasks_while_card_update_never_trigg
         assert_eq!(run.state, "queued");
         assert!(
             run.instruction.contains(&format!(
-                "You were mentioned (@{}) on this Card. Read the Card context, respond to the user's message in the Card title and description, and publish your reply to the Card discussion via the single `report` CLI command under Reporting.",
+                "You were mentioned (@{}) on this Card. Read the Card context and respond to the user's message in the Card title and description.",
                 run.profile.id
             ))
         );
@@ -4557,9 +4564,8 @@ fn card_create_mentions_launch_mention_reply_tasks_while_card_update_never_trigg
     .unwrap();
     let rendered_prompt = std::fs::read_to_string(app.home.join(rel_prompt)).unwrap();
     assert!(
-        rendered_prompt.contains(
-            "Publish your response and complete this `@mention` assignment in a single CLI call"
-        ) && !rendered_prompt.contains("## Pending questions"),
+        rendered_prompt.contains("Finish this `@mention` in one report (no separate `reply`).")
+            && !rendered_prompt.contains("## Pending questions"),
         "card mention prompt must use reporting_mention.txt and omit separate `reply --to` section"
     );
     app.call(

@@ -2849,7 +2849,7 @@ fn streamlined_prompt_omits_manifest_instruction_and_inlines_context_conditional
     assert!(!fresh_prompt.contains("## Card discussion"));
     assert!(!fresh_prompt.contains("## Earlier reports"));
     assert!(!fresh_prompt.contains("## Attachments"));
-    assert!(fresh_prompt.contains("--state <completed|backlog|blocked|failed>"));
+    assert!(fresh_prompt.contains("--state <completed|backlog|blocked|failed|working>"));
     assert!(fresh_prompt.contains("--state backlog"));
 
     // Finish initial request, add a human comment + attachment, and verify conditional sections appear.
@@ -3426,7 +3426,7 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
     git_identity(&wt);
     let term_entry = admit(&app, &req);
 
-    // Prompt teaches both user-confirmed Card updates and permission-gated `card adopt`.
+    // Prompt separates Behavior rules from CLI Commands (`card update` / `card adopt`).
     let prompt_rel = canban_context::capture(
         &app.home,
         &p,
@@ -3437,9 +3437,19 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
     )
     .unwrap();
     let prompt = std::fs::read_to_string(app.home.join(prompt_rel)).unwrap();
+    assert!(prompt.contains("## Behavior"));
+    assert!(prompt.contains("## Commands"));
     assert!(prompt.contains("card update"));
     assert!(prompt.contains("card adopt"));
-    assert!(prompt.contains("Ask the user for permission before starting implementation"));
+    assert!(prompt.contains("Edit repository files only when asked to implement."));
+    let behavior_section = prompt
+        .split_once("## Commands")
+        .map(|(before, _)| before)
+        .expect("prompt separates Behavior and Commands");
+    assert!(
+        !behavior_section.to_ascii_lowercase().contains("adopt"),
+        "Behavior section should describe actions without leaking `adopt` CLI terminology"
+    );
 
     // Validation check: `card.adopt` requires `--card` (or `CANBAN_CARD`) / `card_id`.
     assert!(

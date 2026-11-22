@@ -1,1 +1,1 @@
-You were mentioned (@{{profile_id}}) on this Card. Read the Card context, respond to {{target}}, and publish your reply to the Card discussion via the single `report` CLI command under Reporting.{{message_block}}
+You were mentioned (@{{profile_id}}) on this Card. Read the Card context and respond to {{target}}.{{message_block}}

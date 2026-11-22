@@ -33,6 +33,12 @@ Canban injects `CANBAN_CLI` and task environment variables when launching an Age
 | `CANBAN_SCHEDULE_RUN_ID` | Scheduled run ID (`scheduled:<project_id>:<short_id>`), injected into Cardless scheduled Terminal Agent runs. |
 | `CANBAN_SCHEDULE_ID` | Parent schedule state ID (`schedule:<project_id>:<workflow_id>:<rule_id>`), injected into Cardless scheduled runs. |
 
+## Session Behavior
+
+- **Discussion vs. implementation**: In interactive sessions, `@mention` runs, and manual Card terminals, edit repository files only when asked to implement. If the Card is not yet in `develop`, move it to `develop` in this session first.
+- **Card updates**: Update the Card title or body only with user-confirmed design points or when asked.
+- **Reporting**: In interactive sessions, reply in the terminal during discussion and run `report` only when a requested task finishes. In dedicated `@mention` assignments, publish and finish in one `report` call (no separate `reply`).
+
 ## Core Execution Commands
 
 ### Report task or comment outcome
@@ -49,10 +55,6 @@ Canban injects `CANBAN_CLI` and task environment variables when launching an Age
 - `backlog`: Card is already implemented, obsolete, or not actionable right now; returns the Card to Backlog with your explanation.
 - `failed`: Unrecoverable execution error.
 - `working`: Optional interim progress update without finishing the assignment.
-
-> **Interactive sessions vs. comment tasks**:
-> - In an **interactive Card session**, reply directly in the terminal for initial discussion; only run `report` once the user asks you to complete a concrete task.
-> - In a **dedicated `@mention` comment assignment**, publish your answer and finish in a single `report --state completed` call (do not call `reply` separately).
 
 ### Report batch merge queue outcome (`batch report`)
 
@@ -87,7 +89,7 @@ Read the current Card summary (uses `CANBAN_CARD` + `CANBAN_PROJECT` automatical
 "$CANBAN_CLI" card show --fields number,title,body,stage,revision
 ```
 
-Update the Card title or Markdown description only with user-confirmed design decisions or when explicitly requested:
+Update the Card title or Markdown body:
 
 ```sh
 "$CANBAN_CLI" card update [--title 'Updated title'] --file "$CANBAN_RUN_DIR/card.md"
@@ -95,10 +97,10 @@ Update the Card title or Markdown description only with user-confirmed design de
 
 ### Adopt a workflow stage (`card adopt`)
 
-In an interactive session on a Card not yet in `develop`, once the user authorizes implementation, adopt `develop` first so the current session takes over without spawning a duplicate scheduled run:
+Move the current Card to a stage (default: `develop`) and bind its workflow to the current session without spawning a duplicate scheduled run:
 
 ```sh
-"$CANBAN_CLI" card adopt --stage develop
+"$CANBAN_CLI" card adopt [--stage develop]
 ```
 
 ### Stage local diff review comments (`review draft`)
