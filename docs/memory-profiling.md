@@ -11,10 +11,14 @@ Canban exposes a persistent `app.subscribe` event stream and conditional
 `app.state {after: cursor}`. Both local UI subscription and per-host remote
 supervisors receive push invalidation events over dedicated persistent
 `app.subscribe` streams instead of polling a cursor or retaining a full JSON
-snapshot periodically. A push invalidation triggers a debounced conditional
-`app.state {after: cursor}` fetch once (or direct state fetch on local UI),
-while remote supervision retains only cursor/GitHub metadata beside its typed
-offline cache.
+snapshot periodically. On `canban-ui`, `UiBackend::subscribe` delivers an async
+`tokio::sync::mpsc::UnboundedReceiver<BackendEvent>` awaited directly inside
+`ui.spawn`, covering both snapshot invalidations (`Host`) and side-channel
+payloads (`UpdateChanged`, `UtilitiesChanged`, `UsageChanged`, `HerdrInstall`)
+without periodic UI polling timers. A push invalidation triggers a debounced
+conditional `app.state {after: cursor}` fetch once (or direct state fetch on
+local UI), while remote supervision retains only cursor/GitHub metadata beside
+its typed offline cache.
 
 The cursor includes persistent server identity, a fresh per-boot instance ID, SQLite
 connection total changes, an explicit in-memory invalidation generation, and runtime

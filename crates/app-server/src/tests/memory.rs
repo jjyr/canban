@@ -430,3 +430,51 @@ fn transient_merge_marker_removal_invalidates_without_a_database_write() {
                 .is_empty()
     );
 }
+
+#[test]
+fn active_update_checks_push_update_changed_progress_without_ui_polling() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let app = AppServer::open(home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    app.config.write().unwrap().hc = "/usr/bin/false".into();
+    let _running = app
+        .start_with_listen(Some(ServerListenConfig {
+            tailscale: false,
+            port: 0,
+            listen: Some("127.0.0.1:0".into()),
+        }))
+        .unwrap();
+
+    let client = AppClient::connect_home(home.clone(), Path::new("/bin/echo")).unwrap();
+    let mut push_rx = client.subscribe_topics(&["update"]);
+    // Give subscribe stream a brief moment to complete handshake before writing updater state.
+    std::thread::sleep(Duration::from_millis(60));
+
+    let mut state = canban_updater::load_state(&home);
+    state.phase = "downloading".into();
+    state.progress = 35;
+    canban_updater::save_state(&home, &state).unwrap();
+
+    let first = push_rx
+        .blocking_recv()
+        .expect("expected initial update.changed push");
+    match first {
+        ClientPushEvent::UpdateChanged(v) => {
+            assert_eq!(v["state"]["phase"], "downloading");
+            assert_eq!(v["state"]["progress"], 35);
+        }
+        other => panic!("unexpected ClientPushEvent: {other:?}"),
+    }
+
+    state.progress = 85;
+    canban_updater::save_state(&home, &state).unwrap();
+    let second = push_rx
+        .blocking_recv()
+        .expect("expected progress update.changed push");
+    match second {
+        ClientPushEvent::UpdateChanged(v) => {
+            assert_eq!(v["state"]["progress"], 85);
+        }
+        other => panic!("unexpected ClientPushEvent: {other:?}"),
+    }
+}

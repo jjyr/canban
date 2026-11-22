@@ -12,13 +12,17 @@ use canban_types::{AppEvent, Config, HostSummary, SavedHost, Snapshot, SyncActio
 use serde_json::{Value, json};
 use std::{
     path::PathBuf,
-    sync::{Arc, OnceLock, mpsc},
+    sync::{Arc, OnceLock},
 };
 
-/// Host-scoped event delivered by a [`UiBackend`] subscription.
+/// Host-scoped event or side-channel push payload delivered by a [`UiBackend`] subscription.
 #[derive(Clone, Debug)]
 pub enum BackendEvent {
     Host { host_id: String, event: AppEvent },
+    UpdateChanged { host_id: String, state: Value },
+    UtilitiesChanged { host_id: String, state: Value },
+    UsageChanged { host_id: String, state: Value },
+    HerdrInstall { host_id: String, state: Value },
 }
 
 impl BackendEvent {
@@ -38,13 +42,18 @@ impl BackendEvent {
 
     pub fn host_id(&self) -> &str {
         match self {
-            Self::Host { host_id, .. } => host_id,
+            Self::Host { host_id, .. }
+            | Self::UpdateChanged { host_id, .. }
+            | Self::UtilitiesChanged { host_id, .. }
+            | Self::UsageChanged { host_id, .. }
+            | Self::HerdrInstall { host_id, .. } => host_id,
         }
     }
 
-    pub fn app_event(&self) -> &AppEvent {
+    pub fn app_event(&self) -> Option<&AppEvent> {
         match self {
-            Self::Host { event, .. } => event,
+            Self::Host { event, .. } => Some(event),
+            _ => None,
         }
     }
 }
@@ -91,8 +100,8 @@ pub trait UiBackend: Send + Sync + 'static {
         None
     }
 
-    /// Subscribe to host/application change events.
-    fn subscribe(&self) -> mpsc::Receiver<BackendEvent>;
+    /// Subscribe to async host/application change events and side-channel push updates.
+    fn subscribe(&self) -> tokio::sync::mpsc::UnboundedReceiver<BackendEvent>;
 
     /// Return the display home directory path for `host_id` (e.g. `~/.canban`).
     fn home_for(&self, host_id: &str) -> String {
@@ -230,7 +239,7 @@ pub fn server_notice() -> Option<String> {
     BACKEND.get().and_then(|b| b.server_notice())
 }
 
-pub fn subscribe() -> Option<mpsc::Receiver<BackendEvent>> {
+pub fn subscribe() -> Option<tokio::sync::mpsc::UnboundedReceiver<BackendEvent>> {
     BACKEND.get().map(|b| b.subscribe())
 }
 
@@ -465,38 +474,83 @@ impl UiBackend for LocalBackend {
         self.app.server_notice().map(str::to_owned)
     }
 
-    fn subscribe(&self) -> mpsc::Receiver<BackendEvent> {
-        let (tx, rx) = mpsc::channel();
+    fn subscribe(&self) -> tokio::sync::mpsc::UnboundedReceiver<BackendEvent> {
         if let Some(hosts) = &self.hosts {
-            let upstream = hosts.subscribe();
-            let _ = std::thread::Builder::new()
-                .name("ui-backend-events".into())
-                .spawn(move || {
-                    while let Ok(ev) = upstream.recv() {
-                        if tx
-                            .send(BackendEvent::Host {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut upstream = hosts.subscribe_push();
+            drop(hosts.runtime_handle().spawn(async move {
+                loop {
+                    let mapped = match upstream.recv().await {
+                        Ok(canban_app_server::hosts::HostPushEvent::State(ev)) => {
+                            BackendEvent::Host {
                                 host_id: ev.host_id,
                                 event: ev.event,
+                            }
+                        }
+                        Ok(canban_app_server::hosts::HostPushEvent::UpdateChanged {
+                            host_id,
+                            state,
+                        }) => BackendEvent::UpdateChanged { host_id, state },
+                        Ok(canban_app_server::hosts::HostPushEvent::UtilitiesChanged {
+                            host_id,
+                            state,
+                        }) => BackendEvent::UtilitiesChanged { host_id, state },
+                        Ok(canban_app_server::hosts::HostPushEvent::UsageChanged {
+                            host_id,
+                            state,
+                        }) => BackendEvent::UsageChanged { host_id, state },
+                        Ok(canban_app_server::hosts::HostPushEvent::HerdrInstall {
+                            host_id,
+                            state,
+                        }) => BackendEvent::HerdrInstall { host_id, state },
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            BackendEvent::local(AppEvent::Changed {
+                                topic: "resync",
+                                card_id: None,
                             })
-                            .is_err()
-                        {
-                            break;
                         }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    };
+                    if tx.send(mapped).is_err() {
+                        break;
                     }
-                });
+                }
+            }));
+            rx
         } else {
-            let upstream = self.app.subscribe();
-            let _ = std::thread::Builder::new()
-                .name("ui-backend-events".into())
-                .spawn(move || {
-                    while let Ok(ev) = upstream.recv() {
-                        if tx.send(BackendEvent::local(ev)).is_err() {
-                            break;
+            self.app.subscribe_mapped(
+                &["snapshot", "update", "utilities", "usage", "herdr"],
+                |ev| match ev {
+                    canban_app_server::ClientPushEvent::State(app_ev) => {
+                        BackendEvent::local(app_ev)
+                    }
+                    canban_app_server::ClientPushEvent::UpdateChanged(state) => {
+                        BackendEvent::UpdateChanged {
+                            host_id: "local".into(),
+                            state,
                         }
                     }
-                });
+                    canban_app_server::ClientPushEvent::UtilitiesChanged(state) => {
+                        BackendEvent::UtilitiesChanged {
+                            host_id: "local".into(),
+                            state,
+                        }
+                    }
+                    canban_app_server::ClientPushEvent::UsageChanged(state) => {
+                        BackendEvent::UsageChanged {
+                            host_id: "local".into(),
+                            state,
+                        }
+                    }
+                    canban_app_server::ClientPushEvent::HerdrInstall(state) => {
+                        BackendEvent::HerdrInstall {
+                            host_id: "local".into(),
+                            state,
+                        }
+                    }
+                },
+            )
         }
-        rx
     }
 
     fn home_for(&self, host_id: &str) -> String {
@@ -635,8 +689,8 @@ mod tests {
             "remote-1".into()
         }
 
-        fn subscribe(&self) -> mpsc::Receiver<BackendEvent> {
-            let (tx, rx) = mpsc::channel();
+        fn subscribe(&self) -> tokio::sync::mpsc::UnboundedReceiver<BackendEvent> {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             let _ = tx.send(BackendEvent::host(
                 "remote-1",
                 AppEvent::Changed {
@@ -644,6 +698,10 @@ mod tests {
                     card_id: None,
                 },
             ));
+            let _ = tx.send(BackendEvent::UsageChanged {
+                host_id: "remote-1".into(),
+                state: json!({"readings":[]}),
+            });
             rx
         }
     }
@@ -662,15 +720,18 @@ mod tests {
         );
         assert!(!backend.has_host_registry());
         assert_eq!(backend.local_home(), None);
-        let rx = backend.subscribe();
-        let ev = rx.recv().unwrap();
+        let mut rx = backend.subscribe();
+        let ev = rx.blocking_recv().unwrap();
         assert_eq!(ev.host_id(), "remote-1");
         assert!(matches!(
             ev.app_event(),
-            AppEvent::Changed {
+            Some(AppEvent::Changed {
                 topic: "resync",
                 card_id: None
-            }
+            })
         ));
+        let side = rx.blocking_recv().unwrap();
+        assert_eq!(side.host_id(), "remote-1");
+        assert!(side.app_event().is_none());
     }
 }

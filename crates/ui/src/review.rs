@@ -955,7 +955,9 @@ pub(crate) fn handle_host_events(ui: Ui, events: &[crate::backend::BackendEvent]
     let project = ui.project.get_untracked();
     let mut active_changed = false;
     for event in events {
-        let canban_types::AppEvent::Changed { topic, card_id } = event.app_event();
+        let Some(canban_types::AppEvent::Changed { topic, card_id }) = event.app_event() else {
+            continue;
+        };
         if !matches!(*topic, "resync" | "review") {
             continue;
         }

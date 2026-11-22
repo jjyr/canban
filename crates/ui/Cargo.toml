@@ -45,6 +45,7 @@ canban-notifications.workspace = true
 canban-terminal = { workspace = true, default-features = false }
 canban-ui-kit.workspace = true
 canban-app-server = { workspace = true, optional = true }
+tokio = { version = "1", default-features = false, features = ["sync"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 nsh-platform-macos.workspace = true

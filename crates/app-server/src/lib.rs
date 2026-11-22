@@ -1208,7 +1208,7 @@ pub mod network;
 pub mod representation;
 pub mod startup_progress;
 mod state;
-pub use client::{AppClient, BackendOlder, ClientEndpoint, ConnectProgress};
+pub use client::{AppClient, BackendOlder, ClientEndpoint, ClientPushEvent, ConnectProgress};
 mod activity;
 mod adoption;
 mod agents;

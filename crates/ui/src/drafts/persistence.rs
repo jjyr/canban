@@ -14,9 +14,23 @@ use std::{
 
 static SERVICE: OnceLock<Service> = OnceLock::new();
 static ERROR_EPOCH: AtomicU64 = AtomicU64::new(0);
+static ERROR_WATCH: OnceLock<tokio::sync::watch::Sender<u64>> = OnceLock::new();
+
+fn error_watch() -> &'static tokio::sync::watch::Sender<u64> {
+    ERROR_WATCH.get_or_init(|| tokio::sync::watch::channel(0).0)
+}
+
+pub fn bump_error_epoch() {
+    let next = ERROR_EPOCH.fetch_add(1, Ordering::Relaxed) + 1;
+    let _ = error_watch().send(next);
+}
 
 pub fn error_epoch() -> u64 {
     ERROR_EPOCH.load(Ordering::Relaxed)
+}
+
+pub fn subscribe_error_epoch() -> tokio::sync::watch::Receiver<u64> {
+    error_watch().subscribe()
 }
 #[derive(Default)]
 struct Entry {
@@ -127,14 +141,14 @@ pub fn start(backend: Arc<dyn crate::backend::UiBackend>) -> Result<()> {
                             entry.saved = value;
                             if !entry.error.is_empty() {
                                 entry.error.clear();
-                                ERROR_EPOCH.fetch_add(1, Ordering::Relaxed);
+                                bump_error_epoch();
                             }
                         }
                         Err(error) => {
                             let next_err = format!("Draft not saved: {error:#}");
                             if entry.error != next_err {
                                 entry.error = next_err;
-                                ERROR_EPOCH.fetch_add(1, Ordering::Relaxed);
+                                bump_error_epoch();
                             }
                         }
                     }
@@ -167,7 +181,7 @@ pub fn queue(key: &str, data: Value) {
     entry.latest = data.clone();
     if !entry.error.is_empty() {
         entry.error.clear();
-        ERROR_EPOCH.fetch_add(1, Ordering::Relaxed);
+        bump_error_epoch();
     }
     let _ = service.tx.send(Message::Write(key.into(), data));
 }

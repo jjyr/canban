@@ -505,6 +505,10 @@ impl HostRegistry {
         self.push_tx.subscribe()
     }
 
+    pub fn runtime_handle(&self) -> &tokio::runtime::Handle {
+        &self.runtime_handle
+    }
+
     fn emit(&self, host_id: &str, event: AppEvent) {
         let event = HostEvent {
             host_id: host_id.into(),
@@ -3014,8 +3018,12 @@ async fn remote_host_supervisor(
                 after_revision,
                 has_tunnel,
             } => {
-                let open_fut =
-                    client::open_async_subscribe(&endpoint, &after_revision, &["snapshot"], None);
+                let open_fut = client::open_async_subscribe(
+                    &endpoint,
+                    &after_revision,
+                    &["snapshot", "usage"],
+                    None,
+                );
                 tokio::pin!(open_fut);
                 let subscribe_res = loop {
                     tokio::select! {

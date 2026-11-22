@@ -1285,3 +1285,197 @@ fn idle_remote_host_receives_heartbeats_without_polling_app_state() {
     let _ = server_thread.join();
     drop(local_running);
 }
+
+#[test]
+fn remote_host_supervisor_forwards_usage_changed_side_channel() {
+    let dir = tempfile::tempdir().unwrap();
+    let local_home = dir.path().join("local-home");
+    let local_app = AppServer::open(local_home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let local_running = local_app.start_with_listen(None).unwrap();
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let stop_srv = Arc::new(AtomicBool::new(false));
+    let stop_srv_clone = stop_srv.clone();
+    let (sub_topics_tx, sub_topics_rx) = mpsc::channel::<Vec<String>>();
+
+    let server_thread = std::thread::spawn(move || {
+        let mut workers = Vec::new();
+        while !stop_srv_clone.load(Ordering::SeqCst) {
+            let Ok((stream, _)) = listener.accept() else {
+                break;
+            };
+            if stop_srv_clone.load(Ordering::SeqCst) {
+                break;
+            }
+            let stop_w = stop_srv_clone.clone();
+            let sub_tx_w = sub_topics_tx.clone();
+            workers.push(std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut writer = stream;
+                let snap_val = serde_json::to_value(Snapshot::default()).unwrap();
+                let cfg_val = serde_json::to_value(Config::default()).unwrap();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    let req: Value = serde_json::from_str(&line).unwrap_or_default();
+                    let id = req["id"].clone();
+                    match req["method"].as_str().unwrap_or("") {
+                        "app.ping" => {
+                            let _ = writeln!(
+                                writer,
+                                "{}",
+                                json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "result": {
+                                        "api_version": API_VERSION,
+                                        "server_id": "srv-mock-usage",
+                                        "build": {
+                                            "version": env!("CARGO_PKG_VERSION"),
+                                            "api": API_VERSION,
+                                            "platform": "linux-x86_64"
+                                        }
+                                    }
+                                })
+                            );
+                            let _ = writer.flush();
+                        }
+                        "app.state" => {
+                            let rev = json!(["srv-mock-usage", "inst-1", 1, 0, 0]);
+                            let changed = req["params"]["after"] != rev;
+                            let mut res = json!({
+                                "revision": rev,
+                                "changed": changed,
+                                "server_id": "srv-mock-usage",
+                                "github_revision": 0,
+                            });
+                            if changed {
+                                res["snapshot"] = snap_val.clone();
+                                res["config"] = cfg_val.clone();
+                                res["home"] = json!("/tmp/mock-usage");
+                                res["hostname"] = json!("mock-usage");
+                            }
+                            let _ = writeln!(
+                                writer,
+                                "{}",
+                                json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "result": res,
+                                })
+                            );
+                            let _ = writer.flush();
+                        }
+                        "app.subscribe" => {
+                            let topics: Vec<String> = req["params"]["topics"]
+                                .as_array()
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(Value::as_str)
+                                        .map(str::to_owned)
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            let _ = sub_tx_w.send(topics);
+                            let rev = json!(["srv-mock-usage", "inst-1", 1, 0, 0]);
+                            let _ = writeln!(
+                                writer,
+                                "{}",
+                                json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "result": {
+                                        "subscribed": true,
+                                        "server_id": "srv-mock-usage",
+                                        "api_version": API_VERSION,
+                                        "revision": rev,
+                                        "changed": false,
+                                        "github_revision": 0,
+                                        "heartbeat_ms": 100,
+                                    }
+                                })
+                            );
+                            let _ = writeln!(
+                                writer,
+                                "{}",
+                                json!({
+                                    "jsonrpc": "2.0",
+                                    "method": "usage.changed",
+                                    "params": {
+                                        "seq": 1,
+                                        "state": {
+                                            "readings": [{"provider": "codex", "used": 42}],
+                                            "busy": false,
+                                        }
+                                    }
+                                })
+                            );
+                            let _ = writer.flush();
+                            while !stop_w.load(Ordering::SeqCst) {
+                                std::thread::sleep(Duration::from_millis(25));
+                            }
+                            break;
+                        }
+                        _ => break,
+                    }
+                }
+            }));
+        }
+        for w in workers {
+            let _ = w.join();
+        }
+    });
+
+    let local_client = AppClient::connect_home(local_home, Path::new("/bin/echo")).unwrap();
+    let registry = HostRegistry::new(local_client);
+    let mut push_rx = registry.subscribe_push();
+
+    registry
+        .add_host(SavedHost {
+            id: "remote-usage".into(),
+            name: "Remote Usage".into(),
+            transport: HostTransport::Tcp {
+                addr: addr.clone(),
+                token: "test-token".into(),
+            },
+            ssh_target: None,
+            server_id: None,
+            enabled: true,
+            added_at: now(),
+        })
+        .unwrap();
+
+    let subscribed_topics = sub_topics_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(subscribed_topics.iter().any(|t| t == "snapshot"));
+    assert!(subscribed_topics.iter().any(|t| t == "usage"));
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        match push_rx.try_recv() {
+            Ok(crate::hosts::HostPushEvent::UsageChanged { host_id, state })
+                if host_id == "remote-usage" =>
+            {
+                assert_eq!(state["readings"][0]["provider"], "codex");
+                assert_eq!(state["readings"][0]["used"], 42);
+                break;
+            }
+            Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "Expected HostPushEvent::UsageChanged for remote-usage"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => panic!("Unexpected push_rx error: {e:?}"),
+        }
+    }
+
+    stop_srv.store(true, Ordering::SeqCst);
+    drop(registry);
+    let _ = std::net::TcpStream::connect(&addr);
+    let _ = server_thread.join();
+    drop(local_running);
+}

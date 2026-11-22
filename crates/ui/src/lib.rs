@@ -126,12 +126,13 @@ pub(crate) fn workspace_root() -> impl IntoElement {
         .set(backend::server_notice().unwrap_or_default());
     updates::restore(ui);
     links::install(ui);
-    let last_draft_err_epoch = stored(drafts::persistence::error_epoch());
-    set_interval(std::time::Duration::from_millis(250), move || {
-        let epoch = drafts::persistence::error_epoch();
-        if last_draft_err_epoch.get() != epoch {
-            last_draft_err_epoch.replace(epoch);
-            ui.draft_status.update(|n| *n += 1);
+    let mut draft_err_rx = drafts::persistence::subscribe_error_epoch();
+    ui.spawn(async move {
+        while draft_err_rx.changed().await.is_ok() {
+            let Some(cur) = ui.draft_status.try_get() else {
+                break;
+            };
+            let _ = ui.draft_status.try_set(cur.wrapping_add(1));
         }
     });
     commands::bindings(ui);
@@ -193,46 +194,86 @@ pub(crate) fn workspace_root() -> impl IntoElement {
         }
     });
     review::init(ui);
-    let events = stored(backend::subscribe());
-    let dirty = signal(false);
-    set_interval(std::time::Duration::from_millis(250), move || {
-        let changed = events.with(|slot| {
-            slot.as_ref()
-                .map(|rx| rx.try_iter().collect::<Vec<_>>())
-                .unwrap_or_default()
+    if let Some(mut events_rx) = backend::subscribe() {
+        ui.spawn(async move {
+            while let Some(first) = events_rx.recv().await {
+                let mut events = vec![first];
+                while let Ok(more) = events_rx.try_recv() {
+                    events.push(more);
+                }
+                handle_backend_events(ui, events);
+            }
         });
-        if changed.iter().any(|e| {
-            matches!(
+    }
+    frame::screen(ui)
+}
+
+pub(crate) fn handle_backend_events(ui: Ui, events: Vec<backend::BackendEvent>) {
+    if ui.snapshot_ready.try_get().is_none() {
+        return;
+    }
+    let mut host_events = Vec::new();
+    for ev in events {
+        match ev {
+            backend::BackendEvent::UpdateChanged { host_id, state } => {
+                if host_id == "local" {
+                    updates::apply_push(ui, state);
+                }
+            }
+            backend::BackendEvent::UtilitiesChanged { host_id, state } => {
+                if host_id == "local" {
+                    utilities::apply_push(ui, state);
+                }
+            }
+            backend::BackendEvent::UsageChanged { host_id, state } => {
+                utilities::apply_usage_push(ui, &host_id, state);
+            }
+            backend::BackendEvent::HerdrInstall { .. } => {}
+            ev @ backend::BackendEvent::Host { .. } => {
+                host_events.push(ev);
+            }
+        }
+    }
+    if host_events.is_empty() {
+        return;
+    }
+    if host_events.iter().any(|e| {
+        matches!(
+            e.app_event(),
+            Some(canban_types::AppEvent::Changed {
+                topic: "resync",
+                ..
+            })
+        )
+    }) {
+        ui.notification_resync.replace(true);
+    }
+    if host_events.iter().any(|e| {
+        e.host_id() == "local"
+            && matches!(
                 e.app_event(),
-                canban_types::AppEvent::Changed {
+                Some(canban_types::AppEvent::Changed {
                     topic: "resync",
                     ..
-                }
+                })
             )
-        }) {
-            ui.notification_resync.replace(true);
-        }
-        if changed.iter().any(|e| {
-            matches!(
-                e.app_event(),
-                canban_types::AppEvent::Changed {
-                    topic: "github" | "resync",
-                    ..
-                }
-            )
-        }) {
-            ui.github.epoch.update(|v| *v += 1);
-        }
-        review::handle_host_events(ui, &changed);
-        if !changed.is_empty() {
-            dirty.set(true);
-        }
-        if dirty.get_untracked() && !ui.refreshing.get_untracked() {
-            dirty.set(false);
-            refresh(ui);
-        }
-    });
-    frame::screen(ui)
+    }) {
+        updates::refresh(ui);
+        utilities::refresh(ui);
+    }
+    if host_events.iter().any(|e| {
+        matches!(
+            e.app_event(),
+            Some(canban_types::AppEvent::Changed {
+                topic: "github" | "resync",
+                ..
+            })
+        )
+    }) {
+        ui.github.epoch.update(|v| *v += 1);
+    }
+    review::handle_host_events(ui, &host_events);
+    refresh(ui);
 }
 
 #[cfg(feature = "local-host")]
@@ -281,4 +322,191 @@ fn run_application(ran_window: &mut bool) -> Result<()> {
         anyhow::bail!("Native application exited with an error");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod push_tests {
+    use super::*;
+    use serde_json::{Value, json};
+    use std::sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    };
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn handle_backend_events_applies_side_channels_and_guards_pending_utilities() {
+        static EVENTS_TX: OnceLock<tokio::sync::mpsc::UnboundedSender<backend::BackendEvent>> =
+            OnceLock::new();
+        static PENDING_ON: AtomicBool = AtomicBool::new(false);
+        static OBSERVED_PHASE: Mutex<String> = Mutex::new(String::new());
+        static OBSERVED_THEME: Mutex<String> = Mutex::new(String::new());
+        static OBSERVED_USAGE: Mutex<Value> = Mutex::new(Value::Null);
+
+        #[component]
+        fn ProbeRoot() -> impl IntoElement {
+            let ui = Ui::new();
+            ui.snapshot_ready.set(true);
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let _ = EVENTS_TX.set(tx);
+            ui.spawn(async move {
+                while let Some(first) = rx.recv().await {
+                    let mut batch = vec![first];
+                    while let Ok(more) = rx.try_recv() {
+                        batch.push(more);
+                    }
+                    if PENDING_ON.load(Ordering::SeqCst) {
+                        ui.pending_methods.update(|s| {
+                            s.insert("utilities.configure");
+                        });
+                    } else {
+                        ui.pending_methods.update(|s| {
+                            s.remove("utilities.configure");
+                        });
+                    }
+                    handle_backend_events(ui, batch);
+                    *OBSERVED_PHASE.lock().unwrap() = ui
+                        .update
+                        .with_untracked(|v| v["state"]["phase"].as_str().unwrap_or("").to_owned());
+                    *OBSERVED_THEME.lock().unwrap() = ui.utility.with_untracked(|v| {
+                        v["preferences"]["theme"].as_str().unwrap_or("").to_owned()
+                    });
+                    *OBSERVED_USAGE.lock().unwrap() = ui.usage.get_untracked();
+                }
+            });
+            view()
+        }
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_time()
+            .build()
+            .unwrap();
+        let mut core = nsh_core::Core::new(
+            nsh_core::ApproxTextEngine,
+            nsh_core::geometry::size(px(300.), px(200.)),
+        );
+        core.set_task_runtime(runtime.handle().clone());
+        core.mount_root(&nsh_core::element::Root::of::<ProbeRoot>());
+        core.run_component_tasks();
+        core.commit();
+
+        let tx = EVENTS_TX.get().unwrap();
+        // Remote update.changed is ignored; local update.changed updates ui.update immediately.
+        tx.send(backend::BackendEvent::UpdateChanged {
+            host_id: "remote-1".into(),
+            state: json!({"state": {"phase": "ignored"}}),
+        })
+        .unwrap();
+        tx.send(backend::BackendEvent::UpdateChanged {
+            host_id: "local".into(),
+            state: json!({"state": {"phase": "downloading", "progress": 60}}),
+        })
+        .unwrap();
+        tx.send(backend::BackendEvent::UtilitiesChanged {
+            host_id: "local".into(),
+            state: json!({"preferences": {"theme": "nord"}}),
+        })
+        .unwrap();
+        // Mismatched usage host is ignored; matching local host applies.
+        tx.send(backend::BackendEvent::UsageChanged {
+            host_id: "other-host".into(),
+            state: json!({"readings": [{"provider": "ignored"}]}),
+        })
+        .unwrap();
+        tx.send(backend::BackendEvent::UsageChanged {
+            host_id: "local".into(),
+            state: json!({"readings": [{"provider": "codex", "used": 17}]}),
+        })
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            core.run_component_tasks();
+            core.commit();
+            if OBSERVED_PHASE.lock().unwrap().as_str() == "downloading"
+                && OBSERVED_THEME.lock().unwrap().as_str() == "nord"
+                && OBSERVED_USAGE.lock().unwrap()["readings"][0]["used"] == 17
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(OBSERVED_PHASE.lock().unwrap().as_str(), "downloading");
+        assert_eq!(OBSERVED_THEME.lock().unwrap().as_str(), "nord");
+        assert_eq!(OBSERVED_USAGE.lock().unwrap()["host_id"], "local");
+
+        // Optimistic `utilities.configure` in flight blocks overwriting `ui.utility`.
+        PENDING_ON.store(true, Ordering::SeqCst);
+        tx.send(backend::BackendEvent::UtilitiesChanged {
+            host_id: "local".into(),
+            state: json!({"preferences": {"theme": "stale-theme"}}),
+        })
+        .unwrap();
+        for _ in 0..10 {
+            core.run_component_tasks();
+            core.commit();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            OBSERVED_THEME.lock().unwrap().as_str(),
+            "nord",
+            "pending utilities.configure must protect optimistic preference state"
+        );
+
+        drop(core);
+        drop(runtime);
+    }
+
+    #[test]
+    fn draft_error_watch_wakes_ui_spawn_consumer_without_polling() {
+        static DRAFT_STATUS_VAL: AtomicU64 = AtomicU64::new(0);
+
+        #[component]
+        fn ProbeDrafts() -> impl IntoElement {
+            let ui = Ui::new();
+            let mut rx = drafts::persistence::subscribe_error_epoch();
+            ui.spawn(async move {
+                while rx.changed().await.is_ok() {
+                    if let Some(cur) = ui.draft_status.try_get() {
+                        let next = cur.wrapping_add(1);
+                        let _ = ui.draft_status.try_set(next);
+                        DRAFT_STATUS_VAL.store(next, Ordering::SeqCst);
+                    }
+                }
+            });
+            view()
+        }
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_time()
+            .build()
+            .unwrap();
+        let mut core = nsh_core::Core::new(
+            nsh_core::ApproxTextEngine,
+            nsh_core::geometry::size(px(300.), px(200.)),
+        );
+        core.set_task_runtime(runtime.handle().clone());
+        core.mount_root(&nsh_core::element::Root::of::<ProbeDrafts>());
+        core.run_component_tasks();
+        core.commit();
+
+        assert_eq!(DRAFT_STATUS_VAL.load(Ordering::SeqCst), 0);
+        let worker = std::thread::spawn(|| {
+            drafts::persistence::bump_error_epoch();
+        });
+        worker.join().unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && DRAFT_STATUS_VAL.load(Ordering::SeqCst) == 0 {
+            core.run_component_tasks();
+            core.commit();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(DRAFT_STATUS_VAL.load(Ordering::SeqCst), 1);
+
+        drop(core);
+        drop(runtime);
+    }
 }

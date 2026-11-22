@@ -10,7 +10,6 @@ use std::{
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
-        mpsc,
     },
     time::{Duration, Instant},
 };
@@ -670,6 +669,43 @@ fn apply_boot_event(progress: &mut BootProgress, event: BootEvent) {
     }
 }
 
+fn parse_herdr_install_payload(inst: &Value) -> (&str, Vec<String>, Option<String>) {
+    let phase = inst["phase"].as_str().unwrap_or("idle");
+    let logs = inst["logs"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let err = inst["error"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    (phase, logs, err)
+}
+
+fn schedule_boot_clock(
+    stage: Signal<Stage>,
+    boot: Signal<BootProgress>,
+    boot_started: Stored<Instant>,
+    elapsed_ms: Signal<u64>,
+) {
+    set_timeout(Duration::from_millis(80), move || {
+        if !matches!(stage.try_get(), Some(Stage::Checking))
+            || boot.try_get().is_some_and(|b| b.boot_complete)
+        {
+            return;
+        }
+        if let Some(started) = boot_started.try_with(|s| *s) {
+            let _ = elapsed_ms.try_set(started.elapsed().as_millis() as u64);
+        }
+        schedule_boot_clock(stage, boot, boot_started, elapsed_ms);
+    });
+}
+
 /// Primary desktop bootstrap root: verifies `AppServer` and `herdr-core` (`hc`),
 /// presents unified recovery / `Install` + `Check` actions when needed, and
 /// mounts `<Canban />` seamlessly in the same window once ready.
@@ -691,57 +727,157 @@ pub fn Bootstrap() -> impl IntoElement {
     let boot = signal(BootProgress::initial(home_display.clone()));
     let elapsed_ms = signal(0_u64);
     let boot_started = stored(Instant::now());
-    let boot_rx = stored(None::<mpsc::Receiver<BootEvent>>);
     let show_checking_panel = signal(false);
     let copy_status = signal(String::new());
-    let poll_active = stored(false);
+    let install_watching = stored(false);
     let recheck_count = stored(0_u32);
 
     set_timeout(Duration::from_millis(140), move || {
-        show_checking_panel.set(true);
+        let _ = show_checking_panel.try_set(true);
     });
 
-    // Live POST clock + real-time progress event drain while checking.
-    set_interval(Duration::from_millis(80), move || {
-        if !matches!(stage.get_untracked(), Stage::Checking) {
-            return;
-        }
-        let drained = boot_rx.with(|slot| {
-            let mut events = Vec::new();
-            if let Some(rx) = slot.as_ref() {
-                while let Ok(ev) = rx.try_recv() {
-                    events.push(ev);
-                }
+    let watch_herdr_install: Rc<dyn Fn(Arc<canban_app_server::AppClient>, String)> =
+        Rc::new(move |app, home_str| {
+            if install_watching.try_with(|w| *w) == Some(true) {
+                return;
             }
-            events
-        });
-        if !drained.is_empty() {
-            boot.update(|b| {
-                for ev in drained {
-                    apply_boot_event(b, ev);
-                }
+            let _ = install_watching.try_with(|w| *w = true);
+            root_owner.run(move || {
+                spawn(async move {
+                    let mut rx = app.subscribe_topics(&["herdr"]);
+                    let app_init = app.clone();
+                    let polled =
+                        blocking(move || app_init.call("herdr.check", json!({"probe": false})))
+                            .await;
+                    let (mut phase, mut logs, mut install_err) = match polled {
+                        Ok(Ok(val)) => {
+                            let (p, l, e) = parse_herdr_install_payload(&val["install"]);
+                            (p.to_owned(), l, e)
+                        }
+                        _ => (String::new(), Vec::new(), None),
+                    };
+                    if phase == "installing" {
+                        if matches!(stage.try_get(), Some(Stage::HerdrSetup { .. })) {
+                            let initial_logs = logs.clone();
+                            stage.update(|s| {
+                                if let Stage::HerdrSetup { state, .. } = s {
+                                    state.installing = true;
+                                    state.logs = initial_logs;
+                                }
+                            });
+                        }
+                        while let Some(ev) = rx.recv().await {
+                            if !matches!(stage.try_get(), Some(Stage::HerdrSetup { .. })) {
+                                break;
+                            }
+                            if let canban_app_server::ClientPushEvent::HerdrInstall(inst) = ev {
+                                let (next_phase, next_logs, next_err) =
+                                    parse_herdr_install_payload(&inst);
+                                phase = next_phase.to_owned();
+                                logs = next_logs;
+                                install_err = next_err;
+                                if phase == "installing" {
+                                    let push_logs = logs.clone();
+                                    stage.update(|s| {
+                                        if let Stage::HerdrSetup { state, .. } = s {
+                                            state.installing = true;
+                                            state.logs = push_logs;
+                                        }
+                                    });
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    drop(rx);
+                    let _ = install_watching.try_with(|w| *w = false);
+                    if !matches!(stage.try_get(), Some(Stage::HerdrSetup { .. })) {
+                        return;
+                    }
+                    let app_verify = app.clone();
+                    let full = blocking(move || -> Result<(Value, bool)> {
+                        let check = app_verify.call("herdr.check", json!({}))?;
+                        if check["ready"] == true {
+                            finalize_workspace(app_verify)?;
+                            return Ok((check, true));
+                        }
+                        Ok((check, false))
+                    })
+                    .await;
+                    match full {
+                        Ok(Ok((_, true))) => {
+                            let _ = stage.try_set(Stage::Workspace);
+                        }
+                        Ok(Ok((check, false))) => {
+                            let mut next = HerdrSetupView::from_check(home_str, &check);
+                            next.installing = false;
+                            if !logs.is_empty() && next.logs.is_empty() {
+                                next.logs = logs;
+                            }
+                            if let Some(err) = install_err {
+                                next.error = Some(err);
+                            }
+                            let _ = stage.try_set(Stage::HerdrSetup { app, state: next });
+                        }
+                        Ok(Err(err)) => {
+                            if stage.try_get().is_some() {
+                                stage.update(|s| {
+                                    if let Stage::HerdrSetup { state, .. } = s {
+                                        state.installing = false;
+                                        state.error = Some(format!("{err:#}"));
+                                    }
+                                });
+                            }
+                        }
+                        Err(err) => {
+                            if stage.try_get().is_some() {
+                                stage.update(|s| {
+                                    if let Stage::HerdrSetup { state, .. } = s {
+                                        state.installing = false;
+                                        state.error = Some(err.to_string());
+                                    }
+                                });
+                            }
+                        }
+                    }
+                });
             });
-        }
-        if !boot.get_untracked().boot_complete {
-            elapsed_ms.set(boot_started.get().elapsed().as_millis() as u64);
-        }
-    });
+        });
 
     let run_boot: Rc<dyn Fn()> = Rc::new({
         let home_path = home_path.clone();
         let home_display = home_display.clone();
+        let watch_for_boot = watch_herdr_install.clone();
         move || {
             clear_fatal_exit();
             let started = Instant::now();
             boot_started.replace(started);
             elapsed_ms.set(0);
             boot.set(BootProgress::initial(home_display.clone()));
-            let (tx, rx) = mpsc::channel::<BootEvent>();
-            boot_rx.replace(Some(rx));
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BootEvent>();
             stage.set(Stage::Checking);
+            schedule_boot_clock(stage, boot, boot_started, elapsed_ms);
+            root_owner.run(move || {
+                spawn(async move {
+                    while let Some(first) = rx.recv().await {
+                        let mut events = vec![first];
+                        while let Ok(ev) = rx.try_recv() {
+                            events.push(ev);
+                        }
+                        if let Some(mut b) = boot.try_get() {
+                            for ev in events {
+                                apply_boot_event(&mut b, ev);
+                            }
+                            let _ = boot.try_set(b);
+                        }
+                    }
+                });
+            });
             let hp = home_path.clone();
             let hd = home_display.clone();
             let hd_after = home_display.clone();
+            let watch_after = watch_for_boot.clone();
             root_owner.run(move || {
                 spawn(async move {
                     let outcome = blocking(move || -> BootOutcome {
@@ -831,25 +967,6 @@ pub fn Bootstrap() -> impl IntoElement {
                     })
                     .await;
 
-                    // Drain any final progress events before transitioning.
-                    let remaining = boot_rx.with(|slot| {
-                        let mut events = Vec::new();
-                        if let Some(rx) = slot.as_ref() {
-                            while let Ok(ev) = rx.try_recv() {
-                                events.push(ev);
-                            }
-                        }
-                        events
-                    });
-                    boot_rx.replace(None);
-                    if !remaining.is_empty() {
-                        boot.update(|b| {
-                            for ev in remaining {
-                                apply_boot_event(b, ev);
-                            }
-                        });
-                    }
-
                     match outcome {
                         Ok(BootOutcome::Workspace {
                             projects,
@@ -865,11 +982,13 @@ pub fn Bootstrap() -> impl IntoElement {
                             stage.set(Stage::Workspace);
                         }
                         Ok(BootOutcome::HerdrSetup(app, view)) => {
-                            let resume_poll = view.installing;
+                            let resume_watch = view.installing;
+                            let watch_home = view.home.clone();
+                            let watch_app = app.clone();
                             ready();
                             stage.set(Stage::HerdrSetup { app, state: view });
-                            if resume_poll {
-                                poll_active.replace(true);
+                            if resume_watch {
+                                watch_after(watch_app, watch_home);
                             }
                         }
                         Ok(BootOutcome::BackendOlder(old, detail)) => {
@@ -901,104 +1020,6 @@ pub fn Bootstrap() -> impl IntoElement {
         }
     });
 
-    // Polling loop when `herdr.install` is running in the background on `AppServer`.
-    let poll_in_flight = stored(false);
-    set_interval(Duration::from_millis(250), move || {
-        if !poll_active.get() || poll_in_flight.get() {
-            return;
-        }
-        let current = stage.get_untracked();
-        let Stage::HerdrSetup { app, state } = current else {
-            poll_active.replace(false);
-            return;
-        };
-        poll_in_flight.replace(true);
-        let home_str = state.home.clone();
-        root_owner.run(move || {
-            spawn(async move {
-                let app_for_poll = app.clone();
-                let polled =
-                    blocking(move || app_for_poll.call("herdr.check", json!({"probe": false})))
-                        .await;
-                match polled {
-                    Ok(Ok(val)) => {
-                        let phase = val["install"]["phase"].as_str().unwrap_or("idle");
-                        let logs = val["install"]["logs"]
-                            .as_array()
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(Value::as_str)
-                                    .map(str::to_owned)
-                                    .collect::<Vec<_>>()
-                            })
-                            .unwrap_or_default();
-                        let install_err = val["install"]["error"]
-                            .as_str()
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_owned);
-                        if phase == "installing" {
-                            stage.update(|s| {
-                                if let Stage::HerdrSetup { state, .. } = s {
-                                    state.installing = true;
-                                    state.logs = logs;
-                                }
-                            });
-                            poll_in_flight.replace(false);
-                        } else {
-                            poll_active.replace(false);
-                            let app_verify = app.clone();
-                            let full = blocking(move || -> Result<(Value, bool)> {
-                                let check = app_verify.call("herdr.check", json!({}))?;
-                                if check["ready"] == true {
-                                    finalize_workspace(app_verify)?;
-                                    return Ok((check, true));
-                                }
-                                Ok((check, false))
-                            })
-                            .await;
-                            poll_in_flight.replace(false);
-                            match full {
-                                Ok(Ok((_, true))) => {
-                                    stage.set(Stage::Workspace);
-                                }
-                                Ok(Ok((check, false))) => {
-                                    let mut next = HerdrSetupView::from_check(home_str, &check);
-                                    next.installing = false;
-                                    if !logs.is_empty() && next.logs.is_empty() {
-                                        next.logs = logs;
-                                    }
-                                    if let Some(err) = install_err {
-                                        next.error = Some(err);
-                                    }
-                                    stage.set(Stage::HerdrSetup { app, state: next });
-                                }
-                                Ok(Err(err)) => {
-                                    stage.update(|s| {
-                                        if let Stage::HerdrSetup { state, .. } = s {
-                                            state.installing = false;
-                                            state.error = Some(format!("{err:#}"));
-                                        }
-                                    });
-                                }
-                                Err(err) => {
-                                    stage.update(|s| {
-                                        if let Stage::HerdrSetup { state, .. } = s {
-                                            state.installing = false;
-                                            state.error = Some(err.to_string());
-                                        }
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    _ => {
-                        poll_in_flight.replace(false);
-                    }
-                }
-            });
-        });
-    });
-
     // Trigger initial boot once mounted.
     let boot_once = run_boot.clone();
     set_timeout(Duration::from_millis(1), move || {
@@ -1006,6 +1027,7 @@ pub fn Bootstrap() -> impl IntoElement {
     });
 
     let retry_boot = run_boot.clone();
+    let watch_for_stage = watch_herdr_install;
     view()
         .flex_1()
         .min_h(px(0.))
@@ -1013,6 +1035,7 @@ pub fn Bootstrap() -> impl IntoElement {
         .child(dynamic(move || {
             let current = stage.get();
             let show_checking = matches!(current, Stage::Checking) && show_checking_panel.get();
+            let watch_btn = watch_for_stage.clone();
             untracked(|| match current {
                 Stage::Workspace => crate::workspace_root().into_element(),
                 Stage::Checking => {
@@ -1058,12 +1081,13 @@ pub fn Bootstrap() -> impl IntoElement {
             let app_install = app.clone();
             let app_check = app.clone();
             let home_for_check = state.home.clone();
+            let home_for_watch = state.home.clone();
             let cmd_for_copy = state.install_command.clone();
             herdr_setup_screen(
                 state,
                 copy_status,
                 move || {
-                    if poll_active.get() {
+                    if install_watching.try_with(|w| *w) == Some(true) {
                         return;
                     }
                     copy_status.set(String::new());
@@ -1077,13 +1101,16 @@ pub fn Bootstrap() -> impl IntoElement {
                         }
                     });
                     let app_call = app_install.clone();
+                    let watch_on_ok = watch_btn.clone();
+                    let home_on_ok = home_for_watch.clone();
                     root_owner.run(move || {
                         spawn(async move {
-                            let res =
-                                blocking(move || app_call.call("herdr.install", json!({}))).await;
+                            let app_for_rpc = app_call.clone();
+                            let res = blocking(move || app_for_rpc.call("herdr.install", json!({})))
+                                .await;
                             match res {
                                 Ok(Ok(_)) => {
-                                    poll_active.replace(true);
+                                    watch_on_ok(app_call, home_on_ok);
                                 }
                                 Ok(Err(err)) => {
                                     stage.update(|s| {

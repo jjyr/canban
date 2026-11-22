@@ -137,8 +137,9 @@ Implemented on 2026-11-17; [memory profiling and synchronization](memory-profili
 contains source-level details, diagnostic commands and dated acceptance evidence.
 
 ```text
-Local AppClient -- app.subscribe (push) --> AppServer: server-pushed invalidation events
-                 <-- event / heartbeat ----
+Local AppClient -- app.subscribe (push) --> AppServer: server-pushed invalidation & side-channel events
+                 <-- event / update / utilities / usage / herdr / heartbeat ----
+canban-ui ------ ui.spawn async recv ----> BackendEvent (0ms timer polling; direct side-channel apply)
 Presenter ------ app.state ---------------> current full-state projection
                  <-- owned response --
                          |
@@ -149,7 +150,7 @@ Presenter ------ app.state ---------------> current full-state projection
               selected Card history view
 
 Remote supervisor -- app.subscribe (push) --------> remote AppServer
-                 <-- event / heartbeat -----------
+                 <-- event / usage / heartbeat ----
                   -- debounced app.state(after) -->
                  <-- unchanged OR updated state ---
                          |

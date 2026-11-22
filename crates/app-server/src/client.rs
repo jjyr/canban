@@ -207,6 +207,15 @@ pub struct AppClient {
     server_notice: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub enum ClientPushEvent {
+    State(AppEvent),
+    UpdateChanged(Value),
+    UtilitiesChanged(Value),
+    UsageChanged(Value),
+    HerdrInstall(Value),
+}
+
 #[derive(Debug, Clone)]
 pub struct BackendOlder {
     pub home: PathBuf,
@@ -649,22 +658,77 @@ impl AppClient {
         let (tx, rx) = mpsc::channel();
         let weak = Arc::downgrade(self);
         std::thread::spawn(move || {
-            let mut last = Value::Null;
-            let mut connected = false;
-            while let Some(app) = weak.upgrade() {
-                let endpoint = app.endpoint.clone();
-                drop(app);
-                let res = subscribe_session(&endpoint, &weak, &mut last, &mut connected, &tx);
-                match res {
-                    Ok(true) => return,
-                    Ok(false) | Err(_) => {
-                        connected = false;
-                        std::thread::sleep(Duration::from_millis(750));
-                    }
-                }
-            }
+            run_subscribe_worker(
+                &weak,
+                &["snapshot"],
+                || false,
+                |ev| match ev {
+                    ClientPushEvent::State(app_ev) => tx.send(app_ev).is_ok(),
+                    _ => true,
+                },
+            );
         });
         rx
+    }
+
+    pub fn subscribe_topics(
+        self: &Arc<Self>,
+        topics: &'static [&'static str],
+    ) -> tokio::sync::mpsc::UnboundedReceiver<ClientPushEvent> {
+        self.subscribe_mapped(topics, |ev| ev)
+    }
+
+    pub fn subscribe_mapped<T: Send + 'static>(
+        self: &Arc<Self>,
+        topics: &'static [&'static str],
+        mut map: impl FnMut(ClientPushEvent) -> T + Send + 'static,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<T> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let weak = Arc::downgrade(self);
+        std::thread::spawn(move || {
+            run_subscribe_worker(
+                &weak,
+                topics,
+                || tx.is_closed(),
+                |ev| tx.send(map(ev)).is_ok(),
+            );
+        });
+        rx
+    }
+}
+
+fn run_subscribe_worker(
+    weak: &std::sync::Weak<AppClient>,
+    topics: &[&str],
+    is_closed: impl Fn() -> bool,
+    mut emit: impl FnMut(ClientPushEvent) -> bool,
+) {
+    let mut last = Value::Null;
+    let mut connected = false;
+    while !is_closed() {
+        let Some(app) = weak.upgrade() else {
+            break;
+        };
+        let endpoint = app.endpoint.clone();
+        drop(app);
+        match subscribe_session(
+            &endpoint,
+            weak,
+            topics,
+            &mut last,
+            &mut connected,
+            &is_closed,
+            &mut emit,
+        ) {
+            Ok(true) => return,
+            Ok(false) | Err(_) => {
+                if is_closed() {
+                    return;
+                }
+                connected = false;
+                std::thread::sleep(Duration::from_millis(750));
+            }
+        }
     }
 }
 
@@ -702,9 +766,11 @@ fn open_subscribe_io(
 fn subscribe_session(
     endpoint: &ClientEndpoint,
     weak: &std::sync::Weak<AppClient>,
+    topics: &[&str],
     last: &mut Value,
     connected: &mut bool,
-    tx: &mpsc::Sender<AppEvent>,
+    is_closed: &impl Fn() -> bool,
+    emit: &mut impl FnMut(ClientPushEvent) -> bool,
 ) -> Result<bool> {
     let (read_io, mut write_io) = open_subscribe_io(endpoint)?;
     let mut req = json!({
@@ -713,7 +779,7 @@ fn subscribe_session(
         "method": "app.subscribe",
         "params": {
             "after": last["revision"],
-            "topics": ["snapshot"],
+            "topics": topics,
         }
     });
     if let ClientEndpoint::Tcp { token, .. } = endpoint {
@@ -735,14 +801,12 @@ fn subscribe_session(
     let result = reply
         .get("result")
         .context("Invalid app.subscribe response")?;
-    if !*connected || result["changed"] == true {
-        if tx
-            .send(AppEvent::Changed {
-                topic: change_topic(*connected, last, result),
-                card_id: None,
-            })
-            .is_err()
-        {
+    let want_snapshot = topics.is_empty() || topics.contains(&"snapshot");
+    if want_snapshot && (!*connected || result["changed"] == true) {
+        if !emit(ClientPushEvent::State(AppEvent::Changed {
+            topic: change_topic(*connected, last, result),
+            card_id: None,
+        })) {
             return Ok(true);
         }
         *last = super::state::state_marker(result);
@@ -755,22 +819,29 @@ fn subscribe_session(
         if n == 0 || !line.ends_with('\n') {
             return Ok(false);
         }
-        if weak.strong_count() == 0 {
+        if weak.strong_count() == 0 || is_closed() {
             return Ok(true);
         }
-        let msg: Value = serde_json::from_str(&line)?;
-        match msg["method"].as_str() {
+        let mut msg: Value = serde_json::from_str(&line)?;
+        let push_ev = match msg["method"].as_str() {
             Some("heartbeat") => continue,
             Some("event") => {
                 let params = &msg["params"];
                 let topic = static_event_topic(params["topic"].as_str(), last, params);
                 let card_id = params["card_id"].as_str().map(str::to_owned);
                 *last = super::state::state_marker(params);
-                if tx.send(AppEvent::Changed { topic, card_id }).is_err() {
-                    return Ok(true);
-                }
+                ClientPushEvent::State(AppEvent::Changed { topic, card_id })
             }
-            _ => {}
+            Some("update.changed") => ClientPushEvent::UpdateChanged(msg["params"]["state"].take()),
+            Some("utilities.changed") => {
+                ClientPushEvent::UtilitiesChanged(msg["params"]["state"].take())
+            }
+            Some("usage.changed") => ClientPushEvent::UsageChanged(msg["params"]["state"].take()),
+            Some("herdr.install") => ClientPushEvent::HerdrInstall(msg["params"]["state"].take()),
+            _ => continue,
+        };
+        if !emit(push_ev) {
+            return Ok(true);
         }
     }
 }

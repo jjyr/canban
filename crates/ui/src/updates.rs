@@ -129,33 +129,7 @@ pub fn init(ui: Ui) {
     let saved_token = stored(String::new());
     #[cfg(feature = "local-host")]
     let ready = stored(false);
-    let idle_ticks = stored(0_u32);
     refresh(ui);
-    set_interval(std::time::Duration::from_secs(1), move || {
-        let (disabled, active) = ui.update.with_untracked(|v| {
-            let disabled = v["disabled"].as_bool().unwrap_or(false);
-            let state_phase = v["state"]["phase"].as_str().unwrap_or("");
-            let install_phase = v["install"]["phase"].as_str().unwrap_or("");
-            let active = matches!(state_phase, "checking" | "downloading" | "installing")
-                || matches!(install_phase, "prepared" | "stopping");
-            (disabled, active)
-        });
-        if disabled {
-            return;
-        }
-        if active {
-            idle_ticks.replace(0);
-            refresh(ui);
-            return;
-        }
-        let next = idle_ticks.get() + 1;
-        if next >= 30 {
-            idle_ticks.replace(0);
-            refresh(ui);
-        } else {
-            idle_ticks.replace(next);
-        }
-    });
     #[cfg(feature = "local-host")]
     effect(move || {
         let v = ui.update.get();
@@ -221,7 +195,19 @@ pub fn init(ui: Ui) {
         }
     });
 }
-fn refresh(ui: Ui) {
+pub(crate) fn apply_push(ui: Ui, v: Value) {
+    if !matches!(
+        v["state"]["phase"].as_str(),
+        Some("downloading" | "installing")
+    ) {
+        let _ = ui.update_busy.try_set(false);
+    }
+    if ui.update.try_get().is_some_and(|cur| cur != v) {
+        let _ = ui.update.try_set(v);
+    }
+}
+
+pub(crate) fn refresh(ui: Ui) {
     let Some(backend) = crate::backend::get() else {
         return;
     };
@@ -231,17 +217,9 @@ fn refresh(ui: Ui) {
     ui.update_loading.set(true);
     ui.spawn(async move {
         let r = blocking(move || backend.call_local("update.state", json!({}))).await;
-        ui.update_loading.set(false);
+        let _ = ui.update_loading.try_set(false);
         if let Ok(Ok(v)) = r {
-            if !matches!(
-                v["state"]["phase"].as_str(),
-                Some("downloading" | "installing")
-            ) {
-                ui.update_busy.set(false);
-            }
-            if v != ui.update.get_untracked() {
-                ui.update.set(v);
-            }
+            apply_push(ui, v);
         }
     });
 }

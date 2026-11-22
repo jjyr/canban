@@ -12,12 +12,16 @@ pub fn close(ui: Ui) {
 pub fn open(ui: Ui, name: &str) {
     ui.quick_open.set(false);
     ui.utility_query.set(String::new());
+    let opening_usage = ui.utility_popup.get_untracked() != "usage" && name == "usage";
     ui.utility_popup
         .set(if ui.utility_popup.get_untracked() == name {
             String::new()
         } else {
             name.into()
         });
+    if opening_usage {
+        usage(ui, untracked(|| host(ui)), false);
+    }
     ui.terminal_focus.update(|n| *n += 1);
 }
 pub fn host(ui: Ui) -> String {
@@ -35,46 +39,22 @@ pub fn host(ui: Ui) -> String {
 pub fn init(ui: Ui) {
     ensure_fonts_loaded(ui);
     refresh(ui);
-    let utility_ticks = stored(0_u32);
-    set_interval(std::time::Duration::from_secs(5), move || {
-        let open = !ui.utility_popup.get_untracked().is_empty();
-        if open {
-            utility_ticks.replace(0);
-            refresh(ui);
-        } else {
-            let next = utility_ticks.get() + 1;
-            if next >= 6 {
-                utility_ticks.replace(0);
-                refresh(ui);
-            } else {
-                utility_ticks.replace(next);
-            }
-        }
-    });
     let target = computed(move || host(ui));
     effect(move || {
         let host_id = target.get();
         untracked(|| usage(ui, host_id, false));
     });
-    let usage_ticks = stored(0_u32);
-    set_interval(std::time::Duration::from_secs(5), move || {
-        let open = ui.utility_popup.get_untracked() == "usage";
-        if open {
-            usage_ticks.replace(0);
-            usage(ui, untracked(|| host(ui)), false);
-        } else {
-            let next = usage_ticks.get() + 1;
-            if next >= 6 {
-                usage_ticks.replace(0);
-                usage(ui, untracked(|| host(ui)), false);
-            } else {
-                usage_ticks.replace(next);
-            }
-        }
-    });
+    let usage_minutes = stored(0_u32);
     set_interval(std::time::Duration::from_secs(60), move || {
         ui.utility_clock.set(canban_types::now() / 1000);
         crate::activity::tick(ui);
+        let next = usage_minutes.get() + 1;
+        if next >= 10 {
+            usage_minutes.replace(0);
+            usage(ui, untracked(|| host(ui)), false);
+        } else {
+            usage_minutes.replace(next);
+        }
     });
     effect(move || {
         let v = ui.utility.get();
@@ -91,7 +71,32 @@ pub fn init(ui: Ui) {
         }
     });
 }
-fn refresh(ui: Ui) {
+pub(crate) fn apply_push(ui: Ui, v: Value) {
+    if ui
+        .pending_methods
+        .try_get()
+        .is_some_and(|s| s.contains("utilities.configure") || s.contains("utilities.awake"))
+    {
+        return;
+    }
+    if ui.utility.try_get().is_some_and(|cur| cur != v) {
+        let _ = ui.utility.try_set(v);
+    }
+}
+pub(crate) fn apply_usage_push(ui: Ui, host_id: &str, mut v: Value) {
+    if ui.snapshot_ready.try_get().is_none() {
+        return;
+    }
+    if untracked(|| host(ui)) != host_id {
+        return;
+    }
+    v["host_id"] = json!(host_id);
+    let _ = ui.usage_loading.try_set(false);
+    if ui.usage.try_get().is_some_and(|cur| cur != v) {
+        let _ = ui.usage.try_set(v);
+    }
+}
+pub(crate) fn refresh(ui: Ui) {
     let Some(backend) = crate::backend::get() else {
         return;
     };
@@ -102,14 +107,12 @@ fn refresh(ui: Ui) {
     let epoch = ui.utility_epoch.get_untracked();
     ui.spawn(async move {
         let r = blocking(move || backend.call_local("utilities.state", json!({}))).await;
-        ui.utility_loading.set(false);
-        if epoch != ui.utility_epoch.get_untracked() {
+        let _ = ui.utility_loading.try_set(false);
+        if ui.utility_epoch.try_get() != Some(epoch) {
             return;
         }
-        if let Ok(Ok(v)) = r
-            && v != ui.utility.get_untracked()
-        {
-            ui.utility.set(v);
+        if let Ok(Ok(v)) = r {
+            apply_push(ui, v);
         }
     });
 }
