@@ -207,7 +207,11 @@ impl AppServer {
         }
         match method {
             "github.auth.status" => Ok(serde_json::to_value(self.github.status())?),
-            "github.auth.begin" => Ok(serde_json::to_value(self.github.begin()?)?),
+            "github.auth.begin" => {
+                let status = self.github.begin()?;
+                self.github_sync_notify.notify_one();
+                Ok(serde_json::to_value(status)?)
+            }
             "github.auth.refresh" => {
                 self.github.refresh()?;
                 Ok(serde_json::to_value(self.github.status())?)

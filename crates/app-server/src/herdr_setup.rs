@@ -118,7 +118,7 @@ impl AppServer {
                 changed
             };
             if changed {
-                self.herdr_wake.store(true, Ordering::SeqCst);
+                self.wake_herdr();
                 self.wake_runtime();
                 self.emit("configuration", None);
             }
@@ -132,7 +132,7 @@ impl AppServer {
         .status()
         {
             Ok(status) => {
-                self.herdr_wake.store(true, Ordering::SeqCst);
+                self.wake_herdr();
                 self.wake_runtime();
                 let core_id = status["core"]["id"]
                     .as_str()
@@ -197,14 +197,13 @@ impl AppServer {
         let home = self.home.clone();
         let install_state = Arc::clone(&self.herdr_install);
         let weak = self.self_weak.get().cloned().unwrap_or_default();
-        let handle = std::thread::spawn(move || {
-            run_herdr_installer(&home, &install_state, Some(weak));
-        });
-
         if wait {
-            let _ = handle.join();
+            run_herdr_installer(&home, &install_state, Some(weak));
             return self.herdr_check(json!({}));
         }
+        self.spawn_blocking_bg(move || {
+            run_herdr_installer(&home, &install_state, Some(weak));
+        });
         Ok(self.herdr_install_snapshot())
     }
 }
@@ -304,28 +303,23 @@ fn run_herdr_installer(
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let s_out = Arc::clone(install_state);
-    let srv_out = server.clone();
-    let out_handle = std::thread::spawn(move || {
+    let status = std::thread::scope(|scope| {
         if let Some(stdout) = stdout {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                push_install_log(&s_out, srv_out.as_ref(), line);
-            }
+            scope.spawn(|| {
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    push_install_log(install_state, server.as_ref(), line);
+                }
+            });
         }
-    });
-    let s_err = Arc::clone(install_state);
-    let srv_err = server.clone();
-    let err_handle = std::thread::spawn(move || {
         if let Some(stderr) = stderr {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                push_install_log(&s_err, srv_err.as_ref(), line);
-            }
+            scope.spawn(|| {
+                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                    push_install_log(install_state, server.as_ref(), line);
+                }
+            });
         }
+        child.wait()
     });
-
-    let status = child.wait();
-    let _ = out_handle.join();
-    let _ = err_handle.join();
 
     match status {
         Ok(exit) if exit.success() => {

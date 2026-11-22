@@ -204,7 +204,7 @@ impl AppServer {
             )?;
             Ok(value)
         })?;
-        self.github_sync_due.store(true, Ordering::SeqCst);
+        self.trigger_github_sync();
         self.emit("github", Some(card.id));
         Ok(value)
     }
@@ -1181,7 +1181,7 @@ impl AppServer {
             self.sync_merged_target(&card, Some(&pr.base_branch));
             let _ = self.try_auto_archive_resolved(&card.id);
         }
-        self.github_sync_due.store(true, Ordering::SeqCst);
+        self.trigger_github_sync();
         self.emit("github", Some(strp(&p, "card_id")?.into()));
         Ok(value)
     }

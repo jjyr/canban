@@ -50,7 +50,7 @@ impl AppServer {
             },
         );
         drop(jobs);
-        self.github_job_signal.notify_one();
+        self.github_job_notify.notify_one();
         self.emit("github", None);
         Ok(())
     }
@@ -69,74 +69,103 @@ impl AppServer {
     }
     pub(crate) fn start_github_workers(self: &Arc<Self>) {
         for _ in 0..2 {
-            let weak = Arc::downgrade(self);
-            std::thread::spawn(move || {
-                while let Some(server) = weak.upgrade() {
-                    if server.stopped() {
-                        break;
-                    }
-                    let job = {
-                        let mut jobs = server.github_jobs.lock().unwrap();
-                        if !jobs
-                            .pending
-                            .iter()
-                            .any(|(id, _, _)| !jobs.running.contains(id))
-                        {
-                            jobs = server
-                                .github_job_signal
-                                .wait_timeout(jobs, Duration::from_secs(1))
-                                .unwrap()
-                                .0;
-                        }
-                        let index = jobs
-                            .pending
-                            .iter()
-                            .position(|(id, _, _)| !jobs.running.contains(id));
-                        index
-                            .and_then(|i| jobs.pending.remove(i))
-                            .inspect(|(id, _, _)| {
-                                jobs.running.insert(id.clone());
-                            })
-                    };
-                    if let Some((pid, generation, manual)) = job {
-                        let before = server
-                            .store
-                            .lock()
-                            .unwrap()
-                            .db()
-                            .list::<Card>()
-                            .unwrap_or_default();
-                        let result = server.github_sync_run(&pid, manual, Some(&generation));
-                        let after = server
-                            .store
-                            .lock()
-                            .unwrap()
-                            .db()
-                            .list::<Card>()
-                            .unwrap_or_default();
-                        let added: Vec<_> = after
-                            .iter()
-                            .filter(|c| c.project_id == pid && !before.iter().any(|b| b.id == c.id))
-                            .collect();
-                        let mut jobs = server.github_jobs.lock().unwrap();
-                        jobs.running.remove(&pid);
-                        if let Some(s) = jobs.status.get_mut(&pid)
-                            && s.generation == generation
-                        {
-                            s.phase = if result.is_ok() { "success" } else { "failed" }.into();
-                            s.error = result.err().map(|e| format!("{e:#}"));
-                            s.issues_added = added
-                                .iter()
-                                .filter(|c| c.github_issue().is_some() && !c.is_github_pr())
-                                .count();
-                            s.prs_added = added.iter().filter(|c| c.is_github_pr()).count();
-                        }
-                        drop(jobs);
-                        server.github_job_signal.notify_all();
-                        server.emit("github", None);
-                    }
+            self.spawn_bg(github_worker_loop(
+                Arc::downgrade(self),
+                self.github_job_notify.clone(),
+                self.stop_receiver(),
+            ));
+        }
+    }
+}
+
+async fn github_worker_loop(
+    weak: std::sync::Weak<AppServer>,
+    notify: Arc<tokio::sync::Notify>,
+    mut stop_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    while !*stop_rx.borrow() {
+        let step_weak = weak.clone();
+        let worked = tokio::task::spawn_blocking(move || {
+            let server = step_weak.upgrade()?;
+            if server.stopped() {
+                return None;
+            }
+            let job = {
+                let mut jobs = server.github_jobs.lock().unwrap();
+                let index = jobs
+                    .pending
+                    .iter()
+                    .position(|(id, _, _)| !jobs.running.contains(id));
+                let claimed = index
+                    .and_then(|i| jobs.pending.remove(i))
+                    .inspect(|(id, _, _)| {
+                        jobs.running.insert(id.clone());
+                    });
+                if claimed.is_some()
+                    && jobs
+                        .pending
+                        .iter()
+                        .any(|(id, _, _)| !jobs.running.contains(id))
+                {
+                    server.github_job_notify.notify_one();
                 }
-            });
+                claimed
+            };
+            let Some((pid, generation, manual)) = job else {
+                return Some(false);
+            };
+            let before = server
+                .store
+                .lock()
+                .unwrap()
+                .db()
+                .list::<Card>()
+                .unwrap_or_default();
+            let result = server.github_sync_run(&pid, manual, Some(&generation));
+            let after = server
+                .store
+                .lock()
+                .unwrap()
+                .db()
+                .list::<Card>()
+                .unwrap_or_default();
+            let added: Vec<_> = after
+                .iter()
+                .filter(|c| c.project_id == pid && !before.iter().any(|b| b.id == c.id))
+                .collect();
+            let has_more = {
+                let mut jobs = server.github_jobs.lock().unwrap();
+                jobs.running.remove(&pid);
+                if let Some(s) = jobs.status.get_mut(&pid)
+                    && s.generation == generation
+                {
+                    s.phase = if result.is_ok() { "success" } else { "failed" }.into();
+                    s.error = result.err().map(|e| format!("{e:#}"));
+                    s.issues_added = added
+                        .iter()
+                        .filter(|c| c.github_issue().is_some() && !c.is_github_pr())
+                        .count();
+                    s.prs_added = added.iter().filter(|c| c.is_github_pr()).count();
+                }
+                jobs.pending
+                    .iter()
+                    .any(|(id, _, _)| !jobs.running.contains(id))
+            };
+            if has_more {
+                server.github_job_notify.notify_one();
+            }
+            server.emit("github", None);
+            Some(has_more)
+        })
+        .await;
+        match worked {
+            Ok(Some(true)) => continue,
+            Ok(Some(false)) => {
+                if !AppServer::wait_or_stop(&notify, &mut stop_rx, None).await {
+                    break;
+                }
+            }
+            _ => break,
         }
     }
 }

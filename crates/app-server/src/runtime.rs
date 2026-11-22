@@ -31,15 +31,6 @@ enum ConnStream {
     Tcp(tokio::net::TcpStream),
 }
 
-impl ConnStream {
-    fn into_relay(self, server: &AppServer, params: &Value) -> Result<()> {
-        match self {
-            Self::Unix(s) => server.relay(s.into_std()?, params),
-            Self::Tcp(s) => server.relay_tcp(s.into_std()?, params),
-        }
-    }
-}
-
 impl tokio::io::AsyncRead for ConnStream {
     fn poll_read(
         self: std::pin::Pin<&mut Self>,
@@ -233,124 +224,15 @@ impl AppServer {
                 runtime.spawn(accept_tcp_loop(weak_tcp, tcp_listener, stop_tcp));
             }
         }
+        *self.runtime_handle.lock().unwrap() = Some(runtime.handle().clone());
         self.migrate_exit_failures()?;
         self.start_runtime();
         self.start_github_workers();
         self.start_update_checks();
         let weak = Arc::downgrade(self);
-        std::thread::spawn(move || {
-            let mut next_sync = std::time::Instant::now();
-            let mut next_fast_pr = std::time::Instant::now() + Duration::from_secs(25);
-            let mut prev_auth_state = String::new();
-            while let Some(server) = weak.upgrade() {
-                if server.stopped() {
-                    break;
-                }
-                if canban_updater::handoff::active(&server.home) {
-                    drop(server);
-                    std::thread::sleep(Duration::from_millis(250));
-                    continue;
-                }
-                if let Err(e) = server.github.poll() {
-                    eprintln!("Canban GitHub sign-in: {e}");
-                }
-                let auth_state = server.github.status().state;
-                if auth_state != prev_auth_state {
-                    if auth_state == "connected" && !prev_auth_state.is_empty() {
-                        server.github_sync_due.store(true, Ordering::SeqCst);
-                        server.emit("github", None);
-                    }
-                    prev_auth_state = auth_state;
-                }
-                let now_instant = std::time::Instant::now();
-                if now_instant >= next_sync || server.github_sync_due.swap(false, Ordering::SeqCst)
-                {
-                    next_sync = now_instant + Duration::from_secs(120);
-                    next_fast_pr = now_instant + Duration::from_secs(25);
-                    server.reconcile_project_github_bindings();
-                    let projects = server
-                        .store
-                        .lock()
-                        .unwrap()
-                        .db()
-                        .list::<Project>()
-                        .unwrap_or_default();
-                    for project in projects.into_iter().filter(|p| p.github.is_some()) {
-                        let _ = server.queue_github_sync(&project.id, false);
-                    }
-                    server.github_refresh_queries();
-                    let cards = server
-                        .store
-                        .lock()
-                        .unwrap()
-                        .db()
-                        .list::<Card>()
-                        .unwrap_or_default();
-                    for c in cards.into_iter().filter(|c| {
-                        c.active()
-                            && !c.resolved()
-                            && (c.pull_request.as_ref().is_some_and(|pr| !pr.merged)
-                                || c.is_github_pr())
-                    }) {
-                        let _ = server.github_pr_refresh(json!({"card_id":c.id}));
-                    }
-                } else if now_instant >= next_fast_pr {
-                    next_fast_pr = now_instant + Duration::from_secs(25);
-                    let cards = server
-                        .store
-                        .lock()
-                        .unwrap()
-                        .db()
-                        .list::<Card>()
-                        .unwrap_or_default();
-                    let client = server.github_cached_client().ok();
-                    for c in cards.into_iter().filter(|c| {
-                        if !c.active() || c.resolved() {
-                            return false;
-                        }
-                        if let Some(pr) = &c.pull_request {
-                            return !pr.merged
-                                && matches!(
-                                    pr.checks.as_str(),
-                                    "" | "unknown" | "pending" | "running"
-                                );
-                        }
-                        if c.is_github_pr()
-                            && let Some(src) = c.github_issue()
-                            && let Some(client) = client.as_ref()
-                        {
-                            let is_open = client
-                                .cached::<Value>(&format!(
-                                    "/repos/{}/pulls/{}",
-                                    src.repository, src.number
-                                ))
-                                .is_some_and(|p| {
-                                    p["merged"] != true && p["state"].as_str() == Some("open")
-                                });
-                            if !is_open {
-                                return false;
-                            }
-                            return client
-                                .cached::<Value>(&format!(
-                                    "/repos/{}/pulls/{}/canban-summary",
-                                    src.repository, src.number
-                                ))
-                                .and_then(|s| {
-                                    s["checks_summary"]["state"].as_str().map(str::to_owned)
-                                })
-                                .is_some_and(|st| {
-                                    matches!(st.as_str(), "running" | "pending" | "unknown")
-                                });
-                        }
-                        false
-                    }) {
-                        let _ = server.github_pr_refresh(json!({"card_id":c.id}));
-                    }
-                }
-                drop(server);
-                std::thread::sleep(Duration::from_secs(1));
-            }
-        });
+        let github_notify = self.github_sync_notify.clone();
+        let github_stop = self.stop_receiver();
+        runtime.spawn(github_sync_loop(weak, github_notify, github_stop));
         Ok(Running {
             server: self.clone(),
             runtime: Some(runtime),
@@ -567,10 +449,9 @@ async fn serve_connection(
                 let _ = write_json_line_async(&mut writer, &err_reply).await;
                 return Ok(());
             }
-            let conn = reader.into_inner().unsplit(writer);
             let params = input["params"].clone();
-            let srv = server.clone();
-            return tokio::task::spawn_blocking(move || conn.into_relay(&srv, &params)).await?;
+            return handle_herdr_connect(server, reader.into_inner(), writer, &params, stop_rx)
+                .await;
         }
 
         if method == "app.subscribe" {
@@ -777,6 +658,324 @@ async fn handle_subscribe(
                 Ok(Err(_)) | Err(_) => return Ok(()),
             }
         }
+    }
+}
+
+async fn github_sync_loop(
+    weak: std::sync::Weak<AppServer>,
+    notify: Arc<tokio::sync::Notify>,
+    mut stop_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut next_sync = std::time::Instant::now();
+    let mut next_fast_pr = std::time::Instant::now() + Duration::from_secs(25);
+    let mut prev_auth_state = String::new();
+    while !*stop_rx.borrow() {
+        let Some(server) = weak.upgrade() else {
+            break;
+        };
+        if server.stopped() {
+            break;
+        }
+        let home = server.home.clone();
+        drop(server);
+        if canban_updater::handoff::active(&home) {
+            if !AppServer::wait_or_stop(&notify, &mut stop_rx, Some(Duration::from_millis(250)))
+                .await
+            {
+                break;
+            }
+            continue;
+        }
+        let step_weak = weak.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let server = step_weak.upgrade()?;
+            if server.stopped() {
+                return None;
+            }
+            if let Err(e) = server.github.poll() {
+                eprintln!("Canban GitHub sign-in: {e}");
+            }
+            let auth_state = server.github.status().state;
+            if auth_state != prev_auth_state {
+                if auth_state == "connected" && !prev_auth_state.is_empty() {
+                    server.github_sync_due.store(true, Ordering::SeqCst);
+                    server.emit("github", None);
+                }
+                prev_auth_state = auth_state;
+            }
+            let now_instant = std::time::Instant::now();
+            if now_instant >= next_sync || server.github_sync_due.swap(false, Ordering::SeqCst) {
+                next_sync = now_instant + Duration::from_secs(120);
+                next_fast_pr = now_instant + Duration::from_secs(25);
+                server.reconcile_project_github_bindings();
+                let projects = server
+                    .store
+                    .lock()
+                    .unwrap()
+                    .db()
+                    .list::<Project>()
+                    .unwrap_or_default();
+                for project in projects.into_iter().filter(|p| p.github.is_some()) {
+                    let _ = server.queue_github_sync(&project.id, false);
+                }
+                server.github_refresh_queries();
+                let cards = server
+                    .store
+                    .lock()
+                    .unwrap()
+                    .db()
+                    .list::<Card>()
+                    .unwrap_or_default();
+                for c in cards.into_iter().filter(|c| {
+                    c.active()
+                        && !c.resolved()
+                        && (c.pull_request.as_ref().is_some_and(|pr| !pr.merged)
+                            || c.is_github_pr())
+                }) {
+                    let _ = server.github_pr_refresh(json!({"card_id":c.id}));
+                }
+            } else if now_instant >= next_fast_pr {
+                next_fast_pr = now_instant + Duration::from_secs(25);
+                let cards = server
+                    .store
+                    .lock()
+                    .unwrap()
+                    .db()
+                    .list::<Card>()
+                    .unwrap_or_default();
+                let client = server.github_cached_client().ok();
+                for c in cards.into_iter().filter(|c| {
+                    if !c.active() || c.resolved() {
+                        return false;
+                    }
+                    if let Some(pr) = &c.pull_request {
+                        return !pr.merged
+                            && matches!(
+                                pr.checks.as_str(),
+                                "" | "unknown" | "pending" | "running"
+                            );
+                    }
+                    if c.is_github_pr()
+                        && let Some(src) = c.github_issue()
+                        && let Some(client) = client.as_ref()
+                    {
+                        let is_open = client
+                            .cached::<Value>(&format!(
+                                "/repos/{}/pulls/{}",
+                                src.repository, src.number
+                            ))
+                            .is_some_and(|p| {
+                                p["merged"] != true && p["state"].as_str() == Some("open")
+                            });
+                        if !is_open {
+                            return false;
+                        }
+                        return client
+                            .cached::<Value>(&format!(
+                                "/repos/{}/pulls/{}/canban-summary",
+                                src.repository, src.number
+                            ))
+                            .and_then(|s| s["checks_summary"]["state"].as_str().map(str::to_owned))
+                            .is_some_and(|st| {
+                                matches!(st.as_str(), "running" | "pending" | "unknown")
+                            });
+                    }
+                    false
+                }) {
+                    let _ = server.github_pr_refresh(json!({"card_id":c.id}));
+                }
+            }
+            let authorizing = prev_auth_state == "authorizing";
+            Some((next_sync, next_fast_pr, prev_auth_state, authorizing))
+        })
+        .await;
+        let Ok(Some((ns, nfp, pas, authorizing))) = outcome else {
+            break;
+        };
+        next_sync = ns;
+        next_fast_pr = nfp;
+        prev_auth_state = pas;
+        let mut deadline = next_sync.min(next_fast_pr);
+        if authorizing {
+            deadline = deadline.min(std::time::Instant::now() + Duration::from_secs(1));
+        }
+        let delay = deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .max(Duration::from_millis(1));
+        if !AppServer::wait_or_stop(&notify, &mut stop_rx, Some(delay)).await {
+            break;
+        }
+    }
+}
+
+async fn handle_herdr_connect(
+    server: Arc<AppServer>,
+    read_half: tokio::io::ReadHalf<ConnStream>,
+    mut writer: tokio::io::WriteHalf<ConnStream>,
+    params: &Value,
+    mut stop_rx: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    let terminal = params["terminal"].as_str().map(str::to_owned);
+    let expected_core_id = params["expected_core_id"].as_str().map(str::to_owned);
+    let (target, _viewer) = if let Some(terminal) = terminal {
+        let srv = server.clone();
+        let core_res = tokio::task::spawn_blocking(move || srv.verified_core_id()).await?;
+        let core_id = match core_res {
+            Ok(id) => {
+                if let Some(expected) = expected_core_id
+                    && id != expected
+                {
+                    let err = anyhow::anyhow!("Original core identity changed");
+                    let _ = write_json_line_async(
+                        &mut writer,
+                        &json!({"jsonrpc":"2.0","id":0,"error":{"code":-32000,"message":format!("{err:#}")}}),
+                    )
+                    .await;
+                    return Err(err);
+                }
+                id
+            }
+            Err(e) => {
+                let _ = write_json_line_async(
+                    &mut writer,
+                    &json!({"jsonrpc":"2.0","id":0,"error":{"code":-32000,"message":format!("{e:#}")}}),
+                )
+                .await;
+                return Err(e);
+            }
+        };
+        let target = Some((core_id.clone(), terminal.clone()));
+        let viewer = Some(canban_herdr::activity::Viewer::new(&core_id, &terminal));
+        (target, viewer)
+    } else {
+        (None, None)
+    };
+
+    if *stop_rx.borrow() || server.stopped() {
+        return Ok(());
+    }
+
+    let config = server.config();
+    let mut cmd = tokio::process::Command::from(canban_herdr::transport::command(&config));
+    let mut child = match cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            let _ = write_json_line_async(
+                &mut writer,
+                &json!({"jsonrpc":"2.0","id":0,"error":{"code":-32000,"message":format!("{e:#}")}}),
+            )
+            .await;
+            return Err(e.into());
+        }
+    };
+    let mut child_stdin = child.stdin.take().unwrap();
+    let mut child_stdout = child.stdout.take().unwrap();
+
+    write_json_line_async(&mut writer, &json!({"result":{"ready":true}})).await?;
+
+    let mut to_herdr = tokio::spawn(async move {
+        let mut source = read_half;
+        let res = if target.is_some() {
+            relay_input_async(&mut source, &mut child_stdin, target).await
+        } else {
+            tokio::io::copy(&mut source, &mut child_stdin)
+                .await
+                .map(|_| ())
+                .map_err(Into::into)
+        };
+        let _ = child_stdin.shutdown().await;
+        drop(child_stdin);
+        res
+    });
+
+    let mut to_client = tokio::spawn(async move {
+        let res = tokio::io::copy(&mut child_stdout, &mut writer)
+            .await
+            .map(|_| ())
+            .map_err(anyhow::Error::from);
+        let _ = writer.shutdown().await;
+        res
+    });
+
+    let mut to_herdr_done = false;
+    let mut to_client_done = false;
+    tokio::select! {
+        _ = &mut to_herdr => {
+            to_herdr_done = true;
+            tokio::select! {
+                _ = tokio::time::timeout(Duration::from_millis(500), async {
+                    let _ = (&mut to_client).await;
+                    to_client_done = true;
+                }) => {}
+                _ = stop_rx.changed() => {}
+            }
+        }
+        _ = &mut to_client => {
+            to_client_done = true;
+        }
+        _ = stop_rx.changed() => {}
+    }
+
+    if !to_herdr_done {
+        to_herdr.abort();
+        let _ = to_herdr.await;
+    }
+    if !to_client_done {
+        to_client.abort();
+        let _ = to_client.await;
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    drop(_viewer);
+    Ok(())
+}
+
+async fn relay_input_async<R, W>(
+    source: R,
+    writer: &mut W,
+    target: Option<(String, String)>,
+) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let mut reader = tokio::io::BufReader::new(source);
+    let mut hello = Vec::new();
+    (&mut reader)
+        .take(65536)
+        .read_until(b'\n', &mut hello)
+        .await?;
+    ensure!(hello.last() == Some(&b'\n'), "Invalid viewer greeting");
+    writer.write_all(&hello).await?;
+    writer.flush().await?;
+    loop {
+        let mut header = [0; 9];
+        if let Err(e) = reader.read_exact(&mut header).await {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                return Ok(());
+            }
+            return Err(e.into());
+        }
+        let channel = u32::from_le_bytes(header[..4].try_into().unwrap());
+        let length = u32::from_le_bytes(header[5..].try_into().unwrap()) as usize;
+        ensure!(length <= 16 * 1024 * 1024, "Invalid viewer frame size");
+        let mut data = vec![0; length];
+        reader.read_exact(&mut data).await?;
+        if channel != 0
+            && (header[4] == 0 && !data.is_empty() || header[4] == 4 && data == [1])
+            && let Some((core, terminal)) = &target
+        {
+            canban_herdr::activity::touch(core, terminal);
+        }
+        writer.write_all(&header).await?;
+        writer.write_all(&data).await?;
+        writer.flush().await?;
     }
 }
 
@@ -2067,5 +2266,177 @@ mod tests {
         let n = held_reader.read_line(&mut eof_line).unwrap_or(0);
         assert_eq!(n, 0);
         assert!(wait_empty());
+    }
+
+    fn encode_relay_frame(out: &mut Vec<u8>, channel: u32, kind: u8, payload: &[u8]) {
+        out.extend_from_slice(&channel.to_le_bytes());
+        out.push(kind);
+        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(payload);
+    }
+
+    #[test]
+    fn async_relay_input_touches_activity_only_on_human_input() {
+        let core = format!("async-relay-core-{}", uuid_session_id());
+        let terminal = "term-1".to_owned();
+        let _lease = canban_herdr::activity::Viewer::new(&core, &terminal);
+        let before = canban_herdr::activity::get(&core, &terminal).last_at;
+        std::thread::sleep(Duration::from_millis(5));
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut non_human = b"{\"method\":\"viewer\"}\n".to_vec();
+        // Control/render ack (kind=1) and channel 0 traffic must not touch activity.
+        encode_relay_frame(&mut non_human, 7, 1, &[0, 0, 0, 0]);
+        encode_relay_frame(&mut non_human, 0, 0, b"ignore-channel-0");
+        let mut forwarded_non_human = Vec::new();
+        rt.block_on(relay_input_async(
+            non_human.as_slice(),
+            &mut forwarded_non_human,
+            Some((core.clone(), terminal.clone())),
+        ))
+        .unwrap();
+        assert_eq!(forwarded_non_human, non_human);
+        assert_eq!(
+            canban_herdr::activity::get(&core, &terminal).last_at,
+            before
+        );
+
+        let mut human = b"{\"method\":\"viewer\"}\n".to_vec();
+        encode_relay_frame(&mut human, 7, 0, b"human input");
+        let mut forwarded_human = Vec::new();
+        rt.block_on(relay_input_async(
+            human.as_slice(),
+            &mut forwarded_human,
+            Some((core.clone(), terminal.clone())),
+        ))
+        .unwrap();
+        assert_eq!(forwarded_human, human);
+        assert!(canban_herdr::activity::get(&core, &terminal).last_at > before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn async_herdr_connect_relay_forwards_bytes_and_cleans_up_viewer_and_tcp_count() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let core_id = format!("core-relay-{}", uuid_session_id());
+        let term_id = format!("term-relay-{}", uuid_session_id());
+        let mock_hc = dir.path().join("mock-hc");
+        std::fs::write(
+            &mock_hc,
+            format!(
+                r#"#!/usr/bin/python3
+import json, os, sys
+first = sys.stdin.buffer.readline()
+if not first:
+    sys.exit(0)
+try:
+    msg = json.loads(first.decode())
+except Exception:
+    msg = None
+if isinstance(msg, dict) and msg.get("method") == "hello":
+    def handle(req):
+        m = req.get("method")
+        if m == "hello":
+            res = {{}}
+        elif m == "server.status":
+            res = {{"core": {{"id": "{core_id}"}}}}
+        elif m == "events.subscribe":
+            res = {{"seq": 1, "terminals": []}}
+        else:
+            res = {{}}
+        sys.stdout.write(json.dumps({{"jsonrpc": "2.0", "id": req["id"], "result": res}}) + "\n")
+        sys.stdout.flush()
+    handle(msg)
+    for raw in sys.stdin.buffer:
+        line = raw.decode().strip()
+        if line:
+            handle(json.loads(line))
+else:
+    sys.stdout.buffer.write(first)
+    sys.stdout.buffer.flush()
+    while True:
+        chunk = sys.stdin.buffer.read1(4096)
+        if not chunk:
+            break
+        sys.stdout.buffer.write(chunk)
+        sys.stdout.buffer.flush()
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&mock_hc, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let app = AppServer::open(home.clone(), PathBuf::from("/bin/echo")).unwrap();
+        app.config.write().unwrap().hc = mock_hc.to_string_lossy().into_owned();
+        let running = app
+            .start_with_listen(Some(ServerListenConfig {
+                tailscale: false,
+                port: 0,
+                listen: Some("127.0.0.1:0".into()),
+            }))
+            .unwrap();
+        let addr = app.bound_tcp_addrs().into_iter().next().unwrap();
+        let token = network::read_server_token(&home).unwrap();
+
+        let mut stream = std::net::TcpStream::connect(&addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        writeln!(
+            stream,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "herdr.connect",
+                "params": {"terminal": term_id},
+                "auth": token
+            })
+        )
+        .unwrap();
+        stream.flush().unwrap();
+
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut ready_line = String::new();
+        reader.read_line(&mut ready_line).unwrap();
+        let ready_json: Value = serde_json::from_str(&ready_line).unwrap();
+        assert_eq!(ready_json["result"]["ready"], true);
+
+        let before_activity = canban_herdr::activity::get(&core_id, &term_id);
+        assert_eq!(before_activity.viewers, 1);
+        assert_eq!(app.active_tcp_count(), 1);
+
+        std::thread::sleep(Duration::from_millis(5));
+        let mut relay_payload = b"{\"viewer\":1}\n".to_vec();
+        encode_relay_frame(&mut relay_payload, 3, 0, b"hello relay");
+        stream.write_all(&relay_payload).unwrap();
+        stream.flush().unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+
+        let mut echoed = Vec::new();
+        std::io::Read::read_to_end(&mut reader, &mut echoed).unwrap();
+        assert_eq!(echoed, relay_payload);
+        assert!(canban_herdr::activity::get(&core_id, &term_id).last_at > before_activity.last_at);
+
+        drop(reader);
+        drop(stream);
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            if canban_herdr::activity::get(&core_id, &term_id).viewers == 0
+                && app.active_tcp_count() == 0
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(canban_herdr::activity::get(&core_id, &term_id).viewers, 0);
+        assert_eq!(app.active_tcp_count(), 0);
+        drop(running);
     }
 }

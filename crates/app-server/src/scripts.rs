@@ -538,15 +538,15 @@ struct ScriptOutcome<'a> {
 
 impl AppServer {
     pub(super) fn wake_scripts(&self) {
-        if let Some(tx) = self.script_wake.lock().unwrap().as_ref() {
-            let _ = tx.try_send(());
+        if let Some(notify) = self.script_wake.lock().unwrap().as_ref() {
+            notify.notify_one();
         }
     }
 
     /// Wakes the background script worker in daemon mode; runs synchronously for in-process callers.
     pub(crate) fn request_scripts(&self) {
-        if let Some(tx) = self.script_wake.lock().unwrap().clone() {
-            let _ = tx.try_send(());
+        if let Some(notify) = self.script_wake.lock().unwrap().clone() {
+            notify.notify_one();
         } else {
             let _ = self.pump_scripts();
         }

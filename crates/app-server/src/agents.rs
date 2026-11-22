@@ -144,7 +144,7 @@ fn probe_cli_models_with_timeout_hook(
     let program_owned = program.to_owned();
     let args_owned: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
+    let run_probe = move || {
         let mut cmd = canban_exec::command(&program_owned);
         cmd.args(&args_owned)
             .stdin(std::process::Stdio::null())
@@ -166,7 +166,12 @@ fn probe_cli_models_with_timeout_hook(
             }
         }
         let _ = tx.send(parsed);
-    });
+    };
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn_blocking(run_probe);
+    } else {
+        std::thread::spawn(run_probe);
+    }
 
     if let Ok(parsed) = rx.recv_timeout(timeout)
         && !parsed.is_empty()

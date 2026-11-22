@@ -523,7 +523,7 @@ impl AppServer {
                     Ok(serde_json::to_value(saved)?)
                 })?;
                 if linked_github {
-                    self.github_sync_due.store(true, Ordering::SeqCst);
+                    self.trigger_github_sync();
                 }
                 Ok(result)
             }

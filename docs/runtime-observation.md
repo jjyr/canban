@@ -101,3 +101,22 @@ background context cache, never by UI rendering. Shells and Agents consume the
 same foreground cwd events. Same-binding last-known contexts survive temporary
 observation loss; known external locations do not fall back to launch Projects.
 The desktop API version advances with this additive snapshot field.
+
+## Tokio runtime and async worker boundaries (2026-11-22)
+
+When `AppServer::start_with_listen` starts the Tokio runtime, long-lived
+service loops (`observer_loop`, `context_worker_loop`, `delivery_worker_loop`,
+`script_worker_loop`, `runtime_worker_loop`, `github_sync_loop`,
+`github_worker_loop`, and `update_checks_loop`) run as Tokio tasks holding
+`Weak<AppServer>` and `tokio::sync::watch` stop receivers, offloading blocking
+SQLite, Git, updater, and Herdr I/O to `tokio::task::spawn_blocking`.
+Wakeups flow through `tokio::sync::Notify` (including `canban_herdr::activity::subscribe_callback`),
+replacing per-worker `Condvar`/`mpsc` polling threads while preserving synchronous
+in-memory test drivers when `AppServer` runs without `start_with_listen`.
+
+The `herdr.connect` relay runs asynchronously via `tokio::process::Command` and
+bidirectional Tokio stream tasks with explicit stdin half-close, bounded stdout
+drain on client EOF or shutdown, `activity::Viewer` lease cleanup, and
+`active_tcp_connections` accounting. `Power` (`utilities.rs`) keeps its `!Send`
+OS thread, and `update.daemon` keeps its detached restart thread outliving
+server shutdown.

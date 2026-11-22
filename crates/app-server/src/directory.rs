@@ -249,7 +249,7 @@ impl AppServer {
         }
         if !fresh {
             q.pending.insert(key, job);
-            self.context_signal.notify_all();
+            self.context_notify.notify_one();
         }
     }
     pub(super) fn cached_context(
@@ -327,119 +327,10 @@ impl AppServer {
         })
         .ok();
         self.contexts.lock().unwrap().watcher = watcher;
-        for _ in 0..4 {
-            let weak = Arc::downgrade(self);
-            std::thread::spawn(move || {
-                loop {
-                    let Some(server) = weak.upgrade() else {
-                        break;
-                    };
-                    if server.stopped() {
-                        break;
-                    }
-                    let next = {
-                        let mut q = server.contexts.lock().unwrap();
-                        let pending_watches = std::mem::take(&mut q.pending_watches);
-                        for path in pending_watches {
-                            if q.watched.insert(path.clone())
-                                && let Some(w) = &mut q.watcher
-                                && let Err(e) = w.watch(&path, RecursiveMode::NonRecursive)
-                            {
-                                eprintln!("Canban context watcher {}: {e}", path.display());
-                            }
-                        }
-                        if !q.running
-                            && let Some(key) = q.pending.keys().next().cloned()
-                        {
-                            let job = q.pending.remove(&key).unwrap();
-                            q.running = true;
-                            let cache = q.cache.clone();
-                            Some((key, job, cache))
-                        } else {
-                            let _ = server
-                                .context_signal
-                                .wait_timeout(q, Duration::from_secs(1))
-                                .unwrap();
-                            None
-                        }
-                    };
-                    let Some((key, job, cache)) = next else {
-                        continue;
-                    };
-                    let permit = server.check();
-                    let result = server.ops().directory_context_full_cached(
-                        &job.snapshot,
-                        &key,
-                        &mut cache.lock().unwrap(),
-                    );
-                    drop(permit);
-                    let mut q = server.contexts.lock().unwrap();
-                    q.running = false;
-                    let mut changed = false;
-                    if job.generation == q.generation
-                        && let Ok(resolved) = result
-                    {
-                        let mut context = job.context.clone();
-                        context.directory_root = resolved.directory_root;
-                        context.project_id = resolved.project_id;
-                        context.card_id = resolved.card_id;
-                        context.worktree_id = resolved.worktree_id;
-                        context.branch = resolved.branch;
-                        context.dirty = resolved.dirty;
-                        context.additions = resolved.additions;
-                        context.deletions = resolved.deletions;
-                        context.ahead = resolved.ahead;
-                        context.behind = resolved.behind;
-                        changed = true;
-                        if q.pending.get(&key).is_some_and(|p| {
-                            p.generation == job.generation && p.signature == job.signature
-                        }) {
-                            q.pending.remove(&key);
-                        }
-                        q.results.insert(
-                            key.clone(),
-                            Cached {
-                                context: context.clone(),
-                                signature: job.signature.clone(),
-                                at: Instant::now(),
-                            },
-                        );
-                        let targets = q
-                            .targets
-                            .values()
-                            .filter(|t| {
-                                t.context.cwd.as_ref() == Some(&key)
-                                    && t.signature == job.signature
-                                    && t.generation == job.generation
-                            })
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        for target in targets {
-                            let mut context = context.clone();
-                            context.terminal_id = target.context.terminal_id;
-                            context.core_id = target.context.core_id;
-                            context.terminal = target.context.terminal;
-                            let mut contexts = server.terminal_contexts.lock().unwrap();
-                            contexts.retain(|c| c.terminal_id != context.terminal_id);
-                            contexts.push(context);
-                        }
-                        for path in cache.lock().unwrap().watch_paths() {
-                            if q.watched.insert(path.clone())
-                                && let Some(w) = &mut q.watcher
-                                && let Err(e) = w.watch(&path, RecursiveMode::NonRecursive)
-                            {
-                                eprintln!("Canban context watcher {}: {e}", path.display());
-                            }
-                        }
-                    }
-                    server.context_signal.notify_all();
-                    drop(q);
-                    if changed {
-                        server.emit("terminals", None);
-                    }
-                }
-            });
-        }
+        let weak = Arc::downgrade(self);
+        let notify = self.context_notify.clone();
+        let stop_rx = self.stop_receiver();
+        self.spawn_bg(context_worker_loop(weak, notify, stop_rx));
     }
     pub(super) fn git_changed(&self) {
         let mut q = self.contexts.lock().unwrap();
@@ -485,6 +376,130 @@ impl AppServer {
         self.queue_context(s, id, core, terminal, value);
         self.cached_context(id, core, terminal, Some(cwd))
             .context("Directory context is updating")
+    }
+}
+
+async fn context_worker_loop(
+    weak: std::sync::Weak<AppServer>,
+    notify: Arc<tokio::sync::Notify>,
+    mut stop_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    while !*stop_rx.borrow() {
+        let step_weak = weak.clone();
+        let worked = tokio::task::spawn_blocking(move || {
+            let server = step_weak.upgrade()?;
+            if server.stopped() {
+                return None;
+            }
+            let next = {
+                let mut q = server.contexts.lock().unwrap();
+                let pending_watches = std::mem::take(&mut q.pending_watches);
+                for path in pending_watches {
+                    if q.watched.insert(path.clone())
+                        && let Some(w) = &mut q.watcher
+                        && let Err(e) = w.watch(&path, RecursiveMode::NonRecursive)
+                    {
+                        eprintln!("Canban context watcher {}: {e}", path.display());
+                    }
+                }
+                if !q.running
+                    && let Some(key) = q.pending.keys().next().cloned()
+                {
+                    let job = q.pending.remove(&key).unwrap();
+                    q.running = true;
+                    let cache = q.cache.clone();
+                    Some((key, job, cache))
+                } else {
+                    None
+                }
+            };
+            let Some((key, job, cache)) = next else {
+                return Some(false);
+            };
+            let permit = server.check();
+            let result = server.ops().directory_context_full_cached(
+                &job.snapshot,
+                &key,
+                &mut cache.lock().unwrap(),
+            );
+            drop(permit);
+            let mut q = server.contexts.lock().unwrap();
+            q.running = false;
+            let mut changed = false;
+            if job.generation == q.generation
+                && let Ok(resolved) = result
+            {
+                let mut context = job.context.clone();
+                context.directory_root = resolved.directory_root;
+                context.project_id = resolved.project_id;
+                context.card_id = resolved.card_id;
+                context.worktree_id = resolved.worktree_id;
+                context.branch = resolved.branch;
+                context.dirty = resolved.dirty;
+                context.additions = resolved.additions;
+                context.deletions = resolved.deletions;
+                context.ahead = resolved.ahead;
+                context.behind = resolved.behind;
+                changed = true;
+                if q.pending
+                    .get(&key)
+                    .is_some_and(|p| p.generation == job.generation && p.signature == job.signature)
+                {
+                    q.pending.remove(&key);
+                }
+                q.results.insert(
+                    key.clone(),
+                    Cached {
+                        context: context.clone(),
+                        signature: job.signature.clone(),
+                        at: Instant::now(),
+                    },
+                );
+                let targets = q
+                    .targets
+                    .values()
+                    .filter(|t| {
+                        t.context.cwd.as_ref() == Some(&key)
+                            && t.signature == job.signature
+                            && t.generation == job.generation
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for target in targets {
+                    let mut context = context.clone();
+                    context.terminal_id = target.context.terminal_id;
+                    context.core_id = target.context.core_id;
+                    context.terminal = target.context.terminal;
+                    let mut contexts = server.terminal_contexts.lock().unwrap();
+                    contexts.retain(|c| c.terminal_id != context.terminal_id);
+                    contexts.push(context);
+                }
+                for path in cache.lock().unwrap().watch_paths() {
+                    if q.watched.insert(path.clone())
+                        && let Some(w) = &mut q.watcher
+                        && let Err(e) = w.watch(&path, RecursiveMode::NonRecursive)
+                    {
+                        eprintln!("Canban context watcher {}: {e}", path.display());
+                    }
+                }
+            }
+            let more = !q.pending.is_empty();
+            drop(q);
+            if changed {
+                server.emit("terminals", None);
+            }
+            Some(more)
+        })
+        .await;
+        match worked {
+            Ok(Some(true)) => continue,
+            Ok(Some(false)) => {
+                if !AppServer::wait_or_stop(&notify, &mut stop_rx, None).await {
+                    break;
+                }
+            }
+            _ => break,
+        }
     }
 }
 

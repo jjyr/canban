@@ -1,6 +1,6 @@
 //! Event-driven runtime inventory. No periodic terminal or Git inventory scan.
 use super::*;
-use std::{collections::BTreeMap, sync::mpsc::RecvTimeoutError, time::Instant};
+use std::{collections::BTreeMap, time::Instant};
 
 const MIN_AGENT_WORK_MS: u64 = 2_000;
 
@@ -211,20 +211,20 @@ impl Inventory {
 }
 impl AppServer {
     pub(super) fn wake_runtime(&self) {
-        if let Some(tx) = self.runtime_wake.lock().unwrap().as_ref() {
-            let _ = tx.try_send(());
+        if let Some(notify) = self.runtime_wake.lock().unwrap().as_ref() {
+            notify.notify_one();
         }
     }
     pub(super) fn wake_delivery(&self) {
-        if let Some(tx) = self.delivery_wake.lock().unwrap().as_ref() {
-            let _ = tx.try_send(());
+        if let Some(notify) = self.delivery_wake.lock().unwrap().as_ref() {
+            notify.notify_one();
         }
     }
     /// Wakes the background delivery worker when the service runtime is active;
     /// runs synchronously for in-memory `AppServer::open` callers and unit tests.
     pub(crate) fn request_deliveries(&self) {
-        if let Some(tx) = self.delivery_wake.lock().unwrap().clone() {
-            let _ = tx.try_send(());
+        if let Some(notify) = self.delivery_wake.lock().unwrap().clone() {
+            notify.notify_one();
         } else {
             let _ = self.pump_deliveries();
         }
@@ -297,132 +297,9 @@ impl AppServer {
     pub(super) fn start_observer(self: &Arc<Self>) {
         self.observer_running.store(true, Ordering::SeqCst);
         let weak = Arc::downgrade(self);
-        std::thread::spawn(move || {
-            let mut delay = 1;
-            loop {
-                let Some(server) = weak.upgrade() else {
-                    break;
-                };
-                if server.stopped() {
-                    break;
-                }
-                let config = server.config();
-                let config_key =
-                    serde_json::to_vec(&json!([config.hc, config.hc_session, config.hc_env]))
-                        .unwrap();
-                let subscription = canban_herdr::Client { config }.subscribe();
-                let result: Result<()> = match subscription {
-                    Err(e) => Err(e),
-                    Ok(subscription) => {
-                        {
-                            let mut inv = server.inventory.lock().unwrap();
-                            if !inv.core.is_empty() && inv.core != subscription.core {
-                                inv.close_all_working(now());
-                            }
-                            inv.core = subscription.core.clone();
-                            inv.generation += 1;
-                            inv.snapshot(&subscription.snapshot);
-                            inv.last_at = now();
-                            inv.error = None;
-                            server.observed_at.store(inv.last_at, Ordering::SeqCst);
-                        }
-                        server.contexts.lock().unwrap().reset();
-                        server.emit("terminals", None);
-                        delay = 1;
-                        drop(server);
-                        loop {
-                            let Some(server) = weak.upgrade() else {
-                                return;
-                            };
-                            if server.stopped() {
-                                return;
-                            }
-                            let config = server.config();
-                            if serde_json::to_vec(&json!([
-                                config.hc,
-                                config.hc_session,
-                                config.hc_env
-                            ]))
-                            .unwrap()
-                                != config_key
-                            {
-                                break Err(anyhow::anyhow!("Herdr configuration changed"));
-                            }
-                            match subscription.recv_timeout(Duration::from_secs(1)) {
-                                Ok(Ok(message)) => {
-                                    let (changed, last_at) = {
-                                        let mut inv = server.inventory.lock().unwrap();
-                                        let changed = inv.apply(&message);
-                                        (changed, inv.last_at)
-                                    };
-                                    server.observed_at.store(last_at, Ordering::SeqCst);
-                                    if changed {
-                                        server.emit("terminals", None);
-                                    }
-                                    if matches!(
-                                        message["params"]["type"].as_str(),
-                                        Some("finished" | "removed")
-                                    ) || message["method"] == "missed"
-                                    {
-                                        server.wake_scripts();
-                                    }
-                                }
-                                Ok(Err(e)) => break Err(e),
-                                Err(RecvTimeoutError::Disconnected) => {
-                                    break Err(anyhow::anyhow!(
-                                        "Herdr event stream closed or overflowed"
-                                    ));
-                                }
-                                Err(RecvTimeoutError::Timeout) => {
-                                    if now()
-                                        .saturating_sub(server.inventory.lock().unwrap().last_at)
-                                        > 45_000
-                                    {
-                                        break Err(anyhow::anyhow!(
-                                            "Herdr event heartbeat timed out"
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                };
-                let Some(server) = weak.upgrade() else {
-                    break;
-                };
-                if let Err(e) = result {
-                    {
-                        let mut inv = server.inventory.lock().unwrap();
-                        inv.error = Some(format!("{e:#}"));
-                        inv.generation += 1;
-                    }
-                    server.emit("terminals", None);
-                } else {
-                    server.wake_runtime();
-                }
-                drop(server);
-                // Interruptible reconnect backoff, not a runtime scan.
-                let mut woke_early = false;
-                for _ in 0..delay * 10 {
-                    let Some(s) = weak.upgrade() else {
-                        return;
-                    };
-                    if s.stopped() {
-                        return;
-                    }
-                    let cfg = s.config();
-                    let next_key =
-                        serde_json::to_vec(&json!([cfg.hc, cfg.hc_session, cfg.hc_env])).unwrap();
-                    if s.herdr_wake.swap(false, Ordering::SeqCst) || next_key != config_key {
-                        woke_early = true;
-                        break;
-                    }
-                    drop(s);
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                delay = if woke_early { 1 } else { (delay * 2).min(30) };
-            }
-        });
+        let notify = self.herdr_notify.clone();
+        let stop_rx = self.stop_receiver();
+        self.spawn_bg(observer_loop(weak, notify, stop_rx));
     }
     pub(super) fn migrate_exit_failures(&self) -> Result<()> {
         const REASONS: [&str; 2] = [
@@ -524,188 +401,268 @@ impl AppServer {
         self.emit("runtime", Some(card_id));
         Ok(())
     }
-    fn start_delivery_worker(self: &Arc<Self>, drx: mpsc::Receiver<()>) {
-        let weak = Arc::downgrade(self);
-        std::thread::spawn(move || {
-            loop {
-                let Some(server) = weak.upgrade() else {
-                    break;
-                };
-                if server.stopped() {
-                    break;
-                }
-                let mut wait: Option<Duration> = None;
-                if canban_updater::handoff::active(&server.home) {
-                    wait = Some(Duration::from_millis(250));
-                } else {
-                    if let Err(e) = server.pump_deliveries() {
-                        eprintln!("Canban delivery: {e:#}");
-                    }
-                    let _ = server.pump_admissions();
-                    let s = server
-                        .store
-                        .lock()
-                        .unwrap()
-                        .db()
-                        .admission_snapshot()
-                        .unwrap_or_default();
-                    if s.terminals.iter().any(|t| {
-                        t.agent
-                            .as_ref()
-                            .is_some_and(|a| a.state == "queued" || a.pending.is_some())
-                    }) || s.merge_batches.iter().any(|b| b.state == "queued")
-                    {
-                        server.wake_runtime();
-                    }
-                    let mut due = |at: u64| {
-                        let duration = Duration::from_millis(at.saturating_sub(now()).max(1));
-                        wait = Some(wait.map_or(duration, |w| w.min(duration)));
-                    };
-                    if s.workflow_runs
-                        .iter()
-                        .any(|r| r.state == "waiting_delivery" && r.queue_pause_reason().is_some())
-                    {
-                        due(now().saturating_add(2_000));
-                    }
-                    for t in &s.terminals {
-                        let Some(a) = &t.agent else {
-                            continue;
-                        };
-                        if a.terminal.is_some()
-                            && a.connection_state == "connected"
-                            && !a.agent_stopped()
-                            && let Some(run) = s.workflow_runs.iter().find(|r| {
-                                r.card_id.as_deref() == Some(a.card_id.as_str())
-                                    && r.state == "waiting_delivery"
-                            })
-                        {
-                            let anchor = a
-                                .completed_at
-                                .max(Some(run.updated_at))
-                                .unwrap_or(t.created_at);
-                            due(anchor.saturating_add(Self::DELIVERY_AGENT_SETTLE_MS + 1));
-                        }
-                    }
-                }
-                drop(server);
-                match wait {
-                    Some(d) => {
-                        let _ = drx.recv_timeout(d);
-                    }
-                    None => {
-                        if drx.recv().is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-    }
-    fn start_script_worker(self: &Arc<Self>, srx: mpsc::Receiver<()>) {
-        let weak = Arc::downgrade(self);
-        std::thread::spawn(move || {
-            loop {
-                let Some(server) = weak.upgrade() else {
-                    break;
-                };
-                if server.stopped() {
-                    break;
-                }
-                let mut wait: Option<Duration> = None;
-                if canban_updater::handoff::active(&server.home) {
-                    wait = Some(Duration::from_millis(250));
-                } else {
-                    match server.pump_scripts() {
-                        Ok(true) => {
-                            wait = Some(Duration::from_millis(200));
-                        }
-                        Ok(false) => {}
-                        Err(e) => {
-                            eprintln!("Canban scripts: {e:#}");
-                            wait = Some(Duration::from_millis(500));
-                        }
-                    }
-                }
-                drop(server);
-                match wait {
-                    Some(d) => {
-                        let _ = srx.recv_timeout(d);
-                    }
-                    None => {
-                        if srx.recv().is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-    }
     pub(super) fn start_runtime(self: &Arc<Self>) {
-        let (tx, rx) = mpsc::sync_channel(1);
-        canban_herdr::activity::subscribe(tx.clone());
-        *self.runtime_wake.lock().unwrap() = Some(tx);
-        let (dtx, drx) = mpsc::sync_channel(1);
-        *self.delivery_wake.lock().unwrap() = Some(dtx);
-        let (stx, srx) = mpsc::sync_channel(1);
-        *self.script_wake.lock().unwrap() = Some(stx);
+        let runtime_notify = Arc::new(tokio::sync::Notify::new());
+        let activity_notify = Arc::downgrade(&runtime_notify);
+        canban_herdr::activity::subscribe_callback(move || {
+            if let Some(notify) = activity_notify.upgrade() {
+                notify.notify_one();
+                true
+            } else {
+                false
+            }
+        });
+        *self.runtime_wake.lock().unwrap() = Some(runtime_notify.clone());
+        let delivery_notify = Arc::new(tokio::sync::Notify::new());
+        *self.delivery_wake.lock().unwrap() = Some(delivery_notify.clone());
+        let script_notify = Arc::new(tokio::sync::Notify::new());
+        *self.script_wake.lock().unwrap() = Some(script_notify.clone());
         self.start_observer();
         self.start_context_workers();
-        self.start_delivery_worker(drx);
-        self.start_script_worker(srx);
-        let weak = Arc::downgrade(self);
-        std::thread::spawn(move || {
-            let mut retry = Instant::now() + Duration::from_secs(1);
-            let mut backoff = 1;
-            let mut queued = Vec::<String>::new();
-            loop {
+        self.spawn_bg(delivery_worker_loop(
+            Arc::downgrade(self),
+            delivery_notify,
+            self.stop_receiver(),
+        ));
+        self.spawn_bg(script_worker_loop(
+            Arc::downgrade(self),
+            script_notify,
+            self.stop_receiver(),
+        ));
+        self.spawn_bg(runtime_worker_loop(
+            Arc::downgrade(self),
+            runtime_notify,
+            self.stop_receiver(),
+        ));
+    }
+}
+
+async fn observer_loop(
+    weak: std::sync::Weak<AppServer>,
+    notify: Arc<tokio::sync::Notify>,
+    mut stop_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut delay = 1u64;
+    while !*stop_rx.borrow() {
+        let Some(server) = weak.upgrade() else {
+            break;
+        };
+        if server.stopped() {
+            break;
+        }
+        server.herdr_wake.store(false, Ordering::SeqCst);
+        let config = server.config();
+        let config_key =
+            serde_json::to_vec(&json!([config.hc, config.hc_session, config.hc_env])).unwrap();
+        drop(server);
+
+        let subscribe_cfg = config;
+        let sub_res = tokio::select! {
+            biased;
+            res = stop_rx.changed() => {
+                let _ = res;
+                return;
+            }
+            join_res = tokio::task::spawn_blocking(move || {
+                canban_herdr::Client { config: subscribe_cfg }.subscribe()
+            }) => {
+                match join_res {
+                    Ok(res) => res,
+                    Err(e) => Err(anyhow::anyhow!("Herdr subscribe task failed: {e}")),
+                }
+            }
+        };
+
+        let result: Result<()> = match sub_res {
+            Err(e) => Err(e),
+            Ok(subscription) => {
                 let Some(server) = weak.upgrade() else {
                     break;
                 };
                 if server.stopped() {
                     break;
                 }
-                if let Err(e) = server.tick() {
-                    eprintln!("Canban runtime: {e:#}");
+                {
+                    let mut inv = server.inventory.lock().unwrap();
+                    if !inv.core.is_empty() && inv.core != subscription.core {
+                        inv.close_all_working(now());
+                    }
+                    inv.core = subscription.core.clone();
+                    inv.generation += 1;
+                    inv.snapshot(&subscription.snapshot);
+                    inv.last_at = now();
+                    inv.error = None;
+                    server.observed_at.store(inv.last_at, Ordering::SeqCst);
                 }
-                let mut s = server
+                server.contexts.lock().unwrap().reset();
+                server.emit("terminals", None);
+                delay = 1;
+                drop(server);
+
+                let stream_weak = weak.clone();
+                let stream_key = config_key.clone();
+                match tokio::task::spawn_blocking(move || -> Option<Result<()>> {
+                    loop {
+                        let server = stream_weak.upgrade()?;
+                        if server.stopped() {
+                            return None;
+                        }
+                        let config = server.config();
+                        if serde_json::to_vec(&json!([config.hc, config.hc_session, config.hc_env]))
+                            .unwrap()
+                            != stream_key
+                        {
+                            return Some(Err(anyhow::anyhow!("Herdr configuration changed")));
+                        }
+                        match subscription.recv_timeout(Duration::from_millis(250)) {
+                            Ok(Ok(message)) => {
+                                let (changed, last_at) = {
+                                    let mut inv = server.inventory.lock().unwrap();
+                                    let changed = inv.apply(&message);
+                                    (changed, inv.last_at)
+                                };
+                                server.observed_at.store(last_at, Ordering::SeqCst);
+                                if changed {
+                                    server.emit("terminals", None);
+                                }
+                                if matches!(
+                                    message["params"]["type"].as_str(),
+                                    Some("finished" | "removed")
+                                ) || message["method"] == "missed"
+                                {
+                                    server.wake_scripts();
+                                }
+                            }
+                            Ok(Err(e)) => return Some(Err(e)),
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                return Some(Err(anyhow::anyhow!(
+                                    "Herdr event stream closed or overflowed"
+                                )));
+                            }
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                if now().saturating_sub(server.inventory.lock().unwrap().last_at)
+                                    > 45_000
+                                {
+                                    return Some(Err(anyhow::anyhow!(
+                                        "Herdr event heartbeat timed out"
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                })
+                .await
+                {
+                    Ok(Some(res)) => res,
+                    Ok(None) | Err(_) => return,
+                }
+            }
+        };
+
+        let Some(server) = weak.upgrade() else {
+            break;
+        };
+        if server.stopped() {
+            break;
+        }
+        if let Err(e) = result {
+            {
+                let mut inv = server.inventory.lock().unwrap();
+                inv.error = Some(format!("{e:#}"));
+                inv.generation += 1;
+            }
+            server.emit("terminals", None);
+        } else {
+            server.wake_runtime();
+        }
+        drop(server);
+
+        // Interruptible reconnect backoff via Notify + stop watch, not a runtime scan.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(delay);
+        let mut woke_early = false;
+        loop {
+            let Some(s) = weak.upgrade() else {
+                return;
+            };
+            if s.stopped() {
+                return;
+            }
+            let cfg = s.config();
+            let next_key =
+                serde_json::to_vec(&json!([cfg.hc, cfg.hc_session, cfg.hc_env])).unwrap();
+            if s.herdr_wake.swap(false, Ordering::SeqCst) || next_key != config_key {
+                woke_early = true;
+                break;
+            }
+            drop(s);
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::select! {
+                _ = notify.notified() => {}
+                _ = tokio::time::sleep_until(deadline) => {
+                    break;
+                }
+                res = stop_rx.changed() => {
+                    if res.is_err() || *stop_rx.borrow() {
+                        return;
+                    }
+                }
+            }
+        }
+        delay = if woke_early { 1 } else { (delay * 2).min(30) };
+    }
+}
+
+async fn delivery_worker_loop(
+    weak: std::sync::Weak<AppServer>,
+    notify: Arc<tokio::sync::Notify>,
+    mut stop_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    while !*stop_rx.borrow() {
+        let step_weak = weak.clone();
+        let step = tokio::task::spawn_blocking(move || {
+            let server = step_weak.upgrade()?;
+            if server.stopped() {
+                return None;
+            }
+            let mut wait: Option<Duration> = None;
+            if canban_updater::handoff::active(&server.home) {
+                wait = Some(Duration::from_millis(250));
+            } else {
+                if let Err(e) = server.pump_deliveries() {
+                    eprintln!("Canban delivery: {e:#}");
+                }
+                let _ = server.pump_admissions();
+                let s = server
                     .store
                     .lock()
                     .unwrap()
                     .db()
-                    .runtime_snapshot()
+                    .admission_snapshot()
                     .unwrap_or_default();
-                server.project_observation_freshness(&mut s);
-                let mut wait: Option<Duration> = None;
+                if s.terminals.iter().any(|t| {
+                    t.agent
+                        .as_ref()
+                        .is_some_and(|a| a.state == "queued" || a.pending.is_some())
+                }) || s.merge_batches.iter().any(|b| b.state == "queued")
+                {
+                    server.wake_runtime();
+                }
                 let mut due = |at: u64| {
                     let duration = Duration::from_millis(at.saturating_sub(now()).max(1));
                     wait = Some(wait.map_or(duration, |w| w.min(duration)));
                 };
-                if let Some(at) = server.event_deadline() {
-                    due(at);
-                }
-                if let Some(at) = server.refine_deadline() {
-                    due(at);
-                }
-                if let Some(at) = server.schedule_deadline(&s) {
-                    due(at);
-                }
                 if s.workflow_runs
                     .iter()
                     .any(|r| r.state == "waiting_delivery" && r.queue_pause_reason().is_some())
                 {
-                    // Re-check transient main-checkout blockers (dirty tree or switched branch)
-                    // so the FIFO merge queue automatically drains once the checkout is clean.
                     due(now().saturating_add(2_000));
                 }
                 for t in &s.terminals {
                     let Some(a) = &t.agent else {
                         continue;
                     };
-                    if a.close_state == "closing"
-                        && let Some(at) = a.close_requested_at
-                    {
-                        due(at.saturating_add(30_001));
-                    }
                     if a.terminal.is_some()
                         && a.connection_state == "connected"
                         && !a.agent_stopped()
@@ -718,106 +675,230 @@ impl AppServer {
                             .completed_at
                             .max(Some(run.updated_at))
                             .unwrap_or(t.created_at);
-                        due(anchor.saturating_add(Self::DELIVERY_AGENT_SETTLE_MS + 1));
-                    }
-                    if let Some(anchor) = canban_notifications::unreported_idle_anchor(&s, &t.id, a)
-                    {
-                        let activity = canban_herdr::activity::get(
-                            a.core_id.as_deref().unwrap_or(""),
-                            a.terminal.as_deref().unwrap_or(""),
-                        );
-                        let deadline = anchor
-                            .max(activity.last_at)
-                            .saturating_add(canban_notifications::UNREPORTED_IDLE_ALERT_MS);
-                        if a.lifecycle.observed_at.unwrap_or(0) < deadline {
-                            due(deadline.saturating_add(1));
-                        }
-                    }
-                    if lifecycle::idle_candidate(
-                        &s,
-                        a,
-                        server.config().scheduler.idle_minutes,
-                        u64::MAX,
-                        false,
-                    ) {
-                        let activity = canban_herdr::activity::get(
-                            a.core_id.as_deref().unwrap_or(""),
-                            a.terminal.as_deref().unwrap_or(""),
-                        );
-                        if let Some(deadline) = lifecycle::idle_reclaim_deadline(
-                            a,
-                            server.config().scheduler.idle_minutes,
-                            activity.last_at,
-                        ) {
-                            due(deadline);
-                        }
-                    }
-                }
-                // Only queued work awaiting a scheduler slot needs retry admission.
-                let retry_needed = canban_scheduler::next(&s, server.config().scheduler.max_agents)
-                    .is_some()
-                    || canban_scheduler::timers::next_scheduled_run(
-                        &s,
-                        server.config().scheduler.max_agents,
-                    )
-                    .is_some()
-                    || (canban_scheduler::active_count(&s) < server.config().scheduler.max_agents
-                        && (s.merge_batches.iter().any(|b| b.state == "queued")
-                            || s.configuration_sessions.iter().any(|c| c.state == "queued")));
-                if retry_needed {
-                    let mut current = s
-                        .terminals
-                        .iter()
-                        .filter(|t| {
-                            t.agent
-                                .as_ref()
-                                .is_some_and(|a| a.state == "queued" || a.pending.is_some())
-                        })
-                        .map(|t| t.id.clone())
-                        .collect::<Vec<_>>();
-                    current.extend(
-                        s.merge_batches
-                            .iter()
-                            .filter(|b| b.state == "queued")
-                            .map(|b| b.id.clone()),
-                    );
-                    current.extend(
-                        s.scheduled_runs
-                            .iter()
-                            .filter(|r| !r.creates_card && r.state == "queued")
-                            .map(|r| r.id.clone()),
-                    );
-                    current.extend(
-                        s.configuration_sessions
-                            .iter()
-                            .filter(|c| c.state == "queued")
-                            .map(|c| format!("{}:{}", c.id, c.generation)),
-                    );
-                    if current != queued {
-                        queued = current;
-                        backoff = 1;
-                        retry = Instant::now() + Duration::from_secs(1);
-                    }
-                    if Instant::now() >= retry {
-                        backoff = (backoff * 2).min(30);
-                        retry = Instant::now() + Duration::from_secs(backoff);
-                    }
-                    let d = retry.saturating_duration_since(Instant::now());
-                    wait = Some(wait.map_or(d, |w| w.min(d)));
-                }
-                drop(server);
-                match wait {
-                    Some(d) => {
-                        let _ = rx.recv_timeout(d);
-                    }
-                    None => {
-                        if rx.recv().is_err() {
-                            break;
-                        }
+                        due(anchor.saturating_add(AppServer::DELIVERY_AGENT_SETTLE_MS + 1));
                     }
                 }
             }
-        });
+            Some(wait)
+        })
+        .await;
+        let Ok(Some(wait)) = step else {
+            break;
+        };
+        if !AppServer::wait_or_stop(&notify, &mut stop_rx, wait).await {
+            break;
+        }
+    }
+}
+
+async fn script_worker_loop(
+    weak: std::sync::Weak<AppServer>,
+    notify: Arc<tokio::sync::Notify>,
+    mut stop_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    while !*stop_rx.borrow() {
+        let step_weak = weak.clone();
+        let step = tokio::task::spawn_blocking(move || {
+            let server = step_weak.upgrade()?;
+            if server.stopped() {
+                return None;
+            }
+            let mut wait: Option<Duration> = None;
+            if canban_updater::handoff::active(&server.home) {
+                wait = Some(Duration::from_millis(250));
+            } else {
+                match server.pump_scripts() {
+                    Ok(true) => {
+                        wait = Some(Duration::from_millis(200));
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        eprintln!("Canban scripts: {e:#}");
+                        wait = Some(Duration::from_millis(500));
+                    }
+                }
+            }
+            Some(wait)
+        })
+        .await;
+        let Ok(Some(wait)) = step else {
+            break;
+        };
+        if !AppServer::wait_or_stop(&notify, &mut stop_rx, wait).await {
+            break;
+        }
+    }
+}
+
+async fn runtime_worker_loop(
+    weak: std::sync::Weak<AppServer>,
+    notify: Arc<tokio::sync::Notify>,
+    mut stop_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut retry = Instant::now() + Duration::from_secs(1);
+    let mut backoff = 1u64;
+    let mut queued = Vec::<String>::new();
+    while !*stop_rx.borrow() {
+        let step_weak = weak.clone();
+        let prev_queued = std::mem::take(&mut queued);
+        let step = tokio::task::spawn_blocking(move || {
+            let server = step_weak.upgrade()?;
+            if server.stopped() {
+                return None;
+            }
+            let mut queued = prev_queued;
+            if let Err(e) = server.tick() {
+                eprintln!("Canban runtime: {e:#}");
+            }
+            let mut s = server
+                .store
+                .lock()
+                .unwrap()
+                .db()
+                .runtime_snapshot()
+                .unwrap_or_default();
+            server.project_observation_freshness(&mut s);
+            let mut wait: Option<Duration> = None;
+            let mut due = |at: u64| {
+                let duration = Duration::from_millis(at.saturating_sub(now()).max(1));
+                wait = Some(wait.map_or(duration, |w| w.min(duration)));
+            };
+            if let Some(at) = server.event_deadline() {
+                due(at);
+            }
+            if let Some(at) = server.refine_deadline() {
+                due(at);
+            }
+            if let Some(at) = server.schedule_deadline(&s) {
+                due(at);
+            }
+            if s.workflow_runs
+                .iter()
+                .any(|r| r.state == "waiting_delivery" && r.queue_pause_reason().is_some())
+            {
+                // Re-check transient main-checkout blockers (dirty tree or switched branch)
+                // so the FIFO merge queue automatically drains once the checkout is clean.
+                due(now().saturating_add(2_000));
+            }
+            for t in &s.terminals {
+                let Some(a) = &t.agent else {
+                    continue;
+                };
+                if a.close_state == "closing"
+                    && let Some(at) = a.close_requested_at
+                {
+                    due(at.saturating_add(30_001));
+                }
+                if a.terminal.is_some()
+                    && a.connection_state == "connected"
+                    && !a.agent_stopped()
+                    && let Some(run) = s.workflow_runs.iter().find(|r| {
+                        r.card_id.as_deref() == Some(a.card_id.as_str())
+                            && r.state == "waiting_delivery"
+                    })
+                {
+                    let anchor = a
+                        .completed_at
+                        .max(Some(run.updated_at))
+                        .unwrap_or(t.created_at);
+                    due(anchor.saturating_add(AppServer::DELIVERY_AGENT_SETTLE_MS + 1));
+                }
+                if let Some(anchor) = canban_notifications::unreported_idle_anchor(&s, &t.id, a) {
+                    let activity = canban_herdr::activity::get(
+                        a.core_id.as_deref().unwrap_or(""),
+                        a.terminal.as_deref().unwrap_or(""),
+                    );
+                    let deadline = anchor
+                        .max(activity.last_at)
+                        .saturating_add(canban_notifications::UNREPORTED_IDLE_ALERT_MS);
+                    if a.lifecycle.observed_at.unwrap_or(0) < deadline {
+                        due(deadline.saturating_add(1));
+                    }
+                }
+                if lifecycle::idle_candidate(
+                    &s,
+                    a,
+                    server.config().scheduler.idle_minutes,
+                    u64::MAX,
+                    false,
+                ) {
+                    let activity = canban_herdr::activity::get(
+                        a.core_id.as_deref().unwrap_or(""),
+                        a.terminal.as_deref().unwrap_or(""),
+                    );
+                    if let Some(deadline) = lifecycle::idle_reclaim_deadline(
+                        a,
+                        server.config().scheduler.idle_minutes,
+                        activity.last_at,
+                    ) {
+                        due(deadline);
+                    }
+                }
+            }
+            // Only queued work awaiting a scheduler slot needs retry admission.
+            let retry_needed = canban_scheduler::next(&s, server.config().scheduler.max_agents)
+                .is_some()
+                || canban_scheduler::timers::next_scheduled_run(
+                    &s,
+                    server.config().scheduler.max_agents,
+                )
+                .is_some()
+                || (canban_scheduler::active_count(&s) < server.config().scheduler.max_agents
+                    && (s.merge_batches.iter().any(|b| b.state == "queued")
+                        || s.configuration_sessions.iter().any(|c| c.state == "queued")));
+            if retry_needed {
+                let mut current = s
+                    .terminals
+                    .iter()
+                    .filter(|t| {
+                        t.agent
+                            .as_ref()
+                            .is_some_and(|a| a.state == "queued" || a.pending.is_some())
+                    })
+                    .map(|t| t.id.clone())
+                    .collect::<Vec<_>>();
+                current.extend(
+                    s.merge_batches
+                        .iter()
+                        .filter(|b| b.state == "queued")
+                        .map(|b| b.id.clone()),
+                );
+                current.extend(
+                    s.scheduled_runs
+                        .iter()
+                        .filter(|r| !r.creates_card && r.state == "queued")
+                        .map(|r| r.id.clone()),
+                );
+                current.extend(
+                    s.configuration_sessions
+                        .iter()
+                        .filter(|c| c.state == "queued")
+                        .map(|c| format!("{}:{}", c.id, c.generation)),
+                );
+                if current != queued {
+                    queued = current;
+                    backoff = 1;
+                    retry = Instant::now() + Duration::from_secs(1);
+                }
+                if Instant::now() >= retry {
+                    backoff = (backoff * 2).min(30);
+                    retry = Instant::now() + Duration::from_secs(backoff);
+                }
+                let d = retry.saturating_duration_since(Instant::now());
+                wait = Some(wait.map_or(d, |w| w.min(d)));
+            }
+            Some((wait, retry, backoff, queued))
+        })
+        .await;
+        let Ok(Some((wait, next_retry, next_backoff, next_queued))) = step else {
+            break;
+        };
+        retry = next_retry;
+        backoff = next_backoff;
+        queued = next_queued;
+        if !AppServer::wait_or_stop(&notify, &mut stop_rx, wait).await {
+            break;
+        }
     }
 }
 

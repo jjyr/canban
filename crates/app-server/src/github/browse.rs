@@ -870,7 +870,7 @@ impl AppServer {
                 let _ =
                     self.clear_review_draft_for_pr(&r.repository, number, p["card_id"].as_str());
             }
-            self.github_sync_due.store(true, Ordering::SeqCst);
+            self.trigger_github_sync();
         }
         self.emit("github", None);
         Ok(result)
@@ -916,7 +916,7 @@ impl AppServer {
         if result["state"] == "published" {
             self.github_cli
                 .notification_changed(thread, method.ends_with("done"))?;
-            self.github_sync_due.store(true, Ordering::SeqCst);
+            self.trigger_github_sync();
         }
         self.emit("github", None);
         Ok(result)

@@ -2292,12 +2292,23 @@ impl HostRegistry {
                 slot.prefetching.clone(),
             )
         };
+        drop(reg);
 
-        if draining_flag
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
+        loop {
+            let Some(reg) = weak.upgrade() else {
+                return;
+            };
+            if reg.stop.load(Ordering::SeqCst) {
+                return;
+            }
+            if draining_flag
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                break;
+            }
             let drain_guard = AtomicFlagGuard(draining_flag.clone());
+            let mut stopped_on_conn_err = false;
             if reg.has_drainable_outbox(host_id) {
                 reg.sync_host_now(host_id);
                 let mut snapshot = reg.cached_snapshot_for(host_id).unwrap_or_default();
@@ -2394,7 +2405,10 @@ impl HostRegistry {
                         FinishOutcome::RetryImmediate => {
                             rebuilt_ids.insert(mutation_id);
                         }
-                        FinishOutcome::StopConnection => break,
+                        FinishOutcome::StopConnection => {
+                            stopped_on_conn_err = true;
+                            break;
+                        }
                     }
                 }
 
@@ -2410,8 +2424,24 @@ impl HostRegistry {
                         },
                     );
                 }
+            } else {
+                drop(reg);
             }
             drop(drain_guard);
+            let should_continue = !stopped_on_conn_err
+                && weak.upgrade().is_some_and(|reg| {
+                    !reg.stop.load(Ordering::SeqCst)
+                        && reg
+                            .remotes
+                            .lock()
+                            .unwrap()
+                            .get(host_id)
+                            .is_some_and(|s| s.client.is_some())
+                        && reg.has_drainable_outbox(host_id)
+                });
+            if !should_continue {
+                break;
+            }
         }
 
         // Sequential timeline prefetch for active Cards when not draining.

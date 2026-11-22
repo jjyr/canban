@@ -65,16 +65,23 @@ pub fn touch(core: &str, terminal: &str) {
     changed();
 }
 
-fn listeners() -> &'static Mutex<Vec<SyncSender<()>>> {
-    static LISTENERS: OnceLock<Mutex<Vec<SyncSender<()>>>> = OnceLock::new();
+type ActivityListener = Box<dyn Fn() -> bool + Send + 'static>;
+
+fn listeners() -> &'static Mutex<Vec<ActivityListener>> {
+    static LISTENERS: OnceLock<Mutex<Vec<ActivityListener>>> = OnceLock::new();
     LISTENERS.get_or_init(Default::default)
 }
-pub fn subscribe(sender: SyncSender<()>) {
-    listeners().lock().unwrap().push(sender);
+
+/// Subscribes a pure-std callback to viewer lease and input activity changes.
+/// Returning `false` unsubscribes the listener automatically.
+pub fn subscribe_callback(cb: impl Fn() -> bool + Send + 'static) {
+    listeners().lock().unwrap().push(Box::new(cb));
 }
+
+pub fn subscribe(sender: SyncSender<()>) {
+    subscribe_callback(move || !matches!(sender.try_send(()), Err(TrySendError::Disconnected(_))));
+}
+
 fn changed() {
-    listeners()
-        .lock()
-        .unwrap()
-        .retain(|tx| !matches!(tx.try_send(()), Err(TrySendError::Disconnected(_))));
+    listeners().lock().unwrap().retain(|cb| cb());
 }

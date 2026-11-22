@@ -29,8 +29,9 @@ pub struct AppServer {
     pub home: PathBuf,
     github: Arc<canban_github::auth::Service>,
     github_sync_due: AtomicBool,
+    github_sync_notify: Arc<tokio::sync::Notify>,
     github_jobs: Mutex<github::worker::Jobs>,
-    github_job_signal: std::sync::Condvar,
+    github_job_notify: Arc<tokio::sync::Notify>,
     github_revision: Arc<AtomicU64>,
     state_instance: String,
     db_changes: Arc<AtomicU64>,
@@ -52,6 +53,7 @@ pub struct AppServer {
     stop: AtomicBool,
     stop_tx: tokio::sync::watch::Sender<bool>,
     stop_cond: (Mutex<bool>, std::sync::Condvar),
+    runtime_handle: Mutex<Option<tokio::runtime::Handle>>,
     checkout_gates: delivery_gates::KeyedGateTable<delivery_gates::CheckoutGateKey>,
     queue_gates: delivery_gates::KeyedGateTable<String>,
     card_delivery_gates: delivery_gates::KeyedGateTable<String>,
@@ -63,14 +65,15 @@ pub struct AppServer {
     refinements: refine::RefinementTracker,
     observer_running: AtomicBool,
     herdr_wake: AtomicBool,
+    herdr_notify: Arc<tokio::sync::Notify>,
     herdr_install: Arc<Mutex<herdr_setup::HerdrInstallState>>,
     check_slots: Mutex<bool>,
     check_signal: std::sync::Condvar,
-    runtime_wake: Mutex<Option<mpsc::SyncSender<()>>>,
-    delivery_wake: Mutex<Option<mpsc::SyncSender<()>>>,
-    script_wake: Mutex<Option<mpsc::SyncSender<()>>>,
+    runtime_wake: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    delivery_wake: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    script_wake: Mutex<Option<Arc<tokio::sync::Notify>>>,
     contexts: Mutex<directory::ContextQueue>,
-    context_signal: std::sync::Condvar,
+    context_notify: Arc<tokio::sync::Notify>,
 }
 // A concurrently spawned child can briefly inherit the open file description
 // before exec closes it. Closing just our descriptor would leave its flock held.
@@ -89,6 +92,10 @@ pub struct Running {
 impl Drop for Running {
     fn drop(&mut self) {
         self.server.trigger_stop();
+        *self.server.runtime_handle.lock().unwrap() = None;
+        *self.server.runtime_wake.lock().unwrap() = None;
+        *self.server.delivery_wake.lock().unwrap() = None;
+        *self.server.script_wake.lock().unwrap() = None;
         if let Some(rt) = self.runtime.take() {
             if tokio::runtime::Handle::try_current().is_ok() {
                 let _ = std::thread::spawn(move || {
@@ -699,8 +706,9 @@ impl AppServer {
             self_weak: OnceLock::new(),
             utilities,
             github_sync_due: AtomicBool::new(true),
+            github_sync_notify: Arc::new(tokio::sync::Notify::new()),
             github_jobs: Mutex::new(Default::default()),
-            github_job_signal: std::sync::Condvar::new(),
+            github_job_notify: Arc::new(tokio::sync::Notify::new()),
             github_revision,
             state_instance: id(),
             db_changes,
@@ -731,6 +739,7 @@ impl AppServer {
             stop: AtomicBool::new(false),
             stop_tx,
             stop_cond: (Mutex::new(false), std::sync::Condvar::new()),
+            runtime_handle: Mutex::new(None),
             checkout_gates: Default::default(),
             queue_gates: Default::default(),
             card_delivery_gates: Default::default(),
@@ -742,6 +751,7 @@ impl AppServer {
             refinements: Default::default(),
             observer_running: AtomicBool::new(false),
             herdr_wake: AtomicBool::new(false),
+            herdr_notify: Arc::new(tokio::sync::Notify::new()),
             herdr_install: Arc::new(Mutex::new(Default::default())),
             check_slots: Mutex::new(false),
             check_signal: std::sync::Condvar::new(),
@@ -749,7 +759,7 @@ impl AppServer {
             delivery_wake: Mutex::new(None),
             script_wake: Mutex::new(None),
             contexts: Mutex::new(Default::default()),
-            context_signal: std::sync::Condvar::new(),
+            context_notify: Arc::new(tokio::sync::Notify::new()),
         });
         let _ = server.self_weak.set(Arc::downgrade(&server));
         Ok(server)
@@ -843,6 +853,61 @@ impl AppServer {
     pub fn stopped(&self) -> bool {
         self.stop.load(Ordering::SeqCst)
     }
+    pub(crate) fn spawn_bg<F>(&self, fut: F) -> bool
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let handle = self.runtime_handle.lock().unwrap().clone();
+        if let Some(handle) = handle {
+            handle.spawn(fut);
+            true
+        } else {
+            false
+        }
+    }
+    pub(crate) fn spawn_blocking_bg<F>(&self, task: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let handle = self.runtime_handle.lock().unwrap().clone();
+        if let Some(handle) = handle {
+            handle.spawn_blocking(task);
+        } else {
+            std::thread::spawn(task);
+        }
+    }
+    pub(crate) fn trigger_github_sync(&self) {
+        self.github_sync_due.store(true, Ordering::SeqCst);
+        self.github_sync_notify.notify_one();
+    }
+    pub(crate) fn wake_herdr(&self) {
+        self.herdr_wake.store(true, Ordering::SeqCst);
+        self.herdr_notify.notify_one();
+    }
+    pub(crate) async fn wait_or_stop(
+        notify: &tokio::sync::Notify,
+        stop: &mut tokio::sync::watch::Receiver<bool>,
+        timeout: Option<Duration>,
+    ) -> bool {
+        if *stop.borrow() {
+            return false;
+        }
+        match timeout {
+            Some(d) => {
+                tokio::select! {
+                    _ = notify.notified() => !*stop.borrow(),
+                    _ = tokio::time::sleep(d) => !*stop.borrow(),
+                    res = stop.changed() => res.is_ok() && !*stop.borrow(),
+                }
+            }
+            None => {
+                tokio::select! {
+                    _ = notify.notified() => !*stop.borrow(),
+                    res = stop.changed() => res.is_ok() && !*stop.borrow(),
+                }
+            }
+        }
+    }
     pub(crate) fn trigger_stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
         let _ = self.stop_tx.send(true);
@@ -854,7 +919,10 @@ impl AppServer {
         self.wake_runtime();
         self.wake_delivery();
         self.wake_scripts();
-        self.context_signal.notify_all();
+        self.context_notify.notify_waiters();
+        self.github_job_notify.notify_waiters();
+        self.github_sync_notify.notify_waiters();
+        self.herdr_notify.notify_waiters();
     }
     pub fn wait_stopped(&self) {
         let mut guard = self.stop_cond.0.lock().unwrap();
@@ -887,6 +955,9 @@ impl AppServer {
         rx
     }
     fn emit(&self, topic: &'static str, card: Option<String>) {
+        if topic == "configuration" {
+            self.herdr_notify.notify_one();
+        }
         self.state_revision.fetch_add(1, Ordering::SeqCst);
         let gh_rev = if topic == "github" {
             self.github_revision.fetch_add(1, Ordering::SeqCst) + 1
