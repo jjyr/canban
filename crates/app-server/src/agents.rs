@@ -116,10 +116,21 @@ pub(super) fn probe_cli_models_with_timeout(
     defaults: &[ModelOption],
     parser: fn(&str) -> Vec<ModelOption>,
 ) -> Vec<ModelOption> {
-    probe_cli_models_with_timeout_hook(cache_key, program, args, timeout, defaults, parser, None)
+    probe_cli_models_with_timeout_hook_and_env(
+        cache_key,
+        program,
+        args,
+        timeout,
+        defaults,
+        parser,
+        None,
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+    )
 }
 
-fn probe_cli_models_with_timeout_hook(
+#[allow(clippy::too_many_arguments)]
+fn probe_cli_models_with_timeout_hook_and_env(
     cache_key: &str,
     program: &str,
     args: &[&str],
@@ -127,6 +138,8 @@ fn probe_cli_models_with_timeout_hook(
     defaults: &[ModelOption],
     parser: fn(&str) -> Vec<ModelOption>,
     on_live: Option<fn(&[ModelOption])>,
+    extra_env: &BTreeMap<String, String>,
+    unset_keys: &BTreeSet<String>,
 ) -> Vec<ModelOption> {
     let cache = model_probe_cache();
     if let Ok(guard) = cache.lock()
@@ -143,9 +156,17 @@ fn probe_cli_models_with_timeout_hook(
     let key_owned = cache_key.to_owned();
     let program_owned = program.to_owned();
     let args_owned: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+    let extra_env_owned = extra_env.clone();
+    let unset_keys_owned = unset_keys.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let run_probe = move || {
         let mut cmd = canban_exec::command(&program_owned);
+        for key in &unset_keys_owned {
+            cmd.env_remove(key);
+        }
+        if !extra_env_owned.is_empty() {
+            cmd.envs(&extra_env_owned);
+        }
         cmd.args(&args_owned)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -182,9 +203,15 @@ fn probe_cli_models_with_timeout_hook(
     defaults.to_vec()
 }
 
-fn probe_agy_models(agy_path: &str, defaults: &[ModelOption]) -> Vec<ModelOption> {
-    let cache_key = format!("agy:{agy_path}");
-    probe_cli_models_with_timeout_hook(
+fn probe_agy_models(
+    agy_path: &str,
+    defaults: &[ModelOption],
+    env_fingerprint: &str,
+    extra_env: &BTreeMap<String, String>,
+    unset_keys: &BTreeSet<String>,
+) -> Vec<ModelOption> {
+    let cache_key = format!("agy:{agy_path}:{env_fingerprint}");
+    probe_cli_models_with_timeout_hook_and_env(
         &cache_key,
         agy_path,
         &["models"],
@@ -192,17 +219,28 @@ fn probe_agy_models(agy_path: &str, defaults: &[ModelOption]) -> Vec<ModelOption
         defaults,
         parse_agy_models_output,
         Some(canban_profiles::update_probed_agy_models),
+        extra_env,
+        unset_keys,
     )
 }
 
 fn models_for_entry(
     entry: &canban_profiles::CatalogEntry,
     installed_path: Option<&str>,
+    env_fingerprint: &str,
+    extra_env: &BTreeMap<String, String>,
+    unset_keys: &BTreeSet<String>,
 ) -> Vec<ModelOption> {
     match entry.id.as_str() {
         "agy" => {
             if let Some(path) = installed_path {
-                return probe_agy_models(path, &entry.default_models);
+                return probe_agy_models(
+                    path,
+                    &entry.default_models,
+                    env_fingerprint,
+                    extra_env,
+                    unset_keys,
+                );
             }
         }
         "codex" => {
@@ -270,6 +308,24 @@ fn profile_supports_orchestrator(profiles: &[Profile], prof: &Profile) -> bool {
 }
 
 impl AppServer {
+    fn probe_models_for_profile(
+        &self,
+        entry: &canban_profiles::CatalogEntry,
+        installed_path: Option<&str>,
+        profile: Option<&Profile>,
+    ) -> Vec<ModelOption> {
+        let resolved_probe_env = self
+            .resolve_runtime_env(profile, None, &BTreeMap::new(), None, None)
+            .ok();
+        let empty_map = BTreeMap::new();
+        let empty_set = BTreeSet::new();
+        let (probe_fp, probe_env, probe_unset) = match resolved_probe_env.as_ref() {
+            Some(r) => (r.fingerprint.as_str(), &r.env, &r.unset_keys),
+            None => ("", &empty_map, &empty_set),
+        };
+        models_for_entry(entry, installed_path, probe_fp, probe_env, probe_unset)
+    }
+
     pub(super) fn agent_catalog(&self, _p: Value) -> Result<Value> {
         let config = self.config();
         let catalog = canban_profiles::builtin_catalog();
@@ -325,7 +381,7 @@ impl AppServer {
                 .get(effective_bin)
                 .or_else(|| probed.get(&entry.binary))
                 .map(String::as_str);
-            let models = models_for_entry(entry, probe_for_models);
+            let models = self.probe_models_for_profile(entry, probe_for_models, existing);
             agents.push(json!({
                 "id": entry.id,
                 "display_name": existing.and_then(|p| p.name.clone()).unwrap_or_else(|| entry.display_name.clone()),
@@ -362,7 +418,7 @@ impl AppServer {
             let meta = canban_profiles::catalog_entry_for_profile(preset_prof);
             let models = meta
                 .as_ref()
-                .map(|m| models_for_entry(m, installed_path.as_deref()))
+                .map(|m| self.probe_models_for_profile(m, installed_path.as_deref(), existing))
                 .unwrap_or_default();
             let supported_efforts = meta
                 .as_ref()
@@ -422,7 +478,7 @@ impl AppServer {
             let meta = canban_profiles::catalog_entry_for_profile(prof);
             let models = meta
                 .as_ref()
-                .map(|m| models_for_entry(m, installed_path.as_deref()))
+                .map(|m| self.probe_models_for_profile(m, installed_path.as_deref(), Some(prof)))
                 .unwrap_or_default();
             let supported_efforts = meta
                 .as_ref()
@@ -1161,6 +1217,16 @@ impl AppServer {
                 let before = raw.profiles.len();
                 raw.profiles.retain(|x| x.id != id);
                 ensure!(raw.profiles.len() < before, "Profile @{id} not found");
+                {
+                    let mut store = self.store.lock().unwrap();
+                    store.write(|db| {
+                        canban_storage::env::delete_scope(
+                            db.conn,
+                            canban_storage::env::SCOPE_AGENT,
+                            id,
+                        )
+                    })?;
+                }
                 if raw.default_agent == id {
                     raw.default_agent = raw
                         .profiles

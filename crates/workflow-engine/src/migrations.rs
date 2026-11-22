@@ -7,7 +7,7 @@ use crate::source::Document;
 use anyhow::{Result, ensure};
 
 pub const BASELINE: u32 = 1;
-pub const CURRENT: u32 = 11;
+pub const CURRENT: u32 = 12;
 
 pub struct Migration {
     pub version: u32,
@@ -54,6 +54,10 @@ const STEPS: &[Migration] = &[
     Migration {
         version: 11,
         up: v11_cardless_and_event_selectors,
+    },
+    Migration {
+        version: 12,
+        up: v12_env_secret_expressions,
     },
 ];
 
@@ -336,6 +340,12 @@ fn v11_cardless_and_event_selectors(doc: &mut Document) -> Result<()> {
     Ok(())
 }
 
+/// Schema 12: Workflow and step `env` values support `${{ secrets.KEY }}` and `${{ vars.KEY }}`
+/// expressions resolved against Project, Agent, and Global scopes at execution time.
+fn v12_env_secret_expressions(_doc: &mut Document) -> Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -578,6 +588,40 @@ steps:
             Some("org/repo")
         );
         assert_eq!(doc.on["blank_repo"].selector.repository, None);
+        assert!(upgrade_yaml(&upgraded).unwrap().is_none());
+    }
+
+    #[test]
+    fn v12_upgrades_v11_preserving_env_secret_expressions() {
+        let v11 = r#"schema: 11
+id: delivery:demo
+name: Development
+on:
+  develop:
+    event: card.column_entered
+    start_at: script:check
+    match:
+      column: develop
+env:
+  CI: "true"
+steps:
+  - id: script:check
+    run: ./check.sh
+    env:
+      DEPLOY_TOKEN: ${{ secrets.STAGING_TOKEN }}
+    next: __end
+  - id: __end
+    uses: complete
+"#;
+        let upgraded = upgrade_yaml(v11)
+            .unwrap()
+            .expect("v11 should upgrade to v12");
+        let doc = crate::source::parse(&upgraded).unwrap();
+        assert_eq!(doc.schema, CURRENT);
+        assert_eq!(
+            doc.steps[0].env.get("DEPLOY_TOKEN").map(String::as_str),
+            Some("${{ secrets.STAGING_TOKEN }}")
+        );
         assert!(upgrade_yaml(&upgraded).unwrap().is_none());
     }
 }

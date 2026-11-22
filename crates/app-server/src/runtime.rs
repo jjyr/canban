@@ -217,6 +217,7 @@ async fn serve_stream(
 ) -> Result<()> {
     let mut initial_request = accepted.initial_request;
     let mut has_initial_pipelined = accepted.has_pipelined_bytes;
+    let auth_token = accepted.auth_token;
     let mut stop_rx = accepted.stop_rx;
     let (read_half, mut writer) = tokio::io::split(accepted.stream);
     let mut reader = tokio::io::BufReader::new(read_half);
@@ -288,7 +289,11 @@ async fn serve_stream(
         first = false;
         let srv = server.clone();
         let params = input["params"].clone();
-        let call_res = tokio::task::spawn_blocking(move || srv.call(&method, params)).await?;
+        let tok = auth_token.clone();
+        let call_res = tokio::task::spawn_blocking(move || {
+            srv.call_with_transport_token(&method, params, tok.as_deref().map(String::as_str))
+        })
+        .await?;
         let reply = match call_res {
             Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
             Err(e) => {
@@ -1112,7 +1117,15 @@ impl AppServer {
                 {
                     return Ok(None);
                 }
-                let continue_in_place = canban_scheduler::can_continue_in_place(&current, &entry);
+                let env_matches = entry.agent.as_ref().is_some_and(|a| {
+                    a.applied_env_fingerprint.is_empty()
+                        || self
+                            .expected_agent_env_fingerprint_with_db(db, &current, &entry)
+                            .as_deref()
+                            == Some(a.applied_env_fingerprint.as_str())
+                });
+                let continue_in_place =
+                    env_matches && canban_scheduler::can_continue_in_place(&current, &entry);
                 let Some(agent) = &mut entry.agent else {
                     return Ok(None);
                 };
@@ -1560,8 +1573,12 @@ impl AppServer {
         updated_entry.agent = Some(run.clone());
         let run_dir_path = canban_context::run_dir(&self.home, &updated_entry);
         let endpoint = self.endpoint().to_string_lossy().into_owned();
-        let (mut env, custom_env) =
-            crate::scripts::build_step_env(crate::scripts::StepEnvContext {
+        let step_ref = att
+            .workflow_step
+            .as_deref()
+            .or_else(|| wf_run.as_ref().and_then(|r| r.step.as_deref()));
+        let mut protected =
+            crate::scripts::build_step_context_env(crate::scripts::StepEnvContext {
                 cli: &self.cli,
                 exec_home: &self.home,
                 endpoint: &endpoint,
@@ -1570,20 +1587,28 @@ impl AppServer {
                 workspace: run.workspace.as_ref().or(card.workspace.as_ref()),
                 run_dir: &run_dir_path,
                 workflow_run: wf_run.as_ref(),
-                step_ref: att
-                    .workflow_step
-                    .as_deref()
-                    .or_else(|| wf_run.as_ref().and_then(|r| r.step.as_deref())),
+                step_ref,
                 script_env_file: None,
                 script_output_file: None,
             });
-        env.insert(
+        protected.insert(
             "CANBAN_SESSION_ID".into(),
             context.provider_session_id.clone().unwrap_or_default(),
         );
         // Do not misidentify a child invocation using its launching Agent's ID.
-        env.insert("CANBAN_PROFILE_ID".into(), att.profile.id.clone());
-        run.applied_env = custom_env;
+        protected.insert("CANBAN_PROFILE_ID".into(), att.profile.id.clone());
+        let wf_env = wf_run.as_ref().map(|r| r.custom_env_for_step(step_ref));
+        let resolved_env = self.resolve_runtime_env(
+            Some(&att.profile),
+            Some(&project),
+            &protected,
+            wf_env.as_ref(),
+            Some(card.trust_level()),
+        )?;
+        run.applied_env = resolved_env.safe_workflow_env;
+        run.applied_env_fingerprint = resolved_env.fingerprint;
+        let env = resolved_env.env;
+        let unset_keys = resolved_env.unset_keys;
         updated_entry.agent = Some(run.clone());
         self.store.lock().unwrap().write(|db| {
             let mut current: TerminalEntry = db.get(&entry.id)?;
@@ -1636,8 +1661,14 @@ impl AppServer {
             client.config.terminal_env_mode.is_inherit(),
             Some(card.trust_level()),
         );
-        let terminal =
-            client.launch_with_policy(spec.argv, &spec.cwd, spec.env, labels, env_policy)?;
+        let terminal = client.launch_with_policy_and_unset(
+            spec.argv,
+            &spec.cwd,
+            spec.env,
+            labels,
+            env_policy,
+            &unset_keys,
+        )?;
         let terminal_address = strp(&terminal, "address")?.to_owned();
         run.core_id = Some(core_id.clone());
         run.terminal = Some(terminal_address.clone());
@@ -1890,20 +1921,7 @@ impl AppServer {
                 let store = self.store.lock().unwrap();
                 let db = store.db();
                 if is_global_project_id(&run.project_id) {
-                    Project {
-                        id: GLOBAL_PROJECT_ID.into(),
-                        name: "Global".into(),
-                        directory: self.home.to_string_lossy().into_owned(),
-                        target_branch: None,
-                        workflow: Workflow::default(),
-                        github: None,
-                        detected_github: None,
-                        github_disconnected: false,
-                        delivery_mode: DeliveryMode::default(),
-                        agent_overrides: std::collections::BTreeMap::new(),
-                        tags: Vec::new(),
-                        created_at: 0,
-                    }
+                    crate::scripts::global_workflow_project(&self.home)
                 } else {
                     match db.get::<Project>(&run.project_id) {
                         Ok(p) => p,
@@ -1914,20 +1932,34 @@ impl AppServer {
             let run_dir = crate::scripts::cardless_run_dir(&self.home, &run.project_id, &run.id);
             let _ = std::fs::create_dir_all(&run_dir);
             let endpoint = self.endpoint().to_string_lossy().into_owned();
-            let (mut env, _) = crate::scripts::build_step_env(crate::scripts::StepEnvContext {
-                cli: &self.cli,
-                exec_home: &self.home,
-                endpoint: &endpoint,
-                project: &project,
-                card: None,
-                workspace: None,
-                run_dir: &run_dir,
-                workflow_run: Some(&run),
-                step_ref: Some(&step_id),
-                script_env_file: None,
-                script_output_file: None,
-            });
-            env.insert("CANBAN_PROFILE_ID".into(), profile.id.clone());
+            let mut protected =
+                crate::scripts::build_step_context_env(crate::scripts::StepEnvContext {
+                    cli: &self.cli,
+                    exec_home: &self.home,
+                    endpoint: &endpoint,
+                    project: &project,
+                    card: None,
+                    workspace: None,
+                    run_dir: &run_dir,
+                    workflow_run: Some(&run),
+                    step_ref: Some(&step_id),
+                    script_env_file: None,
+                    script_output_file: None,
+                });
+            protected.insert("CANBAN_PROFILE_ID".into(), profile.id.clone());
+            let wf_env = run.custom_env_for_step(Some(&step_id));
+            let source_trust = crate::scripts::cardless_run_source_trust(&run);
+            let Ok(resolved_env) = self.resolve_runtime_env(
+                Some(&profile),
+                Some(&project),
+                &protected,
+                Some(&wf_env),
+                source_trust,
+            ) else {
+                continue;
+            };
+            let env = resolved_env.env;
+            let unset_keys = resolved_env.unset_keys;
 
             let Ok(mut argv) = canban_profiles::command(
                 &profile,
@@ -1960,14 +1992,21 @@ impl AppServer {
             };
             let env_policy = canban_exec::shell_env::LocalEnvPolicy::for_source_trust(
                 config.terminal_env_mode.is_inherit(),
-                crate::scripts::cardless_run_source_trust(&run),
+                source_trust,
             );
             let labels = std::collections::BTreeMap::from([
                 ("canban.project".into(), run.project_id.clone()),
                 ("canban.workflow_run".into(), run.id.clone()),
                 ("canban.workflow_step".into(), step_id.clone()),
             ]);
-            match client.launch_with_policy(spec.argv, &spec.cwd, spec.env, labels, env_policy) {
+            match client.launch_with_policy_and_unset(
+                spec.argv,
+                &spec.cwd,
+                spec.env,
+                labels,
+                env_policy,
+                &unset_keys,
+            ) {
                 Ok(launched) => {
                     let addr = launched["address"].as_str().unwrap_or("").to_owned();
                     let _ = self.store.lock().unwrap().write(|db| {

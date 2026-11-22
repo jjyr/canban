@@ -90,6 +90,7 @@ pub fn agent_run(
         connection_state: String::new(),
         pending: None,
         applied_env: Default::default(),
+        applied_env_fingerprint: String::new(),
     }
 }
 

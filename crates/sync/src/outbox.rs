@@ -17,6 +17,7 @@ pub enum MutationKind {
     MoveCard,
     AddComment,
     ResolveCard,
+    SyncGlobalEnv,
 }
 
 impl MutationKind {
@@ -27,6 +28,7 @@ impl MutationKind {
             Self::MoveCard => "card.move",
             Self::AddComment => "comment.add",
             Self::ResolveCard => "card.resolve",
+            Self::SyncGlobalEnv => "env.global.sync",
         }
     }
 
@@ -37,6 +39,7 @@ impl MutationKind {
             Self::MoveCard => "Move Card",
             Self::AddComment => "Add Comment",
             Self::ResolveCard => "Resolve Card",
+            Self::SyncGlobalEnv => "Sync Global Environment",
         }
     }
 }
@@ -116,7 +119,12 @@ impl Outbox {
     pub fn save(&self) -> Result<()> {
         if self.ops.is_empty() {
             if self.path.exists() {
-                let _ = std::fs::remove_file(&self.path);
+                std::fs::remove_file(&self.path)?;
+                if let Some(parent) = self.path.parent()
+                    && let Ok(dir) = std::fs::File::open(parent)
+                {
+                    let _ = dir.sync_all();
+                }
             }
             return Ok(());
         }
@@ -159,7 +167,13 @@ impl Outbox {
                     MutationState::Conflict { .. } | MutationState::Failed { .. }
                 )
             })
-            .map(|m| m.card_id.clone())
+            .map(|m| {
+                if m.kind == MutationKind::SyncGlobalEnv {
+                    "__global_env__".to_owned()
+                } else {
+                    m.card_id.clone()
+                }
+            })
             .collect()
     }
 
@@ -168,6 +182,19 @@ impl Outbox {
     pub fn enqueue(&mut self, mutation: Mutation) -> Result<(Mutation, bool)> {
         if let Some(existing) = self.ops.iter().find(|m| m.id == mutation.id) {
             return Ok((existing.clone(), false));
+        }
+        if mutation.kind == MutationKind::SyncGlobalEnv
+            && let Some(existing) = self.ops.iter_mut().find(|m| {
+                m.kind == MutationKind::SyncGlobalEnv
+                    && matches!(m.state, MutationState::Queued)
+                    && !m.retry_same_params
+            })
+        {
+            existing.params = mutation.params;
+            existing.created_at = mutation.created_at;
+            let updated = existing.clone();
+            self.save()?;
+            return Ok((updated, true));
         }
         if mutation.kind == MutationKind::UpdateCard
             && let Some(create) = self.ops.iter_mut().find(|m| {
@@ -300,5 +327,32 @@ mod tests {
             ))
             .unwrap_err();
         assert!(err.to_string().contains("Offline queue is full"));
+    }
+
+    #[test]
+    fn coalesces_global_env_sync_ops_and_keeps_outbox_pointer_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("host.outbox.json");
+        let mut outbox = Outbox::load(path.clone());
+        let op1 = mk_op(
+            "g1",
+            "",
+            MutationKind::SyncGlobalEnv,
+            json!({"generation": 1}),
+        );
+        let (_, coalesced1) = outbox.enqueue(op1).unwrap();
+        assert!(!coalesced1);
+        let op2 = mk_op(
+            "g2",
+            "",
+            MutationKind::SyncGlobalEnv,
+            json!({"generation": 2}),
+        );
+        let (merged, coalesced2) = outbox.enqueue(op2).unwrap();
+        assert!(coalesced2);
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(merged.params["generation"], 2);
+        let disk = std::fs::read_to_string(&path).unwrap();
+        assert!(disk.contains("sync_global_env"));
     }
 }

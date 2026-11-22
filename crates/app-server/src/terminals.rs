@@ -669,13 +669,35 @@ impl AppServer {
                     vec![shell, "-l".into()]
                 }
             };
-            let spec = canban_profiles::prepare_launch(canban_profiles::LaunchRequest {
-                profile: agent_profile.as_ref(),
-                argv,
-                env,
-                cwd: cwd.clone(),
-            })?;
-            let receipt = client.launch(spec.argv, &spec.cwd, spec.env, labels)?;
+            let receipt = if is_setup {
+                let spec = canban_profiles::prepare_launch(canban_profiles::LaunchRequest {
+                    profile: agent_profile.as_ref(),
+                    argv,
+                    env,
+                    cwd: cwd.clone(),
+                })?;
+                client.launch_with_policy_and_unset(
+                    spec.argv,
+                    &spec.cwd,
+                    spec.env,
+                    labels,
+                    canban_exec::shell_env::LocalEnvPolicy::MinimalPathOnly,
+                    &std::collections::BTreeSet::new(),
+                )?
+            } else {
+                let trust = card.as_ref().map(Card::trust_level);
+                self.launch_herdr_with_env(crate::env::HerdrLaunchRequest {
+                    profile: agent_profile.as_ref(),
+                    project: project.as_ref(),
+                    protected_context: &env,
+                    workflow_env: None,
+                    source_trust: trust,
+                    argv,
+                    cwd: cwd.clone(),
+                    labels,
+                })?
+                .receipt
+            };
             let address = receipt["address"]
                 .as_str()
                 .context("Terminal launch receipt has no address")?

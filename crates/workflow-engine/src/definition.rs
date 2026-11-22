@@ -6,18 +6,115 @@ use std::path::{Component, Path};
 pub fn validate_env_map(env: &BTreeMap<String, String>, scope: &str) -> Result<()> {
     for (k, v) in env {
         ensure!(
-            !k.is_empty()
-                && !k.contains('=')
-                && !k.contains('\0')
-                && !k.chars().any(char::is_whitespace),
+            canban_types::is_valid_env_key(k),
             "Invalid environment variable name `{k}` in {scope}"
         );
         ensure!(
             !v.contains('\0'),
             "Environment variable `{k}` in {scope} cannot contain NUL bytes"
         );
+        validate_env_expressions(v, k, scope)?;
     }
     Ok(())
+}
+
+/// Validate `${{ ... }}` expressions inside workflow/step `env:` values.
+/// Only `${{ secrets.<KEY> }}` and `${{ vars.<KEY> }}` are supported.
+pub fn validate_env_expressions(value: &str, key: &str, scope: &str) -> Result<()> {
+    let mut rest = value;
+    while let Some(start) = rest.find("${{") {
+        let after_open = &rest[start + 3..];
+        let Some(end) = after_open.find("}}") else {
+            anyhow::bail!("Unclosed `${{{{` expression in environment variable `{key}` in {scope}");
+        };
+        let expr = after_open[..end].trim();
+        let (ns, target_key) = expr.split_once('.').ok_or_else(|| {
+            anyhow::anyhow!(
+                "Invalid expression `${{{{ {expr} }}}}` in `{key}` ({scope}); expected `secrets.<KEY>` or `vars.<KEY>`"
+            )
+        })?;
+        let ns = ns.trim();
+        let target_key = target_key.trim();
+        ensure!(
+            matches!(ns, "secrets" | "vars"),
+            "Unsupported expression namespace `{ns}` in `{key}` ({scope}); expected `secrets` or `vars`"
+        );
+        ensure!(
+            canban_types::is_valid_env_key(target_key),
+            "Invalid variable name `{target_key}` in `${{{{ {expr} }}}}` (`{key}`, {scope})"
+        );
+        rest = &after_open[end + 2..];
+    }
+    Ok(())
+}
+
+pub fn env_value_references_secret(raw: &str) -> bool {
+    let mut rest = raw;
+    while let Some(start) = rest.find("${{") {
+        let after_open = &rest[start + 3..];
+        let Some(end) = after_open.find("}}") else {
+            break;
+        };
+        let expr = after_open[..end].trim();
+        if let Some((ns, _)) = expr.split_once('.')
+            && ns.trim() == "secrets"
+        {
+            return true;
+        }
+        rest = &after_open[end + 2..];
+    }
+    false
+}
+
+/// Expand `${{ vars.KEY }}` and `${{ secrets.KEY }}` inside a workflow/step `env:` value.
+/// Returns `(expanded_value, skipped_secret_keys_when_untrusted)`.
+pub fn expand_env_templates(
+    raw: &str,
+    vars: &BTreeMap<String, String>,
+    secrets: &BTreeMap<String, String>,
+    allow_secrets: bool,
+) -> (String, Vec<String>) {
+    let mut out = String::with_capacity(raw.len());
+    let mut skipped = Vec::new();
+    let mut rest = raw;
+    while let Some(start) = rest.find("${{") {
+        out.push_str(&rest[..start]);
+        let after_open = &rest[start + 3..];
+        let Some(end) = after_open.find("}}") else {
+            out.push_str(&rest[start..]);
+            rest = "";
+            break;
+        };
+        let expr = after_open[..end].trim();
+        if let Some((ns, target)) = expr.split_once('.') {
+            let ns = ns.trim();
+            let target = target.trim();
+            match ns {
+                "vars" => {
+                    if let Some(val) = vars.get(target) {
+                        out.push_str(val);
+                    }
+                }
+                "secrets" => {
+                    if allow_secrets {
+                        if let Some(val) = secrets.get(target) {
+                            out.push_str(val);
+                        }
+                    } else if !skipped.iter().any(|s| s == target) {
+                        skipped.push(target.to_owned());
+                    }
+                }
+                _ => {
+                    out.push_str(&rest[start..start + 3 + end + 2]);
+                }
+            }
+        } else {
+            out.push_str(&rest[start..start + 3 + end + 2]);
+        }
+        rest = &after_open[end + 2..];
+    }
+    out.push_str(rest);
+    (out, skipped)
 }
 
 pub fn validate_definition(
@@ -577,5 +674,55 @@ mod column_selector_tests {
             ..Default::default()
         };
         assert!(!matches(&no_repo_selector, &external_comment));
+    }
+
+    #[test]
+    fn env_expression_validation_and_expansion_handles_vars_secrets_and_untrusted_runs() {
+        let valid = BTreeMap::from([
+            (
+                "AUTH_HEADER".into(),
+                "Bearer ${{ secrets.DEPLOY_TOKEN }}".into(),
+            ),
+            (
+                "URL".into(),
+                "https://${{ vars.API_HOST }}/v1?k=${{ secrets.API_KEY }}".into(),
+            ),
+        ]);
+        validate_env_map(&valid, "step deploy").unwrap();
+        assert!(env_value_references_secret(&valid["AUTH_HEADER"]));
+        assert!(!env_value_references_secret("https://${{ vars.API_HOST }}"));
+
+        for bad in [
+            BTreeMap::from([("A".into(), "${{ secrets.UNCLOSED".into())]),
+            BTreeMap::from([("A".into(), "${{ github.token }}".into())]),
+            BTreeMap::from([("A".into(), "${{ secrets.BAD KEY }}".into())]),
+            BTreeMap::from([("A".into(), "${{ just_name }}".into())]),
+        ] {
+            assert!(validate_env_map(&bad, "step bad").is_err(), "{bad:?}");
+        }
+
+        let vars = BTreeMap::from([("API_HOST".into(), "api.example.com".into())]);
+        let secrets = BTreeMap::from([
+            ("DEPLOY_TOKEN".into(), "tok-secret".into()),
+            ("API_KEY".into(), "key-secret".into()),
+        ]);
+
+        let (trusted_val, skipped_ok) = expand_env_templates(
+            "https://${{ vars.API_HOST }}/v1?k=${{ secrets.API_KEY }}",
+            &vars,
+            &secrets,
+            true,
+        );
+        assert_eq!(trusted_val, "https://api.example.com/v1?k=key-secret");
+        assert!(skipped_ok.is_empty());
+
+        let (untrusted_val, skipped) = expand_env_templates(
+            "https://${{ vars.API_HOST }}/v1?k=${{ secrets.API_KEY }}",
+            &vars,
+            &secrets,
+            false,
+        );
+        assert_eq!(untrusted_val, "https://api.example.com/v1?k=");
+        assert_eq!(skipped, vec!["API_KEY".to_owned()]);
     }
 }

@@ -263,21 +263,21 @@ impl AppServer {
                         session.provider_session_id.clone().unwrap_or_default(),
                     ),
                 ]);
-                let spec = canban_profiles::prepare_launch(canban_profiles::LaunchRequest {
-                    profile: Some(&profile),
-                    argv,
-                    env,
-                    cwd: cwd_str.clone(),
-                })?;
-                let receipt = client.launch(
-                    spec.argv,
-                    &spec.cwd,
-                    spec.env,
-                    std::collections::BTreeMap::from([
-                        ("canban.configuration".into(), session.id.clone()),
-                        ("canban.project".into(), session.project_id.clone()),
-                    ]),
-                )?;
+                let receipt = self
+                    .launch_herdr_with_env(crate::env::HerdrLaunchRequest {
+                        profile: Some(&profile),
+                        project: project.as_ref(),
+                        protected_context: &env,
+                        workflow_env: None,
+                        source_trust: Some("local"),
+                        argv,
+                        cwd: cwd_str.clone(),
+                        labels: std::collections::BTreeMap::from([
+                            ("canban.configuration".into(), session.id.clone()),
+                            ("canban.project".into(), session.project_id.clone()),
+                        ]),
+                    })?
+                    .receipt;
                 let address = strp(&receipt, "address")?.to_owned();
                 let runtime = terminal.runtime.as_mut().unwrap();
                 runtime.core_id = Some(core.clone());

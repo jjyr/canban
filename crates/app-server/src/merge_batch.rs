@@ -1130,13 +1130,17 @@ impl AppServer {
             observed_agent: None,
             waiting: None,
         };
-        let spec = canban_profiles::prepare_launch(canban_profiles::LaunchRequest {
+        let launch_res = self.launch_herdr_with_env(crate::env::HerdrLaunchRequest {
             profile: Some(&profile),
+            project: Some(&project),
+            protected_context: &env,
+            workflow_env: None,
+            source_trust: Some("local"),
             argv,
-            env,
             cwd: batch.worktree.clone(),
-        })?;
-        match client.launch(spec.argv, &spec.cwd, spec.env, labels) {
+            labels,
+        });
+        match launch_res.map(|o| o.receipt) {
             Ok(receipt) => {
                 let address = strp(&receipt, "address")?.to_owned();
                 runtime.terminal = Some(address.clone());

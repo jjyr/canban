@@ -1,4 +1,6 @@
+pub mod env;
 pub mod migrations;
+pub mod vault;
 use anyhow::{Context, Result};
 use canban_types::*;
 use rusqlite::{Connection, params};
@@ -583,7 +585,8 @@ impl Db<'_> {
             ],
         )?;
 
-        // 5. Delete cards and finally the project itself.
+        // 5. Delete project-scoped secrets, cards and finally the project itself.
+        env::delete_scope(self.conn, env::SCOPE_PROJECT, project_id)?;
         self.conn
             .execute("DELETE FROM cards WHERE project_id=?1", [project_id])?;
         self.conn
@@ -808,6 +811,7 @@ impl Db<'_> {
             })
             .collect::<Vec<_>>()
         };
+        let (global_env, scoped_env) = env::list_all_snapshot_env(self.conn)?;
         Ok(Snapshot {
             github_sync: Default::default(),
             workflow_runs: self.list()?,
@@ -840,6 +844,8 @@ impl Db<'_> {
             questions: self.list()?,
             note_events: self.list()?,
             review_drafts,
+            global_env,
+            scoped_env,
             ..Default::default()
         })
     }

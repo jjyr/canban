@@ -119,7 +119,7 @@ fn apply_one(snapshot: &mut Snapshot, host_id: &str, op: &Mutation) {
                 card.human_gate = None;
             }
         }
-        MutationKind::AddComment => {}
+        MutationKind::AddComment | MutationKind::SyncGlobalEnv => {}
     }
 }
 
@@ -127,6 +127,9 @@ fn apply_one(snapshot: &mut Snapshot, host_id: &str, op: &Mutation) {
 pub fn compute_pending_sync(ops: &[Mutation]) -> BTreeMap<String, SyncMark> {
     let mut marks = BTreeMap::new();
     for op in ops {
+        if op.kind == MutationKind::SyncGlobalEnv || op.card_id.is_empty() {
+            continue;
+        }
         let next = match op.state {
             MutationState::Failed { .. } => SyncMark::Failed,
             MutationState::Conflict { .. } => SyncMark::Conflict,

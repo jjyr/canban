@@ -157,6 +157,10 @@ pub trait UiBackend: Send + Sync + 'static {
     fn sync_action(&self, _host_id: &str, _mutation_id: &str, _action: SyncAction) -> Result<()> {
         anyhow::bail!("Offline sync is not supported by this backend")
     }
+
+    fn global_env_sync_summary(&self) -> canban_types::GlobalEnvSyncSummary {
+        Default::default()
+    }
 }
 
 static BACKEND: OnceLock<Arc<dyn UiBackend>> = OnceLock::new();
@@ -267,6 +271,13 @@ pub fn sync_action(host_id: &str, mutation_id: &str, action: SyncAction) -> Resu
         .get()
         .ok_or_else(|| anyhow::anyhow!("Gallery preview: no AppServer connected"))?;
     backend.sync_action(host_id, mutation_id, action)
+}
+
+pub fn global_env_sync_summary() -> canban_types::GlobalEnvSyncSummary {
+    BACKEND
+        .get()
+        .map(|b| b.global_env_sync_summary())
+        .unwrap_or_default()
 }
 
 /// Desktop API version used for compatibility displays and fixture metadata.
@@ -641,6 +652,13 @@ impl UiBackend for LocalBackend {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Host registry unavailable"))?;
         hosts.sync_action(host_id, mutation_id, action)
+    }
+
+    fn global_env_sync_summary(&self) -> canban_types::GlobalEnvSyncSummary {
+        self.hosts
+            .as_ref()
+            .map(|h| h.global_env_sync_summary())
+            .unwrap_or_default()
     }
 }
 

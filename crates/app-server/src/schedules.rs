@@ -1390,18 +1390,24 @@ impl AppServer {
                     canban_context::atomic(&env_file, b"")?;
                     canban_context::atomic(&output_file, b"")?;
 
-                    let mut env = self.base_schedule_env(project, run, &run_dir, Some(&step_id));
-                    env.insert("CANBAN_ENV".into(), env_file.to_string_lossy().into_owned());
-                    env.insert(
+                    let mut protected =
+                        self.base_schedule_env(project, run, &run_dir, Some(&step_id));
+                    protected.insert("CANBAN_ENV".into(), env_file.to_string_lossy().into_owned());
+                    protected.insert(
                         "CANBAN_OUTPUT".into(),
                         output_file.to_string_lossy().into_owned(),
                     );
-                    for (k, v) in &shared_env {
-                        env.insert(k.clone(), v.clone());
-                    }
+                    let mut wf_env = shared_env.clone();
                     for (k, v) in step_env {
-                        env.insert(k.clone(), v.clone());
+                        wf_env.insert(k.clone(), v.clone());
                     }
+                    let resolved_env = self.resolve_runtime_env(
+                        None,
+                        project,
+                        &protected,
+                        Some(&wf_env),
+                        Some("local"),
+                    )?;
                     let argv = crate::scripts::shell_argv(shell.as_deref(), &script_file)?;
                     let timeout_secs =
                         crate::scripts::script_timeout_secs(*timeout_minutes, *timeout_seconds);
@@ -1410,15 +1416,17 @@ impl AppServer {
                         cfg.terminal_env_mode.is_inherit(),
                         Some("local"),
                     );
-                    let (exit_code, timed_out) = crate::scripts::run_local_process_with_policy(
-                        &argv,
-                        &script_cwd,
-                        &env,
-                        &cfg.hc_env,
-                        env_policy,
-                        &log_file,
-                        timeout_secs,
-                    )?;
+                    let (exit_code, timed_out) =
+                        crate::scripts::run_local_process_with_policy_and_unset(
+                            &argv,
+                            &script_cwd,
+                            &resolved_env.env,
+                            &cfg.hc_env,
+                            env_policy,
+                            &resolved_env.unset_keys,
+                            &log_file,
+                            timeout_secs,
+                        )?;
                     let duration_ms = now().saturating_sub(step_started_at);
                     if let Ok(raw_env) = std::fs::read_to_string(&env_file)
                         && let Ok(parsed) = crate::scripts::parse_key_value_file(&raw_env)
@@ -1427,7 +1435,12 @@ impl AppServer {
                             shared_env.insert(k, v);
                         }
                     }
-                    let log_text = std::fs::read_to_string(&log_file).unwrap_or_default();
+                    let raw_log_text = std::fs::read_to_string(&log_file).unwrap_or_default();
+                    let log_text =
+                        crate::env::mask_secrets(&raw_log_text, &resolved_env.secret_values);
+                    if log_text != raw_log_text {
+                        let _ = canban_context::atomic(&log_file, log_text.as_bytes());
+                    }
                     let rel_log = canban_context::relative(&self.home, &log_file)?;
                     let ok = !timed_out && exit_code == Some(0);
                     let tail = crate::scripts::log_tail(&log_text);
@@ -1618,17 +1631,15 @@ impl AppServer {
         } else {
             None
         };
-        let mut env = self.base_schedule_env(project, run, run_dir, Some(step_id));
-        env.insert("CANBAN_PROFILE_ID".into(), prof.id.clone());
-        env.insert(
+        let mut protected = self.base_schedule_env(project, run, run_dir, Some(step_id));
+        protected.insert("CANBAN_PROFILE_ID".into(), prof.id.clone());
+        protected.insert(
             "CANBAN_SESSION_ID".into(),
             session_id.clone().unwrap_or_default(),
         );
-        for (k, v) in shared_env {
-            env.insert(k.clone(), v.clone());
-        }
+        let mut wf_env = shared_env.clone();
         for (k, v) in step_env {
-            env.insert(k.clone(), v.clone());
+            wf_env.insert(k.clone(), v.clone());
         }
 
         let prompt = self.render_cardless_schedule_prompt(
@@ -1680,7 +1691,6 @@ impl AppServer {
             argv[0] = canban_profiles::executable_with_env(&argv[0], &config.hc_env);
         }
 
-        let client = canban_herdr::Client { config };
         let core_id = self.verified_core_id()?;
         let mut labels = BTreeMap::from([
             ("canban.schedule_run".into(), run.id.clone()),
@@ -1691,18 +1701,18 @@ impl AppServer {
         } else {
             labels.insert("canban.scope".into(), "global".into());
         }
-        let spec = canban_profiles::prepare_launch(canban_profiles::LaunchRequest {
-            profile: Some(&prof),
-            argv,
-            env,
-            cwd: directory.to_owned(),
-        })?;
-        let env_policy = canban_exec::shell_env::LocalEnvPolicy::for_source_trust(
-            client.config.terminal_env_mode.is_inherit(),
-            Some("local"),
-        );
-        let receipt =
-            client.launch_with_policy(spec.argv, &spec.cwd, spec.env, labels, env_policy)?;
+        let receipt = self
+            .launch_herdr_with_env(crate::env::HerdrLaunchRequest {
+                profile: Some(&prof),
+                project,
+                protected_context: &protected,
+                workflow_env: Some(&wf_env),
+                source_trust: Some("local"),
+                argv,
+                cwd: directory.to_owned(),
+                labels,
+            })?
+            .receipt;
         let terminal_address = strp(&receipt, "address")?.to_owned();
         {
             let mut inv = self.inventory.lock().unwrap();

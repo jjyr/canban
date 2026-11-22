@@ -5,13 +5,14 @@ use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
 use serde_json::json;
 
-pub const SECTION_COUNT: usize = 11;
+pub const SECTION_COUNT: usize = 12;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SectionId {
     Theme,
     Terminal,
     Hosts,
+    Environment,
     Diagnostics,
     Updates,
     Scheduling,
@@ -27,6 +28,7 @@ impl SectionId {
         Self::Theme,
         Self::Terminal,
         Self::Hosts,
+        Self::Environment,
         Self::Diagnostics,
         Self::Updates,
         Self::Scheduling,
@@ -42,14 +44,15 @@ impl SectionId {
             Self::Theme => 0,
             Self::Terminal => 1,
             Self::Hosts => 2,
-            Self::Diagnostics => 3,
-            Self::Updates => 4,
-            Self::Scheduling => 5,
-            Self::TerminalEnv => 6,
-            Self::Agents => 7,
-            Self::Herdr => 8,
-            Self::Storage => 9,
-            Self::Acknowledgements => 10,
+            Self::Environment => 3,
+            Self::Diagnostics => 4,
+            Self::Updates => 5,
+            Self::Scheduling => 6,
+            Self::TerminalEnv => 7,
+            Self::Agents => 8,
+            Self::Herdr => 9,
+            Self::Storage => 10,
+            Self::Acknowledgements => 11,
         }
     }
 
@@ -58,6 +61,7 @@ impl SectionId {
             Self::Theme => "theme",
             Self::Terminal => "terminal",
             Self::Hosts => "hosts",
+            Self::Environment => "environment",
             Self::Diagnostics => "diagnostics",
             Self::Updates => "updates",
             Self::Scheduling => "scheduling",
@@ -81,6 +85,7 @@ impl SectionId {
             Self::Theme => "Theme & support",
             Self::Terminal => "Terminal",
             Self::Hosts => "Hosts",
+            Self::Environment => "Environment & Secrets",
             Self::Diagnostics => "Diagnostics",
             Self::Updates => "Updates",
             Self::Scheduling => "Agent scheduling",
@@ -477,7 +482,55 @@ pub fn acknowledgements_section(ui: Ui) -> impl IntoElement {
     }))
 }
 
-pub(crate) fn terminal_env_section(ui: Ui) -> impl IntoElement {
+pub(crate) fn global_env_section(ui: Ui) -> impl IntoElement {
+    let local_host = signal("local".to_owned());
+    let scope_key = computed(|| "global".to_owned());
+    let source_meta = computed(move || ui.snapshot.with(|s| s.global_env.clone()));
+    let on_save =
+        crate::components::env_table::env_save_callback(ui, local_host, "global", || None);
+
+    settings_section(
+        "Environment & Secrets",
+        "Global secrets (${{ secrets.KEY }}) and variables (${{ vars.KEY }}) injected into all Agents, Scripts, and Terminals across connected hosts.",
+    )
+    .trailing(dynamic(move || {
+        let _ = ui.snapshot_epoch.get();
+        let _ = ui.hosts.get();
+        let summary = crate::backend::global_env_sync_summary();
+        if summary.total_remote_hosts == 0 {
+            badge("Local only").into_element()
+        } else if summary.pending_hosts.is_empty() {
+            badge(format!(
+                "Synced to {}/{} hosts",
+                summary.synced_hosts, summary.total_remote_hosts
+            ))
+            .into_element()
+        } else {
+            notice(
+                format!("Pending sync: {}", summary.pending_hosts.join(", ")),
+                Tone::Attention,
+            )
+            .into_element()
+        }
+    }))
+    .child(crate::components::env_table::env_table(
+        ui,
+        crate::components::env_table::EnvTableConfig {
+            host_id: local_host,
+            project_id: None,
+            scope_key,
+            source_meta,
+            save_label: "Save Global Env",
+            on_save,
+        },
+    ))
+    .child(
+        muted("Secrets are encrypted locally per host (vault.key + SQLite WAL) and replicated over the unified host Outbox.")
+            .text_size(px(12.)),
+    )
+}
+
+fn terminal_env_section(ui: Ui) -> impl IntoElement {
     use canban_types::HostTerminalEnvMode;
 
     let save_error = signal(String::new());
@@ -1059,6 +1112,10 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                             crate::hosts::settings_section_view(ui).into_element(),
                                         ))
                                         .child(wrap_section(
+                                            SectionId::Environment,
+                                            global_env_section(ui).into_element(),
+                                        ))
+                                        .child(wrap_section(
                                             SectionId::Diagnostics,
                                             crate::diagnostics::section_view_with_activation(
                                                 ui,
@@ -1111,7 +1168,7 @@ mod tests {
     use super::*;
 
     const SAMPLE_OFFSETS: [f32; SECTION_COUNT] = [
-        32.0, 220.0, 340.0, 480.0, 600.0, 720.0, 1060.0, 1380.0, 1820.0, 2060.0, 2280.0,
+        32.0, 220.0, 340.0, 410.0, 480.0, 600.0, 720.0, 1060.0, 1380.0, 1820.0, 2060.0, 2280.0,
     ];
 
     #[test]
@@ -1128,6 +1185,15 @@ mod tests {
             scroll_spy_section(180.0, &SAMPLE_OFFSETS, 2800.0, 800.0),
             SectionId::Terminal
         );
+        assert_eq!(
+            scroll_spy_section(350.0, &SAMPLE_OFFSETS, 2800.0, 800.0),
+            SectionId::Environment
+        );
+        assert_eq!(
+            SectionId::from_id("environment"),
+            Some(SectionId::Environment)
+        );
+        assert_eq!(SectionId::Environment.nav_label(), "Environment & Secrets");
         assert_eq!(
             scroll_spy_section(680.0, &SAMPLE_OFFSETS, 2800.0, 800.0),
             SectionId::Scheduling

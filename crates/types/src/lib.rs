@@ -1,7 +1,9 @@
 mod activity;
 mod board_filter;
+mod env;
 pub use activity::*;
 pub use board_filter::BoardFilter;
+pub use env::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -1031,6 +1033,8 @@ pub struct AgentRun {
     pub pending: Option<QueuedAssignment>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub applied_env: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub applied_env_fingerprint: String,
 }
 /// Durable policy facts; runtime input waits never become workflow approvals.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -1131,6 +1135,7 @@ impl AgentRun {
             self.connection_state.clear();
             self.lifecycle = Lifecycle::default();
             self.applied_env.clear();
+            self.applied_env_fingerprint.clear();
         }
         self.updated_at = pending.queued_at.max(now());
         Some(pending)
@@ -1455,12 +1460,44 @@ pub struct Snapshot {
     /// Client-only bounded sync status markers per Card ID.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pending_sync: BTreeMap<String, SyncMark>,
+    /// Global variables and secret metadata (never plaintext secrets), synced across hosts.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub global_env: BTreeMap<String, EnvEntryMeta>,
+    /// Scoped Agent/Project environment metadata (`"project:<id>"`, `"agent:<id>"`, `"agent:<host>:<id>"`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub scoped_env: BTreeMap<String, BTreeMap<String, EnvEntryMeta>>,
 }
 impl Snapshot {
     pub fn reclaim_status_for(&self, terminal_id: &str) -> Option<&TerminalReclaimStatus> {
         self.reclaim_status
             .iter()
             .find(|r| r.terminal_id == terminal_id)
+    }
+
+    pub fn project_env_key(project_id: &str) -> String {
+        format!("project:{project_id}")
+    }
+
+    pub fn agent_env_key(host_id: &str, profile_id: &str) -> String {
+        if host_id.is_empty() || host_id == "local" {
+            format!("agent:{profile_id}")
+        } else {
+            format!("agent:{host_id}:{profile_id}")
+        }
+    }
+
+    pub fn project_env(&self, project_id: &str) -> BTreeMap<String, EnvEntryMeta> {
+        self.scoped_env
+            .get(&Self::project_env_key(project_id))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn agent_env(&self, host_id: &str, profile_id: &str) -> BTreeMap<String, EnvEntryMeta> {
+        self.scoped_env
+            .get(&Self::agent_env_key(host_id, profile_id))
+            .cloned()
+            .unwrap_or_default()
     }
     pub fn terminal_project_id<'a>(&'a self, t: &'a TerminalEntry) -> Option<&'a str> {
         if let Some(a) = &t.agent {

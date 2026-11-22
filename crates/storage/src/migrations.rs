@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 pub const BASELINE: u32 = 8;
-pub const CURRENT: u32 = 22;
+pub const CURRENT: u32 = 23;
 pub struct Migration {
     pub version: u32,
     pub up: fn(&Transaction<'_>) -> Result<()>,
@@ -83,6 +83,11 @@ const STEPS: &[Migration] = &[
         version: 22,
         up: remove_legacy_remote_machine_up,
         down: remove_legacy_remote_machine_down,
+    },
+    Migration {
+        version: 23,
+        up: env_secrets_up,
+        down: env_secrets_down,
     },
 ];
 
@@ -339,6 +344,40 @@ fn remove_legacy_remote_machine_down(tx: &Transaction<'_>) -> Result<()> {
         changed
     })?;
 
+    Ok(())
+}
+
+fn env_secrets_up(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS vault_entries(\
+            namespace TEXT NOT NULL,\
+            scope TEXT NOT NULL,\
+            key TEXT NOT NULL,\
+            nonce BLOB NOT NULL,\
+            ciphertext BLOB NOT NULL,\
+            hint TEXT NOT NULL DEFAULT '',\
+            updated_at INTEGER NOT NULL,\
+            PRIMARY KEY (namespace, scope, key)\
+        );\
+        CREATE TABLE IF NOT EXISTS env_entries(\
+            scope TEXT NOT NULL,\
+            target_id TEXT NOT NULL,\
+            key TEXT NOT NULL,\
+            kind TEXT NOT NULL,\
+            value TEXT,\
+            updated_at INTEGER NOT NULL,\
+            deleted INTEGER NOT NULL DEFAULT 0,\
+            PRIMARY KEY (scope, target_id, key)\
+        );",
+    )?;
+    Ok(())
+}
+
+fn env_secrets_down(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS env_entries;\
+         DROP TABLE IF EXISTS vault_entries;",
+    )?;
     Ok(())
 }
 
@@ -4189,5 +4228,42 @@ mod tests {
         drop(conn);
 
         assert_eq!(migrate(home.path(), 22).unwrap(), 22);
+    }
+
+    #[test]
+    fn schema_23_creates_vault_and_env_entries_and_round_trips_cleanly() {
+        let home = tempfile::tempdir().unwrap();
+        let store = crate::Store::open(home.path()).unwrap();
+        assert_eq!(version(&store.conn).unwrap(), CURRENT);
+        let entries = std::collections::BTreeMap::from([(
+            "GLOBAL_TOKEN".into(),
+            canban_types::EnvWriteEntry::Secret {
+                value: Some("tok-1234567890abcdef".into()),
+                keep_existing: false,
+            },
+        )]);
+        let meta = crate::env::apply_env_writes(
+            &store.conn,
+            home.path(),
+            crate::env::SCOPE_GLOBAL,
+            "",
+            &entries,
+            10,
+        )
+        .unwrap();
+        assert!(meta.contains_key("GLOBAL_TOKEN"));
+        let snap = store.snapshot().unwrap();
+        assert_eq!(snap.global_env, meta);
+        drop(store);
+
+        assert_eq!(migrate(home.path(), 22).unwrap(), 22);
+        let conn = Connection::open(home.path().join("canban.sqlite")).unwrap();
+        assert!(!table_exists(&conn, "vault_entries").unwrap());
+        assert!(!table_exists(&conn, "env_entries").unwrap());
+        drop(conn);
+
+        assert_eq!(migrate(home.path(), 23).unwrap(), 23);
+        let store = crate::Store::open(home.path()).unwrap();
+        assert!(store.snapshot().unwrap().global_env.is_empty());
     }
 }

@@ -1,8 +1,8 @@
 //! Read-your-writes while a background (possibly cached remote) snapshot catches up.
 //! Only server-confirmed replies enter this overlay; failed submissions never do.
 use canban_types::{
-    Card, CardRead, ConfigurationSession, Event, ManagedWorktree, ReviewDraft, ScheduleState,
-    Snapshot, TerminalContext, TerminalEntry,
+    Card, CardRead, ConfigurationSession, EnvEntryMeta, Event, ManagedWorktree, Project,
+    ReviewDraft, ScheduleState, Snapshot, TerminalContext, TerminalEntry,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -52,6 +52,8 @@ pub(super) fn immediate(method: &str) -> bool {
             | "configuration.open"
             | "worktree.create"
             | "worktree.promote"
+            | "env.save"
+            | "project.agents"
     )
 }
 
@@ -69,6 +71,9 @@ pub(crate) struct CommittedWrites {
     worktrees: BTreeMap<String, (ManagedWorktree, String)>,
     removed_worktrees: BTreeSet<String>,
     configuration_sessions: BTreeMap<String, ConfigurationSession>,
+    projects: BTreeMap<String, Project>,
+    env_updates: BTreeMap<String, (BTreeMap<String, EnvEntryMeta>, u64)>,
+    env_gen: u64,
 }
 
 fn event_revision(event: &Event) -> u64 {
@@ -294,6 +299,32 @@ impl CommittedWrites {
                     self.schedule_states.insert(state.id.clone(), state);
                 }
             }
+            "env.save" => {
+                if let Ok(meta) =
+                    serde_json::from_value::<BTreeMap<String, EnvEntryMeta>>(reply["env"].clone())
+                {
+                    let scope = reply["scope"].as_str().unwrap_or("");
+                    let target_id = reply["target_id"].as_str().unwrap_or("");
+                    let snap_key = reply["snapshot_key"].as_str().unwrap_or("");
+                    let host_id = host.trim();
+                    let key = if scope == "global" {
+                        "global".to_owned()
+                    } else if scope == "agent" && !host_id.is_empty() && host_id != "local" {
+                        Snapshot::agent_env_key(host_id, target_id)
+                    } else {
+                        snap_key.to_owned()
+                    };
+                    if !key.is_empty() {
+                        self.env_gen = self.env_gen.saturating_add(1);
+                        self.env_updates.insert(key, (meta, self.env_gen));
+                    }
+                }
+            }
+            "project.agents" => {
+                if let Ok(project) = serde_json::from_value::<Project>(reply.clone()) {
+                    self.projects.insert(project.id.clone(), project);
+                }
+            }
             "notifications.read_all" => {}
             _ => {
                 if let Ok(card) = serde_json::from_value::<Card>(reply.clone()) {
@@ -431,6 +462,20 @@ impl CommittedWrites {
                 snapshot.configuration_sessions.push(session.clone());
             }
         }
+        for project in self.projects.values() {
+            if let Some(existing) = snapshot.projects.iter_mut().find(|p| p.id == project.id) {
+                *existing = project.clone();
+            }
+        }
+        for (key, (meta, _)) in &self.env_updates {
+            if key == "global" {
+                snapshot.global_env = meta.clone();
+            } else if meta.is_empty() {
+                snapshot.scoped_env.remove(key);
+            } else {
+                snapshot.scoped_env.insert(key.clone(), meta.clone());
+            }
+        }
     }
 
     /// Drop a receipt only after the authoritative snapshot includes it. A
@@ -494,6 +539,17 @@ impl CommittedWrites {
                 .configuration_sessions
                 .iter()
                 .any(|s| &s.id == id && s.generation >= session.generation)
+        });
+        self.projects
+            .retain(|id, proj| snapshot.projects.iter().any(|p| &p.id == id && p != proj));
+        self.env_updates.retain(|key, (meta, _)| {
+            if key == "global" {
+                snapshot.global_env != *meta
+            } else if meta.is_empty() {
+                snapshot.scoped_env.get(key).is_some_and(|m| !m.is_empty())
+            } else {
+                snapshot.scoped_env.get(key) != Some(meta)
+            }
         });
         self.overlay(snapshot);
     }
@@ -1134,5 +1190,70 @@ mod tests {
         writes.overlay(&mut stale_resolved);
         assert!(!stale_resolved.cards[0].resolved());
         assert_eq!(stale_resolved.cards[0].revision, 3);
+    }
+
+    #[test]
+    fn env_save_receipts_overlay_reconcile_and_clear_empty_scopes() {
+        let mut writes = CommittedWrites::default();
+        let meta = BTreeMap::from([(
+            "API_KEY".into(),
+            EnvEntryMeta::Secret {
+                configured: true,
+                hint: "abcd".into(),
+            },
+        )]);
+        writes.record(
+            "env.save",
+            &json!({ "scope": "global", "target_id": "", "snapshot_key": "global", "env": meta }),
+            "local",
+        );
+        writes.record(
+            "env.save",
+            &json!({ "scope": "agent", "target_id": "codex", "snapshot_key": "agent:codex", "env": meta }),
+            "home-linux",
+        );
+        writes.record(
+            "env.save",
+            &json!({ "scope": "project", "target_id": "p1", "snapshot_key": "project:p1", "env": meta }),
+            "home-linux",
+        );
+
+        let mut stale = Snapshot::default();
+        writes.overlay(&mut stale);
+        assert!(stale.global_env.contains_key("API_KEY"));
+        assert!(
+            stale
+                .agent_env("home-linux", "codex")
+                .contains_key("API_KEY")
+        );
+        assert!(stale.project_env("p1").contains_key("API_KEY"));
+
+        // Clearing remote agent scope removes it immediately and drops the overlay once caught up.
+        writes.record(
+            "env.save",
+            &json!({ "scope": "agent", "target_id": "codex", "snapshot_key": "agent:codex", "env": {} }),
+            "home-linux",
+        );
+        let mut with_stale_agent = Snapshot {
+            global_env: meta.clone(),
+            scoped_env: BTreeMap::from([
+                ("agent:home-linux:codex".into(), meta.clone()),
+                ("project:p1".into(), meta),
+            ]),
+            ..Snapshot::default()
+        };
+        writes.reconcile(&mut with_stale_agent);
+        assert!(
+            !with_stale_agent
+                .scoped_env
+                .contains_key("agent:home-linux:codex")
+        );
+        assert!(!writes.env_updates.contains_key("global"));
+        assert!(!writes.env_updates.contains_key("project:p1"));
+        assert!(writes.env_updates.contains_key("agent:home-linux:codex"));
+
+        let mut caught_up = Snapshot::default();
+        writes.reconcile(&mut caught_up);
+        assert!(writes.env_updates.is_empty());
     }
 }

@@ -45,6 +45,7 @@ fn prepare_params(op: &Mutation, snapshot: &Snapshot) -> PrepareResult {
     match op.kind {
         MutationKind::CreateCard => PrepareResult::Send(strip_host_and_force(op.params.clone())),
         MutationKind::AddComment => PrepareResult::Send(strip_host_and_force(op.params.clone())),
+        MutationKind::SyncGlobalEnv => PrepareResult::Send(op.params.clone()),
         MutationKind::UpdateCard => {
             let Some(server) = snapshot.cards.iter().find(|c| c.id == op.card_id) else {
                 return PrepareResult::Failed("Card no longer exists on host".into());
@@ -148,7 +149,7 @@ fn card_already_matches_after_key_conflict(op: &Mutation, snapshot: &Snapshot) -
             .and_then(Value::as_str)
             .is_some_and(|s| card.stage == s),
         MutationKind::ResolveCard => card.resolved(),
-        MutationKind::AddComment => false,
+        MutationKind::AddComment | MutationKind::SyncGlobalEnv => false,
     }
 }
 
@@ -188,15 +189,19 @@ pub fn prepare_next_step(
     report: &mut DrainReport,
 ) -> StepAction {
     let mut idx = 0;
-    while idx < outbox.ops.len() {
-        let card_id = outbox.ops[idx].card_id.clone();
-        if blocked.contains(&card_id) {
+    while let Some(op) = outbox.ops.get(idx) {
+        let block_key = if op.kind == MutationKind::SyncGlobalEnv {
+            "__global_env__".to_owned()
+        } else {
+            op.card_id.clone()
+        };
+        if blocked.contains(&block_key) {
             idx += 1;
             continue;
         }
         match &outbox.ops[idx].state {
             MutationState::Conflict { .. } | MutationState::Failed { .. } => {
-                blocked.insert(card_id);
+                blocked.insert(block_key);
                 idx += 1;
                 continue;
             }
@@ -212,26 +217,30 @@ pub fn prepare_next_step(
             PrepareResult::Conflict(fields) => {
                 outbox.ops[idx].state = MutationState::Conflict { fields };
                 let _ = outbox.save();
-                blocked.insert(card_id);
+                blocked.insert(block_key);
                 report.conflicts += 1;
                 idx += 1;
             }
             PrepareResult::Failed(message) => {
                 outbox.ops[idx].state = MutationState::Failed { message };
                 let _ = outbox.save();
-                blocked.insert(card_id);
+                blocked.insert(block_key);
                 report.failed += 1;
                 idx += 1;
             }
             PrepareResult::Send(sent_params) => {
-                let was_retry_same_params = outbox.ops[idx].retry_same_params;
-                let mutation_id = outbox.ops[idx].id.clone();
-                let method = outbox.ops[idx].kind.as_method();
+                let prev = outbox.ops[idx].clone();
+                let mutation_id = prev.id.clone();
+                let method = prev.kind.as_method();
+                let was_retry_same_params = prev.retry_same_params;
                 outbox.ops[idx].sent_params = sent_params.clone();
                 outbox.ops[idx].retry_same_params = false;
                 outbox.ops[idx].state = MutationState::InFlight;
                 outbox.ops[idx].attempts = outbox.ops[idx].attempts.saturating_add(1);
-                let _ = outbox.save();
+                if outbox.save().is_err() {
+                    outbox.ops[idx] = prev;
+                    return StepAction::Idle;
+                }
                 return StepAction::Send {
                     mutation_id,
                     method,
@@ -261,7 +270,11 @@ pub fn finish_step(
     let Some(pos) = outbox.ops.iter().position(|m| m.id == mutation_id) else {
         return FinishOutcome::Continue;
     };
-    let card_id = outbox.ops[pos].card_id.clone();
+    let block_key = if outbox.ops[pos].kind == MutationKind::SyncGlobalEnv {
+        "__global_env__".to_owned()
+    } else {
+        outbox.ops[pos].card_id.clone()
+    };
     match result {
         Ok(reply) => {
             upsert_card_into_snapshot(snapshot, &reply);
@@ -300,7 +313,7 @@ pub fn finish_step(
             }
             outbox.ops[pos].state = MutationState::Failed { message: msg };
             let _ = outbox.save();
-            blocked.insert(card_id);
+            blocked.insert(block_key);
             report.failed += 1;
             FinishOutcome::Continue
         }
@@ -637,5 +650,62 @@ mod tests {
         assert!(matches!(outbox.ops[0].state, MutationState::Failed { .. }));
         assert_eq!(outbox.ops[1].id, "m-missing-comment");
         assert_eq!(outbox.ops[1].state, MutationState::Queued);
+    }
+
+    #[test]
+    fn failed_global_env_sync_does_not_block_card_ops() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut outbox = Outbox::load(dir.path().join("o.json"));
+        outbox
+            .enqueue(Mutation {
+                id: "m-genv".into(),
+                host_id: "h1".into(),
+                card_id: String::new(),
+                kind: MutationKind::SyncGlobalEnv,
+                params: json!({"generation": 1}),
+                base: UpdateBase::default(),
+                sent_params: Value::Null,
+                retry_same_params: false,
+                state: MutationState::Queued,
+                created_at: 1,
+                attempts: 0,
+            })
+            .unwrap();
+        outbox
+            .enqueue(Mutation {
+                id: "m-create".into(),
+                host_id: "h1".into(),
+                card_id: "c-ok".into(),
+                kind: MutationKind::CreateCard,
+                params: json!({"id": "c-ok", "project_id": "p1", "title": "Ok", "body": ""}),
+                base: UpdateBase::default(),
+                sent_params: Value::Null,
+                retry_same_params: false,
+                state: MutationState::Queued,
+                created_at: 2,
+                attempts: 0,
+            })
+            .unwrap();
+        let mut snap = snap_with_cards(vec![]);
+        let transport = MockTransport {
+            calls: RefCell::new(vec![]),
+            handler: Box::new(|method, p| match method {
+                "env.global.sync" => Err(anyhow!("sync failed")),
+                "card.create" => Ok(serde_json::to_value(make_card(
+                    p["id"].as_str().unwrap(),
+                    "Ok",
+                    "backlog",
+                    1,
+                ))
+                .unwrap()),
+                other => panic!("unexpected call {other}"),
+            }),
+            refresh: Box::new(|| Ok(snap_with_cards(vec![]))),
+        };
+        let rep = drain(&mut outbox, &mut snap, &transport);
+        assert_eq!(rep.failed, 1);
+        assert_eq!(rep.applied, 1);
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(outbox.ops[0].kind, MutationKind::SyncGlobalEnv);
     }
 }

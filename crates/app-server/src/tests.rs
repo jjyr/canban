@@ -2267,6 +2267,8 @@ mod schedules_cases;
 
 mod multi_host;
 
+mod env;
+
 #[test]
 fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_end_to_end() {
     let (dir, app, project, card) = setup();

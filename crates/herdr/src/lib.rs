@@ -2,7 +2,7 @@ use anyhow::{Context, Result, ensure};
 use canban_types::Config;
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{BufRead, BufReader, BufWriter, Read, Write},
     process::{Command, Stdio},
     time::Duration,
@@ -161,13 +161,27 @@ impl Client {
         &self,
         argv: Vec<String>,
         cwd: &str,
+        env: BTreeMap<String, String>,
+        labels: BTreeMap<String, String>,
+        env_policy: LocalEnvPolicy,
+    ) -> Result<Value> {
+        self.launch_with_policy_and_unset(argv, cwd, env, labels, env_policy, &BTreeSet::new())
+    }
+    pub fn launch_with_policy_and_unset(
+        &self,
+        argv: Vec<String>,
+        cwd: &str,
         mut env: BTreeMap<String, String>,
         labels: BTreeMap<String, String>,
         env_policy: LocalEnvPolicy,
+        unset_keys: &BTreeSet<String>,
     ) -> Result<Value> {
         ensure!(!argv.is_empty(), "Agent profile has no launch command");
         merge_default_terminal_env(&mut env, &self.config.hc_env);
         merge_local_env_with_policy(&mut env, &self.config.hc_env, env_policy);
+        for k in unset_keys {
+            env.remove(k);
+        }
         let p = json!({"argv":argv,"cwd":cwd,"env":env,"labels":labels,"no_parent":true,"no_notify":true,"outlive_parent":true,"wait":false});
         self.call("terminal.run", p)
     }

@@ -179,3 +179,17 @@ Dedicated diagnostic workspace for verifying and repairing multi-host setups:
 4. **Milestone 4 — Per-Host `Settings`, `Diagnostics` workspace, Command Palette parity & Gallery/Integration verification:**
    - Split `Settings` into `APP` vs `HOST SETTINGS` (with host selector + `Copy profiles from This Mac`) and add `Diagnostics` (`SectionId::Hosts`, `SectionId::Diagnostics`).
    - Register all new host/diagnostic actions in `crates/ui/src/commands.rs`, add deterministic Gallery scenes in `examples/gallery`, and run multi-host automated & native acceptance checks.
+
+---
+
+## 5. Multi-host Environment Variables & Global Secrets Replication
+
+1. **Per-host Local Layers vs Replicated Global Layer:**
+   - Agent/`@Identity` and Project environment variables & secrets live per-host inside that host's SQLite `env_entries` and `vault_entries` (encrypted with that host's `<CANBAN_HOME>/vault.key`). Neither `config/agents.json` nor `Project` JSON carries env/secret maps, so `Copy profiles from This Mac` never overwrites a remote host's Agent env/secrets.
+   - Only **Global Environment & Secrets** (`Settings -> App -> Environment & Secrets`) automatically replicates across connected remote `canband` hosts.
+2. **Transport Sealing over TCP (`enc:v1:...`):**
+   - Before any `env.save` or `env.global.sync` request leaves the client over a TCP connection, secret values are sealed client-side using AEAD key `SHA-256("canban-vault-transport-v1\0" || session_token)` (derived from the active TCP session bearer token: per-device `dev_...` token or deprecated legacy `server.token`) and AAD `canban-vault-rpc-v1\0{key_name}` (`enc:v1:<nonce>:<ciphertext>`), then opened server-side and re-encrypted under the receiving host's local `vault.key`.
+3. **Pointer-Only Unified Outbox Replication (`MutationKind::SyncGlobalEnv`):**
+   - Saving Global Env & Secrets on `local` writes locally, creates/updates `deleted=1` tombstones for removed global keys, and enqueues a pointer-only `MutationKind::SyncGlobalEnv` into every remote host's Outbox (coalesced to a single pending entry per host, excluded from Card pending counts).
+   - **Zero secrets hit `.outbox.json` or disk caches:** During Outbox drain, the sender decrypts active global rows and tombstones from the local vault/DB on the fly, seals them with the target host's TCP transport token, and calls `env.global.sync`. Recipients resolve conflicts via Last-Write-Wins (`updated_at`) and remove entries marked by newer tombstones.
+

@@ -210,6 +210,35 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn codex_keeps_custom_agent_and_project_plain_and_secret_vars_out_of_cli_argv() {
+        let p = profile(Some("codex"));
+        let mut req = request(Some(&p), &["codex", "resume", "session-id"]);
+        req.env.insert(
+            "ANTHROPIC_BASE_URL".into(),
+            "https://proxy.example.com".into(),
+        );
+        req.env
+            .insert("ANTHROPIC_API_KEY".into(), "sk-secret-sentinel-123".into());
+        req.env.insert("RUST_LOG".into(), "debug".into());
+        let expected_env = req.env.clone();
+        let spec = prepare_launch(req).unwrap();
+        assert_eq!(spec.env, expected_env);
+        let joined_argv = spec.argv.join(" ");
+        for k in [
+            "ANTHROPIC_BASE_URL",
+            "https://proxy.example.com",
+            "ANTHROPIC_API_KEY",
+            "sk-secret-sentinel-123",
+            "RUST_LOG",
+        ] {
+            assert!(
+                !joined_argv.contains(k),
+                "user env {k:?} must never travel on Codex CLI argv: {joined_argv}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

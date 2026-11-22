@@ -1458,21 +1458,21 @@ impl AppServer {
                 ),
                 ("CANBAN_CLI".into(), self.cli.to_string_lossy().into_owned()),
             ]);
-            let spec = canban_profiles::prepare_launch(canban_profiles::LaunchRequest {
-                profile: Some(&profile),
-                argv,
-                env,
-                cwd: cwd.clone(),
-            })?;
-            let receipt = client.launch(
-                spec.argv,
-                &spec.cwd,
-                spec.env,
-                std::collections::BTreeMap::from([
-                    ("canban.terminal".into(), item.id.clone()),
-                    ("canban.project".into(), project.id.clone()),
-                ]),
-            )?;
+            let receipt = self
+                .launch_herdr_with_env(crate::env::HerdrLaunchRequest {
+                    profile: Some(&profile),
+                    project: Some(&project),
+                    protected_context: &env,
+                    workflow_env: None,
+                    source_trust: Some("local"),
+                    argv,
+                    cwd: cwd.clone(),
+                    labels: std::collections::BTreeMap::from([
+                        ("canban.terminal".into(), item.id.clone()),
+                        ("canban.project".into(), project.id.clone()),
+                    ]),
+                })?
+                .receipt;
             let address = strp(&receipt, "address")?.to_owned();
             runtime.terminal = Some(address.clone());
             {

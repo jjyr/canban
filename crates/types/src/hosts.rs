@@ -423,6 +423,14 @@ impl Snapshot {
         for (k, v) in remote.entity_hosts {
             self.entity_hosts.insert(k, v);
         }
+        for (key, entries) in remote.scoped_env {
+            if key.starts_with("project:") {
+                self.scoped_env.insert(key, entries);
+            } else if let Some(pid) = key.strip_prefix("agent:") {
+                self.scoped_env
+                    .insert(Self::agent_env_key(&host_id, pid), entries);
+            }
+        }
         self.host_summaries.insert(host_id, summary);
 
         let existing_projects: std::collections::HashSet<String> =

@@ -2921,6 +2921,89 @@ pub fn onboarding_screen(ui: Ui) -> impl IntoElement {
         )
 }
 
+fn agent_env_inline_editor(
+    ui: Ui,
+    profile_id: String,
+    host_id: Signal<String>,
+    env_target: Signal<Option<String>>,
+) -> AnyElement {
+    let pid_scope = profile_id.clone();
+    let scope_key = computed(move || format!("{}:{pid_scope}", host_id.get()));
+    let pid_meta = profile_id.clone();
+    let source_meta = computed(move || {
+        let hid = host_id.get();
+        ui.snapshot.with(|s| s.agent_env(&hid, &pid_meta))
+    });
+    let on_save =
+        crate::components::env_table::env_save_callback(ui, host_id, "agent", move || {
+            Some(profile_id.clone())
+        });
+
+    panel()
+        .gap_2()
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(
+                    muted(
+                        "Per-profile Secrets & Variables (local to this host; overrides Global).",
+                    )
+                    .text_size(px(12.)),
+                )
+                .child(compact_action("Done", Variant::Quiet, move |_| {
+                    env_target.set(None);
+                })),
+        )
+        .child(crate::components::env_table::env_table(
+            ui,
+            crate::components::env_table::EnvTableConfig {
+                host_id,
+                project_id: None,
+                scope_key,
+                source_meta,
+                save_label: "Save Env",
+                on_save,
+            },
+        ))
+        .into_element()
+}
+
+fn agent_env_toggle_button(
+    ui: Ui,
+    profile_id: String,
+    env_target: Signal<Option<String>>,
+) -> impl IntoElement {
+    dynamic(move || {
+        let is_open = env_target.get().as_deref() == Some(profile_id.as_str());
+        let count = ui
+            .snapshot
+            .with(|s| s.agent_env(&ui.settings_host.get(), &profile_id).len());
+        let label = if count > 0 {
+            format!("{} Env · {count}", if is_open { "▾" } else { "▸" })
+        } else if is_open {
+            "▾ Env".into()
+        } else {
+            "▸ Env".into()
+        };
+        let variant = if is_open || count > 0 {
+            Variant::Secondary
+        } else {
+            Variant::Quiet
+        };
+        let toggle_pid = profile_id.clone();
+        compact_action(label, variant, move |_| {
+            if env_target.get_untracked().as_deref() == Some(toggle_pid.as_str()) {
+                env_target.set(None);
+            } else {
+                env_target.set(Some(toggle_pid.clone()));
+            }
+        })
+        .into_element()
+    })
+}
+
 /// Global Settings section for Agents, Custom CLI Agents, Default `@identity`, and Role Identities.
 pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement {
     if ui.agent_catalog.with_untracked(Value::is_null) || !ui.agent_catalog_loading.get_untracked()
@@ -2947,6 +3030,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
     let command_bin_draft = signal(String::new());
     let command_args_draft = signal(String::new());
     let command_error = signal(String::new());
+    let env_target = signal(Option::<String>::None);
 
     let copy_path = config_path.clone();
 
@@ -2980,7 +3064,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                 move |_| {
                                     refresh_catalog(ui);
                                     ui.notify(format!(
-                                        "Copied Agent & @identity profiles from {}",
+                                        "Copied Agent & @identity profiles from {} (existing target Env & Secrets preserved)",
                                         crate::platform::LOCAL_HOST_NAME
                                     ));
                                 },
@@ -3336,6 +3420,11 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                 custom_model_target,
                                                 custom_model_draft,
                                             ))
+                                            .child(agent_env_toggle_button(
+                                                ui,
+                                                pid.clone(),
+                                                env_target,
+                                            ))
                                             .child(compact_action(
                                                 if is_editing { "Done" } else { "Prompt" },
                                                 Variant::Quiet,
@@ -3457,6 +3546,23 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                     .into_element()
                             } else {
                                 view().into_element()
+                            })
+                            .child({
+                                let check_pid = pid.clone();
+                                let mount_pid = pid;
+                                when(
+                                    move || {
+                                        env_target.get().as_deref() == Some(check_pid.as_str())
+                                    },
+                                    move || {
+                                        agent_env_inline_editor(
+                                            ui,
+                                            mount_pid.clone(),
+                                            ui.settings_host,
+                                            env_target,
+                                        )
+                                    },
+                                )
                             })
                             .into_element()
                     }))
@@ -3843,6 +3949,11 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                                     }
                                                                 },
                                                             ))
+                                                            .child(agent_env_toggle_button(
+                                                                ui,
+                                                                pid.clone(),
+                                                                env_target,
+                                                            ))
                                                             .child(when(
                                                                 move || is_pure_custom,
                                                                 move || {
@@ -3898,7 +4009,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                             .child(if is_editing_command {
                                                 agent_command_inline_editor(
                                                     ui,
-                                                    pid,
+                                                    pid.clone(),
                                                     preset_default,
                                                     command_target,
                                                     command_bin_draft,
@@ -3907,6 +4018,24 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                 )
                                             } else {
                                                 view().into_element()
+                                            })
+                                            .child({
+                                                let check_pid = pid.clone();
+                                                let mount_pid = pid;
+                                                when(
+                                                    move || {
+                                                        env_target.get().as_deref()
+                                                            == Some(check_pid.as_str())
+                                                    },
+                                                    move || {
+                                                        agent_env_inline_editor(
+                                                            ui,
+                                                            mount_pid.clone(),
+                                                            ui.settings_host,
+                                                            env_target,
+                                                        )
+                                                    },
+                                                )
                                             })
                                             .into_element()
                                     })),
@@ -4492,6 +4621,16 @@ pub fn project_agents_screen(ui: Ui) -> impl IntoElement {
     let overrides = signal(initial_overrides);
     let host_id = signal(ui.active_project_host());
 
+    let env_scope_key = computed(move || format!("{}:{}", host_id.get(), ui.project.get()));
+    let env_source_meta = computed(move || {
+        let pid = ui.project.get();
+        ui.snapshot.with(|s| s.project_env(&pid))
+    });
+    let on_project_env_save =
+        crate::components::env_table::env_save_callback(ui, host_id, "project", move || {
+            Some(ui.project.get_untracked())
+        });
+
     view()
         .flex_1()
         .min_h(px(0.))
@@ -4552,6 +4691,39 @@ pub fn project_agents_screen(ui: Ui) -> impl IntoElement {
                                         }),
                                     ),
                             ),
+                    )
+                    .child(
+                        panel()
+                            .gap_3()
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        view()
+                                            .gap_0p5()
+                                            .child(
+                                                label("Project Environment & Secrets")
+                                                    .font_weight(FontWeight::SEMIBOLD),
+                                            )
+                                            .child(
+                                                muted("Overrides Global and Agent/Identity secrets & variables for this Project; local to the Project's host.")
+                                                    .text_size(px(12.)),
+                                            ),
+                                    ),
+                            )
+                            .child(crate::components::env_table::env_table(
+                                ui,
+                                crate::components::env_table::EnvTableConfig {
+                                    host_id,
+                                    project_id: Some(ui.project),
+                                    scope_key: env_scope_key,
+                                    source_meta: env_source_meta,
+                                    save_label: "Save Project Env",
+                                    on_save: on_project_env_save,
+                                },
+                            )),
                     ),
             ),
         )

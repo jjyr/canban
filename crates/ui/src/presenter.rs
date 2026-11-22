@@ -1612,7 +1612,8 @@ pub fn dispatch_complete(
                                 ));
                             }
                         }
-                        "project.agents" => ui.notify("Project Agent overrides saved"),
+                        "project.agents" => ui.notify("Project Agents settings saved"),
+                        "env.save" => ui.notify("Environment & Secrets saved"),
                         "scheduler.configure" => ui.notify("Scheduling settings saved"),
                         "project.update" => ui.notify("Project updated"),
                         "project.delete" => {

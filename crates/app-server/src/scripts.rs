@@ -1,6 +1,6 @@
 //! Unified local/remote execution of Workflow `Script` steps and shared multi-layer `env` resolution.
 use super::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -60,12 +60,26 @@ pub(crate) fn cardless_run_source_trust(run: &WorkflowRun) -> Option<&str> {
     }
 }
 
-/// Builds the merged environment map for an `agent` or `script` step:
-/// Layer 1 (`CANBAN_*` context) < Layer 2 (workflow `env`) < Layer 3 (`$CANBAN_ENV`) < Layer 4 (step `env`).
-/// Returns `(full_env, custom_env_only)` where `custom_env_only` captures Layers 2–4 for PTY tracking.
-pub(crate) fn build_step_env(
-    ctx: StepEnvContext<'_>,
-) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+/// Shared dummy Project used for Global (`__global__`) cardless workflows.
+pub(crate) fn global_workflow_project(home: &Path) -> Project {
+    Project {
+        id: GLOBAL_PROJECT_ID.into(),
+        name: "Global".into(),
+        directory: home.to_string_lossy().into_owned(),
+        target_branch: None,
+        workflow: Workflow::default(),
+        github: None,
+        detected_github: None,
+        github_disconnected: false,
+        delivery_mode: DeliveryMode::default(),
+        agent_overrides: BTreeMap::new(),
+        tags: Vec::new(),
+        created_at: 0,
+    }
+}
+
+/// Builds protected `CANBAN_*` context environment variables for an `agent` or `script` step.
+pub(crate) fn build_step_context_env(ctx: StepEnvContext<'_>) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     let workspace_dir = ctx
         .workspace
@@ -230,7 +244,29 @@ pub(crate) fn build_step_env(
     if let Some(path) = ctx.script_output_file {
         env.insert("CANBAN_OUTPUT".into(), path.to_string_lossy().into_owned());
     }
+    env
+}
 
+/// Builds the merged environment map for an `agent` or `script` step:
+/// Layer 1 (`CANBAN_*` context) < Layer 2 (workflow `env`) < Layer 3 (`$CANBAN_ENV`) < Layer 4 (step `env`).
+/// Returns `(full_env, custom_env_only)` where `custom_env_only` captures Layers 2–4 for PTY tracking.
+#[allow(dead_code)]
+pub(crate) fn build_step_env(
+    ctx: StepEnvContext<'_>,
+) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+    let mut env = build_step_context_env(StepEnvContext {
+        cli: ctx.cli,
+        exec_home: ctx.exec_home,
+        endpoint: ctx.endpoint,
+        project: ctx.project,
+        card: ctx.card,
+        workspace: ctx.workspace,
+        run_dir: ctx.run_dir,
+        workflow_run: ctx.workflow_run,
+        step_ref: ctx.step_ref,
+        script_env_file: ctx.script_env_file,
+        script_output_file: ctx.script_output_file,
+    });
     let custom = ctx
         .workflow_run
         .map(|run| run.custom_env_for_step(ctx.step_ref))
@@ -429,6 +465,7 @@ pub(crate) fn log_tail(text: &str) -> String {
 struct PreparedScript {
     cwd: PathBuf,
     env: BTreeMap<String, String>,
+    unset_keys: BTreeSet<String>,
     env_policy: canban_exec::shell_env::LocalEnvPolicy,
     argv: Vec<String>,
     script_file: PathBuf,
@@ -585,20 +622,7 @@ impl AppServer {
                 None
             };
             let project = if is_global_project_id(&run.project_id) {
-                Project {
-                    id: GLOBAL_PROJECT_ID.into(),
-                    name: "Global".into(),
-                    directory: self.home.to_string_lossy().into_owned(),
-                    target_branch: None,
-                    workflow: Workflow::default(),
-                    github: None,
-                    detected_github: None,
-                    github_disconnected: false,
-                    delivery_mode: DeliveryMode::default(),
-                    agent_overrides: BTreeMap::new(),
-                    tags: Vec::new(),
-                    created_at: 0,
-                }
+                global_workflow_project(&self.home)
             } else {
                 db.get::<Project>(&run.project_id)?
             };
@@ -699,7 +723,7 @@ impl AppServer {
         canban_context::atomic(&output_file, b"")?;
         canban_context::atomic(&raw_log_file, b"")?;
 
-        let (env, _) = build_step_env(StepEnvContext {
+        let protected = build_step_context_env(StepEnvContext {
             cli: &self.cli,
             exec_home: &self.home,
             endpoint: &self.endpoint().to_string_lossy(),
@@ -717,6 +741,9 @@ impl AppServer {
             .as_ref()
             .map(Card::trust_level)
             .or_else(|| cardless_run_source_trust(run));
+        let wf_env = run.custom_env_for_step(Some(step_id));
+        let resolved =
+            self.resolve_runtime_env(None, Some(&bound), &protected, Some(&wf_env), source_trust)?;
         let env_policy = canban_exec::shell_env::LocalEnvPolicy::for_source_trust(
             config.terminal_env_mode.is_inherit(),
             source_trust,
@@ -725,7 +752,8 @@ impl AppServer {
 
         Ok(PreparedScript {
             cwd,
-            env,
+            env: resolved.env,
+            unset_keys: resolved.unset_keys,
             env_policy,
             argv,
             script_file,
@@ -807,6 +835,26 @@ impl AppServer {
             } else {
                 None
             };
+            let project_for_env = if is_global_project_id(&current_run.project_id) {
+                global_workflow_project(&self.home)
+            } else {
+                db.get::<Project>(&current_run.project_id)?
+            };
+            let source_trust = card_opt
+                .as_ref()
+                .map(Card::trust_level)
+                .or_else(|| cardless_run_source_trust(&current_run));
+            let wf_env = current_run.custom_env_for_step(Some(out.step_id));
+            let resolved_secrets = crate::env::resolve_effective_env(
+                db,
+                &self.home,
+                &config,
+                None,
+                Some(&project_for_env),
+                &BTreeMap::new(),
+                Some(&wf_env),
+                source_trust,
+            )?;
             let local_log = if let Some(card) = &card_opt {
                 canban_context::card_dir(&self.home, &card.project_id, card.number)
                     .join("scripts")
@@ -817,6 +865,13 @@ impl AppServer {
                     .join(format!("{slug}-v{}.log", out.visit))
             };
             let mut log_body = raw_log.clone();
+            if !resolved_secrets.skipped_untrusted_secrets.is_empty() {
+                log_body.push_str(&format!(
+                    "\n[canban] Skipped secret(s) for untrusted source ({}): {}\n",
+                    source_trust.unwrap_or("external"),
+                    resolved_secrets.skipped_untrusted_secrets.join(", ")
+                ));
+            }
             if out.timed_out {
                 log_body.push_str(&format!(
                     "\n[canban] Script timed out after {}s\n",
@@ -829,6 +884,7 @@ impl AppServer {
             if let Err(ref e) = parse_out_res {
                 log_body.push_str(&format!("\n[canban] Failed to parse $CANBAN_OUTPUT: {e:#}\n"));
             }
+            let log_body = crate::env::mask_secrets(&log_body, &resolved_secrets.secret_values);
             canban_context::atomic(&local_log, log_body.as_bytes())?;
             let log_rel = canban_context::relative(&self.home, &local_log)?;
 
@@ -838,7 +894,11 @@ impl AppServer {
                 .or_else(|| parse_out_res.as_ref().err())
                 .map(|e| format!("{e:#}"));
             let exported_env = parse_env_res.as_ref().ok().cloned().unwrap_or_default();
-            let outputs = parse_out_res.as_ref().ok().cloned().unwrap_or_default();
+            let raw_outputs = parse_out_res.as_ref().ok().cloned().unwrap_or_default();
+            let outputs: BTreeMap<String, String> = raw_outputs
+                .into_iter()
+                .map(|(k, v)| (k, crate::env::mask_secrets(&v, &resolved_secrets.secret_values)))
+                .collect();
 
             let succeeded = !out.timed_out && out.exit_code == Some(0) && parse_error.is_none();
             let summary = if let Some(err) = &parse_error {
@@ -853,6 +913,7 @@ impl AppServer {
                     .map_or_else(|| "signal".into(), |c| c.to_string());
                 format!("Script `{}` failed with exit code {code}", out.step_id)
             };
+            let summary = crate::env::mask_secrets(&summary, &resolved_secrets.secret_values);
 
             let output_val = collect_script_outputs(
                 &log_rel,
@@ -1083,12 +1144,13 @@ impl AppServer {
                 labels.insert("canban.card_id".into(), cid.clone());
             }
             let wrapped = wrapped_herdr_argv(&prep.raw_log_file, &prep.argv);
-            match client.launch_with_policy(
+            match client.launch_with_policy_and_unset(
                 wrapped,
                 &prep.cwd.to_string_lossy(),
                 prep.env.clone(),
                 labels,
                 prep.env_policy,
+                &prep.unset_keys,
             ) {
                 Ok(launched) => {
                     let addr = launched["address"].as_str().unwrap_or("").to_owned();
@@ -1170,12 +1232,13 @@ impl AppServer {
                 }
             };
             let hc_env = self.config().hc_env;
-            let (exit_code, timed_out) = run_local_process_with_policy(
+            let (exit_code, timed_out) = run_local_process_with_policy_and_unset(
                 &prep.argv,
                 &prep.cwd,
                 &prep.env,
                 &hc_env,
                 prep.env_policy,
+                &prep.unset_keys,
                 &prep.raw_log_file,
                 prep.timeout_secs,
             )?;
@@ -1290,12 +1353,36 @@ impl AppServer {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn run_local_process_with_policy(
     argv: &[String],
     cwd: &Path,
     env: &BTreeMap<String, String>,
     hc_env: &BTreeMap<String, String>,
     env_policy: canban_exec::shell_env::LocalEnvPolicy,
+    log_path: &Path,
+    timeout_secs: u64,
+) -> Result<(Option<i64>, bool)> {
+    run_local_process_with_policy_and_unset(
+        argv,
+        cwd,
+        env,
+        hc_env,
+        env_policy,
+        &BTreeSet::new(),
+        log_path,
+        timeout_secs,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_local_process_with_policy_and_unset(
+    argv: &[String],
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    hc_env: &BTreeMap<String, String>,
+    env_policy: canban_exec::shell_env::LocalEnvPolicy,
+    unset_keys: &BTreeSet<String>,
     log_path: &Path,
     timeout_secs: u64,
 ) -> Result<(Option<i64>, bool)> {
@@ -1309,14 +1396,20 @@ pub(crate) fn run_local_process_with_policy(
 
     let mut merged_env = env.clone();
     canban_exec::shell_env::merge_local_env_with_policy(&mut merged_env, hc_env, env_policy);
+    for key in unset_keys {
+        merged_env.remove(key);
+    }
 
     let mut cmd = canban_exec::command(&argv[0]);
     cmd.args(&argv[1..])
         .current_dir(cwd)
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .envs(&merged_env)
+        .env_remove("GIT_INDEX_FILE");
+    for key in unset_keys {
+        cmd.env_remove(key);
+    }
+    cmd.envs(&merged_env)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file));

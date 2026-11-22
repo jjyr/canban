@@ -78,15 +78,29 @@ impl AppServer {
     }
 
     pub fn call(&self, method: &str, p: Value) -> Result<Value> {
+        self.call_with_transport_token(method, p, None)
+    }
+
+    pub(crate) fn call_with_transport_token(
+        &self,
+        method: &str,
+        p: Value,
+        transport_token: Option<&str>,
+    ) -> Result<Value> {
         representation::validate(method, &p)?;
         let mut business = p.clone();
         business.as_object_mut().unwrap().remove("view");
         business.as_object_mut().unwrap().remove("fields");
-        let result = self.call_business(method, business)?;
+        let result = self.call_business(method, business, transport_token)?;
         Ok(representation::render(method, &p, result))
     }
 
-    fn call_business(&self, method: &str, p: Value) -> Result<Value> {
+    fn call_business(
+        &self,
+        method: &str,
+        p: Value,
+        transport_token: Option<&str>,
+    ) -> Result<Value> {
         if canban_updater::handoff::active(&self.home)
             && !matches!(
                 method,
@@ -191,6 +205,10 @@ impl AppServer {
                     "full_env_captured": snapshot.full_env_captured,
                 }))
             }
+            "host.env.keys" => self.host_env_keys(),
+            "env.save" => self.env_save(p, transport_token),
+            "env.global.sync" => self.global_env_sync(p, transport_token),
+            "env.preview" => self.env_preview(p),
             "host.discover" => Ok(serde_json::to_value(network::discover_all())?),
             "directory.list" => self.browse_directory(p),
             "project.update" => self.update_project(p),

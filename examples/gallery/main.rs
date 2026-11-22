@@ -281,6 +281,40 @@ fn controls() -> impl IntoElement {
     let gutter_scroll = element_ref();
     let split_width = signal(240.0_f32);
     let chosen_ref = signal("feat/git-client".to_string());
+    let env_secret_val = signal("sk-gallery-demo-secret".to_owned());
+    let env_secret_revealed = signal(false);
+    let env_fixture_meta = signal(fixtures::env_meta_map());
+    let env_host = signal("local".to_owned());
+    let env_scope = computed(|| "gallery-env".to_owned());
+    let env_meta_memo = computed(move || env_fixture_meta.get());
+    let env_on_save: canban_ui::components::env_table::SaveCallback =
+        std::rc::Rc::new(move |entries, done| {
+            let mut next = std::collections::BTreeMap::new();
+            for (k, entry) in entries {
+                match entry {
+                    canban_types::EnvWriteEntry::Plain { value } => {
+                        next.insert(k, canban_types::EnvEntryMeta::Plain { value });
+                    }
+                    canban_types::EnvWriteEntry::Unset => {
+                        next.insert(k, canban_types::EnvEntryMeta::Unset);
+                    }
+                    canban_types::EnvWriteEntry::Secret { value, .. } => {
+                        next.insert(
+                            k,
+                            canban_types::EnvEntryMeta::Secret {
+                                configured: true,
+                                hint: value
+                                    .as_deref()
+                                    .map(canban_types::secret_hint)
+                                    .unwrap_or_else(|| "••••9a2f".into()),
+                            },
+                        );
+                    }
+                }
+            }
+            env_fixture_meta.set(next);
+            done(Ok(()));
+        });
     view().flex_1().min_h(px(0.0)).p_5().gap_4().bg(BACKGROUND)
     .child(heading("Component Gallery"))
     .child(muted("Production components · local fixtures · no AppServer or Agent required"))
@@ -761,6 +795,52 @@ fn controls() -> impl IntoElement {
                 .child(canban_ui::utilities::terminal_settings(ui))
                 .child(
                     panel()
+                        .gap_3()
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .child(label("Environment Variables & Secrets"))
+                                .child(badge("Synced to 2/2 hosts")),
+                        )
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(view().w(px(280.)).child(
+                                    secret_field(env_secret_val, env_secret_revealed, "Secret value")
+                                        .font_family(MONO_FONT)
+                                        .label("Gallery secret field"),
+                                ))
+                                .child(compact_action_with_icon(
+                                    Icon::Eye,
+                                    move || {
+                                        if env_secret_revealed.get() {
+                                            "Hide secret"
+                                        } else {
+                                            "Show secret"
+                                        }
+                                    },
+                                    Variant::Secondary,
+                                    move |_| env_secret_revealed.update(|v| *v = !*v),
+                                )),
+                        )
+                        .child(canban_ui::components::env_table::env_table(
+                            ui,
+                            canban_ui::components::env_table::EnvTableConfig {
+                                host_id: env_host,
+                                project_id: None,
+                                scope_key: env_scope,
+                                source_meta: env_meta_memo,
+                                save_label: "Save Env",
+                                on_save: env_on_save,
+                            },
+                        )),
+                )
+                .child(
+                    panel()
                         .child(label("Searchable + typeable popover picker (canban-ui-kit)"))
                         .child(
                             view()
@@ -1205,12 +1285,35 @@ pub fn Gallery() -> impl IntoElement {
     }
     if matches!(
         std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
-        Ok("agent-setup" | "settings-agents" | "project-agents")
+        Ok("agent-setup" | "settings-agents" | "settings-environment" | "project-agents")
     ) {
         ui.card.set(String::new());
         match std::env::var("CANBAN_GALLERY_SCENE").as_deref() {
             Ok("agent-setup") => ui.page.set("agent-setup".into()),
-            Ok("project-agents") => ui.page.set("project-agents".into()),
+            Ok("settings-environment") => {
+                ui.snapshot.update(|snap| {
+                    snap.global_env = fixtures::env_meta_map()
+                        .into_iter()
+                        .filter(|(_, m)| !m.is_unset())
+                        .collect();
+                });
+                ui.open_settings_section("environment");
+            }
+            Ok("project-agents") => {
+                ui.snapshot.update(|snap| {
+                    snap.global_env = fixtures::env_meta_map()
+                        .into_iter()
+                        .filter(|(_, m)| !m.is_unset())
+                        .collect();
+                    if let Some(pid) = snap.projects.first().map(|p| p.id.clone()) {
+                        snap.scoped_env.insert(
+                            canban_types::Snapshot::project_env_key(&pid),
+                            fixtures::env_meta_map(),
+                        );
+                    }
+                });
+                ui.page.set("project-agents".into());
+            }
             _ => {
                 let mut cfg = fixtures::agent_config();
                 let custom_argv = vec![
@@ -3210,6 +3313,16 @@ pub fn Gallery() -> impl IntoElement {
                 .child(action("Settings · Agents", Variant::Quiet, move |_| {
                     scene.set("workspace".into());
                     ui.open_settings_section("agents");
+                }))
+                .child(action("Env & Secrets", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());
+                    ui.snapshot.update(|snap| {
+                        snap.global_env = fixtures::env_meta_map()
+                            .into_iter()
+                            .filter(|(_, m)| !m.is_unset())
+                            .collect();
+                    });
+                    ui.open_settings_section("environment");
                 }))
                 .child(action("Multi-host · Online", Variant::Quiet, move |_| {
                     let (snap, hosts) = fixtures::multi_host_workspace(false);

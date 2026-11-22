@@ -37,6 +37,8 @@ pub struct AcceptedStream {
     /// True if frame 1 on a non-mux TCP stream was followed immediately by pipelined bytes.
     pub has_pipelined_bytes: bool,
     pub device_id: Option<String>,
+    /// Effective bearer token for the authenticated TCP session (or `None` on Unix sockets).
+    pub auth_token: Option<zeroize::Zeroizing<String>>,
     pub stop_rx: tokio::sync::watch::Receiver<bool>,
 }
 
@@ -86,6 +88,7 @@ pub fn spawn_unix_listener<H, Fut>(
                                     initial_request: None,
                                     has_pipelined_bytes: false,
                                     device_id: None,
+                                    auth_token: None,
                                     stop_rx: conn_stop,
                                 })
                                 .await;
@@ -240,6 +243,7 @@ where
     let device_store = cfg.device_store.clone();
     let pairing_codes = cfg.pairing_codes.clone();
     let provided = input["auth"].as_str().unwrap_or("").to_owned();
+    let provided_auth = provided.clone();
     let device_name = input["params"]["device_name"].as_str().map(str::to_owned);
     let allow_upgrade = method == "transport.mux";
 
@@ -248,7 +252,7 @@ where
             &home,
             &device_store,
             &pairing_codes,
-            &provided,
+            &provided_auth,
             device_name.as_deref(),
             allow_upgrade,
         )
@@ -273,6 +277,7 @@ where
             return Ok(());
         }
     };
+    let session_token = zeroize::Zeroizing::new(upgraded_token.clone().unwrap_or(provided));
 
     if method == "transport.mux" {
         if !reader.buffer().is_empty() {
@@ -320,7 +325,16 @@ where
 
         let leftover = reader.buffer().to_vec();
         let tcp = reader.into_inner().unsplit(writer);
-        return handle_mux_session(tcp, leftover, cfg, device_id, stop_rx, handler).await;
+        return handle_mux_session(
+            tcp,
+            leftover,
+            cfg,
+            device_id,
+            session_token,
+            stop_rx,
+            handler,
+        )
+        .await;
     }
 
     let leftover = reader.buffer().to_vec();
@@ -339,6 +353,7 @@ where
         initial_request: Some(input),
         has_pipelined_bytes,
         device_id: Some(device_id),
+        auth_token: Some(session_token),
         stop_rx: conn_stop_rx,
     })
     .await;
@@ -352,6 +367,7 @@ async fn handle_mux_session<H, Fut>(
     leftover: Vec<u8>,
     cfg: Arc<ServerTransportConfig>,
     device_id: String,
+    session_token: zeroize::Zeroizing<String>,
     mut stop_rx: tokio::sync::watch::Receiver<bool>,
     handler: Arc<H>,
 ) -> Result<()>
@@ -378,12 +394,14 @@ where
                 let h = handler.clone();
                 let child_stop = conn_stop_rx.clone();
                 let did = device_id.clone();
+                let tok = session_token.clone();
                 tokio::spawn(async move {
                     h(AcceptedStream {
                         stream: TransportStream::Mux(mux_stream),
                         initial_request: None,
                         has_pipelined_bytes: false,
                         device_id: Some(did),
+                        auth_token: Some(tok),
                         stop_rx: child_stop,
                     })
                     .await;

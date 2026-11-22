@@ -1891,3 +1891,510 @@ fn pairing_code_and_legacy_server_token_upgrade_persist_in_hosts_json_and_remove
     drop(legacy_running);
     drop(invite_running);
 }
+
+#[test]
+fn global_env_replicates_via_outbox_with_coalescing_tombstones_lww_and_zero_plaintext_leaks() {
+    use canban_types::{EnvEntryMeta, EnvWriteEntry};
+    use std::{collections::BTreeMap, os::unix::fs::PermissionsExt};
+
+    let dir = tempfile::tempdir().unwrap();
+    let local_home = dir.path().join("local-home");
+    let remote_home = dir.path().join("remote-home");
+
+    let local_app = AppServer::open(local_home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let _local_running = local_app.start_with_listen(None).unwrap();
+
+    let remote_app = AppServer::open(remote_home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let (_, remote_token) = remote_app.issue_device_token("remote-test").unwrap();
+    assert!(
+        network::read_server_token(&remote_home).is_none(),
+        "new daemons must not auto-create legacy server.token"
+    );
+    let remote_running = remote_app
+        .start_with_listen(Some(ServerListenConfig {
+            tailscale: false,
+            port: 0,
+            listen: Some("127.0.0.1:0".into()),
+            allow_insecure_bind: false,
+        }))
+        .unwrap();
+    let remote_addr = remote_app.bound_tcp_addrs()[0].clone();
+    let remote_port: u16 = remote_addr.rsplit(':').next().unwrap().parse().unwrap();
+
+    let local_client = AppClient::connect_home(local_home.clone(), Path::new("/bin/echo")).unwrap();
+    let registry = HostRegistry::new(local_client);
+    registry
+        .add_host(SavedHost {
+            id: "home-linux".into(),
+            name: "Home Linux".into(),
+            transport: HostTransport::Tcp {
+                addr: remote_addr.clone(),
+                token: remote_token.clone(),
+            },
+            ssh_target: None,
+            server_id: None,
+            enabled: true,
+            added_at: now(),
+        })
+        .unwrap();
+
+    // 1. Connected save replicates Global Plain + Secret over TCP and re-encrypts under remote vault.key.
+    let sec_v1 = "multi_global_secret_v1_alpha";
+    registry
+        .call_routed(
+            "env.save",
+            json!({
+                "scope": "global",
+                "entries": BTreeMap::<String, EnvWriteEntry>::from([
+                    ("G_PLAIN".into(), EnvWriteEntry::Plain { value: "initial".into() }),
+                    ("TEMP_DEL".into(), EnvWriteEntry::Plain { value: "temporary".into() }),
+                    (
+                        "G_SECRET".into(),
+                        EnvWriteEntry::Secret {
+                            value: Some(sec_v1.into()),
+                            keep_existing: false,
+                        },
+                    ),
+                ]),
+            }),
+            None,
+        )
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if registry.global_env_sync_summary().pending_hosts.is_empty()
+            && remote_app
+                .snapshot()
+                .unwrap()
+                .global_env
+                .contains_key("G_SECRET")
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Timed out waiting for initial global env sync"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    // Distinct vault.key files with 0600 permissions on each host.
+    let local_key = std::fs::read(local_home.join("vault.key")).unwrap();
+    let remote_key = std::fs::read(remote_home.join("vault.key")).unwrap();
+    assert_ne!(local_key, remote_key);
+    assert_eq!(
+        std::fs::metadata(remote_home.join("vault.key"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+
+    let remote_resolved1 = remote_app
+        .resolve_runtime_env(None, None, &BTreeMap::new(), None, Some("local"))
+        .unwrap();
+    assert_eq!(
+        remote_resolved1.env.get("G_SECRET").map(String::as_str),
+        Some(sec_v1)
+    );
+
+    // 2. Take remote offline and make 3 rapid global edits: coalesce to 1 pointer-only outbox op.
+    drop(remote_running);
+    drop(remote_app);
+    registry.poll_remotes_once();
+
+    let sec_v2 = "multi_global_secret_v2_beta";
+    let sec_v3 = "multi_global_secret_v3_gamma";
+    registry
+        .call_routed(
+            "env.save",
+            json!({
+                "scope": "global",
+                "entries": BTreeMap::<String, EnvWriteEntry>::from([
+                    ("G_PLAIN".into(), EnvWriteEntry::Plain { value: "offline_1".into() }),
+                    ("TEMP_DEL".into(), EnvWriteEntry::Plain { value: "temporary".into() }),
+                    ("LWW_KEY".into(), EnvWriteEntry::Plain { value: "local_older".into() }),
+                    (
+                        "G_SECRET".into(),
+                        EnvWriteEntry::Secret {
+                            value: Some(sec_v2.into()),
+                            keep_existing: false,
+                        },
+                    ),
+                ]),
+            }),
+            None,
+        )
+        .unwrap();
+    registry
+        .call_routed(
+            "env.save",
+            json!({
+                "scope": "global",
+                "entries": BTreeMap::<String, EnvWriteEntry>::from([
+                    ("G_PLAIN".into(), EnvWriteEntry::Plain { value: "offline_2".into() }),
+                    ("LWW_KEY".into(), EnvWriteEntry::Plain { value: "local_older".into() }),
+                    (
+                        "G_SECRET".into(),
+                        EnvWriteEntry::Secret {
+                            value: Some(sec_v3.into()),
+                            keep_existing: false,
+                        },
+                    ),
+                ]),
+            }),
+            None,
+        )
+        .unwrap();
+
+    let summary_offline = registry.global_env_sync_summary();
+    assert_eq!(summary_offline.pending_hosts, vec!["Home Linux"]);
+    assert!(
+        registry.sync_items().is_empty(),
+        "Global sync must stay out of card pending counts"
+    );
+
+    // Outbox file must be coalesced to 1 SyncGlobalEnv entry and contain zero plaintext secrets.
+    let outbox_path = local_home.join("cache/hosts/home-linux.outbox.json");
+    let outbox_bytes = std::fs::read_to_string(&outbox_path).unwrap();
+    let parsed_ob = canban_sync::Outbox::load(outbox_path);
+    assert_eq!(
+        parsed_ob
+            .ops
+            .iter()
+            .filter(|m| m.kind == canban_sync::MutationKind::SyncGlobalEnv)
+            .count(),
+        1
+    );
+    let cache_bytes =
+        std::fs::read_to_string(local_home.join("cache/hosts/home-linux.json")).unwrap_or_default();
+    for s in [sec_v1, sec_v2, sec_v3] {
+        assert!(
+            !outbox_bytes.contains(s),
+            "Secret sentinel leaked in .outbox.json"
+        );
+        assert!(
+            !cache_bytes.contains(s),
+            "Secret sentinel leaked in cached host snapshot"
+        );
+    }
+
+    // 3. Restart remote with a newer LWW_KEY write on remote DB, then reconnect & drain.
+    let remote_app2 = AppServer::open(remote_home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    remote_app2
+        .call(
+            "env.save",
+            json!({
+                "scope": "global",
+                "entries": BTreeMap::<String, EnvWriteEntry>::from([
+                    ("G_PLAIN".into(), EnvWriteEntry::Plain { value: "initial".into() }),
+                    ("TEMP_DEL".into(), EnvWriteEntry::Plain { value: "temporary".into() }),
+                    ("LWW_KEY".into(), EnvWriteEntry::Plain { value: "remote_newer_wins".into() }),
+                    (
+                        "G_SECRET".into(),
+                        EnvWriteEntry::Secret {
+                            value: Some(sec_v1.into()),
+                            keep_existing: false,
+                        },
+                    ),
+                ]),
+            }),
+        )
+        .unwrap();
+    remote_app2
+        .store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            db.conn.execute(
+                "UPDATE env_entries SET updated_at = 1 WHERE scope = 'global' AND key != 'LWW_KEY'",
+                [],
+            )?;
+            db.conn.execute(
+                "UPDATE env_entries SET updated_at = updated_at + 60000 WHERE scope = 'global' AND key = 'LWW_KEY'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    let _remote_running2 = remote_app2
+        .start_with_listen(Some(ServerListenConfig {
+            tailscale: false,
+            port: remote_port,
+            listen: Some(format!("127.0.0.1:{remote_port}")),
+            allow_insecure_bind: false,
+        }))
+        .unwrap();
+    registry.reconnect(Some("home-linux"));
+    registry.poll_remotes_once();
+
+    let deadline2 = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if registry.global_env_sync_summary().pending_hosts.is_empty()
+            && remote_app2.snapshot().unwrap().global_env.get("G_PLAIN")
+                == Some(&EnvEntryMeta::Plain {
+                    value: "offline_2".into(),
+                })
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline2,
+            "Timed out waiting for offline global env sync drain"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    let remote_snap = remote_app2.snapshot().unwrap();
+    assert!(
+        !remote_snap.global_env.contains_key("TEMP_DEL"),
+        "Tombstone must delete TEMP_DEL"
+    );
+    assert_eq!(
+        remote_snap.global_env.get("LWW_KEY"),
+        Some(&EnvEntryMeta::Plain {
+            value: "remote_newer_wins".into(),
+        })
+    );
+    let remote_resolved2 = remote_app2
+        .resolve_runtime_env(None, None, &BTreeMap::new(), None, Some("local"))
+        .unwrap();
+    assert_eq!(
+        remote_resolved2.env.get("G_SECRET").map(String::as_str),
+        Some(sec_v3)
+    );
+    assert_eq!(
+        remote_resolved2.env.get("G_PLAIN").map(String::as_str),
+        Some("offline_2")
+    );
+}
+
+#[test]
+fn remote_agent_and_project_env_save_seal_over_tcp_and_isolate_across_hosts() {
+    use canban_types::{EnvEntryMeta, EnvWriteEntry};
+    use std::collections::BTreeMap;
+
+    let dir = tempfile::tempdir().unwrap();
+    let local_home = dir.path().join("local-home");
+    let remote_home = dir.path().join("remote-home");
+    let legacy_home = dir.path().join("legacy-home");
+
+    let local_app = AppServer::open(local_home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let _local_running = local_app.start_with_listen(None).unwrap();
+
+    let remote_app = AppServer::open(remote_home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let (_, remote_token) = remote_app.issue_device_token("remote-test").unwrap();
+    assert!(
+        network::read_server_token(&remote_home).is_none(),
+        "new daemons must not auto-create legacy server.token"
+    );
+    let _remote_running = remote_app
+        .start_with_listen(Some(ServerListenConfig {
+            tailscale: false,
+            port: 0,
+            listen: Some("127.0.0.1:0".into()),
+            allow_insecure_bind: false,
+        }))
+        .unwrap();
+    let remote_addr = remote_app.bound_tcp_addrs()[0].clone();
+
+    let legacy_app = AppServer::open(legacy_home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let legacy_token = network::ensure_server_token(&legacy_home).unwrap();
+    let _legacy_running = legacy_app
+        .start_with_listen(Some(ServerListenConfig {
+            tailscale: false,
+            port: 0,
+            listen: Some("127.0.0.1:0".into()),
+            allow_insecure_bind: false,
+        }))
+        .unwrap();
+    let legacy_addr = legacy_app.bound_tcp_addrs()[0].clone();
+
+    let remote_proj: Project = serde_json::from_value(
+        remote_app
+            .call(
+                "project.create",
+                json!({ "name": "Remote Env Repo", "directory": dir.path().join("rem-repo") }),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+
+    let local_client = AppClient::connect_home(local_home, Path::new("/bin/echo")).unwrap();
+    let registry = HostRegistry::new(local_client);
+    registry
+        .add_host(SavedHost {
+            id: "home-linux".into(),
+            name: "Home Linux".into(),
+            transport: HostTransport::Tcp {
+                addr: remote_addr,
+                token: remote_token.clone(),
+            },
+            ssh_target: None,
+            server_id: None,
+            enabled: true,
+            added_at: now(),
+        })
+        .unwrap();
+    registry
+        .add_host(SavedHost {
+            id: "legacy-linux".into(),
+            name: "Legacy Linux".into(),
+            transport: HostTransport::Tcp {
+                addr: legacy_addr,
+                token: legacy_token,
+            },
+            ssh_target: None,
+            server_id: None,
+            enabled: true,
+            added_at: now(),
+        })
+        .unwrap();
+
+    // Direct TCP sealed call check + HostRegistry routed agent/project saves.
+    let sealed_agent =
+        canban_storage::vault::seal_transport(&remote_token, "REM_AGENT_SEC", "rem_agent_sec_555")
+            .unwrap();
+    assert!(sealed_agent.starts_with(canban_storage::vault::TRANSPORT_SEAL_PREFIX));
+
+    registry
+        .call_routed(
+            "env.save",
+            json!({
+                "host_id": "home-linux",
+                "scope": "agent",
+                "target_id": "codex",
+                "entries": BTreeMap::<String, EnvWriteEntry>::from([
+                    ("REM_AGENT_PLAIN".into(), EnvWriteEntry::Plain { value: "linux-codex".into() }),
+                    (
+                        "REM_AGENT_SEC".into(),
+                        EnvWriteEntry::Secret {
+                            value: Some("rem_agent_sec_555".into()),
+                            keep_existing: false,
+                        },
+                    ),
+                ]),
+            }),
+            None,
+        )
+        .unwrap();
+
+    registry
+        .call_routed(
+            "env.save",
+            json!({
+                "host_id": "home-linux",
+                "scope": "project",
+                "target_id": remote_proj.id,
+                "entries": BTreeMap::<String, EnvWriteEntry>::from([
+                    ("REM_PROJ_PLAIN".into(), EnvWriteEntry::Plain { value: "linux-proj".into() }),
+                    (
+                        "REM_PROJ_SEC".into(),
+                        EnvWriteEntry::Secret {
+                            value: Some("rem_proj_sec_666".into()),
+                            keep_existing: false,
+                        },
+                    ),
+                ]),
+            }),
+            Some(&remote_proj.id),
+        )
+        .unwrap();
+
+    // Legacy server.token host auto-upgrades to dev_... on transport.mux and unseals TCP secrets
+    // using its active session token even after legacy server.token is deleted.
+    legacy_app
+        .call("device.remove_legacy_token", json!({}))
+        .unwrap();
+    registry
+        .call_routed(
+            "env.save",
+            json!({
+                "host_id": "legacy-linux",
+                "scope": "agent",
+                "target_id": "codex",
+                "entries": BTreeMap::<String, EnvWriteEntry>::from([(
+                    "UPGRADED_SEC".into(),
+                    EnvWriteEntry::Secret {
+                        value: Some("upgraded_dev_secret_777".into()),
+                        keep_existing: false,
+                    },
+                )]),
+            }),
+            None,
+        )
+        .unwrap();
+
+    let merged = registry.merged_snapshot().unwrap();
+    assert!(matches!(
+        merged.agent_env("home-linux", "codex").get("REM_AGENT_SEC"),
+        Some(EnvEntryMeta::Secret {
+            configured: true,
+            ..
+        })
+    ));
+    assert!(matches!(
+        merged.project_env(&remote_proj.id).get("REM_PROJ_SEC"),
+        Some(EnvEntryMeta::Secret {
+            configured: true,
+            ..
+        })
+    ));
+    assert!(
+        !local_app
+            .snapshot()
+            .unwrap()
+            .agent_env("local", "codex")
+            .contains_key("REM_AGENT_SEC"),
+        "Remote Agent secrets must remain isolated from local host"
+    );
+
+    let codex_prof = remote_app
+        .config()
+        .profiles
+        .into_iter()
+        .find(|p| p.id == "codex")
+        .unwrap();
+    let rem_resolved = remote_app
+        .resolve_runtime_env(
+            Some(&codex_prof),
+            Some(&remote_proj),
+            &BTreeMap::new(),
+            None,
+            Some("local"),
+        )
+        .unwrap();
+    assert_eq!(
+        rem_resolved.env.get("REM_AGENT_SEC").map(String::as_str),
+        Some("rem_agent_sec_555")
+    );
+    assert_eq!(
+        rem_resolved.env.get("REM_PROJ_SEC").map(String::as_str),
+        Some("rem_proj_sec_666")
+    );
+    assert_eq!(
+        rem_resolved.env.get("REM_AGENT_PLAIN").map(String::as_str),
+        Some("linux-codex")
+    );
+    assert_eq!(
+        rem_resolved.env.get("REM_PROJ_PLAIN").map(String::as_str),
+        Some("linux-proj")
+    );
+
+    let leg_resolved = legacy_app
+        .resolve_runtime_env(
+            Some(&codex_prof),
+            None,
+            &BTreeMap::new(),
+            None,
+            Some("local"),
+        )
+        .unwrap();
+    assert_eq!(
+        leg_resolved.env.get("UPGRADED_SEC").map(String::as_str),
+        Some("upgraded_dev_secret_777")
+    );
+}

@@ -566,6 +566,7 @@ fn activity_record_and_insights_activity_validate_clip_and_include_open_agent_wo
         connection_state: "connected".into(),
         pending: None,
         applied_env: Default::default(),
+        applied_env_fingerprint: String::new(),
     };
     app.store
         .lock()
@@ -818,6 +819,7 @@ fn insights_activity_and_activity_buckets_have_exact_parity_for_same_window() {
         connection_state: "connected".into(),
         pending: None,
         applied_env: Default::default(),
+        applied_env_fingerprint: String::new(),
     };
     app.store
         .lock()

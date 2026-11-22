@@ -2381,6 +2381,76 @@ fn env_editor_dialog(ctx: Ctx) -> impl IntoElement {
     let parse_error = signal(String::new());
     let editor = canban_ui_kit::markdown::MarkdownInput::new();
     let close = move || ctx.env_dialog.set(None);
+
+    let open_insert_menu = move |_: &()| {
+        use nsh_core::element::desktop::{MenuItem, popup_menu};
+        let ui_ref = ctx.ui;
+        let (global_meta, project_meta) = ui_ref.snapshot.with_untracked(|s| {
+            let pid = ui_ref.project.get_untracked();
+            (s.global_env.clone(), s.project_env(&pid))
+        });
+
+        let mut choices: Vec<(String, String, String)> = Vec::new();
+        for (k, meta) in &project_meta {
+            match meta {
+                canban_types::EnvEntryMeta::Secret { .. } => choices.push((
+                    format!("{k} (Project Secret)"),
+                    k.clone(),
+                    format!("${{{{ secrets.{k} }}}}"),
+                )),
+                canban_types::EnvEntryMeta::Plain { .. } => choices.push((
+                    format!("{k} (Project Var)"),
+                    k.clone(),
+                    format!("${{{{ vars.{k} }}}}"),
+                )),
+                canban_types::EnvEntryMeta::Unset => {}
+            }
+        }
+        for (k, meta) in &global_meta {
+            if project_meta.contains_key(k) {
+                continue;
+            }
+            match meta {
+                canban_types::EnvEntryMeta::Secret { .. } => choices.push((
+                    format!("{k} (Global Secret)"),
+                    k.clone(),
+                    format!("${{{{ secrets.{k} }}}}"),
+                )),
+                canban_types::EnvEntryMeta::Plain { .. } => choices.push((
+                    format!("{k} (Global Var)"),
+                    k.clone(),
+                    format!("${{{{ vars.{k} }}}}"),
+                )),
+                canban_types::EnvEntryMeta::Unset => {}
+            }
+        }
+
+        ui_ref.spawn(async move {
+            if choices.is_empty() {
+                popup_menu(vec![MenuItem::new(
+                    "No Secrets or Vars configured yet (Settings → Environment & Secrets or Project → Agents)",
+                )])
+                .await;
+                return;
+            }
+            let items: Vec<MenuItem> = choices
+                .into_iter()
+                .map(|(label, key, expr)| {
+                    MenuItem::new(label).on_select(move || {
+                        text.update(|s| {
+                            if !s.is_empty() && !s.ends_with('\n') {
+                                s.push('\n');
+                            }
+                            s.push_str(&format!("{key}={expr}"));
+                        });
+                        parse_error.set(String::new());
+                    })
+                })
+                .collect();
+            popup_menu(items).await;
+        });
+    };
+
     super::workflow_dialog(
         view()
             .flex_1()
@@ -2401,10 +2471,23 @@ fn env_editor_dialog(ctx: Ctx) -> impl IntoElement {
                     )),
             )
             .child(
-                muted(
-                    "Enter one KEY=VALUE pair per line (applied to both Script and Agent steps).",
-                )
-                .text_size(px(12.)),
+                view()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        muted(
+                            "One KEY=VALUE per line. Supports ${{ secrets.KEY }} and ${{ vars.KEY }} references.",
+                        )
+                        .text_size(px(12.)),
+                    )
+                    .child(compact_action(
+                        "Insert Secret / Var ▾",
+                        Variant::Secondary,
+                        open_insert_menu,
+                    )),
             )
             .child(when(
                 move || !parse_error.get().is_empty(),
@@ -2422,7 +2505,7 @@ fn env_editor_dialog(ctx: Ctx) -> impl IntoElement {
                             .source(
                                 text,
                                 "Environment (KEY=VALUE per line)",
-                                "CI=1\nRUST_LOG=info",
+                                "CI=1\nAPI_KEY=${{ secrets.OPENAI_API_KEY }}",
                             )
                             .size_full(),
                     ),

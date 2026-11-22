@@ -10,7 +10,7 @@ pub use button::{
     toggle,
 };
 pub use checkbox::checkbox;
-pub use input::{bound_field, field};
+pub use input::{bound_field, field, secret_field};
 pub use scrollbar::vertical_scrollbar;
 pub use surface::{badge, heading, label, muted, panel, read_text};
 

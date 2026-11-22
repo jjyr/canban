@@ -4618,6 +4618,31 @@ pub fn terminal_managed_reclaim() -> canban_types::Snapshot {
     s
 }
 
+pub fn env_meta_map() -> std::collections::BTreeMap<String, canban_types::EnvEntryMeta> {
+    use canban_types::EnvEntryMeta;
+    std::collections::BTreeMap::from([
+        (
+            "RUST_LOG".into(),
+            EnvEntryMeta::Plain {
+                value: "debug".into(),
+            },
+        ),
+        (
+            "OPENAI_API_KEY".into(),
+            EnvEntryMeta::Secret {
+                configured: true,
+                hint: "••••9a2f".into(),
+            },
+        ),
+        (
+            "MISSING_REMOTE_TOKEN".into(),
+            EnvEntryMeta::Secret {
+                configured: false,
+                hint: String::new(),
+            },
+        ),
+    ])
+}
 #[cfg(test)]
 mod tests {
     use super::*;
