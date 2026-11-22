@@ -3,9 +3,10 @@
 Implemented 2026-11-09. This supersedes the proposed periodic reconciliation in [the cost assessment](runtime-observation-cost.md). Canban no longer runs a half-second Terminal inventory scan or individual Agent status loop. GitHub synchronization and the remote Agent reporting bridge are separate responsibilities.
 
 The subscription below is **Herdr Core -> AppServer** runtime observation.
-Desktop **AppServer -> UI** synchronization has its own boundary: local AppClient
-waits on a lightweight `app.watch` cursor; remote-host supervision makes
-conditional `app.state` requests. Changed cursors can still lead to full Snapshot
+Desktop **AppServer -> UI** synchronization has its own boundary: both local
+`AppClient` and remote-host Tokio supervisors subscribe to AppServer's
+persistent `app.subscribe` push streams and issue debounced conditional
+`app.state` requests on invalidation. Changed cursors can still lead to full Snapshot
 refreshes. See the [UI data/ownership contract](ui-architecture.md#state-synchronization-ownership-and-memory-cost)
 and [memory profiling implementation and evidence](memory-profiling.md); this
 runtime subscription is not a claim of per-entity incremental desktop updates.

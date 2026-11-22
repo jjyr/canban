@@ -1,10 +1,19 @@
 use super::*;
 impl AppServer {
+    pub(crate) fn update_state_payload(&self) -> Value {
+        json!({
+            "build": canban_updater::Build::current(),
+            "disabled": self.updates_disabled,
+            "state": canban_updater::load_state(&self.home),
+            "install": canban_updater::handoff::journal(&self.home)
+                .ok()
+                .map(|j| json!({"token": j.token, "phase": j.phase})),
+        })
+    }
+
     pub(super) fn update_call(&self, method: &str, p: Value) -> Result<Value> {
         match method {
-            "update.state" => Ok(
-                json!({"build":canban_updater::Build::current(),"disabled":self.updates_disabled,"state":canban_updater::load_state(&self.home),"install":canban_updater::handoff::journal(&self.home).ok().map(|j|json!({"token":j.token,"phase":j.phase}))}),
-            ),
+            "update.state" => Ok(self.update_state_payload()),
             "update.check" => {
                 ensure!(
                     !self.updates_disabled,
@@ -12,9 +21,13 @@ impl AppServer {
                 );
                 let home = self.home.clone();
                 let github = self.github.clone();
+                let weak = self.self_weak.get().cloned().unwrap_or_default();
                 std::thread::spawn(move || {
                     if let Err(e) = canban_updater::feed::check(&home, github.client().ok()) {
                         eprintln!("Canban update check: {e:#}");
+                    }
+                    if let Some(server) = weak.upgrade() {
+                        server.emit_update();
                     }
                 });
                 Ok(json!({"checking":true}))
@@ -58,9 +71,11 @@ impl AppServer {
                 state.error = None;
                 state.progress = 0;
                 canban_updater::save_state(&self.home, &state)?;
+                self.emit_update();
                 let home = self.home.clone();
                 let cli = active_cli;
                 let github = self.github.clone();
+                let weak = self.self_weak.get().cloned().unwrap_or_default();
                 let app_id = p["app_id"]
                     .as_str()
                     .unwrap_or("com.canban.desktop")
@@ -84,6 +99,9 @@ impl AppServer {
                         s.phase = "error".into();
                         s.error = Some(format!("{e:#}"));
                         let _ = canban_updater::save_state(&home, &s);
+                    }
+                    if let Some(server) = weak.upgrade() {
+                        server.emit_update();
                     }
                 });
                 Ok(json!({"installing":true}))
@@ -246,6 +264,9 @@ impl AppServer {
                         let result =
                             canban_updater::feed::check_automatically(&home, github.client().ok());
                         let delay = if result.is_ok() {
+                            if let Some(server) = weak.upgrade() {
+                                server.emit_update();
+                            }
                             canban_updater::load_state(&home)
                                 .automatic_delay(canban_updater::now())
                                 .max(1)

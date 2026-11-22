@@ -27,17 +27,26 @@ impl Default for HerdrInstallState {
     }
 }
 
-fn push_install_log(state: &Arc<Mutex<HerdrInstallState>>, line: impl Into<String>) {
+fn push_install_log(
+    state: &Arc<Mutex<HerdrInstallState>>,
+    server: Option<&std::sync::Weak<AppServer>>,
+    line: impl Into<String>,
+) {
     let cleaned = strip_ansi(&line.into());
     let trimmed = cleaned.trim();
     if trimmed.is_empty() {
         return;
     }
-    let mut guard = state.lock().unwrap();
-    guard.logs.push(trimmed.to_owned());
-    if guard.logs.len() > MAX_INSTALL_LOGS {
-        let drain = guard.logs.len() - MAX_INSTALL_LOGS;
-        guard.logs.drain(0..drain);
+    {
+        let mut guard = state.lock().unwrap();
+        guard.logs.push(trimmed.to_owned());
+        if guard.logs.len() > MAX_INSTALL_LOGS {
+            let drain = guard.logs.len() - MAX_INSTALL_LOGS;
+            guard.logs.drain(0..drain);
+        }
+    }
+    if let Some(s) = server.and_then(std::sync::Weak::upgrade) {
+        s.emit_herdr_install();
     }
 }
 
@@ -167,23 +176,29 @@ impl AppServer {
             "Installing Herdr Core requires an explicit user action"
         );
         let wait = p["wait"] == true;
-        {
+        let changed = {
             let mut guard = self.herdr_install.lock().unwrap();
             if guard.phase == "installing" {
                 if !wait {
                     return Ok(serde_json::to_value(guard.clone())?);
                 }
+                false
             } else {
                 guard.phase = "installing".into();
                 guard.logs = vec!["Starting Herdr Core installer…".into()];
                 guard.error = None;
+                true
             }
+        };
+        if changed {
+            self.emit_herdr_install();
         }
 
         let home = self.home.clone();
         let install_state = Arc::clone(&self.herdr_install);
+        let weak = self.self_weak.get().cloned().unwrap_or_default();
         let handle = std::thread::spawn(move || {
-            run_herdr_installer(&home, &install_state);
+            run_herdr_installer(&home, &install_state, Some(weak));
         });
 
         if wait {
@@ -194,13 +209,26 @@ impl AppServer {
     }
 }
 
-fn run_herdr_installer(home: &Path, install_state: &Arc<Mutex<HerdrInstallState>>) {
+fn notify_install(server: Option<&std::sync::Weak<AppServer>>) {
+    if let Some(s) = server.and_then(std::sync::Weak::upgrade) {
+        s.emit_herdr_install();
+    }
+}
+
+fn run_herdr_installer(
+    home: &Path,
+    install_state: &Arc<Mutex<HerdrInstallState>>,
+    server: Option<std::sync::Weak<AppServer>>,
+) {
     let raw = match load_raw_agents_config(home) {
         Ok(cfg) => cfg,
         Err(err) => {
-            let mut guard = install_state.lock().unwrap();
-            guard.phase = "failed".into();
-            guard.error = Some(format!("Could not read configuration: {err:#}"));
+            {
+                let mut guard = install_state.lock().unwrap();
+                guard.phase = "failed".into();
+                guard.error = Some(format!("Could not read configuration: {err:#}"));
+            }
+            notify_install(server.as_ref());
             return;
         }
     };
@@ -213,7 +241,11 @@ fn run_herdr_installer(home: &Path, install_state: &Arc<Mutex<HerdrInstallState>
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_INSTALL_URL.into());
 
-    push_install_log(install_state, format!("Downloading installer from {url}"));
+    push_install_log(
+        install_state,
+        server.as_ref(),
+        format!("Downloading installer from {url}"),
+    );
 
     let mut cmd = canban_exec::command("/bin/sh");
     cmd.arg("-c")
@@ -260,9 +292,12 @@ fn run_herdr_installer(home: &Path, install_state: &Arc<Mutex<HerdrInstallState>
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(err) => {
-            let mut guard = install_state.lock().unwrap();
-            guard.phase = "failed".into();
-            guard.error = Some(format!("Could not start installer process: {err}"));
+            {
+                let mut guard = install_state.lock().unwrap();
+                guard.phase = "failed".into();
+                guard.error = Some(format!("Could not start installer process: {err}"));
+            }
+            notify_install(server.as_ref());
             return;
         }
     };
@@ -270,18 +305,20 @@ fn run_herdr_installer(home: &Path, install_state: &Arc<Mutex<HerdrInstallState>
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let s_out = Arc::clone(install_state);
+    let srv_out = server.clone();
     let out_handle = std::thread::spawn(move || {
         if let Some(stdout) = stdout {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                push_install_log(&s_out, line);
+                push_install_log(&s_out, srv_out.as_ref(), line);
             }
         }
     });
     let s_err = Arc::clone(install_state);
+    let srv_err = server.clone();
     let err_handle = std::thread::spawn(move || {
         if let Some(stderr) = stderr {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                push_install_log(&s_err, line);
+                push_install_log(&s_err, srv_err.as_ref(), line);
             }
         }
     });
@@ -292,7 +329,11 @@ fn run_herdr_installer(home: &Path, install_state: &Arc<Mutex<HerdrInstallState>
 
     match status {
         Ok(exit) if exit.success() => {
-            push_install_log(install_state, "Verifying Herdr Core runtime connection…");
+            push_install_log(
+                install_state,
+                server.as_ref(),
+                "Verifying Herdr Core runtime connection…",
+            );
             let configured_hc = raw.hc.trim();
             let lookup_name = if configured_hc.is_empty() {
                 "hc"
@@ -302,11 +343,14 @@ fn run_herdr_installer(home: &Path, install_state: &Arc<Mutex<HerdrInstallState>
             let Some(resolved) =
                 canban_profiles::find_local_executable_with_env(lookup_name, &raw.hc_env)
             else {
-                let mut guard = install_state.lock().unwrap();
-                guard.phase = "failed".into();
-                guard.error = Some(format!(
-                    "Installer finished, but `{lookup_name}` was still not found on disk."
-                ));
+                {
+                    let mut guard = install_state.lock().unwrap();
+                    guard.phase = "failed".into();
+                    guard.error = Some(format!(
+                        "Installer finished, but `{lookup_name}` was still not found on disk."
+                    ));
+                }
+                notify_install(server.as_ref());
                 return;
             };
             let mut probe_config = raw;
@@ -321,22 +365,32 @@ fn run_herdr_installer(home: &Path, install_state: &Arc<Mutex<HerdrInstallState>
                         .as_str()
                         .or_else(|| status_val["version"].as_str())
                         .unwrap_or("installed");
-                    push_install_log(install_state, format!("Herdr Core ready ({version})"));
+                    push_install_log(
+                        install_state,
+                        server.as_ref(),
+                        format!("Herdr Core ready ({version})"),
+                    );
                     let endpoint = home.join("app.sock");
                     if endpoint.exists() {
                         let _ = rpc(&endpoint, "herdr.check", json!({}));
                     }
-                    let mut guard = install_state.lock().unwrap();
-                    guard.phase = "succeeded".into();
-                    guard.error = None;
+                    {
+                        let mut guard = install_state.lock().unwrap();
+                        guard.phase = "succeeded".into();
+                        guard.error = None;
+                    }
+                    notify_install(server.as_ref());
                 }
                 Err(err) => {
-                    let mut guard = install_state.lock().unwrap();
-                    guard.phase = "failed".into();
-                    guard.error = Some(format!(
-                        "Installed `{}` could not start Herdr Core: {err:#}",
-                        resolved.display()
-                    ));
+                    {
+                        let mut guard = install_state.lock().unwrap();
+                        guard.phase = "failed".into();
+                        guard.error = Some(format!(
+                            "Installed `{}` could not start Herdr Core: {err:#}",
+                            resolved.display()
+                        ));
+                    }
+                    notify_install(server.as_ref());
                 }
             }
         }
@@ -345,19 +399,25 @@ fn run_herdr_installer(home: &Path, install_state: &Arc<Mutex<HerdrInstallState>
                 .code()
                 .map(|c| format!("exit code {c}"))
                 .unwrap_or_else(|| "terminated by signal".into());
-            let mut guard = install_state.lock().unwrap();
-            let last_line = guard.logs.last().cloned().unwrap_or_default();
-            guard.phase = "failed".into();
-            guard.error = Some(if last_line.is_empty() {
-                format!("Herdr Core installer failed ({code}).")
-            } else {
-                format!("Herdr Core installer failed ({code}): {last_line}")
-            });
+            {
+                let mut guard = install_state.lock().unwrap();
+                let last_line = guard.logs.last().cloned().unwrap_or_default();
+                guard.phase = "failed".into();
+                guard.error = Some(if last_line.is_empty() {
+                    format!("Herdr Core installer failed ({code}).")
+                } else {
+                    format!("Herdr Core installer failed ({code}): {last_line}")
+                });
+            }
+            notify_install(server.as_ref());
         }
         Err(err) => {
-            let mut guard = install_state.lock().unwrap();
-            guard.phase = "failed".into();
-            guard.error = Some(format!("Installer wait error: {err}"));
+            {
+                let mut guard = install_state.lock().unwrap();
+                guard.phase = "failed".into();
+                guard.error = Some(format!("Installer wait error: {err}"));
+            }
+            notify_install(server.as_ref());
         }
     }
 }

@@ -8,6 +8,8 @@ use std::{
 
 const PROBE: &str = include_str!("probe.py");
 
+type UsageUpdateHook = Arc<dyn Fn(Value) + Send + Sync>;
+
 #[derive(Default)]
 struct Entry {
     readings: Vec<Value>,
@@ -17,6 +19,18 @@ struct Entry {
     updated: Option<u64>,
     due: Option<Instant>,
     requested: Option<Instant>,
+    on_update: Option<UsageUpdateHook>,
+}
+
+impl Entry {
+    fn payload(&self) -> Value {
+        json!({
+            "readings": self.readings,
+            "busy": self.busy,
+            "updated_at": self.updated,
+            "error": self.error,
+        })
+    }
 }
 
 #[derive(Clone, Default)]
@@ -25,6 +39,10 @@ pub struct Service {
 }
 
 impl Service {
+    pub fn set_on_update(&self, hook: impl Fn(Value) + Send + Sync + 'static) {
+        self.entry.lock().unwrap().on_update = Some(Arc::new(hook));
+    }
+
     pub fn request(&self, config: Config, refresh: bool) -> Value {
         let now = Instant::now();
         let mut e = self.entry.lock().unwrap();
@@ -38,41 +56,48 @@ impl Service {
             let shared = self.entry.clone();
             std::thread::spawn(move || {
                 let result = canban_herdr::host::Host::new(config).python(PROBE, &[]);
-                let mut e = shared.lock().unwrap();
-                e.busy = false;
-                match result {
-                    Ok(v) if v.is_array() => {
-                        e.access_blocked = v.as_array().unwrap().iter().any(|r| {
-                            r["error"]
-                                .as_str()
-                                .is_some_and(|s| s.contains("Credential access"))
-                        });
-                        e.readings = reconcile(&e.readings, v.as_array().unwrap());
-                        e.error = None;
-                        e.updated = Some(canban_types::now());
-                        let rejected = e.readings.iter().any(|r| {
-                            r["error"].as_str().is_some_and(|s| {
-                                s.contains("401")
-                                    || s.contains("403")
-                                    || s.contains("429")
-                                    || s.contains("Credential")
-                            })
-                        });
-                        e.due = Some(
-                            Instant::now() + Duration::from_secs(if rejected { 1800 } else { 600 }),
-                        );
-                    }
-                    _ => {
-                        e.error = Some("Usage unavailable".into());
-                        for r in &mut e.readings {
-                            r["stale"] = json!(true);
+                let (hook, payload) = {
+                    let mut e = shared.lock().unwrap();
+                    e.busy = false;
+                    match result {
+                        Ok(v) if v.is_array() => {
+                            e.access_blocked = v.as_array().unwrap().iter().any(|r| {
+                                r["error"]
+                                    .as_str()
+                                    .is_some_and(|s| s.contains("Credential access"))
+                            });
+                            e.readings = reconcile(&e.readings, v.as_array().unwrap());
+                            e.error = None;
+                            e.updated = Some(canban_types::now());
+                            let rejected = e.readings.iter().any(|r| {
+                                r["error"].as_str().is_some_and(|s| {
+                                    s.contains("401")
+                                        || s.contains("403")
+                                        || s.contains("429")
+                                        || s.contains("Credential")
+                                })
+                            });
+                            e.due = Some(
+                                Instant::now()
+                                    + Duration::from_secs(if rejected { 1800 } else { 600 }),
+                            );
                         }
-                        e.due = Some(Instant::now() + Duration::from_secs(300));
+                        _ => {
+                            e.error = Some("Usage unavailable".into());
+                            for r in &mut e.readings {
+                                r["stale"] = json!(true);
+                            }
+                            e.due = Some(Instant::now() + Duration::from_secs(300));
+                        }
                     }
+                    (e.on_update.clone(), e.payload())
+                };
+                if let Some(hook) = hook {
+                    hook(payload);
                 }
             });
         }
-        json!({"readings": e.readings, "busy": e.busy, "updated_at": e.updated, "error": e.error})
+        e.payload()
     }
 }
 

@@ -7,22 +7,23 @@ capture procedure and dated acceptance evidence together.
 
 ## Implemented boundaries
 
-Canban exposes a small `app.watch` invalidation cursor and conditional
-`app.state {after: cursor}`. Local UI subscription waits on the cursor instead of
-reading and retaining a full JSON snapshot every 750 ms. A change invalidates the
-UI, which fetches state once. Remote supervision makes conditional state requests
-and keeps only cursor/GitHub metadata beside its typed offline cache.
+Canban exposes a persistent `app.subscribe` event stream and conditional
+`app.state {after: cursor}`. Both local UI subscription and per-host remote
+supervisors receive push invalidation events over dedicated persistent
+`app.subscribe` streams instead of polling a cursor or retaining a full JSON
+snapshot periodically. A push invalidation triggers a debounced conditional
+`app.state {after: cursor}` fetch once (or direct state fetch on local UI),
+while remote supervision retains only cursor/GitHub metadata beside its typed
+offline cache.
 
 The cursor includes persistent server identity, a fresh per-boot instance ID, SQLite
-connection total changes, an explicit
-in-memory invalidation generation, and runtime observation freshness. It is not a
-durable event-journal offset. Rolled-back writes may conservatively invalidate.
-The cursor is captured before loading state, so concurrent commits may require an
-extra refresh but cannot be acknowledged by an older snapshot. A bounded wait
-rechecks every 250 ms without loading histories or holding database locks; this
-also covers internal commits that do not emit a notification. Waits stop within
-15 seconds and service restart invalidates the old cursor while preserving server identity. Heartbeats
-can still refresh observation freshness; this change is not a per-entity delta
+connection total changes, an explicit in-memory invalidation generation, and runtime
+observation freshness. It is not a durable event-journal offset. Rolled-back writes may
+conservatively invalidate. `Store::write` commit hooks and explicit `emit()` calls
+broadcast push events immediately without periodic database polling, while lagged
+subscribers receive a `resync` event and service restart invalidates the old cursor
+while preserving server identity. Heartbeats keep the subscription alive and refresh
+observation freshness; this change is not a per-entity delta
 protocol.
 
 Timeline pages use `(card_id, number)` SQL selection and limit before JSON

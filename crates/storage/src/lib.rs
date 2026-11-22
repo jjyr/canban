@@ -234,9 +234,12 @@ impl Record for Event {
     }
 }
 
+type CommitHook = std::sync::Arc<dyn Fn(u64) + Send + Sync>;
+
 pub struct Store {
     conn: Connection,
     pub home: PathBuf,
+    on_commit: Option<CommitHook>,
 }
 #[derive(Clone, Copy)]
 pub struct Db<'a> {
@@ -390,17 +393,28 @@ impl Store {
         Ok(Self {
             conn,
             home: home.to_owned(),
+            on_commit: None,
         })
+    }
+    pub fn set_on_commit(&mut self, hook: impl Fn(u64) + Send + Sync + 'static) {
+        self.on_commit = Some(std::sync::Arc::new(hook));
     }
     pub fn db(&self) -> Db<'_> {
         Db { conn: &self.conn }
     }
     pub fn write<T>(&mut self, f: impl FnOnce(Db<'_>) -> Result<T>) -> Result<T> {
+        let before = self.conn.total_changes();
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let out = f(Db { conn: &tx })?;
         tx.commit()?;
+        let after = self.conn.total_changes();
+        if after != before
+            && let Some(hook) = &self.on_commit
+        {
+            hook(after);
+        }
         Ok(out)
     }
     pub fn snapshot(&self) -> Result<Snapshot> {

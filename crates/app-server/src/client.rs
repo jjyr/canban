@@ -652,35 +652,407 @@ impl AppClient {
             let mut last = Value::Null;
             let mut connected = false;
             while let Some(app) = weak.upgrade() {
-                match app.call(
-                    "app.watch",
-                    json!({"after":last["revision"],"wait_ms":15_000}),
-                ) {
-                    Ok(state) => {
-                        if !connected || state["changed"] == true {
-                            if tx
-                                .send(AppEvent::Changed {
-                                    topic: change_topic(connected, &last, &state),
-                                    card_id: None,
-                                })
-                                .is_err()
-                            {
-                                break;
-                            }
-                            last = super::state::state_marker(&state);
-                        }
-                        connected = true;
-                    }
-                    Err(_) => {
+                let endpoint = app.endpoint.clone();
+                drop(app);
+                let res = subscribe_session(&endpoint, &weak, &mut last, &mut connected, &tx);
+                match res {
+                    Ok(true) => return,
+                    Ok(false) | Err(_) => {
                         connected = false;
                         std::thread::sleep(Duration::from_millis(750));
                     }
                 }
-                drop(app);
             }
         });
         rx
     }
+}
+
+fn open_subscribe_io(
+    endpoint: &ClientEndpoint,
+) -> Result<(Box<dyn Read + Send>, Box<dyn Write + Send>)> {
+    let read_timeout = Some(Duration::from_secs(45));
+    let write_timeout = Some(Duration::from_secs(30));
+    match endpoint {
+        ClientEndpoint::Unix(path) => {
+            let writer = UnixStream::connect(path)
+                .with_context(|| format!("Canban is not running at {}", path.display()))?;
+            writer.set_read_timeout(read_timeout)?;
+            writer.set_write_timeout(write_timeout)?;
+            let reader = writer.try_clone()?;
+            Ok((Box::new(reader), Box::new(writer)))
+        }
+        ClientEndpoint::Tcp { addr, .. } => {
+            let sock_addr = addr
+                .to_socket_addrs()
+                .with_context(|| format!("Invalid Canban TCP address {addr}"))?
+                .next()
+                .with_context(|| format!("Could not resolve Canban TCP address {addr}"))?;
+            let writer = TcpStream::connect_timeout(&sock_addr, Duration::from_secs(10))
+                .with_context(|| format!("Canban is not reachable at {addr}"))?;
+            let _ = writer.set_nodelay(true);
+            writer.set_read_timeout(read_timeout)?;
+            writer.set_write_timeout(write_timeout)?;
+            let reader = writer.try_clone()?;
+            Ok((Box::new(reader), Box::new(writer)))
+        }
+    }
+}
+
+fn subscribe_session(
+    endpoint: &ClientEndpoint,
+    weak: &std::sync::Weak<AppClient>,
+    last: &mut Value,
+    connected: &mut bool,
+    tx: &mpsc::Sender<AppEvent>,
+) -> Result<bool> {
+    let (read_io, mut write_io) = open_subscribe_io(endpoint)?;
+    let mut req = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "app.subscribe",
+        "params": {
+            "after": last["revision"],
+            "topics": ["snapshot"],
+        }
+    });
+    if let ClientEndpoint::Tcp { token, .. } = endpoint {
+        req["auth"] = json!(token);
+    }
+    runtime::write_json_line(&mut write_io, &req)?;
+
+    let mut reader = BufReader::new(read_io);
+    let mut line = String::new();
+    let n = (&mut reader).take(48 * 1024 * 1024).read_line(&mut line)?;
+    if n == 0 || !line.ends_with('\n') {
+        return Ok(false);
+    }
+    let reply: Value = serde_json::from_str(&line)?;
+    if let Some(err) = reply.get("error") {
+        let msg = err["message"].as_str().unwrap_or("app.subscribe failed");
+        bail!("{msg}");
+    }
+    let result = reply
+        .get("result")
+        .context("Invalid app.subscribe response")?;
+    if !*connected || result["changed"] == true {
+        if tx
+            .send(AppEvent::Changed {
+                topic: change_topic(*connected, last, result),
+                card_id: None,
+            })
+            .is_err()
+        {
+            return Ok(true);
+        }
+        *last = super::state::state_marker(result);
+    }
+    *connected = true;
+
+    loop {
+        line.clear();
+        let n = (&mut reader).take(48 * 1024 * 1024).read_line(&mut line)?;
+        if n == 0 || !line.ends_with('\n') {
+            return Ok(false);
+        }
+        if weak.strong_count() == 0 {
+            return Ok(true);
+        }
+        let msg: Value = serde_json::from_str(&line)?;
+        match msg["method"].as_str() {
+            Some("heartbeat") => continue,
+            Some("event") => {
+                let params = &msg["params"];
+                let topic = static_event_topic(params["topic"].as_str(), last, params);
+                let card_id = params["card_id"].as_str().map(str::to_owned);
+                *last = super::state::state_marker(params);
+                if tx.send(AppEvent::Changed { topic, card_id }).is_err() {
+                    return Ok(true);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn static_event_topic(raw: Option<&str>, previous: &Value, params: &Value) -> &'static str {
+    match raw {
+        Some("resync") => "resync",
+        Some("github") => "github",
+        Some("review") => "review",
+        Some("configuration") => "configuration",
+        Some("desktop") => "desktop",
+        Some("schedules") => "schedules",
+        Some("terminals") => "terminals",
+        Some("worktrees") => "worktrees",
+        Some("execution") => "execution",
+        Some("host") => "host",
+        Some("application") => "application",
+        _ => change_topic(true, previous, params),
+    }
+}
+
+enum AsyncClientStream {
+    Unix(tokio::net::UnixStream),
+    Tcp(tokio::net::TcpStream),
+}
+
+impl tokio::io::AsyncRead for AsyncClientStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Unix(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            Self::Tcp(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for AsyncClientStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Self::Unix(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            Self::Tcp(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Unix(s) => std::pin::Pin::new(s).poll_flush(cx),
+            Self::Tcp(s) => std::pin::Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Unix(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            Self::Tcp(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
+
+pub(crate) enum PushFrame {
+    Heartbeat,
+    StateChanged {
+        topic: &'static str,
+        card_id: Option<String>,
+        marker: Value,
+    },
+    UpdateChanged(Value),
+    UtilitiesChanged(Value),
+    UsageChanged(Value),
+    HerdrInstall(Value),
+}
+
+pub(crate) struct SubscribeHandshake {
+    pub changed: bool,
+    pub marker: Value,
+    pub result: Value,
+}
+
+pub(crate) struct AsyncSubscribeStream {
+    reader: tokio::io::BufReader<tokio::io::ReadHalf<AsyncClientStream>>,
+    _writer: tokio::io::WriteHalf<AsyncClientStream>,
+    heartbeat_ms: u64,
+    last_marker: Value,
+}
+
+impl AsyncSubscribeStream {
+    pub(crate) fn read_timeout(&self) -> Duration {
+        Duration::from_millis(self.heartbeat_ms.saturating_mul(3).max(500))
+    }
+
+    pub(crate) async fn next_frame(&mut self) -> Result<Option<PushFrame>> {
+        const MAX_FRAME_BYTES: usize = 48 * 1024 * 1024;
+        loop {
+            let line_opt = match tokio::time::timeout(
+                self.read_timeout(),
+                runtime::read_bounded_line(&mut self.reader, MAX_FRAME_BYTES),
+            )
+            .await
+            {
+                Ok(Ok(opt)) => opt,
+                Ok(Err(e)) => return Err(e.into()),
+                Err(_) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "app.subscribe heartbeat timed out",
+                    )
+                    .into());
+                }
+            };
+            let Some(line) = line_opt else {
+                return Ok(None);
+            };
+            let mut msg: Value = serde_json::from_str(&line)?;
+            match msg["method"].as_str() {
+                Some("heartbeat") => return Ok(Some(PushFrame::Heartbeat)),
+                Some("event") => {
+                    let params = &msg["params"];
+                    let topic =
+                        static_event_topic(params["topic"].as_str(), &self.last_marker, params);
+                    let card_id = params["card_id"].as_str().map(str::to_owned);
+                    let marker = super::state::state_marker(params);
+                    self.last_marker = marker.clone();
+                    return Ok(Some(PushFrame::StateChanged {
+                        topic,
+                        card_id,
+                        marker,
+                    }));
+                }
+                Some("update.changed") => {
+                    return Ok(Some(PushFrame::UpdateChanged(
+                        msg["params"]["state"].take(),
+                    )));
+                }
+                Some("utilities.changed") => {
+                    return Ok(Some(PushFrame::UtilitiesChanged(
+                        msg["params"]["state"].take(),
+                    )));
+                }
+                Some("usage.changed") => {
+                    return Ok(Some(PushFrame::UsageChanged(msg["params"]["state"].take())));
+                }
+                Some("herdr.install") => {
+                    return Ok(Some(PushFrame::HerdrInstall(msg["params"]["state"].take())));
+                }
+                _ => continue,
+            }
+        }
+    }
+}
+
+/// Open an async persistent `app.subscribe` stream without holding any client mutexes.
+pub(crate) async fn open_async_subscribe(
+    endpoint: &ClientEndpoint,
+    after: &Value,
+    topics: &[&str],
+    heartbeat_ms: Option<u64>,
+) -> Result<(AsyncSubscribeStream, SubscribeHandshake)> {
+    const MAX_FRAME_BYTES: usize = 48 * 1024 * 1024;
+    let stream = match endpoint {
+        ClientEndpoint::Unix(path) => {
+            let s = tokio::time::timeout(
+                Duration::from_secs(10),
+                tokio::net::UnixStream::connect(path),
+            )
+            .await
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("Timed out connecting to {}", path.display()),
+                )
+            })?
+            .with_context(|| format!("Canban is not running at {}", path.display()))?;
+            AsyncClientStream::Unix(s)
+        }
+        ClientEndpoint::Tcp { addr, .. } => {
+            let s = tokio::time::timeout(
+                Duration::from_secs(10),
+                tokio::net::TcpStream::connect(addr.as_str()),
+            )
+            .await
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("Timed out connecting to {addr}"),
+                )
+            })?
+            .with_context(|| format!("Canban is not reachable at {addr}"))?;
+            let _ = s.set_nodelay(true);
+            AsyncClientStream::Tcp(s)
+        }
+    };
+
+    let (read_half, mut writer) = tokio::io::split(stream);
+    let mut reader = tokio::io::BufReader::new(read_half);
+    let mut params = json!({
+        "after": after,
+        "topics": topics,
+    });
+    if let Some(ms) = heartbeat_ms {
+        params["heartbeat_ms"] = json!(ms);
+    }
+    let mut req = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "app.subscribe",
+        "params": params,
+    });
+    if let ClientEndpoint::Tcp { token, .. } = endpoint {
+        req["auth"] = json!(token);
+    }
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        runtime::write_json_line_async(&mut writer, &req),
+    )
+    .await
+    .map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "Timed out sending app.subscribe request",
+        )
+    })??;
+
+    let line_opt = tokio::time::timeout(
+        Duration::from_secs(15),
+        runtime::read_bounded_line(&mut reader, MAX_FRAME_BYTES),
+    )
+    .await
+    .map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "Timed out waiting for app.subscribe handshake",
+        )
+    })??;
+    let Some(line) = line_opt else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "Server closed connection during app.subscribe handshake",
+        )
+        .into());
+    };
+    let reply: Value = serde_json::from_str(&line)?;
+    if let Some(err) = reply.get("error") {
+        let code = err["code"].as_i64().unwrap_or(-32000);
+        let msg = err["message"].as_str().unwrap_or("app.subscribe failed");
+        if code == -32001 {
+            bail!("auth_failed: {msg}");
+        }
+        bail!("{msg}");
+    }
+    let result = reply
+        .get("result")
+        .cloned()
+        .context("Invalid app.subscribe response")?;
+    let marker = super::state::state_marker(&result);
+    let changed = result["changed"] == true;
+    let hb_ms = result["heartbeat_ms"].as_u64().unwrap_or(15_000);
+    Ok((
+        AsyncSubscribeStream {
+            reader,
+            _writer: writer,
+            heartbeat_ms: hb_ms,
+            last_marker: marker.clone(),
+        },
+        SubscribeHandshake {
+            changed,
+            marker,
+            result,
+        },
+    ))
 }
 
 pub(crate) fn change_topic(connected: bool, previous: &Value, next: &Value) -> &'static str {
@@ -706,6 +1078,7 @@ impl RelayIo for UnixStream {
         Ok(self.try_clone()?)
     }
     fn clear_timeouts(&self) -> Result<()> {
+        self.set_nonblocking(false)?;
         self.set_read_timeout(None)?;
         self.set_write_timeout(None)?;
         Ok(())
@@ -720,6 +1093,7 @@ impl RelayIo for TcpStream {
         Ok(self.try_clone()?)
     }
     fn clear_timeouts(&self) -> Result<()> {
+        self.set_nonblocking(false)?;
         self.set_read_timeout(None)?;
         self.set_write_timeout(None)?;
         Ok(())

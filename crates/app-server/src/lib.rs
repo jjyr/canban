@@ -5,11 +5,11 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader, Read, Write},
-    os::unix::net::{UnixListener, UnixStream},
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, RwLock,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock, RwLock,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc,
     },
     time::Duration,
@@ -24,29 +24,34 @@ pub struct AppServer {
     _development: Option<instance::Registration>,
     updates_disabled: bool,
     _service_lock: std::fs::File,
+    self_weak: OnceLock<std::sync::Weak<Self>>,
     utilities: utilities::Utilities,
     pub home: PathBuf,
     github: Arc<canban_github::auth::Service>,
     github_sync_due: AtomicBool,
     github_jobs: Mutex<github::worker::Jobs>,
     github_job_signal: std::sync::Condvar,
-    github_revision: std::sync::atomic::AtomicU64,
+    github_revision: Arc<AtomicU64>,
     state_instance: String,
-    state_revision: std::sync::atomic::AtomicU64,
-    state_signal: (Mutex<()>, std::sync::Condvar),
+    db_changes: Arc<AtomicU64>,
+    state_revision: Arc<AtomicU64>,
+    observed_at: Arc<AtomicU64>,
+    push_seq: Arc<AtomicU64>,
+    push_tx: tokio::sync::broadcast::Sender<state::PushEvent>,
     github_cli: Arc<canban_github::cli::Service>,
     github_queries: Mutex<std::collections::BTreeMap<String, Value>>,
     branch_pr_probes: Mutex<std::collections::HashMap<(String, String), std::time::Instant>>,
     identity: String,
     started_at: u64,
     bound_tcp: Mutex<Vec<String>>,
-    next_tcp_conn_id: std::sync::atomic::AtomicU64,
-    active_tcp_streams: Mutex<std::collections::HashMap<u64, std::net::TcpStream>>,
+    active_tcp_connections: AtomicUsize,
     store: Mutex<Store>,
     config: RwLock<Config>,
     cli: PathBuf,
     listeners: Mutex<Vec<mpsc::Sender<AppEvent>>>,
     stop: AtomicBool,
+    stop_tx: tokio::sync::watch::Sender<bool>,
+    stop_cond: (Mutex<bool>, std::sync::Condvar),
     checkout_gates: delivery_gates::KeyedGateTable<delivery_gates::CheckoutGateKey>,
     queue_gates: delivery_gates::KeyedGateTable<String>,
     card_delivery_gates: delivery_gates::KeyedGateTable<String>,
@@ -77,19 +82,24 @@ impl Drop for AppServer {
 }
 pub struct Running {
     server: Arc<AppServer>,
-    accept_handles: Vec<std::thread::JoinHandle<()>>,
+    runtime: Option<tokio::runtime::Runtime>,
+    socket_path: PathBuf,
+    _lock: std::fs::File,
 }
 impl Drop for Running {
     fn drop(&mut self) {
-        self.server.stop.store(true, Ordering::SeqCst);
-        self.server.close_active_tcp_streams();
-        self.server.wake_runtime();
-        self.server.wake_delivery();
-        self.server.wake_scripts();
-        self.server.context_signal.notify_all();
-        for handle in self.accept_handles.drain(..) {
-            let _ = handle.join();
+        self.server.trigger_stop();
+        if let Some(rt) = self.runtime.take() {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                let _ = std::thread::spawn(move || {
+                    rt.shutdown_timeout(Duration::from_secs(2));
+                })
+                .join();
+            } else {
+                rt.shutdown_timeout(Duration::from_secs(2));
+            }
         }
+        let _ = std::fs::remove_file(&self.socket_path);
         let _ = self.server.finish_agent_work();
         let _ = self.server._service_lock.unlock();
     }
@@ -643,21 +653,61 @@ impl AppServer {
                 verified_snapshot.cards.len()
             ),
         );
-        Ok(Arc::new(Self {
+        let initial_changes = store.db().conn.total_changes();
+        let db_changes = Arc::new(AtomicU64::new(initial_changes));
+        let state_revision = Arc::new(AtomicU64::new(0));
+        let github_revision = Arc::new(AtomicU64::new(0));
+        let observed_at = Arc::new(AtomicU64::new(0));
+        let push_seq = Arc::new(AtomicU64::new(0));
+        let (push_tx, _) = tokio::sync::broadcast::channel(256);
+        let (stop_tx, _) = tokio::sync::watch::channel(false);
+
+        {
+            let hook_changes = db_changes.clone();
+            let hook_github_rev = github_revision.clone();
+            let hook_push_seq = push_seq.clone();
+            let hook_push_tx = push_tx.clone();
+            store.set_on_commit(move |after| {
+                hook_changes.store(after, Ordering::SeqCst);
+                let seq = hook_push_seq.fetch_add(1, Ordering::SeqCst) + 1;
+                let _ = hook_push_tx.send(state::PushEvent::StateChanged {
+                    seq,
+                    topic: "application",
+                    card_id: None,
+                    github_revision: hook_github_rev.load(Ordering::SeqCst),
+                });
+            });
+        }
+
+        let utilities = utilities::Utilities::new(&home);
+        {
+            let usage_push_seq = push_seq.clone();
+            let usage_push_tx = push_tx.clone();
+            utilities.usage.set_on_update(move |state| {
+                let seq = usage_push_seq.fetch_add(1, Ordering::SeqCst) + 1;
+                let _ = usage_push_tx.send(state::PushEvent::UsageChanged { seq, state });
+            });
+        }
+
+        let server = Arc::new(Self {
             _development: development
                 .as_ref()
                 .map(|v| instance::register(v, "server"))
                 .transpose()?,
             updates_disabled,
             _service_lock: service_lock,
-            utilities: utilities::Utilities::new(&home),
+            self_weak: OnceLock::new(),
+            utilities,
             github_sync_due: AtomicBool::new(true),
             github_jobs: Mutex::new(Default::default()),
             github_job_signal: std::sync::Condvar::new(),
-            github_revision: std::sync::atomic::AtomicU64::new(0),
+            github_revision,
             state_instance: id(),
-            state_revision: std::sync::atomic::AtomicU64::new(0),
-            state_signal: (Mutex::new(()), std::sync::Condvar::new()),
+            db_changes,
+            state_revision,
+            observed_at,
+            push_seq,
+            push_tx,
             github_queries: Mutex::new(
                 std::fs::read(home.join("cache/github/queries.json"))
                     .ok()
@@ -672,14 +722,15 @@ impl AppServer {
             identity,
             started_at: now(),
             bound_tcp: Mutex::new(Vec::new()),
-            next_tcp_conn_id: std::sync::atomic::AtomicU64::new(1),
-            active_tcp_streams: Mutex::new(std::collections::HashMap::new()),
+            active_tcp_connections: AtomicUsize::new(0),
             home,
             store: Mutex::new(store),
             config: RwLock::new(config),
             cli,
             listeners: Mutex::new(Vec::new()),
             stop: AtomicBool::new(false),
+            stop_tx,
+            stop_cond: (Mutex::new(false), std::sync::Condvar::new()),
             checkout_gates: Default::default(),
             queue_gates: Default::default(),
             card_delivery_gates: Default::default(),
@@ -699,7 +750,9 @@ impl AppServer {
             script_wake: Mutex::new(None),
             contexts: Mutex::new(Default::default()),
             context_signal: std::sync::Condvar::new(),
-        }))
+        });
+        let _ = server.self_weak.set(Arc::downgrade(&server));
+        Ok(server)
     }
     fn read_config(home: &Path) -> Result<(Config, Option<Vec<u8>>)> {
         let bytes = std::fs::read(home.join("config/agents.json"))?;
@@ -790,6 +843,35 @@ impl AppServer {
     pub fn stopped(&self) -> bool {
         self.stop.load(Ordering::SeqCst)
     }
+    pub(crate) fn trigger_stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = self.stop_tx.send(true);
+        {
+            let mut stopped = self.stop_cond.0.lock().unwrap();
+            *stopped = true;
+            self.stop_cond.1.notify_all();
+        }
+        self.wake_runtime();
+        self.wake_delivery();
+        self.wake_scripts();
+        self.context_signal.notify_all();
+    }
+    pub fn wait_stopped(&self) {
+        let mut guard = self.stop_cond.0.lock().unwrap();
+        while !*guard && !self.stopped() {
+            guard = self.stop_cond.1.wait(guard).unwrap();
+        }
+    }
+    pub(crate) fn stop_receiver(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.stop_tx.subscribe()
+    }
+    pub(crate) fn subscribe_push(&self) -> tokio::sync::broadcast::Receiver<state::PushEvent> {
+        self.push_tx.subscribe()
+    }
+    #[cfg(test)]
+    pub(crate) fn active_tcp_count(&self) -> usize {
+        self.active_tcp_connections.load(Ordering::SeqCst)
+    }
     pub fn endpoint(&self) -> PathBuf {
         self.home.join("app.sock")
     }
@@ -799,11 +881,6 @@ impl AppServer {
     pub fn bound_tcp_addrs(&self) -> Vec<String> {
         self.bound_tcp.lock().unwrap().clone()
     }
-    pub(crate) fn close_active_tcp_streams(&self) {
-        for (_, s) in self.active_tcp_streams.lock().unwrap().drain() {
-            let _ = s.shutdown(std::net::Shutdown::Both);
-        }
-    }
     pub fn subscribe(&self) -> mpsc::Receiver<AppEvent> {
         let (tx, rx) = mpsc::channel();
         self.listeners.lock().unwrap().push(tx);
@@ -811,10 +888,18 @@ impl AppServer {
     }
     fn emit(&self, topic: &'static str, card: Option<String>) {
         self.state_revision.fetch_add(1, Ordering::SeqCst);
-        self.state_signal.1.notify_all();
-        if topic == "github" {
-            self.github_revision.fetch_add(1, Ordering::SeqCst);
-        }
+        let gh_rev = if topic == "github" {
+            self.github_revision.fetch_add(1, Ordering::SeqCst) + 1
+        } else {
+            self.github_revision.load(Ordering::SeqCst)
+        };
+        let seq = self.push_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = self.push_tx.send(state::PushEvent::StateChanged {
+            seq,
+            topic,
+            card_id: card.clone(),
+            github_revision: gh_rev,
+        });
         self.wake_runtime();
         let event = AppEvent::Changed {
             topic,
@@ -824,6 +909,27 @@ impl AppServer {
             .lock()
             .unwrap()
             .retain(|tx| tx.send(event.clone()).is_ok());
+    }
+    pub(crate) fn emit_update(&self) {
+        let seq = self.push_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = self.push_tx.send(state::PushEvent::UpdateChanged {
+            seq,
+            state: self.update_state_payload(),
+        });
+    }
+    pub(crate) fn emit_utilities(&self) {
+        let seq = self.push_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = self.push_tx.send(state::PushEvent::UtilitiesChanged {
+            seq,
+            state: self.utilities.state(),
+        });
+    }
+    pub(crate) fn emit_herdr_install(&self) {
+        let seq = self.push_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = self.push_tx.send(state::PushEvent::HerdrInstall {
+            seq,
+            state: self.herdr_install_snapshot(),
+        });
     }
     pub(crate) fn track_merging<'a>(&'a self, card_id: &str) -> MergingCard<'a> {
         let id = card_id.to_owned();

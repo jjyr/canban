@@ -137,9 +137,9 @@ Implemented on 2026-11-17; [memory profiling and synchronization](memory-profili
 contains source-level details, diagnostic commands and dated acceptance evidence.
 
 ```text
-Local AppClient -- app.watch(cursor) --> AppServer: small cursor checks
-                 <-- changed cursor --
-Presenter ------ app.state ----------> current full-state projection
+Local AppClient -- app.subscribe (push) --> AppServer: server-pushed invalidation events
+                 <-- event / heartbeat ----
+Presenter ------ app.state ---------------> current full-state projection
                  <-- owned response --
                          |
                     UI Snapshot
@@ -148,8 +148,10 @@ Presenter ------ app.state ----------> current full-state projection
                          |
               selected Card history view
 
-Remote supervisor -- app.state(after: cursor) --> remote AppServer
-                  <-- unchanged metadata OR updated full state --
+Remote supervisor -- app.subscribe (push) --------> remote AppServer
+                 <-- event / heartbeat -----------
+                  -- debounced app.state(after) -->
+                 <-- unchanged OR updated state ---
                          |
                    typed offline cache
 ```

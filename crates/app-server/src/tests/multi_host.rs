@@ -690,3 +690,598 @@ fn host_registry_detects_same_field_conflict_and_resolves_via_use_mine() {
     .unwrap();
     assert_eq!(final_card.title, "My offline title");
 }
+
+#[test]
+fn remote_host_push_updates_merged_snapshot_without_polling_and_detects_disconnect_immediately() {
+    let dir = tempfile::tempdir().unwrap();
+    let local_home = dir.path().join("local-home");
+    let remote_home = dir.path().join("remote-home");
+
+    let local_app = AppServer::open(local_home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let local_running = local_app.start_with_listen(None).unwrap();
+
+    let remote_app = AppServer::open(remote_home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let remote_token = network::ensure_server_token(&remote_home).unwrap();
+    let remote_running = remote_app
+        .start_with_listen(Some(ServerListenConfig {
+            tailscale: false,
+            port: 0,
+            listen: Some("127.0.0.1:0".into()),
+        }))
+        .unwrap();
+    let remote_addr = remote_app.bound_tcp_addrs()[0].clone();
+
+    let remote_p: Project = serde_json::from_value(
+        remote_app
+            .call(
+                "project.create",
+                json!({"name": "Push Remote", "directory": dir.path().join("remote-repo")}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+
+    let local_client = AppClient::connect_home(local_home, Path::new("/bin/echo")).unwrap();
+    let registry = HostRegistry::new(local_client);
+    let events_rx = registry.subscribe();
+
+    registry
+        .add_host(SavedHost {
+            id: "home-linux".into(),
+            name: "Home Linux".into(),
+            transport: HostTransport::Tcp {
+                addr: remote_addr,
+                token: remote_token,
+            },
+            ssh_target: None,
+            server_id: None,
+            enabled: true,
+            added_at: now(),
+        })
+        .unwrap();
+
+    // Wait for initial subscribe handshake settle, then drain prior events.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while remote_app.active_tcp_count() == 0 {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    while events_rx.try_recv().is_ok() {}
+
+    // Create card directly on remote AppServer WITHOUT calling poll_remotes_once().
+    let pushed_card: Card = serde_json::from_value(
+        remote_app
+            .call(
+                "card.create",
+                json!({
+                    "view": "full",
+                    "project_id": remote_p.id,
+                    "title": "Pushed without poll",
+                    "body": "Instant remote push",
+                }),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut saw_remote_event = false;
+    loop {
+        if let Ok(ev) = events_rx.recv_timeout(Duration::from_millis(50))
+            && ev.host_id == "home-linux"
+        {
+            saw_remote_event = true;
+            if registry
+                .merged_snapshot()
+                .unwrap()
+                .cards
+                .iter()
+                .any(|c| c.id == pushed_card.id && c.title == "Pushed without poll")
+            {
+                break;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Expected remote push update without polling (saw_remote_event={saw_remote_event})"
+        );
+    }
+
+    // Drop remote server without calling poll_remotes_once() -> EOF disconnect detected immediately.
+    while events_rx.try_recv().is_ok() {}
+    drop(remote_running);
+    drop(remote_app);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Ok(ev) = events_rx.recv_timeout(Duration::from_millis(50))
+            && ev.host_id == "home-linux"
+            && matches!(ev.event, AppEvent::Changed { topic: "host", .. })
+            && registry
+                .merged_snapshot()
+                .unwrap()
+                .is_host_offline("home-linux")
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Expected immediate offline detection via app.subscribe EOF"
+        );
+    }
+
+    drop(registry);
+    drop(local_running);
+}
+
+#[test]
+fn stalled_remote_host_does_not_block_healthy_remote_host_push_updates() {
+    let dir = tempfile::tempdir().unwrap();
+    let local_home = dir.path().join("local-home");
+    let remote_home = dir.path().join("healthy-home");
+
+    let local_app = AppServer::open(local_home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let local_running = local_app.start_with_listen(None).unwrap();
+
+    // Mock hung TCP endpoint that accepts sockets and holds them open without replying.
+    let stalled_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    stalled_listener.set_nonblocking(true).unwrap();
+    let stalled_addr = stalled_listener.local_addr().unwrap().to_string();
+    let stop_stalled = Arc::new(AtomicBool::new(false));
+    let stop_stalled_clone = stop_stalled.clone();
+    let held_sockets: Arc<Mutex<Vec<std::net::TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
+    let held_clone = held_sockets.clone();
+    let stalled_thread = std::thread::spawn(move || {
+        while !stop_stalled_clone.load(Ordering::SeqCst) {
+            match stalled_listener.accept() {
+                Ok((s, _)) => held_clone.lock().unwrap().push(s),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(15));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Seed stalled host before creating HostRegistry so its supervisor blocks in connect/handshake.
+    let hosts_file = HostsFile {
+        hosts: vec![SavedHost {
+            id: "stalled-host".into(),
+            name: "Stalled Remote".into(),
+            transport: HostTransport::Tcp {
+                addr: stalled_addr,
+                token: "deadbeef".into(),
+            },
+            ssh_target: None,
+            server_id: None,
+            enabled: true,
+            added_at: now(),
+        }],
+    };
+    canban_context::atomic(
+        &HostRegistry::hosts_path(&local_home),
+        &serde_json::to_vec_pretty(&hosts_file).unwrap(),
+    )
+    .unwrap();
+
+    let remote_app = AppServer::open(remote_home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let remote_token = network::ensure_server_token(&remote_home).unwrap();
+    let remote_running = remote_app
+        .start_with_listen(Some(ServerListenConfig {
+            tailscale: false,
+            port: 0,
+            listen: Some("127.0.0.1:0".into()),
+        }))
+        .unwrap();
+    let remote_addr = remote_app.bound_tcp_addrs()[0].clone();
+    let remote_p: Project = serde_json::from_value(
+        remote_app
+            .call(
+                "project.create",
+                json!({"name": "Healthy Repo", "directory": dir.path().join("healthy-repo")}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+
+    let local_client = AppClient::connect_home(local_home, Path::new("/bin/echo")).unwrap();
+    let registry = HostRegistry::new(local_client);
+
+    // Wait briefly until stalled-host has attempted at least one hung TCP connection.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while held_sockets.lock().unwrap().is_empty() {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    registry
+        .add_host(SavedHost {
+            id: "healthy-remote".into(),
+            name: "Healthy Remote".into(),
+            transport: HostTransport::Tcp {
+                addr: remote_addr,
+                token: remote_token,
+            },
+            ssh_target: None,
+            server_id: None,
+            enabled: true,
+            added_at: now(),
+        })
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while remote_app.active_tcp_count() == 0 {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let card: Card = serde_json::from_value(
+        remote_app
+            .call(
+                "card.create",
+                json!({
+                    "view": "full",
+                    "project_id": remote_p.id,
+                    "title": "Healthy host isolated",
+                    "body": "Stalled host never blocks me",
+                }),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if registry
+            .merged_snapshot()
+            .unwrap()
+            .cards
+            .iter()
+            .any(|c| c.id == card.id)
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Healthy remote push update should arrive while stalled-host is hung"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // Release hung sockets before dropping HostRegistry so shutdown finishes immediately.
+    stop_stalled.store(true, Ordering::SeqCst);
+    held_sockets.lock().unwrap().clear();
+    let _ = stalled_thread.join();
+
+    drop(registry);
+    drop(remote_running);
+    drop(local_running);
+}
+
+#[test]
+fn host_registry_lifecycle_closes_remote_push_connections_and_forwards_local_side_channels() {
+    let dir = tempfile::tempdir().unwrap();
+    let local_home = dir.path().join("local-home");
+    let remote_home = dir.path().join("remote-home");
+
+    let local_app = AppServer::open(local_home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let local_running = local_app.start_with_listen(None).unwrap();
+
+    let remote_app = AppServer::open(remote_home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let remote_token = network::ensure_server_token(&remote_home).unwrap();
+    let remote_running = remote_app
+        .start_with_listen(Some(ServerListenConfig {
+            tailscale: false,
+            port: 0,
+            listen: Some("127.0.0.1:0".into()),
+        }))
+        .unwrap();
+    let remote_addr = remote_app.bound_tcp_addrs()[0].clone();
+
+    let local_client = AppClient::connect_home(local_home, Path::new("/bin/echo")).unwrap();
+    let registry = HostRegistry::new(local_client);
+    let events_rx = registry.subscribe();
+    let mut push_rx = registry.subscribe_push();
+
+    // Wait for local push supervisor initial handshake ("local" resync).
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Ok(ev) = events_rx.recv_timeout(Duration::from_millis(50))
+            && ev.host_id == "local"
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Timed out waiting for local push supervisor handshake"
+        );
+    }
+
+    // Side-channel push from local AppServer flows through local_push_supervisor -> HostPushEvent.
+    local_app.emit_utilities();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match push_rx.try_recv() {
+            Ok(crate::hosts::HostPushEvent::UtilitiesChanged { host_id, state }) => {
+                assert_eq!(host_id, "local");
+                assert!(state.is_object());
+                break;
+            }
+            Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "Expected HostPushEvent::UtilitiesChanged from local push stream"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => panic!("Unexpected push_rx error: {e:?}"),
+        }
+    }
+
+    let host_cfg = SavedHost {
+        id: "home-linux".into(),
+        name: "Home Linux".into(),
+        transport: HostTransport::Tcp {
+            addr: remote_addr,
+            token: remote_token,
+        },
+        ssh_target: None,
+        server_id: None,
+        enabled: true,
+        added_at: now(),
+    };
+    registry.add_host(host_cfg.clone()).unwrap();
+
+    let wait_active = |min_count: usize| {
+        let dl = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let cur = remote_app.active_tcp_count();
+            if (min_count == 0 && cur == 0) || (min_count > 0 && cur >= min_count) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < dl,
+                "Timed out waiting for active_tcp_count condition {min_count} (got {cur})"
+            );
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    };
+
+    wait_active(1);
+
+    registry.set_host_enabled("home-linux", false).unwrap();
+    wait_active(0);
+
+    registry.set_host_enabled("home-linux", true).unwrap();
+    wait_active(1);
+
+    registry.remove_host("home-linux").unwrap();
+    wait_active(0);
+
+    registry.add_host(host_cfg).unwrap();
+    wait_active(1);
+
+    drop(registry);
+    wait_active(0);
+
+    drop(remote_running);
+    drop(local_running);
+}
+
+#[test]
+fn idle_remote_host_receives_heartbeats_without_polling_app_state() {
+    use std::sync::atomic::AtomicUsize;
+
+    let dir = tempfile::tempdir().unwrap();
+    let local_home = dir.path().join("local-home");
+    let local_app = AppServer::open(local_home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let local_running = local_app.start_with_listen(None).unwrap();
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let token = "test-remote-token";
+
+    let state_calls = Arc::new(AtomicUsize::new(0));
+    let state_calls_srv = state_calls.clone();
+    let stop_srv = Arc::new(AtomicBool::new(false));
+    let stop_srv_clone = stop_srv.clone();
+    let (sub_open_tx, sub_open_rx) = mpsc::channel::<()>();
+    let (push_trigger_tx, push_trigger_rx) = mpsc::channel::<u64>();
+    let push_trigger_rx = Arc::new(Mutex::new(push_trigger_rx));
+    let cur_change = Arc::new(AtomicU64::new(1));
+    let cur_change_srv = cur_change.clone();
+
+    let server_thread = std::thread::spawn(move || {
+        let mut workers = Vec::new();
+        while !stop_srv_clone.load(Ordering::SeqCst) {
+            let Ok((stream, _)) = listener.accept() else {
+                break;
+            };
+            if stop_srv_clone.load(Ordering::SeqCst) {
+                break;
+            }
+            let state_calls_w = state_calls_srv.clone();
+            let stop_w = stop_srv_clone.clone();
+            let sub_open_tx_w = sub_open_tx.clone();
+            let push_trigger_rx_w = push_trigger_rx.clone();
+            let cur_change_w = cur_change_srv.clone();
+            workers.push(std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut writer = stream;
+                let snap_val = serde_json::to_value(Snapshot::default()).unwrap();
+                let cfg_val = serde_json::to_value(Config::default()).unwrap();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    let req: Value = serde_json::from_str(&line).unwrap_or_default();
+                    let id = req["id"].clone();
+                    match req["method"].as_str().unwrap_or("") {
+                        "app.ping" => {
+                            let _ = writeln!(
+                                writer,
+                                "{}",
+                                json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "result": {
+                                        "api_version": API_VERSION,
+                                        "server_id": "srv-mock-push",
+                                        "build": {
+                                            "version": env!("CARGO_PKG_VERSION"),
+                                            "api": API_VERSION,
+                                            "platform": "linux-x86_64"
+                                        }
+                                    }
+                                })
+                            );
+                            let _ = writer.flush();
+                        }
+                        "app.state" => {
+                            state_calls_w.fetch_add(1, Ordering::SeqCst);
+                            let rev_num = cur_change_w.load(Ordering::SeqCst);
+                            let rev = json!(["srv-mock-push", "inst-1", rev_num, 0, 0]);
+                            let changed = req["params"]["after"] != rev;
+                            let mut res = json!({
+                                "revision": rev,
+                                "changed": changed,
+                                "server_id": "srv-mock-push",
+                                "github_revision": 0,
+                            });
+                            if changed {
+                                res["snapshot"] = snap_val.clone();
+                                res["config"] = cfg_val.clone();
+                                res["home"] = json!("/tmp/mock-remote");
+                                res["hostname"] = json!("mock-remote");
+                            }
+                            let _ = writeln!(
+                                writer,
+                                "{}",
+                                json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "result": res,
+                                })
+                            );
+                            let _ = writer.flush();
+                        }
+                        "app.subscribe" => {
+                            let rev_num = cur_change_w.load(Ordering::SeqCst);
+                            let rev = json!(["srv-mock-push", "inst-1", rev_num, 0, 0]);
+                            let changed = req["params"]["after"] != rev;
+                            let _ = writeln!(
+                                writer,
+                                "{}",
+                                json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "result": {
+                                        "subscribed": true,
+                                        "server_id": "srv-mock-push",
+                                        "api_version": API_VERSION,
+                                        "revision": rev,
+                                        "changed": changed,
+                                        "github_revision": 0,
+                                        "heartbeat_ms": 80,
+                                    }
+                                })
+                            );
+                            let _ = writer.flush();
+                            let _ = sub_open_tx_w.send(());
+                            while !stop_w.load(Ordering::SeqCst) {
+                                if let Ok(new_rev) = push_trigger_rx_w
+                                    .lock()
+                                    .unwrap()
+                                    .recv_timeout(Duration::from_millis(80))
+                                {
+                                    let _ = writeln!(
+                                        writer,
+                                        "{}",
+                                        json!({
+                                            "jsonrpc": "2.0",
+                                            "method": "event",
+                                            "params": {
+                                                "seq": 1,
+                                                "revision": ["srv-mock-push", "inst-1", new_rev, 0, 0],
+                                                "topic": "application",
+                                                "card_id": Value::Null,
+                                                "github_revision": 0,
+                                            }
+                                        })
+                                    );
+                                } else {
+                                    let _ = writeln!(
+                                        writer,
+                                        "{}",
+                                        json!({
+                                            "jsonrpc": "2.0",
+                                            "method": "heartbeat",
+                                            "params": { "ts": now(), "server_id": "srv-mock-push" }
+                                        })
+                                    );
+                                }
+                                if writer.flush().is_err() {
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+                        _ => break,
+                    }
+                }
+            }));
+        }
+        for w in workers {
+            let _ = w.join();
+        }
+    });
+
+    let local_client = AppClient::connect_home(local_home, Path::new("/bin/echo")).unwrap();
+    let registry = HostRegistry::new(local_client);
+
+    registry
+        .add_host(SavedHost {
+            id: "mock-remote".into(),
+            name: "Mock Remote".into(),
+            transport: HostTransport::Tcp {
+                addr: addr.clone(),
+                token: token.into(),
+            },
+            ssh_target: None,
+            server_id: None,
+            enabled: true,
+            added_at: now(),
+        })
+        .unwrap();
+
+    sub_open_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("app.subscribe should connect");
+    let baseline = state_calls.load(Ordering::SeqCst);
+
+    // Stay idle across ~4 heartbeats: ZERO `app.state` calls may occur while idle.
+    std::thread::sleep(Duration::from_millis(350));
+    assert_eq!(
+        state_calls.load(Ordering::SeqCst),
+        baseline,
+        "Idle remote host should not poll app.state"
+    );
+
+    // Push a state invalidation event and verify exactly one conditional `app.state` follows.
+    cur_change.store(2, Ordering::SeqCst);
+    push_trigger_tx.send(2).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while state_calls.load(Ordering::SeqCst) < baseline + 1 {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(state_calls.load(Ordering::SeqCst), baseline + 1);
+
+    stop_srv.store(true, Ordering::SeqCst);
+    drop(registry);
+    let _ = std::net::TcpStream::connect(&addr);
+    let _ = server_thread.join();
+    drop(local_running);
+}

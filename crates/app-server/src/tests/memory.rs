@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn unchanged_state_and_watch_do_not_deserialize_history() {
+fn unchanged_state_and_cursor_checks_do_not_deserialize_history() {
     let (_dir, app, _project, _card) = setup();
     let initial = app.call("app.state", json!({})).unwrap();
     let unchanged = app
@@ -9,7 +9,9 @@ fn unchanged_state_and_watch_do_not_deserialize_history() {
         .unwrap();
     assert_eq!(unchanged["changed"], false);
     assert!(unchanged.get("snapshot").is_none());
-    // If either cheap path reads event bodies, this deliberately invalid history fails parsing.
+    assert!(app.call("app.watch", json!({})).is_err());
+
+    // If state_cursor or unchanged app.state reads event bodies, invalid history fails parsing.
     app.store
         .lock()
         .unwrap()
@@ -17,14 +19,9 @@ fn unchanged_state_and_watch_do_not_deserialize_history() {
         .conn
         .execute("UPDATE events SET data='invalid-json'", [])
         .unwrap();
-    let watch = app
-        .call("app.watch", json!({"after":initial["revision"]}))
-        .unwrap();
-    assert_eq!(watch["changed"], true);
-    assert!(watch.get("snapshot").is_none());
-    let unchanged = app
-        .call("app.state", json!({"after":watch["revision"],"wait_ms":1}))
-        .unwrap();
+    let cursor = app.state_cursor();
+    assert_ne!(cursor, initial["revision"]);
+    let unchanged = app.call("app.state", json!({"after":cursor})).unwrap();
     assert_eq!(unchanged["changed"], false);
     assert!(unchanged.get("snapshot").is_none());
 }
@@ -32,7 +29,7 @@ fn unchanged_state_and_watch_do_not_deserialize_history() {
 #[test]
 fn state_cursor_covers_worker_writes_config_freshness_and_server_restart() {
     let (dir, app, _project, card) = setup();
-    let mut previous = app.call("app.watch", json!({})).unwrap();
+    let mut previous = app.call("app.state", json!({})).unwrap();
     app.store
         .lock()
         .unwrap()
@@ -63,15 +60,15 @@ fn state_cursor_covers_worker_writes_config_freshness_and_server_restart() {
     );
     previous = next;
     app.inventory.lock().unwrap().last_at = now();
-    let next = app
-        .call("app.watch", json!({"after":previous["revision"]}))
+    let cursor_changed = app
+        .call("app.state", json!({"after":previous["revision"]}))
         .unwrap();
-    assert_eq!(next["changed"], true);
+    assert_eq!(cursor_changed["changed"], true);
     app.emit("github", None);
     let github = app
-        .call("app.watch", json!({"after":next["revision"]}))
+        .call("app.state", json!({"after":cursor_changed["revision"]}))
         .unwrap();
-    assert_ne!(github["github_revision"], next["github_revision"]);
+    assert_ne!(github["github_revision"], cursor_changed["github_revision"]);
     drop(app);
     let reopened = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
     let restarted = reopened
@@ -83,18 +80,78 @@ fn state_cursor_covers_worker_writes_config_freshness_and_server_restart() {
 }
 
 #[test]
-fn waiting_watch_observes_commits_without_emit_and_coalesces_updates() {
-    let (_dir, app, _project, card) = setup();
-    let cursor = app.call("app.watch", json!({})).unwrap()["revision"].clone();
-    let watcher = app.clone();
-    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
-    let handle = std::thread::spawn(move || {
-        ready_tx.send(()).unwrap();
-        watcher
-            .call("app.watch", json!({"after":cursor,"wait_ms":2000}))
-            .unwrap()
-    });
-    ready_rx.recv().unwrap();
+fn push_subscription_observes_worker_commits_without_emit_side_channels_and_heartbeats() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let app = AppServer::open(home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    app.config.write().unwrap().hc = "/usr/bin/false".into();
+    let p: Project = serde_json::from_value(
+        app.call("project.create", json!({"name":"P","directory":"/tmp"}))
+            .unwrap(),
+    )
+    .unwrap();
+    let card: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id":p.id,"title":"T","view":"full"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let _running = app
+        .start_with_listen(Some(ServerListenConfig {
+            tailscale: false,
+            port: 0,
+            listen: Some("127.0.0.1:0".into()),
+        }))
+        .unwrap();
+    let addr = app.bound_tcp_addrs().into_iter().next().unwrap();
+    let token = network::read_server_token(&home).unwrap();
+
+    // 1. Handshake and push over TCP with all side channels + fast heartbeat.
+    let mut tcp = std::net::TcpStream::connect(&addr).unwrap();
+    tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    writeln!(
+        tcp,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "app.subscribe",
+            "auth": token,
+            "params": {
+                "topics": ["snapshot", "update", "utilities", "usage", "herdr"],
+                "heartbeat_ms": 60,
+            }
+        })
+    )
+    .unwrap();
+    tcp.flush().unwrap();
+    let mut tcp_reader = BufReader::new(tcp.try_clone().unwrap());
+    let mut line = String::new();
+    tcp_reader.read_line(&mut line).unwrap();
+    let handshake: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(handshake["id"], 1);
+    assert_eq!(handshake["result"]["subscribed"], true);
+    assert_eq!(handshake["result"]["changed"], true);
+    assert_eq!(handshake["result"]["api_version"], API_VERSION);
+    let initial_rev = handshake["result"]["revision"].clone();
+
+    let next_matching =
+        |reader: &mut BufReader<std::net::TcpStream>, pred: &dyn Fn(&Value) -> bool| -> Value {
+            for _ in 0..24 {
+                let mut buf = String::new();
+                let n = reader.read_line(&mut buf).unwrap();
+                assert!(n > 0, "unexpected EOF waiting for push frame");
+                let v: Value = serde_json::from_str(&buf).unwrap();
+                if v["method"] != "heartbeat" && pred(&v) {
+                    return v;
+                }
+            }
+            panic!("did not observe expected push frame within bound");
+        };
+
+    // Direct Store::write (two writes in one transaction) without emit pushes a single coalesced event.
     app.store
         .lock()
         .unwrap()
@@ -106,11 +163,194 @@ fn waiting_watch_observes_commits_without_emit_and_coalesces_updates() {
             db.save(&c)
         })
         .unwrap();
-    let update = handle.join().unwrap();
-    assert_eq!(update["changed"], true);
-    let full = app.call("app.state", json!({})).unwrap();
-    assert_eq!(full["snapshot"]["cards"][0]["title"], "latest title");
-    assert_eq!(full["snapshot"]["cards"][0]["body"], "changed twice");
+    let ev = next_matching(&mut tcp_reader, &|v| {
+        v["method"] == "event" && v["params"]["topic"] == "application"
+    });
+    assert_ne!(ev["params"]["revision"], initial_rev);
+
+    // Explicit emit preserves topic and card_id.
+    app.emit("review", Some(card.id.clone()));
+    let ev = next_matching(&mut tcp_reader, &|v| {
+        v["method"] == "event" && v["params"]["topic"] == "review"
+    });
+    assert_eq!(ev["params"]["card_id"], card.id);
+
+    // Utilities configure pushes both desktop snapshot invalidation and utilities.changed payload.
+    app.call("utilities.configure", json!({"theme":"nord"}))
+        .unwrap();
+    let mut saw_desktop = false;
+    let mut saw_utilities = false;
+    for _ in 0..16 {
+        let msg = next_matching(&mut tcp_reader, &|v| {
+            (v["method"] == "event" && v["params"]["topic"] == "desktop")
+                || v["method"] == "utilities.changed"
+        });
+        if msg["method"] == "event" && msg["params"]["topic"] == "desktop" {
+            saw_desktop = true;
+        } else if msg["method"] == "utilities.changed"
+            && msg["params"]["state"]["preferences"]["theme"] == "nord"
+        {
+            saw_utilities = true;
+        }
+        if saw_desktop && saw_utilities {
+            break;
+        }
+    }
+    assert!(saw_desktop && saw_utilities);
+
+    // Side-channel emitters push update.changed and herdr.install directly.
+    app.emit_update();
+    let upd = next_matching(&mut tcp_reader, &|v| v["method"] == "update.changed");
+    assert!(upd["params"]["state"]["build"].is_object());
+
+    app.emit_herdr_install();
+    let inst = next_matching(&mut tcp_reader, &|v| v["method"] == "herdr.install");
+    assert_eq!(inst["params"]["state"]["phase"], "idle");
+
+    // Idle heartbeat arrives within expected cadence.
+    let mut saw_hb = false;
+    for _ in 0..10 {
+        let mut buf = String::new();
+        tcp_reader.read_line(&mut buf).unwrap();
+        let msg: Value = serde_json::from_str(&buf).unwrap();
+        if msg["method"] == "heartbeat" {
+            assert_eq!(msg["params"]["server_id"], app.server_id());
+            saw_hb = true;
+            break;
+        }
+    }
+    assert!(saw_hb, "expected periodic heartbeat frame");
+
+    // Closing subscriber cleans up TCP connection count cleanly.
+    drop(tcp_reader);
+    drop(tcp);
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline && app.active_tcp_count() > 0 {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(app.active_tcp_count(), 0);
+}
+
+#[test]
+fn push_subscription_handles_auth_second_frame_lagged_resync_and_client_subscribe() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let app = AppServer::open(home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    app.config.write().unwrap().hc = "/usr/bin/false".into();
+    let p: Project = serde_json::from_value(
+        app.call("project.create", json!({"name":"P","directory":"/tmp"}))
+            .unwrap(),
+    )
+    .unwrap();
+    let running = app
+        .start_with_listen(Some(ServerListenConfig {
+            tailscale: false,
+            port: 0,
+            listen: Some("127.0.0.1:0".into()),
+        }))
+        .unwrap();
+    let addr = app.bound_tcp_addrs().into_iter().next().unwrap();
+    let token = network::read_server_token(&home).unwrap();
+
+    // 1. Unauthenticated TCP subscribe is rejected with -32001.
+    let mut bad = std::net::TcpStream::connect(&addr).unwrap();
+    bad.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    writeln!(
+        bad,
+        "{}",
+        json!({"jsonrpc":"2.0","id":1,"method":"app.subscribe","auth":"wrong-token","params":{}})
+    )
+    .unwrap();
+    bad.flush().unwrap();
+    let mut bad_line = String::new();
+    BufReader::new(bad).read_line(&mut bad_line).unwrap();
+    let bad_reply: Value = serde_json::from_str(&bad_line).unwrap();
+    assert_eq!(bad_reply["error"]["code"], -32001);
+
+    // 2. Sending app.subscribe as second frame after app.ping fails cleanly.
+    let mut reuse = UnixStream::connect(app.endpoint()).unwrap();
+    reuse
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    writeln!(
+        reuse,
+        "{}",
+        json!({"jsonrpc":"2.0","id":1,"method":"app.ping","params":{}})
+    )
+    .unwrap();
+    writeln!(
+        reuse,
+        "{}",
+        json!({"jsonrpc":"2.0","id":2,"method":"app.subscribe","params":{}})
+    )
+    .unwrap();
+    reuse.flush().unwrap();
+    let mut r_reader = BufReader::new(reuse);
+    let mut r1 = String::new();
+    let mut r2 = String::new();
+    r_reader.read_line(&mut r1).unwrap();
+    r_reader.read_line(&mut r2).unwrap();
+    let reply1: Value = serde_json::from_str(&r1).unwrap();
+    let reply2: Value = serde_json::from_str(&r2).unwrap();
+    assert!(reply1.get("result").is_some());
+    assert!(
+        reply2["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("first frame")
+    );
+
+    // 3. Overflowing broadcast capacity surfaces resync.
+    let mut lag_tcp = std::net::TcpStream::connect(&addr).unwrap();
+    lag_tcp
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    writeln!(
+        lag_tcp,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "app.subscribe",
+            "auth": token,
+            "params": { "topics": ["snapshot"], "heartbeat_ms": 60_000 }
+        })
+    )
+    .unwrap();
+    lag_tcp.flush().unwrap();
+    let mut lag_reader = BufReader::new(lag_tcp.try_clone().unwrap());
+    let mut hs = String::new();
+    lag_reader.read_line(&mut hs).unwrap();
+    for _ in 0..320 {
+        app.emit("application", None);
+    }
+    let mut lag_line = String::new();
+    lag_reader.read_line(&mut lag_line).unwrap();
+    let lag_msg: Value = serde_json::from_str(&lag_line).unwrap();
+    assert_eq!(lag_msg["method"], "event");
+    assert_eq!(lag_msg["params"]["topic"], "resync");
+    assert!(lag_msg["params"]["lagged"].as_u64().unwrap() > 0);
+    drop(lag_reader);
+    drop(lag_tcp);
+
+    // 4. AppClient::subscribe receives live push events over Unix socket and observes server shutdown cleanly.
+    let client = AppClient::connect_home(home, Path::new("/bin/echo")).unwrap();
+    let rx = client.subscribe();
+    let first_ev = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert!(matches!(
+        first_ev,
+        AppEvent::Changed {
+            topic: "resync",
+            ..
+        }
+    ));
+    let _ = client
+        .call("card.create", json!({"project_id":p.id,"title":"Pushed"}))
+        .unwrap();
+    let pushed = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert!(matches!(pushed, AppEvent::Changed { .. }));
+    drop(client);
+    drop(running);
 }
 
 #[test]
@@ -175,7 +415,7 @@ fn timeline_pages_ignore_other_card_bodies_and_preserve_sequence_order() {
 fn transient_merge_marker_removal_invalidates_without_a_database_write() {
     let (_dir, app, _project, card) = setup();
     let guard = app.track_merging(&card.id);
-    let before = app.call("app.watch", json!({})).unwrap();
+    let before = app.call("app.state", json!({})).unwrap();
     assert_eq!(app.snapshot().unwrap().merging_cards, vec![card.id.clone()]);
     drop(guard);
     let after = app

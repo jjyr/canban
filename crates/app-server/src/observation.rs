@@ -324,9 +324,10 @@ impl AppServer {
                             inv.snapshot(&subscription.snapshot);
                             inv.last_at = now();
                             inv.error = None;
+                            server.observed_at.store(inv.last_at, Ordering::SeqCst);
                         }
                         server.contexts.lock().unwrap().reset();
-                        server.wake_runtime();
+                        server.emit("terminals", None);
                         delay = 1;
                         drop(server);
                         loop {
@@ -349,9 +350,14 @@ impl AppServer {
                             }
                             match subscription.recv_timeout(Duration::from_secs(1)) {
                                 Ok(Ok(message)) => {
-                                    let changed = server.inventory.lock().unwrap().apply(&message);
+                                    let (changed, last_at) = {
+                                        let mut inv = server.inventory.lock().unwrap();
+                                        let changed = inv.apply(&message);
+                                        (changed, inv.last_at)
+                                    };
+                                    server.observed_at.store(last_at, Ordering::SeqCst);
                                     if changed {
-                                        server.wake_runtime();
+                                        server.emit("terminals", None);
                                     }
                                     if matches!(
                                         message["params"]["type"].as_str(),
@@ -385,11 +391,15 @@ impl AppServer {
                     break;
                 };
                 if let Err(e) = result {
-                    let mut inv = server.inventory.lock().unwrap();
-                    inv.error = Some(format!("{e:#}"));
-                    inv.generation += 1;
+                    {
+                        let mut inv = server.inventory.lock().unwrap();
+                        inv.error = Some(format!("{e:#}"));
+                        inv.generation += 1;
+                    }
+                    server.emit("terminals", None);
+                } else {
+                    server.wake_runtime();
                 }
-                server.wake_runtime();
                 drop(server);
                 // Interruptible reconnect backoff, not a runtime scan.
                 let mut woke_early = false;

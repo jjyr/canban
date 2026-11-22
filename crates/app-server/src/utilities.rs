@@ -139,7 +139,7 @@ impl Power {
 pub(super) struct Utilities {
     preferences: Mutex<Preferences>,
     power: Power,
-    usage: canban_usage::Service,
+    pub(super) usage: canban_usage::Service,
 }
 impl Utilities {
     pub fn new(home: &Path) -> Self {
@@ -174,7 +174,7 @@ impl Utilities {
         Ok(changed)
     }
 
-    fn state(&self) -> Value {
+    pub(super) fn state(&self) -> Value {
         json!({"preferences":self.preferences.lock().unwrap().clone(),"awake":*self.power.active.lock().unwrap(),"awake_machine":"local","awake_scope":"system","version":env!("CARGO_PKG_VERSION"),"platform":std::env::consts::OS,"architecture":std::env::consts::ARCH})
     }
 }
@@ -305,6 +305,7 @@ impl AppServer {
                 drop(prefs);
                 if changed {
                     self.emit("desktop", None);
+                    self.emit_utilities();
                 }
                 Ok(self.utilities.state())
             }
@@ -313,6 +314,7 @@ impl AppServer {
                     .power
                     .set(p["enabled"].as_bool().context("enabled required")?)?;
                 self.emit("desktop", None);
+                self.emit_utilities();
                 Ok(self.utilities.state())
             }
             "usage.status" | "usage.refresh" => Ok(self

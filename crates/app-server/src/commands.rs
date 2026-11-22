@@ -93,7 +93,6 @@ impl AppServer {
                 "app.ping"
                     | "app.shutdown"
                     | "app.state"
-                    | "app.watch"
                     | "app.snapshot"
                     | "host.probe"
                     | "host.discover"
@@ -176,14 +175,10 @@ impl AppServer {
                     );
                 }
                 let _ = self.finish_agent_work();
-                self.stop.store(true, Ordering::SeqCst);
-                self.close_active_tcp_streams();
-                self.wake_runtime();
-                self.context_signal.notify_all();
+                self.trigger_stop();
                 Ok(json!({"stopping":true}))
             }
-            "app.state" => self.state_response(&p, true),
-            "app.watch" => self.state_response(&p, false),
+            "app.state" => self.state_response(&p),
             "host.probe" => Ok(self.host_probe_payload()),
             "host.env.refresh" => {
                 let snapshot = canban_exec::shell_env::refresh_local_shell_env();
@@ -642,6 +637,7 @@ impl AppServer {
                     }
                     if self.utilities.clear_project(&self.home, &pid).unwrap_or(false) {
                         self.emit("desktop", None);
+                        self.emit_utilities();
                     }
                     self.terminal_contexts
                         .lock()

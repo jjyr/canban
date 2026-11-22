@@ -642,9 +642,7 @@ fn run() -> Result<()> {
         for tcp in app.bound_tcp_addrs() {
             println!("Canban TCP listener bound at {tcp}");
         }
-        while !app.stopped() {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
+        app.wait_stopped();
         return Ok(());
     }
     if let Cmd::Pair {

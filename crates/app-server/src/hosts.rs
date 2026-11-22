@@ -164,6 +164,7 @@ struct RemoteSlot {
     read_cache: Arc<Mutex<ReadCache>>,
     draining: Arc<AtomicBool>,
     prefetching: Arc<AtomicBool>,
+    connect_gate: Arc<Mutex<()>>,
 }
 
 struct AtomicFlagGuard(Arc<AtomicBool>);
@@ -240,6 +241,20 @@ impl HostEvent {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum HostPushEvent {
+    State(HostEvent),
+    UpdateChanged { host_id: String, state: Value },
+    UtilitiesChanged { host_id: String, state: Value },
+    UsageChanged { host_id: String, state: Value },
+    HerdrInstall { host_id: String, state: Value },
+}
+
+struct HostSupervisorHandle {
+    stop_tx: tokio::sync::watch::Sender<bool>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
 struct UpdatingGuard<'a> {
     registry: &'a HostRegistry,
     host_id: String,
@@ -274,7 +289,7 @@ impl Drop for UpdatingGuard<'_> {
                 card_id: None,
             },
         );
-        self.registry.wake();
+        self.registry.wake_host(&self.host_id);
     }
 }
 
@@ -287,14 +302,38 @@ pub struct HostRegistry {
     entity_hosts: RwLock<BTreeMap<String, String>>,
     acknowledged_owners: Mutex<BTreeMap<String, String>>,
     listeners: Mutex<Vec<mpsc::Sender<HostEvent>>>,
-    wake_tx: mpsc::SyncSender<()>,
+    runtime: Option<tokio::runtime::Runtime>,
+    runtime_handle: tokio::runtime::Handle,
+    stop_tx: tokio::sync::watch::Sender<bool>,
+    push_tx: tokio::sync::broadcast::Sender<HostPushEvent>,
+    supervisors: Mutex<BTreeMap<String, HostSupervisorHandle>>,
     stop: AtomicBool,
 }
 
 impl Drop for HostRegistry {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        let _ = self.wake_tx.try_send(());
+        let _ = self.stop_tx.send(true);
+        let handles: Vec<HostSupervisorHandle> = {
+            let mut guard = self.supervisors.lock().unwrap();
+            let keys: Vec<String> = guard.keys().cloned().collect();
+            keys.into_iter().filter_map(|k| guard.remove(&k)).collect()
+        };
+        for handle in handles {
+            let _ = handle.stop_tx.send(true);
+            handle.notify.notify_one();
+        }
+        self.remotes.lock().unwrap().clear();
+        if let Some(rt) = self.runtime.take() {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                let _ = std::thread::spawn(move || {
+                    rt.shutdown_timeout(Duration::from_secs(2));
+                })
+                .join();
+            } else {
+                rt.shutdown_timeout(Duration::from_secs(2));
+            }
+        }
     }
 }
 
@@ -356,11 +395,22 @@ impl HostRegistry {
                     read_cache,
                     draining: Arc::new(AtomicBool::new(false)),
                     prefetching: Arc::new(AtomicBool::new(false)),
+                    connect_gate: Arc::new(Mutex::new(())),
                 },
             );
         }
 
-        let (wake_tx, wake_rx) = mpsc::sync_channel(4);
+        let initial_host_ids: Vec<String> = map.keys().cloned().collect();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("canban-hosts")
+            .build()
+            .expect("Could not start HostRegistry Tokio runtime");
+        let runtime_handle = runtime.handle().clone();
+        let (stop_tx, _) = tokio::sync::watch::channel(false);
+        let (push_tx, _) = tokio::sync::broadcast::channel(256);
+
         let registry = Arc::new(Self {
             local_home,
             local: local.clone(),
@@ -370,38 +420,23 @@ impl HostRegistry {
             entity_hosts: RwLock::new(initial_entity_hosts),
             acknowledged_owners: Mutex::new(BTreeMap::new()),
             listeners: Mutex::new(Vec::new()),
-            wake_tx,
+            runtime: Some(runtime),
+            runtime_handle,
+            stop_tx,
+            push_tx,
+            supervisors: Mutex::new(BTreeMap::new()),
             stop: AtomicBool::new(false),
         });
         let _ = registry.self_weak.set(Arc::downgrade(&registry));
 
-        // Forward local AppClient subscription events into unified listeners.
-        let local_rx = local.subscribe();
-        let weak_local = Arc::downgrade(&registry);
-        std::thread::spawn(move || {
-            while let Ok(ev) = local_rx.recv() {
-                let Some(reg) = weak_local.upgrade() else {
-                    break;
-                };
-                if reg.stop.load(Ordering::SeqCst) {
-                    break;
-                }
-                reg.emit("local", ev);
-            }
-        });
-
-        // Background remote host supervisor & state poller.
-        let weak_sup = Arc::downgrade(&registry);
-        std::thread::spawn(move || {
-            while let Some(reg) = weak_sup.upgrade() {
-                if reg.stop.load(Ordering::SeqCst) {
-                    break;
-                }
-                reg.poll_remotes_once();
-                drop(reg);
-                let _ = wake_rx.recv_timeout(Duration::from_millis(850));
-            }
-        });
+        registry.runtime_handle.spawn(local_push_supervisor(
+            Arc::downgrade(&registry),
+            local.endpoint().clone(),
+            registry.stop_tx.subscribe(),
+        ));
+        for host_id in initial_host_ids {
+            registry.ensure_host_supervisor(&host_id);
+        }
 
         registry
     }
@@ -466,19 +501,78 @@ impl HostRegistry {
         rx
     }
 
+    pub fn subscribe_push(&self) -> tokio::sync::broadcast::Receiver<HostPushEvent> {
+        self.push_tx.subscribe()
+    }
+
     fn emit(&self, host_id: &str, event: AppEvent) {
         let event = HostEvent {
             host_id: host_id.into(),
             event,
         };
+        let _ = self.push_tx.send(HostPushEvent::State(event.clone()));
         self.listeners
             .lock()
             .unwrap()
             .retain(|tx| tx.send(event.clone()).is_ok());
     }
 
+    fn emit_push(&self, event: HostPushEvent) {
+        let _ = self.push_tx.send(event);
+    }
+
+    fn ensure_host_supervisor(&self, host_id: &str) {
+        if self.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut guard = self.supervisors.lock().unwrap();
+        if let Some(handle) = guard.get(host_id) {
+            handle.notify.notify_one();
+            return;
+        }
+        let Some(weak) = self.self_weak.get().cloned() else {
+            return;
+        };
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let notify = Arc::new(tokio::sync::Notify::new());
+        guard.insert(
+            host_id.to_owned(),
+            HostSupervisorHandle {
+                stop_tx,
+                notify: notify.clone(),
+            },
+        );
+        self.runtime_handle.spawn(remote_host_supervisor(
+            weak,
+            host_id.to_owned(),
+            stop_rx,
+            self.stop_tx.subscribe(),
+            notify,
+        ));
+    }
+
+    fn stop_host_supervisor(&self, host_id: &str) {
+        if let Some(handle) = self.supervisors.lock().unwrap().remove(host_id) {
+            let _ = handle.stop_tx.send(true);
+            handle.notify.notify_one();
+        }
+    }
+
+    fn restart_host_supervisor(&self, host_id: &str) {
+        self.stop_host_supervisor(host_id);
+        self.ensure_host_supervisor(host_id);
+    }
+
+    pub fn wake_host(&self, host_id: &str) {
+        if let Some(handle) = self.supervisors.lock().unwrap().get(host_id) {
+            handle.notify.notify_one();
+        }
+    }
+
     pub fn wake(&self) {
-        let _ = self.wake_tx.try_send(());
+        for handle in self.supervisors.lock().unwrap().values() {
+            handle.notify.notify_one();
+        }
     }
 
     pub fn saved_hosts(&self) -> Vec<SavedHost> {
@@ -578,6 +672,7 @@ impl HostRegistry {
                 read_cache,
                 draining: Arc::new(AtomicBool::new(false)),
                 prefetching: Arc::new(AtomicBool::new(false)),
+                connect_gate: Arc::new(Mutex::new(())),
             };
             let sum = Self::slot_summary(&slot);
             guard.insert(slot.saved.id.clone(), slot);
@@ -604,12 +699,13 @@ impl HostRegistry {
                 card_id: None,
             },
         );
-        self.wake();
+        self.restart_host_supervisor(&summary.id);
         Ok(summary)
     }
 
     pub fn remove_host(&self, host_id: &str) -> Result<()> {
         ensure!(host_id != "local", "Cannot remove This Mac");
+        self.stop_host_supervisor(host_id);
         let all_saved = {
             let mut guard = self.remotes.lock().unwrap();
             guard.remove(host_id);
@@ -682,7 +778,7 @@ impl HostRegistry {
                 card_id: None,
             },
         );
-        self.wake();
+        self.wake_host(host_id);
         Ok(())
     }
 
@@ -710,8 +806,8 @@ impl HostRegistry {
                     card_id: None,
                 },
             );
+            self.wake_host(&id);
         }
-        self.wake();
     }
 
     fn store_cached_snapshot(
@@ -750,6 +846,9 @@ impl HostRegistry {
             let Some(slot) = guard.get_mut(host_id) else {
                 return (false, false);
             };
+            if slot.updating || !slot.saved.enabled {
+                return (false, false);
+            }
             let previous = slot.connection.clone();
             let data_changed = state_val
                 .as_ref()
@@ -836,7 +935,7 @@ impl HostRegistry {
                 card_id: None,
             },
         );
-        self.wake();
+        self.wake_host(host_id);
 
         let params = json!({
             "request_key": id(),
@@ -897,7 +996,7 @@ impl HostRegistry {
                         card_id: None,
                     },
                 );
-                self.wake();
+                self.wake_host(host_id);
                 return Err(err);
             }
         };
@@ -1007,7 +1106,7 @@ impl HostRegistry {
                     card_id: None,
                 },
             );
-            self.wake();
+            self.wake_host(host_id);
         } else {
             updating_guard.active = false;
             {
@@ -1034,13 +1133,21 @@ impl HostRegistry {
                     card_id: None,
                 },
             );
-            self.wake();
+            self.wake_host(host_id);
         }
         Ok(res)
     }
 
     fn establish_connection(
         &self,
+        host_id: &str,
+        transport: &HostTransport,
+    ) -> Result<EstablishedConnection> {
+        Self::establish_connection_for(&self.local_home, host_id, transport)
+    }
+
+    fn establish_connection_for(
+        local_home: &Path,
         host_id: &str,
         transport: &HostTransport,
     ) -> Result<EstablishedConnection> {
@@ -1055,7 +1162,7 @@ impl HostRegistry {
                 remote_home,
             } => {
                 let tun = SshTunnel::start(
-                    &Self::tunnels_dir(&self.local_home),
+                    &Self::tunnels_dir(local_home),
                     host_id,
                     target,
                     remote_home.as_deref(),
@@ -1129,6 +1236,153 @@ impl HostRegistry {
         }
     }
 
+    fn apply_remote_state_response(
+        &self,
+        host_id: &str,
+        client: &Arc<AppClient>,
+        mut state_val: Value,
+        rtt_ms: u64,
+        preferred_topic: Option<&'static str>,
+    ) -> Option<&'static str> {
+        let mut updated_entities = None;
+        let mut emitted_topic = None;
+        {
+            let mut guard = self.remotes.lock().unwrap();
+            let slot = guard.get_mut(host_id)?;
+            if slot.updating
+                || !slot.saved.enabled
+                || !slot.client.as_ref().is_some_and(|c| Arc::ptr_eq(c, client))
+            {
+                return None;
+            }
+            if state_val["changed"] == true
+                && let (Ok(snap), Ok(cfg)) = (
+                    serde_json::from_value::<Snapshot>(state_val["snapshot"].take()),
+                    serde_json::from_value::<Config>(state_val["config"].take()),
+                )
+            {
+                client.set_cached_config(cfg.clone());
+                let data = Self::store_cached_snapshot(&self.local_home, host_id, snap, cfg);
+                updated_entities = Some(data.snapshot.entity_hosts.clone());
+                slot.cached = Some(data);
+                let topic = if preferred_topic == Some("resync") {
+                    "resync"
+                } else if slot.last_state_marker["github_revision"] != state_val["github_revision"]
+                {
+                    "github"
+                } else if let Some(t) = preferred_topic {
+                    t
+                } else {
+                    client::change_topic(true, &slot.last_state_marker, &state_val)
+                };
+                emitted_topic = Some(topic);
+                slot.last_state_marker = super::state::state_marker(&state_val);
+            }
+            if let HostConnectionState::Connected {
+                rtt_ms: prev_rtt, ..
+            } = &mut slot.connection
+            {
+                *prev_rtt = rtt_ms;
+            }
+        }
+        if let Some(entities) = updated_entities {
+            self.replace_host_entity_owners(host_id, &entities);
+        }
+        emitted_topic
+    }
+
+    fn handle_remote_connected_error(
+        &self,
+        host_id: &str,
+        client: &Arc<AppClient>,
+        err: &anyhow::Error,
+    ) -> bool {
+        let msg = format!("{err:#}");
+        let is_auth = msg.contains("auth_failed:");
+        let changed = {
+            let mut guard = self.remotes.lock().unwrap();
+            let Some(slot) = guard.get_mut(host_id) else {
+                return false;
+            };
+            if slot.updating
+                || !slot.saved.enabled
+                || !slot.client.as_ref().is_some_and(|c| Arc::ptr_eq(c, client))
+            {
+                return false;
+            }
+            slot.client = None;
+            slot.tunnel = None;
+            slot.reconnect_count = slot.reconnect_count.saturating_add(1);
+            slot.consecutive_failures = 1;
+            slot.next_retry_at =
+                std::time::Instant::now() + Duration::from_secs(if is_auth { 4 } else { 1 });
+            slot.connection = if is_auth {
+                HostConnectionState::AuthFailed { error: msg }
+            } else {
+                HostConnectionState::Reconnecting {
+                    attempt: 1,
+                    error: msg,
+                }
+            };
+            true
+        };
+        if changed {
+            self.emit(
+                host_id,
+                AppEvent::Changed {
+                    topic: "host",
+                    card_id: None,
+                },
+            );
+        }
+        changed
+    }
+
+    fn handle_remote_connect_error(&self, host_id: &str, err: &anyhow::Error) {
+        let msg = format!("{err:#}");
+        let emit_host = {
+            let mut guard = self.remotes.lock().unwrap();
+            let Some(slot) = guard.get_mut(host_id) else {
+                return;
+            };
+            if slot.updating || !slot.saved.enabled || slot.client.is_some() {
+                return;
+            }
+            slot.consecutive_failures = slot.consecutive_failures.saturating_add(1);
+            let backoff_secs = match slot.consecutive_failures {
+                1 => 1,
+                2 => 2,
+                _ => 4,
+            };
+            slot.next_retry_at = std::time::Instant::now() + Duration::from_secs(backoff_secs);
+            let prev = slot.connection.clone();
+            slot.connection = if msg.contains("auth_failed:") {
+                HostConnectionState::AuthFailed { error: msg }
+            } else if slot.consecutive_failures <= 2 {
+                HostConnectionState::Reconnecting {
+                    attempt: slot.consecutive_failures,
+                    error: msg,
+                }
+            } else {
+                HostConnectionState::Offline {
+                    error: msg,
+                    cached_at: slot.cached.as_ref().map(|c| c.saved_at),
+                }
+            };
+            slot.connection != prev
+        };
+        if emit_host {
+            self.emit(
+                host_id,
+                AppEvent::Changed {
+                    topic: "host",
+                    card_id: None,
+                },
+            );
+        }
+    }
+
+    /// On-demand synchronous remote probe/sync (background monitoring runs via per-host push tasks).
     pub fn poll_remotes_once(&self) {
         let ids: Vec<String> = {
             let guard = self.remotes.lock().unwrap();
@@ -1136,8 +1390,7 @@ impl HostRegistry {
         };
 
         for id in ids {
-            let mut topic = None;
-            let (saved, existing_client, should_retry) = {
+            let (saved, existing_client, should_retry, connect_gate) = {
                 let mut guard = self.remotes.lock().unwrap();
                 let Some(slot) = guard.get_mut(&id) else {
                     continue;
@@ -1155,6 +1408,7 @@ impl HostRegistry {
                     slot.saved.clone(),
                     slot.client.clone(),
                     std::time::Instant::now() >= slot.next_retry_at,
+                    slot.connect_gate.clone(),
                 )
             };
 
@@ -1167,84 +1421,26 @@ impl HostRegistry {
                     .get(&id)
                     .map(|slot| slot.last_state_marker["revision"].clone())
                     .unwrap_or(Value::Null);
-                match client.call("app.state", json!({"after":after})) {
-                    Ok(mut state_val) => {
+                match client.call("app.state", json!({"after": after})) {
+                    Ok(state_val) => {
                         let rtt_ms = start.elapsed().as_millis() as u64;
-                        let mut updated_entities = None;
+                        if let Some(topic) =
+                            self.apply_remote_state_response(&id, &client, state_val, rtt_ms, None)
                         {
-                            let mut guard = self.remotes.lock().unwrap();
-                            if let Some(slot) = guard.get_mut(&id)
-                                && !slot.updating
-                            {
-                                if state_val["changed"] == true
-                                    && let (Ok(snap), Ok(cfg)) = (
-                                        serde_json::from_value::<Snapshot>(
-                                            state_val["snapshot"].take(),
-                                        ),
-                                        serde_json::from_value::<Config>(
-                                            state_val["config"].take(),
-                                        ),
-                                    )
-                                {
-                                    client.set_cached_config(cfg.clone());
-                                    let data = Self::store_cached_snapshot(
-                                        &self.local_home,
-                                        &id,
-                                        snap,
-                                        cfg,
-                                    );
-                                    updated_entities = Some(data.snapshot.entity_hosts.clone());
-                                    slot.cached = Some(data);
-                                    topic = Some(client::change_topic(
-                                        true,
-                                        &slot.last_state_marker,
-                                        &state_val,
-                                    ));
-                                    slot.last_state_marker = super::state::state_marker(&state_val);
-                                }
-                                if let HostConnectionState::Connected {
-                                    rtt_ms: prev_rtt, ..
-                                } = &mut slot.connection
-                                {
-                                    *prev_rtt = rtt_ms;
-                                }
-                            }
-                        }
-                        if let Some(entities) = updated_entities {
-                            self.replace_host_entity_owners(&id, &entities);
+                            self.emit(
+                                &id,
+                                AppEvent::Changed {
+                                    topic,
+                                    card_id: None,
+                                },
+                            );
                         }
                     }
                     Err(err) => {
-                        let msg = format!("{err:#}");
-                        let mut guard = self.remotes.lock().unwrap();
-                        if let Some(slot) = guard.get_mut(&id)
-                            && !slot.updating
-                        {
-                            slot.client = None;
-                            slot.tunnel = None;
-                            slot.reconnect_count = slot.reconnect_count.saturating_add(1);
-                            slot.consecutive_failures = 1;
-                            slot.next_retry_at = std::time::Instant::now() + Duration::from_secs(1);
-                            slot.connection = if msg.contains("auth_failed:") {
-                                HostConnectionState::AuthFailed { error: msg }
-                            } else {
-                                HostConnectionState::Reconnecting {
-                                    attempt: 1,
-                                    error: msg,
-                                }
-                            };
-                            topic = Some("host");
+                        if self.handle_remote_connected_error(&id, &client, &err) {
+                            self.wake_host(&id);
                         }
                     }
-                }
-                if let Some(topic) = topic {
-                    self.emit(
-                        &id,
-                        AppEvent::Changed {
-                            topic,
-                            card_id: None,
-                        },
-                    );
                 }
                 if self.has_drainable_outbox(&id) {
                     self.spawn_drain_and_prefetch(&id);
@@ -1256,58 +1452,40 @@ impl HostRegistry {
                 continue;
             }
 
-            match self.establish_connection(&id, &saved.transport) {
+            let _gate = connect_gate.lock().unwrap();
+            let still_due = {
+                let guard = self.remotes.lock().unwrap();
+                guard.get(&id).is_some_and(|slot| {
+                    slot.saved.enabled
+                        && !slot.updating
+                        && slot.client.is_none()
+                        && std::time::Instant::now() >= slot.next_retry_at
+                })
+            };
+            if !still_due {
+                continue;
+            }
+
+            match Self::establish_connection_for(&self.local_home, &id, &saved.transport) {
                 Ok(established) => {
                     let (changed, connected) = self.apply_established_slot(&id, established);
                     if connected {
                         self.spawn_drain_and_prefetch(&id);
+                        self.wake_host(&id);
                     }
                     if changed {
-                        topic = Some(if connected { "resync" } else { "host" });
+                        self.emit(
+                            &id,
+                            AppEvent::Changed {
+                                topic: if connected { "resync" } else { "host" },
+                                card_id: None,
+                            },
+                        );
                     }
                 }
                 Err(err) => {
-                    let msg = format!("{err:#}");
-                    let mut guard = self.remotes.lock().unwrap();
-                    if let Some(slot) = guard.get_mut(&id)
-                        && !slot.updating
-                    {
-                        slot.consecutive_failures = slot.consecutive_failures.saturating_add(1);
-                        let backoff_secs = match slot.consecutive_failures {
-                            1 => 1,
-                            2 => 2,
-                            _ => 4,
-                        };
-                        slot.next_retry_at =
-                            std::time::Instant::now() + Duration::from_secs(backoff_secs);
-                        let prev = slot.connection.clone();
-                        slot.connection = if msg.contains("auth_failed:") {
-                            HostConnectionState::AuthFailed { error: msg }
-                        } else if slot.consecutive_failures <= 2 {
-                            HostConnectionState::Reconnecting {
-                                attempt: slot.consecutive_failures,
-                                error: msg,
-                            }
-                        } else {
-                            HostConnectionState::Offline {
-                                error: msg,
-                                cached_at: slot.cached.as_ref().map(|c| c.saved_at),
-                            }
-                        };
-                        if slot.connection != prev {
-                            topic = Some("host");
-                        }
-                    }
+                    self.handle_remote_connect_error(&id, &err);
                 }
-            }
-            if let Some(topic) = topic {
-                self.emit(
-                    &id,
-                    AppEvent::Changed {
-                        topic,
-                        card_id: None,
-                    },
-                );
             }
         }
     }
@@ -1911,7 +2089,6 @@ impl HostRegistry {
                 method,
                 "app.ping"
                     | "app.state"
-                    | "app.watch"
                     | "app.snapshot"
                     | "agent.catalog"
                     | "diagnostics.status"
@@ -1957,7 +2134,7 @@ impl HostRegistry {
                     }
                 }
                 drop(guard);
-                self.wake();
+                self.wake_host(&host_id);
             } else if matches!(
                 method,
                 "card.create"
@@ -1990,7 +2167,7 @@ impl HostRegistry {
                         .unwrap()
                         .insert(id.into(), host_id.clone());
                 }
-                self.wake();
+                self.wake_host(&host_id);
             } else {
                 self.sync_host_now(&host_id);
             }
@@ -2049,7 +2226,7 @@ impl HostRegistry {
                     card_id: None,
                 },
             );
-            self.wake();
+            self.wake_host(host_id);
         }
     }
 
@@ -2080,23 +2257,24 @@ impl HostRegistry {
     }
 
     fn spawn_drain_and_prefetch(&self, host_id: &str) {
-        let Some(reg) = self.self_weak.get().and_then(Weak::upgrade) else {
+        let Some(weak) = self.self_weak.get().cloned() else {
             return;
         };
         let hid = host_id.to_owned();
-        let _ = std::thread::Builder::new()
-            .name(format!("canban-sync-{hid}"))
-            .spawn(move || {
-                reg.run_drain_and_prefetch(&hid);
-            });
+        drop(self.runtime_handle.spawn_blocking(move || {
+            Self::run_drain_and_prefetch_weak(&weak, &hid);
+        }));
     }
 
-    fn run_drain_and_prefetch(&self, host_id: &str) {
-        if self.stop.load(Ordering::SeqCst) {
+    fn run_drain_and_prefetch_weak(weak: &Weak<Self>, host_id: &str) {
+        let Some(reg) = weak.upgrade() else {
+            return;
+        };
+        if reg.stop.load(Ordering::SeqCst) {
             return;
         }
         let (outbox_arc, read_cache_arc, draining_flag, prefetching_flag) = {
-            let guard = self.remotes.lock().unwrap();
+            let guard = reg.remotes.lock().unwrap();
             let Some(slot) = guard.get(host_id) else {
                 return;
             };
@@ -2116,21 +2294,26 @@ impl HostRegistry {
             .is_ok()
         {
             let drain_guard = AtomicFlagGuard(draining_flag.clone());
-            if self.has_drainable_outbox(host_id) {
-                self.sync_host_now(host_id);
-                let mut snapshot = self.cached_snapshot_for(host_id).unwrap_or_default();
+            if reg.has_drainable_outbox(host_id) {
+                reg.sync_host_now(host_id);
+                let mut snapshot = reg.cached_snapshot_for(host_id).unwrap_or_default();
                 let mut report = DrainReport::default();
                 let mut blocked = BTreeSet::new();
                 let mut rebuilt_ids = BTreeSet::new();
+                drop(reg);
 
                 loop {
-                    if self.stop.load(Ordering::SeqCst) {
+                    let Some(reg) = weak.upgrade() else {
+                        break;
+                    };
+                    if reg.stop.load(Ordering::SeqCst) {
                         break;
                     }
                     let client = {
-                        let guard = self.remotes.lock().unwrap();
+                        let guard = reg.remotes.lock().unwrap();
                         guard.get(host_id).and_then(|s| s.client.clone())
                     };
+                    drop(reg);
                     let Some(client) = client else {
                         break;
                     };
@@ -2151,12 +2334,16 @@ impl HostRegistry {
 
                     let allow_rebuild = !rebuilt_ids.contains(&mutation_id);
                     let result = client.call(method, sent_params);
+
+                    let Some(reg) = weak.upgrade() else {
+                        break;
+                    };
                     let (is_conn_err, refreshed) = match &result {
                         Ok(_) => (false, None),
                         Err(err) => {
                             let conn = is_connection_error(err);
                             if conn {
-                                self.mark_host_reconnecting(host_id, err);
+                                reg.mark_host_reconnecting(host_id, err);
                             }
                             let msg = format!("{err:#}");
                             let need_refresh = !conn
@@ -2165,8 +2352,8 @@ impl HostRegistry {
                                     && allow_rebuild)
                                     || msg.contains("request_key_conflict"));
                             let snap = if need_refresh {
-                                self.sync_host_now(host_id);
-                                self.cached_snapshot_for(host_id)
+                                reg.sync_host_now(host_id);
+                                reg.cached_snapshot_for(host_id)
                             } else {
                                 None
                             };
@@ -2174,7 +2361,7 @@ impl HostRegistry {
                         }
                     };
                     let outcome = {
-                        let mut guard = self.remotes.lock().unwrap();
+                        let mut guard = reg.remotes.lock().unwrap();
                         let mut ob = outbox_arc.lock().unwrap();
                         let outcome = finish_step(
                             &mut ob,
@@ -2197,6 +2384,7 @@ impl HostRegistry {
                         }
                         outcome
                     };
+                    drop(reg);
                     match outcome {
                         FinishOutcome::Continue => {}
                         FinishOutcome::RetryImmediate => {
@@ -2206,9 +2394,11 @@ impl HostRegistry {
                     }
                 }
 
-                if report.applied > 0 || report.conflicts > 0 || report.failed > 0 {
-                    self.sync_host_now(host_id);
-                    self.emit(
+                if (report.applied > 0 || report.conflicts > 0 || report.failed > 0)
+                    && let Some(reg) = weak.upgrade()
+                {
+                    reg.sync_host_now(host_id);
+                    reg.emit(
                         host_id,
                         AppEvent::Changed {
                             topic: "application",
@@ -2228,7 +2418,10 @@ impl HostRegistry {
             return;
         }
         let _prefetch_guard = AtomicFlagGuard(prefetching_flag);
-        let Some(snap) = self.cached_snapshot_for(host_id) else {
+        let Some(snap) = weak
+            .upgrade()
+            .and_then(|reg| reg.cached_snapshot_for(host_id))
+        else {
             return;
         };
         let targets: Vec<(String, u64)> = snap
@@ -2238,14 +2431,17 @@ impl HostRegistry {
             .map(|c| (c.id.clone(), c.revision))
             .collect();
         for (card_id, rev) in targets {
-            if self.stop.load(Ordering::SeqCst)
-                || draining_flag.load(Ordering::SeqCst)
-                || self.has_drainable_outbox(host_id)
-            {
-                break;
-            }
             let client = {
-                let guard = self.remotes.lock().unwrap();
+                let Some(reg) = weak.upgrade() else {
+                    break;
+                };
+                if reg.stop.load(Ordering::SeqCst)
+                    || draining_flag.load(Ordering::SeqCst)
+                    || reg.has_drainable_outbox(host_id)
+                {
+                    break;
+                }
+                let guard = reg.remotes.lock().unwrap();
                 guard.get(host_id).and_then(|s| s.client.clone())
             };
             let Some(client) = client else {
@@ -2464,6 +2660,605 @@ impl HostRegistry {
             self.spawn_drain_and_prefetch(host_id);
         }
         Ok(())
+    }
+}
+
+const REMOTE_PUSH_DEBOUNCE: Duration = Duration::from_millis(30);
+const REMOTE_PUSH_MAX_DEBOUNCE: Duration = Duration::from_millis(100);
+
+fn merge_push_topic(current: &'static str, incoming: &'static str) -> &'static str {
+    if current == "resync" || incoming == "resync" {
+        "resync"
+    } else if current == "github" || incoming == "github" {
+        "github"
+    } else {
+        incoming
+    }
+}
+
+enum RemoteSupervisorTarget {
+    Idle,
+    Connected {
+        client: Arc<AppClient>,
+        endpoint: ClientEndpoint,
+        after_revision: Value,
+        has_tunnel: bool,
+    },
+    Disconnected {
+        transport: HostTransport,
+        local_home: PathBuf,
+        next_retry_at: std::time::Instant,
+        connect_gate: Arc<Mutex<()>>,
+    },
+}
+
+struct PendingRefresh {
+    topic: &'static str,
+    card_id: Option<String>,
+    latest_revision: Value,
+    deadline: tokio::time::Instant,
+    max_deadline: tokio::time::Instant,
+}
+
+async fn local_push_supervisor(
+    weak: Weak<HostRegistry>,
+    endpoint: ClientEndpoint,
+    mut stop_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut last = Value::Null;
+
+    loop {
+        if *stop_rx.borrow() || weak.strong_count() == 0 {
+            return;
+        }
+        let open_res = tokio::select! {
+            biased;
+            _ = stop_rx.changed() => return,
+            res = client::open_async_subscribe(
+                &endpoint,
+                &last["revision"],
+                &["snapshot", "update", "utilities", "usage", "herdr"],
+                None,
+            ) => res,
+        };
+        let (mut stream, handshake) = match open_res {
+            Ok(pair) => pair,
+            Err(_) => {
+                tokio::select! {
+                    biased;
+                    _ = stop_rx.changed() => return,
+                    _ = tokio::time::sleep(Duration::from_millis(500)) => continue,
+                }
+            }
+        };
+
+        if let Some(reg) = weak.upgrade() {
+            let topic = if handshake.changed {
+                client::change_topic(false, &last, &handshake.result)
+            } else {
+                "resync"
+            };
+            last = handshake.marker;
+            reg.emit(
+                "local",
+                AppEvent::Changed {
+                    topic,
+                    card_id: None,
+                },
+            );
+        } else {
+            return;
+        }
+
+        loop {
+            let frame_res = tokio::select! {
+                biased;
+                _ = stop_rx.changed() => return,
+                res = stream.next_frame() => res,
+            };
+            match frame_res {
+                Ok(Some(frame)) => {
+                    let Some(reg) = weak.upgrade() else {
+                        return;
+                    };
+                    match frame {
+                        client::PushFrame::Heartbeat => {}
+                        client::PushFrame::StateChanged {
+                            topic,
+                            card_id,
+                            marker,
+                        } => {
+                            last = marker;
+                            reg.emit("local", AppEvent::Changed { topic, card_id });
+                        }
+                        client::PushFrame::UpdateChanged(state) => {
+                            reg.emit_push(HostPushEvent::UpdateChanged {
+                                host_id: "local".into(),
+                                state,
+                            });
+                        }
+                        client::PushFrame::UtilitiesChanged(state) => {
+                            reg.emit_push(HostPushEvent::UtilitiesChanged {
+                                host_id: "local".into(),
+                                state,
+                            });
+                        }
+                        client::PushFrame::UsageChanged(state) => {
+                            reg.emit_push(HostPushEvent::UsageChanged {
+                                host_id: "local".into(),
+                                state,
+                            });
+                        }
+                        client::PushFrame::HerdrInstall(state) => {
+                            reg.emit_push(HostPushEvent::HerdrInstall {
+                                host_id: "local".into(),
+                                state,
+                            });
+                        }
+                    }
+                }
+                Ok(None) | Err(_) => break,
+            }
+        }
+
+        tokio::select! {
+            biased;
+            _ = stop_rx.changed() => return,
+            _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+        }
+    }
+}
+
+async fn refresh_remote_host_async(
+    weak: &Weak<HostRegistry>,
+    host_id: &str,
+    client: &Arc<AppClient>,
+    preferred_topic: Option<&'static str>,
+    card_id: Option<String>,
+    host_stop_rx: &mut tokio::sync::watch::Receiver<bool>,
+    global_stop_rx: &mut tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    let after = {
+        let Some(reg) = weak.upgrade() else {
+            return false;
+        };
+        let guard = reg.remotes.lock().unwrap();
+        let Some(slot) = guard.get(host_id) else {
+            return false;
+        };
+        if !slot.saved.enabled
+            || slot.updating
+            || !slot.client.as_ref().is_some_and(|c| Arc::ptr_eq(c, client))
+        {
+            return false;
+        }
+        slot.last_state_marker["revision"].clone()
+    };
+
+    let rpc_client = client.clone();
+    let join = tokio::task::spawn_blocking(move || {
+        let start = std::time::Instant::now();
+        let res = rpc_client.call("app.state", json!({"after": after}));
+        (res, start.elapsed().as_millis() as u64)
+    });
+    let (rpc_res, rtt_ms) = tokio::select! {
+        biased;
+        _ = global_stop_rx.changed() => return false,
+        _ = host_stop_rx.changed() => return false,
+        res = join => match res {
+            Ok(pair) => pair,
+            Err(_) => return false,
+        },
+    };
+
+    let Some(reg) = weak.upgrade() else {
+        return false;
+    };
+    match rpc_res {
+        Ok(state_val) => {
+            if let Some(emitted_topic) =
+                reg.apply_remote_state_response(host_id, client, state_val, rtt_ms, preferred_topic)
+            {
+                reg.emit(
+                    host_id,
+                    AppEvent::Changed {
+                        topic: emitted_topic,
+                        card_id,
+                    },
+                );
+            }
+            if reg.has_drainable_outbox(host_id) {
+                reg.spawn_drain_and_prefetch(host_id);
+            }
+            true
+        }
+        Err(err) => {
+            reg.handle_remote_connected_error(host_id, client, &err);
+            false
+        }
+    }
+}
+
+async fn remote_host_supervisor(
+    weak: Weak<HostRegistry>,
+    host_id: String,
+    mut host_stop_rx: tokio::sync::watch::Receiver<bool>,
+    mut global_stop_rx: tokio::sync::watch::Receiver<bool>,
+    notify: Arc<tokio::sync::Notify>,
+) {
+    loop {
+        if *global_stop_rx.borrow() || *host_stop_rx.borrow() {
+            return;
+        }
+        let target = {
+            let Some(reg) = weak.upgrade() else {
+                return;
+            };
+            let mut guard = reg.remotes.lock().unwrap();
+            let Some(slot) = guard.get_mut(&host_id) else {
+                return;
+            };
+            if !slot.saved.enabled || slot.updating {
+                RemoteSupervisorTarget::Idle
+            } else {
+                if let Some(tun) = &mut slot.tunnel
+                    && !tun.is_alive()
+                {
+                    slot.client = None;
+                    slot.tunnel = None;
+                }
+                if let Some(client) = &slot.client {
+                    RemoteSupervisorTarget::Connected {
+                        client: client.clone(),
+                        endpoint: client.endpoint().clone(),
+                        after_revision: slot.last_state_marker["revision"].clone(),
+                        has_tunnel: slot.tunnel.is_some(),
+                    }
+                } else {
+                    RemoteSupervisorTarget::Disconnected {
+                        transport: slot.saved.transport.clone(),
+                        local_home: reg.local_home.clone(),
+                        next_retry_at: slot.next_retry_at,
+                        connect_gate: slot.connect_gate.clone(),
+                    }
+                }
+            }
+        };
+
+        match target {
+            RemoteSupervisorTarget::Idle => {
+                tokio::select! {
+                    biased;
+                    _ = global_stop_rx.changed() => return,
+                    _ = host_stop_rx.changed() => return,
+                    _ = notify.notified() => continue,
+                }
+            }
+            RemoteSupervisorTarget::Disconnected {
+                transport,
+                local_home,
+                next_retry_at,
+                connect_gate,
+            } => {
+                if std::time::Instant::now() < next_retry_at {
+                    tokio::select! {
+                        biased;
+                        _ = global_stop_rx.changed() => return,
+                        _ = host_stop_rx.changed() => return,
+                        _ = notify.notified() => continue,
+                        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_retry_at)) => continue,
+                    }
+                }
+
+                let hid = host_id.clone();
+                let weak_blocking = weak.clone();
+                let join = tokio::task::spawn_blocking(move || {
+                    let _gate = connect_gate.lock().unwrap();
+                    if let Some(reg) = weak_blocking.upgrade() {
+                        let still_due = {
+                            let guard = reg.remotes.lock().unwrap();
+                            guard.get(&hid).is_some_and(|slot| {
+                                slot.saved.enabled
+                                    && !slot.updating
+                                    && slot.client.is_none()
+                                    && std::time::Instant::now() >= slot.next_retry_at
+                            })
+                        };
+                        drop(reg);
+                        if !still_due {
+                            return Ok(None);
+                        }
+                    } else {
+                        return Ok(None);
+                    }
+                    HostRegistry::establish_connection_for(&local_home, &hid, &transport).map(Some)
+                });
+                let est_res = tokio::select! {
+                    biased;
+                    _ = global_stop_rx.changed() => return,
+                    _ = host_stop_rx.changed() => return,
+                    res = join => match res {
+                        Ok(r) => r,
+                        Err(_) => return,
+                    },
+                };
+                let Some(reg) = weak.upgrade() else {
+                    return;
+                };
+                match est_res {
+                    Ok(Some(established)) => {
+                        let (changed, connected) =
+                            reg.apply_established_slot(&host_id, established);
+                        if connected {
+                            reg.spawn_drain_and_prefetch(&host_id);
+                        }
+                        if changed {
+                            reg.emit(
+                                &host_id,
+                                AppEvent::Changed {
+                                    topic: if connected { "resync" } else { "host" },
+                                    card_id: None,
+                                },
+                            );
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        reg.handle_remote_connect_error(&host_id, &err);
+                    }
+                }
+            }
+            RemoteSupervisorTarget::Connected {
+                client,
+                endpoint,
+                after_revision,
+                has_tunnel,
+            } => {
+                let open_fut =
+                    client::open_async_subscribe(&endpoint, &after_revision, &["snapshot"], None);
+                tokio::pin!(open_fut);
+                let subscribe_res = loop {
+                    tokio::select! {
+                        biased;
+                        _ = global_stop_rx.changed() => return,
+                        _ = host_stop_rx.changed() => return,
+                        _ = notify.notified() => {
+                            let keep_going = weak.upgrade().is_some_and(|reg| {
+                                let guard = reg.remotes.lock().unwrap();
+                                guard.get(&host_id).is_some_and(|s| {
+                                    s.saved.enabled
+                                        && !s.updating
+                                        && s.client.as_ref().is_some_and(|c| Arc::ptr_eq(c, &client))
+                                })
+                            });
+                            if !keep_going {
+                                break None;
+                            }
+                        }
+                        res = &mut open_fut => break Some(res),
+                    }
+                };
+                let Some(subscribe_res) = subscribe_res else {
+                    continue;
+                };
+                let (mut stream, handshake) = match subscribe_res {
+                    Ok(pair) => pair,
+                    Err(err) => {
+                        if let Some(reg) = weak.upgrade() {
+                            reg.handle_remote_connected_error(&host_id, &client, &err);
+                        }
+                        continue;
+                    }
+                };
+
+                if handshake.changed
+                    && !refresh_remote_host_async(
+                        &weak,
+                        &host_id,
+                        &client,
+                        None,
+                        None,
+                        &mut host_stop_rx,
+                        &mut global_stop_rx,
+                    )
+                    .await
+                {
+                    continue;
+                }
+                if let Some(reg) = weak.upgrade()
+                    && reg.has_drainable_outbox(&host_id)
+                {
+                    reg.spawn_drain_and_prefetch(&host_id);
+                }
+
+                let mut pending: Option<PendingRefresh> = None;
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = global_stop_rx.changed() => return,
+                        _ = host_stop_rx.changed() => return,
+                        _ = notify.notified() => {
+                            let Some(reg) = weak.upgrade() else {
+                                return;
+                            };
+                            let keep_going = {
+                                let guard = reg.remotes.lock().unwrap();
+                                guard.get(&host_id).is_some_and(|s| {
+                                    s.saved.enabled
+                                        && !s.updating
+                                        && s.client.as_ref().is_some_and(|c| Arc::ptr_eq(c, &client))
+                                })
+                            };
+                            if !keep_going {
+                                break;
+                            }
+                            if reg.has_drainable_outbox(&host_id) {
+                                reg.spawn_drain_and_prefetch(&host_id);
+                            }
+                        }
+                        _ = async {
+                            match pending.as_ref() {
+                                Some(p) => tokio::time::sleep_until(p.deadline).await,
+                                None => std::future::pending::<()>().await,
+                            }
+                        } => {
+                            let Some(p) = pending.take() else {
+                                continue;
+                            };
+                            let (still_active, already_fetched) = {
+                                let Some(reg) = weak.upgrade() else {
+                                    return;
+                                };
+                                let guard = reg.remotes.lock().unwrap();
+                                let Some(slot) = guard.get(&host_id) else {
+                                    break;
+                                };
+                                let active = slot.saved.enabled
+                                    && !slot.updating
+                                    && slot.client.as_ref().is_some_and(|c| Arc::ptr_eq(c, &client));
+                                let up_to_date = p.topic != "resync"
+                                    && !p.latest_revision.is_null()
+                                    && slot.last_state_marker["revision"] == p.latest_revision;
+                                (active, up_to_date)
+                            };
+                            if !still_active {
+                                break;
+                            }
+                            if already_fetched {
+                                continue;
+                            }
+                            if !refresh_remote_host_async(
+                                &weak,
+                                &host_id,
+                                &client,
+                                Some(p.topic),
+                                p.card_id,
+                                &mut host_stop_rx,
+                                &mut global_stop_rx,
+                            )
+                            .await
+                            {
+                                break;
+                            }
+                        }
+                        frame_res = stream.next_frame() => {
+                            match frame_res {
+                                Ok(Some(client::PushFrame::Heartbeat)) => {
+                                    if has_tunnel {
+                                        let Some(reg) = weak.upgrade() else {
+                                            return;
+                                        };
+                                        let dead = {
+                                            let mut guard = reg.remotes.lock().unwrap();
+                                            guard
+                                                .get_mut(&host_id)
+                                                .and_then(|s| s.tunnel.as_mut())
+                                                .is_some_and(|t| !t.is_alive())
+                                        };
+                                        if dead {
+                                            reg.handle_remote_connected_error(
+                                                &host_id,
+                                                &client,
+                                                &anyhow::anyhow!("SSH tunnel exited"),
+                                            );
+                                            break;
+                                        }
+                                    }
+                                }
+                                Ok(Some(client::PushFrame::StateChanged {
+                                    topic,
+                                    card_id,
+                                    marker,
+                                    ..
+                                })) => {
+                                    let rev = marker["revision"].clone();
+                                    let already_fetched = weak.upgrade().is_some_and(|reg| {
+                                        let guard = reg.remotes.lock().unwrap();
+                                        guard.get(&host_id).is_some_and(|s| {
+                                            topic != "resync"
+                                                && !rev.is_null()
+                                                && s.last_state_marker["revision"] == rev
+                                        })
+                                    });
+                                    if already_fetched {
+                                        continue;
+                                    }
+                                    let now_i = tokio::time::Instant::now();
+                                    match &mut pending {
+                                        Some(p) => {
+                                            p.topic = merge_push_topic(p.topic, topic);
+                                            if p.card_id != card_id {
+                                                p.card_id = None;
+                                            }
+                                            p.latest_revision = rev;
+                                            p.deadline =
+                                                (now_i + REMOTE_PUSH_DEBOUNCE).min(p.max_deadline);
+                                        }
+                                        None => {
+                                            pending = Some(PendingRefresh {
+                                                topic,
+                                                card_id,
+                                                latest_revision: rev,
+                                                deadline: now_i + REMOTE_PUSH_DEBOUNCE,
+                                                max_deadline: now_i + REMOTE_PUSH_MAX_DEBOUNCE,
+                                            });
+                                        }
+                                    }
+                                }
+                                Ok(Some(client::PushFrame::UpdateChanged(state))) => {
+                                    if let Some(reg) = weak.upgrade() {
+                                        reg.emit_push(HostPushEvent::UpdateChanged {
+                                            host_id: host_id.clone(),
+                                            state,
+                                        });
+                                    }
+                                }
+                                Ok(Some(client::PushFrame::UtilitiesChanged(state))) => {
+                                    if let Some(reg) = weak.upgrade() {
+                                        reg.emit_push(HostPushEvent::UtilitiesChanged {
+                                            host_id: host_id.clone(),
+                                            state,
+                                        });
+                                    }
+                                }
+                                Ok(Some(client::PushFrame::UsageChanged(state))) => {
+                                    if let Some(reg) = weak.upgrade() {
+                                        reg.emit_push(HostPushEvent::UsageChanged {
+                                            host_id: host_id.clone(),
+                                            state,
+                                        });
+                                    }
+                                }
+                                Ok(Some(client::PushFrame::HerdrInstall(state))) => {
+                                    if let Some(reg) = weak.upgrade() {
+                                        reg.emit_push(HostPushEvent::HerdrInstall {
+                                            host_id: host_id.clone(),
+                                            state,
+                                        });
+                                    }
+                                }
+                                Ok(None) => {
+                                    if let Some(reg) = weak.upgrade() {
+                                        reg.handle_remote_connected_error(
+                                            &host_id,
+                                            &client,
+                                            &anyhow::anyhow!("Remote push stream closed"),
+                                        );
+                                    }
+                                    break;
+                                }
+                                Err(err) => {
+                                    if let Some(reg) = weak.upgrade() {
+                                        reg.handle_remote_connected_error(&host_id, &client, &err);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
