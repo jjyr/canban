@@ -109,6 +109,7 @@ impl AppServer {
                     | "herdr.check"
                     | "project.detect_github"
                     | "workflow.default.get"
+                    | "viewer.presence"
             )
         {
             bail!("Canban is upgrading; retry after the service handoff");
@@ -203,6 +204,7 @@ impl AppServer {
             "terminal.end" => self.control_terminal(p, true),
             "terminal.close" => self.close_terminal(p),
             "terminal.context" => self.terminal_context(p),
+            "viewer.presence" => self.viewer_presence(p),
             "runtime.observation" => {
                 let (core, generation, connected, terminals) = {
                     let inv = self.inventory.lock().unwrap();

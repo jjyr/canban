@@ -1082,6 +1082,21 @@ impl AppServer {
         }
         self.deliver_questions(&client)?;
         self.close_idle(&client)?;
+        let reclaim_at = now();
+        self.presence.prune_expired(reclaim_at);
+        let mut reclaim_snap = self
+            .store
+            .lock()
+            .unwrap()
+            .db()
+            .runtime_snapshot()
+            .unwrap_or_default();
+        self.project_observation_freshness(&mut reclaim_snap);
+        self.presence.retain_live(&reclaim_snap, reclaim_at);
+        let reclaim_status = self.compute_reclaim_status(&reclaim_snap, reclaim_at);
+        if self.presence.sync_emitted_reclaim(&reclaim_status) {
+            self.emit("runtime", None);
+        }
         let _ = self.pump_admissions();
         let snapshot = self.snapshot()?;
         if self.observer_running.load(Ordering::SeqCst) && self.runtime_inventory().is_err() {

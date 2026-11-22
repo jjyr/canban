@@ -102,8 +102,11 @@ fn card_tab_item(ui: Ui, cid: String, e: Entry, selected_id: Memo<String>) -> im
         let rename_id = id.clone();
         let tab_cid = cid.clone();
         let text = card_tab_title(&e);
-        let hint = e.hint();
-        let mark = e.provider().map(|(ic, _)| ic).unwrap_or(Icon::Terminal);
+        let hint = e.hint_with_policy(ui.idle_minutes.get());
+        let managed = e.is_managed();
+        let reclaim_badge = crate::terminals::labels::tab_reclaim_badge(&e);
+        let has_reclaim_badge = reclaim_badge.is_some();
+        let provider_mark = e.provider().map(|(ic, _)| ic);
         let mut tab_button = view()
             .h_full()
             .focusable(true)
@@ -122,21 +125,33 @@ fn card_tab_item(ui: Ui, cid: String, e: Entry, selected_id: Memo<String>) -> im
                 ..Default::default()
             })
             .label(format!("Tab {text}"));
-        if let Some(mark_el) = crate::terminals::labels::status_mark(&e) {
+        if !has_reclaim_badge && let Some(mark_el) = crate::terminals::labels::status_mark(&e) {
             tab_button = tab_button.child(mark_el);
         }
+        if let Some(mark) = provider_mark {
+            tab_button = tab_button.child(icon(mark).w(px(13.)).h(px(13.)).flex_shrink_0());
+        } else if !managed {
+            tab_button =
+                tab_button.child(icon(Icon::Terminal).w(px(13.)).h(px(13.)).flex_shrink_0());
+        }
+        tab_button = tab_button.child(
+            label(text.clone())
+                .font_weight(if is_sel {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::NORMAL
+                })
+                .flex_shrink(1.)
+                .truncate()
+                .min_w(px(0.)),
+        );
+        if managed {
+            tab_button = tab_button.child(crate::terminals::labels::managed_badge());
+        }
+        if let Some(badge) = reclaim_badge {
+            tab_button = tab_button.child(badge);
+        }
         tab_button = tab_button
-            .child(icon(mark).w(px(13.)).h(px(13.)).flex_shrink_0())
-            .child(
-                label(text.clone())
-                    .font_weight(if is_sel {
-                        FontWeight::SEMIBOLD
-                    } else {
-                        FontWeight::NORMAL
-                    })
-                    .truncate()
-                    .min_w(px(0.)),
-            )
             .on_press_down(move |event: &nsh_core::PressEvent| {
                 if event.clicks >= 2 {
                     ui.terminal_rename.set(Some(rename_id.clone()));
@@ -153,15 +168,23 @@ fn card_tab_item(ui: Ui, cid: String, e: Entry, selected_id: Memo<String>) -> im
                 select_card_tab(ui, &tab_cid, id.clone());
                 ui.card_terminal_focused.set(true);
             });
-        view()
+        let bg = if is_sel {
+            SURFACE
+        } else if managed {
+            HIGHLIGHT_SURFACE
+        } else {
+            CLEAR
+        };
+        let mut cell = view()
+            .relative()
             .h_full()
-            .max_w(px(230.))
+            .max_w(px(if has_reclaim_badge { 296. } else { 230. }))
             .flex_shrink_0()
             .flex_row()
             .items_center()
             .gap_0()
             .pr_0p5()
-            .bg(if is_sel { SURFACE } else { CLEAR })
+            .bg(bg)
             .hover(move |st| st.bg(if is_sel { SURFACE } else { CARD_HOVER }))
             .border_r_1()
             .border_color(BORDER)
@@ -171,7 +194,20 @@ fn card_tab_item(ui: Ui, cid: String, e: Entry, selected_id: Memo<String>) -> im
                 Icon::Close,
                 format!("Close terminal {}", e.title()),
                 move |_| crate::terminals::close_entry(ui, &close_id),
-            ))
+            ));
+        if managed {
+            cell = cell.child(
+                view()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top_0()
+                    .h(px(1.5))
+                    .bg(HIGHLIGHT)
+                    .pointer_events(PointerEvents::None),
+            );
+        }
+        cell
     })
 }
 
@@ -196,7 +232,15 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                 b["terminal"].as_str().unwrap_or("").to_owned(),
                 b["read_only"] == true,
                 b["input_status"].as_str().unwrap_or("").to_owned(),
+                e.canvas_notice_status().to_owned(),
             ))
+        })
+    });
+    let binding_key = computed(move || {
+        target.with(|t| {
+            t.as_ref().map(|(entry_id, core_id, terminal, _, _, _)| {
+                (entry_id.clone(), core_id.clone(), terminal.clone())
+            })
         })
     });
     let has_live_target = computed(move || target.with(|t| t.is_some()));
@@ -205,18 +249,21 @@ pub fn pane(ui: Ui) -> impl IntoElement {
         if cid.is_empty() {
             return Vec::new();
         }
+        let idle_minutes = ui.idle_minutes.get();
         card_live_entries_for_ui(ui, &cid)
             .into_iter()
             .map(|e| {
                 (
                     e.saved.id.clone(),
                     card_tab_title(&e),
-                    e.hint(),
+                    e.hint_with_policy(idle_minutes),
                     e.ended(),
                     e.inactive(),
                     e.herdr_status(),
                     e.attention_reason(),
                     e.provider(),
+                    e.is_managed(),
+                    e.reclaim.clone(),
                 )
             })
             .collect::<Vec<_>>()
@@ -391,6 +438,24 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                                 )),
                             )
                             .prop("read_only", json!(true))
+                            .prop("input_status", move || {
+                                target.with(|t| {
+                                    json!(
+                                        t.as_ref()
+                                            .map(|(_, _, _, _, status, _)| status.as_str())
+                                            .unwrap_or("")
+                                    )
+                                })
+                            })
+                            .prop("notice_status", move || {
+                                target.with(|t| {
+                                    json!(
+                                        t.as_ref()
+                                            .map(|(_, _, _, _, _, notice)| notice.as_str())
+                                            .unwrap_or("")
+                                    )
+                                })
+                            })
                             .w_full()
                             .flex_1()
                             .min_h(px(0.))
@@ -405,8 +470,8 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                         )
                         .prop("focus", focus_prop)
                         .prop("binding", move || {
-                            target.with(|t| match t {
-                                Some((entry_id, core_id, terminal, _, _)) => {
+                            binding_key.with(|t| match t {
+                                Some((entry_id, core_id, terminal)) => {
                                     let host_id = ui
                                         .snapshot
                                         .with_untracked(|s| s.terminal_host(entry_id).to_owned());
@@ -420,13 +485,21 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                             })
                         })
                         .prop("read_only", move || {
-                            target.with(|t| json!(t.as_ref().is_none_or(|(_, _, _, ro, _)| *ro)))
+                            target.with(|t| json!(t.as_ref().is_none_or(|(_, _, _, ro, _, _)| *ro)))
                         })
                         .prop("input_status", move || {
                             target.with(|t| {
                                 json!(t
                                     .as_ref()
-                                    .map(|(_, _, _, _, status)| status.as_str())
+                                    .map(|(_, _, _, _, status, _)| status.as_str())
+                                    .unwrap_or(""))
+                            })
+                        })
+                        .prop("notice_status", move || {
+                            target.with(|t| {
+                                json!(t
+                                    .as_ref()
+                                    .map(|(_, _, _, _, _, notice)| notice.as_str())
                                     .unwrap_or(""))
                             })
                         })
@@ -451,7 +524,7 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                             && ui.project_delete_confirm.get().is_none(),
                     };
                     if !crate::backend::is_connected() {
-                        return canban_terminal::linux::preview_terminal(
+                        return canban_terminal::linux::preview_terminal_with_status(
                             concat!(
                                 "\x1b[1;36mCard Live Terminal\x1b[0m · Side-by-side discussion\r\n",
                                 "\x1b[2mDiscuss requirements or answer Agent prompts directly beside the Card.\x1b[0m\r\n\r\n",
@@ -460,6 +533,20 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                             crate::utilities::terminal_theme,
                             move || crate::utilities::terminal_font(ui),
                             focus_req,
+                            move || {
+                                target.with(|t| {
+                                    t.as_ref()
+                                        .map(|(_, _, _, _, status, _)| status.clone())
+                                        .unwrap_or_default()
+                                })
+                            },
+                            move || {
+                                target.with(|t| {
+                                    t.as_ref()
+                                        .map(|(_, _, _, _, _, notice)| notice.clone())
+                                        .unwrap_or_default()
+                                })
+                            },
                         )
                         .w_full()
                         .flex_1()
@@ -469,7 +556,7 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                     return canban_terminal::linux::live_terminal(
                         move || {
                             target.with(|t| {
-                                t.as_ref().map(|(entry_id, core_id, terminal, _, _)| {
+                                t.as_ref().map(|(entry_id, core_id, terminal, _, _, _)| {
                                     let host_id = ui
                                         .snapshot
                                         .with_untracked(|s| s.terminal_host(entry_id).to_owned());
@@ -484,11 +571,18 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                         crate::utilities::terminal_theme,
                         move || crate::utilities::terminal_font(ui),
                         focus_req,
-                        move || target.with(|t| t.as_ref().is_none_or(|(_, _, _, ro, _)| *ro)),
+                        move || target.with(|t| t.as_ref().is_none_or(|(_, _, _, ro, _, _)| *ro)),
                         move || {
                             target.with(|t| {
                                 t.as_ref()
-                                    .map(|(_, _, _, _, status)| status.clone())
+                                    .map(|(_, _, _, _, status, _)| status.clone())
+                                    .unwrap_or_default()
+                            })
+                        },
+                        move || {
+                            target.with(|t| {
+                                t.as_ref()
+                                    .map(|(_, _, _, _, _, notice)| notice.clone())
                                     .unwrap_or_default()
                             })
                         },

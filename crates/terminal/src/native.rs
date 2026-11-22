@@ -225,6 +225,7 @@ struct Host {
     content: Option<String>,
     read_only: bool,
     input_status: String,
+    notice_status: String,
     font_family: Option<String>,
     font_size: f64,
 }
@@ -270,6 +271,7 @@ impl Host {
             content: None,
             read_only: false,
             input_status: String::new(),
+            notice_status: String::new(),
             font_family: None,
             font_size: 13.0,
         }
@@ -302,6 +304,7 @@ impl Host {
             state,
             self.read_only,
             &self.input_status,
+            &self.notice_status,
             self.content.is_some(),
         )
     }
@@ -1100,6 +1103,13 @@ impl NativeComponent for Terminal {
                 self.host.wake.notify();
             }
         }
+        if name == "notice_status" {
+            let next = value.and_then(Value::as_str).unwrap_or("").to_owned();
+            if self.host.notice_status != next {
+                self.host.notice_status = next;
+                self.host.wake.notify();
+            }
+        }
         if name == "read_only" {
             let next = value == Some(&json!(true));
             if self.host.read_only != next {
@@ -1225,6 +1235,14 @@ mod tests {
         }
 
         host.read_only = false;
+        host.notice_status = "Reclaiming soon · Focus or type to keep open".into();
+        let snap = unsafe { &*cb_snapshot(ptr, default_geom(), false) };
+        let notice = unsafe {
+            std::str::from_utf8(std::slice::from_raw_parts(snap.status_ptr, snap.status_len))
+                .unwrap()
+        };
+        assert_eq!(notice, "Reclaiming soon · Focus or type to keep open");
+        host.notice_status.clear();
         let snap = unsafe { &*cb_snapshot(ptr, default_geom(), false) };
         assert_eq!(snap.status_len, 0);
         cb_text(ptr, text.as_ptr(), text.len());

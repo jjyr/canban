@@ -65,6 +65,7 @@ pub struct AppServer {
     merging_cards: Mutex<std::collections::BTreeSet<String>>,
     terminal_gate: Mutex<()>,
     terminal_contexts: Mutex<Vec<TerminalContext>>,
+    presence: presence::PresenceTracker,
     inventory: Mutex<observation::Inventory>,
     refinements: refine::RefinementTracker,
     observer_running: AtomicBool,
@@ -757,6 +758,7 @@ impl AppServer {
             merging_cards: Mutex::new(Default::default()),
             terminal_gate: Mutex::new(()),
             terminal_contexts: Mutex::new(Vec::new()),
+            presence: Default::default(),
             inventory: Mutex::new(Default::default()),
             refinements: Default::default(),
             observer_running: AtomicBool::new(false),
@@ -1107,6 +1109,7 @@ impl AppServer {
             .collect();
         self.populate_terminal_contexts(&mut snapshot);
         self.project_observation_freshness(&mut snapshot);
+        self.populate_reclaim_status(&mut snapshot);
 
         let present_cards: std::collections::BTreeSet<&str> =
             snapshot.cards.iter().map(|c| c.id.as_str()).collect();
@@ -1320,6 +1323,7 @@ mod lifecycle;
 mod notes;
 mod observation;
 mod overview;
+mod presence;
 mod refine;
 mod reminders;
 mod reports;

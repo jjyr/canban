@@ -406,3 +406,30 @@ Back/Forward retain existing route, draft and scroll behavior and never replay e
   newly accepted**: the computer-use service failed with `Sky Computer Use native
   pipe startup failed`. Gallery/App startup is only a smoke check, and the mounted
   NSH test is not a substitute for macOS interaction or a frame-rate benchmark.
+
+## Managed Terminal Distinction, Presence Leases, and Reclaim Indicators (2026-11-23, Card #162)
+
+### Managed vs. Manual Classification & Visual Cues
+
+- **Classification** (`ManagedTerminalKind` on `TerminalEntry` / `Entry`):
+  - **Managed terminals**: Card/workflow `AgentRun` sessions (`entry.agent.is_some()`), cardless scheduled runs (`scheduled:*`), merge-queue batch sessions (`merge-queue:*`), and workflow configuration sessions (`configuration:*`).
+  - **Manual terminals**: User-created shells or standalone CLI Agent launches (`+` / `⌘T` / `Open Agent`), never subject to automatic idle reclamation.
+- **Visual distinction**:
+  - Managed terminals keep their provider brand mark (`Icon::Claude`, `Icon::OpenAI`, etc., falling back to `Icon::Agent`), add a compact `Icon::Agent` pill badge (`HIGHLIGHT_SURFACE` / `HIGHLIGHT` semantic tokens) in tab strips and Terminal sidebar rows, and style inactive managed tabs with a subtle `HIGHLIGHT_SURFACE` background and `1.5px` top `HIGHLIGHT` accent bar while preserving the single-line tab height.
+  - Every tab and sidebar row exposes a structured English hover policy summary describing the exact lifecycle rule (`Managed by Canban · Auto-reclaim paused while open`, `Managed by Canban · Auto-reclaims 30s after completion (history & Resume saved on Card)`, `Managed by Canban · Auto-reclaims after <N>m idle`, `Managed by Canban · Auto-reclaim disabled`, `Managed by Canban · Stays open until closed` for `configuration:*`, or `Manual terminal · Never auto-reclaimed`).
+
+### In-Memory Presence Lease (`viewer.presence`)
+
+- Decouples reclaim protection from `canban-terminal`'s 8-session LRU `LiveSession` pool (`activity::viewers`):
+  - When the desktop window is active (`Lifecycle::Active`), the UI synchronizes `viewer.presence` every ~10s and immediately on navigation, Card split toggle/tab change, terminal selection, sidebar overlay changes on narrow widths, window blur, and clean exit (`DESKTOP_API = 81`).
+  - AppServer holds leases strictly in memory (`PresenceTracker`, ~25s lease TTL fallback, zero SQLite writes, and no `state_revision` or remote host sync emissions on steady heartbeats).
+  - Viewing a managed terminal (in `Terminals` with the canvas uncovered, or inside a Card's split terminal pane) or viewing its owning Card (`page == "card"`, even with the right terminal pane collapsed) pauses auto-reclaim across both Card-bound Agents and cardless `scheduled:*` terminals.
+  - Leaving a protected view records an in-memory `last_viewed_at` timestamp, starting a fresh 30s (`COMPLETED_IDLE_RECLAIM_MS`) post-view grace window before reclamation can fire.
+
+### Herdr-Driven Manual Follow-Up Cooldown & Static Reclaim Warning
+
+- **Herdr-only follow-up detection**: AppServer relies solely on Herdr status/turn reports (`observe_lifecycle` for Card runs and `PresenceTracker::observe_scheduled_runtime` for cardless `scheduled:*` runs) without adding extra keystroke/PTY listeners.
+- When Herdr reports `working`/`running`/`blocked` or a turn advance past `completion_turn` after completion, `idle_since` clears, `interactive_followup` is marked without altering Card `stage` or `ScheduledRun.state`, and once the Agent settles again and the user leaves, cooldown waits for the full `scheduler.idle_minutes` (default 15m) instead of 30s. Completing another stage report or resuming in-place clears `interactive_followup`.
+- **Static `Reclaiming soon` & `Auto-reclaiming…`**:
+  - Within the final 15s (for windows `<= 60s`) or final 30s (for multi-minute `idle_minutes` windows) before deadline, `Snapshot.reclaim_status` surfaces a calm static `Reclaiming soon` clock badge in tabs/sidebar and a top-right terminal canvas pill (`Reclaiming soon · Focus or type to keep open`) while keeping the PTY writable.
+  - Once `close_idle` (or cardless schedule exit) enters graceful idle close (`close_state == "closing"` with `close_reason == "idle"`), tabs, sidebar rows, tooltips, and the terminal overlay display `Auto-reclaiming…` instead of generic `Closing`.

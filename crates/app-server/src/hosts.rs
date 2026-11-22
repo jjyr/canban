@@ -2138,6 +2138,7 @@ impl HostRegistry {
                     | "insights.activity_buckets"
                     | "usage.status"
                     | "usage.refresh"
+                    | "viewer.presence"
             )
         {
             if matches!(

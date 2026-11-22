@@ -4,12 +4,37 @@ use super::*;
 /// Completed (`completed` / `backlog`) Agent runs reclaim their idle PTY after 30s
 /// instead of waiting for the full interactive `scheduler.idle_minutes` window.
 pub(super) const COMPLETED_IDLE_RECLAIM_MS: u64 = 30_000;
+pub(super) const SHORT_RECLAIM_WARNING_MS: u64 = 15_000;
+pub(super) const LONG_RECLAIM_WARNING_MS: u64 = 30_000;
+
+pub(super) fn reclaim_warning_window_ms(delay_ms: u64) -> u64 {
+    if delay_ms <= 60_000 {
+        SHORT_RECLAIM_WARNING_MS.min(delay_ms)
+    } else {
+        LONG_RECLAIM_WARNING_MS.min(delay_ms)
+    }
+}
+
+pub(super) fn is_interactive_followup(run: &AgentRun) -> bool {
+    if !matches!(run.state.as_str(), "completed" | "backlog") {
+        return false;
+    }
+    if run.lifecycle.interactive_followup {
+        return true;
+    }
+    let observed_turn = run.observed.as_ref().and_then(|v| v["turn"].as_u64());
+    run.lifecycle.idle_since.is_some()
+        && run
+            .completion_turn
+            .zip(observed_turn)
+            .is_some_and(|(ct, t)| t > ct)
+}
 
 pub(super) fn idle_reclaim_delay_ms(run: &AgentRun, minutes: u64) -> Option<u64> {
     if minutes == 0 {
         return None;
     }
-    if matches!(run.state.as_str(), "completed" | "backlog") {
+    if matches!(run.state.as_str(), "completed" | "backlog") && !is_interactive_followup(run) {
         Some(COMPLETED_IDLE_RECLAIM_MS)
     } else {
         Some(minutes.saturating_mul(60_000))
@@ -40,26 +65,21 @@ fn is_non_idle_send_skip(err: &anyhow::Error) -> bool {
     msg.contains("\"kind\":\"status_mismatch\"") || msg.contains("\"kind\":\"blocked\"")
 }
 
-pub(super) fn idle_candidate(
+pub(super) fn idle_eligible_without_clock(
     snapshot: &Snapshot,
     run: &AgentRun,
     minutes: u64,
-    at: u64,
-    _viewed: bool,
 ) -> bool {
-    let Some(delay_ms) = idle_reclaim_delay_ms(run, minutes) else {
+    if idle_reclaim_delay_ms(run, minutes).is_none() {
         return false;
-    };
+    }
     if !matches!(run.runtime_status(), "idle" | "done")
         || !run.close_state.is_empty()
         || run.pending.is_some()
     {
         return false;
     }
-    let Some(anchor) = idle_reclaim_anchor(run) else {
-        return false;
-    };
-    if at.saturating_sub(anchor) < delay_ms {
+    if idle_reclaim_anchor(run).is_none() {
         return false;
     }
     if (canban_scheduler::automatic(run) || run.workflow_run_id.is_some())
@@ -88,6 +108,40 @@ pub(super) fn idle_candidate(
         return false;
     }
     true
+}
+
+pub(super) fn idle_candidate_with_extra(
+    snapshot: &Snapshot,
+    run: &AgentRun,
+    minutes: u64,
+    at: u64,
+    extra_activity_at: u64,
+    protected: bool,
+) -> bool {
+    if protected {
+        return false;
+    }
+    let Some(delay_ms) = idle_reclaim_delay_ms(run, minutes) else {
+        return false;
+    };
+    if !idle_eligible_without_clock(snapshot, run, minutes) {
+        return false;
+    }
+    let Some(anchor) = idle_reclaim_anchor(run) else {
+        return false;
+    };
+    at.saturating_sub(anchor.max(extra_activity_at)) >= delay_ms
+}
+
+#[cfg(test)]
+pub(super) fn idle_candidate(
+    snapshot: &Snapshot,
+    run: &AgentRun,
+    minutes: u64,
+    at: u64,
+    protected: bool,
+) -> bool {
+    idle_candidate_with_extra(snapshot, run, minutes, at, 0, protected)
 }
 
 impl AppServer {
@@ -140,11 +194,44 @@ impl AppServer {
             if activity.last_at > a.lifecycle.last_interaction_at.unwrap_or(0) {
                 a.lifecycle.last_interaction_at = Some(activity.last_at);
             }
-            if matches!(status, "idle" | "done") && observed["state"] != "finished" {
+            let was_settled = a.lifecycle.idle_since.is_some();
+            let is_completed = matches!(a.state.as_str(), "completed" | "backlog");
+            let observed_turn = observed["turn"].as_u64();
+            let live = observed["state"] != "finished";
+            if matches!(status, "idle" | "done") && live {
+                if is_completed {
+                    if !was_settled && !a.lifecycle.interactive_followup {
+                        if let Some(turn) = observed_turn {
+                            if a.completion_turn
+                                .is_some_and(|ct| turn > ct.saturating_add(1))
+                            {
+                                a.lifecycle.interactive_followup = true;
+                            } else {
+                                a.completion_turn = Some(turn);
+                            }
+                        }
+                    } else if was_settled
+                        && a.completion_turn
+                            .zip(observed_turn)
+                            .is_some_and(|(ct, turn)| turn > ct)
+                    {
+                        a.lifecycle.interactive_followup = true;
+                    }
+                }
                 if changed || a.lifecycle.idle_since.is_none() {
                     a.lifecycle.idle_since = Some(now());
                 }
             } else {
+                if live
+                    && is_completed
+                    && matches!(status, "working" | "running" | "blocked")
+                    && (was_settled
+                        || a.completion_turn
+                            .zip(observed_turn)
+                            .is_some_and(|(ct, turn)| turn > ct))
+                {
+                    a.lifecycle.interactive_followup = true;
+                }
                 a.lifecycle.idle_since = None;
             }
             if !matches!(status, "idle" | "done")
@@ -215,8 +302,250 @@ impl AppServer {
         Ok(())
     }
 
+    pub(super) fn compute_reclaim_status(
+        &self,
+        snapshot: &Snapshot,
+        at: u64,
+    ) -> Vec<TerminalReclaimStatus> {
+        let idle_minutes = self.config().scheduler.idle_minutes;
+        let mut out = Vec::new();
+        for entry in &snapshot.terminals {
+            let Some(run) = &entry.agent else {
+                continue;
+            };
+            if run.finished() || run.terminal.is_none() {
+                continue;
+            }
+            let auto_reclaiming =
+                run.close_state == "closing" && run.lifecycle.close_reason == "idle";
+            let paused = !auto_reclaiming
+                && self
+                    .presence
+                    .is_protected(&entry.id, Some(&run.card_id), at);
+            let interactive_followup = is_interactive_followup(run);
+            let (deadline_at, reclaiming_soon) = if !auto_reclaiming
+                && !paused
+                && idle_eligible_without_clock(snapshot, run, idle_minutes)
+            {
+                let activity = canban_herdr::activity::get(
+                    run.core_id.as_deref().unwrap_or(""),
+                    run.terminal.as_deref().unwrap_or(""),
+                );
+                let viewed_at = self
+                    .presence
+                    .last_viewed_at(&entry.id, Some(&run.card_id), at);
+                let extra = activity.last_at.max(viewed_at);
+                if let Some(deadline) = idle_reclaim_deadline(run, idle_minutes, extra) {
+                    let delay_ms = idle_reclaim_delay_ms(run, idle_minutes)
+                        .unwrap_or(COMPLETED_IDLE_RECLAIM_MS);
+                    let warn_window = reclaim_warning_window_ms(delay_ms);
+                    (Some(deadline), at >= deadline.saturating_sub(warn_window))
+                } else {
+                    (None, false)
+                }
+            } else {
+                (None, false)
+            };
+            out.push(TerminalReclaimStatus {
+                terminal_id: entry.id.clone(),
+                paused,
+                reclaiming_soon,
+                auto_reclaiming,
+                interactive_followup,
+                deadline_at,
+            });
+        }
+        for run in &snapshot.scheduled_runs {
+            if run.creates_card {
+                continue;
+            }
+            let Some(tid) = run.terminal_id.as_deref() else {
+                continue;
+            };
+            let Some(rt) = snapshot
+                .terminals
+                .iter()
+                .find(|t| t.id == tid)
+                .and_then(|t| t.runtime.as_ref())
+            else {
+                continue;
+            };
+            if rt.state == "finished" {
+                continue;
+            }
+            let auto_reclaiming = run.close_requested_at.is_some() || rt.state == "closing";
+            let paused = !auto_reclaiming && self.presence.is_protected(tid, None, at);
+            let track = self.presence.get_scheduled_track(tid);
+            let interactive_followup = track.as_ref().is_some_and(|t| t.interactive_followup);
+            let (deadline_at, reclaiming_soon) = if !auto_reclaiming
+                && !paused
+                && matches!(run.state.as_str(), "completed" | "failed")
+                && idle_minutes > 0
+                && !matches!(
+                    rt.agent_status.as_deref(),
+                    Some("working" | "running" | "blocked")
+                ) {
+                let last_viewed = self.presence.last_viewed_at(tid, None, at);
+                let delay_ms = if interactive_followup {
+                    Some(idle_minutes.saturating_mul(60_000))
+                } else if last_viewed > 0 {
+                    Some(COMPLETED_IDLE_RECLAIM_MS)
+                } else {
+                    None
+                };
+                if let Some(delay_ms) = delay_ms {
+                    let anchor = track
+                        .as_ref()
+                        .and_then(|t| t.idle_since)
+                        .unwrap_or(0)
+                        .max(last_viewed)
+                        .max(run.completed_at.unwrap_or(0));
+                    if anchor > 0 {
+                        let deadline = anchor.saturating_add(delay_ms);
+                        let warn_window = reclaim_warning_window_ms(delay_ms);
+                        (Some(deadline), at >= deadline.saturating_sub(warn_window))
+                    } else {
+                        (None, false)
+                    }
+                } else {
+                    (None, false)
+                }
+            } else {
+                (None, false)
+            };
+            out.push(TerminalReclaimStatus {
+                terminal_id: tid.to_owned(),
+                paused,
+                reclaiming_soon,
+                auto_reclaiming,
+                interactive_followup,
+                deadline_at,
+            });
+        }
+        out
+    }
+
+    pub(super) fn populate_reclaim_status(&self, snapshot: &mut Snapshot) {
+        let at = now();
+        self.presence.prune_expired(at);
+        snapshot.reclaim_status = self.compute_reclaim_status(snapshot, at);
+    }
+
+    pub(super) fn reclaim_wake_deadline(&self, snapshot: &Snapshot, at: u64) -> Option<u64> {
+        self.presence.prune_expired(at);
+        let mut earliest = self.presence.next_expiry(at);
+        let mut consider = |ts: u64| {
+            earliest = Some(earliest.map_or(ts, |cur| cur.min(ts)));
+        };
+        let idle_minutes = self.config().scheduler.idle_minutes;
+        if idle_minutes == 0 {
+            return earliest;
+        }
+        for entry in &snapshot.terminals {
+            let Some(run) = &entry.agent else {
+                continue;
+            };
+            if run.finished() || run.terminal.is_none() {
+                continue;
+            }
+            if self
+                .presence
+                .is_protected(&entry.id, Some(&run.card_id), at)
+            {
+                continue;
+            }
+            if !idle_eligible_without_clock(snapshot, run, idle_minutes) {
+                continue;
+            }
+            let activity = canban_herdr::activity::get(
+                run.core_id.as_deref().unwrap_or(""),
+                run.terminal.as_deref().unwrap_or(""),
+            );
+            let viewed_at = self
+                .presence
+                .last_viewed_at(&entry.id, Some(&run.card_id), at);
+            let extra = activity.last_at.max(viewed_at);
+            if let Some(deadline) = idle_reclaim_deadline(run, idle_minutes, extra) {
+                let delay_ms =
+                    idle_reclaim_delay_ms(run, idle_minutes).unwrap_or(COMPLETED_IDLE_RECLAIM_MS);
+                let warn_at = deadline.saturating_sub(reclaim_warning_window_ms(delay_ms));
+                if at < warn_at {
+                    consider(warn_at.saturating_add(1));
+                } else if at < deadline {
+                    consider(deadline.saturating_add(1));
+                } else {
+                    consider(at.saturating_add(5_000));
+                }
+            }
+        }
+        for run in &snapshot.scheduled_runs {
+            if run.creates_card
+                || !matches!(run.state.as_str(), "completed" | "failed")
+                || run.close_requested_at.is_some()
+            {
+                continue;
+            }
+            let Some(tid) = run.terminal_id.as_deref() else {
+                continue;
+            };
+            let Some(rt) = snapshot
+                .terminals
+                .iter()
+                .find(|t| t.id == tid)
+                .and_then(|t| t.runtime.as_ref())
+            else {
+                continue;
+            };
+            if rt.state == "finished"
+                || rt.state == "closing"
+                || matches!(
+                    rt.agent_status.as_deref(),
+                    Some("working" | "running" | "blocked")
+                )
+            {
+                continue;
+            }
+            if self.presence.is_protected(tid, None, at) {
+                continue;
+            }
+            let last_viewed = self.presence.last_viewed_at(tid, None, at);
+            let track = self.presence.get_scheduled_track(tid);
+            let interactive_followup = track.as_ref().is_some_and(|t| t.interactive_followup);
+            let delay_ms = if interactive_followup {
+                Some(idle_minutes.saturating_mul(60_000))
+            } else if last_viewed > 0 {
+                Some(COMPLETED_IDLE_RECLAIM_MS)
+            } else {
+                None
+            };
+            if let Some(delay_ms) = delay_ms {
+                let anchor = track
+                    .as_ref()
+                    .and_then(|t| t.idle_since)
+                    .unwrap_or(0)
+                    .max(last_viewed)
+                    .max(run.completed_at.unwrap_or(0));
+                if anchor > 0 {
+                    let deadline = anchor.saturating_add(delay_ms);
+                    let warn_at = deadline.saturating_sub(reclaim_warning_window_ms(delay_ms));
+                    if at < warn_at {
+                        consider(warn_at.saturating_add(1));
+                    } else if at < deadline {
+                        consider(deadline.saturating_add(1));
+                    } else {
+                        consider(at.saturating_add(5_000));
+                    }
+                }
+            }
+        }
+        earliest
+    }
+
     pub(super) fn close_idle(&self, client: &canban_herdr::Client) -> Result<()> {
         let snapshot = self.snapshot()?;
+        let idle_minutes = self.config().scheduler.idle_minutes;
+        let check_at = now();
+        self.presence.prune_expired(check_at);
         for entry in &snapshot.terminals {
             let Some(run) = &entry.agent else {
                 continue;
@@ -225,19 +554,15 @@ impl AppServer {
                 run.core_id.as_deref().unwrap_or(""),
                 run.terminal.as_deref().unwrap_or(""),
             );
-            let mut candidate = run.clone();
-            candidate.lifecycle.last_interaction_at = Some(
-                activity
-                    .last_at
-                    .max(run.lifecycle.last_interaction_at.unwrap_or(0)),
-            );
-            if !idle_candidate(
-                &snapshot,
-                &candidate,
-                self.config().scheduler.idle_minutes,
-                now(),
-                activity.viewers > 0,
-            ) {
+            let protected = self
+                .presence
+                .is_protected(&entry.id, Some(&run.card_id), check_at);
+            let viewed_at = self
+                .presence
+                .last_viewed_at(&entry.id, Some(&run.card_id), check_at);
+            let extra = activity.last_at.max(viewed_at);
+            if !idle_candidate_with_extra(&snapshot, run, idle_minutes, check_at, extra, protected)
+            {
                 continue;
             }
             let terminal = run.terminal.as_deref().context("Idle terminal missing")?;
@@ -264,20 +589,22 @@ impl AppServer {
                 let Some(a) = &mut current_entry.agent else {
                     return Ok(false);
                 };
+                let lock_at = now();
+                self.presence.prune_expired(lock_at);
+                let protected =
+                    self.presence
+                        .is_protected(&current_entry.id, Some(&a.card_id), lock_at);
+                let viewed_at =
+                    self.presence
+                        .last_viewed_at(&current_entry.id, Some(&a.card_id), lock_at);
                 let activity =
                     canban_herdr::activity::get(run.core_id.as_deref().unwrap_or(""), terminal);
-                a.lifecycle.last_interaction_at = Some(
-                    activity
-                        .last_at
-                        .max(a.lifecycle.last_interaction_at.unwrap_or(0)),
-                );
-                if !idle_candidate(
-                    &current,
-                    a,
-                    self.config().scheduler.idle_minutes,
-                    now(),
-                    activity.viewers > 0,
-                ) {
+                if activity.last_at > a.lifecycle.last_interaction_at.unwrap_or(0) {
+                    a.lifecycle.last_interaction_at = Some(activity.last_at);
+                }
+                let extra = activity.last_at.max(viewed_at);
+                if !idle_candidate_with_extra(&current, a, idle_minutes, lock_at, extra, protected)
+                {
                     return Ok(false);
                 }
                 a.lifecycle.close_reason = "idle".into();

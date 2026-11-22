@@ -344,6 +344,7 @@ impl AppServer {
                             .unwrap_or(0),
                     );
                     run.turn_ended_at = None;
+                    run.lifecycle.interactive_followup = false;
                 }
                 db.save(entry)?;
                 should_advance = true;

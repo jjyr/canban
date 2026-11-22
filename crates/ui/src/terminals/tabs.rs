@@ -152,7 +152,9 @@ fn tab(ui: Ui, e: Entry, max_tab_w: Memo<f32>, show_card_number: bool) -> impl I
         let close = id.clone();
         let context = id.clone();
         let rename = id.clone();
-        let hint = e.hint();
+        let hint = e.hint_with_policy(ui.idle_minutes.get());
+        let managed = e.is_managed();
+        let has_reclaim_badge = e.is_reclaiming_soon() || e.is_auto_reclaiming();
         let mut tab_button = view()
             .h_full()
             .focusable(true)
@@ -172,7 +174,7 @@ fn tab(ui: Ui, e: Entry, max_tab_w: Memo<f32>, show_card_number: bool) -> impl I
             .label(format!("Tab {hint}"))
             .flex_row()
             .gap_2();
-        if let Some(mark_el) = super::labels::status_mark(&e) {
+        if !has_reclaim_badge && let Some(mark_el) = super::labels::status_mark(&e) {
             tab_button = tab_button.child(mark_el);
         }
         tab_button = tab_button
@@ -186,6 +188,13 @@ fn tab(ui: Ui, e: Entry, max_tab_w: Memo<f32>, show_card_number: bool) -> impl I
                 ui.spawn(menu(ui, context.clone(), Some(event.page_position)));
             })
             .on_press(move |_: &nsh_core::PressEvent| ui.select_terminal_in_scope(id.clone()));
+        let bg = if selected {
+            SELECTED
+        } else if managed {
+            HIGHLIGHT_SURFACE
+        } else {
+            CLEAR
+        };
         let mut cell = view()
             .relative()
             .w(move || px(base_width.min(max_tab_w.get())))
@@ -196,7 +205,7 @@ fn tab(ui: Ui, e: Entry, max_tab_w: Memo<f32>, show_card_number: bool) -> impl I
             .items_center()
             .gap_0()
             .px_1()
-            .bg(if selected { SELECTED } else { CLEAR })
+            .bg(bg)
             .hover(move |s| s.bg(if selected { SELECTED } else { CARD_HOVER }))
             .border_r_1()
             .border_color(BORDER)
@@ -207,6 +216,18 @@ fn tab(ui: Ui, e: Entry, max_tab_w: Memo<f32>, show_card_number: bool) -> impl I
                 format!("Close terminal {}", e.title()),
                 move |_| close_tab(ui, &close),
             ));
+        if managed {
+            cell = cell.child(
+                view()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top_0()
+                    .h(px(1.5))
+                    .bg(HIGHLIGHT)
+                    .pointer_events(PointerEvents::None),
+            );
+        }
         if selected {
             cell = cell.child(
                 view()
@@ -248,15 +269,18 @@ pub fn header(ui: Ui) -> impl IntoElement {
                                 && super::worktrees::entry_scope(s, e) == target_scope
                         })
                         .map(|e| {
+                            let idle_minutes = ui.idle_minutes.get();
                             (
                                 e.saved.id.clone(),
                                 super::labels::tab_label_text(e, show_num),
-                                e.hint(),
+                                e.hint_with_policy(idle_minutes),
                                 e.ended(),
                                 e.inactive(),
                                 e.herdr_status(),
                                 e.attention_reason(),
                                 e.provider(),
+                                e.is_managed(),
+                                e.reclaim.clone(),
                             )
                         })
                         .collect::<Vec<_>>()

@@ -445,6 +445,7 @@ impl AppServer {
             run.lifecycle.waiting = None;
             run.lifecycle.idle_since = None;
             run.lifecycle.close_reason.clear();
+            run.lifecycle.interactive_followup = false;
         }
         let card_events = self.store.lock().unwrap().db().events_for_card(&card.id)?;
         let input = canban_context::capture(

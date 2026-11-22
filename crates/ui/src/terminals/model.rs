@@ -43,7 +43,11 @@ pub fn binding(row: &OverviewRow) -> Option<Value> {
         return None;
     }
     let input_status = if matches!(a.close_state.as_str(), "pending" | "closing" | "closed") {
-        "Closing"
+        if a.close_state == "closing" && a.lifecycle.close_reason == "idle" {
+            "Auto-reclaiming…"
+        } else {
+            "Closing"
+        }
     } else if a.connection_state == "connecting" {
         "Connecting"
     } else if a.connection_state != "connected" {

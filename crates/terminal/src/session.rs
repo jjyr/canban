@@ -435,11 +435,14 @@ pub fn effective_status(
     state: &State,
     read_only: bool,
     input_status: &str,
+    notice_status: &str,
     is_preview: bool,
 ) -> String {
     if read_only {
         let reason = if !input_status.is_empty() {
             input_status
+        } else if is_preview && !notice_status.is_empty() {
+            notice_status
         } else if is_preview {
             "Preview"
         } else if !state.connected && state.status.starts_with("Connecting") {
@@ -448,7 +451,7 @@ pub fn effective_status(
             "Disconnected"
         };
         if state.status.is_empty()
-            || reason == "Closing"
+            || matches!(reason, "Closing" | "Auto-reclaiming…")
             || (reason == "Connecting" && state.status == "Connecting…")
         {
             reason.to_owned()
@@ -464,8 +467,10 @@ pub fn effective_status(
             .is_some_and(|t| t.elapsed() < CONNECTING_GRACE)
     {
         String::new()
-    } else {
+    } else if !state.status.is_empty() {
         state.status.clone()
+    } else {
+        notice_status.to_owned()
     }
 }
 
@@ -1023,5 +1028,53 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(detached.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn effective_status_surfaces_auto_reclaim_and_writable_reclaim_warning() {
+        let mut state = State::new(80, 24);
+        state.connected = true;
+
+        assert_eq!(
+            effective_status(
+                &state,
+                false,
+                "",
+                "Reclaiming soon · Focus or type to keep open",
+                false
+            ),
+            "Reclaiming soon · Focus or type to keep open"
+        );
+        assert!(accepts_pty_input(&state, false));
+
+        assert_eq!(
+            effective_status(&state, true, "Auto-reclaiming…", "", false),
+            "Auto-reclaiming…"
+        );
+        assert!(!accepts_pty_input(&state, true));
+
+        assert_eq!(
+            effective_status(
+                &state,
+                true,
+                "",
+                "Reclaiming soon · Focus or type to keep open",
+                true
+            ),
+            "Reclaiming soon · Focus or type to keep open"
+        );
+        assert_eq!(effective_status(&state, true, "", "", true), "Preview");
+
+        state.status = "Disconnected".into();
+        assert_eq!(
+            effective_status(
+                &state,
+                false,
+                "",
+                "Reclaiming soon · Focus or type to keep open",
+                false
+            ),
+            "Disconnected"
+        );
     }
 }

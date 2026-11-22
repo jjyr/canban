@@ -815,25 +815,9 @@ async fn runtime_worker_loop(
                         due(deadline.saturating_add(1));
                     }
                 }
-                if lifecycle::idle_candidate(
-                    &s,
-                    a,
-                    server.config().scheduler.idle_minutes,
-                    u64::MAX,
-                    false,
-                ) {
-                    let activity = canban_herdr::activity::get(
-                        a.core_id.as_deref().unwrap_or(""),
-                        a.terminal.as_deref().unwrap_or(""),
-                    );
-                    if let Some(deadline) = lifecycle::idle_reclaim_deadline(
-                        a,
-                        server.config().scheduler.idle_minutes,
-                        activity.last_at,
-                    ) {
-                        due(deadline);
-                    }
-                }
+            }
+            if let Some(at) = server.reclaim_wake_deadline(&s, now()) {
+                due(at);
             }
             // Only queued work awaiting a scheduler slot needs retry admission.
             let retry_needed = canban_scheduler::next(&s, server.config().scheduler.max_agents)

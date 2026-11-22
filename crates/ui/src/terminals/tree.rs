@@ -483,9 +483,10 @@ fn row(
         } else {
             crate::hosts::host_name(ui, &e.host_id)
         };
-        let hint = super::labels::sidebar_hint(&e, &host_label);
+        let hint = super::labels::sidebar_hint(&e, &host_label, ui.idle_minutes.get());
         let row_title = super::labels::sidebar_row_title(&e, in_own_card_worktree);
         let lead_icon = super::labels::sidebar_meta_icon(&e);
+        let managed = e.is_managed();
         let wide_row = ui.terminal_width.get() >= 230.;
         let host_badge = (wide_row && !host_in_scope_header)
             .then(|| super::labels::sidebar_host_badge(&e, &host_label))
@@ -509,10 +510,14 @@ fn row(
                     } else {
                         FontWeight::MEDIUM
                     })
-                    .flex_1()
+                    .flex_shrink(1.)
                     .min_w(px(0.))
                     .truncate(),
             );
+        if managed {
+            line = line.child(super::labels::managed_badge());
+        }
+        line = line.child(view().flex_1().min_w(px(0.)));
         if !hovered.get() {
             if let Some(host) = host_badge {
                 line = line.child(

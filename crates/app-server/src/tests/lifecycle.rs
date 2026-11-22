@@ -166,13 +166,10 @@ fn idle_reclamation_covers_all_inactive_managed_agents_including_manual_exit_pro
         now(),
         false
     ));
-    assert!(idle_candidate(
-        &s,
-        entry.agent.as_ref().unwrap(),
-        15,
-        now(),
-        true
-    ));
+    assert!(
+        !idle_candidate(&s, entry.agent.as_ref().unwrap(), 15, now(), true),
+        "Active viewer presence lease must block idle reclamation"
+    );
     entry.agent.as_mut().unwrap().lifecycle.last_interaction_at = Some(now());
     s.terminals = vec![entry.clone()];
     assert!(!idle_candidate(
@@ -1134,40 +1131,27 @@ for line in sys.stdin:
         );
     }
 
-    // Also verify `observe_lifecycle` clears `idle_since` when transitioning to `working`,
-    // then re-arms a fresh 30s window on the next `done` transition and closes cleanly once elapsed.
+    // Herdr observing `working` -> `done` after completion is treated as a manual
+    // follow-up: clears `idle_since`, sets `interactive_followup`, waits full `idle_minutes`
+    // (15m) instead of 30s, then enters `closing` with `close_reason == "idle"`.
     app.observe_lifecycle(
         &app.snapshot().unwrap().terminals[0],
         &json!({"state": "live", "status": {"state": "working"}, "turn": 2}),
     )
     .unwrap();
-    assert!(
-        app.snapshot().unwrap().terminals[0]
-            .agent
-            .as_ref()
-            .unwrap()
-            .lifecycle
-            .idle_since
-            .is_none()
-    );
+    {
+        let after_work = app.snapshot().unwrap();
+        let a = after_work.terminals[0].agent.as_ref().unwrap();
+        assert!(a.lifecycle.idle_since.is_none());
+        assert!(a.lifecycle.interactive_followup);
+    }
     app.observe_lifecycle(
         &app.snapshot().unwrap().terminals[0],
         &json!({"state": "live", "status": {"state": "done"}, "turn": 2}),
     )
     .unwrap();
     std::fs::write(dir.path().join("mode.txt"), "done").unwrap();
-    // Freshly re-entered `done` (< 30s) is not reclaimed yet.
-    app.close_idle(&client).unwrap();
-    assert_eq!(
-        app.snapshot().unwrap().terminals[0]
-            .agent
-            .as_ref()
-            .unwrap()
-            .close_state,
-        ""
-    );
-
-    // Once 30s elapse in `done`, `close_idle` dispatches normal exit and enters `closing`.
+    // 31s in `done` is NOT reclaimed because interactive follow-up switched cooldown to 15m.
     app.store
         .lock()
         .unwrap()
@@ -1178,9 +1162,454 @@ for line in sys.stdin:
         })
         .unwrap();
     app.close_idle(&client).unwrap();
+    assert_eq!(
+        app.snapshot().unwrap().terminals[0]
+            .agent
+            .as_ref()
+            .unwrap()
+            .close_state,
+        ""
+    );
+
+    // Once full `idle_minutes` (15m+) elapses in `done`, `close_idle` dispatches exit and enters `closing`.
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut cur: TerminalEntry = db.get(&entry.id)?;
+            let past = now().saturating_sub(16 * 60_000);
+            let a = cur.agent.as_mut().unwrap();
+            a.completed_at = Some(past);
+            a.lifecycle.idle_since = Some(past);
+            db.save(&cur)
+        })
+        .unwrap();
+    app.close_idle(&client).unwrap();
     let final_snap = app.snapshot().unwrap();
     let final_run = final_snap.terminals[0].agent.as_ref().unwrap();
     assert_eq!(final_run.close_state, "closing");
     assert_eq!(final_run.lifecycle.close_reason, "idle");
     assert!(final_run.error.is_none());
+}
+
+#[test]
+fn viewer_presence_protects_card_and_terminal_without_db_writes_and_drives_reclaim_warning() {
+    let (_d, app, _p, c) = setup();
+    app.call(
+        "agent.open",
+        json!({"card_id": c.id, "profile_id": "codex"}),
+    )
+    .unwrap();
+    let req = app.snapshot().unwrap().terminals[0].clone();
+    let mut entry = admit(&app, &req);
+    observed(&mut entry, "done");
+    let t0 = now();
+    {
+        let run = entry.agent.as_mut().unwrap();
+        run.state = "completed".into();
+        run.trigger = ExecutionTrigger::StageEntry;
+        run.completed_at = Some(t0.saturating_sub(60_000));
+        run.lifecycle.idle_since = Some(t0.saturating_sub(60_000));
+        run.lifecycle.observed_at = Some(t0);
+        run.core_id = Some("local-core".into());
+        run.terminal = Some("pty-presence".into());
+    }
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| db.save(&entry))
+        .unwrap();
+
+    // Active Card presence (even with terminal pane collapsed: terminal_id = None)
+    // protects the Card's managed terminal with zero SQLite writes and no state_revision bump
+    // on steady heartbeats.
+    let db_changes_before = app.store.lock().unwrap().db().conn.total_changes();
+    let rev_before = app.state_revision.load(std::sync::atomic::Ordering::SeqCst);
+    app.call(
+        "viewer.presence",
+        json!({"client_id": "win-1", "card_id": c.id, "terminal_id": null}),
+    )
+    .unwrap();
+    let rev_after_first = app.state_revision.load(std::sync::atomic::Ordering::SeqCst);
+    app.call(
+        "viewer.presence",
+        json!({"client_id": "win-1", "card_id": c.id, "terminal_id": null}),
+    )
+    .unwrap();
+    assert_eq!(
+        app.store.lock().unwrap().db().conn.total_changes(),
+        db_changes_before,
+        "viewer.presence must remain strictly in-memory with zero SQLite writes"
+    );
+    assert_eq!(
+        app.state_revision.load(std::sync::atomic::Ordering::SeqCst),
+        rev_after_first,
+        "Steady heartbeat must not bump state_revision or trigger sync broadcasts"
+    );
+    let _ = rev_before;
+
+    let snap = app.snapshot().unwrap();
+    let rs_paused = snap.reclaim_status_for(&entry.id).unwrap();
+    assert!(rs_paused.paused);
+    assert!(!rs_paused.reclaiming_soon);
+    assert!(rs_paused.deadline_at.is_none());
+
+    // Clearing presence removes active pause and arms a fresh 30s post-view grace window.
+    app.call(
+        "viewer.presence",
+        json!({"client_id": "win-1", "card_id": null, "terminal_id": null}),
+    )
+    .unwrap();
+    let client = canban_herdr::Client {
+        config: app.config(),
+    };
+    app.close_idle(&client).unwrap();
+    let after_clear = app.snapshot().unwrap();
+    assert_eq!(
+        after_clear.terminals[0].agent.as_ref().unwrap().close_state,
+        "",
+        "Leaving a viewed managed terminal must anchor a fresh 30s grace window instead of immediate reclaim"
+    );
+    let rs_grace = after_clear.reclaim_status_for(&entry.id).unwrap();
+    assert!(!rs_grace.paused);
+    assert!(!rs_grace.reclaiming_soon);
+    assert!(rs_grace.deadline_at.is_some());
+
+    // Deterministic lease TTL (25s), post-view grace (30s), warning window (15s), focus reset,
+    // and overdue wakeup backoff (5s). Advance past `t0` so prior `win-1` view timestamps never shadow `base`.
+    let base = t0 + 1_000_000;
+    let mut det_entry = entry.clone();
+    det_entry.agent.as_mut().unwrap().completed_at = Some(base - 120_000);
+    det_entry.agent.as_mut().unwrap().lifecycle.idle_since = Some(base - 120_000);
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| db.save(&det_entry))
+        .unwrap();
+    let det_snap = app.snapshot().unwrap();
+    app.presence
+        .update("det-win".into(), None, Some(entry.id.clone()), base);
+
+    let at_24s = base + crate::presence::PRESENCE_LEASE_TTL_MS - 1;
+    let s_24 = app.compute_reclaim_status(&det_snap, at_24s);
+    assert!(s_24[0].paused);
+    assert!(!s_24[0].reclaiming_soon);
+
+    let expires_at = base + crate::presence::PRESENCE_LEASE_TTL_MS;
+    let s_exp = app.compute_reclaim_status(&det_snap, expires_at);
+    assert!(!s_exp[0].paused);
+    assert!(!s_exp[0].reclaiming_soon);
+    assert_eq!(
+        s_exp[0].deadline_at,
+        Some(expires_at + COMPLETED_IDLE_RECLAIM_MS)
+    );
+
+    // 14s after expiry: still 16s left (> 15s short warning window) -> not warning yet.
+    let s_14 = app.compute_reclaim_status(&det_snap, expires_at + 14_000);
+    assert!(!s_14[0].reclaiming_soon);
+
+    // 15s after expiry: enters final 15s -> `reclaiming_soon == true`.
+    let s_15 = app.compute_reclaim_status(&det_snap, expires_at + 15_000);
+    assert!(s_15[0].reclaiming_soon);
+
+    // Focusing / selecting the terminal again immediately clears `reclaiming_soon`.
+    app.presence.update(
+        "det-win".into(),
+        None,
+        Some(entry.id.clone()),
+        expires_at + 16_000,
+    );
+    let s_refocus = app.compute_reclaim_status(&det_snap, expires_at + 16_000);
+    assert!(s_refocus[0].paused);
+    assert!(!s_refocus[0].reclaiming_soon);
+
+    // Clear lease and inspect wake deadlines before warning, before reclaim, and when overdue.
+    app.presence
+        .update("det-win".into(), None, None, expires_at + 16_000);
+    let deadline = expires_at + 16_000 + COMPLETED_IDLE_RECLAIM_MS;
+    let warn_at = deadline - crate::lifecycle::reclaim_warning_window_ms(COMPLETED_IDLE_RECLAIM_MS);
+    assert_eq!(
+        app.reclaim_wake_deadline(&det_snap, expires_at + 16_000),
+        Some(warn_at + 1)
+    );
+    assert_eq!(
+        app.reclaim_wake_deadline(&det_snap, warn_at),
+        Some(deadline + 1)
+    );
+    assert_eq!(
+        app.reclaim_wake_deadline(&det_snap, deadline + 1_234),
+        Some(deadline + 1_234 + 5_000),
+        "Overdue runtime wakeup must back off instead of 1ms busy-spinning"
+    );
+
+    // Multi-minute (`15m`) follow-up session uses 30s warning window, not 15s.
+    let mut long_entry = det_entry.clone();
+    long_entry
+        .agent
+        .as_mut()
+        .unwrap()
+        .lifecycle
+        .interactive_followup = true;
+    long_entry.agent.as_mut().unwrap().lifecycle.idle_since = Some(base);
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| db.save(&long_entry))
+        .unwrap();
+    let long_snap = app.snapshot().unwrap();
+    let long_deadline =
+        idle_reclaim_deadline(long_entry.agent.as_ref().unwrap(), 15, expires_at + 16_000).unwrap();
+    assert!(!app.compute_reclaim_status(&long_snap, long_deadline - 31_000)[0].reclaiming_soon);
+    assert!(app.compute_reclaim_status(&long_snap, long_deadline - 30_000)[0].reclaiming_soon);
+}
+
+#[test]
+fn herdr_followup_detection_ignores_mere_pty_touch_and_preserves_card_stage() {
+    let (_d, app, _p, c) = setup();
+    app.call(
+        "card.move",
+        json!({"view":"full","card_id":c.id,"revision":1,"stage":"develop"}),
+    )
+    .unwrap();
+    let req = app.snapshot().unwrap().terminals[0].clone();
+    let mut entry = admit(&app, &req);
+    let t0 = now();
+    {
+        let run = entry.agent.as_mut().unwrap();
+        run.state = "completed".into();
+        run.completed_at = Some(t0.saturating_sub(5_000));
+        run.completion_turn = Some(2);
+        run.observed = Some(json!({"state":"live","turn":2,"status":{"state":"done"}}));
+        run.connection_state = "connected".into();
+        run.lifecycle.observed_at = Some(t0);
+        run.lifecycle.idle_since = Some(t0.saturating_sub(5_000));
+        // Mere PTY interaction timestamp without Herdr status/turn change must NOT switch cooldown.
+        run.lifecycle.last_interaction_at = Some(t0);
+    }
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| db.save(&entry))
+        .unwrap();
+    assert!(!crate::lifecycle::is_interactive_followup(
+        entry.agent.as_ref().unwrap()
+    ));
+    assert_eq!(
+        crate::lifecycle::idle_reclaim_delay_ms(entry.agent.as_ref().unwrap(), 15),
+        Some(COMPLETED_IDLE_RECLAIM_MS)
+    );
+
+    // Herdr reporting a new turn (`turn: 3 > completion_turn: 2`) marks `interactive_followup`
+    // and keeps the completed Card in `develop` without re-triggering workflow transitions.
+    app.observe_lifecycle(
+        &app.snapshot().unwrap().terminals[0],
+        &json!({"state":"live","turn":3,"status":{"state":"done"}}),
+    )
+    .unwrap();
+    let after = app.snapshot().unwrap();
+    let card_after = after.cards.iter().find(|card| card.id == c.id).unwrap();
+    assert_eq!(card_after.stage, "develop");
+    let run_after = after.terminals[0].agent.as_ref().unwrap();
+    assert!(crate::lifecycle::is_interactive_followup(run_after));
+    assert_eq!(
+        crate::lifecycle::idle_reclaim_delay_ms(run_after, 15),
+        Some(15 * 60_000)
+    );
+}
+
+#[test]
+fn cardless_scheduled_presence_grace_and_followup_cooldown_preserve_run_state() {
+    let (dir, app, project, _c) = setup();
+    let hc_script = dir.path().join("sched-reclaim-hc");
+    std::fs::write(
+        &hc_script,
+        r#"#!/usr/bin/python3
+import sys, json, os
+base = os.path.dirname(__file__)
+for line in sys.stdin:
+    req = json.loads(line)
+    m = req['method']
+    params = req.get('params', {})
+    if m == 'hello':
+        res = {'generation': 1}
+    elif m == 'server.status':
+        res = {'core': {'id': 'core-sched'}}
+    elif m == 'terminal.send':
+        with open(base + '/sends.jsonl', 'a') as f:
+            f.write(json.dumps(params) + '\n')
+        res = {'started': True}
+    elif m == 'terminal.kill':
+        res = {'sent': True}
+    else:
+        res = {'ok': True}
+    print(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': res}), flush=True)
+"#,
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&hc_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    {
+        let mut cfg = app.config.write().unwrap();
+        cfg.hc = hc_script.to_string_lossy().into_owned();
+        if let Some(p) = cfg.profiles.iter_mut().find(|p| p.id == "codex") {
+            p.exit = Some(ExitAction::Input {
+                text: "/exit".into(),
+            });
+        }
+    }
+
+    let sched_id = format!("scheduled:{}:r99", project.id);
+    let t0 = now();
+    let run = ScheduledRun {
+        id: sched_id.clone(),
+        schedule_id: "sched-1".into(),
+        project_id: project.id.clone(),
+        workflow_id: "wf-sched".into(),
+        workflow_name: "Nightly".into(),
+        filename: "nightly.yaml".into(),
+        rule_id: "schedule".into(),
+        cron: "0 * * * *".into(),
+        number: 99,
+        trigger_kind: "manual".into(),
+        creates_card: false,
+        card_id: None,
+        card_number: None,
+        workflow_run_id: None,
+        start_step: Some("audit".into()),
+        current_step: Some("audit".into()),
+        profile_id: Some("codex".into()),
+        provider_session_id: None,
+        terminal_id: Some(sched_id.clone()),
+        cwd: project.directory.clone(),
+        state: "completed".into(),
+        summary: Some("Done".into()),
+        report_path: None,
+        output_path: Some("done.log".into()),
+        error: None,
+        steps: Vec::new(),
+        scheduled_at: t0.saturating_sub(60_000),
+        started_at: Some(t0.saturating_sub(60_000)),
+        completed_at: Some(t0.saturating_sub(20_000)),
+        close_requested_at: None,
+        updated_at: t0,
+    };
+    let entry = TerminalEntry {
+        id: sched_id.clone(),
+        conversation_id: None,
+        number: 1,
+        name: Some("Nightly #99".into()),
+        origin_project_id: Some(project.id),
+        origin_card_id: None,
+        agent_engine: Some("codex".into()),
+        runtime: Some(TerminalRuntime {
+            core_id: Some("core-sched".into()),
+            terminal: Some("pty-sched".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: Some("done".into()),
+            agent_turn: Some(1),
+            observed_agent: None,
+            waiting: None,
+        }),
+        agent: None,
+        created_at: t0.saturating_sub(60_000),
+    };
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            db.save(&run)?;
+            db.save(&entry)
+        })
+        .unwrap();
+
+    // 1. Viewing the cardless scheduled terminal protects it from auto-reclaim.
+    app.call(
+        "viewer.presence",
+        json!({"client_id": "win-1", "card_id": null, "terminal_id": sched_id}),
+    )
+    .unwrap();
+    app.pump_schedules().unwrap();
+    let s1 = app.snapshot().unwrap();
+    assert!(s1.scheduled_runs[0].close_requested_at.is_none());
+    assert!(s1.reclaim_status_for(&sched_id).unwrap().paused);
+
+    // 2. Manual follow-up observed by Herdr (`working`, turn 2) clears idle and marks
+    //    `interactive_followup` without mutating `ScheduledRun.state == "completed"`.
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut e: TerminalEntry = db.get(&sched_id)?;
+            let rt = e.runtime.as_mut().unwrap();
+            rt.agent_status = Some("working".into());
+            rt.agent_turn = Some(2);
+            db.save(&e)
+        })
+        .unwrap();
+    app.pump_schedules().unwrap();
+    let s2 = app.snapshot().unwrap();
+    assert_eq!(s2.scheduled_runs[0].state, "completed");
+    assert!(
+        s2.reclaim_status_for(&sched_id)
+            .unwrap()
+            .interactive_followup
+    );
+
+    // 3. Settling back to `done` and leaving the terminal must NOT immediately reclaim
+    //    (must honor interactive `idle_minutes = 15m`, and shows 15m deadline once unviewed).
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut e: TerminalEntry = db.get(&sched_id)?;
+            e.runtime.as_mut().unwrap().agent_status = Some("done".into());
+            db.save(&e)
+        })
+        .unwrap();
+    app.call(
+        "viewer.presence",
+        json!({"client_id": "win-1", "card_id": null, "terminal_id": null}),
+    )
+    .unwrap();
+    app.pump_schedules().unwrap();
+    let s3 = app.snapshot().unwrap();
+    assert!(s3.scheduled_runs[0].close_requested_at.is_none());
+    assert_eq!(s3.scheduled_runs[0].state, "completed");
+    let rs3 = s3.reclaim_status_for(&sched_id).unwrap();
+    assert!(rs3.interactive_followup);
+    assert!(rs3.deadline_at.is_some_and(|d| d > now() + 10 * 60_000));
+
+    // 4. Direct completion without prior view/follow-up reclaims cleanly with `rt.state == "closing"`
+    //    and `auto_reclaiming == true`.
+    app.presence.remove_scheduled_track(&sched_id);
+    // Use a fresh unviewed scheduled run to verify immediate unviewed reclaim path cleanly.
+    let sched2 = format!("{}2", sched_id);
+    let mut run2 = run.clone();
+    run2.id = sched2.clone();
+    run2.terminal_id = Some(sched2.clone());
+    let mut entry2 = entry.clone();
+    entry2.id = sched2.clone();
+    entry2.number = 2;
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            db.save(&run2)?;
+            db.save(&entry2)
+        })
+        .unwrap();
+    app.pump_schedules().unwrap();
+    let s4 = app.snapshot().unwrap();
+    let rt2 = s4
+        .terminals
+        .iter()
+        .find(|t| t.id == sched2)
+        .unwrap()
+        .runtime
+        .as_ref()
+        .unwrap();
+    assert_eq!(rt2.state, "closing");
+    assert!(s4.reclaim_status_for(&sched2).unwrap().auto_reclaiming);
 }

@@ -477,6 +477,15 @@ impl Snapshot {
         self.conversations.extend(remote.conversations);
         self.questions.extend(remote.questions);
         self.note_events.extend(remote.note_events);
+        for status in remote.reclaim_status {
+            if !self
+                .reclaim_status
+                .iter()
+                .any(|existing| existing.terminal_id == status.terminal_id)
+            {
+                self.reclaim_status.push(status);
+            }
+        }
         self.pending_sync.extend(remote.pending_sync);
     }
 

@@ -13,6 +13,7 @@ pub struct Entry {
     pub inferred_card: bool,
     pub location: Option<TerminalContext>,
     pub stage: Option<String>,
+    pub reclaim: Option<TerminalReclaimStatus>,
 }
 impl Entry {
     /// Automatic title is presentation only; provider/session keys never change.
@@ -59,6 +60,105 @@ impl Entry {
     pub fn herdr_status(&self) -> HerdrStatus {
         self.saved.herdr_status()
     }
+    pub fn managed_kind(&self) -> Option<ManagedTerminalKind> {
+        if self.agent.is_some() {
+            Some(ManagedTerminalKind::Agent)
+        } else {
+            self.saved.managed_kind()
+        }
+    }
+    pub fn is_managed(&self) -> bool {
+        self.managed_kind().is_some()
+    }
+    pub fn is_reclaim_paused(&self) -> bool {
+        self.reclaim.as_ref().is_some_and(|r| r.paused)
+    }
+    pub fn is_auto_reclaiming(&self) -> bool {
+        if self.ended() {
+            return false;
+        }
+        if self.reclaim.as_ref().is_some_and(|r| r.auto_reclaiming) {
+            return true;
+        }
+        self.agent
+            .as_ref()
+            .and_then(|r| r.agent())
+            .or(self.saved.agent.as_ref())
+            .is_some_and(|a| a.close_state == "closing" && a.lifecycle.close_reason == "idle")
+    }
+    pub fn is_reclaiming_soon(&self) -> bool {
+        !self.ended()
+            && !self.is_auto_reclaiming()
+            && self.reclaim.as_ref().is_some_and(|r| r.reclaiming_soon)
+    }
+    pub fn is_interactive_followup(&self) -> bool {
+        self.reclaim
+            .as_ref()
+            .is_some_and(|r| r.interactive_followup)
+            || self
+                .agent
+                .as_ref()
+                .and_then(|r| r.agent())
+                .or(self.saved.agent.as_ref())
+                .is_some_and(|a| a.lifecycle.interactive_followup)
+    }
+    pub fn canvas_notice_status(&self) -> &'static str {
+        if self.is_reclaiming_soon() {
+            "Reclaiming soon · Focus or type to keep open"
+        } else {
+            ""
+        }
+    }
+    pub fn lifecycle_policy_summary(&self, idle_minutes: u64) -> String {
+        match self.managed_kind() {
+            None => "Manual terminal · Never auto-reclaimed".into(),
+            Some(ManagedTerminalKind::Configuration) => {
+                "Managed by Canban · Stays open until closed".into()
+            }
+            Some(ManagedTerminalKind::MergeQueue) => {
+                "Managed by Canban · Auto-reclaims after merge batch finishes".into()
+            }
+            Some(ManagedTerminalKind::Scheduled) => {
+                if self.is_auto_reclaiming() {
+                    "Managed by Canban · Auto-reclaiming idle session".into()
+                } else if self.is_reclaiming_soon() {
+                    "Managed by Canban · Reclaiming soon — focus or type to keep open".into()
+                } else if self.is_reclaim_paused() {
+                    "Managed by Canban · Auto-reclaim paused while open".into()
+                } else if self.is_interactive_followup() {
+                    if idle_minutes == 0 {
+                        "Managed by Canban · Auto-reclaim disabled".into()
+                    } else {
+                        format!("Managed by Canban · Auto-reclaims after {idle_minutes}m idle")
+                    }
+                } else {
+                    "Managed by Canban · Auto-reclaims after completion".into()
+                }
+            }
+            Some(ManagedTerminalKind::Agent) => {
+                if self.is_auto_reclaiming() {
+                    "Managed by Canban · Auto-reclaiming idle session".into()
+                } else if self.is_reclaiming_soon() {
+                    "Managed by Canban · Reclaiming soon — focus or type to keep open".into()
+                } else if self.is_reclaim_paused() {
+                    "Managed by Canban · Auto-reclaim paused while open".into()
+                } else if idle_minutes == 0 {
+                    "Managed by Canban · Auto-reclaim disabled".into()
+                } else if self
+                    .agent
+                    .as_ref()
+                    .and_then(|r| r.agent())
+                    .or(self.saved.agent.as_ref())
+                    .is_some_and(|a| matches!(a.state.as_str(), "completed" | "backlog"))
+                    && !self.is_interactive_followup()
+                {
+                    "Managed by Canban · Auto-reclaims 30s after completion (history & Resume saved on Card)".into()
+                } else {
+                    format!("Managed by Canban · Auto-reclaims after {idle_minutes}m idle")
+                }
+            }
+        }
+    }
     pub fn runtime_wait(&self) -> Option<&RuntimeWait> {
         self.saved.runtime_wait()
     }
@@ -69,6 +169,12 @@ impl Entry {
     pub fn display_status(&self) -> String {
         if self.ended() {
             return "Ended".into();
+        }
+        if self.is_auto_reclaiming() {
+            return "Auto-reclaiming…".into();
+        }
+        if self.is_reclaiming_soon() {
+            return "Reclaiming soon".into();
         }
         if let Some(reason) = self
             .binding()
@@ -317,7 +423,11 @@ impl Entry {
         let r = self.saved.runtime.as_ref()?;
         (r.state != "finished").then_some(())?;
         let input_status = if r.state == "closing" {
-            "Closing"
+            if self.is_auto_reclaiming() {
+                "Auto-reclaiming…"
+            } else {
+                "Closing"
+            }
         } else if r.connection == "connecting" {
             "Connecting"
         } else if r.connection != "connected" {
@@ -333,12 +443,19 @@ impl Entry {
         self.location.as_ref()?.cwd.clone()
     }
     pub fn hint(&self) -> String {
+        self.hint_with_policy(canban_types::default_idle_minutes())
+    }
+    pub fn hint_with_policy(&self, idle_minutes: u64) -> String {
         let context = self
             .card
             .as_ref()
             .map(|c| format!("#{} {}", c.number, c.title))
             .unwrap_or_else(|| self.project_name.clone());
-        let mut lines = vec![self.title(), format!("Project: {}", self.project_name)];
+        let mut lines = vec![
+            self.title(),
+            self.lifecycle_policy_summary(idle_minutes),
+            format!("Project: {}", self.project_name),
+        ];
         if self.agent.is_some() {
             if lines[0] != context {
                 lines.push(context);
@@ -571,6 +688,7 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
             inferred_card,
             location,
             stage,
+            reclaim: s.reclaim_status_for(&t.id).cloned(),
             saved: t,
             agent,
         });

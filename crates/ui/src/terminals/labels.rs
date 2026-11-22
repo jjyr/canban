@@ -2,9 +2,59 @@
 use super::*;
 
 /// Leading icon for a Terminal sidebar row: Agent brand mark when present,
-/// otherwise the generic `Icon::Terminal` mark.
+/// `Icon::Agent` for managed sessions without a brand mark, otherwise `Icon::Terminal`.
 pub fn sidebar_meta_icon(e: &Entry) -> Icon {
-    e.provider().map(|(mark, _)| mark).unwrap_or(Icon::Terminal)
+    e.provider()
+        .map(|(mark, _)| mark)
+        .unwrap_or(if e.is_managed() {
+            Icon::Agent
+        } else {
+            Icon::Terminal
+        })
+}
+
+/// Compact bot badge distinguishing Canban-managed terminals from user-created manual terminals.
+pub fn managed_badge() -> View {
+    view()
+        .w(px(16.))
+        .h(px(16.))
+        .rounded(px(4.))
+        .bg(HIGHLIGHT_SURFACE)
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .pointer_events(PointerEvents::None)
+        .child(icon_tinted(Icon::Agent, HIGHLIGHT).w(px(10.)).h(px(10.)))
+}
+
+/// Calm static pre-reclaim / active auto-reclaim indicator pill for Terminal tabs.
+pub fn tab_reclaim_badge(e: &Entry) -> Option<View> {
+    let (label_text, bg, fg) = if e.is_auto_reclaiming() {
+        ("Auto-reclaiming…", INSET, MUTED)
+    } else if e.is_reclaiming_soon() {
+        ("Reclaiming soon", ATTENTION_SURFACE, ATTENTION)
+    } else {
+        return None;
+    };
+    Some(
+        view()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_1p5()
+            .py(px(1.))
+            .rounded(px(4.))
+            .bg(bg)
+            .flex_shrink_0()
+            .pointer_events(PointerEvents::None)
+            .child(icon_tinted(Icon::Clock, fg).w(px(10.)).h(px(10.)))
+            .child(
+                text(label_text)
+                    .text_size(px(10.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(fg),
+            ),
+    )
 }
 
 /// Single-line title for compact 30px Terminal sidebar rows:
@@ -194,8 +244,12 @@ pub fn group_summary_badge(summary: GroupStatusSummary) -> Option<View> {
     Some(row)
 }
 
-pub fn sidebar_hint(e: &Entry, machine: &str) -> String {
-    let mut lines = vec![e.title(), format!("Project: {}", e.project_name)];
+pub fn sidebar_hint(e: &Entry, machine: &str, idle_minutes: u64) -> String {
+    let mut lines = vec![
+        e.title(),
+        e.lifecycle_policy_summary(idle_minutes),
+        format!("Project: {}", e.project_name),
+    ];
     if let Some(profile) = e.profile() {
         lines.push(format!(
             "{} · {} · @{profile}",
@@ -221,6 +275,24 @@ pub fn sidebar_hint(e: &Entry, machine: &str) -> String {
 /// Compact leading Herdr status mark for Terminal sidebar rows and top/Card tab strips.
 pub fn status_mark(e: &Entry) -> Option<AnyElement> {
     use canban_types::HerdrStatus;
+    if e.is_auto_reclaiming() {
+        return Some(
+            icon_tinted(Icon::Clock, MUTED)
+                .w(px(12.))
+                .h(px(12.))
+                .flex_shrink_0()
+                .into_element(),
+        );
+    }
+    if e.is_reclaiming_soon() {
+        return Some(
+            icon_tinted(Icon::Clock, ATTENTION)
+                .w(px(12.))
+                .h(px(12.))
+                .flex_shrink_0()
+                .into_element(),
+        );
+    }
     match e.herdr_status() {
         HerdrStatus::PlainShell | HerdrStatus::Ended => None,
         HerdrStatus::Working => Some(live_dot(ACCENT).into_element()),
@@ -302,30 +374,36 @@ pub fn status_mark(e: &Entry) -> Option<AnyElement> {
 
 fn sidebar_status_label_raw(e: &Entry) -> Option<AnyElement> {
     use canban_types::HerdrStatus;
-    let st = e.herdr_status();
-    let (word, color) = match st {
-        HerdrStatus::PlainShell | HerdrStatus::Ended => return None,
-        HerdrStatus::Working => ("Working", ACCENT),
-        HerdrStatus::Starting => ("Starting", MUTED),
-        HerdrStatus::Queued => ("Queued", MUTED),
-        HerdrStatus::Closing => ("Closing", MUTED),
-        HerdrStatus::Blocked => ("Blocked", ATTENTION),
-        HerdrStatus::Done => {
-            if e.needs_attention() {
-                ("Needs you", ATTENTION)
-            } else {
-                ("Done", SUCCESS)
+    let (word, color) = if e.is_auto_reclaiming() {
+        ("Auto-reclaiming…", MUTED)
+    } else if e.is_reclaiming_soon() {
+        ("Reclaiming soon", ATTENTION)
+    } else {
+        let st = e.herdr_status();
+        match st {
+            HerdrStatus::PlainShell | HerdrStatus::Ended => return None,
+            HerdrStatus::Working => ("Working", ACCENT),
+            HerdrStatus::Starting => ("Starting", MUTED),
+            HerdrStatus::Queued => ("Queued", MUTED),
+            HerdrStatus::Closing => ("Closing", MUTED),
+            HerdrStatus::Blocked => ("Blocked", ATTENTION),
+            HerdrStatus::Done => {
+                if e.needs_attention() {
+                    ("Needs you", ATTENTION)
+                } else {
+                    ("Done", SUCCESS)
+                }
             }
-        }
-        HerdrStatus::Idle => {
-            if e.needs_attention() {
-                ("Needs you", ATTENTION)
-            } else {
-                ("Idle", MUTED)
+            HerdrStatus::Idle => {
+                if e.needs_attention() {
+                    ("Needs you", ATTENTION)
+                } else {
+                    ("Idle", MUTED)
+                }
             }
+            HerdrStatus::Error => ("Error", DANGER),
+            HerdrStatus::Disconnected => ("Offline", DANGER),
         }
-        HerdrStatus::Error => ("Error", DANGER),
-        HerdrStatus::Disconnected => ("Offline", DANGER),
     };
     Some(
         text(word)
@@ -360,17 +438,28 @@ pub fn tab_label_text(e: &Entry, show_card_number: bool) -> String {
 
 pub fn has_status_mark(e: &Entry) -> bool {
     use canban_types::HerdrStatus;
-    !matches!(
-        e.herdr_status(),
-        HerdrStatus::PlainShell | HerdrStatus::Ended
-    )
+    e.is_auto_reclaiming()
+        || e.is_reclaiming_soon()
+        || !matches!(
+            e.herdr_status(),
+            HerdrStatus::PlainShell | HerdrStatus::Ended
+        )
 }
 
 pub fn tab_width(e: &Entry, show_card_number: bool) -> f32 {
     let label_w = text_width(&tab_label_text(e, show_card_number));
-    let status_extra = if has_status_mark(e) { 18. } else { 0. };
+    let reclaim_badge = e.is_reclaiming_soon() || e.is_auto_reclaiming();
+    let status_extra = if reclaim_badge {
+        108.
+    } else if has_status_mark(e) {
+        18.
+    } else {
+        0.
+    };
+    let managed_extra = if e.is_managed() { 20. } else { 0. };
     let icon_extra = if e.provider().is_some() { 20. } else { 0. };
-    (label_w + 68. + status_extra + icon_extra).clamp(112., 210.)
+    let max_w = if reclaim_badge { 296. } else { 226. };
+    (label_w + 68. + status_extra + managed_extra + icon_extra).clamp(112., max_w)
 }
 
 pub fn tab(e: &Entry, selected: bool, show_card_number: bool) -> View {
@@ -391,12 +480,19 @@ pub fn tab(e: &Entry, selected: bool, show_card_number: bool) -> View {
     if let Some((mark, _)) = e.provider() {
         row = row.child(icon(mark).w(px(14.)).h(px(14.)).flex_shrink_0());
     }
-    row.child(
+    row = row.child(
         label(label_text)
             .font_weight(weight)
             .text_color(title_color)
-            .flex_1()
+            .flex_shrink(1.)
             .min_w(px(0.))
             .truncate(),
-    )
+    );
+    if e.is_managed() {
+        row = row.child(managed_badge());
+    }
+    if let Some(badge) = tab_reclaim_badge(e) {
+        row = row.child(badge);
+    }
+    row.child(view().flex_1().min_w(px(0.)))
 }

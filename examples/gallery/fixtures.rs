@@ -4227,6 +4227,270 @@ pub fn large_board() -> canban_types::Snapshot {
     s
 }
 
+/// Terminal workspace fixture contrasting managed tabs (paused, reclaiming soon, auto-reclaiming,
+/// configuration, and cardless scheduled) against manual CLI and plain shell terminals.
+pub fn terminal_managed_reclaim() -> canban_types::Snapshot {
+    use canban_types::*;
+    let mut s = workspace();
+    let cfg = agent_config();
+    let dev_profile = cfg
+        .profiles
+        .iter()
+        .find(|p| p.id == "developer")
+        .unwrap()
+        .clone();
+    let rev_profile = cfg
+        .profiles
+        .iter()
+        .find(|p| p.id == "reviewer")
+        .cloned()
+        .unwrap_or_else(|| dev_profile.clone());
+
+    let mut paused_run = canban_scheduler::agent_run(
+        "gallery-project",
+        "card-2",
+        1,
+        "develop",
+        "stage_entry",
+        dev_profile.clone(),
+        "Implement managed terminal distinction.".into(),
+        None,
+    );
+    paused_run.state = "completed".into();
+    paused_run.core_id = Some("gallery".into());
+    paused_run.terminal = Some("managed-paused-pty".into());
+    paused_run.cwd = "/preview/worktrees/card-2".into();
+    paused_run.observed = Some(json!({"state": "live", "turn": 2, "status": {"state": "done"}}));
+    paused_run.connection_state = "connected".into();
+    paused_run.completed_at = Some(now().saturating_sub(45_000));
+    paused_run.lifecycle.idle_since = Some(now().saturating_sub(45_000));
+    paused_run.lifecycle.observed_at = Some(u64::MAX);
+    let paused_id = push_agent_terminal(&mut s, paused_run);
+
+    let mut soon_run = canban_scheduler::agent_run(
+        "gallery-project",
+        "card-3",
+        2,
+        "review",
+        "stage_entry",
+        rev_profile,
+        "Review terminal lifecycle changes.".into(),
+        None,
+    );
+    soon_run.state = "completed".into();
+    soon_run.core_id = Some("gallery".into());
+    soon_run.terminal = Some("managed-soon-pty".into());
+    soon_run.cwd = "/preview/worktrees/card-2".into();
+    soon_run.observed = Some(json!({"state": "live", "turn": 3, "status": {"state": "done"}}));
+    soon_run.connection_state = "connected".into();
+    soon_run.completed_at = Some(now().saturating_sub(22_000));
+    soon_run.lifecycle.idle_since = Some(now().saturating_sub(22_000));
+    soon_run.lifecycle.observed_at = Some(u64::MAX);
+    let soon_id = push_agent_terminal(&mut s, soon_run);
+
+    let mut closing_run = canban_scheduler::agent_run(
+        "gallery-project",
+        "card-1",
+        3,
+        "plan",
+        "stage_entry",
+        dev_profile,
+        "Planning draft complete.".into(),
+        None,
+    );
+    closing_run.state = "completed".into();
+    closing_run.core_id = Some("gallery".into());
+    closing_run.terminal = Some("managed-reclaiming-pty".into());
+    closing_run.cwd = "/preview/worktrees/card-2".into();
+    closing_run.close_state = "closing".into();
+    closing_run.close_requested_at = Some(now());
+    closing_run.lifecycle.close_reason = "idle".into();
+    closing_run.observed = Some(json!({"state": "live", "turn": 1, "status": {"state": "done"}}));
+    closing_run.connection_state = "connected".into();
+    closing_run.lifecycle.observed_at = Some(u64::MAX);
+    let closing_id = push_agent_terminal(&mut s, closing_run);
+
+    s.terminals.push(TerminalEntry {
+        id: "configuration:gallery-project:default:developer".into(),
+        conversation_id: None,
+        number: 10,
+        name: Some("Workflow Setup".into()),
+        origin_project_id: Some("gallery-project".into()),
+        origin_card_id: None,
+        agent_engine: Some("codex".into()),
+        runtime: Some(TerminalRuntime {
+            core_id: Some("gallery".into()),
+            terminal: Some("managed-config-pty".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: Some("idle".into()),
+            agent_turn: Some(1),
+            observed_agent: None,
+            waiting: None,
+        }),
+        agent: None,
+        created_at: now(),
+    });
+
+    let sched_id = "scheduled:gallery-project:run42".to_string();
+    s.terminals.push(TerminalEntry {
+        id: sched_id.clone(),
+        conversation_id: None,
+        number: 11,
+        name: Some("Nightly Audit #42".into()),
+        origin_project_id: Some("gallery-project".into()),
+        origin_card_id: None,
+        agent_engine: Some("codex".into()),
+        runtime: Some(TerminalRuntime {
+            core_id: Some("gallery".into()),
+            terminal: Some("managed-sched-pty".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: Some("done".into()),
+            agent_turn: Some(2),
+            observed_agent: None,
+            waiting: None,
+        }),
+        agent: None,
+        created_at: now(),
+    });
+    s.scheduled_runs.push(ScheduledRun {
+        id: sched_id.clone(),
+        schedule_id: "sched-audit".into(),
+        project_id: "gallery-project".into(),
+        workflow_id: "dependency-audit:gallery-project".into(),
+        workflow_name: "Nightly Dependency Audit".into(),
+        filename: "dependency-audit.yaml".into(),
+        rule_id: "schedule".into(),
+        cron: "0 2 * * *".into(),
+        number: 42,
+        trigger_kind: "manual".into(),
+        creates_card: false,
+        card_id: None,
+        card_number: None,
+        workflow_run_id: None,
+        start_step: Some("audit".into()),
+        current_step: Some("audit".into()),
+        profile_id: Some("developer".into()),
+        provider_session_id: None,
+        terminal_id: Some(sched_id.clone()),
+        cwd: "/preview/worktrees/card-2".into(),
+        state: "completed".into(),
+        summary: Some("Audit completed; interactive follow-up cooled down.".into()),
+        report_path: None,
+        output_path: None,
+        error: None,
+        steps: Vec::new(),
+        scheduled_at: now().saturating_sub(180_000),
+        started_at: Some(now().saturating_sub(180_000)),
+        completed_at: Some(now().saturating_sub(60_000)),
+        close_requested_at: None,
+        updated_at: now(),
+    });
+
+    s.terminals.push(TerminalEntry {
+        id: "manual-agy-1".into(),
+        conversation_id: None,
+        number: 12,
+        name: Some("Antigravity 1".into()),
+        origin_project_id: Some("gallery-project".into()),
+        origin_card_id: Some("card-2".into()),
+        agent_engine: Some("agy".into()),
+        runtime: Some(TerminalRuntime {
+            core_id: Some("gallery".into()),
+            terminal: Some("manual-agy-pty".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: Some("idle".into()),
+            agent_turn: Some(1),
+            observed_agent: None,
+            waiting: None,
+        }),
+        agent: None,
+        created_at: now(),
+    });
+    s.terminals.push(TerminalEntry {
+        id: "manual-shell-1".into(),
+        conversation_id: None,
+        number: 13,
+        name: Some("Terminal 1".into()),
+        origin_project_id: Some("gallery-project".into()),
+        origin_card_id: Some("card-2".into()),
+        agent_engine: None,
+        runtime: Some(TerminalRuntime {
+            core_id: Some("gallery".into()),
+            terminal: Some("manual-shell-pty".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: None,
+            agent_turn: None,
+            observed_agent: None,
+            waiting: None,
+        }),
+        agent: None,
+        created_at: now(),
+    });
+
+    s.terminal_contexts = vec![
+        paused_id.as_str(),
+        soon_id.as_str(),
+        closing_id.as_str(),
+        "manual-agy-1",
+        "manual-shell-1",
+    ]
+    .into_iter()
+    .map(|tid| TerminalContext {
+        terminal_id: tid.into(),
+        cwd: Some("/preview/worktrees/card-2".into()),
+        directory_root: Some("/preview/worktrees/card-2".into()),
+        branch: Some("canban/card-2".into()),
+        project_id: Some("gallery-project".into()),
+        card_id: Some("card-2".into()),
+        ..Default::default()
+    })
+    .collect();
+
+    s.reclaim_status = vec![
+        TerminalReclaimStatus {
+            terminal_id: paused_id,
+            paused: true,
+            reclaiming_soon: false,
+            auto_reclaiming: false,
+            interactive_followup: false,
+            deadline_at: None,
+        },
+        TerminalReclaimStatus {
+            terminal_id: soon_id,
+            paused: false,
+            reclaiming_soon: true,
+            auto_reclaiming: false,
+            interactive_followup: false,
+            deadline_at: Some(now().saturating_add(8_000)),
+        },
+        TerminalReclaimStatus {
+            terminal_id: closing_id,
+            paused: false,
+            reclaiming_soon: false,
+            auto_reclaiming: true,
+            interactive_followup: false,
+            deadline_at: None,
+        },
+        TerminalReclaimStatus {
+            terminal_id: sched_id,
+            paused: false,
+            reclaiming_soon: false,
+            auto_reclaiming: false,
+            interactive_followup: true,
+            deadline_at: Some(now().saturating_add(15 * 60_000)),
+        },
+    ];
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

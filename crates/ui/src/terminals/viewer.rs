@@ -77,12 +77,13 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                     b["terminal"].as_str().unwrap_or("").to_owned(),
                     b["read_only"] == true,
                     b["input_status"].as_str().unwrap_or("").to_owned(),
+                    e.canvas_notice_status().to_owned(),
                 ))
             })
     });
     let binding_key = computed(move || {
         target.with(|t| {
-            t.as_ref().map(|(entry_id, core_id, terminal, _, _)| {
+            t.as_ref().map(|(entry_id, core_id, terminal, _, _, _)| {
                 (entry_id.clone(), core_id.clone(), terminal.clone())
             })
         })
@@ -170,6 +171,24 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                         )),
                     )
                     .prop("read_only", json!(true))
+                    .prop("input_status", move || {
+                        target.with(|t| {
+                            json!(
+                                t.as_ref()
+                                    .map(|(_, _, _, _, status, _)| status.as_str())
+                                    .unwrap_or("")
+                            )
+                        })
+                    })
+                    .prop("notice_status", move || {
+                        target.with(|t| {
+                            json!(
+                                t.as_ref()
+                                    .map(|(_, _, _, _, _, notice)| notice.as_str())
+                                    .unwrap_or("")
+                            )
+                        })
+                    })
                     .w_full()
                     .flex_1()
                     .min_h(px(0.))
@@ -212,13 +231,22 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                         })
                     })
                     .prop("read_only", move || {
-                        target.with(|t| json!(t.as_ref().is_none_or(|(_, _, _, ro, _)| *ro)))
+                        target.with(|t| json!(t.as_ref().is_none_or(|(_, _, _, ro, _, _)| *ro)))
                     })
                     .prop("input_status", move || {
                         target.with(|t| {
                             json!(
                                 t.as_ref()
-                                    .map(|(_, _, _, _, status)| status.as_str())
+                                    .map(|(_, _, _, _, status, _)| status.as_str())
+                                    .unwrap_or("")
+                            )
+                        })
+                    })
+                    .prop("notice_status", move || {
+                        target.with(|t| {
+                            json!(
+                                t.as_ref()
+                                    .map(|(_, _, _, _, _, notice)| notice.as_str())
                                     .unwrap_or("")
                             )
                         })
@@ -252,7 +280,7 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                     && ui.project_delete_confirm.get().is_none(),
             };
             if !crate::backend::is_connected() {
-                return canban_terminal::linux::preview_terminal(
+                return canban_terminal::linux::preview_terminal_with_status(
                     concat!(
                         "\x1b[1;36mCanban native Terminal\x1b[0m · Gallery preview (no Core connection)\r\n",
                         "Styles: \x1b[1mBold\x1b[0m · \x1b[3mItalic\x1b[0m · \x1b[4:3;58;2;255;105;97mCurly underline\x1b[0m · 世界 · ░▒▓█\r\n",
@@ -261,6 +289,20 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                     crate::utilities::terminal_theme,
                     move || crate::utilities::terminal_font(ui),
                     focus_req,
+                    move || {
+                        target.with(|t| {
+                            t.as_ref()
+                                .map(|(_, _, _, _, status, _)| status.clone())
+                                .unwrap_or_default()
+                        })
+                    },
+                    move || {
+                        target.with(|t| {
+                            t.as_ref()
+                                .map(|(_, _, _, _, _, notice)| notice.clone())
+                                .unwrap_or_default()
+                        })
+                    },
                 )
                 .w_full()
                 .flex_1()
@@ -270,7 +312,7 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
             canban_terminal::linux::live_terminal(
                 move || {
                     target.with(|t| {
-                        t.as_ref().map(|(entry_id, core_id, terminal, _, _)| {
+                        t.as_ref().map(|(entry_id, core_id, terminal, _, _, _)| {
                             let host_id = ui
                                 .snapshot
                                 .with_untracked(|s| s.terminal_host(entry_id).to_owned());
@@ -285,11 +327,18 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                 crate::utilities::terminal_theme,
                 move || crate::utilities::terminal_font(ui),
                 focus_req,
-                move || target.with(|t| t.as_ref().is_none_or(|(_, _, _, ro, _)| *ro)),
+                move || target.with(|t| t.as_ref().is_none_or(|(_, _, _, ro, _, _)| *ro)),
                 move || {
                     target.with(|t| {
                         t.as_ref()
-                            .map(|(_, _, _, _, status)| status.clone())
+                            .map(|(_, _, _, _, status, _)| status.clone())
+                            .unwrap_or_default()
+                    })
+                },
+                move || {
+                    target.with(|t| {
+                        t.as_ref()
+                            .map(|(_, _, _, _, _, notice)| notice.clone())
                             .unwrap_or_default()
                     })
                 },

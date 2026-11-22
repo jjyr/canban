@@ -2197,6 +2197,19 @@ pub fn Gallery() -> impl IntoElement {
         ui.open_card_with_terminal("card-2".into(), None);
         return canban_ui::frame::screen(ui).into_element();
     }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("terminal-managed") {
+        canban_ui::frame::configure_window_chrome();
+        let snapshot = fixtures::terminal_managed_reclaim();
+        let soon_id = snapshot
+            .reclaim_status
+            .iter()
+            .find(|r| r.reclaiming_soon)
+            .map(|r| r.terminal_id.clone())
+            .unwrap_or_default();
+        ui.snapshot.set(snapshot);
+        ui.open_terminal(soon_id);
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("agent-setup") {
         ui.onboarded.set(false);
         ui.page.set("agent-setup".into());
@@ -2978,6 +2991,18 @@ pub fn Gallery() -> impl IntoElement {
                     }
                     ui.snapshot.set(snapshot);ui.terminal_tabs.set(Vec::new());ui.terminal_selection.set(String::new());
                     ui.navigate("terminals");scene.set("workspace".into());
+                }))
+                .child(action("Managed & Reclaim", Variant::Secondary, move |_| {
+                    let snapshot = fixtures::terminal_managed_reclaim();
+                    let soon_id = snapshot
+                        .reclaim_status
+                        .iter()
+                        .find(|r| r.reclaiming_soon)
+                        .map(|r| r.terminal_id.clone())
+                        .unwrap_or_default();
+                    ui.snapshot.set(snapshot);
+                    ui.open_terminal(soon_id);
+                    scene.set("workspace".into());
                 }))
                 .child(action("Quick Open", Variant::Secondary, move |_| {
                     scene.set("workspace".into());

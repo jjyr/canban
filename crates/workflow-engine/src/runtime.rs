@@ -487,6 +487,7 @@ pub fn start_adopted(
                             agent.close_requested_at = None;
                             agent.close_state.clear();
                             agent.lifecycle.close_reason.clear();
+                            agent.lifecycle.interactive_followup = false;
                         }
                         if agent.trigger.is_comment() {
                             agent.trigger = ExecutionTrigger::Interactive;

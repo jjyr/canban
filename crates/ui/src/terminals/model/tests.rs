@@ -4434,3 +4434,276 @@ fn compact_terminal_tabs_never_push_notifications_or_hosts_out_of_header_bounds(
         run_layout_probe(w, sidebar_open);
     }
 }
+
+#[test]
+fn managed_classification_policy_tooltips_and_reclaim_states_are_distinct() {
+    use nsh_core::{ApproxTextEngine, Core, geometry::size, prelude::*};
+
+    let mut s = fixture();
+    let cfg = Config::default();
+    let dev_profile = cfg.profiles[0].id.clone();
+
+    // Turn fixture terminal[0] into a completed un-followed-up managed Agent run.
+    let agent_id = s.terminals[0].id.clone();
+    {
+        let a = s.terminals[0].agent.as_mut().unwrap();
+        a.state = "completed".into();
+        a.observed = Some(json!({"state":"live","turn":2,"status":{"state":"done"}}));
+        a.connection_state = "connected".into();
+        a.lifecycle.observed_at = Some(now());
+    }
+
+    // Add configuration, merge-queue, cardless scheduled, manual CLI agent, and manual plain shell.
+    let make_entry =
+        |id: &str, engine: Option<&str>, status: Option<&str>, state: &str| TerminalEntry {
+            id: id.into(),
+            conversation_id: None,
+            number: 9,
+            name: Some(id.into()),
+            origin_project_id: Some("p1".into()),
+            origin_card_id: None,
+            agent_engine: engine.map(str::to_owned),
+            runtime: Some(TerminalRuntime {
+                core_id: Some("core-1".into()),
+                terminal: Some(format!("{id}-pty")),
+                state: state.into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: status.map(str::to_owned),
+                agent_turn: Some(1),
+                observed_agent: None,
+                waiting: None,
+            }),
+            agent: None,
+            created_at: now(),
+        };
+
+    let cfg_id = "configuration:p1:wf1:dev";
+    let mq_id = "merge-queue:b1";
+    let sched_id = "scheduled:p1:r1";
+    let manual_cli_id = "manual-agy";
+    let manual_shell_id = "manual-shell";
+
+    s.terminals
+        .push(make_entry(cfg_id, Some("codex"), Some("idle"), "running"));
+    s.terminals
+        .push(make_entry(mq_id, Some("codex"), Some("working"), "running"));
+    s.terminals
+        .push(make_entry(sched_id, Some("codex"), Some("idle"), "running"));
+    s.terminals.push(make_entry(
+        manual_cli_id,
+        Some("agy"),
+        Some("idle"),
+        "running",
+    ));
+    s.terminals
+        .push(make_entry(manual_shell_id, None, None, "running"));
+
+    let find = |s: &Snapshot, id: &str| {
+        super::super::entries(s)
+            .into_iter()
+            .find(|e| e.saved.id == id)
+            .unwrap()
+    };
+
+    // Classification
+    let e_agent = find(&s, &agent_id);
+    let e_cfg = find(&s, cfg_id);
+    let e_mq = find(&s, mq_id);
+    let e_sched = find(&s, sched_id);
+    let e_manual_cli = find(&s, manual_cli_id);
+    let e_manual_shell = find(&s, manual_shell_id);
+
+    assert_eq!(e_agent.managed_kind(), Some(ManagedTerminalKind::Agent));
+    assert_eq!(
+        e_cfg.managed_kind(),
+        Some(ManagedTerminalKind::Configuration)
+    );
+    assert_eq!(e_mq.managed_kind(), Some(ManagedTerminalKind::MergeQueue));
+    assert_eq!(e_sched.managed_kind(), Some(ManagedTerminalKind::Scheduled));
+    assert_eq!(e_manual_cli.managed_kind(), None);
+    assert_eq!(e_manual_shell.managed_kind(), None);
+    assert!(e_agent.is_managed());
+    assert!(e_cfg.is_managed());
+    assert!(e_mq.is_managed());
+    assert!(e_sched.is_managed());
+    assert!(!e_manual_cli.is_managed());
+    assert!(!e_manual_shell.is_managed());
+
+    // Hover lifecycle policy summaries
+    assert_eq!(
+        e_manual_cli.lifecycle_policy_summary(15),
+        "Manual terminal · Never auto-reclaimed"
+    );
+    assert_eq!(
+        e_manual_shell.lifecycle_policy_summary(15),
+        "Manual terminal · Never auto-reclaimed"
+    );
+    assert_eq!(
+        e_cfg.lifecycle_policy_summary(15),
+        "Managed by Canban · Stays open until closed"
+    );
+    assert_eq!(
+        e_mq.lifecycle_policy_summary(15),
+        "Managed by Canban · Auto-reclaims after merge batch finishes"
+    );
+    assert_eq!(
+        e_sched.lifecycle_policy_summary(15),
+        "Managed by Canban · Auto-reclaims after completion"
+    );
+    assert_eq!(
+        e_agent.lifecycle_policy_summary(15),
+        "Managed by Canban · Auto-reclaims 30s after completion (history & Resume saved on Card)"
+    );
+    assert_eq!(
+        e_agent.lifecycle_policy_summary(0),
+        "Managed by Canban · Auto-reclaim disabled"
+    );
+    assert!(
+        crate::terminals::labels::sidebar_hint(&e_agent, "Local", 15)
+            .contains("Auto-reclaims 30s after completion")
+    );
+
+    // Interactive follow-up uses <N>m idle tooltip
+    s.terminals[0]
+        .agent
+        .as_mut()
+        .unwrap()
+        .lifecycle
+        .interactive_followup = true;
+    let e_followup = find(&s, &agent_id);
+    assert_eq!(
+        e_followup.lifecycle_policy_summary(15),
+        "Managed by Canban · Auto-reclaims after 15m idle"
+    );
+
+    // Paused / protected state
+    s.reclaim_status.push(TerminalReclaimStatus {
+        terminal_id: agent_id.clone(),
+        paused: true,
+        reclaiming_soon: false,
+        auto_reclaiming: false,
+        interactive_followup: false,
+        deadline_at: None,
+    });
+    let e_paused = find(&s, &agent_id);
+    assert_eq!(
+        e_paused.lifecycle_policy_summary(15),
+        "Managed by Canban · Auto-reclaim paused while open"
+    );
+    assert_eq!(e_paused.canvas_notice_status(), "");
+    assert_eq!(e_paused.display_status(), "Done");
+
+    // Pre-reclaim warning state keeps terminal writable and shows canvas + status indicator
+    s.reclaim_status[0] = TerminalReclaimStatus {
+        terminal_id: agent_id.clone(),
+        paused: false,
+        reclaiming_soon: true,
+        auto_reclaiming: false,
+        interactive_followup: false,
+        deadline_at: Some(now() + 10_000),
+    };
+    let e_soon = find(&s, &agent_id);
+    assert_eq!(
+        e_soon.canvas_notice_status(),
+        "Reclaiming soon · Focus or type to keep open"
+    );
+    assert_eq!(e_soon.display_status(), "Reclaiming soon");
+    assert_eq!(
+        e_soon.lifecycle_policy_summary(15),
+        "Managed by Canban · Reclaiming soon — focus or type to keep open"
+    );
+    assert!(crate::terminals::labels::has_status_mark(&e_soon));
+    assert_eq!(
+        e_soon.binding().unwrap()["read_only"],
+        json!(false),
+        "Reclaiming soon must stay writable so user input cancels reclaim"
+    );
+
+    // Active idle close shows Auto-reclaiming… instead of Closing (for both Card Agent and scheduled)
+    s.terminals[0].agent.as_mut().unwrap().close_state = "closing".into();
+    s.terminals[0]
+        .agent
+        .as_mut()
+        .unwrap()
+        .lifecycle
+        .close_reason = "idle".into();
+    s.reclaim_status[0].reclaiming_soon = false;
+    s.reclaim_status[0].auto_reclaiming = true;
+    let e_reclaiming = find(&s, &agent_id);
+    assert_eq!(e_reclaiming.display_status(), "Auto-reclaiming…");
+    let key = Conversation::key("c1", &dev_profile);
+    let row = conversations(&s).into_iter().find(|r| r.id == key).unwrap();
+    let b = binding(&row).unwrap();
+    assert_eq!(b["input_status"], json!("Auto-reclaiming…"));
+    assert_eq!(b["read_only"], json!(true));
+    assert!(crate::terminals::labels::has_status_mark(&e_reclaiming));
+
+    // Scheduled entry entering closing state via reclaim_status also binds Auto-reclaiming…
+    let sched_idx = s.terminals.iter().position(|t| t.id == sched_id).unwrap();
+    s.terminals[sched_idx].runtime.as_mut().unwrap().state = "closing".into();
+    s.reclaim_status.push(TerminalReclaimStatus {
+        terminal_id: sched_id.into(),
+        paused: false,
+        reclaiming_soon: false,
+        auto_reclaiming: true,
+        interactive_followup: false,
+        deadline_at: None,
+    });
+    let e_sched_reclaiming = find(&s, sched_id);
+    assert_eq!(
+        e_sched_reclaiming.binding().unwrap()["input_status"],
+        json!("Auto-reclaiming…")
+    );
+    assert_eq!(e_sched_reclaiming.display_status(), "Auto-reclaiming…");
+
+    // Verify managed/reclaim views construct and mount inside an NSH Core without panics.
+    #[component]
+    fn ReclaimBadgeProbe() -> impl IntoElement {
+        canban_ui_kit::tokens::install_theme();
+        let mut s = fixture();
+        let agent_id = s.terminals[0].id.clone();
+        s.terminals[0].agent.as_mut().unwrap().state = "completed".into();
+        s.reclaim_status.push(TerminalReclaimStatus {
+            terminal_id: agent_id.clone(),
+            paused: false,
+            reclaiming_soon: true,
+            auto_reclaiming: false,
+            interactive_followup: false,
+            deadline_at: Some(now() + 10_000),
+        });
+        let soon_entry = super::super::entries(&s)
+            .into_iter()
+            .find(|e| e.saved.id == agent_id)
+            .unwrap();
+        let soon_badge = crate::terminals::labels::tab_reclaim_badge(&soon_entry).unwrap();
+
+        s.terminals[0].agent.as_mut().unwrap().close_state = "closing".into();
+        s.terminals[0]
+            .agent
+            .as_mut()
+            .unwrap()
+            .lifecycle
+            .close_reason = "idle".into();
+        s.reclaim_status[0].reclaiming_soon = false;
+        s.reclaim_status[0].auto_reclaiming = true;
+        let reclaiming_entry = super::super::entries(&s)
+            .into_iter()
+            .find(|e| e.saved.id == agent_id)
+            .unwrap();
+        let reclaiming_badge =
+            crate::terminals::labels::tab_reclaim_badge(&reclaiming_entry).unwrap();
+
+        view()
+            .flex_row()
+            .child(crate::terminals::labels::tab(&soon_entry, false, true))
+            .child(soon_badge)
+            .child(crate::terminals::labels::managed_badge())
+            .child(reclaiming_badge)
+    }
+
+    let mut core = Core::new(ApproxTextEngine, size(px(640.), px(48.)));
+    core.set_components(nsh_base::registry());
+    core.mount_root(&nsh_core::element::Root::of::<ReclaimBadgeProbe>());
+    assert!(core.commit().is_some());
+}

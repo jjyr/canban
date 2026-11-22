@@ -22,6 +22,7 @@ pub mod links;
 pub mod navigation;
 pub mod overview;
 pub mod platform;
+pub mod presence;
 pub mod presenter;
 pub mod profiles;
 pub mod projects;
@@ -138,6 +139,7 @@ pub(crate) fn workspace_root() -> impl IntoElement {
     commands::bindings(ui);
     utilities::init(ui);
     activity::init(ui);
+    presence::init(ui);
     updates::init(ui);
     github::init(ui);
     github::filters::init(ui);
@@ -315,6 +317,7 @@ fn run_application(ran_window: &mut bool) -> Result<()> {
     };
     github::filters::flush();
     drafts::persistence::flush();
+    presence::clear_blocking();
     if startup::fatal_exit() {
         anyhow::bail!("Canban startup failed");
     }

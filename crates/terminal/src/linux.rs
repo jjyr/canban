@@ -420,6 +420,7 @@ struct ControllerSlot {
     cell_px: (u32, u32),
     read_only: bool,
     input_status: String,
+    notice_status: String,
     is_preview: bool,
     seen_rev: u64,
 }
@@ -439,6 +440,7 @@ impl ControllerSlot {
             cell_px: (8, 18),
             read_only: is_preview,
             input_status: String::new(),
+            notice_status: String::new(),
             is_preview,
             seen_rev: u64::MAX,
         }
@@ -583,7 +585,13 @@ impl ControllerSlot {
 
     fn effective_status(&self) -> String {
         let s = self.state.lock().unwrap();
-        session::effective_status(&s, self.read_only, &self.input_status, self.is_preview)
+        session::effective_status(
+            &s,
+            self.read_only,
+            &self.input_status,
+            &self.notice_status,
+            self.is_preview,
+        )
     }
 
     fn paste_text_to_pty(&self, text: &str) {
@@ -763,6 +771,7 @@ fn adaptive_rgba(c: [u8; 3], alpha: f32) -> AdaptiveColor {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn mount_terminal_surface(
     initial_preview: Option<String>,
     binding: impl Fn() -> Option<LiveBinding> + 'static,
@@ -771,6 +780,7 @@ fn mount_terminal_surface(
     focus: impl Fn() -> FocusRequest + 'static,
     read_only: impl Fn() -> bool + 'static,
     input_status: impl Fn() -> String + 'static,
+    notice_status: impl Fn() -> String + 'static,
 ) -> View {
     let is_preview = initial_preview.is_some();
     let binding = Rc::new(binding);
@@ -779,6 +789,7 @@ fn mount_terminal_surface(
     let focus = Rc::new(focus);
     let read_only = Rc::new(read_only);
     let input_status = Rc::new(input_status);
+    let notice_status = Rc::new(notice_status);
 
     view().relative().overflow_hidden().child(dynamic(move || {
         let slot = Rc::new(RefCell::new(ControllerSlot::new(is_preview)));
@@ -829,6 +840,10 @@ fn mount_terminal_surface(
             let input_status = input_status.clone();
             move || input_status()
         });
+        let notice_override_memo = computed({
+            let notice_status = notice_status.clone();
+            move || notice_status()
+        });
         let focus_memo = computed({
             let focus = focus.clone();
             move || focus()
@@ -858,16 +873,18 @@ fn mount_terminal_surface(
             });
         }
 
-        // Sync read_only + input_status into status pill.
+        // Sync read_only + input_status + notice_status into status pill.
         {
             let slot_ro = slot.clone();
             effect(move || {
                 let ro = ro_memo.get();
                 let status_text = status_override_memo.get();
+                let notice_text = notice_override_memo.get();
                 let next_pill = {
                     let mut guard = slot_ro.borrow_mut();
                     guard.read_only = ro;
                     guard.input_status = status_text;
+                    guard.notice_status = notice_text;
                     guard.effective_status()
                 };
                 if status_sig.get_untracked() != next_pill {
@@ -1132,8 +1149,39 @@ pub fn live_terminal(
     focus: impl Fn() -> FocusRequest + 'static,
     read_only: impl Fn() -> bool + 'static,
     input_status: impl Fn() -> String + 'static,
+    notice_status: impl Fn() -> String + 'static,
 ) -> View {
-    mount_terminal_surface(None, binding, theme, font, focus, read_only, input_status)
+    mount_terminal_surface(
+        None,
+        binding,
+        theme,
+        font,
+        focus,
+        read_only,
+        input_status,
+        notice_status,
+    )
+}
+
+/// Mounts a static read-only `<nsh_base::Terminal />` preview with custom status labels.
+pub fn preview_terminal_with_status(
+    content: impl Into<String>,
+    theme: impl Fn() -> Value + 'static,
+    font: impl Fn() -> Value + 'static,
+    focus: impl Fn() -> FocusRequest + 'static,
+    input_status: impl Fn() -> String + 'static,
+    notice_status: impl Fn() -> String + 'static,
+) -> View {
+    mount_terminal_surface(
+        Some(content.into()),
+        || None,
+        theme,
+        font,
+        focus,
+        || true,
+        input_status,
+        notice_status,
+    )
 }
 
 /// Mounts a static read-only `<nsh_base::Terminal />` preview (for Gallery / offline previews).
@@ -1143,14 +1191,13 @@ pub fn preview_terminal(
     font: impl Fn() -> Value + 'static,
     focus: impl Fn() -> FocusRequest + 'static,
 ) -> View {
-    mount_terminal_surface(
-        Some(content.into()),
-        || None,
+    preview_terminal_with_status(
+        content,
         theme,
         font,
         focus,
-        || true,
         || "Preview".to_owned(),
+        String::new,
     )
 }
 

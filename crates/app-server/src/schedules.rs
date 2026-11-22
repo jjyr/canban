@@ -600,6 +600,7 @@ fn record_skipped_overlap(
 impl AppServer {
     /// Returns the earliest wakeup deadline across enabled schedules and settling Cardless PTYs.
     pub(super) fn schedule_deadline(&self, snapshot: &Snapshot) -> Option<u64> {
+        let now_ms = now();
         let mut earliest = next_schedule_deadline(&snapshot.schedule_states);
         let mut consider = |at: u64| {
             earliest = Some(earliest.map_or(at, |cur| cur.min(at)));
@@ -625,7 +626,14 @@ impl AppServer {
             if matches!(run.state.as_str(), "completed" | "failed") {
                 if let Some(req_at) = run.close_requested_at {
                     consider(req_at.saturating_add(SCHEDULE_GRACEFUL_EXIT_TIMEOUT_MS + 1));
-                } else if let Some(done_at) = run.completed_at {
+                } else if !self.presence.is_protected(tid, None, now_ms)
+                    && self.presence.last_viewed_at(tid, None, now_ms) == 0
+                    && !self
+                        .presence
+                        .get_scheduled_track(tid)
+                        .is_some_and(|t| t.interactive_followup)
+                    && let Some(done_at) = run.completed_at
+                {
                     consider(done_at.saturating_add(SCHEDULE_RECLAIM_SETTLE_MS + 1));
                 }
             }
@@ -980,6 +988,42 @@ impl AppServer {
                 self.mark_scheduled_terminal_finished(tid);
                 continue;
             };
+            let protected = self.presence.is_protected(tid, None, now_ms);
+            let last_viewed = self.presence.last_viewed_at(tid, None, now_ms);
+            let track = self.presence.observe_scheduled_runtime(
+                tid,
+                rt.agent_status.as_deref(),
+                rt.agent_turn,
+                protected || last_viewed > 0,
+                now_ms,
+            );
+            if matches!(
+                rt.agent_status.as_deref(),
+                Some("working" | "running" | "blocked")
+            ) && (track.interactive_followup
+                || track.settled_once
+                || protected
+                || last_viewed > 0)
+            {
+                if run.close_requested_at.is_some() || rt.state == "closing" {
+                    let _ = self.store.lock().unwrap().write(|db| {
+                        let mut cur: ScheduledRun = db.get(&run.id)?;
+                        cur.close_requested_at = None;
+                        db.save(&cur)?;
+                        if let Ok(mut e) = db.get::<TerminalEntry>(tid)
+                            && let Some(r) = &mut e.runtime
+                            && r.state == "closing"
+                        {
+                            r.state = "running".into();
+                            db.save(&e)?;
+                        }
+                        Ok(())
+                    });
+                    self.emit("schedules", None);
+                    self.emit("terminals", None);
+                }
+                continue;
+            }
             let core_matches = rt
                 .core_id
                 .as_deref()
@@ -1005,12 +1049,52 @@ impl AppServer {
                 continue;
             }
 
-            let settled = matches!(rt.agent_status.as_deref(), Some("idle" | "done" | "error"))
-                || run
-                    .completed_at
-                    .is_some_and(|at| now_ms.saturating_sub(at) >= SCHEDULE_RECLAIM_SETTLE_MS);
-            if !settled {
+            if protected {
                 continue;
+            }
+
+            let idle_minutes = self.config().scheduler.idle_minutes;
+            if track.interactive_followup {
+                if idle_minutes == 0 {
+                    continue;
+                }
+                let settled = matches!(rt.agent_status.as_deref(), Some("idle" | "done" | "error"))
+                    || rt.agent_status.is_none();
+                if !settled {
+                    continue;
+                }
+                let anchor = track
+                    .idle_since
+                    .unwrap_or(0)
+                    .max(last_viewed)
+                    .max(run.completed_at.unwrap_or(0));
+                if now_ms.saturating_sub(anchor) < idle_minutes.saturating_mul(60_000) {
+                    continue;
+                }
+            } else if last_viewed > 0 {
+                if idle_minutes == 0 {
+                    continue;
+                }
+                let settled = matches!(rt.agent_status.as_deref(), Some("idle" | "done" | "error"))
+                    || (rt.agent_status.is_none()
+                        && run.completed_at.is_some_and(|at| {
+                            now_ms.saturating_sub(at) >= SCHEDULE_RECLAIM_SETTLE_MS
+                        }));
+                if !settled {
+                    continue;
+                }
+                let anchor = last_viewed.max(run.completed_at.unwrap_or(0));
+                if now_ms.saturating_sub(anchor) < crate::lifecycle::COMPLETED_IDLE_RECLAIM_MS {
+                    continue;
+                }
+            } else {
+                let settled = matches!(rt.agent_status.as_deref(), Some("idle" | "done" | "error"))
+                    || run
+                        .completed_at
+                        .is_some_and(|at| now_ms.saturating_sub(at) >= SCHEDULE_RECLAIM_SETTLE_MS);
+                if !settled {
+                    continue;
+                }
             }
 
             if run.output_path.is_none()
@@ -1052,8 +1136,17 @@ impl AppServer {
                 let _ = self.store.lock().unwrap().write(|db| {
                     let mut cur: ScheduledRun = db.get(&run.id)?;
                     cur.close_requested_at = Some(now_ms);
-                    db.save(&cur)
+                    db.save(&cur)?;
+                    if let Ok(mut e) = db.get::<TerminalEntry>(tid)
+                        && let Some(r) = &mut e.runtime
+                    {
+                        r.state = "closing".into();
+                        db.save(&e)?;
+                    }
+                    Ok(())
                 });
+                self.emit("schedules", None);
+                self.emit("terminals", None);
                 continue;
             }
 
@@ -1065,6 +1158,7 @@ impl AppServer {
     }
 
     fn mark_scheduled_terminal_finished(&self, terminal_id: &str) {
+        self.presence.remove_scheduled_track(terminal_id);
         let _ = self.store.lock().unwrap().write(|db| {
             if let Ok(mut entry) = db.get::<TerminalEntry>(terminal_id) {
                 if let Some(rt) = &mut entry.runtime {

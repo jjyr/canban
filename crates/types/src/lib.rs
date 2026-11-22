@@ -1041,6 +1041,8 @@ pub struct Lifecycle {
     pub waiting: Option<RuntimeWait>,
     #[serde(default)]
     pub close_reason: String,
+    #[serde(default)]
+    pub interactive_followup: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeWait {
@@ -1118,6 +1120,7 @@ impl AgentRun {
         self.completion_turn = None;
         self.turn_ended_at = None;
         self.close_requested_at = None;
+        self.lifecycle.interactive_followup = false;
         if stopped {
             self.core_id = None;
             self.terminal = None;
@@ -1446,11 +1449,19 @@ pub struct Snapshot {
     pub note_events: Vec<NoteEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub review_drafts: Vec<ReviewDraft>,
+    /// Bounded ephemeral auto-reclaim / presence-lease status per managed terminal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reclaim_status: Vec<TerminalReclaimStatus>,
     /// Client-only bounded sync status markers per Card ID.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pending_sync: BTreeMap<String, SyncMark>,
 }
 impl Snapshot {
+    pub fn reclaim_status_for(&self, terminal_id: &str) -> Option<&TerminalReclaimStatus> {
+        self.reclaim_status
+            .iter()
+            .find(|r| r.terminal_id == terminal_id)
+    }
     pub fn terminal_project_id<'a>(&'a self, t: &'a TerminalEntry) -> Option<&'a str> {
         if let Some(a) = &t.agent {
             return Some(a.project_id.as_str());
@@ -1736,11 +1747,54 @@ impl HerdrStatus {
     }
 }
 
+/// Classification of Canban-managed terminals vs user-created manual terminals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManagedTerminalKind {
+    Agent,
+    Scheduled,
+    MergeQueue,
+    Configuration,
+}
+
+/// Bounded ephemeral idle-reclaim and presence-protection status for one managed terminal.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerminalReclaimStatus {
+    pub terminal_id: String,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub reclaiming_soon: bool,
+    #[serde(default)]
+    pub auto_reclaiming: bool,
+    #[serde(default)]
+    pub interactive_followup: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_at: Option<u64>,
+}
+
 impl TerminalEntry {
     pub fn is_special_session(&self) -> bool {
         self.id.starts_with("configuration:")
             || self.id.starts_with("merge-queue:")
             || self.id.starts_with("scheduled:")
+    }
+
+    pub fn managed_kind(&self) -> Option<ManagedTerminalKind> {
+        if self.agent.is_some() {
+            Some(ManagedTerminalKind::Agent)
+        } else if self.id.starts_with("scheduled:") {
+            Some(ManagedTerminalKind::Scheduled)
+        } else if self.id.starts_with("merge-queue:") {
+            Some(ManagedTerminalKind::MergeQueue)
+        } else if self.id.starts_with("configuration:") {
+            Some(ManagedTerminalKind::Configuration)
+        } else {
+            None
+        }
+    }
+
+    pub fn is_managed(&self) -> bool {
+        self.managed_kind().is_some()
     }
 
     /// Active CLI / Role Agent engine identifier if an Agent is running in this terminal.
