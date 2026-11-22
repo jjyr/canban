@@ -2174,8 +2174,9 @@ impl HostRegistry {
                         }
                     };
                     let outcome = {
+                        let mut guard = self.remotes.lock().unwrap();
                         let mut ob = outbox_arc.lock().unwrap();
-                        finish_step(
+                        let outcome = finish_step(
                             &mut ob,
                             &mut snapshot,
                             &mutation_id,
@@ -2186,7 +2187,15 @@ impl HostRegistry {
                             allow_rebuild,
                             &mut blocked,
                             &mut report,
-                        )
+                        );
+                        if let Some(slot) = guard.get_mut(host_id)
+                            && let Some(cached) = slot.cached.as_mut()
+                        {
+                            let mut next_snap = snapshot.clone();
+                            next_snap.register_host_entities(host_id);
+                            cached.snapshot = next_snap;
+                        }
+                        outcome
                     };
                     match outcome {
                         FinishOutcome::Continue => {}
