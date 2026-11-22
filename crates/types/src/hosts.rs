@@ -18,6 +18,8 @@ pub struct ServerListenConfig {
     pub port: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen: Option<String>,
+    #[serde(default)]
+    pub allow_insecure_bind: bool,
 }
 
 impl Default for ServerListenConfig {
@@ -26,8 +28,29 @@ impl Default for ServerListenConfig {
             tailscale: false,
             port: DEFAULT_DAEMON_PORT,
             listen: None,
+            allow_insecure_bind: false,
         }
     }
+}
+
+pub const PAIRING_CODE_PREFIX: &str = "pair_";
+pub const DEVICE_TOKEN_PREFIX: &str = "dev_";
+
+pub fn is_pairing_code(token: &str) -> bool {
+    token.trim().starts_with(PAIRING_CODE_PREFIX)
+}
+
+pub fn is_device_token(token: &str) -> bool {
+    token.trim().starts_with(DEVICE_TOKEN_PREFIX)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PairedDevice {
+    pub id: String,
+    pub name: String,
+    pub created_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<u64>,
 }
 
 impl ServerListenConfig {

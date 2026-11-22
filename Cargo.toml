@@ -26,6 +26,9 @@ clap = { version = "4", features = ["derive", "env"] }
 tempfile = "3"
 sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "process"] }
+yamux = "0.14"
+futures-io = "0.3"
+futures-util = "0.3"
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 tar = "0.4"
 zstd = "0.13"
@@ -50,6 +53,7 @@ canban-workflow-engine = { path = "crates/workflow-engine" }
 canban-scheduler = { path = "crates/scheduler" }
 canban-herdr = { path = "crates/herdr" }
 canban-workspaces = { path = "crates/workspaces" }
+canban-transport = { path = "crates/transport" }
 canban-app-server = { path = "crates/app-server" }
 canban-sync = { path = "crates/sync" }
 canban-ui-kit = { path = "crates/ui-kit" }

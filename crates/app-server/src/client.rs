@@ -1,182 +1,16 @@
 //! UI-side access to authoritative Canban services over local Unix sockets,
 //! authenticated Tailscale/TCP sockets, or SSH-forwarded Unix sockets.
 use super::*;
-use std::net::{TcpStream, ToSocketAddrs};
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ClientEndpoint {
-    Unix(PathBuf),
-    Tcp { addr: String, token: String },
-}
-
-enum ClientStream {
-    Unix {
-        writer: UnixStream,
-        reader: BufReader<UnixStream>,
-    },
-    Tcp {
-        writer: TcpStream,
-        reader: BufReader<TcpStream>,
-        token: String,
-    },
-}
-
-pub(crate) const DEFAULT_RPC_READ_TIMEOUT: Duration = Duration::from_secs(90);
-pub(crate) const DAEMON_UPDATE_RPC_READ_TIMEOUT: Duration = Duration::from_secs(20 * 60);
-
-pub(crate) fn rpc_read_timeout(method: &str) -> Duration {
-    if method == "update.daemon" {
-        DAEMON_UPDATE_RPC_READ_TIMEOUT
-    } else {
-        DEFAULT_RPC_READ_TIMEOUT
-    }
-}
-
-struct RpcConn {
-    stream: ClientStream,
-    next_id: u64,
-}
-
-impl RpcConn {
-    fn connect(endpoint: &ClientEndpoint) -> Result<Self> {
-        match endpoint {
-            ClientEndpoint::Unix(path) => {
-                let writer = UnixStream::connect(path)
-                    .with_context(|| format!("Canban is not running at {}", path.display()))?;
-                writer.set_read_timeout(Some(DEFAULT_RPC_READ_TIMEOUT))?;
-                writer.set_write_timeout(Some(DEFAULT_RPC_READ_TIMEOUT))?;
-                let reader = BufReader::new(writer.try_clone()?);
-                Ok(Self {
-                    stream: ClientStream::Unix { writer, reader },
-                    next_id: 1,
-                })
-            }
-            ClientEndpoint::Tcp { addr, token } => {
-                let sock_addr = addr
-                    .to_socket_addrs()
-                    .with_context(|| format!("Invalid Canban TCP address {addr}"))?
-                    .next()
-                    .with_context(|| format!("Could not resolve Canban TCP address {addr}"))?;
-                let writer = TcpStream::connect_timeout(&sock_addr, Duration::from_secs(10))
-                    .with_context(|| format!("Canban is not reachable at {addr}"))?;
-                let _ = writer.set_nodelay(true);
-                writer.set_read_timeout(Some(DEFAULT_RPC_READ_TIMEOUT))?;
-                writer.set_write_timeout(Some(DEFAULT_RPC_READ_TIMEOUT))?;
-                let reader = BufReader::new(writer.try_clone()?);
-                Ok(Self {
-                    stream: ClientStream::Tcp {
-                        writer,
-                        reader,
-                        token: token.clone(),
-                    },
-                    next_id: 1,
-                })
-            }
-        }
-    }
-
-    fn call(&mut self, method: &str, params: &Value) -> Result<Value> {
-        let _rpc = canban_profiler::Span::new("rpc.request");
-        let req_id = self.next_id;
-        self.next_id += 1;
-        let read_timeout = rpc_read_timeout(method);
-        let extended_timeout = read_timeout != DEFAULT_RPC_READ_TIMEOUT;
-        let mut line = String::new();
-        match &mut self.stream {
-            ClientStream::Unix { writer, reader } => {
-                runtime::write_json_line(
-                    writer,
-                    &json!({"jsonrpc":"2.0","id":req_id,"method":method,"params":params}),
-                )?;
-                if extended_timeout {
-                    writer.set_read_timeout(Some(read_timeout))?;
-                    reader.get_ref().set_read_timeout(Some(read_timeout))?;
-                }
-                let read_res = reader.read_line(&mut line);
-                if extended_timeout {
-                    let _ = writer.set_read_timeout(Some(DEFAULT_RPC_READ_TIMEOUT));
-                    let _ = reader
-                        .get_ref()
-                        .set_read_timeout(Some(DEFAULT_RPC_READ_TIMEOUT));
-                }
-                let n = read_res?;
-                if n == 0 || !line.ends_with('\n') {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        if n == 0 {
-                            "AppServer closed RPC socket"
-                        } else {
-                            "AppServer closed RPC socket mid-frame"
-                        },
-                    )
-                    .into());
-                }
-            }
-            ClientStream::Tcp {
-                writer,
-                reader,
-                token,
-            } => {
-                runtime::write_json_line(
-                    writer,
-                    &json!({
-                        "jsonrpc": "2.0",
-                        "id": req_id,
-                        "method": method,
-                        "params": params,
-                        "auth": token
-                    }),
-                )?;
-                if extended_timeout {
-                    writer.set_read_timeout(Some(read_timeout))?;
-                    reader.get_ref().set_read_timeout(Some(read_timeout))?;
-                }
-                let read_res = reader.read_line(&mut line);
-                if extended_timeout {
-                    let _ = writer.set_read_timeout(Some(DEFAULT_RPC_READ_TIMEOUT));
-                    let _ = reader
-                        .get_ref()
-                        .set_read_timeout(Some(DEFAULT_RPC_READ_TIMEOUT));
-                }
-                let n = read_res?;
-                if n == 0 || !line.ends_with('\n') {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        if n == 0 {
-                            "Remote AppServer closed TCP socket"
-                        } else {
-                            "Remote AppServer closed TCP socket mid-frame"
-                        },
-                    )
-                    .into());
-                }
-            }
-        }
-        let mut decode = canban_profiler::Span::new("rpc.decode");
-        decode.counts(1, line.len());
-        let mut reply: Value = serde_json::from_str(&line)?;
-        if let Some(err) = reply.get("error") {
-            let code = err["code"].as_i64().unwrap_or(-32000);
-            let msg = err["message"].as_str().unwrap_or("Canban RPC error");
-            if code == -32001 {
-                bail!("auth_failed: {msg}");
-            }
-            bail!("{msg}");
-        }
-        reply
-            .get_mut("result")
-            .map(Value::take)
-            .context("Invalid Canban response")
-    }
-}
+pub use canban_transport::ClientEndpoint;
+pub(crate) use canban_transport::rpc_read_timeout;
 
 pub(crate) fn rpc_endpoint(
     endpoint: &ClientEndpoint,
     method: &str,
     params: Value,
 ) -> Result<Value> {
-    let mut conn = RpcConn::connect(endpoint)?;
-    conn.call(method, &params)
+    let _rpc = canban_profiler::Span::new("rpc.request");
+    canban_transport::rpc_once(endpoint, method, &params)
 }
 
 pub(crate) fn rpc_tcp(
@@ -197,14 +31,38 @@ pub(crate) fn rpc_tcp(
 
 pub struct AppClient {
     pub home: PathBuf,
-    endpoint: ClientEndpoint,
+    transport: Arc<canban_transport::ClientTransport>,
     cli: PathBuf,
     explicit_endpoint: bool,
     server_id: Option<String>,
     respawn_lock: Mutex<()>,
-    rpc_pool: Mutex<Vec<RpcConn>>,
     config: RwLock<Config>,
     server_notice: Option<String>,
+}
+
+fn init_mux_relay_opener() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        canban_herdr::transport::register_relay_opener(Arc::new(
+            |endpoint, terminal, expected_core_id| {
+                let key = endpoint
+                    .strip_prefix("mux://")
+                    .context("Invalid mux relay endpoint")?;
+                let mut app_side = canban_transport::open_mux_bridge(key)?;
+                let _ = app_side.set_read_timeout(Some(Duration::from_secs(90)));
+                let _ = app_side.set_write_timeout(Some(Duration::from_secs(90)));
+                canban_herdr::transport::handshake_relay(
+                    &mut app_side,
+                    terminal,
+                    expected_core_id,
+                    None,
+                )?;
+                let _ = app_side.set_read_timeout(None);
+                let _ = app_side.set_write_timeout(None);
+                canban_herdr::transport::Transport::from_unix_stream(app_side)
+            },
+        ));
+    });
 }
 
 #[derive(Clone, Debug)]
@@ -266,25 +124,33 @@ impl AppClient {
 
     /// Connect to a remote authenticated TCP `canband` daemon without spawning a local daemon.
     pub fn connect_tcp(addr: String, token: String) -> Result<Arc<Self>> {
-        let normalized = canban_types::normalize_daemon_addr(&addr);
-        let endpoint = ClientEndpoint::Tcp {
-            addr: normalized,
+        init_mux_relay_opener();
+        let transport = Arc::new(canban_transport::ClientTransport::connect_tcp(
+            addr,
             token,
-        };
-        Self::connect_remote_endpoint(endpoint)
+            network::hostname_string(),
+        )?);
+        Self::connect_remote_transport(transport)
     }
 
     /// Connect to a remote `canband` exposed via a local SSH-forwarded Unix socket.
     pub fn connect_ssh_socket(socket_path: PathBuf) -> Result<Arc<Self>> {
-        Self::connect_remote_endpoint(ClientEndpoint::Unix(socket_path))
+        let transport = Arc::new(canban_transport::ClientTransport::connect_direct(
+            ClientEndpoint::Unix(socket_path),
+        )?);
+        Self::connect_remote_transport(transport)
     }
 
-    fn connect_remote_endpoint(endpoint: ClientEndpoint) -> Result<Arc<Self>> {
-        let mut conn = RpcConn::connect(&endpoint)?;
-        let ping = conn.call("app.ping", &json!({}))?;
+    fn connect_remote_transport(
+        transport: Arc<canban_transport::ClientTransport>,
+    ) -> Result<Arc<Self>> {
+        let ping = transport
+            .call("app.ping", &json!({}))
+            .inspect_err(|_| transport.close())?;
         let mut server_notice = None;
         match canban_updater::backend_order(&ping, &canban_updater::Build::current()) {
             std::cmp::Ordering::Less => {
+                transport.close();
                 return Err(BackendOlder {
                     home: PathBuf::from(ping["home"].as_str().unwrap_or_default()),
                     ping,
@@ -298,19 +164,20 @@ impl AppClient {
             }
             std::cmp::Ordering::Equal => {}
         }
-        let state = conn.call("app.state", &json!({}))?;
+        let state = transport
+            .call("app.state", &json!({}))
+            .inspect_err(|_| transport.close())?;
         let server_id = state["server_id"]
             .as_str()
             .or_else(|| ping["server_id"].as_str())
             .map(str::to_owned);
         Ok(Arc::new(Self {
             home: PathBuf::from(strp(&state, "home")?),
-            endpoint,
+            transport,
             cli: PathBuf::new(),
             explicit_endpoint: true,
             server_id,
             respawn_lock: Mutex::new(()),
-            rpc_pool: Mutex::new(vec![conn]),
             config: RwLock::new(serde_json::from_value(state["config"].clone())?),
             server_notice,
         }))
@@ -476,12 +343,11 @@ impl AppClient {
         };
         Ok(Arc::new(Self {
             home: PathBuf::from(strp(&state, "home")?),
-            endpoint: ClientEndpoint::Unix(sock_path),
+            transport: Arc::new(canban_transport::ClientTransport::unix(sock_path)),
             cli: cli.to_path_buf(),
             explicit_endpoint: explicit.is_some(),
             server_id,
             respawn_lock: Mutex::new(()),
-            rpc_pool: Mutex::new(Vec::new()),
             config: RwLock::new(serde_json::from_value(state["config"].clone())?),
             server_notice,
         }))
@@ -508,45 +374,17 @@ impl AppClient {
         Ok(())
     }
 
-    fn pooled_rpc(&self, method: &str, params: &Value) -> Result<Value> {
-        let pooled = self.rpc_pool.lock().unwrap().pop();
-        let (mut conn, reused) = match pooled {
-            Some(c) => (c, true),
-            None => (RpcConn::connect(&self.endpoint)?, false),
-        };
-        match conn.call(method, params) {
-            Ok(v) => {
-                let mut pool = self.rpc_pool.lock().unwrap();
-                if pool.len() < 4 {
-                    pool.push(conn);
-                }
-                Ok(v)
-            }
-            Err(err)
-                if reused
-                    && !err.to_string().starts_with("auth_failed:")
-                    && (err.downcast_ref::<std::io::Error>().is_some()
-                        || err.to_string().contains("closed")) =>
-            {
-                let mut fresh = RpcConn::connect(&self.endpoint)?;
-                let v = fresh.call(method, params)?;
-                let mut pool = self.rpc_pool.lock().unwrap();
-                if pool.len() < 4 {
-                    pool.push(fresh);
-                }
-                Ok(v)
-            }
-            Err(err) => Err(err),
-        }
-    }
-
     pub fn call(&self, method: &str, params: Value) -> Result<Value> {
-        let value = match self.pooled_rpc(method, &params) {
+        let _rpc = canban_profiler::Span::new("rpc.request");
+        let value = match self.transport.call(method, &params) {
             Ok(v) => v,
             Err(first_err) => {
-                let ClientEndpoint::Unix(sock_path) = &self.endpoint else {
+                let ClientEndpoint::Unix(sock_path) = self.transport.endpoint() else {
                     return Err(first_err);
                 };
+                if self.transport.is_mux() {
+                    return Err(first_err);
+                }
                 let connect_failed = first_err
                     .downcast_ref::<std::io::Error>()
                     .is_some_and(|io| {
@@ -571,7 +409,7 @@ impl AppClient {
                     return Err(first_err);
                 }
                 let _guard = self.respawn_lock.lock().unwrap();
-                self.rpc_pool.lock().unwrap().clear();
+                self.transport.clear_pool();
                 if rpc(sock_path, "app.ping", json!({})).is_err()
                     && !canban_updater::handoff::active(&self.home)
                 {
@@ -583,7 +421,7 @@ impl AppClient {
                         std::thread::sleep(Duration::from_millis(100));
                     }
                 }
-                self.pooled_rpc(method, &params)?
+                self.transport.call(method, &params)?
             }
         };
         self.cache_config_reply(method, &value);
@@ -618,7 +456,15 @@ impl AppClient {
     }
 
     pub fn endpoint(&self) -> &ClientEndpoint {
-        &self.endpoint
+        self.transport.endpoint()
+    }
+
+    pub(crate) fn transport(&self) -> &Arc<canban_transport::ClientTransport> {
+        &self.transport
+    }
+
+    pub(crate) fn upgraded_token(&self) -> Option<&str> {
+        self.transport.upgraded_token()
     }
 
     pub fn is_remote(&self) -> bool {
@@ -641,16 +487,9 @@ impl AppClient {
 
     pub fn config(&self) -> Config {
         let mut c = self.config.read().unwrap().clone();
-        match &self.endpoint {
-            ClientEndpoint::Unix(path) => {
-                c.relay_endpoint = Some(path.to_string_lossy().into());
-                c.relay_token = None;
-            }
-            ClientEndpoint::Tcp { addr, token } => {
-                c.relay_endpoint = Some(format!("tcp://{addr}"));
-                c.relay_token = Some(token.clone());
-            }
-        }
+        let (relay_endpoint, relay_token) = self.transport.relay_endpoint_and_token();
+        c.relay_endpoint = Some(relay_endpoint);
+        c.relay_token = relay_token;
         c
     }
 
@@ -709,10 +548,10 @@ fn run_subscribe_worker(
         let Some(app) = weak.upgrade() else {
             break;
         };
-        let endpoint = app.endpoint.clone();
+        let transport = app.transport.clone();
         drop(app);
         match subscribe_session(
-            &endpoint,
+            &transport,
             weak,
             topics,
             &mut last,
@@ -732,39 +571,9 @@ fn run_subscribe_worker(
     }
 }
 
-fn open_subscribe_io(
-    endpoint: &ClientEndpoint,
-) -> Result<(Box<dyn Read + Send>, Box<dyn Write + Send>)> {
-    let read_timeout = Some(Duration::from_secs(45));
-    let write_timeout = Some(Duration::from_secs(30));
-    match endpoint {
-        ClientEndpoint::Unix(path) => {
-            let writer = UnixStream::connect(path)
-                .with_context(|| format!("Canban is not running at {}", path.display()))?;
-            writer.set_read_timeout(read_timeout)?;
-            writer.set_write_timeout(write_timeout)?;
-            let reader = writer.try_clone()?;
-            Ok((Box::new(reader), Box::new(writer)))
-        }
-        ClientEndpoint::Tcp { addr, .. } => {
-            let sock_addr = addr
-                .to_socket_addrs()
-                .with_context(|| format!("Invalid Canban TCP address {addr}"))?
-                .next()
-                .with_context(|| format!("Could not resolve Canban TCP address {addr}"))?;
-            let writer = TcpStream::connect_timeout(&sock_addr, Duration::from_secs(10))
-                .with_context(|| format!("Canban is not reachable at {addr}"))?;
-            let _ = writer.set_nodelay(true);
-            writer.set_read_timeout(read_timeout)?;
-            writer.set_write_timeout(write_timeout)?;
-            let reader = writer.try_clone()?;
-            Ok((Box::new(reader), Box::new(writer)))
-        }
-    }
-}
-
+#[allow(clippy::too_many_arguments)]
 fn subscribe_session(
-    endpoint: &ClientEndpoint,
+    transport: &canban_transport::ClientTransport,
     weak: &std::sync::Weak<AppClient>,
     topics: &[&str],
     last: &mut Value,
@@ -772,7 +581,9 @@ fn subscribe_session(
     is_closed: &impl Fn() -> bool,
     emit: &mut impl FnMut(ClientPushEvent) -> bool,
 ) -> Result<bool> {
-    let (read_io, mut write_io) = open_subscribe_io(endpoint)?;
+    let stream =
+        transport.open_sync_stream(Some(Duration::from_secs(45)), Some(Duration::from_secs(30)))?;
+    let (read_io, mut write_io) = (stream.reader, stream.writer);
     let mut req = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -782,10 +593,10 @@ fn subscribe_session(
             "topics": topics,
         }
     });
-    if let ClientEndpoint::Tcp { token, .. } = endpoint {
+    if let Some(token) = stream.auth_token {
         req["auth"] = json!(token);
     }
-    runtime::write_json_line(&mut write_io, &req)?;
+    canban_transport::write_json_line(&mut write_io, &req)?;
 
     let mut reader = BufReader::new(read_io);
     let mut line = String::new();
@@ -863,57 +674,6 @@ fn static_event_topic(raw: Option<&str>, previous: &Value, params: &Value) -> &'
     }
 }
 
-enum AsyncClientStream {
-    Unix(tokio::net::UnixStream),
-    Tcp(tokio::net::TcpStream),
-}
-
-impl tokio::io::AsyncRead for AsyncClientStream {
-    fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            Self::Unix(s) => std::pin::Pin::new(s).poll_read(cx, buf),
-            Self::Tcp(s) => std::pin::Pin::new(s).poll_read(cx, buf),
-        }
-    }
-}
-
-impl tokio::io::AsyncWrite for AsyncClientStream {
-    fn poll_write(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        match self.get_mut() {
-            Self::Unix(s) => std::pin::Pin::new(s).poll_write(cx, buf),
-            Self::Tcp(s) => std::pin::Pin::new(s).poll_write(cx, buf),
-        }
-    }
-
-    fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            Self::Unix(s) => std::pin::Pin::new(s).poll_flush(cx),
-            Self::Tcp(s) => std::pin::Pin::new(s).poll_flush(cx),
-        }
-    }
-
-    fn poll_shutdown(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            Self::Unix(s) => std::pin::Pin::new(s).poll_shutdown(cx),
-            Self::Tcp(s) => std::pin::Pin::new(s).poll_shutdown(cx),
-        }
-    }
-}
-
 pub(crate) enum PushFrame {
     Heartbeat,
     StateChanged {
@@ -934,8 +694,8 @@ pub(crate) struct SubscribeHandshake {
 }
 
 pub(crate) struct AsyncSubscribeStream {
-    reader: tokio::io::BufReader<tokio::io::ReadHalf<AsyncClientStream>>,
-    _writer: tokio::io::WriteHalf<AsyncClientStream>,
+    reader: tokio::io::BufReader<tokio::io::ReadHalf<canban_transport::TransportStream>>,
+    _writer: tokio::io::WriteHalf<canban_transport::TransportStream>,
     heartbeat_ms: u64,
     last_marker: Value,
 }
@@ -946,11 +706,13 @@ impl AsyncSubscribeStream {
     }
 
     pub(crate) async fn next_frame(&mut self) -> Result<Option<PushFrame>> {
-        const MAX_FRAME_BYTES: usize = 48 * 1024 * 1024;
         loop {
             let line_opt = match tokio::time::timeout(
                 self.read_timeout(),
-                runtime::read_bounded_line(&mut self.reader, MAX_FRAME_BYTES),
+                canban_transport::read_bounded_line(
+                    &mut self.reader,
+                    canban_transport::MAX_FRAME_BYTES,
+                ),
             )
             .await
             {
@@ -1007,46 +769,12 @@ impl AsyncSubscribeStream {
 
 /// Open an async persistent `app.subscribe` stream without holding any client mutexes.
 pub(crate) async fn open_async_subscribe(
-    endpoint: &ClientEndpoint,
+    transport: &canban_transport::ClientTransport,
     after: &Value,
     topics: &[&str],
     heartbeat_ms: Option<u64>,
 ) -> Result<(AsyncSubscribeStream, SubscribeHandshake)> {
-    const MAX_FRAME_BYTES: usize = 48 * 1024 * 1024;
-    let stream = match endpoint {
-        ClientEndpoint::Unix(path) => {
-            let s = tokio::time::timeout(
-                Duration::from_secs(10),
-                tokio::net::UnixStream::connect(path),
-            )
-            .await
-            .map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!("Timed out connecting to {}", path.display()),
-                )
-            })?
-            .with_context(|| format!("Canban is not running at {}", path.display()))?;
-            AsyncClientStream::Unix(s)
-        }
-        ClientEndpoint::Tcp { addr, .. } => {
-            let s = tokio::time::timeout(
-                Duration::from_secs(10),
-                tokio::net::TcpStream::connect(addr.as_str()),
-            )
-            .await
-            .map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!("Timed out connecting to {addr}"),
-                )
-            })?
-            .with_context(|| format!("Canban is not reachable at {addr}"))?;
-            let _ = s.set_nodelay(true);
-            AsyncClientStream::Tcp(s)
-        }
-    };
-
+    let (stream, auth_token) = transport.open_async_stream().await?;
     let (read_half, mut writer) = tokio::io::split(stream);
     let mut reader = tokio::io::BufReader::new(read_half);
     let mut params = json!({
@@ -1062,12 +790,12 @@ pub(crate) async fn open_async_subscribe(
         "method": "app.subscribe",
         "params": params,
     });
-    if let ClientEndpoint::Tcp { token, .. } = endpoint {
+    if let Some(token) = auth_token {
         req["auth"] = json!(token);
     }
     tokio::time::timeout(
         Duration::from_secs(10),
-        runtime::write_json_line_async(&mut writer, &req),
+        canban_transport::write_json_line_async(&mut writer, &req),
     )
     .await
     .map_err(|_| {
@@ -1079,7 +807,7 @@ pub(crate) async fn open_async_subscribe(
 
     let line_opt = tokio::time::timeout(
         Duration::from_secs(15),
-        runtime::read_bounded_line(&mut reader, MAX_FRAME_BYTES),
+        canban_transport::read_bounded_line(&mut reader, canban_transport::MAX_FRAME_BYTES),
     )
     .await
     .map_err(|_| {
@@ -1157,103 +885,5 @@ mod tests {
         assert!(canban_updater::backend_order(&json!({"api_version":API_VERSION-1}), &app).is_lt());
         assert!(canban_updater::backend_order(&json!({"api_version":API_VERSION}), &app).is_eq());
         assert!(canban_updater::backend_order(&json!({"api_version":API_VERSION+1}), &app).is_gt());
-    }
-
-    #[test]
-    fn update_daemon_extends_read_timeout_and_restores_default_after_reply() {
-        assert_eq!(
-            rpc_read_timeout("update.daemon"),
-            DAEMON_UPDATE_RPC_READ_TIMEOUT
-        );
-        assert_eq!(rpc_read_timeout("app.ping"), DEFAULT_RPC_READ_TIMEOUT);
-
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap().to_string();
-        let (req_seen_tx, req_seen_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel();
-
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            req_seen_tx.send(line).unwrap();
-            release_rx.recv().unwrap();
-            writeln!(
-                stream,
-                "{}",
-                json!({"jsonrpc":"2.0","id":1,"result":{"updated":true}})
-            )
-            .unwrap();
-            stream.flush().unwrap();
-        });
-
-        let mut conn = RpcConn::connect(&ClientEndpoint::Tcp {
-            addr,
-            token: "test-token".into(),
-        })
-        .unwrap();
-        let probe_fd = match &conn.stream {
-            ClientStream::Tcp { reader, .. } => reader.get_ref().try_clone().unwrap(),
-            ClientStream::Unix { .. } => unreachable!(),
-        };
-        assert_eq!(
-            probe_fd.read_timeout().unwrap(),
-            Some(DEFAULT_RPC_READ_TIMEOUT)
-        );
-
-        let caller = std::thread::spawn(move || {
-            let res = conn.call("update.daemon", &json!({})).unwrap();
-            let after = match &conn.stream {
-                ClientStream::Tcp { reader, .. } => reader.get_ref().read_timeout().unwrap(),
-                ClientStream::Unix { .. } => unreachable!(),
-            };
-            (res, after)
-        });
-
-        let raw_req = req_seen_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert!(raw_req.contains("\"update.daemon\""));
-        assert_eq!(
-            probe_fd.read_timeout().unwrap(),
-            Some(DAEMON_UPDATE_RPC_READ_TIMEOUT)
-        );
-        release_tx.send(()).unwrap();
-
-        let (res, restored_timeout) = caller.join().unwrap();
-        server.join().unwrap();
-        assert_eq!(res["updated"], true);
-        assert_eq!(restored_timeout, Some(DEFAULT_RPC_READ_TIMEOUT));
-    }
-
-    #[test]
-    fn truncated_rpc_frame_returns_unexpected_eof_instead_of_json_error() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap().to_string();
-
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            // Write a partial JSON frame without trailing newline, then close.
-            stream
-                .write_all(br#"{"jsonrpc":"2.0","id":1,"result":{"partial":"#)
-                .unwrap();
-            stream.flush().unwrap();
-            let _ = stream.shutdown(std::net::Shutdown::Both);
-        });
-
-        let mut conn = RpcConn::connect(&ClientEndpoint::Tcp {
-            addr,
-            token: "test-token".into(),
-        })
-        .unwrap();
-        let err = conn.call("app.state", &json!({})).unwrap_err();
-        server.join().unwrap();
-
-        let io_err = err
-            .downcast_ref::<std::io::Error>()
-            .expect("truncated frame must surface as std::io::Error so pooling/respawn can retry");
-        assert_eq!(io_err.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 }

@@ -199,6 +199,7 @@ pub struct Ui {
     pub worktree_remove_confirm: Signal<Option<String>>,
     pub project_delete_confirm: Signal<Option<String>>,
     pub hosts: Signal<Vec<HostSummary>>,
+    pub paired_devices_preview: Signal<Option<PairedDevicesPreview>>,
     pub sync_preview: Signal<Vec<SyncItemView>>,
     pub settings_host: Signal<String>,
     pub installed_fonts: Signal<Option<canban_terminal::InstalledFonts>>,
@@ -210,6 +211,14 @@ pub struct Ui {
     pub discovery: Signal<DiscoveryCatalog>,
     pub discovery_loading: Signal<bool>,
 }
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PairedDevicesPreview {
+    pub devices: Vec<PairedDevice>,
+    pub has_legacy_token: bool,
+    pub generated_uri: Option<String>,
+    pub generated_expires_at: Option<u64>,
+}
+
 impl Default for Ui {
     fn default() -> Self {
         Self::new()
@@ -600,6 +609,7 @@ impl Ui {
             worktree_remove_confirm: signal(None),
             project_delete_confirm: signal(None),
             hosts: signal(crate::host_summaries()),
+            paired_devices_preview: signal(None),
             sync_preview: signal(Vec::new()),
             settings_host: signal("local".into()),
             installed_fonts: signal(canban_terminal::try_installed_fonts()),

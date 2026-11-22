@@ -6,7 +6,22 @@ use std::{
     net::{Shutdown, TcpStream, ToSocketAddrs},
     os::unix::net::UnixStream,
     process::{Child, ChildStdin, ChildStdout},
+    sync::{Arc, Mutex, OnceLock},
 };
+
+pub type RelayOpener =
+    Arc<dyn Fn(&str, Option<&str>, Option<&str>) -> Result<Transport> + Send + Sync>;
+
+fn relay_opener_slot() -> &'static Mutex<Option<RelayOpener>> {
+    static SLOT: OnceLock<Mutex<Option<RelayOpener>>> = OnceLock::new();
+    SLOT.get_or_init(Default::default)
+}
+
+/// Registers an external relay opener (e.g. `mux://` over yamux) without coupling
+/// `canban-herdr` to async/multiplexing dependencies.
+pub fn register_relay_opener(opener: RelayOpener) {
+    *relay_opener_slot().lock().unwrap() = Some(opener);
+}
 
 enum RelaySocket {
     Unix(UnixStream),
@@ -33,6 +48,15 @@ pub struct Transport {
     socket: Option<RelaySocket>,
 }
 impl Transport {
+    pub fn from_unix_stream(socket: UnixStream) -> Result<Self> {
+        Ok(Self {
+            reader: Some(Box::new(socket.try_clone()?)),
+            writer: Some(Box::new(socket.try_clone()?)),
+            child: None,
+            socket: Some(RelaySocket::Unix(socket)),
+        })
+    }
+
     pub fn child_exited(&mut self) -> bool {
         self.child
             .as_mut()
@@ -76,7 +100,7 @@ pub fn connect_view(config: &Config, terminal: Option<&str>) -> Result<Transport
     connect_view_fenced(config, terminal, None)
 }
 
-fn handshake_relay<S: Read + Write>(
+pub fn handshake_relay<S: Read + Write>(
     socket: &mut S,
     terminal: Option<&str>,
     expected_core_id: Option<&str>,
@@ -130,6 +154,14 @@ pub fn connect_view_fenced(
     expected_core_id: Option<&str>,
 ) -> Result<Transport> {
     if let Some(endpoint) = &config.relay_endpoint {
+        if endpoint.starts_with("mux://") {
+            let opener = relay_opener_slot()
+                .lock()
+                .unwrap()
+                .clone()
+                .context("Multiplexed relay opener is not registered")?;
+            return opener(endpoint, terminal, expected_core_id);
+        }
         if let Some(addr_str) = endpoint.strip_prefix("tcp://") {
             let sock_addr = addr_str
                 .to_socket_addrs()

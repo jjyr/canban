@@ -106,6 +106,7 @@ impl AppServer {
         let listen_cfg = network::load_listen_config(&self.home);
         let bound_tcp = self.bound_tcp.lock().unwrap().clone();
         let has_token = network::read_server_token(&self.home).is_some();
+        let paired_devices_count = self.device_store.list().len();
 
         let db_path = self.home.join("canban.sqlite");
         let wal_path = self.home.join("canban.sqlite-wal");
@@ -200,7 +201,9 @@ impl AppServer {
                 "socket": self.endpoint(),
                 "listen_config": listen_cfg,
                 "bound_tcp": bound_tcp,
-                "auth_token_configured": has_token,
+                "auth_token_configured": has_token || paired_devices_count > 0,
+                "legacy_token_configured": has_token,
+                "paired_device_count": paired_devices_count,
                 "api_version": API_VERSION,
                 "build": build,
             },

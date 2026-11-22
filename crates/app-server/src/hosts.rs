@@ -431,7 +431,7 @@ impl HostRegistry {
 
         registry.runtime_handle.spawn(local_push_supervisor(
             Arc::downgrade(&registry),
-            local.endpoint().clone(),
+            local.transport().clone(),
             registry.stop_tx.subscribe(),
         ));
         for host_id in initial_host_ids {
@@ -623,6 +623,12 @@ impl HostRegistry {
                     dup.saved.name
                 );
             }
+        }
+
+        if let Some(new_tok) = client.as_ref().and_then(|c| c.upgraded_token())
+            && let HostTransport::Tcp { token, .. } = &mut host.transport
+        {
+            *token = new_tok.to_owned();
         }
 
         host.server_id = server_id;
@@ -845,6 +851,8 @@ impl HostRegistry {
     ) -> (bool, bool) {
         let (client_opt, tunnel, conn_state, state_val, server_id) = established;
         let mut updated_entities = None;
+        let mut upgraded_token_saved = false;
+        let mut persist_hosts = None;
         let (changed, became_connected) = {
             let mut guard = self.remotes.lock().unwrap();
             let Some(slot) = guard.get_mut(host_id) else {
@@ -857,6 +865,13 @@ impl HostRegistry {
             let data_changed = state_val
                 .as_ref()
                 .is_some_and(|v| super::state::state_marker(v) != slot.last_state_marker);
+            if let Some(new_tok) = client_opt.as_ref().and_then(|c| c.upgraded_token())
+                && let HostTransport::Tcp { token, .. } = &mut slot.saved.transport
+                && *token != new_tok
+            {
+                *token = new_tok.to_owned();
+                upgraded_token_saved = true;
+            }
             slot.client = client_opt;
             slot.tunnel = tunnel;
             slot.connection = conn_state;
@@ -887,13 +902,25 @@ impl HostRegistry {
                 slot.last_state_marker = marker;
             }
             let became_connected = !previous.is_connected() && slot.connection.is_connected();
-            (
+            let result = (
                 previous != slot.connection || data_changed,
                 became_connected,
-            )
+            );
+            if upgraded_token_saved {
+                persist_hosts = Some(
+                    guard
+                        .values()
+                        .map(|s| s.saved.clone())
+                        .collect::<Vec<SavedHost>>(),
+                );
+            }
+            result
         };
         if let Some(entities) = updated_entities {
             self.replace_host_entity_owners(host_id, &entities);
+        }
+        if let Some(all_saved) = persist_hosts {
+            let _ = self.save_hosts_file(&all_saved);
         }
         (changed, became_connected)
     }
@@ -2714,7 +2741,6 @@ enum RemoteSupervisorTarget {
     Idle,
     Connected {
         client: Arc<AppClient>,
-        endpoint: ClientEndpoint,
         after_revision: Value,
         has_tunnel: bool,
     },
@@ -2736,7 +2762,7 @@ struct PendingRefresh {
 
 async fn local_push_supervisor(
     weak: Weak<HostRegistry>,
-    endpoint: ClientEndpoint,
+    transport: Arc<canban_transport::ClientTransport>,
     mut stop_rx: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut last = Value::Null;
@@ -2749,7 +2775,7 @@ async fn local_push_supervisor(
             biased;
             _ = stop_rx.changed() => return,
             res = client::open_async_subscribe(
-                &endpoint,
+                &transport,
                 &last["revision"],
                 &["snapshot", "update", "utilities", "usage", "herdr"],
                 None,
@@ -2944,7 +2970,6 @@ async fn remote_host_supervisor(
                 if let Some(client) = &slot.client {
                     RemoteSupervisorTarget::Connected {
                         client: client.clone(),
-                        endpoint: client.endpoint().clone(),
                         after_revision: slot.last_state_marker["revision"].clone(),
                         has_tunnel: slot.tunnel.is_some(),
                     }
@@ -3044,12 +3069,11 @@ async fn remote_host_supervisor(
             }
             RemoteSupervisorTarget::Connected {
                 client,
-                endpoint,
                 after_revision,
                 has_tunnel,
             } => {
                 let open_fut = client::open_async_subscribe(
-                    &endpoint,
+                    client.transport(),
                     &after_revision,
                     &["snapshot", "usage"],
                     None,
@@ -3429,6 +3453,7 @@ mod tests {
                     tailscale: false,
                     port,
                     listen: Some(format!("127.0.0.1:{port}")),
+                    allow_insecure_bind: false,
                 }))
                 .unwrap();
             (restarted_app, restarted_running)
@@ -3564,6 +3589,17 @@ mod tests {
         assert_eq!(
             recovered, 1,
             "only actual remote recovery emits one host-scoped resync"
+        );
+        // Legacy server.token in hosts.json was auto-upgraded to a revocable dev_... token.
+        let persisted: HostsFile =
+            serde_json::from_slice(&std::fs::read(HostRegistry::hosts_path(&local_home)).unwrap())
+                .unwrap();
+        let HostTransport::Tcp { token, .. } = &persisted.hosts[0].transport else {
+            panic!("expected tcp host transport");
+        };
+        assert!(
+            is_device_token(token),
+            "expected legacy token auto-upgrade to dev_..., got {token}"
         );
     }
 

@@ -1,80 +1,11 @@
 use super::*;
+use canban_transport::{
+    MAX_FRAME_BYTES, TransportStream, read_bounded_line, write_json_line_async,
+};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 pub(super) fn uuid_session_id() -> String {
     canban_types::uuid_v4()
-}
-
-struct ActiveTcpConnGuard {
-    server: std::sync::Weak<AppServer>,
-}
-
-impl ActiveTcpConnGuard {
-    fn new(server: &Arc<AppServer>) -> Self {
-        server.active_tcp_connections.fetch_add(1, Ordering::SeqCst);
-        Self {
-            server: Arc::downgrade(server),
-        }
-    }
-}
-
-impl Drop for ActiveTcpConnGuard {
-    fn drop(&mut self) {
-        if let Some(server) = self.server.upgrade() {
-            server.active_tcp_connections.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
-}
-
-enum ConnStream {
-    Unix(tokio::net::UnixStream),
-    Tcp(tokio::net::TcpStream),
-}
-
-impl tokio::io::AsyncRead for ConnStream {
-    fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            Self::Unix(s) => std::pin::Pin::new(s).poll_read(cx, buf),
-            Self::Tcp(s) => std::pin::Pin::new(s).poll_read(cx, buf),
-        }
-    }
-}
-
-impl tokio::io::AsyncWrite for ConnStream {
-    fn poll_write(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        match self.get_mut() {
-            Self::Unix(s) => std::pin::Pin::new(s).poll_write(cx, buf),
-            Self::Tcp(s) => std::pin::Pin::new(s).poll_write(cx, buf),
-        }
-    }
-
-    fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            Self::Unix(s) => std::pin::Pin::new(s).poll_flush(cx),
-            Self::Tcp(s) => std::pin::Pin::new(s).poll_flush(cx),
-        }
-    }
-
-    fn poll_shutdown(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            Self::Unix(s) => std::pin::Pin::new(s).poll_shutdown(cx),
-            Self::Tcp(s) => std::pin::Pin::new(s).poll_shutdown(cx),
-        }
-    }
 }
 
 impl AppServer {
@@ -191,7 +122,6 @@ impl AppServer {
         let listen_cfg = override_listen.unwrap_or_else(|| network::load_listen_config(&self.home));
         let mut std_tcp_listeners = Vec::new();
         if listen_cfg.tcp_enabled() {
-            let _ = network::ensure_server_token(&self.home)?;
             let bind_addrs = network::resolve_bind_addrs(&listen_cfg)?;
             let mut actual_addrs = Vec::new();
             for sa in bind_addrs {
@@ -215,13 +145,52 @@ impl AppServer {
             let _guard = runtime.enter();
             let unix_listener = tokio::net::UnixListener::from_std(std_unix)?;
             let weak_unix = Arc::downgrade(self);
-            let stop_unix = self.stop_receiver();
-            runtime.spawn(accept_unix_loop(weak_unix, unix_listener, stop_unix));
-            for std_tcp in std_tcp_listeners {
-                let tcp_listener = tokio::net::TcpListener::from_std(std_tcp)?;
-                let weak_tcp = Arc::downgrade(self);
-                let stop_tcp = self.stop_receiver();
-                runtime.spawn(accept_tcp_loop(weak_tcp, tcp_listener, stop_tcp));
+            canban_transport::spawn_unix_listener(
+                runtime.handle(),
+                unix_listener,
+                self.stop_receiver(),
+                move |accepted| {
+                    let weak = weak_unix.clone();
+                    async move {
+                        if let Some(server) = weak.upgrade()
+                            && !server.stopped()
+                        {
+                            let _ = serve_stream(server, accepted).await;
+                        }
+                    }
+                },
+            );
+            if !std_tcp_listeners.is_empty() {
+                let transport_cfg = Arc::new(canban_transport::ServerTransportConfig {
+                    home: self.home.clone(),
+                    server_id: self.identity.clone(),
+                    api_version: API_VERSION,
+                    device_store: self.device_store.clone(),
+                    pairing_codes: self.pairing_codes.clone(),
+                    revocations: self.device_revocations.clone(),
+                    active_tcp_connections: self.active_tcp_connections.clone(),
+                });
+                for std_tcp in std_tcp_listeners {
+                    let tcp_listener = tokio::net::TcpListener::from_std(std_tcp)?;
+                    let weak_tcp = Arc::downgrade(self);
+                    let cfg = transport_cfg.clone();
+                    canban_transport::spawn_tcp_listener(
+                        runtime.handle(),
+                        tcp_listener,
+                        cfg,
+                        self.stop_receiver(),
+                        move |accepted| {
+                            let weak = weak_tcp.clone();
+                            async move {
+                                if let Some(server) = weak.upgrade()
+                                    && !server.stopped()
+                                {
+                                    let _ = serve_stream(server, accepted).await;
+                                }
+                            }
+                        },
+                    );
+                }
             }
         }
         *self.runtime_handle.lock().unwrap() = Some(runtime.handle().clone());
@@ -242,200 +211,52 @@ impl AppServer {
     }
 }
 
-pub(crate) fn write_json_line<W: Write>(writer: &mut W, value: &Value) -> std::io::Result<()> {
-    let mut buf = std::io::BufWriter::with_capacity(64 * 1024, writer);
-    serde_json::to_writer(&mut buf, value)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    buf.write_all(b"\n")?;
-    buf.flush()
-}
-
-pub(crate) async fn write_json_line_async<W: tokio::io::AsyncWrite + Unpin>(
-    writer: &mut W,
-    value: &Value,
-) -> std::io::Result<()> {
-    let mut bytes = serde_json::to_vec(value)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    bytes.push(b'\n');
-    writer.write_all(&bytes).await?;
-    writer.flush().await
-}
-
-pub(crate) async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
-    reader: &mut R,
-    max_bytes: usize,
-) -> std::io::Result<Option<String>> {
-    let mut buf = Vec::new();
-    loop {
-        let available = reader.fill_buf().await?;
-        if available.is_empty() {
-            return Ok(None);
-        }
-        if let Some(pos) = available.iter().position(|&b| b == b'\n') {
-            let take_len = pos + 1;
-            if buf.len() + take_len > max_bytes {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "JSON-RPC frame exceeds 48 MiB limit",
-                ));
-            }
-            buf.extend_from_slice(&available[..take_len]);
-            reader.consume(take_len);
-            let s = String::from_utf8(buf)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            return Ok(Some(s));
-        }
-        if buf.len() + available.len() > max_bytes {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "JSON-RPC frame exceeds 48 MiB limit",
-            ));
-        }
-        buf.extend_from_slice(available);
-        let len = available.len();
-        reader.consume(len);
-    }
-}
-
-async fn accept_unix_loop(
-    weak: std::sync::Weak<AppServer>,
-    listener: tokio::net::UnixListener,
-    mut stop_rx: tokio::sync::watch::Receiver<bool>,
-) {
-    loop {
-        if *stop_rx.borrow() {
-            break;
-        }
-        tokio::select! {
-            biased;
-            _ = stop_rx.changed() => break,
-            res = listener.accept() => {
-                match res {
-                    Ok((stream, _)) => {
-                        let Some(server) = weak.upgrade() else {
-                            break;
-                        };
-                        if server.stopped() {
-                            break;
-                        }
-                        let conn_stop = server.stop_receiver();
-                        tokio::spawn(async move {
-                            let _ = serve_connection(server, ConnStream::Unix(stream), false, conn_stop).await;
-                        });
-                    }
-                    Err(_) => break,
-                }
-            }
-        }
-    }
-}
-
-async fn accept_tcp_loop(
-    weak: std::sync::Weak<AppServer>,
-    listener: tokio::net::TcpListener,
-    mut stop_rx: tokio::sync::watch::Receiver<bool>,
-) {
-    loop {
-        if *stop_rx.borrow() {
-            break;
-        }
-        tokio::select! {
-            biased;
-            _ = stop_rx.changed() => break,
-            res = listener.accept() => {
-                match res {
-                    Ok((stream, _)) => {
-                        let _ = stream.set_nodelay(true);
-                        let Some(server) = weak.upgrade() else {
-                            break;
-                        };
-                        if server.stopped() {
-                            break;
-                        }
-                        let conn_guard = ActiveTcpConnGuard::new(&server);
-                        let conn_stop = server.stop_receiver();
-                        tokio::spawn(async move {
-                            let _guard = conn_guard;
-                            let _ = serve_connection(server, ConnStream::Tcp(stream), true, conn_stop).await;
-                        });
-                    }
-                    Err(_) => break,
-                }
-            }
-        }
-    }
-}
-
-async fn serve_connection(
+async fn serve_stream(
     server: Arc<AppServer>,
-    stream: ConnStream,
-    is_tcp: bool,
-    mut stop_rx: tokio::sync::watch::Receiver<bool>,
+    accepted: canban_transport::AcceptedStream,
 ) -> Result<()> {
-    const MAX_FRAME_BYTES: usize = 48 * 1024 * 1024;
-    let (read_half, mut writer) = tokio::io::split(stream);
+    let mut initial_request = accepted.initial_request;
+    let mut has_initial_pipelined = accepted.has_pipelined_bytes;
+    let mut stop_rx = accepted.stop_rx;
+    let (read_half, mut writer) = tokio::io::split(accepted.stream);
     let mut reader = tokio::io::BufReader::new(read_half);
     let mut first = true;
-    let mut authed = !is_tcp;
 
     loop {
         if *stop_rx.borrow() || server.stopped() {
             return Ok(());
         }
-        let read_timeout = Duration::from_secs(if first { 20 } else { 60 });
-        let line_opt = tokio::select! {
-            biased;
-            _ = stop_rx.changed() => return Ok(()),
-            res = tokio::time::timeout(read_timeout, read_bounded_line(&mut reader, MAX_FRAME_BYTES)) => {
-                match res {
-                    Ok(Ok(opt)) => opt,
-                    Ok(Err(e)) => return Err(e.into()),
-                    Err(_) => return Ok(()),
+        let (input, has_pipelined) = if let Some(req) = initial_request.take() {
+            let pipelined = has_initial_pipelined || !reader.buffer().is_empty();
+            has_initial_pipelined = false;
+            (req, pipelined)
+        } else {
+            let read_timeout = Duration::from_secs(if first { 20 } else { 60 });
+            let line_opt = tokio::select! {
+                biased;
+                _ = stop_rx.changed() => return Ok(()),
+                res = tokio::time::timeout(read_timeout, read_bounded_line(&mut reader, MAX_FRAME_BYTES)) => {
+                    match res {
+                        Ok(Ok(opt)) => opt,
+                        Ok(Err(e)) => return Err(e.into()),
+                        Err(_) => return Ok(()),
+                    }
                 }
-            }
+            };
+            let Some(line) = line_opt else {
+                return Ok(());
+            };
+            let parsed: Value = serde_json::from_str(&line)?;
+            let pipelined = !reader.buffer().is_empty();
+            (parsed, pipelined)
         };
-        let Some(line) = line_opt else {
-            return Ok(());
-        };
-        let input: Value = serde_json::from_str(&line)?;
         let id = input["id"].clone();
         let method = strp(&input, "method")?.to_owned();
 
-        if is_tcp && method == "host.probe" && first {
-            let srv = server.clone();
-            let payload = tokio::task::spawn_blocking(move || srv.host_probe_payload()).await?;
-            let reply = json!({"jsonrpc":"2.0","id":id,"result":payload});
-            tokio::time::timeout(
-                Duration::from_secs(90),
-                write_json_line_async(&mut writer, &reply),
-            )
-            .await??;
-            first = false;
-            continue;
-        }
-
-        if !authed {
-            let home = server.home.clone();
-            let provided = input["auth"].as_str().unwrap_or("").to_owned();
-            let valid = tokio::task::spawn_blocking(move || {
-                let expected = network::read_server_token(&home).unwrap_or_default();
-                network::verify_token(&expected, &provided)
-            })
-            .await?;
-            if !valid {
-                let err_reply = json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "error": {
-                        "code": -32001,
-                        "message": "Authentication required: invalid or missing server token"
-                    }
-                });
-                let _ = write_json_line_async(&mut writer, &err_reply).await;
-                let _ = writer.shutdown().await;
-                return Ok(());
-            }
-            authed = true;
+        if method == "transport.mux" {
+            let err_reply = json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":"transport.mux must be the first frame on a direct TCP connection"}});
+            let _ = write_json_line_async(&mut writer, &err_reply).await;
+            return Ok(());
         }
 
         if method == "herdr.connect" {
@@ -444,7 +265,7 @@ async fn serve_connection(
                 let _ = write_json_line_async(&mut writer, &err_reply).await;
                 return Ok(());
             }
-            if !reader.buffer().is_empty() {
+            if has_pipelined {
                 let err_reply = json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":"Unexpected bytes pipelined after herdr.connect"}});
                 let _ = write_json_line_async(&mut writer, &err_reply).await;
                 return Ok(());
@@ -489,8 +310,8 @@ async fn handle_subscribe(
     server: Arc<AppServer>,
     id: Value,
     params: Value,
-    mut reader: tokio::io::BufReader<tokio::io::ReadHalf<ConnStream>>,
-    mut writer: tokio::io::WriteHalf<ConnStream>,
+    mut reader: tokio::io::BufReader<tokio::io::ReadHalf<TransportStream>>,
+    mut writer: tokio::io::WriteHalf<TransportStream>,
     mut stop_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     if *stop_rx.borrow() || server.stopped() {
@@ -810,8 +631,8 @@ async fn github_sync_loop(
 
 async fn handle_herdr_connect(
     server: Arc<AppServer>,
-    read_half: tokio::io::ReadHalf<ConnStream>,
-    mut writer: tokio::io::WriteHalf<ConnStream>,
+    read_half: tokio::io::ReadHalf<TransportStream>,
+    mut writer: tokio::io::WriteHalf<TransportStream>,
     params: &Value,
     mut stop_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
@@ -2188,10 +2009,15 @@ mod tests {
                 tailscale: false,
                 port: 0,
                 listen: Some("127.0.0.1:0".into()),
+                allow_insecure_bind: false,
             }))
             .unwrap();
         let addr = app.bound_tcp_addrs().into_iter().next().unwrap();
-        let token = network::read_server_token(&home).unwrap();
+        assert!(
+            network::read_server_token(&home).is_none(),
+            "new daemon must not auto-generate legacy server.token"
+        );
+        let (_, token) = app.issue_device_token("runtime-test").unwrap();
 
         // 1. Open an idle authenticated TCP socket and verify it is tracked while open.
         let mut live_stream = std::net::TcpStream::connect(&addr).unwrap();
@@ -2229,11 +2055,16 @@ mod tests {
             "active_tcp_connections leaked after client closed TCP socket"
         );
 
-        // 2. Churn short-lived probes, auth failures, and one-shot RPCs (simulating ApiMismatch
-        //    probing / health checks) and verify zero sockets remain tracked.
+        // 2. Churn short-lived reachability probes, auth failures, and one-shot RPCs
+        //    and verify zero sockets remain tracked and unauthenticated host.probe is rejected.
         for _ in 0..15 {
-            let probe = network::probe_tcp_host(&addr, Duration::from_secs(3)).unwrap();
-            assert_eq!(probe["server_id"], app.server_id());
+            network::probe_tcp_reachable(&addr, Duration::from_secs(3)).unwrap();
+
+            let unauth_probe = client::rpc_tcp(&addr, None, "host.probe", json!({})).unwrap_err();
+            assert!(
+                format!("{unauth_probe:#}").contains("auth_failed:"),
+                "unauthenticated host.probe must be rejected: {unauth_probe:#}"
+            );
 
             let bad_auth = client::rpc_tcp(&addr, Some("invalid-token"), "app.ping", json!({}));
             assert!(bad_auth.is_err());
@@ -2252,13 +2083,14 @@ mod tests {
         writeln!(
             held,
             "{}",
-            json!({"jsonrpc":"2.0","id":1,"method":"host.probe","params":{}})
+            json!({"jsonrpc":"2.0","id":1,"method":"app.ping","params":{},"auth":token})
         )
         .unwrap();
         held.flush().unwrap();
-        let mut probe_line = String::new();
+        let mut ping_line = String::new();
         let mut held_reader = BufReader::new(held.try_clone().unwrap());
-        held_reader.read_line(&mut probe_line).unwrap();
+        held_reader.read_line(&mut ping_line).unwrap();
+        assert!(ping_line.contains("\"api_version\""));
         assert!(app.active_tcp_count() > 0);
 
         drop(running);
@@ -2379,10 +2211,15 @@ else:
                 tailscale: false,
                 port: 0,
                 listen: Some("127.0.0.1:0".into()),
+                allow_insecure_bind: false,
             }))
             .unwrap();
         let addr = app.bound_tcp_addrs().into_iter().next().unwrap();
-        let token = network::read_server_token(&home).unwrap();
+        assert!(
+            network::read_server_token(&home).is_none(),
+            "new daemon must not auto-generate legacy server.token"
+        );
+        let (_, token) = app.issue_device_token("runtime-test").unwrap();
 
         let mut stream = std::net::TcpStream::connect(&addr).unwrap();
         stream

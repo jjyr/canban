@@ -94,6 +94,7 @@ impl AppServer {
                     | "app.shutdown"
                     | "app.state"
                     | "app.snapshot"
+                    | "device.list"
                     | "host.probe"
                     | "host.discover"
                     | "diagnostics.status"
@@ -220,6 +221,81 @@ impl AppServer {
             "app.ping" => Ok(
                 json!({"version":env!("CARGO_PKG_VERSION"),"api_version":API_VERSION,"pid":std::process::id(),"home":self.home,"server_id":self.identity,"hostname":network::hostname_string(),"build":canban_updater::Build::current(),"updates_disabled":self.updates_disabled}),
             ),
+            "device.list" => {
+                let bound = self.bound_tcp.lock().unwrap().clone();
+                let listen_cfg = network::load_listen_config(&self.home);
+                Ok(json!({
+                    "devices": self.device_store.list(),
+                    "has_legacy_token": network::read_server_token(&self.home).is_some(),
+                    "tcp_enabled": !bound.is_empty() || listen_cfg.tcp_enabled(),
+                    "listen_addrs": bound,
+                }))
+            }
+            "device.invite.create" => {
+                ensure!(
+                    p["execution"].is_null(),
+                    "Creating pairing invites requires an explicit user action"
+                );
+                let ttl_secs = p["ttl_secs"].as_u64().unwrap_or(300);
+                let (code, expires_at) = self.create_pairing_code(ttl_secs)?;
+                let bound = self.bound_tcp.lock().unwrap().clone();
+                let listen_cfg = network::load_listen_config(&self.home);
+                let non_unspec = |raw: &str| {
+                    raw.parse::<std::net::SocketAddr>()
+                        .ok()
+                        .is_none_or(|sa| !sa.ip().is_unspecified())
+                };
+                let preferred_addr = bound
+                    .iter()
+                    .find(|a| non_unspec(a))
+                    .cloned()
+                    .or_else(|| {
+                        listen_cfg
+                            .listen
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty() && non_unspec(s))
+                            .map(canban_types::normalize_daemon_addr)
+                    })
+                    .or_else(|| {
+                        network::detect_tailscale_ipv4()
+                            .ok()
+                            .map(|ip| format!("{ip}:{}", listen_cfg.port))
+                    });
+                let uri = preferred_addr
+                    .as_deref()
+                    .map(|a| canban_types::format_pairing_uri(a, &code));
+                Ok(json!({
+                    "code": code,
+                    "expires_at": expires_at,
+                    "addr": preferred_addr,
+                    "uri": uri,
+                }))
+            }
+            "device.revoke" => {
+                ensure!(
+                    p["execution"].is_null(),
+                    "Revoking a paired device requires an explicit user action"
+                );
+                let device_id = strp(&p, "device_id")?.to_owned();
+                let revoked = self.revoke_device(&device_id)?;
+                Ok(json!({
+                    "revoked": revoked,
+                    "device_id": device_id,
+                }))
+            }
+            "device.remove_legacy_token" => {
+                ensure!(
+                    p["execution"].is_null(),
+                    "Removing legacy server.token requires an explicit user action"
+                );
+                let token_file = network::token_path(&self.home);
+                let existed = token_file.exists();
+                if existed {
+                    let _ = std::fs::remove_file(&token_file);
+                }
+                Ok(json!({ "removed": existed }))
+            }
             "app.snapshot" => Ok(serde_json::to_value(self.snapshot()?)?),
             "project.list" => Ok(serde_json::to_value(
                 self.store.lock().unwrap().db().list::<Project>()?,

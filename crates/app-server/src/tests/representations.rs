@@ -427,12 +427,13 @@ fn prune_cardless_events_preserves_highwater_pending_deliveries_and_card_events(
 #[test]
 fn tcp_first_frame_accepts_payloads_over_64_kib() {
     let (_dir, app, _project, card) = setup();
-    let token = crate::network::ensure_server_token(&app.home).unwrap();
+    let (_, token) = app.issue_device_token("repr-test").unwrap();
     let _running = app
         .start_with_listen(Some(ServerListenConfig {
             tailscale: false,
             port: 0,
             listen: Some("127.0.0.1:0".into()),
+            allow_insecure_bind: false,
         }))
         .unwrap();
     let addr = app.bound_tcp_addrs()[0].clone();

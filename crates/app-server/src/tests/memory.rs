@@ -103,10 +103,11 @@ fn push_subscription_observes_worker_commits_without_emit_side_channels_and_hear
             tailscale: false,
             port: 0,
             listen: Some("127.0.0.1:0".into()),
+            allow_insecure_bind: false,
         }))
         .unwrap();
     let addr = app.bound_tcp_addrs().into_iter().next().unwrap();
-    let token = network::read_server_token(&home).unwrap();
+    let (_, token) = app.issue_device_token("memory-test-1").unwrap();
 
     // 1. Handshake and push over TCP with all side channels + fast heartbeat.
     let mut tcp = std::net::TcpStream::connect(&addr).unwrap();
@@ -247,10 +248,11 @@ fn push_subscription_handles_auth_second_frame_lagged_resync_and_client_subscrib
             tailscale: false,
             port: 0,
             listen: Some("127.0.0.1:0".into()),
+            allow_insecure_bind: false,
         }))
         .unwrap();
     let addr = app.bound_tcp_addrs().into_iter().next().unwrap();
-    let token = network::read_server_token(&home).unwrap();
+    let (_, token) = app.issue_device_token("memory-test-1").unwrap();
 
     // 1. Unauthenticated TCP subscribe is rejected with -32001.
     let mut bad = std::net::TcpStream::connect(&addr).unwrap();
@@ -442,6 +444,7 @@ fn active_update_checks_push_update_changed_progress_without_ui_polling() {
             tailscale: false,
             port: 0,
             listen: Some("127.0.0.1:0".into()),
+            allow_insecure_bind: false,
         }))
         .unwrap();
 

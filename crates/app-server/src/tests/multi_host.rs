@@ -6,22 +6,29 @@ fn tcp_listener_probe_token_auth_and_diagnostics_work_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().join("remote-home");
     let app = AppServer::open(home.clone(), PathBuf::from("/bin/echo")).unwrap();
-    let token = network::ensure_server_token(&home).unwrap();
     let listen = ServerListenConfig {
         tailscale: false,
         port: 0,
         listen: Some("127.0.0.1:0".into()),
+        allow_insecure_bind: false,
     };
     let running = app.start_with_listen(Some(listen)).unwrap();
     let bound = app.bound_tcp_addrs();
     assert_eq!(bound.len(), 1);
     let addr = bound[0].clone();
+    assert!(
+        network::read_server_token(&home).is_none(),
+        "new daemons must not auto-create legacy server.token"
+    );
 
-    // 1. Pre-auth `host.probe` succeeds without revealing private workspace entities.
-    let probe = network::probe_tcp_host(&addr, Duration::from_secs(2)).unwrap();
-    assert_eq!(probe["server_id"].as_str(), Some(app.server_id()));
-    assert_eq!(probe["api_version"].as_u64(), Some(u64::from(API_VERSION)));
-    assert_eq!(probe["auth_required"], true);
+    // 1. Port reachability probe succeeds without revealing private workspace entities, while
+    //    unauthenticated `host.probe` over TCP is rejected.
+    let _rtt_ms = network::probe_tcp_reachable(&addr, Duration::from_secs(2)).unwrap();
+    let unauth_probe = client::rpc_tcp(&addr, None, "host.probe", json!({})).unwrap_err();
+    assert!(
+        format!("{unauth_probe:#}").contains("auth_failed:"),
+        "Expected auth_failed on unauthenticated host.probe, got: {unauth_probe:#}"
+    );
 
     // 2. Wrong token is rejected with explicit `auth_failed:`.
     let bad_err = match AppClient::connect_tcp(addr.clone(), "wrong-token".into()) {
@@ -33,25 +40,47 @@ fn tcp_listener_probe_token_auth_and_diagnostics_work_end_to_end() {
         "Expected auth_failed error, got: {bad_err:#}"
     );
 
-    // 3. Valid pairing URI parses cleanly and authenticates TCP AppClient.
-    let uri = format_pairing_uri(&addr, &token);
+    // 3. Valid single-use pairing URI parses, exchanges into a revocable device token over
+    //    `transport.mux`, and cannot be replayed.
+    let (invite_code, _) = app.create_pairing_code(300).unwrap();
+    let uri = format_pairing_uri(&addr, &invite_code);
     let (parsed_addr, parsed_token) = parse_pairing_uri(&uri).unwrap();
     assert_eq!(parsed_addr, addr);
-    assert_eq!(parsed_token, token);
+    assert_eq!(parsed_token, invite_code);
 
-    let client = AppClient::connect_tcp(parsed_addr, parsed_token).unwrap();
+    let client = AppClient::connect_tcp(parsed_addr.clone(), parsed_token.clone()).unwrap();
     assert_eq!(client.server_id(), Some(app.server_id()));
-    let cfg = client.config();
-    assert_eq!(
-        cfg.relay_endpoint.as_deref(),
-        Some(format!("tcp://{addr}").as_str())
-    );
-    assert_eq!(cfg.relay_token.as_deref(), Some(token.as_str()));
+    let dev_tok = client
+        .upgraded_token()
+        .expect("single-use pairing code must exchange for a device token")
+        .to_owned();
+    assert!(is_device_token(&dev_tok));
 
-    // 4. Structured diagnostics status and log tail work over authenticated TCP.
+    let replay_err = match AppClient::connect_tcp(parsed_addr, parsed_token) {
+        Ok(_) => panic!("Replaying a consumed single-use pairing code must fail"),
+        Err(e) => e,
+    };
+    assert!(
+        format!("{replay_err:#}").contains("auth_failed:"),
+        "Expected auth_failed on pairing code replay, got: {replay_err:#}"
+    );
+
+    let cfg = client.config();
+    assert!(
+        cfg.relay_endpoint
+            .as_deref()
+            .is_some_and(|e| e.starts_with("mux://")),
+        "Expected mux:// relay endpoint, got {:?}",
+        cfg.relay_endpoint
+    );
+    assert_eq!(cfg.relay_token, None);
+
+    // 4. Structured diagnostics status and log tail work over multiplexed TCP.
     std::fs::write(home.join("server.log"), "line one\nline two\nline three\n").unwrap();
     let diag = client.call("diagnostics.status", json!({})).unwrap();
     assert_eq!(diag["server"]["server_id"].as_str(), Some(app.server_id()));
+    assert_eq!(diag["server"]["paired_device_count"], 1);
+    assert_eq!(diag["server"]["legacy_token_configured"], false);
     assert_eq!(diag["storage"]["healthy"], true);
     assert_eq!(diag["storage"]["journal_mode"], "wal");
     assert_eq!(diag["toolchain"]["git"]["available"], true);
@@ -74,12 +103,13 @@ fn host_registry_merges_multi_host_routes_mutations_caches_offline_and_recovers(
 
     // Start `This Mac` (`local`) with both Unix socket and an ephemeral TCP port (to test loopback guard).
     let local_app = AppServer::open(local_home.clone(), PathBuf::from("/bin/echo")).unwrap();
-    let local_token = network::ensure_server_token(&local_home).unwrap();
+    let (_, local_token) = local_app.issue_device_token("local-test").unwrap();
     let local_running = local_app
         .start_with_listen(Some(ServerListenConfig {
             tailscale: false,
             port: 0,
             listen: Some("127.0.0.1:0".into()),
+            allow_insecure_bind: false,
         }))
         .unwrap();
     let local_tcp_addr = local_app.bound_tcp_addrs()[0].clone();
@@ -105,12 +135,13 @@ fn host_registry_merges_multi_host_routes_mutations_caches_offline_and_recovers(
 
     // Start remote Linux-like `canband` over TCP.
     let remote_app = AppServer::open(remote_home.clone(), PathBuf::from("/bin/echo")).unwrap();
-    let remote_token = network::ensure_server_token(&remote_home).unwrap();
+    let (_, remote_token) = remote_app.issue_device_token("remote-test").unwrap();
     let remote_running = remote_app
         .start_with_listen(Some(ServerListenConfig {
             tailscale: false,
             port: 0,
             listen: Some("127.0.0.1:0".into()),
+            allow_insecure_bind: false,
         }))
         .unwrap();
     let remote_addr = remote_app.bound_tcp_addrs()[0].clone();
@@ -457,6 +488,7 @@ fn host_registry_merges_multi_host_routes_mutations_caches_offline_and_recovers(
             tailscale: false,
             port: remote_port,
             listen: Some(format!("127.0.0.1:{remote_port}")),
+            allow_insecure_bind: false,
         }))
         .unwrap();
 
@@ -554,12 +586,13 @@ fn host_registry_detects_same_field_conflict_and_resolves_via_use_mine() {
     let _local_running = local_app.start_with_listen(None).unwrap();
 
     let remote_app = AppServer::open(remote_home.clone(), PathBuf::from("/bin/echo")).unwrap();
-    let remote_token = network::ensure_server_token(&remote_home).unwrap();
+    let (_, remote_token) = remote_app.issue_device_token("remote-test").unwrap();
     let remote_running = remote_app
         .start_with_listen(Some(ServerListenConfig {
             tailscale: false,
             port: 0,
             listen: Some("127.0.0.1:0".into()),
+            allow_insecure_bind: false,
         }))
         .unwrap();
     let remote_addr = remote_app.bound_tcp_addrs()[0].clone();
@@ -626,6 +659,7 @@ fn host_registry_detects_same_field_conflict_and_resolves_via_use_mine() {
             tailscale: false,
             port: remote_port,
             listen: Some(format!("127.0.0.1:{remote_port}")),
+            allow_insecure_bind: false,
         }))
         .unwrap();
 
@@ -701,12 +735,13 @@ fn remote_host_push_updates_merged_snapshot_without_polling_and_detects_disconne
     let local_running = local_app.start_with_listen(None).unwrap();
 
     let remote_app = AppServer::open(remote_home.clone(), PathBuf::from("/bin/echo")).unwrap();
-    let remote_token = network::ensure_server_token(&remote_home).unwrap();
+    let (_, remote_token) = remote_app.issue_device_token("remote-test").unwrap();
     let remote_running = remote_app
         .start_with_listen(Some(ServerListenConfig {
             tailscale: false,
             port: 0,
             listen: Some("127.0.0.1:0".into()),
+            allow_insecure_bind: false,
         }))
         .unwrap();
     let remote_addr = remote_app.bound_tcp_addrs()[0].clone();
@@ -865,12 +900,13 @@ fn stalled_remote_host_does_not_block_healthy_remote_host_push_updates() {
     .unwrap();
 
     let remote_app = AppServer::open(remote_home.clone(), PathBuf::from("/bin/echo")).unwrap();
-    let remote_token = network::ensure_server_token(&remote_home).unwrap();
+    let (_, remote_token) = remote_app.issue_device_token("remote-test").unwrap();
     let remote_running = remote_app
         .start_with_listen(Some(ServerListenConfig {
             tailscale: false,
             port: 0,
             listen: Some("127.0.0.1:0".into()),
+            allow_insecure_bind: false,
         }))
         .unwrap();
     let remote_addr = remote_app.bound_tcp_addrs()[0].clone();
@@ -968,12 +1004,13 @@ fn host_registry_lifecycle_closes_remote_push_connections_and_forwards_local_sid
     let local_running = local_app.start_with_listen(None).unwrap();
 
     let remote_app = AppServer::open(remote_home.clone(), PathBuf::from("/bin/echo")).unwrap();
-    let remote_token = network::ensure_server_token(&remote_home).unwrap();
+    let (_, remote_token) = remote_app.issue_device_token("remote-test").unwrap();
     let remote_running = remote_app
         .start_with_listen(Some(ServerListenConfig {
             tailscale: false,
             port: 0,
             listen: Some("127.0.0.1:0".into()),
+            allow_insecure_bind: false,
         }))
         .unwrap();
     let remote_addr = remote_app.bound_tcp_addrs()[0].clone();
@@ -1478,4 +1515,379 @@ fn remote_host_supervisor_forwards_usage_changed_side_channel() {
     let _ = std::net::TcpStream::connect(&addr);
     let _ = server_thread.join();
     drop(local_running);
+}
+
+#[cfg(unix)]
+fn write_echo_mock_hc(path: &Path, core_id: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(
+        path,
+        format!(
+            r#"#!/usr/bin/python3
+import json, sys
+first = sys.stdin.buffer.readline()
+if not first:
+    sys.exit(0)
+try:
+    msg = json.loads(first.decode())
+except Exception:
+    msg = None
+if isinstance(msg, dict) and msg.get("method") == "hello":
+    def handle(req):
+        m = req.get("method")
+        if m == "hello":
+            res = {{}}
+        elif m == "server.status":
+            res = {{"core": {{"id": "{core_id}"}}}}
+        elif m == "events.subscribe":
+            res = {{"seq": 1, "terminals": []}}
+        else:
+            res = {{}}
+        sys.stdout.write(json.dumps({{"jsonrpc": "2.0", "id": req["id"], "result": res}}) + "\n")
+        sys.stdout.flush()
+    handle(msg)
+    for raw in sys.stdin.buffer:
+        line = raw.decode().strip()
+        if line:
+            handle(json.loads(line))
+else:
+    sys.stdout.buffer.write(first)
+    sys.stdout.buffer.flush()
+    while True:
+        chunk = sys.stdin.buffer.read1(4096)
+        if not chunk:
+            break
+        sys.stdout.buffer.write(chunk)
+        sys.stdout.buffer.flush()
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn single_tcp_yamux_multiplexes_rpc_subscribe_and_multiple_herdr_relays() {
+    let dir = tempfile::tempdir().unwrap();
+    let local_home = dir.path().join("local-home");
+    let remote_home = dir.path().join("remote-home");
+    let core_id = format!("core-mux-{}", id());
+    let mock_hc = dir.path().join("mock-hc");
+    write_echo_mock_hc(&mock_hc, &core_id);
+
+    let local_app = AppServer::open(local_home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let _local_running = local_app.start_with_listen(None).unwrap();
+
+    let remote_app = AppServer::open(remote_home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    remote_app.config.write().unwrap().hc = mock_hc.to_string_lossy().into_owned();
+    let (_, remote_token) = remote_app.issue_device_token("mux-workstation").unwrap();
+    let remote_running = remote_app
+        .start_with_listen(Some(ServerListenConfig {
+            tailscale: false,
+            port: 0,
+            listen: Some("127.0.0.1:0".into()),
+            allow_insecure_bind: false,
+        }))
+        .unwrap();
+    let remote_addr = remote_app.bound_tcp_addrs()[0].clone();
+    let remote_proj: Project = serde_json::from_value(
+        remote_app
+            .call(
+                "project.create",
+                json!({"name": "Mux Repo", "directory": dir.path().join("mux-repo")}),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+
+    let local_client = AppClient::connect_home(local_home, Path::new("/bin/echo")).unwrap();
+    let registry = HostRegistry::new(local_client);
+    registry
+        .add_host(SavedHost {
+            id: "home-linux".into(),
+            name: "Home Linux".into(),
+            transport: HostTransport::Tcp {
+                addr: remote_addr,
+                token: remote_token,
+            },
+            ssh_target: None,
+            server_id: None,
+            enabled: true,
+            added_at: now(),
+        })
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while remote_app.active_tcp_count() == 0 {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(remote_app.active_tcp_count(), 1);
+
+    let remote_client = registry.client_for("home-linux").unwrap();
+    let relay_cfg = remote_client.config();
+    assert!(
+        relay_cfg
+            .relay_endpoint
+            .as_deref()
+            .is_some_and(|e| e.starts_with("mux://")),
+        "expected mux:// relay endpoint, got {:?}",
+        relay_cfg.relay_endpoint
+    );
+
+    // Open TWO concurrent herdr.connect terminal relays over the single TCP yamux session.
+    let term_1 = format!("term-mux-1-{}", id());
+    let term_2 = format!("term-mux-2-{}", id());
+    let mut tr1 =
+        canban_herdr::transport::connect_view_fenced(&relay_cfg, Some(&term_1), None).unwrap();
+    let mut tr2 =
+        canban_herdr::transport::connect_view_fenced(&relay_cfg, Some(&term_2), None).unwrap();
+    assert_eq!(canban_herdr::activity::get(&core_id, &term_1).viewers, 1);
+    assert_eq!(canban_herdr::activity::get(&core_id, &term_2).viewers, 1);
+    assert_eq!(
+        remote_app.active_tcp_count(),
+        1,
+        "two relays + subscribe + RPC must share exactly 1 TCP connection"
+    );
+
+    // Perform concurrent RPCs while both terminal streams and app.subscribe are active.
+    let mut rpc_handles = Vec::new();
+    for i in 0..4 {
+        let rc = remote_client.clone();
+        let pid = remote_proj.id.clone();
+        rpc_handles.push(std::thread::spawn(move || {
+            let ping = rc.call("app.ping", json!({})).unwrap();
+            assert!(!ping["server_id"].as_str().unwrap().is_empty());
+            rc.call(
+                "card.create",
+                json!({
+                    "project_id": pid,
+                    "title": format!("Mux card {i}"),
+                    "body": "Over yamux"
+                }),
+            )
+            .unwrap()
+        }));
+    }
+
+    let mut w1 = tr1.writer.take().unwrap();
+    let mut r1 = tr1.reader.take().unwrap();
+    let mut w2 = tr2.writer.take().unwrap();
+    let mut r2 = tr2.reader.take().unwrap();
+    let p1 = b"stream-one-payload\n";
+    let p2 = b"stream-two-payload\n";
+    w1.write_all(p1).unwrap();
+    w1.flush().unwrap();
+    w2.write_all(p2).unwrap();
+    w2.flush().unwrap();
+
+    let mut buf1 = vec![0u8; p1.len()];
+    let mut buf2 = vec![0u8; p2.len()];
+    r1.read_exact(&mut buf1).unwrap();
+    r2.read_exact(&mut buf2).unwrap();
+    assert_eq!(&buf1, p1);
+    assert_eq!(&buf2, p2);
+
+    for h in rpc_handles {
+        h.join().unwrap();
+    }
+    assert_eq!(remote_app.active_tcp_count(), 1);
+
+    // Close both terminal relays: viewer counts return to 0 while the shared TCP link stays open.
+    drop(w1);
+    drop(r1);
+    drop(tr1);
+    drop(w2);
+    drop(r2);
+    drop(tr2);
+    let dl = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < dl {
+        if canban_herdr::activity::get(&core_id, &term_1).viewers == 0
+            && canban_herdr::activity::get(&core_id, &term_2).viewers == 0
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(canban_herdr::activity::get(&core_id, &term_1).viewers, 0);
+    assert_eq!(canban_herdr::activity::get(&core_id, &term_2).viewers, 0);
+    assert_eq!(remote_app.active_tcp_count(), 1);
+
+    drop(remote_client);
+    registry.set_host_enabled("home-linux", false).unwrap();
+    let dl2 = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < dl2 && remote_app.active_tcp_count() > 0 {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(remote_app.active_tcp_count(), 0);
+    drop(registry);
+    drop(remote_running);
+}
+
+#[cfg(unix)]
+#[test]
+fn revoking_paired_device_immediately_disconnects_mux_session_and_relays() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote_home = dir.path().join("remote-home");
+    let core_id = format!("core-rev-{}", id());
+    let mock_hc = dir.path().join("mock-hc");
+    write_echo_mock_hc(&mock_hc, &core_id);
+
+    let remote_app = AppServer::open(remote_home, PathBuf::from("/bin/echo")).unwrap();
+    remote_app.config.write().unwrap().hc = mock_hc.to_string_lossy().into_owned();
+    let (dev, dev_token) = remote_app.issue_device_token("Revokable Mac").unwrap();
+    let remote_running = remote_app
+        .start_with_listen(Some(ServerListenConfig {
+            tailscale: false,
+            port: 0,
+            listen: Some("127.0.0.1:0".into()),
+            allow_insecure_bind: false,
+        }))
+        .unwrap();
+    let addr = remote_app.bound_tcp_addrs()[0].clone();
+
+    let client = AppClient::connect_tcp(addr.clone(), dev_token.clone()).unwrap();
+    assert_eq!(remote_app.active_tcp_count(), 1);
+    let term_id = format!("term-rev-{}", id());
+    let cfg = client.config();
+    let _tr = canban_herdr::transport::connect_view_fenced(&cfg, Some(&term_id), None).unwrap();
+    assert_eq!(canban_herdr::activity::get(&core_id, &term_id).viewers, 1);
+
+    // Revoke the active device: TCP mux session + child herdr relay must terminate immediately.
+    let revoked = remote_app
+        .call("device.revoke", json!({"device_id": dev.id}))
+        .unwrap();
+    assert_eq!(revoked["revoked"], true);
+
+    let dl = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < dl {
+        if remote_app.active_tcp_count() == 0
+            && canban_herdr::activity::get(&core_id, &term_id).viewers == 0
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(remote_app.active_tcp_count(), 0);
+    assert_eq!(canban_herdr::activity::get(&core_id, &term_id).viewers, 0);
+
+    // Reconnecting with the revoked token is rejected.
+    let err = match AppClient::connect_tcp(addr, dev_token) {
+        Ok(_) => panic!("Expected revoked device token to be rejected"),
+        Err(e) => e,
+    };
+    assert!(format!("{err:#}").contains("auth_failed:"));
+
+    drop(client);
+    drop(remote_running);
+}
+
+#[test]
+fn pairing_code_and_legacy_server_token_upgrade_persist_in_hosts_json_and_remove_legacy_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let local_home = dir.path().join("local-home");
+    let legacy_remote_home = dir.path().join("legacy-remote");
+    let invite_remote_home = dir.path().join("invite-remote");
+
+    let local_app = AppServer::open(local_home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let _local_running = local_app.start_with_listen(None).unwrap();
+
+    // Legacy remote daemon with deprecated `server.token`.
+    let legacy_app =
+        AppServer::open(legacy_remote_home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let legacy_token = network::ensure_server_token(&legacy_remote_home).unwrap();
+    let legacy_running = legacy_app
+        .start_with_listen(Some(ServerListenConfig {
+            tailscale: false,
+            port: 0,
+            listen: Some("127.0.0.1:0".into()),
+            allow_insecure_bind: false,
+        }))
+        .unwrap();
+    let legacy_addr = legacy_app.bound_tcp_addrs()[0].clone();
+
+    // New remote daemon using single-use pairing code.
+    let invite_app =
+        AppServer::open(invite_remote_home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let invite_running = invite_app
+        .start_with_listen(Some(ServerListenConfig {
+            tailscale: false,
+            port: 0,
+            listen: Some("127.0.0.1:0".into()),
+            allow_insecure_bind: false,
+        }))
+        .unwrap();
+    let invite_addr = invite_app.bound_tcp_addrs()[0].clone();
+    let (pairing_code, _) = invite_app.create_pairing_code(300).unwrap();
+
+    let local_client = AppClient::connect_home(local_home.clone(), Path::new("/bin/echo")).unwrap();
+    let registry = HostRegistry::new(local_client);
+
+    registry
+        .add_host(SavedHost {
+            id: "legacy-host".into(),
+            name: "Legacy Host".into(),
+            transport: HostTransport::Tcp {
+                addr: legacy_addr,
+                token: legacy_token,
+            },
+            ssh_target: None,
+            server_id: None,
+            enabled: true,
+            added_at: now(),
+        })
+        .unwrap();
+
+    registry
+        .add_host(SavedHost {
+            id: "invite-host".into(),
+            name: "Invite Host".into(),
+            transport: HostTransport::Tcp {
+                addr: invite_addr,
+                token: pairing_code,
+            },
+            ssh_target: None,
+            server_id: None,
+            enabled: true,
+            added_at: now(),
+        })
+        .unwrap();
+
+    // Verify hosts.json stores revocable dev_... tokens (never legacy token or raw pair_ code).
+    let persisted: HostsFile =
+        serde_json::from_slice(&std::fs::read(HostRegistry::hosts_path(&local_home)).unwrap())
+            .unwrap();
+    for h in &persisted.hosts {
+        let HostTransport::Tcp { token, .. } = &h.transport else {
+            panic!("expected TCP transport for {}", h.id);
+        };
+        assert!(
+            is_device_token(token),
+            "expected dev_... token persisted for {}, got {token}",
+            h.id
+        );
+    }
+
+    // Remove deprecated `server.token` on legacy remote and verify reconnect continues using dev_...
+    let rm_res = legacy_app
+        .call("device.remove_legacy_token", json!({}))
+        .unwrap();
+    assert_eq!(rm_res["removed"], true);
+    assert!(network::read_server_token(&legacy_remote_home).is_none());
+
+    registry.reconnect(None);
+    registry.poll_remotes_once();
+    for s in registry.summaries() {
+        assert!(
+            s.is_connected(),
+            "expected {} to reconnect using upgraded dev_... token, got {:?}",
+            s.id,
+            s.connection
+        );
+    }
+
+    drop(registry);
+    drop(legacy_running);
+    drop(invite_running);
 }

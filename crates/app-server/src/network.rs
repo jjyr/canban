@@ -22,40 +22,24 @@ pub fn save_listen_config(home: &Path, cfg: &ServerListenConfig) -> Result<()> {
     canban_context::atomic(&path, &serde_json::to_vec_pretty(cfg)?)
 }
 
+/// DEPRECATED: legacy static `server.token` path; retained only to auto-upgrade older hosts.
 pub fn token_path(home: &Path) -> PathBuf {
-    home.join("server.token")
+    canban_transport::auth::legacy_token_path(home)
 }
 
+/// DEPRECATED: read legacy static `server.token` if present.
 pub fn read_server_token(home: &Path) -> Option<String> {
-    std::fs::read_to_string(token_path(home))
-        .ok()
-        .map(|s| s.trim().to_owned())
-        .filter(|s| s.len() >= 32)
+    canban_transport::auth::read_legacy_server_token(home)
 }
 
+/// DEPRECATED: generate legacy static `server.token` for backward-compatibility tests.
 pub fn ensure_server_token(home: &Path) -> Result<String> {
-    if let Some(existing) = read_server_token(home) {
-        return Ok(existing);
-    }
-    std::fs::create_dir_all(home)?;
-    let secret = format!("{}{}", canban_types::token_id(), canban_types::token_id());
-    let path = token_path(home);
-    canban_updater::atomic(&path, format!("{secret}\n").as_bytes())?;
-    Ok(secret)
+    canban_transport::auth::ensure_legacy_server_token(home)
 }
 
-/// Constant-time token comparison to avoid timing side-channels over TCP.
+/// DEPRECATED: Constant-time token comparison for legacy `server.token` verification.
 pub fn verify_token(expected: &str, provided: &str) -> bool {
-    let a = expected.trim().as_bytes();
-    let b = provided.trim().as_bytes();
-    if a.len() < 32 || a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (&x, &y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    canban_transport::auth::verify_legacy_token(expected, provided)
 }
 
 pub fn is_tailscale_ip(ip: IpAddr) -> bool {
@@ -162,10 +146,16 @@ pub fn resolve_bind_addrs(cfg: &ServerListenConfig) -> Result<Vec<SocketAddr>> {
             .to_socket_addrs()
             .with_context(|| format!("Invalid listen address '{explicit}'"))?
         {
-            ensure!(
-                !sa.ip().is_unspecified(),
-                "Refusing to bind Canban daemon to unspecified public address {sa}; bind a Tailscale IP or loopback address"
-            );
+            let is_safe_default = sa.ip().is_loopback() || is_tailscale_ip(sa.ip());
+            if !is_safe_default {
+                ensure!(
+                    cfg.allow_insecure_bind,
+                    "Refusing to bind Canban TCP listener to {sa}: by default only loopback or Tailscale addresses are permitted. Pass `--allow-insecure-bind` if this interface is protected by your own VPN (e.g. WireGuard/ZeroTier) or trusted private network."
+                );
+                eprintln!(
+                    "Warning: Canban TCP listener binding to {sa} (--allow-insecure-bind); ensure this network path is encrypted (e.g. WireGuard/ZeroTier/VPN) or trusted."
+                );
+            }
             if !addrs.contains(&sa) {
                 addrs.push(sa);
             }
@@ -428,8 +418,8 @@ pub fn discover_all() -> DiscoveryCatalog {
     catalog
 }
 
-/// Probe a remote Canban TCP daemon without authentication (`host.probe`).
-pub fn probe_tcp_host(raw_addr: &str, timeout: Duration) -> Result<Value> {
+/// Probe whether a remote Canban TCP endpoint accepts connections and measure connect RTT (ms).
+pub fn probe_tcp_reachable(raw_addr: &str, timeout: Duration) -> Result<u64> {
     let normalized = canban_types::normalize_daemon_addr(raw_addr);
     ensure!(!normalized.is_empty(), "Host address is empty");
     let sock_addr = normalized
@@ -438,48 +428,23 @@ pub fn probe_tcp_host(raw_addr: &str, timeout: Duration) -> Result<Value> {
         .next()
         .with_context(|| format!("No socket address resolved for {normalized}"))?;
     let start = std::time::Instant::now();
-    let mut stream = TcpStream::connect_timeout(&sock_addr, timeout)
+    let stream = TcpStream::connect_timeout(&sock_addr, timeout)
         .with_context(|| format!("Could not connect to {normalized}"))?;
-    let _ = stream.set_nodelay(true);
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
-    crate::runtime::write_json_line(
-        &mut stream,
-        &json!({"jsonrpc":"2.0","id":1,"method":"host.probe","params":{}}),
-    )?;
-    let mut line = String::new();
-    let n = BufReader::new(stream)
-        .take(16 * 1024)
-        .read_line(&mut line)?;
-    ensure!(
-        n > 0 && line.ends_with('\n'),
-        "Remote daemon closed probe socket"
-    );
-    let reply: Value = serde_json::from_str(&line).context("Invalid probe JSON response")?;
-    if let Some(err) = reply.get("error") {
-        bail!(
-            "{}",
-            err["message"].as_str().unwrap_or("Remote probe rejected")
-        );
-    }
-    let mut result = reply
-        .get("result")
-        .cloned()
-        .context("Missing probe result")?;
-    result["addr"] = json!(normalized);
-    result["rtt_ms"] = json!(start.elapsed().as_millis() as u64);
-    Ok(result)
+    drop(stream);
+    Ok(start.elapsed().as_millis() as u64)
 }
 
 /// Attempt non-interactive SSH pairing (`BatchMode=yes`) against `ssh_target`.
 /// If `canban` is already installed on the remote machine, enables `--tailscale` (when requested),
-/// ensures the user service is running, and returns `{ addr, token, server_id, hostname, platform }`.
+/// ensures the user service is running, issues a revocable device token for this host, and returns
+/// `{ addr, token, server_id, hostname, platform, home }`.
 pub fn pair_via_ssh_noninteractive(
     ssh_target: &str,
     prefer_tailscale: bool,
     port: u16,
 ) -> Result<Value> {
     let mode_flag = if prefer_tailscale { "--tailscale" } else { "" };
+    let device_name_quoted = shell_single_quote(&hostname_string());
     let remote_script = format!(
         r#"export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH";
 if ! command -v canban >/dev/null 2>&1; then
@@ -487,7 +452,7 @@ if ! command -v canban >/dev/null 2>&1; then
   exit 0
 fi
 canban service install {mode_flag} --port {port} >/dev/null 2>&1 || true
-canban pair {mode_flag} --port {port} --json"#
+canban pair {mode_flag} --port {port} --device-name {device_name_quoted} --json 2>/dev/null || canban pair {mode_flag} --port {port} --json"#
     );
     let out = canban_exec::command("ssh")
         .args([
@@ -685,16 +650,15 @@ pub fn install_user_service(
     tailscale: bool,
     port: u16,
     listen: Option<String>,
+    allow_insecure_bind: bool,
 ) -> Result<Value> {
     let cfg = ServerListenConfig {
         tailscale,
         port,
         listen,
+        allow_insecure_bind,
     };
     save_listen_config(home, &cfg)?;
-    if cfg.tcp_enabled() {
-        let _ = ensure_server_token(home)?;
-    }
     let user_home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .context("HOME is not set")?;
@@ -943,6 +907,55 @@ mod tests {
         assert!(
             inner_status.success(),
             "remote inner sh script failed syntax check:\n{cmd}"
+        );
+    }
+
+    #[test]
+    fn resolve_bind_addrs_guards_non_tailscale_addresses_unless_allow_insecure_bind() {
+        let safe_loopback = ServerListenConfig {
+            tailscale: false,
+            port: 7680,
+            listen: Some("127.0.0.1:7680".into()),
+            allow_insecure_bind: false,
+        };
+        assert_eq!(
+            resolve_bind_addrs(&safe_loopback).unwrap(),
+            vec!["127.0.0.1:7680".parse().unwrap()]
+        );
+
+        let rejected_wg = ServerListenConfig {
+            tailscale: false,
+            port: 7680,
+            listen: Some("10.10.0.2:7680".into()),
+            allow_insecure_bind: false,
+        };
+        let wg_err = resolve_bind_addrs(&rejected_wg).unwrap_err();
+        assert!(wg_err.to_string().contains("--allow-insecure-bind"));
+
+        let rejected_unspec = ServerListenConfig {
+            tailscale: false,
+            port: 7680,
+            listen: Some("0.0.0.0:7680".into()),
+            allow_insecure_bind: false,
+        };
+        assert!(resolve_bind_addrs(&rejected_unspec).is_err());
+
+        let allowed_wg = ServerListenConfig {
+            allow_insecure_bind: true,
+            ..rejected_wg
+        };
+        assert_eq!(
+            resolve_bind_addrs(&allowed_wg).unwrap(),
+            vec!["10.10.0.2:7680".parse().unwrap()]
+        );
+
+        let allowed_unspec = ServerListenConfig {
+            allow_insecure_bind: true,
+            ..rejected_unspec
+        };
+        assert_eq!(
+            resolve_bind_addrs(&allowed_unspec).unwrap(),
+            vec!["0.0.0.0:7680".parse().unwrap()]
         );
     }
 }

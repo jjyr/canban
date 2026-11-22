@@ -3268,6 +3268,15 @@ pub fn Gallery() -> impl IntoElement {
                     ui.navigate("board");
                     canban_ui::hosts::open_connect_modal(ui);
                 }))
+                .child(action("Multi-host · Paired Devices", Variant::Quiet, move |_| {
+                    let (snap, hosts) = fixtures::multi_host_workspace(false);
+                    ui.discovery.set(fixtures::discovery_catalog());
+                    ui.hosts.set(hosts);
+                    ui.snapshot.set(snap);
+                    ui.paired_devices_preview.set(Some(fixtures::paired_devices_preview()));
+                    scene.set("workspace".into());
+                    canban_ui::hosts::open_host_settings(ui, "local".into(), "hosts");
+                }))
                 .child(action("Diagnostics", Variant::Quiet, move |_| {
                     let (snap, hosts) = fixtures::multi_host_workspace(false);
                     ui.discovery.set(fixtures::discovery_catalog());

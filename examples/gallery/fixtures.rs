@@ -2558,6 +2558,30 @@ pub fn agent_catalog() -> serde_json::Value {
     })
 }
 
+pub fn paired_devices_preview() -> canban_ui::presenter::PairedDevicesPreview {
+    use canban_types::*;
+    let t = now();
+    canban_ui::presenter::PairedDevicesPreview {
+        devices: vec![
+            PairedDevice {
+                id: "dev-macbook".into(),
+                name: "Work MacBook Pro".into(),
+                created_at: t.saturating_sub(3_600_000),
+                last_seen_at: Some(t.saturating_sub(90_000)),
+            },
+            PairedDevice {
+                id: "dev-iphone".into(),
+                name: "iPhone 17".into(),
+                created_at: t.saturating_sub(300_000),
+                last_seen_at: None,
+            },
+        ],
+        has_legacy_token: true,
+        generated_uri: Some("canban://100.84.0.2:7680#pair_demo9f8e7d6c5b4a3210".into()),
+        generated_expires_at: Some(t + 240_000),
+    }
+}
+
 pub fn discovery_catalog() -> canban_types::DiscoveryCatalog {
     use canban_types::*;
     DiscoveryCatalog {

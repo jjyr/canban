@@ -1621,7 +1621,7 @@ fn connect_tailscale_tab(
                                 let res = blocking(move || {
                                     #[cfg(feature = "local-host")]
                                     {
-                                        let probe = canban_app_server::network::probe_tcp_host(
+                                        let probe = canban_app_server::network::probe_tcp_reachable(
                                             &format!("{ip_c}:{DEFAULT_DAEMON_PORT}"),
                                             Duration::from_secs(2),
                                         );
@@ -1637,7 +1637,7 @@ fn connect_tailscale_tab(
                                     {
                                         let _ = (ip_c, ssh_c);
                                         (
-                                            Err::<serde_json::Value, anyhow::Error>(anyhow::anyhow!(
+                                            Err::<u64, anyhow::Error>(anyhow::anyhow!(
                                                 "Host probing requires the local-host feature"
                                             )),
                                             Err::<serde_json::Value, anyhow::Error>(anyhow::anyhow!(
@@ -1770,7 +1770,7 @@ fn connect_tailscale_tab(
                                 .gap_2()
                                 .child(
                                     view().flex_1().child(
-                                        field(ts_manual_uri, "canban://100.x.y.z:7680#token")
+                                        field(ts_manual_uri, "canban://100.x.y.z:7680#pair_...")
                                             .label("Pairing URI"),
                                     ),
                                 )
@@ -2044,7 +2044,7 @@ fn connect_uri_tab(
             view()
                 .gap_1p5()
                 .child(label("Pairing URI"))
-                .child(field(uri_input, "canban://100.64.0.10:7680#<token>").label("Pairing URI")),
+                .child(field(uri_input, "canban://100.64.0.10:7680#pair_...").label("Pairing URI")),
         )
         .child(
             view()
@@ -2601,11 +2601,87 @@ pub fn sync_modal(ui: Ui) -> impl IntoElement {
         )
 }
 
-/// `Settings -> Hosts` section: manage connected `canband` machines (Rename, Enable/Disable, Reconnect, Remove).
+fn format_relative_age(ts_ms: u64) -> String {
+    let delta_secs = canban_types::now().saturating_sub(ts_ms) / 1000;
+    if delta_secs < 60 {
+        "just now".into()
+    } else if delta_secs < 3600 {
+        format!("{}m ago", delta_secs / 60)
+    } else if delta_secs < 86_400 {
+        format!("{}h ago", delta_secs / 3600)
+    } else {
+        format!("{}d ago", delta_secs / 86_400)
+    }
+}
+
+fn update_paired_devices(
+    live: Signal<PairedDevicesPreview>,
+    update: impl FnOnce(&mut PairedDevicesPreview),
+) {
+    if let Some(mut cur) = live.try_get() {
+        update(&mut cur);
+        let _ = live.try_set(cur);
+    }
+}
+
+fn run_device_rpc(
+    ui: Ui,
+    busy: Signal<bool>,
+    err: Signal<Option<String>>,
+    method: &'static str,
+    params: serde_json::Value,
+    on_ok: impl FnOnce(serde_json::Value) + 'static,
+) {
+    err.set(None);
+    busy.set(true);
+    ui.spawn(async move {
+        let res = blocking(move || crate::backend::call_local(method, params)).await;
+        let _ = busy.try_set(false);
+        match res {
+            Ok(Ok(val)) => on_ok(val),
+            Ok(Err(e)) => {
+                let _ = err.try_set(Some(format!("{e:#}")));
+            }
+            Err(e) => {
+                let _ = err.try_set(Some(e.to_string()));
+            }
+        }
+    });
+}
+
+/// `Settings -> Hosts` section: manage connected `canband` machines (Rename, Enable/Disable, Reconnect, Remove)
+/// and per-device incoming pairing tokens on this daemon.
 pub fn settings_section_view(ui: Ui) -> impl IntoElement {
     let renaming_id = signal(Option::<String>::None);
     let rename_draft = signal(String::new());
     let saved_map = signal(Vec::<SavedHost>::new());
+    let devices_live = signal(PairedDevicesPreview::default());
+    let devices_loading = signal(false);
+    let devices_busy = signal(false);
+    let devices_err = signal(Option::<String>::None);
+
+    let reload_devices = move || {
+        if !crate::backend::is_connected() || devices_loading.get_untracked() {
+            return;
+        }
+        run_device_rpc(
+            ui,
+            devices_loading,
+            devices_err,
+            "device.list",
+            json!({}),
+            move |val| {
+                let devices: Vec<PairedDevice> =
+                    serde_json::from_value(val["devices"].clone()).unwrap_or_default();
+                let has_legacy_token = val["has_legacy_token"] == true;
+                update_paired_devices(devices_live, |cur| {
+                    cur.devices = devices;
+                    cur.has_legacy_token = has_legacy_token;
+                });
+            },
+        );
+    };
+    reload_devices();
 
     let reload_saved = move || {
         if let Some(backend) = crate::backend::get().filter(|b| b.has_host_registry()) {
@@ -2843,6 +2919,302 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
         }
         list
     }))
+    .child(dynamic(move || {
+        let state = if crate::backend::is_connected() {
+            devices_live.get()
+        } else {
+            ui.paired_devices_preview.get().unwrap_or_default()
+        };
+        let err_msg = devices_err.get();
+        let mut card = panel()
+            .p_0()
+            .gap_0()
+            .border_1()
+            .border_color(BORDER)
+            .overflow_hidden()
+            .child(
+                view()
+                    .px_3p5()
+                    .py_3()
+                    .bg(INSET)
+                    .border_b_1()
+                    .border_color(BORDER)
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        view()
+                            .gap_0p5()
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(label("Paired Devices").font_weight(FontWeight::SEMIBOLD))
+                                    .child(badge(format!("{}", state.devices.len()))),
+                            )
+                            .child(
+                                muted("Revocable device tokens authorized to connect to this machine over single-connection mux.")
+                                    .text_size(px(11.5)),
+                            ),
+                    )
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_1p5()
+                            .child(
+                                compact_action("Generate Pairing URI", Variant::Secondary, move |_| {
+                                    if !crate::backend::is_connected() {
+                                        devices_err.set(None);
+                                        let demo_uri = "canban://100.84.0.1:7680#pair_demo9f8e7d6c5b4a3210fedcba987654".to_owned();
+                                        ui.paired_devices_preview.update(|slot| {
+                                            let p = slot.get_or_insert_with(Default::default);
+                                            p.generated_uri = Some(demo_uri);
+                                            p.generated_expires_at = Some(canban_types::now() + 300_000);
+                                        });
+                                        return;
+                                    }
+                                    run_device_rpc(
+                                        ui,
+                                        devices_busy,
+                                        devices_err,
+                                        "device.invite.create",
+                                        json!({"ttl_secs": 300}),
+                                        move |val| {
+                                            let uri = val["uri"].as_str().map(str::to_owned);
+                                            let code = val["code"].as_str().unwrap_or_default().to_owned();
+                                            let exp = val["expires_at"].as_u64();
+                                            let display_uri = uri.unwrap_or_else(|| {
+                                                format!("canban://<host-ip>:{DEFAULT_DAEMON_PORT}#{code}")
+                                            });
+                                            update_paired_devices(devices_live, |cur| {
+                                                cur.generated_uri = Some(display_uri);
+                                                cur.generated_expires_at = exp;
+                                            });
+                                        },
+                                    );
+                                })
+                                .disabled(move || devices_busy.get()),
+                            )
+                            .child(
+                                compact_action("Refresh", Variant::Quiet, move |_| reload_devices())
+                                    .disabled(move || devices_loading.get()),
+                            ),
+                    ),
+            );
+
+        if let Some(err) = err_msg {
+            card = card.child(
+                view()
+                    .px_3p5()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(BORDER)
+                    .child(notice(err, Tone::Danger)),
+            );
+        }
+
+        if let Some(uri) = state.generated_uri.clone() {
+            let uri_copy = uri.clone();
+            let exp_label = match state.generated_expires_at {
+                Some(exp) if exp > canban_types::now() => {
+                    let secs = exp.saturating_sub(canban_types::now()) / 1000;
+                    format!("Single-use · expires in {}m {}s", secs / 60, secs % 60)
+                }
+                _ => "Single-use · expires in 5m".to_owned(),
+            };
+            card = card.child(
+                view()
+                    .px_3p5()
+                    .py_2p5()
+                    .gap_1p5()
+                    .bg(SELECTED)
+                    .border_b_1()
+                    .border_color(BORDER)
+                    .child(
+                        view()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(label("Single-use Pairing URI").font_weight(FontWeight::SEMIBOLD))
+                                    .child(badge(exp_label)),
+                            )
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(compact_action("Copy URI", Variant::Primary, move |_| {
+                                        copy_text(ui, uri_copy.clone());
+                                        ui.notify("Copied pairing URI");
+                                    }))
+                                    .child(compact_action("Dismiss", Variant::Quiet, move |_| {
+                                        if crate::backend::is_connected() {
+                                            devices_live.update(|cur| {
+                                                cur.generated_uri = None;
+                                                cur.generated_expires_at = None;
+                                            });
+                                        } else {
+                                            ui.paired_devices_preview.update(|slot| {
+                                                if let Some(p) = slot.as_mut() {
+                                                    p.generated_uri = None;
+                                                    p.generated_expires_at = None;
+                                                }
+                                            });
+                                        }
+                                    })),
+                            ),
+                    )
+                    .child(
+                        muted(uri)
+                            .font_family(MONO_FONT)
+                            .text_size(px(11.5)),
+                    ),
+            );
+        }
+
+        if state.has_legacy_token {
+            card = card.child(
+                view()
+                    .px_3p5()
+                    .py_2p5()
+                    .bg(ATTENTION_SURFACE)
+                    .border_b_1()
+                    .border_color(BORDER)
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        muted("Deprecated static `server.token` is still present on disk. Remove it once all saved hosts have auto-upgraded to per-device tokens.")
+                            .text_size(px(12.)),
+                    )
+                    .child(
+                        compact_action("Remove Legacy Token", Variant::Danger, move |_| {
+                            if !crate::backend::is_connected() {
+                                ui.paired_devices_preview.update(|slot| {
+                                    if let Some(p) = slot.as_mut() {
+                                        p.has_legacy_token = false;
+                                    }
+                                });
+                                return;
+                            }
+                            run_device_rpc(
+                                ui,
+                                devices_busy,
+                                devices_err,
+                                "device.remove_legacy_token",
+                                json!({}),
+                                move |_| {
+                                    update_paired_devices(devices_live, |cur| {
+                                        cur.has_legacy_token = false;
+                                    });
+                                    ui.notify("Removed deprecated legacy server.token");
+                                },
+                            );
+                        })
+                        .disabled(move || devices_busy.get()),
+                    ),
+            );
+        }
+
+        if state.devices.is_empty() {
+            card = card.child(
+                view().px_3p5().py_3().child(
+                    muted("No paired remote devices yet. Generate a single-use pairing URI or connect from another Mac via SSH.")
+                        .text_size(px(12.)),
+                ),
+            );
+        } else {
+            let count = state.devices.len();
+            for (idx, dev) in state.devices.into_iter().enumerate() {
+                let rev_id = dev.id.clone();
+                let rev_name = dev.name.clone();
+                let dot_color = if dev.last_seen_at.is_some() {
+                    SUCCESS
+                } else {
+                    MUTED
+                };
+                let seen_text = dev
+                    .last_seen_at
+                    .map(|ts| format!("Last seen {}", format_relative_age(ts)))
+                    .unwrap_or_else(|| "Pending first connection".into());
+                let mut row = view()
+                    .px_3p5()
+                    .py_3()
+                    .gap_1()
+                    .min_w(px(0.))
+                    .child(
+                        view()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .min_w(px(0.))
+                                    .child(live_dot(dot_color))
+                                    .child(label(dev.name).font_weight(FontWeight::SEMIBOLD))
+                                    .child(badge(dev.id)),
+                            )
+                            .child(
+                                compact_action("Revoke", Variant::Danger, move |_| {
+                                    let did = rev_id.clone();
+                                    let dname = rev_name.clone();
+                                    if !crate::backend::is_connected() {
+                                        ui.paired_devices_preview.update(|slot| {
+                                            if let Some(p) = slot.as_mut() {
+                                                p.devices.retain(|d| d.id != did);
+                                            }
+                                        });
+                                        return;
+                                    }
+                                    let did_rpc = did.clone();
+                                    run_device_rpc(
+                                        ui,
+                                        devices_busy,
+                                        devices_err,
+                                        "device.revoke",
+                                        json!({"device_id": did_rpc}),
+                                        move |_| {
+                                            update_paired_devices(devices_live, |cur| {
+                                                cur.devices.retain(|d| d.id != did);
+                                            });
+                                            ui.notify(format!("Revoked device {dname}"));
+                                        },
+                                    );
+                                })
+                                .disabled(move || devices_busy.get()),
+                            ),
+                    )
+                    .child(
+                        muted(format!("Paired {} · {seen_text}", format_relative_age(dev.created_at)))
+                            .font_family(MONO_FONT)
+                            .text_size(px(11.5)),
+                    );
+                if idx + 1 < count {
+                    row = row.border_b_1().border_color(BORDER);
+                }
+                card = card.child(row);
+            }
+        }
+        card
+    }))
     .child(
         panel()
             .p_3p5()
@@ -2855,7 +3227,7 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
                     .font_weight(FontWeight::SEMIBOLD),
             )
             .child(muted(
-                "On any remote Linux or macOS machine, run `canban service install --tailscale && canban pair --tailscale` to enable autonomous 24/7 background execution and print a pairing URI.",
+                "On any remote Linux or macOS machine, run `canban service install --tailscale && canban pair --tailscale` to enable autonomous 24/7 background execution and print a single-use pairing URI. Pass `--allow-insecure-bind` on `serve`/`service install` if binding to a custom WireGuard/ZeroTier or LAN interface.",
             )),
     )
 }
@@ -3297,6 +3669,51 @@ mod tests {
             !texts.iter().any(|t| t == "Update Daemon"),
             "expected `Update Daemon` button hidden during optimistic update, got {texts:?}"
         );
+    }
+
+    #[test]
+    fn settings_section_renders_paired_devices_invite_uri_and_legacy_token_warning() {
+        #[component]
+        fn ProbePairedDevicesSettings() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            ui.paired_devices_preview.set(Some(PairedDevicesPreview {
+                devices: vec![
+                    PairedDevice {
+                        id: "dev-macbook".into(),
+                        name: "Work MacBook Pro".into(),
+                        created_at: canban_types::now().saturating_sub(3_600_000),
+                        last_seen_at: Some(canban_types::now().saturating_sub(120_000)),
+                    },
+                    PairedDevice {
+                        id: "dev-iphone".into(),
+                        name: "iPhone 17".into(),
+                        created_at: canban_types::now().saturating_sub(300_000),
+                        last_seen_at: None,
+                    },
+                ],
+                has_legacy_token: true,
+                generated_uri: Some("canban://100.84.0.1:7680#pair_testcode1234567890".into()),
+                generated_expires_at: Some(canban_types::now() + 240_000),
+            }));
+            view()
+                .w(px(1200.))
+                .h(px(1100.))
+                .child(settings_section_view(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1200.), px(1100.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<ProbePairedDevicesSettings>());
+        let texts = collect_mounted_texts(core.commit().expect("mount batch"));
+
+        assert!(texts.iter().any(|t| t == "Paired Devices"));
+        assert!(texts.iter().any(|t| t == "Work MacBook Pro"));
+        assert!(texts.iter().any(|t| t == "iPhone 17"));
+        assert!(texts.iter().any(|t| t == "Generate Pairing URI"));
+        assert!(texts.iter().any(|t| t == "Copy URI"));
+        assert!(texts.iter().any(|t| t == "Remove Legacy Token"));
+        assert!(texts.iter().any(|t| t == "Revoke"));
     }
 
     #[test]

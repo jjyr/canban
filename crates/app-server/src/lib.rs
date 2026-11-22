@@ -17,6 +17,7 @@ use std::{
 
 /// Increment when desktop clients need operations unavailable in older services.
 pub const API_VERSION: u32 = canban_updater::DESKTOP_API;
+pub use canban_transport::auth;
 pub mod instance;
 mod updates;
 
@@ -43,9 +44,12 @@ pub struct AppServer {
     github_queries: Mutex<std::collections::BTreeMap<String, Value>>,
     branch_pr_probes: Mutex<std::collections::HashMap<(String, String), std::time::Instant>>,
     identity: String,
+    device_store: Arc<auth::DeviceTokenStore>,
+    pairing_codes: Arc<auth::PairingCodeStore>,
+    device_revocations: canban_transport::RevocationBus,
     started_at: u64,
     bound_tcp: Mutex<Vec<String>>,
-    active_tcp_connections: AtomicUsize,
+    active_tcp_connections: Arc<AtomicUsize>,
     store: Mutex<Store>,
     config: RwLock<Config>,
     cli: PathBuf,
@@ -668,6 +672,9 @@ impl AppServer {
         let push_seq = Arc::new(AtomicU64::new(0));
         let (push_tx, _) = tokio::sync::broadcast::channel(256);
         let (stop_tx, _) = tokio::sync::watch::channel(false);
+        let device_store = Arc::new(auth::DeviceTokenStore::open(&home));
+        let pairing_codes = Arc::new(auth::PairingCodeStore::open(&home));
+        let device_revocations = canban_transport::RevocationBus::new();
 
         {
             let hook_changes = db_changes.clone();
@@ -728,9 +735,12 @@ impl AppServer {
             )),
             github: Arc::new(canban_github::auth::Service::new(home.clone())),
             identity,
+            device_store,
+            pairing_codes,
+            device_revocations,
             started_at: now(),
             bound_tcp: Mutex::new(Vec::new()),
-            active_tcp_connections: AtomicUsize::new(0),
+            active_tcp_connections: Arc::new(AtomicUsize::new(0)),
             home,
             store: Mutex::new(store),
             config: RwLock::new(config),
@@ -945,6 +955,20 @@ impl AppServer {
     }
     pub fn server_id(&self) -> &str {
         &self.identity
+    }
+    pub fn issue_device_token(&self, name: &str) -> Result<(PairedDevice, String)> {
+        self.device_store.issue_device(name)
+    }
+    pub fn create_pairing_code(&self, ttl_secs: u64) -> Result<(String, u64)> {
+        self.pairing_codes.create_code(ttl_secs)
+    }
+    pub fn revoke_device(&self, device_id: &str) -> Result<bool> {
+        let removed = self.device_store.revoke(device_id)?;
+        self.device_revocations.revoke(device_id);
+        Ok(removed)
+    }
+    pub fn paired_devices(&self) -> Vec<PairedDevice> {
+        self.device_store.list()
     }
     pub fn bound_tcp_addrs(&self) -> Vec<String> {
         self.bound_tcp.lock().unwrap().clone()
@@ -1334,7 +1358,7 @@ pub fn rpc(endpoint: &Path, method: &str, params: Value) -> Result<Value> {
         .with_context(|| format!("Canban is not running at {}", endpoint.display()))?;
     stream.set_read_timeout(Some(client::rpc_read_timeout(method)))?;
     stream.set_write_timeout(Some(Duration::from_secs(90)))?;
-    runtime::write_json_line(
+    canban_transport::write_json_line(
         &mut stream,
         &json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}),
     )?;

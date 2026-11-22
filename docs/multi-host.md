@@ -1,6 +1,6 @@
 # Multi-host Canban daemons, Tailscale/SSH connections and Diagnostics
 
-Status: **User-confirmed design and active implementation (2026-11-15)**.
+Status: **User-confirmed design and active implementation (2026-11-23)**.
 
 This contract defines how one native `Canban.app` client connects simultaneously to its local `AppServer` (`canband`, invoked as `canban serve`) and one or more remote `canband` instances (such as an always-on home Linux server over Tailscale or an SSH-reachable host). See [Product discussion and decisions](product/product-log.md) for the decision history and [Multi-machine execution](multi-machine.md) for the earlier single-server remote-Herdr layer.
 
@@ -13,7 +13,7 @@ This contract defines how one native `Canban.app` client connects simultaneously
 3. **One machine concept in the UI:** A Project lives on the `canband` host where it was created. Users no longer need to juggle separate "AppServer host" versus "Herdr execution machine" concepts in normal workflows: adding a machine connects (and optionally bootstraps) `canband` + `hc` on that host.
 4. **Tailscale-first direct data plane with SSH discovery/bootstrap/fallback:**
    - Users select machines directly from discovered **Tailscale peers** (`tailscale status --json`) or **SSH hosts** (`~/.ssh/config` or `user@host`).
-   - Whenever a host is reachable over Tailscale (or direct private TCP), JSON-RPC calls and `herdr.connect` live Terminal byte streams travel **directly over Tailscale TCP** with Bearer Token authentication—avoiding SSH tunnel overhead and recovering immediately on laptop wake.
+   - Whenever a host is reachable over Tailscale (or another encrypted VPN such as WireGuard/ZeroTier), JSON-RPC calls, `app.subscribe` push streams, and multiple concurrent `herdr.connect` live Terminal byte streams share a **single persistent TCP connection multiplexed with `yamux/1`** (`transport.mux`) and authenticated with **per-device revocable tokens**—avoiding SSH tunnel overhead and recovering immediately on laptop wake.
    - SSH is used both for **one-click remote bootstrap / pairing / daemon upgrades** (especially on Linux hosts) and as a **managed Unix-socket tunnel fallback** for non-Tailscale SSH hosts.
 5. **First-class Linux daemon support & built-in Diagnostics:** Remote `canband` runs headlessly on Linux (`x86_64` and `aarch64`) as well as macOS, with `systemd --user` (+ linger) service installation and an integrated **Settings → Diagnostics** page for end-to-end transport, version, runtime, toolchain, and log inspection.
 
@@ -48,28 +48,22 @@ This contract defines how one native `Canban.app` client connects simultaneously
   {
     "tailscale": true,
     "port": 7680,
-    "listen": null
+    "listen": null,
+    "allow_insecure_bind": false
   }
   ```
   `canban serve --tailscale [--port 7680]` or `canban serve --listen <ip>:<port>` persists or overrides the TCP listener configuration so service restarts (`systemd --user` / `launchd`) retain network reachability.
-- **Tailscale interface binding:** When `tailscale: true` is active, `canband` resolves the host's Tailscale IPv4 address (`100.64.0.0/10` via `tailscale ip -4` or local interface inspection) and binds `<tailscale-ip>:<port>` (default port `7680`). Unscoped `0.0.0.0` binding is rejected unless explicitly requested alongside token authentication. The TCP listener carries no application-layer encryption; confidentiality relies on the network path the user chooses (Tailscale, their own VPN, or SSH); see [Transport security](mobile-interaction.md#transport-security).
-- **Bearer Token authentication (`<home>/server.token`):**
-  - On first TCP-enabled startup or `canban pair`, `canband` generates a 256-bit random hex secret in `<home>/server.token` (`0600`).
-  - **Public pre-auth probe (`host.probe`):** Unauthenticated TCP clients may send `{"jsonrpc":"2.0","id":1,"method":"host.probe","params":{}}` (frame capped at 4 KiB) and receive non-sensitive identity metadata:
-    ```json
-    {
-      "server_id": "a1b2c3d4...",
-      "hostname": "home-linux",
-      "platform": "linux-x86_64",
-      "version": "20261115-1",
-      "api_version": 52,
-      "auth_required": true
-    }
-    ```
-  - **Authenticated RPC and Terminal relay:** Every other method over TCP—including `app.state`, mutations, and `herdr.connect` PTY stream upgrades—must supply `"auth": "<token>"` in the JSON-RPC request envelope, verified in constant time against `server.token`.
-- **CLI pairing & service commands:**
-  - `canban pair [--port 7680] [--json]`: Ensures TCP/Tailscale listening and `server.token` are configured, prints a copyable `canban://<addr>:<port>#<token>` pairing URI (or structured JSON for automated SSH pairing). See [Mobile interaction design](mobile-interaction.md#multi-address-pairing) for the proposed v2 multi-address pairing URI and concurrent probe flow.
-  - `canban service install [--tailscale] [--port 7680]` / `canban service status`: Installs and starts `~/.config/systemd/user/canban.service` on Linux (attempting `loginctl enable-linger`) or `~/Library/LaunchAgents/com.canban.daemon.plist` on macOS.
+- **Safe bind policy (`--allow-insecure-bind`):** By default, `resolve_bind_addrs` only allows loopback (`127.0.0.1` / `::1`) and Tailscale CGNAT/ULA addresses (`100.64.0.0/10` / `fd7a:115c:a1e0::/48`), relying on Tailscale WireGuard or SSH for link confidentiality without stacking duplicate application-layer TLS/Noise encryption. Users running custom encrypted networks (e.g. self-hosted WireGuard or ZeroTier) can pass `--allow-insecure-bind` (persisted in `config/server.json`) to bind explicit non-Tailscale addresses—including `0.0.0.0` or `::`—with a startup warning reminding the operator to secure the network path.
+- **Per-device revocable tokens & single-use pairing codes:**
+  - `canband` no longer generates a shared static `server.token` on new setups. Instead, authorized clients hold hashed **per-device bearer tokens** (`dev_<...>`) persisted in `<home>/device_tokens.json` (`0600`) and single-use short-lived **pairing codes** (`pair_<...>`) persisted in `<home>/pairing_codes.json` (`0600`).
+  - **No unauthenticated TCP RPC probe:** Unauthenticated TCP frames (including pre-auth `host.probe`) are immediately rejected with `-32001` and closed; UI Tailscale peer checks use TCP port reachability (`probe_tcp_reachable`) followed by SSH auto-pairing.
+  - **Dedicated transport crate (`crates/transport`, `canban-transport`):** Framing, TCP bearer/pairing authentication, live device revocation broadcast, Unix/TCP accept loops, client pooling/relay bridging, and single-connection `yamux/1` multiplexing (`transport.mux`) are isolated in `crates/transport`, keeping `canban-herdr` pure-std (`RelayOpener`) and `canban-app-server` focused on application RPCs and PTY relays.
+  - **Single-connection `yamux/1` multiplexing (`transport.mux`):** Connected TCP clients upgrade the initial authenticated connection via `transport.mux` into a `yamux` multiplexed session carrying concurrent JSON-RPC requests, `app.subscribe` server push, and any number of concurrent `herdr.connect` terminal relays (`mux://`) over a single TCP socket. Calling `device.revoke` (`canban device revoke <id>` or `Settings → Hosts → Revoke`) immediately closes that device's active multiplexed TCP session and all its streams.
+  - **Deprecated legacy `server.token` auto-upgrade:** Existing `hosts.json` entries carrying a legacy static `server.token` automatically upgrade into a per-device `dev_<...>` token during `transport.mux` negotiation, persist back to `hosts.json`, and can delete the deprecated file via `device.remove_legacy_token` (or the warning banner in `Settings → Hosts`).
+- **CLI pairing, device management & service commands:**
+  - `canban pair [--port 7680] [--allow-insecure-bind] [--device-name <name>] [--json]`: Ensures listener config is saved and prints either a 5-minute single-use `canban://<addr>:<port>#pair_...` pairing URI (default) or a direct per-device token (`--device-name`, used by automated SSH pairing).
+  - `canban device {list | invite | revoke <id> | remove-legacy-token}`: Lists paired devices, creates one-time invites, revokes devices live, or removes deprecated `server.token`.
+  - `canban service install [--tailscale] [--port 7680] [--allow-insecure-bind]` / `canban service status`: Installs and starts `~/.config/systemd/user/canban.service` on Linux (attempting `loginctl enable-linger`) or `~/Library/LaunchAgents/com.canban.daemon.plist` on macOS.
 
 ### 2.2 Client `HostRegistry`, routing and offline snapshot cache
 

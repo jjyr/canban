@@ -93,8 +93,11 @@ enum Cmd {
         /// Explicit private/loopback TCP bind address (`ip:port`).
         #[arg(long)]
         listen: Option<String>,
+        /// Allow binding `--listen` to non-loopback / non-Tailscale addresses (e.g. WireGuard/ZeroTier or 0.0.0.0).
+        #[arg(long)]
+        allow_insecure_bind: bool,
     },
-    /// Generate or display the authenticated TCP pairing URI (`canban://addr:port#token`).
+    /// Generate a single-use TCP pairing URI (`canban://addr:port#pair_...`) or issue a per-device token.
     Pair {
         #[arg(long)]
         tailscale: bool,
@@ -103,7 +106,20 @@ enum Cmd {
         #[arg(long)]
         listen: Option<String>,
         #[arg(long)]
+        allow_insecure_bind: bool,
+        /// Issue a permanent revocable device token directly for this device name instead of a one-time pairing code.
+        #[arg(long)]
+        device_name: Option<String>,
+        /// Time-to-live in seconds for a single-use pairing code (default: 300).
+        #[arg(long, default_value_t = 300)]
+        ttl_secs: u64,
+        #[arg(long)]
         json: bool,
+    },
+    /// Manage paired remote devices and single-use pairing invites on this daemon.
+    Device {
+        #[command(subcommand)]
+        command: DeviceCmd,
     },
     /// Install or inspect the user background daemon (`systemd --user` on Linux, `launchd` on macOS).
     Service {
@@ -204,9 +220,25 @@ enum ServiceCmd {
         port: u16,
         #[arg(long)]
         listen: Option<String>,
+        #[arg(long)]
+        allow_insecure_bind: bool,
     },
     /// Show background service installation and active status.
     Status,
+}
+#[derive(Subcommand)]
+enum DeviceCmd {
+    /// List all paired remote devices and whether legacy `server.token` still exists.
+    List,
+    /// Generate a single-use short-lived pairing invite URI on the running daemon.
+    Invite {
+        #[arg(long, default_value_t = 300)]
+        ttl_secs: u64,
+    },
+    /// Immediately revoke a paired device by ID and disconnect active sessions.
+    Revoke { device_id: String },
+    /// Remove the deprecated static `server.token` file once all hosts have upgraded.
+    RemoveLegacyToken,
 }
 #[derive(Subcommand)]
 enum ScheduleCmd {
@@ -623,14 +655,23 @@ fn run() -> Result<()> {
         tailscale,
         port,
         listen,
+        allow_insecure_bind,
     } = command
     {
-        let override_listen = if tailscale || listen.is_some() {
-            let cfg = canban_types::ServerListenConfig {
-                tailscale,
-                port,
-                listen,
-            };
+        let override_listen = if tailscale || listen.is_some() || allow_insecure_bind {
+            let mut cfg = canban_app_server::network::load_listen_config(&home);
+            if tailscale {
+                cfg.tailscale = true;
+            }
+            if port != canban_types::DEFAULT_DAEMON_PORT || cfg.port == 0 {
+                cfg.port = port;
+            }
+            if listen.is_some() {
+                cfg.listen = listen;
+            }
+            if allow_insecure_bind {
+                cfg.allow_insecure_bind = true;
+            }
             canban_app_server::network::save_listen_config(&home, &cfg)?;
             Some(cfg)
         } else {
@@ -649,6 +690,9 @@ fn run() -> Result<()> {
         tailscale,
         port,
         listen,
+        allow_insecure_bind,
+        device_name,
+        ttl_secs,
         json: as_json,
     } = command
     {
@@ -662,17 +706,39 @@ fn run() -> Result<()> {
         if listen.is_some() {
             cfg.listen = listen;
         }
+        if allow_insecure_bind {
+            cfg.allow_insecure_bind = true;
+        }
         if !cfg.tcp_enabled() {
             cfg.tailscale = true;
         }
         canban_app_server::network::save_listen_config(&home, &cfg)?;
-        let token = canban_app_server::network::ensure_server_token(&home)?;
-        let addr = if let Some(explicit) = cfg.listen.as_deref() {
-            canban_types::normalize_daemon_addr(explicit)
+        let non_unspec = |raw: &str| {
+            let norm = canban_types::normalize_daemon_addr(raw);
+            norm.parse::<std::net::SocketAddr>()
+                .ok()
+                .is_none_or(|sa| !sa.ip().is_unspecified())
+                .then_some(norm)
+        };
+        let addr = if let Some(explicit) = cfg.listen.as_deref().and_then(non_unspec) {
+            explicit
         } else if let Ok(ts_ip) = canban_app_server::network::detect_tailscale_ipv4() {
             format!("{ts_ip}:{}", cfg.port)
         } else {
             format!("<host-ip>:{}", cfg.port)
+        };
+        let (token, kind, device_id, expires_at) = if let Some(name) = device_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let store = canban_app_server::auth::DeviceTokenStore::open(&home);
+            let (dev, tok) = store.issue_device(name)?;
+            (tok, "device_token", Some(dev.id), None)
+        } else {
+            let codes = canban_app_server::auth::PairingCodeStore::open(&home);
+            let (code, exp) = codes.create_code(ttl_secs)?;
+            (code, "pairing_code", None, Some(exp))
         };
         let uri = canban_types::format_pairing_uri(&addr, &token);
         if as_json {
@@ -685,6 +751,9 @@ fn run() -> Result<()> {
                     "addr": addr,
                     "token": token,
                     "uri": uri,
+                    "kind": kind,
+                    "device_id": device_id,
+                    "expires_at": expires_at,
                     "server_id": sid,
                     "hostname": canban_app_server::network::hostname_string(),
                     "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
@@ -701,6 +770,7 @@ fn run() -> Result<()> {
                 tailscale,
                 port,
                 listen,
+                allow_insecure_bind,
             } => {
                 let status = canban_app_server::network::install_user_service(
                     &home,
@@ -708,6 +778,7 @@ fn run() -> Result<()> {
                     tailscale,
                     port,
                     listen,
+                    allow_insecure_bind,
                 )?;
                 println!("{}", output.encode(&status)?);
             }
@@ -1328,6 +1399,17 @@ fn run() -> Result<()> {
                 ("batch.report".into(), params)
             }
         },
+        Cmd::Device { command } => match command {
+            DeviceCmd::List => ("device.list".into(), json!({})),
+            DeviceCmd::Invite { ttl_secs } => (
+                "device.invite.create".into(),
+                json!({ "ttl_secs": ttl_secs }),
+            ),
+            DeviceCmd::Revoke { device_id } => {
+                ("device.revoke".into(), json!({ "device_id": device_id }))
+            }
+            DeviceCmd::RemoveLegacyToken => ("device.remove_legacy_token".into(), json!({})),
+        },
         Cmd::Serve { .. }
         | Cmd::Pair { .. }
         | Cmd::Service { .. }
@@ -1342,6 +1424,7 @@ fn run() -> Result<()> {
         "app.snapshot"
             | "app.ping"
             | "config.get"
+            | "device.list"
             | "herdr.status"
             | "herdr.templates"
             | "profile.presets"
