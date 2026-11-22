@@ -506,6 +506,7 @@ mod tests {
                             agent: Some("agy".into()),
                             model: Some("gemini-4-carbon-high".into()),
                             effort: Some("high".into()),
+                            orchestrator: None,
                         },
                     ),
                     (
@@ -514,6 +515,7 @@ mod tests {
                             agent: None,
                             model: Some("gpt-5.4".into()),
                             effort: Some("medium".into()),
+                            orchestrator: None,
                         },
                     ),
                 ]),

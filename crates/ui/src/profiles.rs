@@ -45,8 +45,16 @@ pub fn registry_items(profiles: Signal<Vec<Profile>>) -> impl IntoElement {
                 .into_iter()
                 .map(|profile| {
                     let (provider_icon, provider_name) = provider(&profile);
-                    let model_badge = profile.model.clone();
-                    let effort_badge = profile.effort.clone();
+                    let model_badge = if profile.is_orchestrator() {
+                        Some(profile.effective_model())
+                    } else {
+                        profile.model.clone()
+                    };
+                    let effort_badge = if profile.is_orchestrator() {
+                        None
+                    } else {
+                        profile.effort.clone()
+                    };
                     view()
                         .min_w(px(0.))
                         .py_2()

@@ -6,8 +6,27 @@
 //! `devin`, `cline`, `grok`, `hermes`, `kilo`, `qodercli`, `letta`, `mastracode`,
 //! `maki`, `muse`), plus helper construction for dynamic Herdr templates.
 
-use canban_types::{ExitAction, Profile};
+use canban_types::{ExitAction, ORCHESTRATOR_MODEL_ID, Profile, is_orchestrator_model_id};
 use serde::{Deserialize, Serialize};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{OnceLock, RwLock},
+};
+
+pub const AGY_ORCHESTRATOR_CLI_MODEL: &str = "gemini-pro-orchestrator-neon";
+pub const AGY_DEFAULT_PLANNER_MODEL: &str = "gemini-4-neon";
+pub const AGY_DEFAULT_WORKER_MODEL: &str = "gemini-4-hydrogen";
+const AGY_PLANNER_MODEL_IDS: &[&str] = &[
+    "gemini-4-neon",
+    "gemini-4-carbon",
+    "gemini-4-argon",
+    "claude-opus-5-5",
+];
+const AGY_WORKER_MODEL_IDS: &[&str] = &["gemini-4-hydrogen", "claude-sonnet-5-5"];
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelOption {
@@ -19,9 +38,45 @@ pub struct ModelOption {
     /// - `Some(levels)`: exact effort levels supported by this model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supported_efforts: Option<Vec<String>>,
+    /// Exact display labels per effort level (e.g. `"xhigh" -> "Gemini 4 Neon (XHigh)"`),
+    /// required by `agy --settings.orchestrator.{planner,executor}`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub effort_labels: BTreeMap<String, String>,
 }
 
 const AGY_EFFORT_ORDER: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+static PROBED_AGY_MODELS: OnceLock<RwLock<Vec<ModelOption>>> = OnceLock::new();
+
+fn probed_agy_models_store() -> &'static RwLock<Vec<ModelOption>> {
+    PROBED_AGY_MODELS.get_or_init(|| RwLock::new(Vec::new()))
+}
+
+pub fn update_probed_agy_models(models: &[ModelOption]) {
+    if models.is_empty() {
+        return;
+    }
+    if let Ok(mut guard) = probed_agy_models_store().write() {
+        *guard = models.to_vec();
+    }
+}
+
+pub fn known_agy_models(fallback: &[ModelOption]) -> Vec<ModelOption> {
+    let probed = probed_agy_models_store()
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    if probed.is_empty() {
+        return fallback.to_vec();
+    }
+    let mut out = probed;
+    for fb in fallback {
+        if !out.iter().any(|m| m.id == fb.id) {
+            out.push(fb.clone());
+        }
+    }
+    out
+}
 
 /// Split an Antigravity (`agy`) model ID into `(base_family, effort_suffix)` when it ends
 /// with a known reasoning effort suffix (`-low`, `-medium`, `-high`, `-xhigh`, `-max`).
@@ -51,20 +106,24 @@ fn strip_agy_effort_label_suffix(label: &str, eff: &str) -> String {
 }
 
 /// Collapse flat `agy models` tier-suffixed entries into base-model families with exact
-/// `supported_efforts`, while keeping orchestrator and single fixed-tier models effort-less:
+/// `supported_efforts` and `effort_labels`, while collapsing all legacy orchestrator slugs into
+/// a single unified `orchestrator` mode entry:
 /// - Multi-variant families (`gemini-4-carbon-{low,medium,high}` -> `gemini-4-carbon`,
 ///   `gemini-4-hydrogen-{low,medium,high,xhigh}` -> `gemini-4-hydrogen`) collapse into one
-///   base entry with sorted `supported_efforts` so `canban` passes `--model <base> --effort <tier>`.
-/// - Orchestrator models (`gemini-pro-orchestrator`, `gemini-pro-orchestrator-argon`) and
-///   single fixed-tier models (`gpt-oss-120b-medium`) stay standalone with `Some(vec![])`.
+///   base entry with sorted `supported_efforts` and preserved exact display labels.
+/// - Orchestrator presets (`gemini-pro-orchestrator*` or `"orchestrator"`) collapse into a single
+///   effort-less `"orchestrator"` mode option.
+/// - Single fixed-tier models (`gpt-oss-120b-medium`) stay standalone with `Some(vec![])`.
 pub fn collapse_agy_models(models: Vec<ModelOption>) -> Vec<ModelOption> {
-    let mut family_efforts: std::collections::BTreeMap<String, Vec<&'static str>> =
-        std::collections::BTreeMap::new();
-    let mut unsuffixed_labels: std::collections::BTreeMap<String, String> =
-        std::collections::BTreeMap::new();
+    let mut family_efforts: BTreeMap<String, Vec<&'static str>> = BTreeMap::new();
+    let mut family_effort_labels: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    let mut unsuffixed_labels: BTreeMap<String, String> = BTreeMap::new();
     for opt in &models {
         let id = opt.id.trim();
-        if id.to_ascii_lowercase().contains("orchestrator") {
+        if id.is_empty()
+            || is_orchestrator_model_id(id)
+            || id.to_ascii_lowercase().contains("orchestrator")
+        {
             continue;
         }
         if let Some((base, eff)) = split_agy_effort_suffix(id) {
@@ -72,10 +131,24 @@ pub fn collapse_agy_models(models: Vec<ModelOption>) -> Vec<ModelOption> {
             if !entry.contains(&eff) {
                 entry.push(eff);
             }
-        } else if !id.is_empty() && !opt.label.trim().is_empty() {
-            unsuffixed_labels
-                .entry(id.to_owned())
-                .or_insert_with(|| opt.label.trim().to_owned());
+            if !opt.label.trim().is_empty() {
+                family_effort_labels
+                    .entry(base.to_owned())
+                    .or_default()
+                    .insert(eff.to_owned(), opt.label.trim().to_owned());
+            }
+        } else {
+            if !opt.label.trim().is_empty() {
+                unsuffixed_labels
+                    .entry(id.to_owned())
+                    .or_insert_with(|| opt.label.trim().to_owned());
+            }
+            if !opt.effort_labels.is_empty() {
+                let map = family_effort_labels.entry(id.to_owned()).or_default();
+                for (eff, label) in &opt.effort_labels {
+                    map.entry(eff.clone()).or_insert_with(|| label.clone());
+                }
+            }
         }
     }
     for list in family_efforts.values_mut() {
@@ -88,18 +161,21 @@ pub fn collapse_agy_models(models: Vec<ModelOption>) -> Vec<ModelOption> {
     }
 
     let mut out = Vec::with_capacity(models.len());
-    let mut seen_families = std::collections::BTreeSet::new();
+    let mut seen_families = BTreeSet::new();
+    let mut seen_orchestrator = false;
     for opt in models {
         let id = opt.id.trim().to_owned();
         if id.is_empty() {
             continue;
         }
-        if id.to_ascii_lowercase().contains("orchestrator") {
-            if seen_families.insert(id.clone()) {
+        if is_orchestrator_model_id(&id) || id.to_ascii_lowercase().contains("orchestrator") {
+            if !seen_orchestrator {
+                seen_orchestrator = true;
                 out.push(ModelOption {
-                    id,
-                    label: opt.label.trim().to_owned(),
+                    id: ORCHESTRATOR_MODEL_ID.to_owned(),
+                    label: "Orchestrator (Planner + Worker)".to_owned(),
                     supported_efforts: Some(Vec::new()),
+                    effort_labels: BTreeMap::new(),
                 });
             }
             continue;
@@ -116,6 +192,7 @@ pub fn collapse_agy_models(models: Vec<ModelOption>) -> Vec<ModelOption> {
                         id: base.to_owned(),
                         label,
                         supported_efforts: Some(siblings.iter().map(|s| (*s).to_owned()).collect()),
+                        effort_labels: family_effort_labels.remove(base).unwrap_or_default(),
                     });
                 }
             } else if seen_families.insert(id.clone()) {
@@ -123,6 +200,7 @@ pub fn collapse_agy_models(models: Vec<ModelOption>) -> Vec<ModelOption> {
                     id,
                     label: opt.label.trim().to_owned(),
                     supported_efforts: Some(Vec::new()),
+                    effort_labels: opt.effort_labels,
                 });
             }
         } else if let Some(siblings) = family_efforts.get(&id)
@@ -130,9 +208,12 @@ pub fn collapse_agy_models(models: Vec<ModelOption>) -> Vec<ModelOption> {
         {
             if seen_families.insert(id.clone()) {
                 out.push(ModelOption {
-                    id,
+                    id: id.clone(),
                     label: opt.label.trim().to_owned(),
                     supported_efforts: Some(siblings.iter().map(|s| (*s).to_owned()).collect()),
+                    effort_labels: family_effort_labels
+                        .remove(&id)
+                        .unwrap_or(opt.effort_labels),
                 });
             }
         } else if seen_families.insert(id.clone()) {
@@ -140,14 +221,139 @@ pub fn collapse_agy_models(models: Vec<ModelOption>) -> Vec<ModelOption> {
                 .supported_efforts
                 .filter(|levels| !levels.is_empty())
                 .unwrap_or_default();
+            let labels = family_effort_labels
+                .remove(&id)
+                .unwrap_or(opt.effort_labels);
             out.push(ModelOption {
                 id,
                 label: opt.label.trim().to_owned(),
                 supported_efforts: Some(preserved),
+                effort_labels: labels,
             });
         }
     }
     out
+}
+
+fn filter_agy_role_models(models: &[ModelOption], preferred_ids: &[&str]) -> Vec<ModelOption> {
+    let mut out = Vec::new();
+    for id in preferred_ids {
+        if let Some(m) = models
+            .iter()
+            .find(|opt| opt.id == *id && !is_orchestrator_model_id(&opt.id))
+        {
+            out.push(m.clone());
+        }
+    }
+    if out.is_empty() {
+        for m in models {
+            if !is_orchestrator_model_id(&m.id)
+                && !m.id.to_ascii_lowercase().contains("orchestrator")
+                && m.supported_efforts
+                    .as_ref()
+                    .is_none_or(|levels| !levels.is_empty())
+            {
+                out.push(m.clone());
+            }
+        }
+    }
+    out
+}
+
+pub fn agy_orchestrator_planner_models(models: &[ModelOption]) -> Vec<ModelOption> {
+    filter_agy_role_models(models, AGY_PLANNER_MODEL_IDS)
+}
+
+pub fn agy_orchestrator_worker_models(models: &[ModelOption]) -> Vec<ModelOption> {
+    filter_agy_role_models(models, AGY_WORKER_MODEL_IDS)
+}
+
+pub fn default_agy_effort_for_model(models: &[ModelOption], model_id: &str) -> Option<String> {
+    let mid = model_id.trim();
+    if mid.is_empty() {
+        return None;
+    }
+    let opt = models.iter().find(|m| m.id == mid)?;
+    let levels = opt.supported_efforts.as_deref()?;
+    for preferred in ["xhigh", "high", "medium", "low", "max"] {
+        if levels.iter().any(|l| l == preferred) {
+            return Some(preferred.to_owned());
+        }
+    }
+    levels.first().cloned()
+}
+
+fn agy_effort_display_name(eff: &str) -> String {
+    match eff.trim().to_ascii_lowercase().as_str() {
+        "low" => "Low".to_owned(),
+        "medium" => "Medium".to_owned(),
+        "high" => "High".to_owned(),
+        "xhigh" => "XHigh".to_owned(),
+        "max" => "Max".to_owned(),
+        other => {
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        }
+    }
+}
+
+/// Resolve an exact display label (e.g. `"Gemini 4 Neon (XHigh)"`) for an `agy` Orchestrator
+/// role (`planner` or `executor`) from collapsed catalog options.
+pub fn resolve_agy_orchestrator_role_label(
+    models: &[ModelOption],
+    model_id: &str,
+    effort: Option<&str>,
+) -> Option<String> {
+    let mid = model_id.trim();
+    if mid.is_empty() {
+        return None;
+    }
+    if mid.contains(' ') || mid.contains('(') {
+        return Some(mid.to_owned());
+    }
+    if let Some((base, suffix_eff)) = split_agy_effort_suffix(mid)
+        && let Some(opt) = models.iter().find(|m| m.id == base)
+    {
+        return Some(
+            opt.effort_labels
+                .get(suffix_eff)
+                .cloned()
+                .unwrap_or_else(|| {
+                    format!("{} ({})", opt.label, agy_effort_display_name(suffix_eff))
+                }),
+        );
+    }
+    if let Some(opt) = models.iter().find(|m| m.id == mid) {
+        let cleaned_eff = effort
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_ascii_lowercase);
+        let eff_supported = |eff: &str| {
+            opt.effort_labels.contains_key(eff)
+                || match &opt.supported_efforts {
+                    None => true,
+                    Some(levels) => levels.iter().any(|l| l == eff),
+                }
+        };
+        let chosen_eff = cleaned_eff
+            .filter(|e| eff_supported(e))
+            .or_else(|| default_agy_effort_for_model(models, mid));
+        if let Some(eff) = chosen_eff {
+            return Some(
+                opt.effort_labels.get(&eff).cloned().unwrap_or_else(|| {
+                    format!("{} ({})", opt.label, agy_effort_display_name(&eff))
+                }),
+            );
+        }
+        return Some(opt.label.clone());
+    }
+    if let Some(eff) = effort.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(format!("{mid} ({})", agy_effort_display_name(eff)));
+    }
+    Some(mid.to_owned())
 }
 
 /// Resolve the supported reasoning effort levels for a given model on an Agent catalog entry.
@@ -202,6 +408,8 @@ pub struct CatalogEntry {
     pub supported_efforts: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub default_models: Vec<ModelOption>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub supports_orchestrator: bool,
 }
 
 impl CatalogEntry {
@@ -214,6 +422,7 @@ impl CatalogEntry {
             preset: None,
             model: None,
             effort: None,
+            orchestrator: None,
             role_instruction: String::new(),
             argv: Some(self.argv.clone()),
             resume_argv: (!self.resume_argv.is_empty()).then(|| self.resume_argv.clone()),
@@ -234,6 +443,7 @@ fn m(items: &[(&str, &str)]) -> Vec<ModelOption> {
             id: (*id).to_owned(),
             label: (*label).to_owned(),
             supported_efforts: None,
+            effort_labels: BTreeMap::new(),
         })
         .collect()
 }
@@ -322,6 +532,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
                 ("gpt-5.4", "GPT-5.4"),
                 ("gpt-5.3-codex", "GPT-5.3 Codex"),
             ]),
+            supports_orchestrator: false,
         },
         CatalogEntry {
             id: "claude".into(),
@@ -342,23 +553,28 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
                     id: "opus".into(),
                     label: "Claude Opus (Latest)".into(),
                     supported_efforts: None,
+                    effort_labels: BTreeMap::new(),
                 },
                 ModelOption {
                     id: "sonnet".into(),
                     label: "Claude Sonnet (Latest)".into(),
                     supported_efforts: None,
+                    effort_labels: BTreeMap::new(),
                 },
                 ModelOption {
                     id: "haiku".into(),
                     label: "Claude Haiku (Latest)".into(),
                     supported_efforts: Some(Vec::new()),
+                    effort_labels: BTreeMap::new(),
                 },
                 ModelOption {
                     id: "fable".into(),
                     label: "Claude Fable (Latest)".into(),
                     supported_efforts: None,
+                    effort_labels: BTreeMap::new(),
                 },
             ],
+            supports_orchestrator: false,
         },
         CatalogEntry {
             id: "agy".into(),
@@ -399,6 +615,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             effort_args: s(&["--effort", "{effort}"]),
             supported_efforts: s(&["low", "medium", "high", "xhigh", "max"]),
             default_models: agy_default_models(),
+            supports_orchestrator: true,
         },
         CatalogEntry {
             id: "gemini".into(),
@@ -432,6 +649,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
                 ("gemini-2.5-pro", "Gemini 2.5 Pro"),
                 ("gemini-2.5-flash", "Gemini 2.5 Flash"),
             ]),
+            supports_orchestrator: false,
         },
         CatalogEntry {
             id: "opencode".into(),
@@ -452,6 +670,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             effort_args: s(&["--variant", "{effort}"]),
             supported_efforts: s(&["low", "medium", "high", "max"]),
             default_models: Vec::new(),
+            supports_orchestrator: false,
         },
         CatalogEntry {
             id: "cursor".into(),
@@ -466,6 +685,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             effort_args: Vec::new(),
             supported_efforts: Vec::new(),
             default_models: Vec::new(),
+            supports_orchestrator: false,
         },
         CatalogEntry {
             id: "pi".into(),
@@ -480,6 +700,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             effort_args: s(&["--thinking", "{effort}"]),
             supported_efforts: s(&["low", "medium", "high", "xhigh"]),
             default_models: Vec::new(),
+            supports_orchestrator: false,
         },
         CatalogEntry {
             id: "omp".into(),
@@ -494,6 +715,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             effort_args: Vec::new(),
             supported_efforts: Vec::new(),
             default_models: Vec::new(),
+            supports_orchestrator: false,
         },
         CatalogEntry {
             id: "copilot".into(),
@@ -508,6 +730,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             effort_args: Vec::new(),
             supported_efforts: Vec::new(),
             default_models: Vec::new(),
+            supports_orchestrator: false,
         },
         CatalogEntry {
             id: "droid".into(),
@@ -522,6 +745,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             effort_args: Vec::new(),
             supported_efforts: Vec::new(),
             default_models: Vec::new(),
+            supports_orchestrator: false,
         },
         CatalogEntry {
             id: "amp".into(),
@@ -536,6 +760,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             effort_args: Vec::new(),
             supported_efforts: Vec::new(),
             default_models: Vec::new(),
+            supports_orchestrator: false,
         },
         CatalogEntry {
             id: "kimi".into(),
@@ -550,6 +775,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             effort_args: Vec::new(),
             supported_efforts: Vec::new(),
             default_models: Vec::new(),
+            supports_orchestrator: false,
         },
         CatalogEntry {
             id: "kiro".into(),
@@ -564,6 +790,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             effort_args: Vec::new(),
             supported_efforts: Vec::new(),
             default_models: Vec::new(),
+            supports_orchestrator: false,
         },
         CatalogEntry {
             id: "qwen".into(),
@@ -578,6 +805,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             effort_args: Vec::new(),
             supported_efforts: Vec::new(),
             default_models: Vec::new(),
+            supports_orchestrator: false,
         },
         CatalogEntry {
             id: "devin".into(),
@@ -592,6 +820,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             effort_args: Vec::new(),
             supported_efforts: Vec::new(),
             default_models: Vec::new(),
+            supports_orchestrator: false,
         },
         CatalogEntry {
             id: "cline".into(),
@@ -606,6 +835,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             effort_args: Vec::new(),
             supported_efforts: Vec::new(),
             default_models: Vec::new(),
+            supports_orchestrator: false,
         },
         CatalogEntry {
             id: "grok".into(),
@@ -620,6 +850,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             effort_args: Vec::new(),
             supported_efforts: Vec::new(),
             default_models: Vec::new(),
+            supports_orchestrator: false,
         },
         CatalogEntry {
             id: "hermes".into(),
@@ -634,6 +865,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             effort_args: Vec::new(),
             supported_efforts: Vec::new(),
             default_models: Vec::new(),
+            supports_orchestrator: false,
         },
         CatalogEntry {
             id: "kilo".into(),
@@ -648,6 +880,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             effort_args: Vec::new(),
             supported_efforts: Vec::new(),
             default_models: Vec::new(),
+            supports_orchestrator: false,
         },
         CatalogEntry {
             id: "qodercli".into(),
@@ -662,6 +895,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             effort_args: Vec::new(),
             supported_efforts: Vec::new(),
             default_models: Vec::new(),
+            supports_orchestrator: false,
         },
         CatalogEntry {
             id: "letta".into(),
@@ -676,6 +910,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             effort_args: Vec::new(),
             supported_efforts: Vec::new(),
             default_models: Vec::new(),
+            supports_orchestrator: false,
         },
         CatalogEntry {
             id: "mastracode".into(),
@@ -690,6 +925,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             effort_args: Vec::new(),
             supported_efforts: Vec::new(),
             default_models: Vec::new(),
+            supports_orchestrator: false,
         },
         CatalogEntry {
             id: "maki".into(),
@@ -704,6 +940,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             effort_args: Vec::new(),
             supported_efforts: Vec::new(),
             default_models: Vec::new(),
+            supports_orchestrator: false,
         },
         CatalogEntry {
             id: "muse".into(),
@@ -718,6 +955,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             effort_args: Vec::new(),
             supported_efforts: Vec::new(),
             default_models: Vec::new(),
+            supports_orchestrator: false,
         },
     ]
 }
@@ -763,6 +1001,7 @@ pub fn herdr_template_profile(template_name: &str) -> Profile {
         preset: Some(format!("herdr:{template_name}")),
         model: None,
         effort: None,
+        orchestrator: None,
         role_instruction: String::new(),
         argv: Some(vec![template_name.to_owned(), "{prompt}".into()]),
         resume_argv: None,
@@ -1373,31 +1612,43 @@ mod tests {
                 id: "gemini-4-hydrogen-xhigh".into(),
                 label: "Gemini 4 Hydrogen (XHigh)".into(),
                 supported_efforts: None,
+                effort_labels: BTreeMap::new(),
             },
             ModelOption {
                 id: "gemini-4-hydrogen-high".into(),
                 label: "Gemini 4 Hydrogen (High)".into(),
                 supported_efforts: None,
+                effort_labels: BTreeMap::new(),
             },
             ModelOption {
                 id: "gemini-4-hydrogen".into(),
                 label: "Gemini 4 Hydrogen".into(),
                 supported_efforts: None,
+                effort_labels: BTreeMap::new(),
+            },
+            ModelOption {
+                id: "gemini-pro-orchestrator-neon".into(),
+                label: "Orchestrator (Neon)".into(),
+                supported_efforts: None,
+                effort_labels: BTreeMap::new(),
             },
             ModelOption {
                 id: "gemini-pro-orchestrator".into(),
                 label: "Orchestrator (Carbon)".into(),
                 supported_efforts: None,
+                effort_labels: BTreeMap::new(),
             },
             ModelOption {
-                id: "gemini-pro-orchestrator-high".into(),
-                label: "Orchestrator (High)".into(),
+                id: "gemini-pro-orchestrator-argon".into(),
+                label: "Orchestrator (Argon)".into(),
                 supported_efforts: None,
+                effort_labels: BTreeMap::new(),
             },
             ModelOption {
                 id: "gpt-oss-120b-medium".into(),
                 label: "GPT-OSS 120B (Medium)".into(),
                 supported_efforts: None,
+                effort_labels: BTreeMap::new(),
             },
         ]);
 
@@ -1408,42 +1659,114 @@ mod tests {
                     id: "gemini-4-hydrogen".into(),
                     label: "Gemini 4 Hydrogen".into(),
                     supported_efforts: Some(vec!["high".into(), "xhigh".into()]),
+                    effort_labels: BTreeMap::from([
+                        ("high".into(), "Gemini 4 Hydrogen (High)".into()),
+                        ("xhigh".into(), "Gemini 4 Hydrogen (XHigh)".into()),
+                    ]),
                 },
                 ModelOption {
-                    id: "gemini-pro-orchestrator".into(),
-                    label: "Orchestrator (Carbon)".into(),
+                    id: "orchestrator".into(),
+                    label: "Orchestrator (Planner + Worker)".into(),
                     supported_efforts: Some(Vec::new()),
-                },
-                ModelOption {
-                    id: "gemini-pro-orchestrator-high".into(),
-                    label: "Orchestrator (High)".into(),
-                    supported_efforts: Some(Vec::new()),
+                    effort_labels: BTreeMap::new(),
                 },
                 ModelOption {
                     id: "gpt-oss-120b-medium".into(),
                     label: "GPT-OSS 120B (Medium)".into(),
                     supported_efforts: Some(Vec::new()),
+                    effort_labels: BTreeMap::new(),
                 },
             ]
         );
         // Re-running collapse_agy_models is idempotent.
         assert_eq!(collapse_agy_models(collapsed.clone()), collapsed);
 
-        let agy_entry = builtin_catalog()
-            .into_iter()
-            .find(|e| e.id == "agy")
-            .unwrap();
+        let catalog = builtin_catalog();
+        let agy_entry = catalog.iter().find(|e| e.id == "agy").unwrap();
+        assert!(agy_entry.supports_orchestrator);
+        assert!(
+            catalog
+                .iter()
+                .filter(|e| e.id != "agy")
+                .all(|e| !e.supports_orchestrator)
+        );
         assert_eq!(
-            model_supported_efforts(&agy_entry, &collapsed, Some("gemini-4-hydrogen")),
+            model_supported_efforts(agy_entry, &collapsed, Some("gemini-4-hydrogen")),
             Some(vec!["high".into(), "xhigh".into()])
         );
         assert_eq!(
-            model_supported_efforts(&agy_entry, &collapsed, Some("gemini-4-hydrogen-high")),
+            model_supported_efforts(agy_entry, &collapsed, Some("gemini-4-hydrogen-high")),
             Some(Vec::new())
         );
         assert_eq!(
-            model_supported_efforts(&agy_entry, &collapsed, Some("custom-orchestrator")),
+            model_supported_efforts(agy_entry, &collapsed, Some("orchestrator")),
             Some(Vec::new())
+        );
+        assert_eq!(
+            model_supported_efforts(agy_entry, &collapsed, Some("custom-orchestrator")),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn agy_orchestrator_role_candidates_defaults_and_display_labels_resolve() {
+        let agy_models = builtin_catalog()
+            .into_iter()
+            .find(|e| e.id == "agy")
+            .unwrap()
+            .default_models;
+
+        let planners = agy_orchestrator_planner_models(&agy_models);
+        let planner_ids: Vec<&str> = planners.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            planner_ids,
+            vec![
+                "gemini-4-neon",
+                "gemini-4-carbon",
+                "gemini-4-argon",
+                "claude-opus-5-5"
+            ]
+        );
+
+        let workers = agy_orchestrator_worker_models(&agy_models);
+        let worker_ids: Vec<&str> = workers.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(worker_ids, vec!["gemini-4-hydrogen", "claude-sonnet-5-5"]);
+
+        assert_eq!(
+            default_agy_effort_for_model(&agy_models, "gemini-4-neon").as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
+            default_agy_effort_for_model(&agy_models, "claude-opus-5-5").as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            default_agy_effort_for_model(&agy_models, "gemini-4-hydrogen").as_deref(),
+            Some("xhigh")
+        );
+
+        assert_eq!(
+            resolve_agy_orchestrator_role_label(&agy_models, "gemini-4-neon", Some("xhigh"))
+                .as_deref(),
+            Some("Gemini 4 Neon (XHigh)")
+        );
+        assert_eq!(
+            resolve_agy_orchestrator_role_label(&agy_models, "claude-opus-5-5", None).as_deref(),
+            Some("Claude Opus 5.5 (High)")
+        );
+        assert_eq!(
+            resolve_agy_orchestrator_role_label(&agy_models, "gemini-4-hydrogen", Some("medium"))
+                .as_deref(),
+            Some("Gemini 4 Hydrogen (Medium)")
+        );
+        assert_eq!(
+            resolve_agy_orchestrator_role_label(&agy_models, "gemini-4-argon-low", None).as_deref(),
+            Some("Gemini 4 Argon (Low)")
+        );
+        assert_eq!(
+            resolve_agy_orchestrator_role_label(&agy_models, "Claude Opus 5.5 (High)", None)
+                .as_deref(),
+            Some("Claude Opus 5.5 (High)")
         );
     }
 }

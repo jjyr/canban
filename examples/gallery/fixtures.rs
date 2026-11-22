@@ -575,6 +575,7 @@ pub fn workspace() -> canban_types::Snapshot {
                 agent: Some("agy".into()),
                 model: Some("gemini-4-carbon".into()),
                 effort: Some("high".into()),
+                orchestrator: None,
             },
         )]),
         tags: vec![
@@ -2460,9 +2461,9 @@ pub fn agent_config() -> canban_types::Config {
         ..Default::default()
     };
     // Enable Antigravity (`agy`) alongside Codex and keep Claude disabled so Gallery
-    // demonstrates enabled-agent gating + custom identities (`@qa`) + per-model effort gating
-    // (`@merger` uses `gemini-pro-orchestrator` which hides `--effort` while `@reviewer` uses
-    // `gemini-4-carbon` with `medium` effort).
+    // demonstrates enabled-agent gating + custom identities (`@qa`) + dual-role Orchestrator mode
+    // (`@merger` uses `orchestrator` with Planner `Claude Opus 5.5 (high)` and Worker
+    // `Gemini 4 Hydrogen (medium)` while `@reviewer` uses single-model `gemini-4-carbon` / `medium`).
     cfg.profiles.push(Profile {
         id: "agy".into(),
         enabled: true,
@@ -2481,8 +2482,14 @@ pub fn agent_config() -> canban_types::Config {
     }
     if let Some(merger) = cfg.profiles.iter_mut().find(|p| p.id == "merger") {
         merger.preset = Some("agy".into());
-        merger.model = Some("gemini-pro-orchestrator".into());
-        merger.effort = Some("medium".into());
+        merger.model = Some("orchestrator".into());
+        merger.effort = None;
+        merger.orchestrator = Some(OrchestratorConfig {
+            planner_model: Some("claude-opus-5-5".into()),
+            planner_effort: Some("high".into()),
+            worker_model: Some("gemini-4-hydrogen".into()),
+            worker_effort: Some("medium".into()),
+        });
     }
     cfg.profiles.push(Profile {
         id: "qa".into(),
@@ -2521,6 +2528,7 @@ pub fn agent_catalog() -> serde_json::Value {
                 "supported_efforts": entry.supported_efforts,
                 "supports_model": !entry.model_args.is_empty(),
                 "supports_effort": !entry.effort_args.is_empty(),
+                "supports_orchestrator": entry.supports_orchestrator,
             })
         })
         .collect();
@@ -2533,7 +2541,18 @@ pub fn agent_catalog() -> serde_json::Value {
         "raw_profiles": [
             { "id": "agy", "preset": "agy", "model": "gemini-4-carbon", "effort": "medium" },
             { "id": "reviewer", "identity": true, "preset": "agy" },
-            { "id": "merger", "identity": true, "preset": "agy", "model": "gemini-pro-orchestrator" },
+            {
+                "id": "merger",
+                "identity": true,
+                "preset": "agy",
+                "model": "orchestrator",
+                "orchestrator": {
+                    "planner_model": "claude-opus-5-5",
+                    "planner_effort": "high",
+                    "worker_model": "gemini-4-hydrogen",
+                    "worker_effort": "medium"
+                }
+            },
             { "id": "qa", "identity": true, "preset": "codex", "model": "gpt-6.1-sol", "effort": "high" }
         ],
     })

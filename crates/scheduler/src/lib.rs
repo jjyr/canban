@@ -417,6 +417,7 @@ mod tests {
                     agent: Some("agy".into()),
                     model: Some("gemini-4-carbon-low".into()),
                     effort: Some("low".into()),
+                    orchestrator: None,
                 },
             )]),
             tags: Default::default(),

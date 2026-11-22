@@ -46,6 +46,7 @@ pub(super) fn parse_codex_cached_models_json(
                     id: slug.to_owned(),
                     label: label.to_owned(),
                     supported_efforts,
+                    effort_labels: BTreeMap::new(),
                 });
             }
         }
@@ -88,6 +89,7 @@ pub(super) fn parse_agy_models_output(text: &str) -> Vec<ModelOption> {
                         label.to_owned()
                     },
                     supported_efforts: None,
+                    effort_labels: BTreeMap::new(),
                 });
             }
         }
@@ -105,6 +107,7 @@ fn model_probe_cache() -> &'static Mutex<ModelCacheMap> {
     CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
+#[cfg(test)]
 pub(super) fn probe_cli_models_with_timeout(
     cache_key: &str,
     program: &str,
@@ -113,12 +116,27 @@ pub(super) fn probe_cli_models_with_timeout(
     defaults: &[ModelOption],
     parser: fn(&str) -> Vec<ModelOption>,
 ) -> Vec<ModelOption> {
+    probe_cli_models_with_timeout_hook(cache_key, program, args, timeout, defaults, parser, None)
+}
+
+fn probe_cli_models_with_timeout_hook(
+    cache_key: &str,
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+    defaults: &[ModelOption],
+    parser: fn(&str) -> Vec<ModelOption>,
+    on_live: Option<fn(&[ModelOption])>,
+) -> Vec<ModelOption> {
     let cache = model_probe_cache();
     if let Ok(guard) = cache.lock()
         && let Some((ts, cached)) = guard.get(cache_key)
         && ts.elapsed() < AGENT_MODEL_CACHE_TTL
         && !cached.is_empty()
     {
+        if let Some(hook) = on_live {
+            hook(cached);
+        }
         return cached.clone();
     }
 
@@ -139,10 +157,13 @@ pub(super) fn probe_cli_models_with_timeout(
             }
             _ => Vec::new(),
         };
-        if !parsed.is_empty()
-            && let Ok(mut guard) = model_probe_cache().lock()
-        {
-            guard.insert(key_owned, (Instant::now(), parsed.clone()));
+        if !parsed.is_empty() {
+            if let Some(hook) = on_live {
+                hook(&parsed);
+            }
+            if let Ok(mut guard) = model_probe_cache().lock() {
+                guard.insert(key_owned, (Instant::now(), parsed.clone()));
+            }
         }
         let _ = tx.send(parsed);
     });
@@ -158,13 +179,14 @@ pub(super) fn probe_cli_models_with_timeout(
 
 fn probe_agy_models(agy_path: &str, defaults: &[ModelOption]) -> Vec<ModelOption> {
     let cache_key = format!("agy:{agy_path}");
-    probe_cli_models_with_timeout(
+    probe_cli_models_with_timeout_hook(
         &cache_key,
         agy_path,
         &["models"],
         AGENT_MODEL_PROBE_TIMEOUT,
         defaults,
         parse_agy_models_output,
+        Some(canban_profiles::update_probed_agy_models),
     )
 }
 
@@ -222,6 +244,24 @@ fn default_role_instruction(id: &str) -> &'static str {
         .trim_end(),
         _ => "",
     }
+}
+
+fn parse_orchestrator_param(val: &Value) -> Result<Option<canban_types::OrchestratorConfig>> {
+    if val.is_null() {
+        return Ok(None);
+    }
+    let parsed: canban_types::OrchestratorConfig =
+        serde_json::from_value(val.clone()).context("Invalid orchestrator configuration")?;
+    Ok(parsed.into_non_empty())
+}
+
+fn profile_supports_orchestrator(profiles: &[Profile], prof: &Profile) -> bool {
+    prof.is_agy()
+        || prof.preset.as_deref().is_some_and(|preset| {
+            profiles
+                .iter()
+                .any(|p| p.id == preset && !p.is_identity() && p.is_agy())
+        })
 }
 
 impl AppServer {
@@ -296,6 +336,7 @@ impl AppServer {
                 "supported_efforts": entry.supported_efforts,
                 "supports_model": !entry.model_args.is_empty(),
                 "supports_effort": !entry.effort_args.is_empty(),
+                "supports_orchestrator": entry.supports_orchestrator,
             }));
         }
 
@@ -328,6 +369,7 @@ impl AppServer {
                     .command()
                     .iter()
                     .any(|a| a.contains("{effort}"));
+            let supports_orchestrator = meta.as_ref().is_some_and(|m| m.supports_orchestrator);
             agents.push(json!({
                 "id": preset_id,
                 "display_name": existing
@@ -346,6 +388,7 @@ impl AppServer {
                 "supported_efforts": supported_efforts,
                 "supports_model": true,
                 "supports_effort": supports_effort,
+                "supports_orchestrator": supports_orchestrator,
             }));
         }
 
@@ -383,6 +426,8 @@ impl AppServer {
             let supports_effort = !is_herdr_tpl
                 && (meta.as_ref().is_some_and(|m| !m.effort_args.is_empty())
                     || prof.command().iter().any(|a| a.contains("{effort}")));
+            let supports_orchestrator =
+                !is_herdr_tpl && meta.as_ref().is_some_and(|m| m.supports_orchestrator);
             let default_argv = if let Some(tpl) = prof
                 .preset
                 .as_deref()
@@ -411,6 +456,7 @@ impl AppServer {
                 "supported_efforts": supported_efforts,
                 "supports_model": !is_herdr_tpl,
                 "supports_effort": supports_effort,
+                "supports_orchestrator": supports_orchestrator,
             }));
         }
 
@@ -565,6 +611,7 @@ impl AppServer {
                 if engine_changed {
                     existing.model = None;
                     existing.effort = None;
+                    existing.orchestrator = None;
                 }
                 if existing.role_instruction.trim().is_empty() {
                     existing.role_instruction = default_role_instruction(role_id).into();
@@ -614,6 +661,7 @@ impl AppServer {
                 if engine_changed {
                     existing.model = None;
                     existing.effort = None;
+                    existing.orchestrator = None;
                 }
             }
         }
@@ -738,7 +786,7 @@ impl AppServer {
                     .profiles
                     .iter()
                     .find(|x| x.id == id)
-                    .map(|x| (x.model.clone(), x.effort.clone()));
+                    .map(|x| (x.model.clone(), x.effort.clone(), x.orchestrator.clone()));
                 let next_model = if p.get("model").is_some() {
                     p["model"]
                         .as_str()
@@ -746,7 +794,7 @@ impl AppServer {
                         .filter(|s| !s.is_empty())
                         .map(str::to_owned)
                 } else {
-                    existing_opts.as_ref().and_then(|(m, _)| m.clone())
+                    existing_opts.as_ref().and_then(|(m, _, _)| m.clone())
                 };
                 let next_effort = if p.get("effort").is_some() {
                     p["effort"]
@@ -755,9 +803,16 @@ impl AppServer {
                         .filter(|s| !s.is_empty())
                         .map(str::to_owned)
                 } else {
-                    existing_opts.as_ref().and_then(|(_, e)| e.clone())
+                    existing_opts.as_ref().and_then(|(_, e, _)| e.clone())
                 };
-                let new_prof = Profile {
+                let parsed_orch = p
+                    .get("orchestrator")
+                    .map(parse_orchestrator_param)
+                    .transpose()?;
+                let next_orch = parsed_orch
+                    .clone()
+                    .unwrap_or_else(|| existing_opts.and_then(|(_, _, o)| o));
+                let mut new_prof = Profile {
                     id: id.to_owned(),
                     name: display,
                     enabled: p["enabled"].as_bool().unwrap_or(true),
@@ -765,12 +820,42 @@ impl AppServer {
                     preset,
                     model: next_model,
                     effort: next_effort,
+                    orchestrator: next_orch,
                     role_instruction: String::new(),
                     argv: final_argv,
                     resume_argv: (!resume_argv.is_empty()).then_some(resume_argv),
                     exit: Some(ExitAction::Manual),
                     session_instruction: None,
                 };
+                if new_prof.is_agy() {
+                    if let Some(m) = new_prof.model.as_deref()
+                        && canban_types::is_orchestrator_model_id(m)
+                    {
+                        if let Some(legacy) = canban_types::legacy_agy_orchestrator_preset(m)
+                            && parsed_orch.is_none()
+                            && new_prof.orchestrator.is_none()
+                        {
+                            new_prof.orchestrator = Some(legacy);
+                        }
+                        new_prof.model = Some(canban_types::ORCHESTRATOR_MODEL_ID.to_owned());
+                        new_prof.effort = None;
+                    } else if parsed_orch.as_ref().is_some_and(Option::is_some) {
+                        new_prof.model = Some(canban_types::ORCHESTRATOR_MODEL_ID.to_owned());
+                        new_prof.effort = None;
+                    } else {
+                        new_prof.orchestrator = None;
+                    }
+                } else {
+                    if new_prof
+                        .model
+                        .as_deref()
+                        .is_some_and(canban_types::is_orchestrator_model_id)
+                        || parsed_orch.as_ref().is_some_and(Option::is_some)
+                    {
+                        bail!("Orchestrator mode is only supported by Antigravity (agy)");
+                    }
+                    new_prof.orchestrator = None;
+                }
                 if let Some(existing) = raw.profiles.iter_mut().find(|x| x.id == id) {
                     *existing = new_prof;
                 } else {
@@ -804,24 +889,80 @@ impl AppServer {
                         bail!("Unknown profile @{id}");
                     }
                 }
+                let supports_orch = raw
+                    .profiles
+                    .iter()
+                    .find(|x| x.id == id)
+                    .is_some_and(|x| profile_supports_orchestrator(&raw.profiles, x));
+                let parsed_orch_param = p
+                    .get("orchestrator")
+                    .map(parse_orchestrator_param)
+                    .transpose()?;
                 let prof = raw
                     .profiles
                     .iter_mut()
                     .find(|x| x.id == id)
                     .with_context(|| format!("Unknown profile @{id}"))?;
                 if p.get("model").is_some() {
-                    prof.model = p["model"]
+                    let next_model = p["model"]
                         .as_str()
                         .map(str::trim)
                         .filter(|s| !s.is_empty())
                         .map(str::to_owned);
+                    if let Some(m) = next_model.as_deref()
+                        && canban_types::is_orchestrator_model_id(m)
+                    {
+                        ensure!(
+                            supports_orch,
+                            "Orchestrator mode is only supported by Antigravity (agy)"
+                        );
+                        if let Some(legacy) = canban_types::legacy_agy_orchestrator_preset(m)
+                            && parsed_orch_param.is_none()
+                            && prof.orchestrator.is_none()
+                        {
+                            prof.orchestrator = Some(legacy);
+                        }
+                        prof.model = Some(canban_types::ORCHESTRATOR_MODEL_ID.to_owned());
+                        prof.effort = None;
+                    } else {
+                        prof.model = next_model;
+                        if parsed_orch_param.is_none() {
+                            prof.orchestrator = None;
+                        }
+                    }
                 }
                 if p.get("effort").is_some() {
-                    prof.effort = p["effort"]
-                        .as_str()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_owned);
+                    if prof
+                        .model
+                        .as_deref()
+                        .is_some_and(canban_types::is_orchestrator_model_id)
+                    {
+                        prof.effort = None;
+                    } else {
+                        prof.effort = p["effort"]
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned);
+                    }
+                }
+                if let Some(opt_orch) = parsed_orch_param {
+                    match opt_orch {
+                        Some(orch) => {
+                            ensure!(
+                                supports_orch,
+                                "Orchestrator mode is only supported by Antigravity (agy)"
+                            );
+                            if !prof.is_identity() && prof.model.is_none() {
+                                prof.model = Some(canban_types::ORCHESTRATOR_MODEL_ID.to_owned());
+                            }
+                            prof.orchestrator = Some(orch);
+                            prof.effort = None;
+                        }
+                        None => {
+                            prof.orchestrator = None;
+                        }
+                    }
                 }
                 if let Some(argv_val) = p.get("argv") {
                     let preset_default_argv: Option<Vec<String>> =
@@ -885,6 +1026,10 @@ impl AppServer {
                         .filter(|s| !s.is_empty())
                         .map(str::to_owned)
                 });
+                let explicit_orch = p
+                    .get("orchestrator")
+                    .map(parse_orchestrator_param)
+                    .transpose()?;
                 // Ensure the chosen engine is resolved / present if built-in
                 let catalog = canban_profiles::builtin_catalog();
                 if !raw
@@ -908,6 +1053,22 @@ impl AppServer {
                     .find(|x| x.id == engine && !x.is_identity())
                     .and_then(|x| x.preset.clone())
                     .unwrap_or_else(|| engine.to_owned());
+                let supports_orch = preset_ref == "agy"
+                    || raw
+                        .profiles
+                        .iter()
+                        .any(|x| x.id == engine && !x.is_identity() && x.is_agy());
+                if explicit_model
+                    .as_ref()
+                    .and_then(|m| m.as_deref())
+                    .is_some_and(canban_types::is_orchestrator_model_id)
+                    || explicit_orch.as_ref().is_some_and(Option::is_some)
+                {
+                    ensure!(
+                        supports_orch,
+                        "Orchestrator mode is only supported by Antigravity (agy)"
+                    );
+                }
                 if let Some(existing) = raw.profiles.iter_mut().find(|x| x.id == id) {
                     let engine_changed = existing.preset.as_deref() != Some(preset_ref.as_str());
                     existing.identity = true;
@@ -930,18 +1091,53 @@ impl AppServer {
                     } else if engine_changed {
                         existing.effort = None;
                     }
+                    if let Some(o) = explicit_orch {
+                        existing.orchestrator = o;
+                    } else if engine_changed {
+                        existing.orchestrator = None;
+                    }
+                    if let Some(m) = existing.model.as_deref()
+                        && canban_types::is_orchestrator_model_id(m)
+                    {
+                        if let Some(legacy) = canban_types::legacy_agy_orchestrator_preset(m)
+                            && existing.orchestrator.is_none()
+                        {
+                            existing.orchestrator = Some(legacy);
+                        }
+                        existing.model = Some(canban_types::ORCHESTRATOR_MODEL_ID.to_owned());
+                        existing.effort = None;
+                    } else if existing.model.is_some() || !supports_orch {
+                        existing.orchestrator = None;
+                    }
                     if p.get("role_instruction").is_some() {
                         existing.role_instruction = role_instruction;
                     }
                 } else {
+                    let mut created_model = explicit_model.flatten();
+                    let mut created_effort = explicit_effort.flatten();
+                    let mut created_orch = explicit_orch.flatten();
+                    if let Some(m) = created_model.as_deref()
+                        && canban_types::is_orchestrator_model_id(m)
+                    {
+                        if let Some(legacy) = canban_types::legacy_agy_orchestrator_preset(m)
+                            && created_orch.is_none()
+                        {
+                            created_orch = Some(legacy);
+                        }
+                        created_model = Some(canban_types::ORCHESTRATOR_MODEL_ID.to_owned());
+                        created_effort = None;
+                    } else if created_model.is_some() || !supports_orch {
+                        created_orch = None;
+                    }
                     raw.profiles.push(Profile {
                         id: id.to_owned(),
                         name: display,
                         enabled,
                         identity: true,
                         preset: Some(preset_ref),
-                        model: explicit_model.flatten(),
-                        effort: explicit_effort.flatten(),
+                        model: created_model,
+                        effort: created_effort,
+                        orchestrator: created_orch,
                         role_instruction: if role_instruction.is_empty() {
                             format!("You are the Card's {id} Agent.")
                         } else {
@@ -1018,7 +1214,7 @@ impl AppServer {
             if target_val.is_null() {
                 continue;
             }
-            let parsed: ProjectAgentOverride = if let Some(s) = target_val.as_str() {
+            let mut parsed: ProjectAgentOverride = if let Some(s) = target_val.as_str() {
                 ProjectAgentOverride::from_agent(s).normalized()
             } else if target_val.is_object() {
                 serde_json::from_value(target_val.clone())
@@ -1038,8 +1234,9 @@ impl AppServer {
                 role_prof.is_identity(),
                 "Project overrides only apply to role @identities (got direct CLI Agent @{role_id})"
             );
-            if let Some(target) = parsed.agent.as_deref() {
-                let _ = canban_profiles::resolve_engine(config, target, Some(&self.home))?;
+            let effective_is_agy = if let Some(target) = parsed.agent.as_deref() {
+                let resolved_eng =
+                    canban_profiles::resolve_engine(config, target, Some(&self.home))?;
                 if let Some(direct) = config
                     .profiles
                     .iter()
@@ -1050,6 +1247,32 @@ impl AppServer {
                         "Agent '{target}' is disabled globally; enable it in Settings first"
                     );
                 }
+                resolved_eng.is_agy()
+            } else {
+                role_prof.is_agy()
+            };
+            if parsed
+                .model
+                .as_deref()
+                .is_some_and(canban_types::is_orchestrator_model_id)
+                || parsed.orchestrator.is_some()
+            {
+                ensure!(
+                    effective_is_agy,
+                    "Orchestrator mode is only supported by Antigravity (agy)"
+                );
+            }
+            if effective_is_agy
+                && let Some(m) = parsed.model.as_deref()
+                && canban_types::is_orchestrator_model_id(m)
+            {
+                if let Some(legacy) = canban_types::legacy_agy_orchestrator_preset(m)
+                    && parsed.orchestrator.is_none()
+                {
+                    parsed.orchestrator = Some(legacy);
+                }
+                parsed.model = Some(canban_types::ORCHESTRATOR_MODEL_ID.to_owned());
+                parsed.effort = None;
             }
             overrides.insert(role_id.to_owned(), parsed);
         }
@@ -1092,6 +1315,7 @@ mod model_probe_tests {
             id: "fallback-model".into(),
             label: "Fallback".into(),
             supported_efforts: None,
+            effort_labels: BTreeMap::new(),
         }];
         let cache_key = format!("test-agy-late-{}", script.display());
 
@@ -1141,10 +1365,13 @@ mod model_probe_tests {
                 "xhigh".into()
             ])
         );
-        let orch = second
-            .iter()
-            .find(|m| m.id == "gemini-pro-orchestrator-neon")
-            .expect("backfilled cache should include neon orchestrator");
+        assert_eq!(
+            neon.effort_labels.get("xhigh").map(String::as_str),
+            Some("Gemini 4 Neon (XHigh)")
+        );
+        let orch = second.iter().find(|m| m.id == "orchestrator").expect(
+            "backfilled cache should collapse orchestrator slugs into unified orchestrator",
+        );
         assert_eq!(orch.supported_efforts, Some(Vec::new()));
         // Live agent probe overrides defaults completely; removed/fallback models must not linger.
         assert!(
@@ -1176,8 +1403,8 @@ mod model_probe_tests {
         );
         let orch = agy_defaults
             .iter()
-            .find(|m| m.id == "gemini-pro-orchestrator-neon")
-            .expect("static agy defaults should include gemini-pro-orchestrator-neon");
+            .find(|m| m.id == "orchestrator")
+            .expect("static agy defaults should include unified orchestrator");
         assert_eq!(orch.supported_efforts, Some(Vec::new()));
 
         let codex_defaults = vec![
@@ -1185,11 +1412,13 @@ mod model_probe_tests {
                 id: "retired-old-model".into(),
                 label: "Retired".into(),
                 supported_efforts: None,
+                effort_labels: BTreeMap::new(),
             },
             ModelOption {
                 id: "still-here".into(),
                 label: "Still Here".into(),
                 supported_efforts: None,
+                effort_labels: BTreeMap::new(),
             },
         ];
         let parsed = parse_codex_cached_models_json(

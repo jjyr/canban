@@ -2579,7 +2579,15 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
         .unwrap();
     assert!(agy_entry["supports_model"].as_bool().unwrap());
     assert!(agy_entry["supports_effort"].as_bool().unwrap());
+    assert!(agy_entry["supports_orchestrator"].as_bool().unwrap());
     assert!(!agy_entry["models"].as_array().unwrap().is_empty());
+    let codex_entry = cat_after_agy["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == "codex")
+        .unwrap();
+    assert!(!codex_entry["supports_orchestrator"].as_bool().unwrap());
 
     // Verify per-model `supported_efforts` parsing for `agy models` and Codex `models_cache.json`
     let parsed_agy = crate::agents::parse_agy_models_output(
@@ -2596,13 +2604,12 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
          gpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n",
     );
     let find_agy = |id: &str| parsed_agy.iter().find(|m| m.id == id).unwrap();
-    assert_eq!(
-        find_agy("gemini-pro-orchestrator").supported_efforts,
-        Some(Vec::new())
-    );
-    assert_eq!(
-        find_agy("gemini-pro-orchestrator-argon").supported_efforts,
-        Some(Vec::new())
+    assert_eq!(find_agy("orchestrator").supported_efforts, Some(Vec::new()));
+    assert!(!parsed_agy.iter().any(|m| m.id == "gemini-pro-orchestrator"));
+    assert!(
+        !parsed_agy
+            .iter()
+            .any(|m| m.id == "gemini-pro-orchestrator-argon")
     );
     assert_eq!(
         find_agy("gpt-oss-120b-medium").supported_efforts,
@@ -2613,6 +2620,13 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
         find_agy("gemini-4-carbon").supported_efforts,
         Some(vec!["low".into(), "medium".into(), "high".into()])
     );
+    assert_eq!(
+        find_agy("gemini-4-carbon")
+            .effort_labels
+            .get("high")
+            .map(String::as_str),
+        Some("Gemini 4 Carbon (High)")
+    );
     assert_eq!(find_agy("gemini-4-hydrogen").label, "Gemini 4 Hydrogen");
     assert_eq!(
         find_agy("gemini-4-hydrogen").supported_efforts,
@@ -2622,6 +2636,13 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
             "high".into(),
             "xhigh".into()
         ])
+    );
+    assert_eq!(
+        find_agy("gemini-4-hydrogen")
+            .effort_labels
+            .get("xhigh")
+            .map(String::as_str),
+        Some("Gemini 4 Hydrogen (XHigh)")
     );
     assert!(
         !parsed_agy
@@ -2738,6 +2759,179 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
         .unwrap();
     assert_eq!(dev_switched.model, None);
     assert_eq!(dev_switched.effort, None);
+    assert_eq!(dev_switched.orchestrator, None);
+
+    // 7b. Dual-role Orchestrator mode on `agy` only (rejected on `codex` / `claude`):
+    assert!(
+        app.call(
+            "config.agents.save",
+            json!({
+                "op": "set_profile_options",
+                "id": "codex",
+                "model": "orchestrator",
+            }),
+        )
+        .is_err(),
+        "Orchestrator mode must be rejected on non-agy agents"
+    );
+    assert!(
+        app.call(
+            "config.agents.save",
+            json!({
+                "op": "set_profile_options",
+                "id": "developer",
+                "orchestrator": { "planner_model": "gemini-4-neon" },
+            }),
+        )
+        .is_err(),
+        "Orchestrator config must be rejected on codex-backed identity"
+    );
+    assert!(
+        app.call(
+            "project.agents",
+            json!({
+                "project_id": project.id,
+                "agent_overrides": {
+                    "developer": {
+                        "agent": "codex",
+                        "model": "orchestrator"
+                    }
+                }
+            }),
+        )
+        .is_err(),
+        "Project orchestrator override must be rejected for codex"
+    );
+
+    // Configure `@agy` in Orchestrator mode and propagate to `@reviewer` (backed by `agy`),
+    // while `@planner` overrides only `worker_effort` and Project override updates `developer` to agy orchestrator.
+    app.call(
+        "config.agents.save",
+        json!({
+            "op": "set_profile_options",
+            "id": "agy",
+            "model": "orchestrator",
+            "orchestrator": {
+                "planner_model": "claude-opus-5-5",
+                "planner_effort": "high",
+                "worker_model": "gemini-4-hydrogen",
+                "worker_effort": "medium"
+            }
+        }),
+    )
+    .unwrap();
+    app.call(
+        "config.agents.save",
+        json!({
+            "op": "set_profile_options",
+            "id": "reviewer",
+            "model": null,
+            "effort": null,
+        }),
+    )
+    .unwrap();
+    app.call(
+        "config.agents.save",
+        json!({
+            "op": "upsert_identity",
+            "id": "planner",
+            "engine": "agy",
+            "orchestrator": { "worker_effort": "low" },
+            "enabled": true,
+        }),
+    )
+    .unwrap();
+    let cfg_orch = app.config();
+    let rev_orch = cfg_orch
+        .profiles
+        .iter()
+        .find(|p| p.id == "reviewer")
+        .unwrap();
+    assert_eq!(rev_orch.model.as_deref(), Some("orchestrator"));
+    assert_eq!(rev_orch.effort, None);
+    assert_eq!(
+        rev_orch
+            .orchestrator
+            .as_ref()
+            .and_then(|o| o.planner_model.as_deref()),
+        Some("claude-opus-5-5")
+    );
+    let planner_orch = cfg_orch
+        .profiles
+        .iter()
+        .find(|p| p.id == "planner")
+        .unwrap();
+    assert_eq!(
+        planner_orch
+            .orchestrator
+            .as_ref()
+            .and_then(|o| o.worker_effort.as_deref()),
+        Some("low")
+    );
+    assert_eq!(
+        planner_orch
+            .orchestrator
+            .as_ref()
+            .and_then(|o| o.planner_model.as_deref()),
+        Some("claude-opus-5-5")
+    );
+    // Project override with agy orchestrator succeeds
+    app.call(
+        "project.agents",
+        json!({
+            "project_id": project.id,
+            "agent_overrides": {
+                "developer": {
+                    "agent": "agy",
+                    "model": "orchestrator",
+                    "orchestrator": {
+                        "planner_model": "gemini-4-neon",
+                        "planner_effort": "xhigh",
+                        "worker_model": "claude-sonnet-5-5",
+                        "worker_effort": "medium"
+                    }
+                }
+            }
+        }),
+    )
+    .unwrap();
+    // Switching `@agy` back to a single model clears `orchestrator` cleanly
+    app.call(
+        "config.agents.save",
+        json!({
+            "op": "set_profile_options",
+            "id": "agy",
+            "model": "gemini-4-carbon",
+            "effort": "medium",
+        }),
+    )
+    .unwrap();
+    let agy_single = app
+        .config()
+        .profiles
+        .into_iter()
+        .find(|p| p.id == "agy")
+        .unwrap();
+    assert_eq!(agy_single.model.as_deref(), Some("gemini-4-carbon"));
+    assert_eq!(agy_single.orchestrator, None);
+    // Switching `@planner` to `codex` clears its orchestrator override
+    app.call(
+        "config.agents.save",
+        json!({
+            "op": "upsert_identity",
+            "id": "planner",
+            "engine": "codex",
+            "enabled": true,
+        }),
+    )
+    .unwrap();
+    let planner_codex = app
+        .config()
+        .profiles
+        .into_iter()
+        .find(|p| p.id == "planner")
+        .unwrap();
+    assert_eq!(planner_codex.orchestrator, None);
 
     // 8. Customizing an enabled Agent's Command + Argv (`set_profile_options` `argv`):
     //    - Saving custom `argv` on `@agy` overrides `argv[0]` (`/bin/agy-modified`) and args,

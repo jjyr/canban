@@ -9,13 +9,19 @@ pub mod mentions;
 pub use mentions::{addressed, remove_address};
 pub mod catalog;
 pub use catalog::{
-    CatalogEntry, ModelOption, builtin_catalog, catalog_entry_for_profile, collapse_agy_models,
-    display_name, herdr_template_profile, identify_agent_process, identify_herdr_agent,
-    model_supported_efforts, split_agy_effort_suffix,
+    AGY_DEFAULT_PLANNER_MODEL, AGY_DEFAULT_WORKER_MODEL, AGY_ORCHESTRATOR_CLI_MODEL, CatalogEntry,
+    ModelOption, agy_orchestrator_planner_models, agy_orchestrator_worker_models, builtin_catalog,
+    catalog_entry_for_profile, collapse_agy_models, default_agy_effort_for_model, display_name,
+    herdr_template_profile, identify_agent_process, identify_herdr_agent, known_agy_models,
+    model_supported_efforts, resolve_agy_orchestrator_role_label, split_agy_effort_suffix,
+    update_probed_agy_models,
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use canban_types::{Config, ExitAction, Profile, Project};
+use canban_types::{
+    Config, ExitAction, ORCHESTRATOR_MODEL_ID, OrchestratorConfig, Profile, Project,
+    legacy_agy_orchestrator_preset,
+};
 use serde_json::{Value, json};
 #[cfg(feature = "local-exec")]
 use std::path::PathBuf;
@@ -176,6 +182,40 @@ fn sync_inherited_resume_binary(
     Some(resume)
 }
 
+fn canonicalize_agy_orchestrator(profile: &mut Profile, clear_if_unset: bool) {
+    profile.orchestrator = profile
+        .orchestrator
+        .take()
+        .and_then(OrchestratorConfig::into_non_empty);
+    if !profile.is_agy() {
+        profile.orchestrator = None;
+        return;
+    }
+    match profile.model.as_deref() {
+        Some(m) if legacy_agy_orchestrator_preset(m).is_some() => {
+            let legacy = legacy_agy_orchestrator_preset(m).unwrap();
+            profile.model = Some(ORCHESTRATOR_MODEL_ID.to_owned());
+            profile.orchestrator = Some(match profile.orchestrator.take() {
+                Some(exp) => exp.merge_fallback(&legacy),
+                None => legacy,
+            });
+            profile.effort = None;
+        }
+        Some(m) if m.eq_ignore_ascii_case(ORCHESTRATOR_MODEL_ID) => {
+            profile.model = Some(ORCHESTRATOR_MODEL_ID.to_owned());
+            profile.effort = None;
+        }
+        Some(_) => {
+            profile.orchestrator = None;
+        }
+        None => {
+            if clear_if_unset {
+                profile.orchestrator = None;
+            }
+        }
+    }
+}
+
 pub fn resolve(config: Config, home: &Path) -> Result<Config> {
     let presets = presets(home)?;
     let mut config = config;
@@ -183,7 +223,20 @@ pub fn resolve(config: Config, home: &Path) -> Result<Config> {
     {
         config.hc = executable_with_env(&config.hc, &config.hc_env);
     }
-    let snapshot_profiles = config.profiles.clone();
+    let mut snapshot_profiles = config.profiles.clone();
+    for p in &mut snapshot_profiles {
+        p.model = p
+            .model
+            .take()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
+        p.effort = p
+            .effort
+            .take()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
+        canonicalize_agy_orchestrator(p, !p.is_identity());
+    }
     for profile in &mut config.profiles {
         profile.model = profile
             .model
@@ -195,10 +248,13 @@ pub fn resolve(config: Config, home: &Path) -> Result<Config> {
             .take()
             .map(|s| s.trim().to_owned())
             .filter(|s| !s.is_empty());
+        canonicalize_agy_orchestrator(profile, false);
+        let mut resolved_peer: Option<&Profile> = None;
         if let Some(name) = &profile.preset {
             let peer_agent = snapshot_profiles
                 .iter()
                 .find(|p| p.id == *name && !p.is_identity());
+            resolved_peer = peer_agent;
             if let Some(tpl) = name.strip_prefix("herdr:") {
                 ensure!(
                     !tpl.trim().is_empty(),
@@ -246,7 +302,7 @@ pub fn resolve(config: Config, home: &Path) -> Result<Config> {
                         .map(str::to_owned)
                         .or_else(|| preset.model.clone());
                 }
-                if profile.effort.is_none() {
+                if profile.effort.is_none() && !peer_agent.is_some_and(Profile::is_orchestrator) {
                     profile.effort = peer_agent
                         .and_then(|p| p.effort.as_deref().map(str::trim))
                         .filter(|s| !s.is_empty())
@@ -297,7 +353,7 @@ pub fn resolve(config: Config, home: &Path) -> Result<Config> {
                         .map(str::to_owned)
                         .or_else(|| peer_preset.and_then(|pp| pp.model.clone()));
                 }
-                if profile.effort.is_none() {
+                if profile.effort.is_none() && !peer.is_orchestrator() {
                     profile.effort = peer
                         .effort
                         .as_deref()
@@ -308,6 +364,16 @@ pub fn resolve(config: Config, home: &Path) -> Result<Config> {
                 }
             } else {
                 bail!("Unknown preset {name} for @{}", profile.id);
+            }
+        }
+        canonicalize_agy_orchestrator(profile, true);
+        if profile.is_orchestrator() {
+            profile.effort = None;
+            if let Some(peer_orch) = resolved_peer.and_then(Profile::effective_orchestrator) {
+                profile.orchestrator = match profile.orchestrator.take() {
+                    Some(child) => child.merge_fallback(&peer_orch).into_non_empty(),
+                    None => peer_orch.into_non_empty(),
+                };
             }
         }
         ensure!(
@@ -426,6 +492,7 @@ pub fn apply_project_override(
         return profile.clone();
     };
     let mut out = profile.clone();
+    canonicalize_agy_orchestrator(&mut out, true);
     if let Some(target) = ov.agent.as_deref() {
         // Only apply an override if the target backend isn't explicitly disabled in global config.
         if config
@@ -435,35 +502,77 @@ pub fn apply_project_override(
         {
             return profile.clone();
         }
-        let Ok(engine) = resolve_engine(config, target, None) else {
+        let Ok(mut engine) = resolve_engine(config, target, None) else {
             return profile.clone();
         };
+        canonicalize_agy_orchestrator(&mut engine, true);
         let next_preset = engine.preset.clone().or_else(|| Some(target.to_owned()));
         let same_engine = profile.preset.as_deref() == next_preset.as_deref()
             || profile.preset.as_deref() == Some(target)
             || profile.command_name() == engine.command_name();
         out.preset = next_preset;
-        out.argv = engine.argv;
-        out.resume_argv = engine.resume_argv;
-        out.exit = Some(engine.exit.unwrap_or(ExitAction::Manual));
-        out.session_instruction = engine.session_instruction;
+        out.argv = engine.argv.clone();
+        out.resume_argv = engine.resume_argv.clone();
+        out.exit = Some(engine.exit.clone().unwrap_or(ExitAction::Manual));
+        out.session_instruction = engine.session_instruction.clone();
         if same_engine {
             if out.model.is_none() {
-                out.model = engine.model;
+                out.model = engine.model.clone();
             }
-            if out.effort.is_none() {
-                out.effort = engine.effort;
+            if out.is_orchestrator() {
+                out.effort = None;
+                if let Some(eng_orch) = engine.effective_orchestrator() {
+                    out.orchestrator = match out.orchestrator.take() {
+                        Some(c) => c.merge_fallback(&eng_orch).into_non_empty(),
+                        None => eng_orch.into_non_empty(),
+                    };
+                }
+            } else {
+                out.orchestrator = None;
+                if out.effort.is_none() && !engine.is_orchestrator() {
+                    out.effort = engine.effort.clone();
+                }
             }
         } else {
             out.model = engine.model;
             out.effort = engine.effort;
+            out.orchestrator = engine.orchestrator;
         }
     }
     if let Some(m) = ov.model {
-        out.model = Some(m);
+        if out.is_agy()
+            && let Some(legacy) = legacy_agy_orchestrator_preset(&m)
+        {
+            out.model = Some(ORCHESTRATOR_MODEL_ID.to_owned());
+            out.effort = None;
+            out.orchestrator = Some(legacy);
+        } else if out.is_agy() && m.eq_ignore_ascii_case(ORCHESTRATOR_MODEL_ID) {
+            if !out.is_orchestrator() {
+                out.orchestrator = None;
+            }
+            out.model = Some(ORCHESTRATOR_MODEL_ID.to_owned());
+            out.effort = None;
+        } else {
+            out.model = Some(m);
+            out.orchestrator = None;
+        }
     }
-    if let Some(e) = ov.effort {
+    if let Some(e) = ov.effort
+        && !out.is_orchestrator()
+    {
         out.effort = Some(e);
+    }
+    if let Some(ov_orch) = ov.orchestrator
+        && out.is_orchestrator()
+    {
+        out.orchestrator = match out.orchestrator.take() {
+            Some(base) => ov_orch.merge_fallback(&base).into_non_empty(),
+            None => ov_orch.into_non_empty(),
+        };
+    }
+    canonicalize_agy_orchestrator(&mut out, true);
+    if out.is_orchestrator() {
+        out.effort = None;
     }
     out
 }
@@ -561,19 +670,38 @@ pub fn migrate(value: &mut Value) -> Result<bool> {
             p["role_instruction"] = json!(new_role);
             changed = true;
         }
-        let legacy = p.get("provider").is_some() || p.get("template").is_some();
-        // Pre-interactive registries have no provider field; recognize their
-        // explicit batch syntax only during this migration.
         let program = p["argv"][0]
             .as_str()
             .and_then(|s| Path::new(s).file_name())
             .and_then(|s| s.to_str())
-            .unwrap_or("");
-        let old_batch = p["argv"].as_array().is_some_and(|a| match program {
-            "codex" => a.get(1).is_some_and(|s| s == "exec"),
-            "claude" => a.iter().any(|s| s == "-p" || s == "--print"),
-            _ => false,
-        });
+            .unwrap_or("")
+            .to_owned();
+        let is_agy_profile = p["preset"].as_str() == Some("agy")
+            || (p["id"].as_str() == Some("agy") && p["identity"].as_bool() != Some(true))
+            || program == "agy";
+        if is_agy_profile
+            && let Some(model_str) = p.get("model").and_then(Value::as_str)
+            && let Some(legacy_orch) = legacy_agy_orchestrator_preset(model_str)
+        {
+            p["model"] = json!(ORCHESTRATOR_MODEL_ID);
+            if p.get("orchestrator").is_none_or(Value::is_null) {
+                p["orchestrator"] = serde_json::to_value(legacy_orch)?;
+            }
+            if let Some(obj) = p.as_object_mut() {
+                obj.remove("effort");
+            }
+            changed = true;
+        }
+        let legacy = p.get("provider").is_some() || p.get("template").is_some();
+        // Pre-interactive registries have no provider field; recognize their
+        // explicit batch syntax only during this migration.
+        let old_batch = p["argv"]
+            .as_array()
+            .is_some_and(|a| match program.as_str() {
+                "codex" => a.get(1).is_some_and(|s| s == "exec"),
+                "claude" => a.iter().any(|s| s == "-p" || s == "--print"),
+                _ => false,
+            });
         if !legacy && !old_batch {
             continue;
         }
@@ -745,10 +873,6 @@ pub fn command(
     for dir in &extra_dirs {
         push_trusted_dir(&mut trusted_dirs, dir);
     }
-    let agy_trusted_settings = serde_json::to_string(&json!({
-        "trustedWorkspaces": trusted_dirs,
-    }))?;
-
     let model_val = profile
         .model
         .as_deref()
@@ -767,29 +891,75 @@ pub fn command(
     let uses_model_placeholder = base_args.iter().any(|a| a.contains("{model}"));
     let uses_effort_placeholder = base_args.iter().any(|a| a.contains("{effort}"));
     let catalog_meta = catalog_entry_for_profile(profile);
+    let known_agy = catalog_meta
+        .as_ref()
+        .filter(|m| m.id == "agy")
+        .map(|m| known_agy_models(&m.default_models));
+    let is_orchestrator = profile.is_orchestrator();
+    let cli_model_val = if is_orchestrator {
+        Some(AGY_ORCHESTRATOR_CLI_MODEL)
+    } else {
+        model_val
+    };
+
+    let mut agy_settings = serde_json::Map::new();
+    agy_settings.insert("trustedWorkspaces".into(), json!(trusted_dirs));
+    if is_orchestrator && let Some(orch) = profile.effective_orchestrator() {
+        let models_ref = known_agy.as_deref().unwrap_or(&[]);
+        let planner_label = if let Some(pm) = orch.planner_model.as_deref() {
+            resolve_agy_orchestrator_role_label(models_ref, pm, orch.planner_effort.as_deref())
+        } else if let Some(pe) = orch.planner_effort.as_deref() {
+            resolve_agy_orchestrator_role_label(models_ref, AGY_DEFAULT_PLANNER_MODEL, Some(pe))
+        } else {
+            None
+        };
+        let executor_label = if let Some(wm) = orch.worker_model.as_deref() {
+            resolve_agy_orchestrator_role_label(models_ref, wm, orch.worker_effort.as_deref())
+        } else if let Some(we) = orch.worker_effort.as_deref() {
+            resolve_agy_orchestrator_role_label(models_ref, AGY_DEFAULT_WORKER_MODEL, Some(we))
+        } else {
+            None
+        };
+        let mut orch_obj = serde_json::Map::new();
+        if let Some(p) = planner_label {
+            orch_obj.insert("planner".into(), Value::String(p));
+        }
+        if let Some(e) = executor_label {
+            orch_obj.insert("executor".into(), Value::String(e));
+        }
+        if !orch_obj.is_empty() {
+            agy_settings.insert("orchestrator".into(), Value::Object(orch_obj));
+        }
+    }
+    let agy_trusted_settings = serde_json::to_string(&Value::Object(agy_settings))?;
 
     // Filter out unsupported or incompatible effort levels for the effective model so
     // inherited Agent/Role effort (e.g. `medium`) is omitted when a role overrides to an
-    // effort-less model (such as `gemini-pro-orchestrator` or `gpt-oss-120b-medium`).
-    let effective_effort = effort_val.filter(|eff| match &catalog_meta {
-        Some(meta) if !uses_effort_placeholder => {
-            if meta.effort_args.is_empty() {
-                false
-            } else {
-                match model_supported_efforts(meta, &meta.default_models, model_val) {
-                    None => false,
-                    Some(levels) if levels.is_empty() => false,
-                    Some(levels) => levels.iter().any(|l| l == eff),
+    // effort-less model (such as `orchestrator` or `gpt-oss-120b-medium`).
+    let effective_effort = if is_orchestrator {
+        None
+    } else {
+        effort_val.filter(|eff| match &catalog_meta {
+            Some(meta) if !uses_effort_placeholder => {
+                if meta.effort_args.is_empty() {
+                    false
+                } else {
+                    let models_ref = known_agy.as_deref().unwrap_or(&meta.default_models);
+                    match model_supported_efforts(meta, models_ref, model_val) {
+                        None => false,
+                        Some(levels) if levels.is_empty() => false,
+                        Some(levels) => levels.iter().any(|l| l == eff),
+                    }
                 }
             }
-        }
-        _ => true,
-    });
+            _ => true,
+        })
+    };
 
     let mut args = Vec::with_capacity(base_args.len() + 4);
     args.push(base_args[0].clone());
     if !is_herdr_template {
-        if let Some(m) = model_val
+        if let Some(m) = cli_model_val
             && !uses_model_placeholder
         {
             let tpl = catalog_meta
@@ -827,7 +997,7 @@ pub fn command(
     replacements.push(("cwd", cwd_val));
     replacements.push(("project_dir", project_dir_val));
     replacements.push(("agy_trusted_settings", &agy_trusted_settings));
-    replacements.push(("model", model_val.unwrap_or("")));
+    replacements.push(("model", cli_model_val.unwrap_or("")));
     replacements.push(("effort", effective_effort.unwrap_or("")));
     replacements.push(("session_id", session.unwrap_or("")));
 
@@ -1176,15 +1346,9 @@ mod tests {
         let orch = agy_entry
             .default_models
             .iter()
-            .find(|m| m.id == "gemini-pro-orchestrator")
+            .find(|m| m.id == "orchestrator")
             .unwrap();
         assert_eq!(orch.supported_efforts, Some(Vec::new()));
-        let orch_argon = agy_entry
-            .default_models
-            .iter()
-            .find(|m| m.id == "gemini-pro-orchestrator-argon")
-            .unwrap();
-        assert_eq!(orch_argon.supported_efforts, Some(Vec::new()));
         let fixed_oss = agy_entry
             .default_models
             .iter()
@@ -1225,7 +1389,8 @@ mod tests {
         );
 
         // Inherited effort (`medium` from `@agy`) is omitted when `@merger` overrides to
-        // `gemini-pro-orchestrator` or when `xhigh` is paired with `gemini-4-carbon`.
+        // `gemini-pro-orchestrator` (canonicalized to `"orchestrator"`) or when `xhigh` is paired
+        // with `gemini-4-carbon`.
         let mut cfg = Config::default();
         cfg.profiles.push(Profile {
             id: "agy".into(),
@@ -1240,8 +1405,17 @@ mod tests {
         }
         let cfg = resolve(cfg, dir.path()).unwrap();
         let merger = cfg.profiles.iter().find(|p| p.id == "merger").unwrap();
-        assert_eq!(merger.model.as_deref(), Some("gemini-pro-orchestrator"));
-        assert_eq!(merger.effort.as_deref(), Some("medium"));
+        assert_eq!(merger.model.as_deref(), Some("orchestrator"));
+        assert_eq!(merger.effort, None);
+        assert_eq!(
+            merger.orchestrator,
+            Some(OrchestratorConfig {
+                planner_model: Some("gemini-4-carbon".into()),
+                planner_effort: Some("high".into()),
+                worker_model: Some("gemini-4-hydrogen".into()),
+                worker_effort: Some("high".into()),
+            })
+        );
 
         let merger_argv = command(
             merger,
@@ -1253,11 +1427,20 @@ mod tests {
         assert!(
             merger_argv
                 .windows(2)
-                .any(|w| w == ["--model", "gemini-pro-orchestrator"])
+                .any(|w| w == ["--model", AGY_ORCHESTRATOR_CLI_MODEL])
         );
         assert!(
             !merger_argv.iter().any(|a| a == "--effort"),
-            "--effort must be omitted for gemini-pro-orchestrator: {merger_argv:?}"
+            "--effort must be omitted for orchestrator: {merger_argv:?}"
+        );
+        let settings_idx = merger_argv.iter().position(|a| a == "--settings").unwrap();
+        let settings_val: Value = serde_json::from_str(&merger_argv[settings_idx + 1]).unwrap();
+        assert_eq!(
+            settings_val["orchestrator"],
+            json!({
+                "planner": "Gemini 4 Carbon (High)",
+                "executor": "Gemini 4 Hydrogen (High)"
+            })
         );
 
         // Unsupported effort tier (`xhigh`) on a `low/medium/high` model (`gemini-4-carbon`)
@@ -1265,12 +1448,14 @@ mod tests {
         let mut carbon_xhigh = merger.clone();
         carbon_xhigh.model = Some("gemini-4-carbon".into());
         carbon_xhigh.effort = Some("xhigh".into());
+        carbon_xhigh.orchestrator = None;
         let carbon_argv = command(&carbon_xhigh, None, true, &[("home", "/tmp/h")]).unwrap();
         assert!(!carbon_argv.iter().any(|a| a == "--effort"));
 
         let mut hydrogen_xhigh = merger.clone();
         hydrogen_xhigh.model = Some("gemini-4-hydrogen".into());
         hydrogen_xhigh.effort = Some("xhigh".into());
+        hydrogen_xhigh.orchestrator = None;
         let hydrogen_argv = command(&hydrogen_xhigh, None, true, &[("home", "/tmp/h")]).unwrap();
         assert!(
             hydrogen_argv
@@ -1284,6 +1469,7 @@ mod tests {
         let mut suffixed_hydrogen = merger.clone();
         suffixed_hydrogen.model = Some("gemini-4-hydrogen-high".into());
         suffixed_hydrogen.effort = Some("high".into());
+        suffixed_hydrogen.orchestrator = None;
         let suffixed_argv = command(&suffixed_hydrogen, None, true, &[("home", "/tmp/h")]).unwrap();
         assert!(!suffixed_argv.iter().any(|a| a == "--effort"));
 
@@ -1301,6 +1487,293 @@ mod tests {
         .unwrap();
         assert!(haiku_argv.windows(2).any(|w| w == ["--model", "haiku"]));
         assert!(!haiku_argv.iter().any(|a| a == "--effort"));
+    }
+
+    #[test]
+    fn agy_orchestrator_inheritance_overrides_migration_and_command_rendering() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.profiles.push(Profile {
+            id: "agy".into(),
+            preset: Some("agy".into()),
+            model: Some("orchestrator".into()),
+            orchestrator: Some(OrchestratorConfig {
+                planner_model: Some("gemini-4-neon".into()),
+                planner_effort: Some("xhigh".into()),
+                worker_model: Some("gemini-4-hydrogen".into()),
+                worker_effort: Some("high".into()),
+            }),
+            ..Default::default()
+        });
+        // @developer inherits full orchestrator config; @planner overrides only worker_effort;
+        // @reviewer overrides planner_model to claude-opus-5-5 without leaking xhigh effort;
+        // @merger switches back to single model.
+        for (id, model, orch) in [
+            ("developer", None, None),
+            (
+                "planner",
+                None,
+                Some(OrchestratorConfig {
+                    worker_effort: Some("medium".into()),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "reviewer",
+                Some("orchestrator"),
+                Some(OrchestratorConfig {
+                    planner_model: Some("claude-opus-5-5".into()),
+                    ..Default::default()
+                }),
+            ),
+            ("merger", Some("gemini-4-carbon"), None),
+        ] {
+            let p = cfg.profiles.iter_mut().find(|p| p.id == id).unwrap();
+            p.preset = Some("agy".into());
+            p.model = model.map(str::to_owned);
+            p.orchestrator = orch;
+        }
+        let cfg = resolve(cfg, dir.path()).unwrap();
+
+        let dev = cfg.profiles.iter().find(|p| p.id == "developer").unwrap();
+        assert_eq!(dev.model.as_deref(), Some("orchestrator"));
+        assert_eq!(dev.effort, None);
+        assert_eq!(
+            dev.orchestrator,
+            cfg.profiles
+                .iter()
+                .find(|p| p.id == "agy")
+                .unwrap()
+                .orchestrator
+        );
+
+        let planner = cfg.profiles.iter().find(|p| p.id == "planner").unwrap();
+        assert_eq!(
+            planner.orchestrator,
+            Some(OrchestratorConfig {
+                planner_model: Some("gemini-4-neon".into()),
+                planner_effort: Some("xhigh".into()),
+                worker_model: Some("gemini-4-hydrogen".into()),
+                worker_effort: Some("medium".into()),
+            })
+        );
+
+        let rev = cfg.profiles.iter().find(|p| p.id == "reviewer").unwrap();
+        assert_eq!(
+            rev.orchestrator,
+            Some(OrchestratorConfig {
+                planner_model: Some("claude-opus-5-5".into()),
+                planner_effort: None,
+                worker_model: Some("gemini-4-hydrogen".into()),
+                worker_effort: Some("high".into()),
+            })
+        );
+
+        let merger = cfg.profiles.iter().find(|p| p.id == "merger").unwrap();
+        assert_eq!(merger.model.as_deref(), Some("gemini-4-carbon"));
+        assert_eq!(merger.orchestrator, None);
+
+        // Command rendering for start, resume, and interactive terminal:
+        let rev_start = command(
+            rev,
+            Some("conv-1"),
+            true,
+            &[("home", "/tmp/h"), ("cwd", "/tmp/wt"), ("prompt", "review")],
+        )
+        .unwrap();
+        assert!(
+            rev_start
+                .windows(2)
+                .any(|w| w == ["--model", AGY_ORCHESTRATOR_CLI_MODEL])
+        );
+        assert!(!rev_start.iter().any(|a| a == "--effort"));
+        let s_idx = rev_start.iter().position(|a| a == "--settings").unwrap();
+        let s_val: Value = serde_json::from_str(&rev_start[s_idx + 1]).unwrap();
+        assert_eq!(
+            s_val["orchestrator"],
+            json!({
+                "planner": "Claude Opus 5.5 (High)",
+                "executor": "Gemini 4 Hydrogen (High)"
+            })
+        );
+        assert!(s_val["trustedWorkspaces"].is_array());
+
+        let rev_resume = command(
+            rev,
+            Some("conv-1"),
+            false,
+            &[
+                ("home", "/tmp/h"),
+                ("cwd", "/tmp/wt"),
+                ("prompt", "continue"),
+            ],
+        )
+        .unwrap();
+        assert!(
+            rev_resume
+                .windows(2)
+                .any(|w| w == ["--conversation", "conv-1"])
+        );
+        assert!(
+            rev_resume
+                .windows(2)
+                .any(|w| w == ["--model", AGY_ORCHESTRATOR_CLI_MODEL])
+        );
+
+        let rev_interactive =
+            interactive_command(rev, None, &[("home", "/tmp/h"), ("cwd", "/tmp/wt")]).unwrap();
+        assert!(
+            rev_interactive
+                .windows(2)
+                .any(|w| w == ["--model", AGY_ORCHESTRATOR_CLI_MODEL])
+        );
+        assert!(rev_interactive.iter().any(|a| a == "--settings"));
+        assert!(!rev_interactive.iter().any(|a| a == "-i" || a == "--effort"));
+
+        // Effort-only selection uses AGY_DEFAULT_PLANNER_MODEL / AGY_DEFAULT_WORKER_MODEL.
+        let effort_only = Profile {
+            id: "agy-effort-only".into(),
+            preset: Some("agy".into()),
+            model: Some("orchestrator".into()),
+            orchestrator: Some(OrchestratorConfig {
+                planner_effort: Some("high".into()),
+                worker_effort: Some("low".into()),
+                ..Default::default()
+            }),
+            argv: Some(vec![
+                "agy".into(),
+                "--settings".into(),
+                "{agy_trusted_settings}".into(),
+                "-i".into(),
+                "{prompt}".into(),
+            ]),
+            ..Default::default()
+        };
+        let eff_argv = command(&effort_only, None, true, &[("home", "/tmp/h")]).unwrap();
+        let eff_idx = eff_argv.iter().position(|a| a == "--settings").unwrap();
+        let eff_settings: Value = serde_json::from_str(&eff_argv[eff_idx + 1]).unwrap();
+        assert_eq!(
+            eff_settings["orchestrator"],
+            json!({
+                "planner": "Gemini 4 Neon (High)",
+                "executor": "Gemini 4 Hydrogen (Low)"
+            })
+        );
+
+        // Project overrides: partial orchestrator override on agy, and switching engine to codex clears orchestrator.
+        let mut proj = Project {
+            github: None,
+            detected_github: None,
+            github_disconnected: false,
+            delivery_mode: Default::default(),
+            agent_overrides: BTreeMap::from([
+                (
+                    "developer".into(),
+                    canban_types::ProjectAgentOverride {
+                        agent: None,
+                        model: None,
+                        effort: None,
+                        orchestrator: Some(OrchestratorConfig {
+                            worker_model: Some("claude-sonnet-5-5".into()),
+                            worker_effort: Some("medium".into()),
+                            ..Default::default()
+                        }),
+                    },
+                ),
+                (
+                    "planner".into(),
+                    canban_types::ProjectAgentOverride {
+                        agent: Some("codex".into()),
+                        model: None,
+                        effort: None,
+                        orchestrator: Some(OrchestratorConfig {
+                            planner_model: Some("gemini-4-neon".into()),
+                            ..Default::default()
+                        }),
+                    },
+                ),
+            ]),
+            tags: Default::default(),
+            id: "p1".into(),
+            name: "Demo".into(),
+            directory: "/tmp".into(),
+            workflow: Default::default(),
+            target_branch: None,
+            created_at: 0,
+        };
+        let dev_proj = apply_project_override(&cfg, Some(&proj), dev);
+        assert_eq!(dev_proj.model.as_deref(), Some("orchestrator"));
+        assert_eq!(
+            dev_proj.orchestrator,
+            Some(OrchestratorConfig {
+                planner_model: Some("gemini-4-neon".into()),
+                planner_effort: Some("xhigh".into()),
+                worker_model: Some("claude-sonnet-5-5".into()),
+                worker_effort: Some("medium".into()),
+            })
+        );
+        let planner_codex = apply_project_override(&cfg, Some(&proj), planner);
+        assert_eq!(planner_codex.command()[0], "codex");
+        assert_eq!(planner_codex.orchestrator, None);
+
+        // Global single-model agy -> project Orchestrator override
+        proj.agent_overrides.insert(
+            "merger".into(),
+            canban_types::ProjectAgentOverride {
+                agent: Some("agy".into()),
+                model: Some("orchestrator".into()),
+                effort: Some("high".into()),
+                orchestrator: Some(OrchestratorConfig {
+                    planner_model: Some("claude-opus-5-5".into()),
+                    planner_effort: Some("high".into()),
+                    worker_model: None,
+                    worker_effort: None,
+                }),
+            },
+        );
+        let merger_proj = apply_project_override(&cfg, Some(&proj), merger);
+        assert_eq!(merger_proj.model.as_deref(), Some("orchestrator"));
+        assert_eq!(merger_proj.effort, None);
+        assert_eq!(
+            merger_proj.orchestrator,
+            Some(OrchestratorConfig {
+                planner_model: Some("claude-opus-5-5".into()),
+                planner_effort: Some("high".into()),
+                worker_model: None,
+                worker_effort: None,
+            })
+        );
+
+        // migrate() converts legacy gemini-pro-orchestrator* slugs idempotently.
+        let mut legacy = json!({
+            "profiles": [
+                {
+                    "id": "agy",
+                    "preset": "agy",
+                    "model": "gemini-pro-orchestrator-argon",
+                    "effort": "medium"
+                },
+                {
+                    "id": "developer",
+                    "preset": "agy",
+                    "identity": true,
+                    "role_instruction": "Dev"
+                }
+            ]
+        });
+        assert!(migrate(&mut legacy).unwrap());
+        assert_eq!(legacy["profiles"][0]["model"], json!("orchestrator"));
+        assert!(legacy["profiles"][0].get("effort").is_none());
+        assert_eq!(
+            legacy["profiles"][0]["orchestrator"],
+            json!({
+                "planner_model": "gemini-4-argon",
+                "planner_effort": "high",
+                "worker_model": "gemini-4-hydrogen",
+                "worker_effort": "high"
+            })
+        );
+        assert!(!migrate(&mut legacy).unwrap());
     }
 
     #[test]
@@ -1385,6 +1858,7 @@ mod tests {
                 agent: Some("agy".into()),
                 model: Some("gemini-4-carbon-low".into()),
                 effort: Some("low".into()),
+                orchestrator: None,
             },
         );
         let dev_custom_agy = apply_project_override(&cfg_with_agy, Some(&proj), dev);
@@ -1399,6 +1873,7 @@ mod tests {
                 agent: None,
                 model: Some("gpt-5.4-mini".into()),
                 effort: Some("low".into()),
+                orchestrator: None,
             },
         );
         let rev_model_only = apply_project_override(&cfg_with_agy, Some(&proj), rev);

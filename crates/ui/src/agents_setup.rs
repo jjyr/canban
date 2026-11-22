@@ -240,6 +240,23 @@ fn trim_non_empty(val: Option<&Value>) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn trim_orchestrator(val: Option<&Value>) -> Option<OrchestratorConfig> {
+    let v = val?;
+    if v.is_null() {
+        return None;
+    }
+    serde_json::from_value::<OrchestratorConfig>(v.clone())
+        .ok()
+        .and_then(OrchestratorConfig::into_non_empty)
+}
+
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+struct RawProfileOptions {
+    model: Option<String>,
+    effort: Option<String>,
+    orchestrator: Option<OrchestratorConfig>,
+}
+
 fn apply_op_to_catalog(cat: &mut Value, payload: &Value, resolved_cfg: Option<&Config>) {
     if cat.is_null() {
         if let Some(cfg) = resolved_cfg {
@@ -266,21 +283,56 @@ fn apply_op_to_catalog(cat: &mut Value, payload: &Value, resolved_cfg: Option<&C
                 if let Some(obj) = item.as_object_mut() {
                     if let Some(m) = payload.get("model") {
                         match trim_non_empty(Some(m)) {
+                            Some(s) if is_orchestrator_model_id(&s) => {
+                                obj.insert("model".into(), json!(ORCHESTRATOR_MODEL_ID));
+                                obj.remove("effort");
+                                if let Some(leg) = legacy_agy_orchestrator_preset(&s)
+                                    && payload.get("orchestrator").is_none()
+                                    && obj.get("orchestrator").is_none_or(Value::is_null)
+                                {
+                                    obj.insert("orchestrator".into(), json!(leg));
+                                }
+                            }
                             Some(s) => {
                                 obj.insert("model".into(), json!(s));
+                                if payload.get("orchestrator").is_none() {
+                                    obj.remove("orchestrator");
+                                }
                             }
                             None => {
                                 obj.remove("model");
+                                if payload.get("orchestrator").is_none() {
+                                    obj.remove("orchestrator");
+                                }
                             }
                         }
                     }
                     if let Some(e) = payload.get("effort") {
-                        match trim_non_empty(Some(e)) {
-                            Some(s) => {
-                                obj.insert("effort".into(), json!(s));
+                        let is_orch = obj
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .is_some_and(is_orchestrator_model_id);
+                        if is_orch {
+                            obj.remove("effort");
+                        } else {
+                            match trim_non_empty(Some(e)) {
+                                Some(s) => {
+                                    obj.insert("effort".into(), json!(s));
+                                }
+                                None => {
+                                    obj.remove("effort");
+                                }
+                            }
+                        }
+                    }
+                    if let Some(o) = payload.get("orchestrator") {
+                        match trim_orchestrator(Some(o)) {
+                            Some(orch) => {
+                                obj.insert("orchestrator".into(), json!(orch));
+                                obj.remove("effort");
                             }
                             None => {
-                                obj.remove("effort");
+                                obj.remove("orchestrator");
                             }
                         }
                     }
@@ -351,27 +403,64 @@ fn apply_op_to_catalog(cat: &mut Value, payload: &Value, resolved_cfg: Option<&C
                     }
                     if let Some(m) = payload.get("model") {
                         match trim_non_empty(Some(m)) {
+                            Some(s) if is_orchestrator_model_id(&s) => {
+                                obj.insert("model".into(), json!(ORCHESTRATOR_MODEL_ID));
+                                obj.remove("effort");
+                                if let Some(leg) = legacy_agy_orchestrator_preset(&s)
+                                    && payload.get("orchestrator").is_none()
+                                    && obj.get("orchestrator").is_none_or(Value::is_null)
+                                {
+                                    obj.insert("orchestrator".into(), json!(leg));
+                                }
+                            }
                             Some(s) => {
                                 obj.insert("model".into(), json!(s));
+                                if payload.get("orchestrator").is_none() {
+                                    obj.remove("orchestrator");
+                                }
                             }
                             None => {
                                 obj.remove("model");
+                                if payload.get("orchestrator").is_none() {
+                                    obj.remove("orchestrator");
+                                }
                             }
                         }
                     } else if engine_changed {
                         obj.remove("model");
                     }
                     if let Some(e) = payload.get("effort") {
-                        match trim_non_empty(Some(e)) {
-                            Some(s) => {
-                                obj.insert("effort".into(), json!(s));
-                            }
-                            None => {
-                                obj.remove("effort");
+                        let is_orch = obj
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .is_some_and(is_orchestrator_model_id);
+                        if is_orch {
+                            obj.remove("effort");
+                        } else {
+                            match trim_non_empty(Some(e)) {
+                                Some(s) => {
+                                    obj.insert("effort".into(), json!(s));
+                                }
+                                None => {
+                                    obj.remove("effort");
+                                }
                             }
                         }
                     } else if engine_changed {
                         obj.remove("effort");
+                    }
+                    if let Some(o) = payload.get("orchestrator") {
+                        match trim_orchestrator(Some(o)) {
+                            Some(orch) => {
+                                obj.insert("orchestrator".into(), json!(orch));
+                                obj.remove("effort");
+                            }
+                            None => {
+                                obj.remove("orchestrator");
+                            }
+                        }
+                    } else if engine_changed {
+                        obj.remove("orchestrator");
                     }
                     if let Some(instr) = payload.get("role_instruction") {
                         obj.insert("role_instruction".into(), instr.clone());
@@ -480,14 +569,34 @@ fn builtin_profile_seed(id: &str) -> Option<Profile> {
         })
 }
 
-fn peer_inherited_options(all: &[Profile], prof: &Profile) -> (Option<String>, Option<String>) {
+fn peer_inherited_options(all: &[Profile], prof: &Profile) -> RawProfileOptions {
     let Some(preset) = prof.preset.as_deref() else {
-        return (None, None);
+        return RawProfileOptions::default();
     };
-    let peer = all.iter().find(|p| p.id == preset && !p.is_identity());
-    let peer_model = peer.and_then(|p| p.model.clone());
-    let peer_effort = peer.and_then(|p| p.effort.clone());
-    (peer_model, peer_effort)
+    let Some(peer) = all.iter().find(|p| p.id == preset && !p.is_identity()) else {
+        return RawProfileOptions::default();
+    };
+    RawProfileOptions {
+        model: peer.model.clone(),
+        effort: if peer.is_orchestrator() {
+            None
+        } else {
+            peer.effort.clone()
+        },
+        orchestrator: peer.effective_orchestrator(),
+    }
+}
+
+fn merge_orchestrator_pair(
+    child: Option<OrchestratorConfig>,
+    base: Option<OrchestratorConfig>,
+) -> Option<OrchestratorConfig> {
+    match (child, base) {
+        (Some(c), Some(b)) => c.merge_fallback(&b).into_non_empty(),
+        (Some(c), None) => c.into_non_empty(),
+        (None, Some(b)) => b.into_non_empty(),
+        (None, None) => None,
+    }
 }
 
 fn fallback_default_agent(all: &[Profile], default_agent: &mut String) {
@@ -538,14 +647,79 @@ fn apply_op_to_profiles(
                 }
                 let snapshot_all = all.clone();
                 if let Some(prof) = all.iter_mut().find(|p| p.id == id) {
-                    let (peer_m, peer_e) = peer_inherited_options(&snapshot_all, prof);
+                    let peer_opts = peer_inherited_options(&snapshot_all, prof);
                     if let Some(m) = payload.get("model") {
-                        prof.model = trim_non_empty(Some(m))
-                            .or_else(|| if prof.is_identity() { peer_m } else { None });
+                        match trim_non_empty(Some(m)) {
+                            Some(s) if prof.is_agy() && is_orchestrator_model_id(&s) => {
+                                prof.model = Some(ORCHESTRATOR_MODEL_ID.to_owned());
+                                prof.effort = None;
+                                if let Some(leg) = legacy_agy_orchestrator_preset(&s)
+                                    && payload.get("orchestrator").is_none()
+                                    && prof.orchestrator.is_none()
+                                {
+                                    prof.orchestrator = Some(leg);
+                                }
+                            }
+                            Some(s) => {
+                                prof.model = Some(s);
+                                if payload.get("orchestrator").is_none() {
+                                    prof.orchestrator = None;
+                                }
+                            }
+                            None => {
+                                if prof.is_identity() {
+                                    prof.model = peer_opts.model.clone();
+                                    if payload.get("orchestrator").is_none() {
+                                        if prof.is_orchestrator() {
+                                            let raw_o = raw_profile_options(raw_catalog, &prof.id)
+                                                .and_then(|r| r.orchestrator);
+                                            prof.orchestrator = merge_orchestrator_pair(
+                                                raw_o,
+                                                peer_opts.orchestrator.clone(),
+                                            );
+                                        } else {
+                                            prof.orchestrator = None;
+                                        }
+                                    }
+                                    if prof.is_orchestrator() {
+                                        prof.effort = None;
+                                    } else if prof.effort.is_none() {
+                                        prof.effort = peer_opts.effort.clone();
+                                    }
+                                } else {
+                                    prof.model = None;
+                                    if payload.get("orchestrator").is_none() {
+                                        prof.orchestrator = None;
+                                    }
+                                }
+                            }
+                        }
                     }
                     if let Some(e) = payload.get("effort") {
-                        prof.effort = trim_non_empty(Some(e))
-                            .or_else(|| if prof.is_identity() { peer_e } else { None });
+                        if prof.is_orchestrator() {
+                            prof.effort = None;
+                        } else {
+                            prof.effort = trim_non_empty(Some(e)).or_else(|| {
+                                if prof.is_identity() {
+                                    peer_opts.effort.clone()
+                                } else {
+                                    None
+                                }
+                            });
+                        }
+                    }
+                    if let Some(o) = payload.get("orchestrator") {
+                        let explicit_o = trim_orchestrator(Some(o));
+                        if prof.is_orchestrator() {
+                            prof.orchestrator = if prof.is_identity() {
+                                merge_orchestrator_pair(explicit_o, peer_opts.orchestrator.clone())
+                            } else {
+                                explicit_o
+                            };
+                            prof.effort = None;
+                        } else {
+                            prof.orchestrator = None;
+                        }
                     }
                     if let Some(argv_val) = payload.get("argv") {
                         if argv_val.is_null() {
@@ -571,20 +745,36 @@ fn apply_op_to_profiles(
                         let updated_id = prof.id.clone();
                         let updated_m = prof.model.clone();
                         let updated_e = prof.effort.clone();
+                        let updated_o = prof.effective_orchestrator();
                         for child in all.iter_mut() {
                             if child.is_identity()
                                 && child.preset.as_deref() == Some(updated_id.as_str())
                             {
                                 let raw_opts = raw_profile_options(raw_catalog, &child.id);
                                 if payload.get("model").is_some()
-                                    && raw_opts.as_ref().is_none_or(|(m, _)| m.is_none())
+                                    && raw_opts.as_ref().is_none_or(|r| r.model.is_none())
                                 {
                                     child.model = updated_m.clone();
                                 }
-                                if payload.get("effort").is_some()
-                                    && raw_opts.as_ref().is_none_or(|(_, e)| e.is_none())
+                                if payload.get("effort").is_some() || payload.get("model").is_some()
                                 {
-                                    child.effort = updated_e.clone();
+                                    if child.is_orchestrator() {
+                                        child.effort = None;
+                                    } else if raw_opts.as_ref().is_none_or(|r| r.effort.is_none()) {
+                                        child.effort = updated_e.clone();
+                                    }
+                                }
+                                if payload.get("orchestrator").is_some()
+                                    || payload.get("model").is_some()
+                                {
+                                    if child.is_orchestrator() {
+                                        let child_raw_o =
+                                            raw_opts.as_ref().and_then(|r| r.orchestrator.clone());
+                                        child.orchestrator =
+                                            merge_orchestrator_pair(child_raw_o, updated_o.clone());
+                                    } else {
+                                        child.orchestrator = None;
+                                    }
                                 }
                             }
                         }
@@ -633,6 +823,19 @@ fn apply_op_to_profiles(
                     } else if engine_changed {
                         existing.effort = peer.as_ref().and_then(|p| p.effort.clone());
                     }
+                    if let Some(o) = payload.get("orchestrator") {
+                        existing.orchestrator = merge_orchestrator_pair(
+                            trim_orchestrator(Some(o)),
+                            peer.as_ref().and_then(|p| p.orchestrator.clone()),
+                        );
+                    } else if engine_changed {
+                        existing.orchestrator = peer.as_ref().and_then(|p| p.orchestrator.clone());
+                    }
+                    if !existing.is_orchestrator() {
+                        existing.orchestrator = None;
+                    } else {
+                        existing.effort = None;
+                    }
                     if let Some(instr) = payload["role_instruction"].as_str() {
                         existing.role_instruction = instr.trim().to_owned();
                     }
@@ -647,6 +850,10 @@ fn apply_op_to_profiles(
                             .or_else(|| peer.as_ref().and_then(|p| p.model.clone())),
                         effort: trim_non_empty(payload.get("effort"))
                             .or_else(|| peer.as_ref().and_then(|p| p.effort.clone())),
+                        orchestrator: merge_orchestrator_pair(
+                            trim_orchestrator(payload.get("orchestrator")),
+                            peer.as_ref().and_then(|p| p.orchestrator.clone()),
+                        ),
                         role_instruction: payload["role_instruction"]
                             .as_str()
                             .map(str::trim)
@@ -683,6 +890,7 @@ fn apply_op_to_profiles(
                     preset: None,
                     model: trim_non_empty(payload.get("model")),
                     effort: trim_non_empty(payload.get("effort")),
+                    orchestrator: None,
                     role_instruction: String::new(),
                     argv: (!argv.is_empty()).then_some(argv),
                     resume_argv: None,
@@ -781,6 +989,7 @@ fn fallback_catalog_entries(all_profiles: &[Profile]) -> Vec<Value> {
             "supported_efforts": entry.supported_efforts,
             "supports_model": !entry.model_args.is_empty(),
             "supports_effort": !entry.effort_args.is_empty(),
+            "supports_orchestrator": entry.supports_orchestrator,
         }));
     }
     for prof in all_profiles {
@@ -795,6 +1004,9 @@ fn fallback_catalog_entries(all_profiles: &[Profile]) -> Vec<Value> {
                 .and_then(|pn| pn.strip_prefix("herdr:"))
                 .map(|tpl| vec![tpl.to_owned(), "{prompt}".to_owned()])
                 .unwrap_or_default();
+            let supports_orchestrator = !is_herdr
+                && canban_profiles::catalog_entry_for_profile(prof)
+                    .is_some_and(|e| e.supports_orchestrator);
             rows.push(json!({
                 "id": prof.id,
                 "display_name": prof.name.clone().unwrap_or_else(|| prof.id.clone()),
@@ -810,6 +1022,7 @@ fn fallback_catalog_entries(all_profiles: &[Profile]) -> Vec<Value> {
                 "supported_efforts": [],
                 "supports_model": !is_herdr,
                 "supports_effort": !is_herdr && prof.command().iter().any(|a| a.contains("{effort}")),
+                "supports_orchestrator": supports_orchestrator,
             }));
         }
     }
@@ -831,9 +1044,34 @@ struct EngineCatalogCaps {
     efforts: Vec<String>,
     supports_model: bool,
     supports_effort: bool,
+    supports_orchestrator: bool,
 }
 
 impl EngineCatalogCaps {
+    fn single_models(&self) -> Vec<canban_profiles::ModelOption> {
+        self.models
+            .iter()
+            .filter(|m| !is_orchestrator_model_id(&m.id))
+            .cloned()
+            .collect()
+    }
+
+    fn planner_models(&self) -> Vec<canban_profiles::ModelOption> {
+        canban_profiles::agy_orchestrator_planner_models(&self.models)
+    }
+
+    fn worker_models(&self) -> Vec<canban_profiles::ModelOption> {
+        canban_profiles::agy_orchestrator_worker_models(&self.models)
+    }
+
+    fn model_label(&self, model_id: &str) -> String {
+        self.models
+            .iter()
+            .find(|m| m.id == model_id)
+            .map(|m| m.label.clone())
+            .unwrap_or_else(|| short_model_badge(model_id))
+    }
+
     /// Resolve the supported effort levels for `model_id` (`None` when this engine or the
     /// chosen model does not support `--effort`).
     fn efforts_for_model(&self, model_id: Option<&str>) -> Option<Vec<String>> {
@@ -916,6 +1154,17 @@ fn catalog_caps_for_engine(rows: &[Value], engine_key: &str) -> EngineCatalogCap
                                     .collect()
                             })
                         });
+                        let effort_labels: BTreeMap<String, String> = v
+                            .get("effort_labels")
+                            .and_then(Value::as_object)
+                            .map(|obj| {
+                                obj.iter()
+                                    .filter_map(|(k, val)| {
+                                        Some((k.clone(), val.as_str()?.trim().to_owned()))
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                         Some(canban_profiles::ModelOption {
                             id: id.to_owned(),
                             label: if label.is_empty() {
@@ -924,6 +1173,7 @@ fn catalog_caps_for_engine(rows: &[Value], engine_key: &str) -> EngineCatalogCap
                                 label.to_owned()
                             },
                             supported_efforts,
+                            effort_labels,
                         })
                     })
                     .collect()
@@ -943,12 +1193,16 @@ fn catalog_caps_for_engine(rows: &[Value], engine_key: &str) -> EngineCatalogCap
         let supports_effort = row["supports_effort"]
             .as_bool()
             .unwrap_or(!efforts.is_empty());
+        let supports_orchestrator = row["supports_orchestrator"]
+            .as_bool()
+            .unwrap_or(engine_id == "agy");
         return EngineCatalogCaps {
             engine_id,
             models,
             efforts,
             supports_model,
             supports_effort,
+            supports_orchestrator,
         };
     }
     EngineCatalogCaps {
@@ -957,26 +1211,40 @@ fn catalog_caps_for_engine(rows: &[Value], engine_key: &str) -> EngineCatalogCap
         efforts: vec!["low".into(), "medium".into(), "high".into()],
         supports_model: true,
         supports_effort: false,
+        supports_orchestrator: engine_key == "agy",
     }
 }
 
-fn raw_profile_options(
-    catalog_val: &Value,
-    profile_id: &str,
-) -> Option<(Option<String>, Option<String>)> {
+fn raw_profile_options(catalog_val: &Value, profile_id: &str) -> Option<RawProfileOptions> {
     let arr = catalog_val["raw_profiles"].as_array()?;
     let item = arr.iter().find(|v| v["id"].as_str() == Some(profile_id))?;
-    let m = item["model"]
+    let mut m = item["model"]
         .as_str()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
-    let e = item["effort"]
+    let mut e = item["effort"]
         .as_str()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
-    Some((m, e))
+    let mut o = trim_orchestrator(item.get("orchestrator"));
+    if let Some(ref model_id) = m
+        && is_orchestrator_model_id(model_id)
+    {
+        if let Some(legacy) = legacy_agy_orchestrator_preset(model_id)
+            && o.is_none()
+        {
+            o = Some(legacy);
+        }
+        m = Some(ORCHESTRATOR_MODEL_ID.to_owned());
+        e = None;
+    }
+    Some(RawProfileOptions {
+        model: m,
+        effort: e,
+        orchestrator: o,
+    })
 }
 
 fn preset_default_argv(rows: &[Value], profile: &Profile) -> Option<Vec<String>> {
@@ -1187,39 +1455,113 @@ fn short_model_badge(model_id: &str) -> String {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OrchestratorRoleKind {
+    Planner,
+    Worker,
+}
+
+impl OrchestratorRoleKind {
+    fn key_suffix(self) -> &'static str {
+        match self {
+            Self::Planner => "planner",
+            Self::Worker => "worker",
+        }
+    }
+
+    fn default_model(self) -> &'static str {
+        match self {
+            Self::Planner => canban_profiles::AGY_DEFAULT_PLANNER_MODEL,
+            Self::Worker => canban_profiles::AGY_DEFAULT_WORKER_MODEL,
+        }
+    }
+}
+
+#[derive(Clone)]
+enum OrchestratorFieldUpdate {
+    Model(OrchestratorRoleKind, Option<String>, bool),
+    Effort(OrchestratorRoleKind, Option<String>),
+}
+
+fn apply_orchestrator_update(orch: &mut OrchestratorConfig, update: OrchestratorFieldUpdate) {
+    match update {
+        OrchestratorFieldUpdate::Model(OrchestratorRoleKind::Planner, next_m, clear_eff) => {
+            orch.planner_model = next_m;
+            if clear_eff {
+                orch.planner_effort = None;
+            }
+        }
+        OrchestratorFieldUpdate::Model(OrchestratorRoleKind::Worker, next_m, clear_eff) => {
+            orch.worker_model = next_m;
+            if clear_eff {
+                orch.worker_effort = None;
+            }
+        }
+        OrchestratorFieldUpdate::Effort(OrchestratorRoleKind::Planner, next_e) => {
+            orch.planner_effort = next_e;
+        }
+        OrchestratorFieldUpdate::Effort(OrchestratorRoleKind::Worker, next_e) => {
+            orch.worker_effort = next_e;
+        }
+    }
+}
+
+type ModelSelectFn = std::rc::Rc<dyn Fn(Option<String>, bool)>;
+type EffortSelectFn = std::rc::Rc<dyn Fn(Option<String>)>;
+
 #[allow(clippy::too_many_arguments)]
-fn profile_model_effort_buttons(
+fn render_model_effort_buttons(
     ui: Ui,
-    profile_id: String,
-    effective_model: Option<String>,
+    target_id: String,
+    inherited_model: Option<String>,
     explicit_model: Option<String>,
-    effective_effort: Option<String>,
+    inherited_effort: Option<String>,
     explicit_effort: Option<String>,
-    is_identity: bool,
+    has_parent: bool,
+    inherit_default_prefix: &str,
     caps: EngineCatalogCaps,
     custom_model_target: Signal<Option<String>>,
     custom_model_draft: Signal<String>,
+    on_select_model: ModelSelectFn,
+    on_select_effort: EffortSelectFn,
 ) -> AnyElement {
-    let active_model_id = explicit_model.as_deref().or(effective_model.as_deref());
-    let model_efforts = caps.efforts_for_model(active_model_id);
+    let active_model_id = explicit_model.as_deref().or(inherited_model.as_deref());
+    let is_orch_mode =
+        caps.supports_orchestrator && active_model_id.is_some_and(is_orchestrator_model_id);
+    let model_efforts = if is_orch_mode {
+        None
+    } else {
+        caps.efforts_for_model(active_model_id)
+    };
     if !caps.supports_model && model_efforts.is_none() {
         return view().into_element();
     }
 
     let model_btn = if caps.supports_model {
-        let btn_label = match (&explicit_model, &effective_model) {
-            (Some(m), _) => format!("{} ▾", short_model_badge(m)),
-            (None, Some(inherited)) if is_identity => {
-                format!("{} (auto) ▾", short_model_badge(inherited))
+        let btn_label = if is_orch_mode {
+            match (&explicit_model, &inherited_model) {
+                (Some(_), _) => "Orchestrator ▾".into(),
+                (None, Some(_)) if has_parent => "Orchestrator (auto) ▾".into(),
+                _ => "Orchestrator ▾".into(),
             }
-            _ => "Model: Default ▾".into(),
+        } else {
+            match (&explicit_model, &inherited_model) {
+                (Some(m), _) => format!("{} ▾", short_model_badge(m)),
+                (None, Some(inherited)) if has_parent => {
+                    format!("{} (auto) ▾", short_model_badge(inherited))
+                }
+                _ => "Model: Default ▾".into(),
+            }
         };
-        let pid_m = profile_id.clone();
-        let models_list = caps.models.clone();
+        let pid_m = target_id.clone();
+        let models_list = caps.single_models();
         let caps_for_menu = caps.clone();
         let cur_explicit_m = explicit_model.clone();
-        let cur_effective_m = effective_model.clone();
+        let cur_inherited_m = inherited_model.clone();
         let cur_explicit_e_for_model = explicit_effort.clone();
+        let default_prefix = inherit_default_prefix.to_owned();
+        let supports_orch = caps.supports_orchestrator;
+        let on_model = on_select_model.clone();
         compact_action(
             btn_label,
             if explicit_model.is_some() {
@@ -1228,10 +1570,10 @@ fn profile_model_effort_buttons(
                 Variant::Quiet
             },
             move |_| {
-                if models_list.is_empty() {
+                if models_list.is_empty() && !supports_orch {
                     let seed = cur_explicit_m
                         .clone()
-                        .or_else(|| cur_effective_m.clone())
+                        .or_else(|| cur_inherited_m.clone())
                         .unwrap_or_default();
                     if custom_model_target.get_untracked().as_deref() == Some(pid_m.as_str()) {
                         custom_model_target.set(None);
@@ -1246,35 +1588,50 @@ fn profile_model_effort_buttons(
                 let caps_m = caps_for_menu.clone();
                 let p_id = pid_m.clone();
                 let exp_m = cur_explicit_m.clone();
-                let eff_m = cur_effective_m.clone();
+                let inh_m = cur_inherited_m.clone();
                 let exp_e_m = cur_explicit_e_for_model.clone();
+                let def_prefix = default_prefix.clone();
+                let on_m = on_model.clone();
                 ui.spawn(async move {
                     let mut items = Vec::new();
-                    let def_label = if exp_m.is_none() {
-                        if is_identity {
-                            "✓ Default (Inherit from Agent)"
-                        } else {
-                            "✓ Default (CLI default)"
+                    let def_base = if has_parent {
+                        match inh_m.as_deref() {
+                            Some(m) if supports_orch && is_orchestrator_model_id(m) => {
+                                format!("{def_prefix} (Orchestrator)")
+                            }
+                            Some(m) if def_prefix.contains("Inherit Global") => {
+                                format!("Default (Inherit: {})", short_model_badge(m))
+                            }
+                            _ => def_prefix.clone(),
                         }
-                    } else if is_identity {
-                        "Default (Inherit from Agent)"
                     } else {
-                        "Default (CLI default)"
+                        "Default (CLI default)".into()
                     };
-                    let clear_id = p_id.clone();
+                    let def_label = if exp_m.is_none() {
+                        format!("✓ {def_base}")
+                    } else {
+                        def_base
+                    };
+                    let on_clear = on_m.clone();
                     items.push(MenuItem::new(def_label).on_select(move || {
                         custom_model_target.set(None);
-                        dispatch_agents_save(
-                            ui,
-                            json!({
-                                "op": "set_profile_options",
-                                "id": clear_id,
-                                "model": Value::Null,
-                            }),
-                            |_| {},
-                        );
+                        on_clear(None, false);
                     }));
                     items.push(MenuItem::separator());
+                    if supports_orch {
+                        let checked = exp_m.as_deref().is_some_and(is_orchestrator_model_id);
+                        let title = if checked {
+                            "✓ Orchestrator (Planner + Worker)"
+                        } else {
+                            "Orchestrator (Planner + Worker)"
+                        };
+                        let on_orch = on_m.clone();
+                        items.push(MenuItem::new(title).on_select(move || {
+                            custom_model_target.set(None);
+                            on_orch(Some(ORCHESTRATOR_MODEL_ID.to_owned()), true);
+                        }));
+                        items.push(MenuItem::separator());
+                    }
                     for opt in opts {
                         let mid = opt.id;
                         let mlabel = opt.label;
@@ -1285,26 +1642,22 @@ fn profile_model_effort_buttons(
                         } else {
                             format!("{prefix}{mlabel} ({mid})")
                         };
-                        let set_id = p_id.clone();
                         let chosen = mid.clone();
-                        let cleaned_eff =
-                            caps_m.cleaned_effort_for_model(Some(&chosen), exp_e_m.as_deref());
+                        let clear_eff = caps_m
+                            .cleaned_effort_for_model(Some(&chosen), exp_e_m.as_deref())
+                            .is_some();
+                        let on_pick = on_m.clone();
                         items.push(MenuItem::new(title).on_select(move || {
                             custom_model_target.set(None);
-                            let mut payload = json!({
-                                "op": "set_profile_options",
-                                "id": set_id,
-                                "model": chosen,
-                            });
-                            if let Some(clear_eff) = &cleaned_eff {
-                                payload["effort"] = clear_eff.clone();
-                            }
-                            dispatch_agents_save(ui, payload, |_| {});
+                            on_pick(Some(chosen.clone()), clear_eff);
                         }));
                     }
                     items.push(MenuItem::separator());
                     let custom_id = p_id.clone();
-                    let seed = exp_m.or(eff_m).unwrap_or_default();
+                    let seed = exp_m
+                        .filter(|m| !is_orchestrator_model_id(m))
+                        .or_else(|| inh_m.filter(|m| !is_orchestrator_model_id(m)))
+                        .unwrap_or_default();
                     items.push(MenuItem::new("Custom model ID…").on_select(move || {
                         custom_model_draft.set(seed.clone());
                         custom_model_target.set(Some(custom_id.clone()));
@@ -1323,17 +1676,19 @@ fn profile_model_effort_buttons(
             .as_ref()
             .filter(|e| efforts_list.iter().any(|l| l == *e))
             .cloned();
-        let valid_effective_effort = effective_effort
+        let valid_inherited_effort = inherited_effort
             .as_ref()
             .filter(|e| efforts_list.iter().any(|l| l == *e))
             .cloned();
-        let eff_label = match (&valid_explicit_effort, &valid_effective_effort) {
+        let eff_label = match (&valid_explicit_effort, &valid_inherited_effort) {
             (Some(e), _) => format!("Effort: {e} ▾"),
-            (None, Some(inherited)) if is_identity => format!("Effort: {inherited} (auto) ▾"),
+            (None, Some(inherited)) if has_parent => format!("Effort: {inherited} (auto) ▾"),
             _ => "Effort: Default ▾".into(),
         };
-        let pid_e = profile_id;
         let cur_explicit_e = valid_explicit_effort.clone();
+        let cur_inherited_e = valid_inherited_effort.clone();
+        let def_prefix = inherit_default_prefix.to_owned();
+        let on_eff = on_select_effort;
         compact_action(
             eff_label,
             if valid_explicit_effort.is_some() {
@@ -1344,32 +1699,30 @@ fn profile_model_effort_buttons(
             move |_| {
                 use nsh_core::element::desktop::{MenuItem, popup_menu};
                 let opts = efforts_list.clone();
-                let p_id = pid_e.clone();
                 let exp_e = cur_explicit_e.clone();
+                let inh_e = cur_inherited_e.clone();
+                let def_pref = def_prefix.clone();
+                let on_e = on_eff.clone();
                 ui.spawn(async move {
                     let mut items = Vec::new();
-                    let def_label = if exp_e.is_none() {
-                        if is_identity {
-                            "✓ Default (Inherit from Agent)"
-                        } else {
-                            "✓ Default (CLI default)"
+                    let def_base = if has_parent {
+                        match inh_e.as_deref() {
+                            Some(e) if def_pref.contains("Inherit Global") => {
+                                format!("Default (Inherit: {e})")
+                            }
+                            _ => def_pref,
                         }
-                    } else if is_identity {
-                        "Default (Inherit from Agent)"
                     } else {
-                        "Default (CLI default)"
+                        "Default (CLI default)".into()
                     };
-                    let clear_id = p_id.clone();
+                    let def_label = if exp_e.is_none() {
+                        format!("✓ {def_base}")
+                    } else {
+                        def_base
+                    };
+                    let on_clear = on_e.clone();
                     items.push(MenuItem::new(def_label).on_select(move || {
-                        dispatch_agents_save(
-                            ui,
-                            json!({
-                                "op": "set_profile_options",
-                                "id": clear_id,
-                                "effort": Value::Null,
-                            }),
-                            |_| {},
-                        );
+                        on_clear(None);
                     }));
                     items.push(MenuItem::separator());
                     for eff in opts {
@@ -1379,18 +1732,10 @@ fn profile_model_effort_buttons(
                         } else {
                             eff.clone()
                         };
-                        let set_id = p_id.clone();
                         let chosen = eff.clone();
+                        let on_pick = on_e.clone();
                         items.push(MenuItem::new(title).on_select(move || {
-                            dispatch_agents_save(
-                                ui,
-                                json!({
-                                    "op": "set_profile_options",
-                                    "id": set_id,
-                                    "effort": chosen,
-                                }),
-                                |_| {},
-                            );
+                            on_pick(Some(chosen.clone()));
                         }));
                     }
                     popup_menu(items).await;
@@ -1409,6 +1754,470 @@ fn profile_model_effort_buttons(
         .child(model_btn)
         .child(effort_btn)
         .into_element()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn profile_model_effort_buttons(
+    ui: Ui,
+    profile_id: String,
+    effective_model: Option<String>,
+    explicit_model: Option<String>,
+    effective_effort: Option<String>,
+    explicit_effort: Option<String>,
+    is_identity: bool,
+    caps: EngineCatalogCaps,
+    custom_model_target: Signal<Option<String>>,
+    custom_model_draft: Signal<String>,
+) -> AnyElement {
+    let pid_m = profile_id.clone();
+    let on_model: ModelSelectFn = std::rc::Rc::new(move |chosen, clear_eff| {
+        let mut payload = json!({
+            "op": "set_profile_options",
+            "id": pid_m,
+            "model": chosen.as_deref().map(|s| json!(s)).unwrap_or(Value::Null),
+        });
+        if chosen.as_deref().is_some_and(is_orchestrator_model_id) {
+            payload["effort"] = Value::Null;
+        } else {
+            payload["orchestrator"] = Value::Null;
+            if clear_eff {
+                payload["effort"] = Value::Null;
+            }
+        }
+        dispatch_agents_save(ui, payload, |_| {});
+    });
+    let pid_e = profile_id.clone();
+    let on_effort: EffortSelectFn = std::rc::Rc::new(move |chosen| {
+        dispatch_agents_save(
+            ui,
+            json!({
+                "op": "set_profile_options",
+                "id": pid_e,
+                "effort": chosen.as_deref().map(|s| json!(s)).unwrap_or(Value::Null),
+            }),
+            |_| {},
+        );
+    });
+    render_model_effort_buttons(
+        ui,
+        profile_id,
+        effective_model,
+        explicit_model,
+        effective_effort,
+        explicit_effort,
+        is_identity,
+        "Default (Inherit from Agent)",
+        caps,
+        custom_model_target,
+        custom_model_draft,
+        on_model,
+        on_effort,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn orchestrator_role_row(
+    ui: Ui,
+    role: OrchestratorRoleKind,
+    row_label: &'static str,
+    candidate_models: Vec<canban_profiles::ModelOption>,
+    explicit_model: Option<String>,
+    inherited_model: Option<String>,
+    explicit_effort: Option<String>,
+    inherited_effort: Option<String>,
+    has_parent: bool,
+    target_key: String,
+    caps: &EngineCatalogCaps,
+    custom_model_target: Signal<Option<String>>,
+    custom_model_draft: Signal<String>,
+    on_update: std::rc::Rc<dyn Fn(OrchestratorFieldUpdate)>,
+) -> AnyElement {
+    let default_fallback = role.default_model();
+    let model_label = match (&explicit_model, &inherited_model) {
+        (Some(m), _) => format!("{} ▾", caps.model_label(m)),
+        (None, Some(inh)) if has_parent => format!("{} (auto) ▾", caps.model_label(inh)),
+        _ => format!("{} (default) ▾", caps.model_label(default_fallback)),
+    };
+    let caps_m = caps.clone();
+    let cand_m = candidate_models;
+    let exp_m = explicit_model.clone();
+    let inh_m = inherited_model.clone();
+    let exp_e_for_m = explicit_effort.clone();
+    let tk_m = target_key;
+    let on_upd_m = on_update.clone();
+
+    let model_btn = compact_action(
+        model_label,
+        if explicit_model.is_some() {
+            Variant::Secondary
+        } else {
+            Variant::Quiet
+        },
+        move |_| {
+            use nsh_core::element::desktop::{MenuItem, popup_menu};
+            let opts = cand_m.clone();
+            let caps_c = caps_m.clone();
+            let cur_exp_m = exp_m.clone();
+            let cur_inh_m = inh_m.clone();
+            let cur_exp_e = exp_e_for_m.clone();
+            let custom_k = tk_m.clone();
+            let cb = on_upd_m.clone();
+            ui.spawn(async move {
+                let mut items = Vec::new();
+                let def_base = if has_parent && let Some(inh) = cur_inh_m.as_deref() {
+                    format!("Default (Inherit: {})", caps_c.model_label(inh))
+                } else {
+                    format!("Default ({})", caps_c.model_label(default_fallback))
+                };
+                let def_title = if cur_exp_m.is_none() {
+                    format!("✓ {def_base}")
+                } else {
+                    def_base
+                };
+                let clear_cb = cb.clone();
+                let clear_eff_on_reset = cur_inh_m.as_deref().is_none_or(|inh| {
+                    caps_c
+                        .cleaned_effort_for_model(Some(inh), cur_exp_e.as_deref())
+                        .is_some()
+                });
+                items.push(MenuItem::new(def_title).on_select(move || {
+                    custom_model_target.set(None);
+                    clear_cb(OrchestratorFieldUpdate::Model(
+                        role,
+                        None,
+                        clear_eff_on_reset,
+                    ));
+                }));
+                items.push(MenuItem::separator());
+                for opt in opts {
+                    let mid = opt.id;
+                    let checked = cur_exp_m.as_deref() == Some(mid.as_str());
+                    let prefix = if checked { "✓ " } else { "" };
+                    let title = if opt.label == mid {
+                        format!("{prefix}{mid}")
+                    } else {
+                        format!("{prefix}{} ({mid})", opt.label)
+                    };
+                    let chosen = mid.clone();
+                    let clear_eff = caps_c
+                        .cleaned_effort_for_model(Some(&chosen), cur_exp_e.as_deref())
+                        .is_some();
+                    let pick_cb = cb.clone();
+                    items.push(MenuItem::new(title).on_select(move || {
+                        custom_model_target.set(None);
+                        pick_cb(OrchestratorFieldUpdate::Model(
+                            role,
+                            Some(chosen.clone()),
+                            clear_eff,
+                        ));
+                    }));
+                }
+                items.push(MenuItem::separator());
+                let seed = cur_exp_m.or(cur_inh_m).unwrap_or_default();
+                items.push(MenuItem::new("Custom model ID…").on_select(move || {
+                    custom_model_draft.set(seed.clone());
+                    custom_model_target.set(Some(custom_k.clone()));
+                }));
+                popup_menu(items).await;
+            });
+        },
+    );
+
+    let active_model = explicit_model
+        .as_deref()
+        .or(inherited_model.as_deref())
+        .unwrap_or(default_fallback);
+    let model_changed_from_parent =
+        explicit_model.is_some() && inherited_model.is_some() && explicit_model != inherited_model;
+    let role_efforts = caps.efforts_for_model(Some(active_model));
+    let effort_btn = if let Some(efforts_list) = role_efforts {
+        let valid_exp_e = explicit_effort.filter(|e| efforts_list.iter().any(|l| l == e));
+        let valid_inh_e = if has_parent && !model_changed_from_parent {
+            inherited_effort.filter(|e| efforts_list.iter().any(|l| l == e))
+        } else {
+            None
+        };
+        let default_eff = canban_profiles::default_agy_effort_for_model(&caps.models, active_model);
+        let eff_label = match (&valid_exp_e, &valid_inh_e) {
+            (Some(e), _) => format!("Effort: {e} ▾"),
+            (None, Some(inh)) => format!("Effort: {inh} (auto) ▾"),
+            _ => match default_eff.as_deref() {
+                Some(de) => format!("Effort: {de} (default) ▾"),
+                None => "Effort: Default ▾".into(),
+            },
+        };
+        let exp_e_menu = valid_exp_e.clone();
+        let inh_e_menu = valid_inh_e;
+        let on_upd_e = on_update;
+        compact_action(
+            eff_label,
+            if valid_exp_e.is_some() {
+                Variant::Secondary
+            } else {
+                Variant::Quiet
+            },
+            move |_| {
+                use nsh_core::element::desktop::{MenuItem, popup_menu};
+                let opts = efforts_list.clone();
+                let cur_exp = exp_e_menu.clone();
+                let cur_inh = inh_e_menu.clone();
+                let def_e = default_eff.clone();
+                let cb = on_upd_e.clone();
+                ui.spawn(async move {
+                    let mut items = Vec::new();
+                    let def_base = if let Some(inh) = cur_inh.as_deref() {
+                        format!("Default (Inherit: {inh})")
+                    } else if let Some(de) = def_e.as_deref() {
+                        format!("Default ({de})")
+                    } else {
+                        "Default".into()
+                    };
+                    let def_title = if cur_exp.is_none() {
+                        format!("✓ {def_base}")
+                    } else {
+                        def_base
+                    };
+                    let clear_cb = cb.clone();
+                    items.push(MenuItem::new(def_title).on_select(move || {
+                        clear_cb(OrchestratorFieldUpdate::Effort(role, None));
+                    }));
+                    items.push(MenuItem::separator());
+                    for eff in opts {
+                        let checked = cur_exp.as_deref() == Some(eff.as_str());
+                        let title = if checked {
+                            format!("✓ {eff}")
+                        } else {
+                            eff.clone()
+                        };
+                        let chosen = eff.clone();
+                        let pick_cb = cb.clone();
+                        items.push(MenuItem::new(title).on_select(move || {
+                            pick_cb(OrchestratorFieldUpdate::Effort(role, Some(chosen.clone())));
+                        }));
+                    }
+                    popup_menu(items).await;
+                });
+            },
+        )
+        .into_element()
+    } else {
+        view().into_element()
+    };
+
+    view()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap_2()
+        .child(view().w(px(88.)).child(muted(row_label).text_size(px(12.))))
+        .child(model_btn)
+        .child(effort_btn)
+        .into_element()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn orchestrator_subpanel(
+    ui: Ui,
+    target_id: String,
+    caps: EngineCatalogCaps,
+    explicit_orch: Option<OrchestratorConfig>,
+    inherited_orch: Option<OrchestratorConfig>,
+    has_parent: bool,
+    custom_model_target: Signal<Option<String>>,
+    custom_model_draft: Signal<String>,
+    on_update: std::rc::Rc<dyn Fn(OrchestratorFieldUpdate)>,
+) -> AnyElement {
+    let exp = explicit_orch.unwrap_or_default().normalized();
+    let inh = inherited_orch.unwrap_or_default().normalized();
+    let planner_key = format!("{target_id}:{}", OrchestratorRoleKind::Planner.key_suffix());
+    let worker_key = format!("{target_id}:{}", OrchestratorRoleKind::Worker.key_suffix());
+    let active_custom = custom_model_target.get();
+    let editing_role = if active_custom.as_deref() == Some(planner_key.as_str()) {
+        Some((OrchestratorRoleKind::Planner, exp.planner_effort.clone()))
+    } else if active_custom.as_deref() == Some(worker_key.as_str()) {
+        Some((OrchestratorRoleKind::Worker, exp.worker_effort.clone()))
+    } else {
+        None
+    };
+
+    let planner_row = orchestrator_role_row(
+        ui,
+        OrchestratorRoleKind::Planner,
+        "Orchestrator",
+        caps.planner_models(),
+        exp.planner_model,
+        inh.planner_model,
+        exp.planner_effort,
+        inh.planner_effort,
+        has_parent,
+        planner_key,
+        &caps,
+        custom_model_target,
+        custom_model_draft,
+        on_update.clone(),
+    );
+    let worker_row = orchestrator_role_row(
+        ui,
+        OrchestratorRoleKind::Worker,
+        "Worker",
+        caps.worker_models(),
+        exp.worker_model,
+        inh.worker_model,
+        exp.worker_effort,
+        inh.worker_effort,
+        has_parent,
+        worker_key,
+        &caps,
+        custom_model_target,
+        custom_model_draft,
+        on_update.clone(),
+    );
+
+    let custom_editor = if let Some((role, cur_eff)) = editing_role {
+        let caps_c = caps.clone();
+        let cb_save = on_update.clone();
+        let cb_reset = on_update;
+        let placeholder = match role {
+            OrchestratorRoleKind::Planner => "e.g. gemini-4-neon, claude-opus-5-5…",
+            OrchestratorRoleKind::Worker => "e.g. gemini-4-hydrogen, claude-sonnet-5-5…",
+        };
+        let role_title = match role {
+            OrchestratorRoleKind::Planner => "Custom Orchestrator model ID",
+            OrchestratorRoleKind::Worker => "Custom Worker model ID",
+        };
+        view()
+            .flex_row()
+            .flex_wrap()
+            .items_end()
+            .gap_2()
+            .pt_1()
+            .child(
+                view().flex_1().min_w(px(200.)).child(
+                    bound_field(
+                        move || custom_model_draft.get(),
+                        move |v| custom_model_draft.set(v.to_owned()),
+                        placeholder,
+                    )
+                    .label(role_title),
+                ),
+            )
+            .child(compact_action("Apply", Variant::Primary, move |_| {
+                let trimmed = custom_model_draft.get_untracked().trim().to_owned();
+                if trimmed.is_empty() {
+                    cb_save(OrchestratorFieldUpdate::Model(role, None, true));
+                } else {
+                    let clear_eff = caps_c
+                        .cleaned_effort_for_model(Some(&trimmed), cur_eff.as_deref())
+                        .is_some();
+                    cb_save(OrchestratorFieldUpdate::Model(
+                        role,
+                        Some(trimmed),
+                        clear_eff,
+                    ));
+                }
+                custom_model_target.set(None);
+            }))
+            .child(compact_action("Reset default", Variant::Quiet, move |_| {
+                cb_reset(OrchestratorFieldUpdate::Model(role, None, true));
+                custom_model_target.set(None);
+            }))
+            .child(compact_action("Cancel", Variant::Quiet, move |_| {
+                custom_model_target.set(None);
+            }))
+            .into_element()
+    } else {
+        view().into_element()
+    };
+
+    view()
+        .rounded(px(RADIUS))
+        .bg(INSET)
+        .px_2p5()
+        .py_2()
+        .gap_1p5()
+        .child(planner_row)
+        .child(worker_row)
+        .child(custom_editor)
+        .into_element()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn global_orchestrator_subpanel(
+    ui: Ui,
+    profile_id: String,
+    explicit_model: Option<String>,
+    explicit_orch: Option<OrchestratorConfig>,
+    inherited_orch: Option<OrchestratorConfig>,
+    is_identity: bool,
+    caps: EngineCatalogCaps,
+    custom_model_target: Signal<Option<String>>,
+    custom_model_draft: Signal<String>,
+) -> AnyElement {
+    let pid = profile_id.clone();
+    let exp_m = explicit_model;
+    let exp_o = explicit_orch.clone();
+    let on_update: std::rc::Rc<dyn Fn(OrchestratorFieldUpdate)> = std::rc::Rc::new(move |upd| {
+        let mut next = exp_o.clone().unwrap_or_default();
+        apply_orchestrator_update(&mut next, upd);
+        let normalized = next.into_non_empty();
+        let mut payload = json!({
+            "op": "set_profile_options",
+            "id": pid,
+            "orchestrator": normalized.as_ref().map(|o| json!(o)).unwrap_or(Value::Null),
+        });
+        if exp_m.is_none() && !is_identity {
+            payload["model"] = json!(ORCHESTRATOR_MODEL_ID);
+        }
+        dispatch_agents_save(ui, payload, |_| {});
+    });
+    orchestrator_subpanel(
+        ui,
+        profile_id,
+        caps,
+        explicit_orch,
+        inherited_orch,
+        is_identity,
+        custom_model_target,
+        custom_model_draft,
+        on_update,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_orchestrator_subpanel(
+    ui: Ui,
+    role_id: String,
+    explicit_orch: Option<OrchestratorConfig>,
+    inherited_orch: Option<OrchestratorConfig>,
+    caps: EngineCatalogCaps,
+    overrides: Signal<BTreeMap<String, ProjectAgentOverride>>,
+    custom_model_target: Signal<Option<String>>,
+    custom_model_draft: Signal<String>,
+) -> AnyElement {
+    let rk = role_id.clone();
+    let on_update: std::rc::Rc<dyn Fn(OrchestratorFieldUpdate)> = std::rc::Rc::new(move |upd| {
+        let k = rk.clone();
+        overrides.update(|m| {
+            let entry = m.entry(k.clone()).or_default();
+            let mut next = entry.orchestrator.clone().unwrap_or_default();
+            apply_orchestrator_update(&mut next, upd);
+            entry.orchestrator = next.into_non_empty();
+            if entry.is_empty() {
+                m.remove(&k);
+            }
+        });
+    });
+    orchestrator_subpanel(
+        ui,
+        role_id,
+        caps,
+        explicit_orch,
+        inherited_orch,
+        true,
+        custom_model_target,
+        custom_model_draft,
+        on_update,
+    )
 }
 
 fn custom_model_inline_editor(
@@ -1451,6 +2260,9 @@ fn custom_model_inline_editor(
                 "id": id_c,
                 "model": if trimmed.is_empty() { Value::Null } else { json!(trimmed) },
             });
+            if !is_orchestrator_model_id(&trimmed) {
+                payload["orchestrator"] = Value::Null;
+            }
             if let Some(clear_eff) = cleaned_eff {
                 payload["effort"] = clear_eff;
             }
@@ -1466,6 +2278,7 @@ fn custom_model_inline_editor(
                     "op": "set_profile_options",
                     "id": id_c,
                     "model": Value::Null,
+                    "orchestrator": Value::Null,
                 }),
                 move |_| {
                     custom_model_target.set(None);
@@ -2084,6 +2897,7 @@ pub fn onboarding_screen(ui: Ui) -> impl IntoElement {
                                                                         {
                                                                             obj.remove("model");
                                                                             obj.remove("effort");
+                                                                            obj.remove("orchestrator");
                                                                         }
                                                                         item["preset"] = json!(eng);
                                                                     }
@@ -2372,7 +3186,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                 let cat_rows = catalog_agents(ui);
                 let engines = enabled_engine_options(ui);
                 let identities: Vec<Profile> =
-                    all.into_iter().filter(|p| p.is_identity()).collect();
+                    all.iter().filter(|p| p.is_identity()).cloned().collect();
                 let active_edit = editing_role.get();
                 let active_custom_model = custom_model_target.get();
                 view()
@@ -2390,9 +3204,25 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                             active_custom_model.as_deref() == Some(pid.as_str());
                         let eng_key = engine_key_for_profile(&prof);
                         let caps = catalog_caps_for_engine(&cat_rows, &eng_key);
-                        let (explicit_model, explicit_effort) =
-                            raw_profile_options(&cat_val, &pid)
-                                .unwrap_or_else(|| (prof.model.clone(), prof.effort.clone()));
+                        let raw_opts = raw_profile_options(&cat_val, &pid);
+                        let explicit_model = raw_opts
+                            .as_ref()
+                            .map(|r| r.model.clone())
+                            .unwrap_or_else(|| prof.model.clone());
+                        let explicit_effort = raw_opts
+                            .as_ref()
+                            .map(|r| r.effort.clone())
+                            .unwrap_or_else(|| prof.effort.clone());
+                        let explicit_orch = raw_opts
+                            .as_ref()
+                            .map(|r| r.orchestrator.clone())
+                            .unwrap_or_else(|| prof.effective_orchestrator());
+                        let peer_opts = peer_inherited_options(&all, &prof);
+                        let is_orch_mode = caps.supports_orchestrator
+                            && explicit_model
+                                .as_deref()
+                                .or(prof.model.as_deref())
+                                .is_some_and(is_orchestrator_model_id);
                         let engines_for_menu = engines.clone();
                         let switch_pid = pid.clone();
                         let role_text = prof.role_instruction.clone();
@@ -2498,7 +3328,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                 ui,
                                                 pid.clone(),
                                                 prof.model.clone(),
-                                                explicit_model,
+                                                explicit_model.clone(),
                                                 prof.effort.clone(),
                                                 explicit_effort.clone(),
                                                 true,
@@ -2557,6 +3387,24 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                             )),
                                     ),
                             )
+                            .child(if is_orch_mode {
+                                view()
+                                    .pl(px(23.))
+                                    .child(global_orchestrator_subpanel(
+                                        ui,
+                                        pid.clone(),
+                                        explicit_model,
+                                        explicit_orch,
+                                        peer_opts.orchestrator,
+                                        true,
+                                        caps.clone(),
+                                        custom_model_target,
+                                        custom_model_draft,
+                                    ))
+                                    .into_element()
+                            } else {
+                                view().into_element()
+                            })
                             .child(if is_editing_custom_model {
                                 custom_model_inline_editor(
                                     ui,
@@ -2866,10 +3714,24 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                         let (mark, prov_name) = crate::profiles::provider(&prof);
                                         let eng_key = engine_key_for_profile(&prof);
                                         let caps = catalog_caps_for_engine(&rows, &eng_key);
-                                        let (explicit_model, explicit_effort) =
-                                            raw_profile_options(&cat_val, &pid).unwrap_or_else(
-                                                || (prof.model.clone(), prof.effort.clone()),
-                                            );
+                                        let raw_opts = raw_profile_options(&cat_val, &pid);
+                                        let explicit_model = raw_opts
+                                            .as_ref()
+                                            .map(|r| r.model.clone())
+                                            .unwrap_or_else(|| prof.model.clone());
+                                        let explicit_effort = raw_opts
+                                            .as_ref()
+                                            .map(|r| r.effort.clone())
+                                            .unwrap_or_else(|| prof.effort.clone());
+                                        let explicit_orch = raw_opts
+                                            .as_ref()
+                                            .map(|r| r.orchestrator.clone())
+                                            .unwrap_or_else(|| prof.effective_orchestrator());
+                                        let is_orch_mode = caps.supports_orchestrator
+                                            && explicit_model
+                                                .as_deref()
+                                                .or(prof.model.as_deref())
+                                                .is_some_and(is_orchestrator_model_id);
                                         let is_editing_custom =
                                             active_custom_model.as_deref() == Some(pid.as_str());
                                         let is_editing_command =
@@ -2943,7 +3805,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                                 ui,
                                                                 pid.clone(),
                                                                 prof.model.clone(),
-                                                                explicit_model,
+                                                                explicit_model.clone(),
                                                                 prof.effort.clone(),
                                                                 explicit_effort.clone(),
                                                                 false,
@@ -3003,6 +3865,24 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                             )),
                                                     ),
                                             )
+                                            .child(if is_orch_mode {
+                                                view()
+                                                    .pl(px(23.))
+                                                    .child(global_orchestrator_subpanel(
+                                                        ui,
+                                                        pid.clone(),
+                                                        explicit_model,
+                                                        explicit_orch,
+                                                        None,
+                                                        false,
+                                                        caps.clone(),
+                                                        custom_model_target,
+                                                        custom_model_draft,
+                                                    ))
+                                                    .into_element()
+                                            } else {
+                                                view().into_element()
+                                            })
                                             .child(if is_editing_custom {
                                                 custom_model_inline_editor(
                                                     ui,
@@ -3064,207 +3944,66 @@ fn project_model_effort_buttons(
     custom_model_target: Signal<Option<String>>,
     custom_model_draft: Signal<String>,
 ) -> AnyElement {
-    let active_model_id = explicit_model.as_deref().or(inherited_model.as_deref());
-    let model_efforts = caps.efforts_for_model(active_model_id);
-    if !caps.supports_model && model_efforts.is_none() {
-        return view().into_element();
-    }
-
-    let model_btn = if caps.supports_model {
-        let btn_label = match (&explicit_model, &inherited_model) {
-            (Some(m), _) => format!("{} ▾", short_model_badge(m)),
-            (None, Some(inherited)) => format!("{} (auto) ▾", short_model_badge(inherited)),
-            _ => "Model: Default ▾".into(),
-        };
-        let pid_m = role_id.clone();
-        let models_list = caps.models.clone();
-        let caps_for_menu = caps.clone();
-        let cur_explicit_m = explicit_model.clone();
-        let cur_inherited_m = inherited_model.clone();
-        compact_action(
-            btn_label,
-            if explicit_model.is_some() {
-                Variant::Secondary
-            } else {
-                Variant::Quiet
-            },
-            move |_| {
-                if models_list.is_empty() {
-                    let seed = cur_explicit_m
-                        .clone()
-                        .or_else(|| cur_inherited_m.clone())
-                        .unwrap_or_default();
-                    if custom_model_target.get_untracked().as_deref() == Some(pid_m.as_str()) {
-                        custom_model_target.set(None);
-                    } else {
-                        custom_model_draft.set(seed);
-                        custom_model_target.set(Some(pid_m.clone()));
+    let rk_m = role_id.clone();
+    let on_model: ModelSelectFn = std::rc::Rc::new(move |chosen, clear_eff| {
+        let k = rk_m.clone();
+        overrides.update(|m| match chosen {
+            None => {
+                if let Some(ov) = m.get_mut(&k) {
+                    ov.model = None;
+                    ov.orchestrator = None;
+                    if ov.is_empty() {
+                        m.remove(&k);
                     }
-                    return;
                 }
-                use nsh_core::element::desktop::{MenuItem, popup_menu};
-                let opts = models_list.clone();
-                let caps_m = caps_for_menu.clone();
-                let p_id = pid_m.clone();
-                let exp_m = cur_explicit_m.clone();
-                let inh_m = cur_inherited_m.clone();
-                ui.spawn(async move {
-                    let mut items = Vec::new();
-                    let def_base = match inh_m.as_deref() {
-                        Some(m) => format!("Default (Inherit: {})", short_model_badge(m)),
-                        None => "Default (Inherit Global)".into(),
-                    };
-                    let def_label = if exp_m.is_none() {
-                        format!("✓ {def_base}")
-                    } else {
-                        def_base
-                    };
-                    let clear_id = p_id.clone();
-                    items.push(MenuItem::new(def_label).on_select(move || {
-                        custom_model_target.set(None);
-                        let k = clear_id.clone();
-                        overrides.update(|m| {
-                            if let Some(ov) = m.get_mut(&k) {
-                                ov.model = None;
-                                if ov.is_empty() {
-                                    m.remove(&k);
-                                }
-                            }
-                        });
-                    }));
-                    items.push(MenuItem::separator());
-                    for opt in opts {
-                        let mid = opt.id;
-                        let mlabel = opt.label;
-                        let checked = exp_m.as_deref() == Some(mid.as_str());
-                        let prefix = if checked { "✓ " } else { "" };
-                        let title = if mlabel == mid {
-                            format!("{prefix}{mid}")
-                        } else {
-                            format!("{prefix}{mlabel} ({mid})")
-                        };
-                        let set_id = p_id.clone();
-                        let chosen = mid.clone();
-                        let caps_opt = caps_m.clone();
-                        items.push(MenuItem::new(title).on_select(move || {
-                            custom_model_target.set(None);
-                            let k = set_id.clone();
-                            let v = chosen.clone();
-                            overrides.update(|m| {
-                                let entry = m.entry(k).or_default();
-                                if caps_opt
-                                    .cleaned_effort_for_model(Some(&v), entry.effort.as_deref())
-                                    .is_some()
-                                {
-                                    entry.effort = None;
-                                }
-                                entry.model = Some(v);
-                            });
-                        }));
+            }
+            Some(v) if is_orchestrator_model_id(&v) => {
+                let entry = m.entry(k).or_default();
+                entry.model = Some(ORCHESTRATOR_MODEL_ID.to_owned());
+                entry.effort = None;
+            }
+            Some(v) => {
+                let entry = m.entry(k).or_default();
+                entry.model = Some(v);
+                entry.orchestrator = None;
+                if clear_eff {
+                    entry.effort = None;
+                }
+            }
+        });
+    });
+    let rk_e = role_id.clone();
+    let on_effort: EffortSelectFn = std::rc::Rc::new(move |chosen| {
+        let k = rk_e.clone();
+        overrides.update(|m| match chosen {
+            None => {
+                if let Some(ov) = m.get_mut(&k) {
+                    ov.effort = None;
+                    if ov.is_empty() {
+                        m.remove(&k);
                     }
-                    items.push(MenuItem::separator());
-                    let custom_id = p_id.clone();
-                    let seed = exp_m.or(inh_m).unwrap_or_default();
-                    items.push(MenuItem::new("Custom model ID…").on_select(move || {
-                        custom_model_draft.set(seed.clone());
-                        custom_model_target.set(Some(custom_id.clone()));
-                    }));
-                    popup_menu(items).await;
-                });
-            },
-        )
-        .into_element()
-    } else {
-        view().into_element()
-    };
-
-    let effort_btn = if let Some(efforts_list) = model_efforts {
-        let valid_explicit_effort = explicit_effort
-            .as_ref()
-            .filter(|e| efforts_list.iter().any(|l| l == *e))
-            .cloned();
-        let valid_inherited_effort = inherited_effort
-            .as_ref()
-            .filter(|e| efforts_list.iter().any(|l| l == *e))
-            .cloned();
-        let eff_label = match (&valid_explicit_effort, &valid_inherited_effort) {
-            (Some(e), _) => format!("Effort: {e} ▾"),
-            (None, Some(inherited)) => format!("Effort: {inherited} (auto) ▾"),
-            _ => "Effort: Default ▾".into(),
-        };
-        let pid_e = role_id;
-        let cur_explicit_e = valid_explicit_effort.clone();
-        let cur_inherited_e = valid_inherited_effort.clone();
-        compact_action(
-            eff_label,
-            if valid_explicit_effort.is_some() {
-                Variant::Secondary
-            } else {
-                Variant::Quiet
-            },
-            move |_| {
-                use nsh_core::element::desktop::{MenuItem, popup_menu};
-                let opts = efforts_list.clone();
-                let p_id = pid_e.clone();
-                let exp_e = cur_explicit_e.clone();
-                let inh_e = cur_inherited_e.clone();
-                ui.spawn(async move {
-                    let mut items = Vec::new();
-                    let def_base = match inh_e.as_deref() {
-                        Some(e) => format!("Default (Inherit: {e})"),
-                        None => "Default (Inherit Global)".into(),
-                    };
-                    let def_label = if exp_e.is_none() {
-                        format!("✓ {def_base}")
-                    } else {
-                        def_base
-                    };
-                    let clear_id = p_id.clone();
-                    items.push(MenuItem::new(def_label).on_select(move || {
-                        let k = clear_id.clone();
-                        overrides.update(|m| {
-                            if let Some(ov) = m.get_mut(&k) {
-                                ov.effort = None;
-                                if ov.is_empty() {
-                                    m.remove(&k);
-                                }
-                            }
-                        });
-                    }));
-                    items.push(MenuItem::separator());
-                    for eff in opts {
-                        let checked = exp_e.as_deref() == Some(eff.as_str());
-                        let title = if checked {
-                            format!("✓ {eff}")
-                        } else {
-                            eff.clone()
-                        };
-                        let set_id = p_id.clone();
-                        let chosen = eff.clone();
-                        items.push(MenuItem::new(title).on_select(move || {
-                            let k = set_id.clone();
-                            let v = chosen.clone();
-                            overrides.update(|m| {
-                                m.entry(k).or_default().effort = Some(v);
-                            });
-                        }));
-                    }
-                    popup_menu(items).await;
-                });
-            },
-        )
-        .into_element()
-    } else {
-        view().into_element()
-    };
-
-    view()
-        .flex_row()
-        .items_center()
-        .gap_1p5()
-        .child(model_btn)
-        .child(effort_btn)
-        .into_element()
+                }
+            }
+            Some(v) => {
+                m.entry(k).or_default().effort = Some(v);
+            }
+        });
+    });
+    render_model_effort_buttons(
+        ui,
+        role_id,
+        inherited_model,
+        explicit_model,
+        inherited_effort,
+        explicit_effort,
+        true,
+        "Default (Inherit Global)",
+        caps,
+        custom_model_target,
+        custom_model_draft,
+        on_model,
+        on_effort,
+    )
 }
 
 fn project_custom_model_inline_editor(
@@ -3301,12 +4040,16 @@ fn project_custom_model_inline_editor(
                 if trimmed.is_empty() {
                     if let Some(ov) = m.get_mut(&k) {
                         ov.model = None;
+                        ov.orchestrator = None;
                         if ov.is_empty() {
                             m.remove(&k);
                         }
                     }
                 } else {
                     let entry = m.entry(k).or_default();
+                    if !is_orchestrator_model_id(&trimmed) {
+                        entry.orchestrator = None;
+                    }
                     if caps_c
                         .cleaned_effort_for_model(Some(&trimmed), entry.effort.as_deref())
                         .is_some()
@@ -3323,6 +4066,7 @@ fn project_custom_model_inline_editor(
             overrides.update(|m| {
                 if let Some(ov) = m.get_mut(&k) {
                     ov.model = None;
+                    ov.orchestrator = None;
                     if ov.is_empty() {
                         m.remove(&k);
                     }
@@ -3340,10 +4084,20 @@ fn inherited_project_options(
     all_profiles: &[Profile],
     prof: &Profile,
     override_agent: Option<&str>,
-) -> (Option<String>, Option<String>) {
+) -> RawProfileOptions {
     let global_eng = engine_key_for_profile(prof);
     let Some(target) = override_agent.filter(|s| !s.trim().is_empty()) else {
-        return (prof.model.clone(), prof.effort.clone());
+        return RawProfileOptions {
+            model: prof.model.clone(),
+            effort: if prof.is_orchestrator() {
+                None
+            } else {
+                prof.effort.clone()
+            },
+            orchestrator: prof
+                .effective_orchestrator()
+                .and_then(OrchestratorConfig::into_non_empty),
+        };
     };
     let same_engine = target == global_eng
         || prof.preset.as_deref() == Some(target)
@@ -3355,17 +4109,37 @@ fn inherited_project_options(
         .and_then(|p| p.model.as_deref().map(str::trim))
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
-    let peer_effort = peer
-        .and_then(|p| p.effort.as_deref().map(str::trim))
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-    if same_engine {
-        (
-            prof.model.clone().or(peer_model),
-            prof.effort.clone().or(peer_effort),
-        )
+    let peer_is_orch = peer.is_some_and(Profile::is_orchestrator);
+    let peer_effort = if peer_is_orch {
+        None
     } else {
-        (peer_model, peer_effort)
+        peer.and_then(|p| p.effort.as_deref().map(str::trim))
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    let peer_orch = peer.and_then(Profile::effective_orchestrator);
+    if same_engine {
+        let model = prof.model.clone().or(peer_model);
+        let is_orch = model.as_deref().is_some_and(is_orchestrator_model_id);
+        RawProfileOptions {
+            model,
+            effort: if is_orch {
+                None
+            } else {
+                prof.effort.clone().or(peer_effort)
+            },
+            orchestrator: if is_orch {
+                merge_orchestrator_pair(prof.effective_orchestrator(), peer_orch)
+            } else {
+                None
+            },
+        }
+    } else {
+        RawProfileOptions {
+            model: peer_model,
+            effort: peer_effort,
+            orchestrator: peer_orch,
+        }
     }
 }
 
@@ -3473,6 +4247,7 @@ pub fn project_overrides_editor(
                                                 if prev_eff.as_deref() != Some(target_id.as_str()) {
                                                     entry.model = None;
                                                     entry.effort = None;
+                                                    entry.orchestrator = None;
                                                 }
                                                 entry.agent = Some(target_id.clone());
                                             }
@@ -3505,8 +4280,14 @@ pub fn project_overrides_editor(
                             .map(engine_icon)
                             .unwrap_or(global_icon);
                         let caps = catalog_caps_for_engine(&cat_rows, &effective_eng_key);
-                        let (inherited_model, inherited_effort) =
+                        let inherited =
                             inherited_project_options(&all, &prof, current_agent_ov.as_deref());
+                        let is_orch_mode = caps.supports_orchestrator
+                            && current_ov
+                                .model
+                                .as_deref()
+                                .or(inherited.model.as_deref())
+                                .is_some_and(is_orchestrator_model_id);
                         let is_editing_custom_model =
                             active_custom_model.as_deref() == Some(role_id.as_str());
                         let engines_row = engines.clone();
@@ -3593,6 +4374,7 @@ pub fn project_overrides_editor(
                                                             {
                                                                 ov.model = None;
                                                                 ov.effort = None;
+                                                                ov.orchestrator = None;
                                                             }
                                                             if ov.is_empty() {
                                                                 m.remove(&k);
@@ -3639,6 +4421,7 @@ pub fn project_overrides_editor(
                                                                 if prev_eff != v {
                                                                     entry.model = None;
                                                                     entry.effort = None;
+                                                                    entry.orchestrator = None;
                                                                 }
                                                                 entry.agent = Some(v);
                                                             });
@@ -3651,9 +4434,9 @@ pub fn project_overrides_editor(
                                     .child(project_model_effort_buttons(
                                         ui,
                                         role_id.clone(),
-                                        inherited_model,
+                                        inherited.model,
                                         current_ov.model,
-                                        inherited_effort,
+                                        inherited.effort,
                                         current_ov.effort,
                                         caps.clone(),
                                         overrides,
@@ -3661,6 +4444,23 @@ pub fn project_overrides_editor(
                                         custom_model_draft,
                                     )),
                             )
+                            .child(if is_orch_mode {
+                                view()
+                                    .pl(px(26.))
+                                    .child(project_orchestrator_subpanel(
+                                        ui,
+                                        role_id.clone(),
+                                        current_ov.orchestrator,
+                                        inherited.orchestrator,
+                                        caps.clone(),
+                                        overrides,
+                                        custom_model_target,
+                                        custom_model_draft,
+                                    ))
+                                    .into_element()
+                            } else {
+                                view().into_element()
+                            })
                             .child(if is_editing_custom_model {
                                 view()
                                     .pl(px(26.))
@@ -3765,8 +4565,8 @@ mod tests {
     fn optimistic_agent_and_catalog_ops_update_explicit_and_inherited_options_without_rescan() {
         let mut catalog = json!({
             "agents": [
-                {"id": "codex", "enabled": true, "configured": true, "installed": true},
-                {"id": "agy", "enabled": false, "configured": false, "installed": true},
+                {"id": "codex", "enabled": true, "configured": true, "installed": true, "supports_orchestrator": false},
+                {"id": "agy", "enabled": false, "configured": false, "installed": true, "supports_orchestrator": true},
             ],
             "raw_profiles": [
                 {"id": "codex", "enabled": true, "identity": false, "preset": "codex", "model": "gpt-5.4", "effort": "medium"},
@@ -3805,7 +4605,11 @@ mod tests {
         apply_op_to_catalog(&mut catalog, &set_model, None);
         assert_eq!(
             raw_profile_options(&catalog, "developer"),
-            Some((Some("gpt-5.4-mini".into()), None))
+            Some(RawProfileOptions {
+                model: Some("gpt-5.4-mini".into()),
+                effort: None,
+                orchestrator: None,
+            })
         );
         assert_eq!(profiles[1].model.as_deref(), Some("gpt-5.4-mini"));
 
@@ -3819,7 +4623,7 @@ mod tests {
         apply_op_to_catalog(&mut catalog, &clear_model, None);
         assert_eq!(
             raw_profile_options(&catalog, "developer"),
-            Some((None, None))
+            Some(RawProfileOptions::default())
         );
         assert_eq!(profiles[1].model.as_deref(), Some("gpt-5.4"));
 
@@ -3853,7 +4657,367 @@ mod tests {
         );
         assert_eq!(
             raw_profile_options(&catalog, "developer"),
-            Some((None, None))
+            Some(RawProfileOptions::default())
+        );
+
+        // 5. Switch @agy to Orchestrator mode -> propagates to inheriting @developer, allows partial override,
+        //    and clears cleanly when switching back to a single model or another engine.
+        let set_agy_orch = json!({
+            "op": "set_profile_options",
+            "id": "agy",
+            "model": "orchestrator",
+            "effort": Value::Null,
+            "orchestrator": {
+                "planner_model": "claude-opus-5-5",
+                "planner_effort": "high",
+                "worker_model": "gemini-4-hydrogen",
+                "worker_effort": "high"
+            }
+        });
+        apply_op_to_profiles(&mut profiles, &mut default_agent, &set_agy_orch, &catalog);
+        apply_op_to_catalog(&mut catalog, &set_agy_orch, None);
+        assert_eq!(
+            profiles
+                .iter()
+                .find(|p| p.id == "developer")
+                .and_then(|p| p.model.as_deref()),
+            Some("orchestrator")
+        );
+        assert_eq!(
+            profiles
+                .iter()
+                .find(|p| p.id == "developer")
+                .and_then(|p| p.orchestrator.as_ref())
+                .and_then(|o| o.planner_model.as_deref()),
+            Some("claude-opus-5-5")
+        );
+
+        let override_dev_worker = json!({
+            "op": "set_profile_options",
+            "id": "developer",
+            "orchestrator": { "worker_effort": "medium" }
+        });
+        apply_op_to_profiles(
+            &mut profiles,
+            &mut default_agent,
+            &override_dev_worker,
+            &catalog,
+        );
+        apply_op_to_catalog(&mut catalog, &override_dev_worker, None);
+        let dev_orch = profiles
+            .iter()
+            .find(|p| p.id == "developer")
+            .unwrap()
+            .orchestrator
+            .clone()
+            .unwrap();
+        assert_eq!(dev_orch.planner_model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(dev_orch.worker_effort.as_deref(), Some("medium"));
+
+        let agy_single = json!({
+            "op": "set_profile_options",
+            "id": "agy",
+            "model": "gemini-4-carbon",
+            "orchestrator": Value::Null,
+            "effort": "medium",
+        });
+        apply_op_to_profiles(&mut profiles, &mut default_agent, &agy_single, &catalog);
+        apply_op_to_catalog(&mut catalog, &agy_single, None);
+        assert_eq!(
+            profiles
+                .iter()
+                .find(|p| p.id == "developer")
+                .unwrap()
+                .orchestrator,
+            None
+        );
+    }
+
+    #[test]
+    fn agy_orchestrator_subpanel_renders_only_for_agy_orchestrator_in_global_and_project_settings()
+    {
+        use nsh_core::{ApproxTextEngine, Core, MountItem, geometry::size};
+
+        fn collect_texts(root: &nsh_core::element::Root) -> Vec<String> {
+            let mut core = Core::new(ApproxTextEngine, size(px(960.), px(900.)));
+            core.set_components(nsh_base::registry());
+            core.mount_root(root);
+            let batch = core.commit().expect("commit layout");
+            batch
+                .items
+                .into_iter()
+                .filter_map(|item| match item {
+                    MountItem::Text { text, .. } => Some(text.text.to_string()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        #[component]
+        fn GlobalProbe() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let agy_entry = canban_profiles::builtin_catalog()
+                .into_iter()
+                .find(|e| e.id == "agy")
+                .unwrap();
+            let codex_entry = canban_profiles::builtin_catalog()
+                .into_iter()
+                .find(|e| e.id == "codex")
+                .unwrap();
+            ui.agent_catalog.set(json!({
+                "agents": [
+                    {
+                        "id": "codex",
+                        "display_name": "Codex",
+                        "binary": "codex",
+                        "default_argv": codex_entry.argv,
+                        "kind": "builtin",
+                        "installed": true,
+                        "configured": true,
+                        "enabled": true,
+                        "models": codex_entry.default_models,
+                        "supported_efforts": codex_entry.supported_efforts,
+                        "supports_model": true,
+                        "supports_effort": true,
+                        "supports_orchestrator": false,
+                    },
+                    {
+                        "id": "agy",
+                        "display_name": "Antigravity",
+                        "binary": "agy",
+                        "default_argv": agy_entry.argv,
+                        "kind": "builtin",
+                        "installed": true,
+                        "configured": true,
+                        "enabled": true,
+                        "models": agy_entry.default_models,
+                        "supported_efforts": agy_entry.supported_efforts,
+                        "supports_model": true,
+                        "supports_effort": true,
+                        "supports_orchestrator": true,
+                    },
+                ],
+                "raw_profiles": [
+                    { "id": "codex", "preset": "codex", "model": "gpt-6.1-sol", "effort": "high" },
+                    { "id": "agy", "preset": "agy", "model": "gemini-4-carbon", "effort": "medium" },
+                    {
+                        "id": "developer",
+                        "identity": true,
+                        "preset": "agy",
+                        "model": "orchestrator",
+                        "orchestrator": {
+                            "planner_model": "claude-opus-5-5",
+                            "planner_effort": "high",
+                            "worker_model": "gemini-4-hydrogen",
+                            "worker_effort": "medium"
+                        }
+                    },
+                    { "id": "reviewer", "identity": true, "preset": "codex" },
+                ]
+            }));
+            ui.all_profiles.set(vec![
+                Profile {
+                    id: "codex".into(),
+                    enabled: true,
+                    preset: Some("codex".into()),
+                    model: Some("gpt-6.1-sol".into()),
+                    effort: Some("high".into()),
+                    ..Default::default()
+                },
+                Profile {
+                    id: "agy".into(),
+                    enabled: true,
+                    preset: Some("agy".into()),
+                    model: Some("gemini-4-carbon".into()),
+                    effort: Some("medium".into()),
+                    ..Default::default()
+                },
+                Profile {
+                    id: "developer".into(),
+                    enabled: true,
+                    identity: true,
+                    preset: Some("agy".into()),
+                    model: Some("orchestrator".into()),
+                    orchestrator: Some(OrchestratorConfig {
+                        planner_model: Some("claude-opus-5-5".into()),
+                        planner_effort: Some("high".into()),
+                        worker_model: Some("gemini-4-hydrogen".into()),
+                        worker_effort: Some("medium".into()),
+                    }),
+                    role_instruction: "Dev".into(),
+                    ..Default::default()
+                },
+                Profile {
+                    id: "reviewer".into(),
+                    enabled: true,
+                    identity: true,
+                    preset: Some("codex".into()),
+                    model: Some("gpt-6.1-sol".into()),
+                    effort: Some("high".into()),
+                    role_instruction: "Rev".into(),
+                    ..Default::default()
+                },
+            ]);
+            view()
+                .w(px(960.))
+                .h(px(900.))
+                .child(global_settings_section(ui, "/tmp/agents.json".into()))
+        }
+
+        let global_texts = collect_texts(&nsh_core::element::Root::of::<GlobalProbe>());
+        assert!(
+            global_texts.iter().any(|t| t == "Orchestrator ▾"),
+            "expected top-level Orchestrator mode button: {global_texts:?}"
+        );
+        assert_eq!(
+            global_texts.iter().filter(|t| *t == "Worker").count(),
+            1,
+            "only the agy orchestrator row should render the Worker sub-row: {global_texts:?}"
+        );
+        assert!(
+            global_texts.iter().any(|t| t == "Claude Opus 5.5 ▾"),
+            "expected planner model button label: {global_texts:?}"
+        );
+        assert!(
+            global_texts.iter().any(|t| t == "Gemini 4 Hydrogen ▾"),
+            "expected worker model button label: {global_texts:?}"
+        );
+
+        #[component]
+        fn ProjectProbeSingleOnly() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let agy_entry = canban_profiles::builtin_catalog()
+                .into_iter()
+                .find(|e| e.id == "agy")
+                .unwrap();
+            ui.agent_catalog.set(json!({
+                "agents": [{
+                    "id": "agy",
+                    "display_name": "Antigravity",
+                    "binary": "agy",
+                    "default_argv": agy_entry.argv,
+                    "kind": "builtin",
+                    "installed": true,
+                    "configured": true,
+                    "enabled": true,
+                    "models": agy_entry.default_models,
+                    "supported_efforts": agy_entry.supported_efforts,
+                    "supports_model": true,
+                    "supports_effort": true,
+                    "supports_orchestrator": true,
+                }]
+            }));
+            ui.all_profiles.set(vec![
+                Profile {
+                    id: "agy".into(),
+                    enabled: true,
+                    preset: Some("agy".into()),
+                    model: Some("gemini-4-carbon".into()),
+                    effort: Some("medium".into()),
+                    ..Default::default()
+                },
+                Profile {
+                    id: "developer".into(),
+                    enabled: true,
+                    identity: true,
+                    preset: Some("agy".into()),
+                    model: Some("gemini-4-carbon".into()),
+                    effort: Some("medium".into()),
+                    role_instruction: "Dev".into(),
+                    ..Default::default()
+                },
+            ]);
+            let overrides = signal(BTreeMap::new());
+            let host_id = signal("local".to_owned());
+            view()
+                .w(px(960.))
+                .h(px(600.))
+                .child(project_overrides_editor(ui, overrides, host_id))
+        }
+
+        let single_texts = collect_texts(&nsh_core::element::Root::of::<ProjectProbeSingleOnly>());
+        assert!(
+            !single_texts.iter().any(|t| t == "Worker"),
+            "single-model agy must not render Orchestrator Worker row: {single_texts:?}"
+        );
+
+        #[component]
+        fn ProjectProbeOrchestrator() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let agy_entry = canban_profiles::builtin_catalog()
+                .into_iter()
+                .find(|e| e.id == "agy")
+                .unwrap();
+            ui.agent_catalog.set(json!({
+                "agents": [{
+                    "id": "agy",
+                    "display_name": "Antigravity",
+                    "binary": "agy",
+                    "default_argv": agy_entry.argv,
+                    "kind": "builtin",
+                    "installed": true,
+                    "configured": true,
+                    "enabled": true,
+                    "models": agy_entry.default_models,
+                    "supported_efforts": agy_entry.supported_efforts,
+                    "supports_model": true,
+                    "supports_effort": true,
+                    "supports_orchestrator": true,
+                }]
+            }));
+            ui.all_profiles.set(vec![
+                Profile {
+                    id: "agy".into(),
+                    enabled: true,
+                    preset: Some("agy".into()),
+                    ..Default::default()
+                },
+                Profile {
+                    id: "developer".into(),
+                    enabled: true,
+                    identity: true,
+                    preset: Some("codex".into()),
+                    role_instruction: "Dev".into(),
+                    ..Default::default()
+                },
+            ]);
+            let overrides = signal(BTreeMap::from([(
+                "developer".into(),
+                ProjectAgentOverride {
+                    agent: Some("agy".into()),
+                    model: Some("orchestrator".into()),
+                    effort: None,
+                    orchestrator: Some(OrchestratorConfig {
+                        planner_model: Some("gemini-4-neon".into()),
+                        planner_effort: Some("xhigh".into()),
+                        worker_model: Some("claude-sonnet-5-5".into()),
+                        worker_effort: Some("medium".into()),
+                    }),
+                },
+            )]));
+            let host_id = signal("local".to_owned());
+            view()
+                .w(px(960.))
+                .h(px(600.))
+                .child(project_overrides_editor(ui, overrides, host_id))
+        }
+
+        let proj_orch_texts =
+            collect_texts(&nsh_core::element::Root::of::<ProjectProbeOrchestrator>());
+        assert!(
+            proj_orch_texts.iter().any(|t| t == "Worker"),
+            "project agy orchestrator override must render Worker row: {proj_orch_texts:?}"
+        );
+        assert!(
+            proj_orch_texts.iter().any(|t| t == "Gemini 4 Neon ▾"),
+            "project agy orchestrator override must render planner model: {proj_orch_texts:?}"
+        );
+        assert!(
+            proj_orch_texts.iter().any(|t| t == "Claude Sonnet 5.5 ▾"),
+            "project agy orchestrator override must render worker model: {proj_orch_texts:?}"
         );
     }
 }

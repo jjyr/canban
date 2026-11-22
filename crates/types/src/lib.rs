@@ -136,6 +136,143 @@ fn is_true(v: &bool) -> bool {
 fn is_false(v: &bool) -> bool {
     !*v
 }
+pub const ORCHESTRATOR_MODEL_ID: &str = "orchestrator";
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OrchestratorConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_effort: Option<String>,
+}
+
+fn clean_option_str(val: &Option<String>) -> Option<String> {
+    val.as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "inherit")
+        .map(str::to_owned)
+}
+
+impl OrchestratorConfig {
+    pub fn normalized(&self) -> Self {
+        Self {
+            planner_model: clean_option_str(&self.planner_model),
+            planner_effort: clean_option_str(&self.planner_effort),
+            worker_model: clean_option_str(&self.worker_model),
+            worker_effort: clean_option_str(&self.worker_effort),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        let n = self.normalized();
+        n.planner_model.is_none()
+            && n.planner_effort.is_none()
+            && n.worker_model.is_none()
+            && n.worker_effort.is_none()
+    }
+
+    pub fn into_non_empty(self) -> Option<Self> {
+        let n = self.normalized();
+        (!n.is_empty()).then_some(n)
+    }
+
+    /// Merge `self` (child override) over `base` (inherited parent).
+    /// When `self` explicitly changes a role's model away from `base`'s model, do not
+    /// inherit `base`'s effort for that role because effort tiers may differ across models.
+    pub fn merge_fallback(&self, base: &Self) -> Self {
+        let child = self.normalized();
+        let base = base.normalized();
+        let planner_changed = child.planner_model.is_some()
+            && base.planner_model.is_some()
+            && child.planner_model != base.planner_model;
+        let worker_changed = child.worker_model.is_some()
+            && base.worker_model.is_some()
+            && child.worker_model != base.worker_model;
+        Self {
+            planner_model: child.planner_model.or(base.planner_model),
+            planner_effort: if planner_changed {
+                child.planner_effort
+            } else {
+                child.planner_effort.or(base.planner_effort)
+            },
+            worker_model: child.worker_model.or(base.worker_model),
+            worker_effort: if worker_changed {
+                child.worker_effort
+            } else {
+                child.worker_effort.or(base.worker_effort)
+            },
+        }
+    }
+
+    pub fn format_summary(orch: Option<&Self>) -> String {
+        fn short_name(id: &str) -> &str {
+            match id {
+                "gemini-4-neon" => "Neon",
+                "gemini-4-carbon" => "Carbon",
+                "gemini-4-argon" => "Argon",
+                "gemini-4-hydrogen" => "Hydrogen",
+                "gemini-3.8-flash" => "Flash",
+                "claude-opus-5-5" => "Opus 5.5",
+                "claude-sonnet-5-5" => "Sonnet 5.5",
+                other => other,
+            }
+        }
+        fn fmt_role(model: Option<&str>, effort: Option<&str>) -> Option<String> {
+            match (model, effort) {
+                (Some(m), Some(e)) => Some(format!("{} ({e})", short_name(m))),
+                (Some(m), None) => Some(short_name(m).to_owned()),
+                (None, Some(e)) => Some(format!("Default ({e})")),
+                (None, None) => None,
+            }
+        }
+        let Some(n) = orch.map(Self::normalized) else {
+            return "Orchestrator".to_owned();
+        };
+        let planner = fmt_role(n.planner_model.as_deref(), n.planner_effort.as_deref());
+        let worker = fmt_role(n.worker_model.as_deref(), n.worker_effort.as_deref());
+        match (planner, worker) {
+            (Some(p), Some(w)) => format!("Orchestrator · {p} + {w}"),
+            (Some(p), None) => format!("Orchestrator · {p}"),
+            (None, Some(w)) => format!("Orchestrator · Default + {w}"),
+            (None, None) => "Orchestrator".to_owned(),
+        }
+    }
+}
+
+pub fn legacy_agy_orchestrator_preset(model_id: &str) -> Option<OrchestratorConfig> {
+    match model_id.trim().to_ascii_lowercase().as_str() {
+        "gemini-pro-orchestrator-neon" => Some(OrchestratorConfig {
+            planner_model: Some("gemini-4-neon".into()),
+            planner_effort: Some("xhigh".into()),
+            worker_model: Some("gemini-4-hydrogen".into()),
+            worker_effort: Some("xhigh".into()),
+        }),
+        "gemini-pro-orchestrator" => Some(OrchestratorConfig {
+            planner_model: Some("gemini-4-carbon".into()),
+            planner_effort: Some("high".into()),
+            worker_model: Some("gemini-4-hydrogen".into()),
+            worker_effort: Some("high".into()),
+        }),
+        "gemini-pro-orchestrator-argon" => Some(OrchestratorConfig {
+            planner_model: Some("gemini-4-argon".into()),
+            planner_effort: Some("high".into()),
+            worker_model: Some("gemini-4-hydrogen".into()),
+            worker_effort: Some("high".into()),
+        }),
+        _ => None,
+    }
+}
+
+pub fn is_orchestrator_model_id(model_id: &str) -> bool {
+    let trimmed = model_id.trim();
+    trimmed.eq_ignore_ascii_case(ORCHESTRATOR_MODEL_ID)
+        || legacy_agy_orchestrator_preset(trimmed).is_some()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Profile {
     pub id: String,
@@ -151,6 +288,8 @@ pub struct Profile {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestrator: Option<OrchestratorConfig>,
     #[serde(default)]
     pub role_instruction: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -172,6 +311,7 @@ impl Default for Profile {
             preset: None,
             model: None,
             effort: None,
+            orchestrator: None,
             role_instruction: String::new(),
             argv: None,
             resume_argv: None,
@@ -188,6 +328,35 @@ impl Profile {
                 self.id.as_str(),
                 "planner" | "developer" | "reviewer" | "merger"
             )
+    }
+    pub fn is_agy(&self) -> bool {
+        if let Some(preset) = self.preset.as_deref() {
+            return preset == "agy";
+        }
+        (!self.is_identity() && self.id == "agy") || self.command_name() == "agy"
+    }
+    pub fn is_orchestrator(&self) -> bool {
+        self.is_agy() && self.model.as_deref().is_some_and(is_orchestrator_model_id)
+    }
+    pub fn effective_orchestrator(&self) -> Option<OrchestratorConfig> {
+        if !self.is_orchestrator() {
+            return None;
+        }
+        let explicit = self
+            .orchestrator
+            .as_ref()
+            .map(OrchestratorConfig::normalized);
+        let legacy = self
+            .model
+            .as_deref()
+            .and_then(legacy_agy_orchestrator_preset);
+        let resolved = match (explicit, legacy) {
+            (Some(exp), Some(leg)) => exp.merge_fallback(&leg),
+            (Some(exp), None) => exp,
+            (None, Some(leg)) => leg,
+            (None, None) => OrchestratorConfig::default(),
+        };
+        Some(resolved)
     }
     pub fn command(&self) -> &[String] {
         self.argv.as_deref().unwrap_or_default()
@@ -219,6 +388,9 @@ impl Profile {
     }
     /// Configured model name, defaulting to `"default"` when unset or blank.
     pub fn effective_model(&self) -> String {
+        if self.is_orchestrator() {
+            return OrchestratorConfig::format_summary(self.effective_orchestrator().as_ref());
+        }
         self.model
             .as_deref()
             .map(str::trim)
@@ -388,6 +560,7 @@ pub struct ProjectAgentOverride {
     pub agent: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub orchestrator: Option<OrchestratorConfig>,
 }
 impl ProjectAgentOverride {
     pub fn from_agent(agent: impl Into<String>) -> Self {
@@ -397,24 +570,23 @@ impl ProjectAgentOverride {
             agent: (!agent.is_empty()).then(|| agent.to_owned()),
             model: None,
             effort: None,
+            orchestrator: None,
         }
     }
     pub fn normalized(&self) -> Self {
-        let clean = |v: &Option<String>| {
-            v.as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty() && *s != "inherit")
-                .map(str::to_owned)
-        };
         Self {
-            agent: clean(&self.agent),
-            model: clean(&self.model),
-            effort: clean(&self.effort),
+            agent: clean_option_str(&self.agent),
+            model: clean_option_str(&self.model),
+            effort: clean_option_str(&self.effort),
+            orchestrator: self
+                .orchestrator
+                .as_ref()
+                .and_then(|o| o.normalized().into_non_empty()),
         }
     }
     pub fn is_empty(&self) -> bool {
         let n = self.normalized();
-        n.agent.is_none() && n.model.is_none() && n.effort.is_none()
+        n.agent.is_none() && n.model.is_none() && n.effort.is_none() && n.orchestrator.is_none()
     }
 }
 impl Serialize for ProjectAgentOverride {
@@ -431,6 +603,9 @@ impl Serialize for ProjectAgentOverride {
         if n.effort.is_some() {
             count += 1;
         }
+        if n.orchestrator.is_some() {
+            count += 1;
+        }
         let mut map = serializer.serialize_map(Some(count))?;
         if let Some(agent) = &n.agent {
             map.serialize_entry("agent", agent)?;
@@ -440,6 +615,9 @@ impl Serialize for ProjectAgentOverride {
         }
         if let Some(effort) = &n.effort {
             map.serialize_entry("effort", effort)?;
+        }
+        if let Some(orchestrator) = &n.orchestrator {
+            map.serialize_entry("orchestrator", orchestrator)?;
         }
         map.end()
     }
@@ -457,6 +635,8 @@ impl<'de> Deserialize<'de> for ProjectAgentOverride {
                 model: Option<String>,
                 #[serde(default)]
                 effort: Option<String>,
+                #[serde(default)]
+                orchestrator: Option<OrchestratorConfig>,
             },
         }
         match Raw::deserialize(deserializer)? {
@@ -465,10 +645,12 @@ impl<'de> Deserialize<'de> for ProjectAgentOverride {
                 agent,
                 model,
                 effort,
+                orchestrator,
             } => Ok(Self {
                 agent,
                 model,
                 effort,
+                orchestrator,
             }
             .normalized()),
         }
@@ -2259,6 +2441,119 @@ mod tests {
             snap.next_unique_terminal_title("Add machine"),
             "Add machine 3"
         );
+    }
+
+    #[test]
+    fn orchestrator_config_merging_legacy_presets_and_override_serde() {
+        let base = OrchestratorConfig {
+            planner_model: Some("gemini-4-neon".into()),
+            planner_effort: Some("xhigh".into()),
+            worker_model: Some("gemini-4-hydrogen".into()),
+            worker_effort: Some("high".into()),
+        };
+        // Changing only worker_effort inherits planner and worker_model.
+        let partial = OrchestratorConfig {
+            worker_effort: Some("medium".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            partial.merge_fallback(&base),
+            OrchestratorConfig {
+                planner_model: Some("gemini-4-neon".into()),
+                planner_effort: Some("xhigh".into()),
+                worker_model: Some("gemini-4-hydrogen".into()),
+                worker_effort: Some("medium".into()),
+            }
+        );
+
+        // Changing planner_model does not leak base planner_effort (e.g. xhigh -> claude-opus-5-5).
+        let model_switch = OrchestratorConfig {
+            planner_model: Some("claude-opus-5-5".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            model_switch.merge_fallback(&base),
+            OrchestratorConfig {
+                planner_model: Some("claude-opus-5-5".into()),
+                planner_effort: None,
+                worker_model: Some("gemini-4-hydrogen".into()),
+                worker_effort: Some("high".into()),
+            }
+        );
+
+        let neon_legacy = legacy_agy_orchestrator_preset("gemini-pro-orchestrator-neon").unwrap();
+        assert_eq!(neon_legacy.planner_model.as_deref(), Some("gemini-4-neon"));
+        assert_eq!(neon_legacy.planner_effort.as_deref(), Some("xhigh"));
+        assert_eq!(
+            neon_legacy.worker_model.as_deref(),
+            Some("gemini-4-hydrogen")
+        );
+        assert_eq!(neon_legacy.worker_effort.as_deref(), Some("xhigh"));
+        assert!(is_orchestrator_model_id("orchestrator"));
+        assert!(is_orchestrator_model_id("gemini-pro-orchestrator"));
+        assert!(!is_orchestrator_model_id("gemini-4-neon"));
+
+        let prof = Profile {
+            id: "developer".into(),
+            identity: true,
+            preset: Some("agy".into()),
+            model: Some("orchestrator".into()),
+            orchestrator: Some(OrchestratorConfig {
+                planner_model: Some("claude-opus-5-5".into()),
+                planner_effort: Some("high".into()),
+                worker_model: Some("gemini-4-hydrogen".into()),
+                worker_effort: Some("medium".into()),
+            }),
+            ..Default::default()
+        };
+        assert!(prof.is_agy());
+        assert!(prof.is_orchestrator());
+        assert_eq!(
+            prof.effective_model(),
+            "Orchestrator · Opus 5.5 (high) + Hydrogen (medium)"
+        );
+
+        let ov = ProjectAgentOverride {
+            agent: Some("agy".into()),
+            model: Some("orchestrator".into()),
+            effort: Some("inherit".into()),
+            orchestrator: Some(OrchestratorConfig {
+                planner_model: Some("  gemini-4-neon ".into()),
+                planner_effort: Some("inherit".into()),
+                worker_model: None,
+                worker_effort: Some("low".into()),
+            }),
+        };
+        let encoded = serde_json::to_value(&ov).unwrap();
+        assert_eq!(
+            encoded,
+            json!({
+                "agent": "agy",
+                "model": "orchestrator",
+                "orchestrator": {
+                    "planner_model": "gemini-4-neon",
+                    "worker_effort": "low"
+                }
+            })
+        );
+        let decoded: ProjectAgentOverride = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, ov.normalized());
+
+        let legacy_ov: ProjectAgentOverride = serde_json::from_value(json!("agy")).unwrap();
+        assert_eq!(legacy_ov, ProjectAgentOverride::from_agent("agy"));
+
+        let blank_orch = ProjectAgentOverride {
+            agent: None,
+            model: None,
+            effort: None,
+            orchestrator: Some(OrchestratorConfig {
+                planner_model: Some("   ".into()),
+                planner_effort: Some("inherit".into()),
+                worker_model: None,
+                worker_effort: None,
+            }),
+        };
+        assert!(blank_orch.is_empty());
     }
 }
 

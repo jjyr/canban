@@ -2208,8 +2208,14 @@ pub fn Gallery() -> impl IntoElement {
             "developer".into(),
             canban_types::ProjectAgentOverride {
                 agent: Some("agy".into()),
-                model: Some("gemini-4-carbon".into()),
-                effort: Some("high".into()),
+                model: Some("orchestrator".into()),
+                effort: None,
+                orchestrator: Some(canban_types::OrchestratorConfig {
+                    planner_model: Some("gemini-4-neon".into()),
+                    planner_effort: Some("xhigh".into()),
+                    worker_model: Some("gemini-4-hydrogen".into()),
+                    worker_effort: Some("medium".into()),
+                }),
             },
         );
         snapshot.projects[0].agent_overrides.insert(
@@ -2218,6 +2224,7 @@ pub fn Gallery() -> impl IntoElement {
                 agent: None,
                 model: Some("gpt-5.4".into()),
                 effort: Some("low".into()),
+                orchestrator: None,
             },
         );
         ui.snapshot.set(snapshot);
@@ -3335,8 +3342,14 @@ pub fn Gallery() -> impl IntoElement {
                         "developer".into(),
                         canban_types::ProjectAgentOverride {
                             agent: Some("agy".into()),
-                            model: Some("gemini-4-carbon".into()),
-                            effort: Some("high".into()),
+                            model: Some("orchestrator".into()),
+                            effort: None,
+                            orchestrator: Some(canban_types::OrchestratorConfig {
+                                planner_model: Some("gemini-4-neon".into()),
+                                planner_effort: Some("xhigh".into()),
+                                worker_model: Some("gemini-4-hydrogen".into()),
+                                worker_effort: Some("medium".into()),
+                            }),
                         },
                     );
                     snapshot.projects[0].agent_overrides.insert(
@@ -3345,6 +3358,7 @@ pub fn Gallery() -> impl IntoElement {
                             agent: None,
                             model: Some("gpt-5.4".into()),
                             effort: Some("low".into()),
+                            orchestrator: None,
                         },
                     );
                     ui.snapshot.set(snapshot);
