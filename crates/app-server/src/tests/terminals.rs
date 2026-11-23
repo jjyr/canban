@@ -1067,3 +1067,109 @@ fn terminal_launches_inject_default_ghostty_identity_and_respect_hc_env_override
         "/custom/npm/bin:/custom/node/bin:/usr/bin:/bin"
     );
 }
+
+#[test]
+fn in_progress_terminal_close_receipt_carries_diagnostic_message() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (dir, app, p, _) = setup();
+    let script = dir.path().join("barrier-hc");
+    std::fs::write(
+        &script,
+        r#"#!/usr/bin/python3
+import sys, json, os, time
+base = os.path.dirname(__file__)
+for line in sys.stdin:
+    req = json.loads(line)
+    m = req["method"]
+    if m == "hello":
+        res = {"generation": 1}
+    elif m == "server.status":
+        res = {"core": {"id": "original"}}
+    elif m == "terminal.run":
+        res = {"address": "t1"}
+    elif m in ("terminal.get", "terminal.list"):
+        t = {"address": "t1", "cwd": base, "foreground": {"cwd": base}, "state": "finished" if os.path.exists(base + "/finished") else "live"}
+        res = {"terminals": [t]} if m == "terminal.list" else t
+    elif m == "terminal.kill":
+        with open(base + "/killed_reached", "w") as f:
+            f.write("1")
+        while not os.path.exists(base + "/release_kill"):
+            time.sleep(0.01)
+        with open(base + "/controls", "a") as f:
+            f.write("terminal.kill\n")
+        open(base + "/finished", "w").close()
+        res = {"sent": True}
+    else:
+        res = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": res}), flush=True)
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    app.config.write().unwrap().hc = script.to_string_lossy().into();
+
+    let terminal = app
+        .call("terminal.create", json!({"project_id": p.id}))
+        .unwrap();
+    let tid = terminal["id"].as_str().unwrap().to_owned();
+    let request_key = "close-inflight-diag".to_owned();
+
+    let app_bg = app.clone();
+    let tid_bg = tid.clone();
+    let key_bg = request_key.clone();
+    let handle = std::thread::spawn(move || {
+        app_bg
+            .call(
+                "terminal.close",
+                json!({"terminal_id": tid_bg, "request_key": key_bg}),
+            )
+            .unwrap()
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !dir.path().join("killed_reached").exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for terminal.kill"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let raw_receipt: String = app
+        .store
+        .lock()
+        .unwrap()
+        .db()
+        .conn
+        .query_row(
+            "SELECT result FROM operations WHERE id=?1",
+            [&request_key],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let inflight: Value = serde_json::from_str(&raw_receipt).unwrap();
+    assert_eq!(inflight["state"], "closing");
+    assert_eq!(inflight["terminal_id"], tid);
+    assert!(
+        inflight["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("still in progress")),
+        "unexpected intermediate close receipt: {inflight}"
+    );
+
+    std::fs::write(dir.path().join("release_kill"), "").unwrap();
+    let final_res = handle.join().unwrap();
+    assert_eq!(final_res["state"], "closed");
+    let replayed = app
+        .call(
+            "terminal.close",
+            json!({"terminal_id": tid, "request_key": request_key}),
+        )
+        .unwrap();
+    assert_eq!(replayed, final_res);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("controls")).unwrap(),
+        "terminal.kill\n"
+    );
+}

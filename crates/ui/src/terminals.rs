@@ -989,12 +989,7 @@ pub(crate) fn finish_optimistic_close(
             });
         }
         Ok(value) => {
-            let msg = format!(
-                "terminal.close: {}",
-                value["message"]
-                    .as_str()
-                    .unwrap_or("Inspect before retrying")
-            );
+            let msg = crate::presenter::format_incomplete_outcome("terminal.close", &value);
             rollback_optimistic_close(ui, ctx, msg);
         }
         Err(error) => {

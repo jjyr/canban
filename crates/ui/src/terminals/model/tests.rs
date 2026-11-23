@@ -1413,6 +1413,17 @@ fn optimistic_close_removes_tab_immediately_and_rolls_back_on_unknown_or_error()
         );
         assert!(ui.operation_error.get_untracked().contains("Core replaced"));
 
+        // 2b. Missing `message` still surfaces the state or bounded response summary instead of opaque fallback text.
+        let ctx_closing = crate::terminals::begin_optimistic_close(ui, "term-1").unwrap();
+        crate::terminals::finish_optimistic_close(ui, &ctx_closing, Ok(json!({"state":"closing"})));
+        let closing_err = ui.operation_error.get_untracked();
+        assert!(closing_err.contains("state=closing"), "got: {closing_err}");
+
+        let ctx_weird = crate::terminals::begin_optimistic_close(ui, "term-1").unwrap();
+        crate::terminals::finish_optimistic_close(ui, &ctx_weird, Ok(json!({"ok":true})));
+        let weird_err = ui.operation_error.get_untracked();
+        assert!(weird_err.contains("{\"ok\":true}"), "got: {weird_err}");
+
         // 3. Successful background close marks entry finished and clears `closing_terminals`.
         ui.operation_error.set(String::new());
         let ctx2 = crate::terminals::begin_optimistic_close(ui, "term-1").unwrap();

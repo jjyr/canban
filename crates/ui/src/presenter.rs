@@ -21,6 +21,35 @@ pub struct CachedReportBody {
     pub body: String,
 }
 
+pub(crate) fn format_incomplete_outcome(method: &str, value: &Value) -> String {
+    if let Some(msg) = value["message"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return format!("{method}: {msg}");
+    }
+    if let Some(state) = value["state"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if state == "closing" {
+            return format!(
+                "{method}: close still in progress (state=closing); inspect before retrying"
+            );
+        }
+        return format!("{method}: unexpected state '{state}'; inspect before retrying");
+    }
+    let raw = value.to_string();
+    let summary: String = raw.chars().take(120).collect();
+    if raw.chars().count() > 120 {
+        format!("{method}: unexpected response ({summary}…); inspect before retrying")
+    } else {
+        format!("{method}: unexpected response ({summary}); inspect before retrying")
+    }
+}
+
 pub fn event_body_version(event: &canban_types::Event) -> u64 {
     event.data["edited_at"]
         .as_u64()
@@ -1573,13 +1602,7 @@ pub fn dispatch_complete(
                 }
                 let failed = matches!(value["state"].as_str(), Some("failed" | "unknown"));
                 if failed {
-                    let msg = format!(
-                        "{}: {}",
-                        method,
-                        value["message"]
-                            .as_str()
-                            .unwrap_or("Inspect before retrying")
-                    );
+                    let msg = format_incomplete_outcome(method, &value);
                     ui.status.set(msg.clone());
                     ui.operation_error.set(msg);
                 } else if value["offline_queued"] == true {

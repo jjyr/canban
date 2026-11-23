@@ -25,14 +25,34 @@ impl AppServer {
             {
                 self.cancel_scheduled_run_from_terminal_close(db, &mut sched, &mut item)?;
             }
-            if let Ok(mut configuration)=db.get::<ConfigurationSession>(terminal_id) && configuration.state=="queued" {
-                configuration.state="cancelled".into();db.save(&configuration)?;
-                item.runtime=Some(TerminalRuntime{core_id:None,terminal:None,state:"finished".into(),connection:"connected".into(),error:None,agent_status:None,agent_turn:None,observed_agent:None,waiting:None});db.save(&item)?;
+            if let Ok(mut configuration) = db.get::<ConfigurationSession>(terminal_id)
+                && configuration.state == "queued"
+            {
+                configuration.state = "cancelled".into();
+                db.save(&configuration)?;
+                item.runtime = Some(TerminalRuntime {
+                    core_id: None,
+                    terminal: None,
+                    state: "finished".into(),
+                    connection: "connected".into(),
+                    error: None,
+                    agent_status: None,
+                    agent_turn: None,
+                    observed_agent: None,
+                    waiting: None,
+                });
+                db.save(&item)?;
             }
             if let Some(run) = &mut item.agent {
                 if !run.finished() && run.terminal.is_some() {
-                    let core = run.core_id.clone().context("Original Core binding unavailable")?;
-                    let terminal = run.terminal.clone().context("Terminal is still starting; wait before closing")?;
+                    let core = run
+                        .core_id
+                        .clone()
+                        .context("Original Core binding unavailable")?;
+                    let terminal = run
+                        .terminal
+                        .clone()
+                        .context("Terminal is still starting; wait before closing")?;
                     target = Some((core, terminal));
                     run.close_state = "closing".into();
                     run.close_requested_at = Some(now());
@@ -40,7 +60,15 @@ impl AppServer {
                     let run_num = run.number;
                     db.save(&item)?;
                     let card: Card = db.get(&card_id)?;
-                    log(db, &card, "execution.close_requested", "user", "Terminal closed by user", Some(item.id.clone()), json!({"run_number":run_num}))?;
+                    log(
+                        db,
+                        &card,
+                        "execution.close_requested",
+                        "user",
+                        "Terminal closed by user",
+                        Some(item.id.clone()),
+                        json!({"run_number":run_num}),
+                    )?;
                     closing_agent = true;
                 } else {
                     ensure!(
@@ -49,12 +77,30 @@ impl AppServer {
                     );
                 }
             } else if let Some(runtime) = &mut item.runtime
-                && runtime.state != "finished" {
-                target = Some((runtime.core_id.clone().context("Original Core binding unavailable")?, runtime.terminal.clone().context("Terminal binding unavailable; inspect before closing")?));
+                && runtime.state != "finished"
+            {
+                target = Some((
+                    runtime
+                        .core_id
+                        .clone()
+                        .context("Original Core binding unavailable")?,
+                    runtime
+                        .terminal
+                        .clone()
+                        .context("Terminal binding unavailable; inspect before closing")?,
+                ));
                 runtime.state = "closing".into();
                 db.save(&item)?;
             }
-            Ok(json!({"state":if target.is_some(){"closing"}else{"closed"},"terminal_id":terminal_id}))
+            Ok(if target.is_some() {
+                json!({
+                    "state": "closing",
+                    "terminal_id": terminal_id,
+                    "message": "Terminal close is still in progress; inspect before retrying"
+                })
+            } else {
+                json!({"state": "closed", "terminal_id": terminal_id})
+            })
         })?;
         let Some((core, terminal)) = target else {
             return Ok(saved);
