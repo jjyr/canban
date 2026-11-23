@@ -1745,6 +1745,79 @@ impl HostRegistry {
         Ok(combined)
     }
 
+    /// Build the merged lightweight `RuntimeState` across `This Mac` and enabled remote hosts.
+    pub fn merged_runtime_state(&self) -> Result<RuntimeState> {
+        let mut combined = self.local.runtime_state()?;
+        let local_active = combined
+            .host_active_agents
+            .get("local")
+            .copied()
+            .unwrap_or(0);
+        {
+            let mut counts = self.local_summary_counts.lock().unwrap();
+            let prev_projects = counts.map(|(_, p, _)| p).unwrap_or(0);
+            *counts = Some((local_active, prev_projects, now()));
+        }
+        combined.register_host("local");
+
+        let remote_states: Vec<(String, RuntimeState)> = {
+            let guard = self.remotes.lock().unwrap();
+            guard
+                .values()
+                .filter(|slot| slot.saved.enabled)
+                .filter_map(|slot| {
+                    let ops = slot.outbox.lock().unwrap().ops.clone();
+                    let snap = if let Some(c) = &slot.cached {
+                        let mut s = c.snapshot.clone();
+                        if !ops.is_empty() {
+                            canban_sync::apply(&mut s, &slot.saved.id, &ops);
+                        }
+                        Some(s)
+                    } else if !ops.is_empty() {
+                        let mut s = Snapshot::default();
+                        canban_sync::apply(&mut s, &slot.saved.id, &ops);
+                        Some(s)
+                    } else {
+                        None
+                    }?;
+                    let active_agents = count_active_agents(&snap);
+                    let rt = RuntimeState {
+                        terminals: snap.terminals,
+                        terminal_contexts: snap.terminal_contexts,
+                        reclaim_status: snap.reclaim_status,
+                        merging_cards: snap.merging_cards,
+                        terminal_hosts: BTreeMap::new(),
+                        host_active_agents: BTreeMap::from([(
+                            slot.saved.id.clone(),
+                            active_agents,
+                        )]),
+                    };
+                    Some((slot.saved.id.clone(), rt))
+                })
+                .collect()
+        };
+
+        for (host_id, remote_rt) in remote_states {
+            combined.merge_remote(remote_rt, &host_id);
+        }
+
+        let acknowledged: Vec<(String, String)> = self
+            .acknowledged_owners
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let mut routing = self.entity_hosts.write().unwrap();
+        for (tid, host) in &combined.terminal_hosts {
+            routing.insert(tid.clone(), host.clone());
+        }
+        for (id, host) in acknowledged {
+            routing.entry(id).or_insert(host);
+        }
+        Ok(combined)
+    }
+
     /// Enqueue a pointer-only `SyncGlobalEnv` mutation into matching remote hosts' outboxes
     /// and immediately trigger drain on connected hosts. Zero secrets are persisted to `.outbox.json`.
     pub fn enqueue_global_env_sync_for(&self, host_ids: Option<&[String]>) {
@@ -2274,6 +2347,7 @@ impl HostRegistry {
                 method,
                 "app.ping"
                     | "app.state"
+                    | "runtime.state"
                     | "app.snapshot"
                     | "agent.catalog"
                     | "diagnostics.status"

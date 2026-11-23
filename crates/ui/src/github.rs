@@ -1100,17 +1100,18 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
 }
 
 pub fn pr_panel(ui: Ui) -> impl IntoElement {
+    let pr_model = computed(move || {
+        let c = ui.current_card()?;
+        let pr = c.pull_request?;
+        Some((c.id, pr))
+    });
     dynamic(move || {
-        let Some(c) = ui.current_card() else {
+        let Some((card_id, pr)) = pr_model.get() else {
             return view().into_element();
         };
-        let Some(pr) = c.pull_request else {
-            return view().into_element();
-        };
-        let refresh = c.id.clone();
-        let merge = c.id.clone();
+        let refresh = card_id.clone();
+        let merge = card_id;
         let head = pr.head.clone();
-        let rev = c.revision;
         let url = pr.url.clone();
         let mut area = panel()
             .child(
@@ -1125,12 +1126,10 @@ pub fn pr_panel(ui: Ui) -> impl IntoElement {
                             pr.number,
                             if pr.merged { "merged" } else { &pr.state }
                         )
+                    } else if pr.state == "not_published" {
+                        "No delivery PR · refresh the diff to publish".into()
                     } else {
-                        if pr.state == "not_published" {
-                            "No delivery PR · refresh the diff to publish".into()
-                        } else {
-                            "PR publication needs reconciliation".into()
-                        }
+                        "PR publication needs reconciliation".into()
                     })),
             )
             .child(muted(format!(
@@ -1186,7 +1185,7 @@ pub fn pr_panel(ui: Ui) -> impl IntoElement {
                         .with_untracked(|s| {
                             s.cards.iter().find(|c| c.id == merge).map(|c| c.revision)
                         })
-                        .unwrap_or(rev);
+                        .unwrap_or(1);
                     dispatch(
                         ui,
                         "github.pr.merge",

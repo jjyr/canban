@@ -8,7 +8,9 @@
 //! subprocess crates.
 
 use anyhow::Result;
-use canban_types::{AppEvent, Config, HostSummary, SavedHost, Snapshot, SyncAction, SyncItemView};
+use canban_types::{
+    AppEvent, Config, HostSummary, RuntimeState, SavedHost, Snapshot, SyncAction, SyncItemView,
+};
 use serde_json::{Value, json};
 use std::{
     path::PathBuf,
@@ -80,6 +82,12 @@ pub trait UiBackend: Send + Sync + 'static {
 
     /// Fetch the merged multi-host workspace snapshot.
     fn merged_snapshot(&self) -> Result<Snapshot>;
+
+    /// Fetch the lightweight merged runtime slice (`terminals`, `terminal_contexts`,
+    /// `reclaim_status`, `merging_cards`). Returns `Ok(None)` when unsupported.
+    fn merged_runtime_state(&self) -> Result<Option<RuntimeState>> {
+        Ok(None)
+    }
 
     /// Return summaries for all known hosts.
     fn host_summaries(&self) -> Vec<HostSummary>;
@@ -212,6 +220,13 @@ pub fn merged_snapshot() -> Result<Snapshot> {
         .get()
         .ok_or_else(|| anyhow::anyhow!("Gallery preview: no AppServer connected"))?;
     backend.merged_snapshot()
+}
+
+pub fn merged_runtime_state() -> Result<Option<RuntimeState>> {
+    let backend = BACKEND
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("Gallery preview: no AppServer connected"))?;
+    backend.merged_runtime_state()
 }
 
 pub fn host_summaries() -> Vec<HostSummary> {
@@ -450,6 +465,14 @@ impl UiBackend for LocalBackend {
             hosts.merged_snapshot()
         } else {
             self.app.snapshot()
+        }
+    }
+
+    fn merged_runtime_state(&self) -> Result<Option<RuntimeState>> {
+        if let Some(hosts) = &self.hosts {
+            Ok(Some(hosts.merged_runtime_state()?))
+        } else {
+            Ok(Some(self.app.runtime_state()?))
         }
     }
 

@@ -291,20 +291,29 @@ pub(crate) fn project_rows(
 }
 
 fn execution(ui: Ui, reading: Reading, terminal_id: String) -> impl IntoElement {
-    dynamic(move || {
+    let selected_run = computed(move || {
         let selected = ui.request.get();
         if selected != terminal_id {
-            return view().into_element();
+            return None;
         }
-        let run = ui.snapshot.with(|s| {
-            s.terminals
+        let cid = ui.card_id();
+        ui.snapshot.with(|s| {
+            let mut run = s
+                .terminals
                 .iter()
-                .find(|t| {
-                    t.id == selected && t.agent.as_ref().is_some_and(|a| a.card_id == ui.card_id())
-                })
-                .cloned()
-        });
-        if let Some(run) = run {
+                .find(|t| t.id == selected && t.agent.as_ref().is_some_and(|a| a.card_id == cid))
+                .cloned()?;
+            if let Some(a) = &mut run.agent {
+                a.lifecycle.observed_at = None;
+            }
+            Some(run)
+        })
+    });
+    dynamic(move || {
+        let Some(run) = selected_run.get() else {
+            return view().into_element();
+        };
+        {
             let terminal_id = run.id.clone();
             let target = element_ref();
             let pending = stored(false);
@@ -347,8 +356,6 @@ fn execution(ui: Ui, reading: Reading, terminal_id: String) -> impl IntoElement 
                     move || crate::components::output_panel(ui),
                 ))
                 .into_element()
-        } else {
-            view().into_element()
         }
     })
 }

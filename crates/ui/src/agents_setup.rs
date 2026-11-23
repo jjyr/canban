@@ -2975,11 +2975,15 @@ fn agent_env_toggle_button(
     profile_id: String,
     env_target: Signal<Option<String>>,
 ) -> impl IntoElement {
+    let pid_state = profile_id.clone();
+    let state = computed(move || {
+        let is_open = env_target.get().as_deref() == Some(pid_state.as_str());
+        let host = ui.settings_host.get();
+        let count = ui.snapshot.with(|s| s.agent_env(&host, &pid_state).len());
+        (is_open, count)
+    });
     dynamic(move || {
-        let is_open = env_target.get().as_deref() == Some(profile_id.as_str());
-        let count = ui
-            .snapshot
-            .with(|s| s.agent_env(&ui.settings_host.get(), &profile_id).len());
+        let (is_open, count) = state.get();
         let label = if count > 0 {
             format!("{} Env · {count}", if is_open { "▾" } else { "▸" })
         } else if is_open {

@@ -89,6 +89,10 @@ pub(crate) fn merged_snapshot() -> Result<canban_types::Snapshot> {
     backend::merged_snapshot()
 }
 
+pub(crate) fn merged_runtime_state() -> Result<Option<canban_types::RuntimeState>> {
+    backend::merged_runtime_state()
+}
+
 pub(crate) fn host_summaries() -> Vec<canban_types::HostSummary> {
     backend::host_summaries()
 }
@@ -210,6 +214,19 @@ pub(crate) fn workspace_root() -> impl IntoElement {
     frame::screen(ui)
 }
 
+pub(crate) fn is_runtime_only_event_batch(events: &[backend::BackendEvent]) -> bool {
+    !events.is_empty()
+        && events.iter().all(|ev| {
+            matches!(
+                ev.app_event(),
+                Some(canban_types::AppEvent::Changed {
+                    topic: "terminals" | "reclaim",
+                    ..
+                })
+            )
+        })
+}
+
 pub(crate) fn handle_backend_events(ui: Ui, events: Vec<backend::BackendEvent>) {
     if ui.snapshot_ready.try_get().is_none() {
         return;
@@ -275,7 +292,11 @@ pub(crate) fn handle_backend_events(ui: Ui, events: Vec<backend::BackendEvent>) 
         ui.github.epoch.update(|v| *v += 1);
     }
     review::handle_host_events(ui, &host_events);
-    refresh(ui);
+    if ui.snapshot_ready.get_untracked() && is_runtime_only_event_batch(&host_events) {
+        refresh_runtime(ui);
+    } else {
+        refresh(ui);
+    }
 }
 
 #[cfg(feature = "local-host")]
@@ -511,5 +532,39 @@ mod push_tests {
 
         drop(core);
         drop(runtime);
+    }
+
+    #[test]
+    fn runtime_only_event_batch_classification() {
+        let host_ev = |topic: &'static str| backend::BackendEvent::Host {
+            host_id: "local".into(),
+            event: canban_types::AppEvent::Changed {
+                topic,
+                card_id: None,
+            },
+        };
+
+        assert!(!is_runtime_only_event_batch(&[]));
+        assert!(is_runtime_only_event_batch(&[host_ev("terminals")]));
+        assert!(is_runtime_only_event_batch(&[host_ev("reclaim")]));
+        assert!(is_runtime_only_event_batch(&[
+            host_ev("terminals"),
+            host_ev("reclaim"),
+        ]));
+        assert!(!is_runtime_only_event_batch(&[
+            host_ev("terminals"),
+            host_ev("application"),
+        ]));
+        assert!(!is_runtime_only_event_batch(&[host_ev("application")]));
+        assert!(!is_runtime_only_event_batch(&[host_ev("review")]));
+        assert!(!is_runtime_only_event_batch(&[host_ev("github")]));
+        assert!(!is_runtime_only_event_batch(&[host_ev("resync")]));
+        assert!(!is_runtime_only_event_batch(&[host_ev("runtime")]));
+        assert!(!is_runtime_only_event_batch(&[
+            backend::BackendEvent::UtilitiesChanged {
+                host_id: "local".into(),
+                state: serde_json::json!({}),
+            }
+        ]));
     }
 }

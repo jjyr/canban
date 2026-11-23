@@ -557,6 +557,114 @@ impl Snapshot {
     pub fn has_remote_hosts(&self) -> bool {
         self.host_summaries.keys().any(|k| k != "local")
     }
+
+    /// Apply a bounded runtime state refresh while preserving durable workspace state
+    /// and valid `started_at` timestamps backfilled during the full `app.state` fetch.
+    pub fn apply_runtime_state(&mut self, mut runtime: RuntimeState) {
+        for next in &mut runtime.terminals {
+            let Some(next_agent) = &mut next.agent else {
+                continue;
+            };
+            if next_agent
+                .started_at
+                .is_some_and(|ts| ts > 1_000_000_000_000)
+            {
+                continue;
+            }
+            if let Some(prev_started) = self
+                .terminals
+                .iter()
+                .find(|prev| prev.id == next.id)
+                .and_then(|prev| prev.agent.as_ref())
+                .filter(|prev_agent| prev_agent.number == next_agent.number)
+                .and_then(|prev_agent| prev_agent.started_at)
+                .filter(|&ts| ts > 1_000_000_000_000)
+            {
+                next_agent.started_at = Some(prev_started);
+            }
+        }
+
+        let prev_terminal_ids: Vec<String> = self.terminals.iter().map(|t| t.id.clone()).collect();
+        let next_terminal_ids: std::collections::HashSet<&str> =
+            runtime.terminals.iter().map(|t| t.id.as_str()).collect();
+        let retained_non_terminal_ids: std::collections::HashSet<&str> = self
+            .projects
+            .iter()
+            .map(|p| p.id.as_str())
+            .chain(self.cards.iter().map(|c| c.id.as_str()))
+            .chain(self.worktrees.iter().map(|w| w.id.as_str()))
+            .chain(self.workflow_runs.iter().map(|r| r.id.as_str()))
+            .chain(self.workflow_sources.iter().map(|s| s.id.as_str()))
+            .chain(self.configuration_sessions.iter().map(|c| c.id.as_str()))
+            .chain(self.merge_batches.iter().map(|b| b.id.as_str()))
+            .chain(self.schedule_states.iter().map(|s| s.id.as_str()))
+            .chain(self.scheduled_runs.iter().map(|r| r.id.as_str()))
+            .collect();
+
+        for old_id in prev_terminal_ids {
+            if !next_terminal_ids.contains(old_id.as_str())
+                && !retained_non_terminal_ids.contains(old_id.as_str())
+            {
+                self.entity_hosts.remove(&old_id);
+            }
+        }
+        for (tid, host) in runtime.terminal_hosts {
+            self.entity_hosts.insert(tid, host);
+        }
+        for (host_id, active) in runtime.host_active_agents {
+            if let Some(summary) = self.host_summaries.get_mut(&host_id) {
+                summary.active_agents = active;
+            }
+        }
+
+        self.terminals = runtime.terminals;
+        self.terminal_contexts = runtime.terminal_contexts;
+        self.reclaim_status = runtime.reclaim_status;
+        self.merging_cards = runtime.merging_cards;
+    }
+}
+
+impl RuntimeState {
+    pub fn register_host(&mut self, host_id: &str) {
+        let host = if host_id.is_empty() { "local" } else { host_id };
+        for t in &self.terminals {
+            self.terminal_hosts
+                .entry(t.id.clone())
+                .or_insert_with(|| host.to_owned());
+        }
+    }
+
+    pub fn merge_remote(&mut self, mut remote: RuntimeState, host_id: &str) {
+        remote.register_host(host_id);
+        self.terminal_hosts.extend(remote.terminal_hosts);
+        self.host_active_agents.extend(remote.host_active_agents);
+
+        let existing_terminals: std::collections::HashSet<String> =
+            self.terminals.iter().map(|t| t.id.clone()).collect();
+        for t in remote.terminals {
+            if !existing_terminals.contains(&t.id) {
+                self.terminals.push(t);
+            }
+        }
+
+        self.terminal_contexts.extend(remote.terminal_contexts);
+
+        for status in remote.reclaim_status {
+            if !self
+                .reclaim_status
+                .iter()
+                .any(|existing| existing.terminal_id == status.terminal_id)
+            {
+                self.reclaim_status.push(status);
+            }
+        }
+
+        for mc in remote.merging_cards {
+            if !self.merging_cards.contains(&mc) {
+                self.merging_cards.push(mc);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -673,5 +781,195 @@ mod host_tests {
         assert!(summary.is_updating());
         assert!(summary.is_offline());
         assert!(!summary.needs_attention());
+    }
+
+    #[test]
+    fn runtime_state_merge_and_apply_preserve_started_at_and_non_terminal_ownership() {
+        let mut local = Snapshot::default();
+        local.host_summaries.insert(
+            "local".into(),
+            HostSummary {
+                id: "local".into(),
+                name: "This Mac".into(),
+                is_local: true,
+                transport_label: "Local socket".into(),
+                endpoint_label: "/tmp/app.sock".into(),
+                ssh_target: None,
+                server_id: None,
+                connection: HostConnectionState::Offline {
+                    error: "n/a".into(),
+                    cached_at: None,
+                },
+                active_agents: 0,
+                max_agents: 4,
+                project_count: 1,
+                reconnect_count: 0,
+                last_synced_at: None,
+                pending_mutations: 0,
+                sync_conflicts: 0,
+            },
+        );
+        local.host_summaries.insert(
+            "remote-1".into(),
+            HostSummary {
+                id: "remote-1".into(),
+                name: "Remote".into(),
+                is_local: false,
+                transport_label: "TCP".into(),
+                endpoint_label: "100.84.1.2:7680".into(),
+                ssh_target: None,
+                server_id: None,
+                connection: HostConnectionState::Offline {
+                    error: "cached".into(),
+                    cached_at: Some(10),
+                },
+                active_agents: 0,
+                max_agents: 4,
+                project_count: 1,
+                reconnect_count: 0,
+                last_synced_at: Some(10),
+                pending_mutations: 0,
+                sync_conflicts: 0,
+            },
+        );
+        // Existing terminal whose ID is shared with a scheduled run (e.g. scheduled run ID).
+        local.scheduled_runs.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "sched-shared",
+                "project_id": "p1",
+                "schedule_id": "s1",
+                "workflow_id": "wf-1",
+                "workflow_name": "Nightly",
+                "filename": "nightly.yaml",
+                "rule_id": "rule-1",
+                "cron": "0 0 * * *",
+                "number": 1,
+                "trigger_kind": "cron",
+                "creates_card": false,
+                "state": "completed",
+                "scheduled_at": 1,
+                "updated_at": 1
+            }))
+            .unwrap(),
+        );
+        local
+            .entity_hosts
+            .insert("sched-shared".into(), "local".into());
+        local
+            .entity_hosts
+            .insert("gone-term".into(), "local".into());
+        local.terminals.push(TerminalEntry {
+            id: "gone-term".into(),
+            conversation_id: None,
+            number: 1,
+            name: Some("Gone".into()),
+            origin_project_id: None,
+            origin_card_id: None,
+            agent_engine: None,
+            runtime: None,
+            agent: None,
+            created_at: 1,
+        });
+        local.terminals.push(TerminalEntry {
+            id: "sched-shared".into(),
+            conversation_id: None,
+            number: 2,
+            name: Some("Scheduled".into()),
+            origin_project_id: None,
+            origin_card_id: None,
+            agent_engine: None,
+            runtime: None,
+            agent: None,
+            created_at: 1,
+        });
+        let existing_agent: AgentRun = serde_json::from_value(serde_json::json!({
+            "project_id": "p1",
+            "card_id": "c1",
+            "number": 3,
+            "stage": "develop",
+            "trigger": "automatic",
+            "profile": { "id": "developer", "enabled": true, "identity": true },
+            "instruction": "Work",
+            "state": "running",
+            "started_at": 1_750_000_000_123u64,
+            "updated_at": 100
+        }))
+        .unwrap();
+        local.terminals.push(TerminalEntry {
+            id: "agent-1".into(),
+            conversation_id: Some("c1:developer".into()),
+            number: 3,
+            name: None,
+            origin_project_id: None,
+            origin_card_id: None,
+            agent_engine: None,
+            runtime: None,
+            agent: Some(existing_agent.clone()),
+            created_at: 1,
+        });
+
+        let mut incoming_agent = existing_agent;
+        incoming_agent.started_at = Some(10); // Missing/sentinel timestamp in partial snapshot.
+        let mut combined = RuntimeState {
+            terminals: vec![TerminalEntry {
+                id: "agent-1".into(),
+                conversation_id: Some("c1:developer".into()),
+                number: 3,
+                name: None,
+                origin_project_id: None,
+                origin_card_id: None,
+                agent_engine: None,
+                runtime: None,
+                agent: Some(incoming_agent),
+                created_at: 1,
+            }],
+            host_active_agents: BTreeMap::from([("local".into(), 1)]),
+            merging_cards: vec!["c1".into()],
+            ..Default::default()
+        };
+        combined.register_host("local");
+
+        let remote_rt = RuntimeState {
+            terminals: vec![TerminalEntry {
+                id: "remote-term".into(),
+                conversation_id: None,
+                number: 4,
+                name: Some("Remote".into()),
+                origin_project_id: None,
+                origin_card_id: None,
+                agent_engine: None,
+                runtime: None,
+                agent: None,
+                created_at: 2,
+            }],
+            host_active_agents: BTreeMap::from([("remote-1".into(), 2)]),
+            merging_cards: vec!["c2".into()],
+            ..Default::default()
+        };
+        combined.merge_remote(remote_rt, "remote-1");
+
+        local.apply_runtime_state(combined);
+
+        assert!(!local.entity_hosts.contains_key("gone-term"));
+        assert_eq!(
+            local.entity_hosts.get("sched-shared").map(String::as_str),
+            Some("local")
+        );
+        assert_eq!(
+            local.entity_hosts.get("remote-term").map(String::as_str),
+            Some("remote-1")
+        );
+        assert_eq!(local.host_summaries["local"].active_agents, 1);
+        assert_eq!(local.host_summaries["remote-1"].active_agents, 2);
+        let preserved = local
+            .terminals
+            .iter()
+            .find(|t| t.id == "agent-1")
+            .unwrap()
+            .agent
+            .as_ref()
+            .unwrap();
+        assert_eq!(preserved.started_at, Some(1_750_000_000_123));
+        assert_eq!(local.merging_cards, vec!["c1", "c2"]);
     }
 }

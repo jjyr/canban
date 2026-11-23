@@ -543,6 +543,54 @@ impl CommittedWrites {
         }
     }
 
+    /// Reconcile only terminal and terminal-context receipts for a lightweight
+    /// `runtime.state` refresh, leaving durable card/draft/project receipts intact.
+    pub(super) fn reconcile_runtime(&mut self, snapshot: &mut Snapshot) {
+        self.record_observed_terminal_contexts(snapshot);
+        self.terminal_hints.retain(|id, hint| {
+            (hint_applies(snapshot, hint) || self.terminals.contains_key(id))
+                && !snapshot
+                    .terminal_contexts
+                    .iter()
+                    .any(|c| c.terminal_id == *id && c.cwd.is_some())
+        });
+        self.terminals.retain(|id, (terminal, _)| {
+            match snapshot.terminals.iter().find(|t| &t.id == id) {
+                None => true,
+                Some(snap) => terminal_is_newer(terminal, snap),
+            }
+        });
+        for (terminal, host) in self.terminals.values() {
+            if let Some(existing) = snapshot.terminals.iter_mut().find(|t| t.id == terminal.id) {
+                if terminal_is_newer(terminal, existing) {
+                    *existing = terminal.clone();
+                }
+            } else {
+                snapshot.terminals.push(terminal.clone());
+            }
+            snapshot
+                .entity_hosts
+                .insert(terminal.id.clone(), host.clone());
+        }
+        for hint in self.terminal_hints.values() {
+            if !hint_applies(snapshot, hint) {
+                continue;
+            }
+            if let Some(context) = snapshot
+                .terminal_contexts
+                .iter_mut()
+                .find(|c| c.terminal_id == hint.terminal_id)
+            {
+                if context.cwd.is_none() {
+                    *context = hint.clone();
+                }
+            } else {
+                snapshot.terminal_contexts.push(hint.clone());
+            }
+        }
+        self.apply_last_terminal_contexts(snapshot);
+    }
+
     /// Drop a receipt only after the authoritative snapshot includes it. A
     /// newer Card revision or edited/deleted comment must always win.
     pub(super) fn reconcile(&mut self, snapshot: &mut Snapshot) {
@@ -1500,5 +1548,45 @@ mod tests {
         writes.reconcile(&mut live_shell);
         assert!(live_shell.terminal_contexts.is_empty());
         assert!(writes.last_terminal_contexts.is_empty());
+    }
+
+    #[test]
+    fn reconcile_runtime_preserves_durable_card_receipts_while_reconciling_terminals() {
+        let mut writes = CommittedWrites::default();
+        writes.record(
+            "card.move",
+            &serde_json::to_value(card(9)).unwrap(),
+            "local",
+        );
+        let term: TerminalEntry = serde_json::from_value(json!({
+            "id": "term-new",
+            "number": 1,
+            "name": "Shell 1",
+            "created_at": 1,
+            "runtime": {
+                "core_id": "core-1",
+                "terminal": "pty-1",
+                "state": "running",
+                "connection": "connected"
+            }
+        }))
+        .unwrap();
+        writes.record(
+            "terminal.create",
+            &serde_json::to_value(&term).unwrap(),
+            "local",
+        );
+
+        let mut runtime_snap = Snapshot::default();
+        writes.reconcile_runtime(&mut runtime_snap);
+        assert_eq!(runtime_snap.terminals.len(), 1);
+        assert_eq!(writes.terminals.len(), 1);
+        // Durable card receipt was not evicted by the runtime-only reconcile pass.
+        assert_eq!(writes.cards.len(), 1);
+
+        let mut stale_full = Snapshot::default();
+        stale_full.cards.push(card(1));
+        writes.overlay(&mut stale_full);
+        assert_eq!(stale_full.cards[0].revision, 9);
     }
 }

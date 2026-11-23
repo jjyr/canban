@@ -1357,7 +1357,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         .min_h(px(0.))
                         .child(when(
                             move || st.mode.get() != "git",
-                            move || dynamic(move || sidebar::render_card_delivery_banner(ui)),
+                            move || sidebar::render_card_delivery_banner(ui),
                         ))
                         .child(dynamic(move || {
                             let err = st.error.get();

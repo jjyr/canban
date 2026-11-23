@@ -153,7 +153,7 @@ impl AppServer {
                 json!({"state":"unknown","terminal_id":terminal_id,"message":format!("{e:#}; inspect before retrying close")})
             }
         };
-        self.store.lock().unwrap().write(|db| {
+        self.store.lock().unwrap().write_topic("terminals", |db| {
             if let Some(key) = p["request_key"].as_str() {
                 db.conn.execute(
                     "UPDATE operations SET result=?2 WHERE id=?1",
@@ -987,7 +987,7 @@ impl AppServer {
                 json!({"state":"unknown","message":format!("{e:#}; inspect before retrying")})
             }
         };
-        self.store.lock().unwrap().write(|db| {
+        self.store.lock().unwrap().write_topic("terminals", |db| {
             if let Some(key) = p["request_key"].as_str() {
                 db.conn.execute(
                     "UPDATE operations SET result=?2 WHERE id=?1",
@@ -1201,7 +1201,7 @@ impl AppServer {
                 }
             }
             if item != before {
-                self.store.lock().unwrap().write(|db| {
+                self.store.lock().unwrap().write_topic("terminals", |db| {
                     let mut current: TerminalEntry = db.get(&item.id)?;
                     // A launch receipt may have arrived after this observation
                     // began. Never erase its binding with an older starting row.

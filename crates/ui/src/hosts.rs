@@ -1115,33 +1115,65 @@ pub fn new_project_host_picker(
 }
 
 /// Calm read-only banner shown at the top of `Board` / `Card` when viewing an offline cached remote Project.
+#[derive(Clone, PartialEq)]
+struct OfflineBannerModel {
+    host_id: String,
+    host_name: String,
+    is_updating: bool,
+    pending_mutations: usize,
+    sync_conflicts: usize,
+    detail: String,
+    mismatch_sum: Option<HostSummary>,
+}
+
 pub fn offline_banner(ui: Ui) -> impl IntoElement {
+    let banner_model = computed(move || {
+        let _ = ui.project.get();
+        let host_id = ui.active_project_host();
+        let list = effective_hosts(ui);
+        let host_sum = list
+            .into_iter()
+            .find(|h| h.id == host_id)
+            .or_else(|| ui.snapshot.with(|s| s.host_summary(&host_id).cloned()));
+        let host_name = host_sum
+            .as_ref()
+            .map(|h| h.name.clone())
+            .unwrap_or_else(|| {
+                ui.snapshot
+                    .with(|s| s.host_display_name(&host_id).to_owned())
+            });
+        let is_updating = host_sum.as_ref().is_some_and(HostSummary::is_updating);
+        let pending_mutations = host_sum.as_ref().map(|h| h.pending_mutations).unwrap_or(0);
+        let sync_conflicts = host_sum.as_ref().map(|h| h.sync_conflicts).unwrap_or(0);
+        let detail = host_sum
+            .as_ref()
+            .map(|h| h.connection.short_status())
+            .unwrap_or_else(|| "Offline · Cached".into());
+        let mismatch_sum =
+            host_sum.filter(|h| matches!(h.connection, HostConnectionState::ApiMismatch { .. }));
+        OfflineBannerModel {
+            host_id,
+            host_name,
+            is_updating,
+            pending_mutations,
+            sync_conflicts,
+            detail,
+            mismatch_sum,
+        }
+    });
     when(
         move || ui.is_active_project_offline(),
         move || {
             dynamic(move || {
-                let host_id = ui.active_project_host();
-                let list = effective_hosts(ui);
-                let host_sum = list
-                    .into_iter()
-                    .find(|h| h.id == host_id)
-                    .or_else(|| ui.snapshot.with(|s| s.host_summary(&host_id).cloned()));
-                let host_name = host_sum
-                    .as_ref()
-                    .map(|h| h.name.clone())
-                    .unwrap_or_else(|| {
-                        ui.snapshot
-                            .with(|s| s.host_display_name(&host_id).to_owned())
-                    });
-                let is_updating = host_sum.as_ref().is_some_and(HostSummary::is_updating);
-                let pending_mutations = host_sum.as_ref().map(|h| h.pending_mutations).unwrap_or(0);
-                let sync_conflicts = host_sum.as_ref().map(|h| h.sync_conflicts).unwrap_or(0);
-                let detail = host_sum
-                    .as_ref()
-                    .map(|h| h.connection.short_status())
-                    .unwrap_or_else(|| "Offline · Cached".into());
-                let mismatch_sum = host_sum
-                    .filter(|h| matches!(h.connection, HostConnectionState::ApiMismatch { .. }));
+                let OfflineBannerModel {
+                    host_id,
+                    host_name,
+                    is_updating,
+                    pending_mutations,
+                    sync_conflicts,
+                    detail,
+                    mismatch_sum,
+                } = banner_model.get();
                 let hid_rec = host_id.clone();
                 let hid_diag = host_id;
                 let mut trailing = view().flex_row().items_center().gap_1p5();

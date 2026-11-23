@@ -236,7 +236,7 @@ impl Record for Event {
     }
 }
 
-type CommitHook = std::sync::Arc<dyn Fn(u64) + Send + Sync>;
+type CommitHook = std::sync::Arc<dyn Fn(u64, &'static str) + Send + Sync>;
 
 pub struct Store {
     conn: Connection,
@@ -398,13 +398,20 @@ impl Store {
             on_commit: None,
         })
     }
-    pub fn set_on_commit(&mut self, hook: impl Fn(u64) + Send + Sync + 'static) {
+    pub fn set_on_commit(&mut self, hook: impl Fn(u64, &'static str) + Send + Sync + 'static) {
         self.on_commit = Some(std::sync::Arc::new(hook));
     }
     pub fn db(&self) -> Db<'_> {
         Db { conn: &self.conn }
     }
     pub fn write<T>(&mut self, f: impl FnOnce(Db<'_>) -> Result<T>) -> Result<T> {
+        self.write_topic("application", f)
+    }
+    pub fn write_topic<T>(
+        &mut self,
+        topic: &'static str,
+        f: impl FnOnce(Db<'_>) -> Result<T>,
+    ) -> Result<T> {
         let before = self.conn.total_changes();
         let tx = self
             .conn
@@ -415,7 +422,7 @@ impl Store {
         if after != before
             && let Some(hook) = &self.on_commit
         {
-            hook(after);
+            hook(after, topic);
         }
         Ok(out)
     }

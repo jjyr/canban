@@ -1142,7 +1142,7 @@ impl AppServer {
         self.presence.retain_live(&reclaim_snap, reclaim_at);
         let reclaim_status = self.compute_reclaim_status(&reclaim_snap, reclaim_at);
         if self.presence.sync_emitted_reclaim(&reclaim_status) {
-            self.emit("runtime", None);
+            self.emit("reclaim", None);
         }
         let _ = self.pump_admissions();
         let snapshot = self.snapshot()?;

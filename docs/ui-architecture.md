@@ -133,21 +133,22 @@ UI Kit remains independent of application state and persistence.
 
 ### Current synchronization and ownership
 
-Implemented on 2026-11-17; [memory profiling and synchronization](memory-profiling.md)
+Implemented on 2026-11-17 and extended on 2026-11-23 with runtime/workspace split updates;
+[memory profiling and synchronization](memory-profiling.md)
 contains source-level details, diagnostic commands and dated acceptance evidence.
 
 ```text
 Local AppClient -- app.subscribe (push) --> AppServer: server-pushed invalidation & side-channel events
                  <-- event / update / utilities / usage / herdr / heartbeat ----
 canban-ui ------ ui.spawn async recv ----> BackendEvent (0ms timer polling; direct side-channel apply)
-Presenter ------ app.state ---------------> current full-state projection
-                 <-- owned response --
+  |-- pure "terminals" / "reclaim" batch ---> runtime.state (bounded RuntimeState + local reminder reconcile)
+  '-- durable workspace batch --------------> app.state (full Snapshot + SnapshotIndex::reuse_or_build)
                          |
-                    UI Snapshot
+                    UI Snapshot / Memo slices
                          |
-              event positions / summaries
+         active_card / card_view_card / active_project / card_status
                          |
-              selected Card history view
+               event positions / summaries / Card history view
 
 Remote supervisor -- app.subscribe (push) --------> remote AppServer
                  <-- event / usage / heartbeat ----
@@ -158,18 +159,26 @@ Remote supervisor -- app.subscribe (push) --------> remote AppServer
 ```
 
 Local change detection does not fetch and retain a full JSON state merely to
-compare it and trigger another full fetch. Remote supervision retains cursor
-metadata beside its typed cache. Owned JSON response fields are moved into the
-next decoding stage; the global event index stores positions instead of another
-copy of every event body. Timeline RPC pages select and limit rows in SQL before
-JSON decoding, and background runtime decisions use narrower projections.
+compare it and trigger another full fetch. Pure runtime invalidation batches
+(`"terminals"` and `"reclaim"`, including 10s observation freshness ticks and
+non-meaningful Herdr status churn) route to the bounded `runtime.state` RPC and
+reconcile client-side runtime wait reminders via `canban_notifications::reconcile_runtime_reminders`,
+without bumping `SnapshotIndex` workspace generation or pulling durable card,
+event, or report collections. Unknown entity references on a runtime batch fall
+back immediately to `app.state`, and `DESKTOP_API` is bumped whenever the UI ↔
+`AppServer` contract evolves.
 
-A changed state can still require a full Snapshot, and concurrent updates can
-require another refresh. Runtime freshness can invalidate the cursor. This is
-not per-entity delta synchronization: full state still includes history used by
-reminders and other consumers, selected-Card history is materialized, and merged
-remote typed snapshots still involve copies. Compact global summaries and fully
-lazy history loading remain follow-up work.
+Remote supervision retains cursor metadata beside its typed cache. Owned JSON
+response fields are moved into the next decoding stage; the global event index
+stores positions instead of another copy of every event body. Timeline RPC pages
+select and limit rows in SQL before JSON decoding, and background runtime
+decisions use narrower projections.
+
+A changed workspace state can still require a full Snapshot, and concurrent
+updates can require another refresh. Full `app.state` still includes history
+used by reminders and other consumers, selected-Card history is materialized,
+and merged remote typed snapshots still involve copies. Compact global
+summaries and fully lazy history loading remain follow-up work.
 
 ### Review contract for new or changed data paths
 
@@ -226,7 +235,7 @@ add no runtime acceptance and do not require repeating an unrelated test suite.
 ## Interaction responsiveness, scroll anchoring and NSH notes
 
 - **Non-blocking screens and mutations:** Heavy reads (such as Settings probes) and slow operations (such as Review deliveries or new Terminal launches) run asynchronously with explicit loading/pending feedback rather than blocking the UI thread or waiting on full workspace refreshes. Interactive mutations apply optimistic projections and hydrate the complete write receipt on completion; gate controls on method-scoped `ui.is_method_pending(...)` rather than global `ui.pending`, and route card/update mutations through `submission::immediate()` or `config_only()`.
-- **Narrow reactive granularity and batched transitions:** Never read high-frequency signals (`ui.runtime_clock`, raw text-input signals, or full `ui.snapshot`) inside an outer `dynamic` that builds a whole screen, header, or list row — push clocks and input validation into leaf closures (`label(move || ...)`, `.disabled(move || ...)`) and omit unused fields from `PartialEq` view models (such as `CardTileModel`). Wrap multi-signal navigation, tab-switch, and pane-toggle updates in `batch(|| { ... })` to avoid intermediate reactive flushes.
+- **Narrow reactive granularity and batched transitions:** Never read high-frequency signals (`ui.runtime_clock`, raw text-input signals, or full `ui.snapshot`) directly inside an outer `dynamic` that builds a whole screen, header, or list row — derive narrow `PartialEq` `Memo` view models instead (`ui.index` with workspace reuse across runtime-only refreshes, `ui.card_status` with volatile-free `RunningAgentBadge`, `ui.active_card`, `ui.card_view_card`, `ui.active_project`, `ui.github_account`), push clocks and input validation into leaf closures (`label(move || ...)`, `.disabled(move || ...)`), and strip volatile timestamps such as `observed_at` from `PartialEq` UI models (`CardTileModel`, Activity rows, Card headers). This keeps interactive `ButtonElement` press targets mounted across unrelated heartbeat/runtime refreshes (`PressDown → Press`). Wrap multi-signal navigation, tab-switch, and pane-toggle updates in `batch(|| { ... })` to avoid intermediate reactive flushes. Enforced by the static `dynamic(...)` granularity guardrail test (`dynamic_blocks_do_not_directly_track_full_snapshot_or_runtime_clock`) and mounted-`Core` press-stability tests.
 - **Cache-first and flicker-free loading:** Hydrate initial workspace mount from the bootstrap snapshot instead of mounting with `Snapshot::default()` and refetching. Check warm in-memory caches synchronously (`peek_fresh`) before clearing existing state or entering `Loading`, and during debounced filter/tab changes keep stale rows visible or enter `loading = true` immediately rather than clearing to an empty state before the debounce fires.
 - **In-page native PTY retention:** On `Terminals`, keep the single `native("canban/terminal")` host mounted while on-page (hiding it with `binding = Null` and an overlay placeholder during empty/connecting states, and keeping `binding_key` separate from `read_only`/`input_status`) to avoid cold re-init flicker; continue unmounting the native view off-page so memory remains bounded and single-active-PTY ownership with the Card split is preserved.
 - **Event-driven or backed-off background timers:** Avoid unconditional high-frequency `set_interval` polling on the UI thread. Use atomic change epochs or push invalidations when idle (for example, draft save errors), skip polling for disabled features, and back off utility/update polling when popovers are closed or idle.
@@ -252,7 +261,7 @@ Gallery fixtures are deterministic and do not start real Agents. UI component ch
 
 Do not claim visual/interaction acceptance from compilation or screenshots alone. Verify the running build/process before taking native evidence; historical desktop work exposed stale-process screenshot mistakes. Use changed-scope checks rather than testing every static leaf or running a huge matrix for each cosmetic edit. Shared control, NSH version and global-token changes justify checking representative consumers and compositions.
 
-The component inventory should name its owner module, reuse route, consumers, and gallery/verification coverage, with gaps visible. A development review asks whether shared controls were reused, whether a new variant is justified, and whether the changed behavior was verified. These are selected review criteria; no automatic enforcement system exists yet. Lightweight dependency/style checks can help once the conventions are concrete; do not rely on a large grep blacklist to establish UI correctness.
+The component inventory should name its owner module, reuse route, consumers, and gallery/verification coverage, with gaps visible. A development review asks whether shared controls were reused, whether a new variant is justified, and whether the changed behavior was verified. These criteria are backed by targeted structural tests (such as the `dynamic(...)` granularity guardrail in `canban-ui`) alongside component/interaction checks rather than a broad grep blacklist.
 
 ## Build order
 

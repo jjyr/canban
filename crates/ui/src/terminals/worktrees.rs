@@ -1253,23 +1253,25 @@ fn create_modal(ui: Ui) -> impl IntoElement {
                                             .list_height(260.)
                                         }),
                                 )
-                                .child(dynamic(move || {
-                                    let pid = project_id.get();
-                                    let proj = ui.snapshot.with(|s| {
-                                        s.projects.iter().find(|p| p.id == pid).cloned()
+                                .child({
+                                    let sync_remote = computed(move || {
+                                        let pid = project_id.get();
+                                        let proj = ui.index.with(|idx| idx.projects.get(&pid).cloned());
+                                        let refs = refs_data.get();
+                                        let base = base_branch.get();
+                                        effective_sync_remote(proj.as_ref(), &refs, &base)
                                     });
-                                    let refs = refs_data.get();
-                                    let base = base_branch.get();
-                                    let remote =
-                                        effective_sync_remote(proj.as_ref(), &refs, &base);
-                                    checkbox(
-                                        format!(
-                                            "Sync base branch from `{remote}` before branching"
-                                        ),
-                                        sync_base,
-                                        move |v| sync_base.set(*v),
-                                    )
-                                }))
+                                    dynamic(move || {
+                                        let remote = sync_remote.get();
+                                        checkbox(
+                                            format!(
+                                                "Sync base branch from `{remote}` before branching"
+                                            ),
+                                            sync_base,
+                                            move |v| sync_base.set(*v),
+                                        )
+                                    })
+                                })
                                 .child(
                                     view()
                                         .gap_1p5()

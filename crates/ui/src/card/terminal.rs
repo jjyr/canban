@@ -244,6 +244,15 @@ pub fn pane(ui: Ui) -> impl IntoElement {
         })
     });
     let has_live_target = computed(move || target.with(|t| t.is_some()));
+    let interruptible_id = computed(move || {
+        let e = active_entry.get()?;
+        let agent = e.agent.as_ref()?;
+        let att = agent.agent()?;
+        (!att.finished()
+            && att.terminal.is_some()
+            && e.card.as_ref().is_some_and(|c| c.archived_at.is_none()))
+        .then_some(e.saved.id)
+    });
     let tab_inventory = computed(move || {
         let cid = card_id.get();
         if cid.is_empty() {
@@ -362,26 +371,17 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                             },
                         ))
                         .child(dynamic(move || {
-                            let Some(e) = active_entry.get() else {
+                            let Some(terminal_id) = interruptible_id.get() else {
                                 return view().into_element();
                             };
-                            if let Some(agent) = &e.agent
-                                && let Some(att) = agent.agent()
-                                && !att.finished()
-                                && att.terminal.is_some()
-                                && e.card.as_ref().is_some_and(|c| c.archived_at.is_none())
-                            {
-                                let terminal_id = e.saved.id.clone();
-                                return compact_action("Interrupt", Variant::Quiet, move |_| {
-                                    dispatch(
-                                        ui,
-                                        "agent.interrupt",
-                                        json!({"terminal_id": terminal_id}),
-                                    )
-                                })
-                                .into_element();
-                            }
-                            view().into_element()
+                            compact_action("Interrupt", Variant::Quiet, move |_| {
+                                dispatch(
+                                    ui,
+                                    "agent.interrupt",
+                                    json!({"terminal_id": terminal_id}),
+                                )
+                            })
+                            .into_element()
                         }))
                         .child(
                             view()

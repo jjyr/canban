@@ -174,37 +174,54 @@ impl Inventory {
         let Some(value) = self.records.get_mut(&key) else {
             return false;
         };
-        let before = value.clone();
-        match kind {
-            "foreground" => value["foreground"] = data.clone(),
-            "finished" => {
-                value["state"] = json!("finished");
-                value.as_object_mut().unwrap().remove("foreground");
-                for k in ["reason", "exit_code", "signal", "finished_ms"] {
-                    value[k] = data[k].clone();
+        let changed = match kind {
+            "foreground" => {
+                let prev_agent = canban_profiles::identify_herdr_agent(value);
+                let prev_cwd = canban_herdr::cwd(value).map(str::to_owned);
+                let prev_has_fg = value.get("foreground").is_some_and(Value::is_object);
+                value["foreground"] = data.clone();
+                let next_agent = canban_profiles::identify_herdr_agent(value);
+                let next_cwd = canban_herdr::cwd(value).map(str::to_owned);
+                let next_has_fg = value.get("foreground").is_some_and(Value::is_object);
+                prev_agent != next_agent || prev_cwd != next_cwd || prev_has_fg != next_has_fg
+            }
+            "title" => {
+                // Canban never projects top-level Herdr terminal titles; skip OSC 0/2 spinner broadcasts.
+                value["title"] = data["title"].clone();
+                false
+            }
+            _ => {
+                let before = value.clone();
+                match kind {
+                    "finished" => {
+                        value["state"] = json!("finished");
+                        value.as_object_mut().unwrap().remove("foreground");
+                        for k in ["reason", "exit_code", "signal", "finished_ms"] {
+                            value[k] = data[k].clone();
+                        }
+                    }
+                    "lost" => {
+                        value["state"] = json!("live");
+                        value["pid"] = Value::Null;
+                        value.as_object_mut().unwrap().remove("foreground");
+                        for k in ["reason", "exit_code", "signal", "finished_ms"] {
+                            value[k] = data[k].clone();
+                        }
+                    }
+                    "status" => {
+                        for k in ["status", "records", "reported"] {
+                            value[k] = data[k].clone();
+                        }
+                    }
+                    "turn" => {
+                        value["turn"] = data["turn"].clone();
+                    }
+                    "labels" => value["labels"] = data["labels"].clone(),
+                    _ => return false,
                 }
+                before != *value
             }
-            "lost" => {
-                value["state"] = json!("live");
-                value["pid"] = Value::Null;
-                value.as_object_mut().unwrap().remove("foreground");
-                for k in ["reason", "exit_code", "signal", "finished_ms"] {
-                    value[k] = data[k].clone();
-                }
-            }
-            "status" => {
-                for k in ["status", "records", "reported"] {
-                    value[k] = data[k].clone();
-                }
-            }
-            "turn" => {
-                value["turn"] = data["turn"].clone();
-            }
-            "labels" => value["labels"] = data["labels"].clone(),
-            "title" => value["title"] = data["title"].clone(),
-            _ => return false,
-        }
-        let changed = before != *value;
+        };
         self.sync_working_key(&key, ts);
         changed
     }
@@ -981,5 +998,78 @@ mod tests {
         assert_eq!(inv.closed_work[2].address, "t2");
         assert_eq!(inv.closed_work[2].start_ms, 30_000);
         assert_eq!(inv.closed_work[2].end_ms, 40_000);
+    }
+
+    #[test]
+    fn title_and_non_agent_same_cwd_foreground_events_do_not_trigger_change_broadcast() {
+        let mut inv = Inventory {
+            core: "core-a".into(),
+            ..Default::default()
+        };
+        inv.snapshot_at(
+            &json!({
+                "seq": 1,
+                "terminals": [{
+                    "address": "t1",
+                    "state": "live",
+                    "cwd": "/repo",
+                    "foreground": { "pid": 100, "name": "zsh", "argv": ["-zsh"], "cwd": "/repo" }
+                }]
+            }),
+            10_000,
+        );
+
+        assert!(!inv.apply_at(
+            &json!({"method":"event","params":{"seq":2,"type":"title","terminal":"t1","data":{"title":"⠋ Building"}}}),
+            10_100,
+        ));
+        assert_eq!(inv.records["t1"]["title"], "⠋ Building");
+        assert!(!inv.apply_at(
+            &json!({"method":"event","params":{"seq":3,"type":"title","terminal":"t1","data":{"title":"⠙ Building"}}}),
+            10_200,
+        ));
+        assert_eq!(inv.records["t1"]["title"], "⠙ Building");
+
+        // Non-agent child processes in the same cwd never alter projected Canban facts.
+        assert!(!inv.apply_at(
+            &json!({"method":"event","params":{"seq":4,"type":"foreground","terminal":"t1","data":{"pid":101,"name":"cargo","argv":["cargo","test"],"cwd":"/repo"}}}),
+            10_300,
+        ));
+        assert!(!inv.apply_at(
+            &json!({"method":"event","params":{"seq":5,"type":"foreground","terminal":"t1","data":{"pid":102,"name":"rustc","argv":["rustc","--crate-name","a"],"cwd":"/repo"}}}),
+            10_400,
+        ));
+        assert!(!inv.apply_at(
+            &json!({"method":"event","params":{"seq":6,"type":"foreground","terminal":"t1","data":{"pid":103,"name":"rustc","argv":["rustc","--crate-name","b"],"cwd":"/repo"}}}),
+            10_500,
+        ));
+        assert!(!inv.apply_at(
+            &json!({"method":"event","params":{"seq":7,"type":"foreground","terminal":"t1","data":{"pid":100,"name":"zsh","argv":["-zsh"],"cwd":"/repo"}}}),
+            10_600,
+        ));
+
+        // Changing cwd or launching/exiting an Agent CLI DOES trigger a change broadcast.
+        assert!(inv.apply_at(
+            &json!({"method":"event","params":{"seq":8,"type":"foreground","terminal":"t1","data":{"pid":100,"name":"zsh","argv":["-zsh"],"cwd":"/repo/sub"}}}),
+            10_700,
+        ));
+        assert!(inv.apply_at(
+            &json!({"method":"event","params":{"seq":9,"type":"foreground","terminal":"t1","data":{"pid":104,"name":"claude","argv":["claude"],"cwd":"/repo/sub"}}}),
+            10_800,
+        ));
+        assert!(inv.apply_at(
+            &json!({"method":"event","params":{"seq":10,"type":"foreground","terminal":"t1","data":{"pid":100,"name":"zsh","argv":["-zsh"],"cwd":"/repo/sub"}}}),
+            10_900,
+        ));
+
+        // First foreground object arriving on a terminal without prior foreground triggers broadcast.
+        inv.apply_at(
+            &json!({"method":"event","params":{"seq":11,"type":"created","terminal":"t2","data":{"state":"live","cwd":"/repo"}}}),
+            11_000,
+        );
+        assert!(inv.apply_at(
+            &json!({"method":"event","params":{"seq":12,"type":"foreground","terminal":"t2","data":{"pid":200,"name":"zsh","argv":["-zsh"],"cwd":"/repo"}}}),
+            11_100,
+        ));
     }
 }

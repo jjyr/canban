@@ -673,3 +673,68 @@ fn stale_downloading_update_recovers_on_open_update_state_and_step() {
         "step must emit only one UpdateChanged event"
     );
 }
+
+#[test]
+fn runtime_state_reads_bounded_runtime_projection_and_preserves_reclaim_terminal_topics() {
+    let (_dir, app, project, _card) = setup();
+    let created: TerminalEntry = serde_json::from_value(
+        app.call(
+            "terminal.create",
+            json!({"project_id": project.id, "name": "Shell 1"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    // Corrupt serialized `events` rows; `runtime.state` must never deserialize event history.
+    app.store
+        .lock()
+        .unwrap()
+        .db()
+        .conn
+        .execute("UPDATE events SET data='invalid-json'", [])
+        .unwrap();
+
+    let res = app.call("runtime.state", json!({})).unwrap();
+    let rt: RuntimeState = serde_json::from_value(res["runtime"].clone()).unwrap();
+    assert!(rt.terminals.iter().any(|t| t.id == created.id));
+    assert_eq!(
+        rt.terminal_hosts.get(&created.id).map(String::as_str),
+        Some("local")
+    );
+    assert_eq!(rt.host_active_agents.get("local").copied(), Some(0));
+
+    // `write_topic("terminals", ...)` pushes `"terminals"` and still advances state_cursor.
+    let mut push_rx = app.subscribe_push();
+    let cursor_before = app.state_cursor();
+    app.store
+        .lock()
+        .unwrap()
+        .write_topic("terminals", |db| {
+            let mut item: TerminalEntry = db.get(&created.id)?;
+            item.name = Some("Shell 1 renamed".into());
+            db.save(&item)
+        })
+        .unwrap();
+    assert_ne!(app.state_cursor(), cursor_before);
+    match push_rx.try_recv().expect("expected StateChanged push") {
+        crate::state::PushEvent::StateChanged { topic, .. } => assert_eq!(topic, "terminals"),
+        other => panic!("unexpected PushEvent: {other:?}"),
+    }
+
+    // Reclaim changes emit topic `"reclaim"`.
+    if app.presence.sync_emitted_reclaim(&[TerminalReclaimStatus {
+        terminal_id: created.id,
+        paused: true,
+        reclaiming_soon: false,
+        auto_reclaiming: false,
+        interactive_followup: false,
+        deadline_at: None,
+    }]) {
+        app.emit("reclaim", None);
+    }
+    match push_rx.try_recv().expect("expected reclaim PushEvent") {
+        crate::state::PushEvent::StateChanged { topic, .. } => assert_eq!(topic, "reclaim"),
+        other => panic!("unexpected PushEvent: {other:?}"),
+    }
+}

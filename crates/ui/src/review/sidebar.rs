@@ -835,20 +835,25 @@ pub fn render_top_bar(ui: Ui) -> impl IntoElement {
                             move || git_ops::render_sync_controls(ui),
                         ))
                         .child(render_refresh(ui))
-                        .child(dynamic(move || {
-                            if let Some(card) =
-                                super::related_card(ui).filter(|_| st.mode.get() != "github_pr")
-                            {
-                                compact_action(
-                                    format!("#{} ↗", card.number),
-                                    Variant::Quiet,
-                                    move |_| super::open_related_card(ui),
-                                )
-                                .into_element()
-                            } else {
-                                view().into_element()
-                            }
-                        })),
+                        .child({
+                            let related_num = computed(move || {
+                                (st.mode.get() != "github_pr")
+                                    .then(|| super::related_card(ui).map(|card| card.number))
+                                    .flatten()
+                            });
+                            dynamic(move || {
+                                if let Some(num) = related_num.get() {
+                                    compact_action(
+                                        format!("#{num} ↗"),
+                                        Variant::Quiet,
+                                        move |_| super::open_related_card(ui),
+                                    )
+                                    .into_element()
+                                } else {
+                                    view().into_element()
+                                }
+                            })
+                        }),
                 ),
         )
         .child(when(
@@ -908,17 +913,127 @@ pub fn render_top_bar(ui: Ui) -> impl IntoElement {
         ))
 }
 
-pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
+#[derive(Clone, PartialEq)]
+enum DeliveryBannerModel {
+    Hidden,
+    StandalonePr {
+        repo: String,
+        number: u64,
+        url: String,
+    },
+    Delivered {
+        card: Box<canban_types::Card>,
+        commit_short: String,
+        target_branch: String,
+        archived: bool,
+    },
+    Active(Box<ActiveDeliveryModel>),
+}
+
+#[derive(Clone, PartialEq)]
+struct ActiveDeliveryModel {
+    card: canban_types::Card,
+    has_worktree: bool,
+    has_local: bool,
+    is_remote: bool,
+    pr_view: Option<crate::components::pr_status::CardPrView>,
+    pr_summary_state: Option<(String, String)>,
+    pr_target: Option<(u64, String)>,
+    merge_remote_pr: Option<(String, bool)>,
+    active_review: Option<(String, Option<u64>)>,
+    default_prof: String,
+}
+
+pub fn render_card_delivery_banner(ui: Ui) -> impl IntoElement {
     let st = ui.review_state;
-    let Some(c) = ui.current_card() else {
-        // Standalone remote GitHub PR inspection (opened from GitHub browser without a Card)
-        if st.mode.get() == "github_pr"
-            && let Some(pr) = st.pr_target.get()
+    let model = computed(move || {
+        let mode = st.mode.get();
+        let Some(c) = ui.current_card() else {
+            if mode == "github_pr"
+                && let Some(pr) = st.pr_target.get()
+            {
+                return DeliveryBannerModel::StandalonePr {
+                    repo: pr["repository"].as_str().unwrap_or("").to_owned(),
+                    number: pr["number"].as_u64().unwrap_or(0),
+                    url: pr["url"].as_str().unwrap_or("").to_owned(),
+                };
+            }
+            return DeliveryBannerModel::Hidden;
+        };
+        if mode == "git" {
+            return DeliveryBannerModel::Hidden;
+        }
+        if let Some(d) = c.delivery.clone()
+            && ui.review.with(Option::is_none)
         {
-            let repo = pr["repository"].as_str().unwrap_or("").to_owned();
-            let num = pr["number"].as_u64().unwrap_or(0);
-            let url = pr["url"].as_str().unwrap_or("").to_owned();
-            return view()
+            let commit_short = d.commit[..d.commit.len().min(10)].to_owned();
+            let archived = c.archived_at.is_some();
+            return DeliveryBannerModel::Delivered {
+                card: Box::new(c),
+                commit_short,
+                target_branch: d.target_branch,
+                archived,
+            };
+        }
+
+        let has_worktree = c.worktree.is_some();
+        let has_local = c.worktree.is_some() || c.branch.is_some();
+        let pr_target = st.pr_target.get().map(|prt| {
+            (
+                prt["number"].as_u64().unwrap_or(0),
+                prt["url"].as_str().unwrap_or("").to_owned(),
+            )
+        });
+        let is_remote = mode == "github_pr";
+        let pr_view = c.pull_request.as_ref().and_then(|_| {
+            ui.snapshot.with(|s| {
+                ui.index
+                    .with(|idx| crate::components::pr_status::from_card(s, idx, &c))
+            })
+        });
+        let pr_summary_state = c
+            .pull_request
+            .as_ref()
+            .filter(|_| pr_view.is_none())
+            .map(|pr| (pr.state.clone(), pr.url.clone()));
+        let merge_remote_pr = c
+            .pull_request
+            .as_ref()
+            .filter(|pr| {
+                pr.number > 0 && pr.state == "open" && !pr.merged && (is_remote || !has_worktree)
+            })
+            .map(|pr| (pr.head.clone(), true));
+        let active_review = if c.active() && !c.resolved() {
+            ui.snapshot.with(|s| super::active_review_run(s, &c.id))
+        } else {
+            None
+        };
+        let default_prof = if c.active() && !c.resolved() && active_review.is_none() {
+            let _ = ui.default_agent.get();
+            crate::sessions::default_review_profile(ui)
+        } else {
+            String::new()
+        };
+
+        DeliveryBannerModel::Active(Box::new(ActiveDeliveryModel {
+            card: c,
+            has_worktree,
+            has_local,
+            is_remote,
+            pr_view,
+            pr_summary_state,
+            pr_target,
+            merge_remote_pr,
+            active_review,
+            default_prof,
+        }))
+    });
+
+    dynamic(move || match model.get() {
+        DeliveryBannerModel::Hidden => view().into_element(),
+        DeliveryBannerModel::StandalonePr { repo, number, url } => {
+            let disabled = url.is_empty();
+            view()
                 .px_3()
                 .py_1p5()
                 .border_b_1()
@@ -936,78 +1051,78 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
                         .gap_2()
                         .child(icon(Icon::GitHub).w(px(13.)).h(px(13.)))
                         .child(
-                            label(format!("{repo} · PR #{num}")).font_weight(FontWeight::SEMIBOLD),
+                            label(format!("{repo} · PR #{number}"))
+                                .font_weight(FontWeight::SEMIBOLD),
                         ),
                 )
                 .child(
                     compact_action("GitHub ↗", Variant::Quiet, move |_| {
                         crate::github::open_url(ui, url.clone());
                     })
-                    .disabled(pr["url"].as_str().unwrap_or("").is_empty()),
+                    .disabled(disabled),
                 )
-                .into_element();
+                .into_element()
         }
-        return view().into_element();
-    };
-    if st.mode.get() == "git" {
-        return view().into_element();
-    }
+        DeliveryBannerModel::Delivered {
+            card: c,
+            commit_short,
+            target_branch,
+            archived,
+        } => {
+            let archive_card = (*c).clone();
+            view()
+                .px_3()
+                .py_2()
+                .border_b_1()
+                .border_color(SUCCESS)
+                .bg(SUCCESS_SURFACE)
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            label(format!(
+                                "Delivered · merged into {target_branch} ({commit_short})"
+                            ))
+                            .text_color(SUCCESS)
+                            .font_weight(FontWeight::SEMIBOLD),
+                        )
+                        .child(muted(format!("#{} {}", c.number, c.title))),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            compact_action("Archive Card", Variant::Primary, move |_| {
+                                crate::card_actions::apply(
+                                    ui,
+                                    archive_card.clone(),
+                                    crate::card_actions::Action::Archive,
+                                );
+                            })
+                            .disabled(move || ui.is_method_pending("card.archive") || archived),
+                        )
+                        .child(chrome_button(Icon::Refresh, "Refresh diff", move |_| {
+                            refresh_active_diff(ui, true)
+                        })),
+                )
+                .into_element()
+        }
+        DeliveryBannerModel::Active(active) => render_active_delivery_banner(ui, st, *active),
+    })
+}
 
-    if let Some(d) = c.delivery.clone()
-        && ui.review.get().is_none()
-    {
-        let archive_card = c.clone();
-        let archived = c.archived_at.is_some();
-        let short = &d.commit[..d.commit.len().min(10)];
-        return view()
-            .px_3()
-            .py_2()
-            .border_b_1()
-            .border_color(SUCCESS)
-            .bg(SUCCESS_SURFACE)
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .child(
-                view()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        label(format!(
-                            "Delivered · merged into {} ({short})",
-                            d.target_branch
-                        ))
-                        .text_color(SUCCESS)
-                        .font_weight(FontWeight::SEMIBOLD),
-                    )
-                    .child(muted(format!("#{} {}", c.number, c.title))),
-            )
-            .child(
-                view()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        compact_action("Archive Card", Variant::Primary, move |_| {
-                            crate::card_actions::apply(
-                                ui,
-                                archive_card.clone(),
-                                crate::card_actions::Action::Archive,
-                            );
-                        })
-                        .disabled(move || ui.is_method_pending("card.archive") || archived),
-                    )
-                    .child(chrome_button(Icon::Refresh, "Refresh diff", move |_| {
-                        refresh_active_diff(ui, true)
-                    })),
-            )
-            .into_element();
-    }
-
+fn render_active_delivery_banner(ui: Ui, st: State, model: ActiveDeliveryModel) -> AnyElement {
+    let c = model.card;
     let default_commit_msg = format!("Canban #{}: {}", c.number, c.title);
     let message_key = format!("review-msg:{}", c.id);
     let msg_draft = crate::drafts::document(
@@ -1024,13 +1139,6 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
         msg_draft.update(|d| d.body = m);
     });
 
-    let card_for_return = c.clone();
-    let has_worktree = c.worktree.is_some();
-    let has_local = c.worktree.is_some() || c.branch.is_some();
-    let pr_target = st.pr_target.get();
-    let is_remote = st.mode.get() == "github_pr";
-
-    // Inline PR summary & actions (replaces the bulky nested `pr_panel` box)
     let mut left_info = view()
         .flex_row()
         .flex_wrap()
@@ -1046,22 +1154,20 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
         )
         .child(status(c.stage.clone(), Tone::Neutral));
 
-    if let Some(pr) = &c.pull_request {
-        if let Some(pr_view) = ui.snapshot.with(|s| {
-            ui.index
-                .with(|idx| crate::components::pr_status::from_card(s, idx, &c))
-        }) && let Some(pr_pill) = crate::components::pr_status::pill(ui, &pr_view, false)
+    if c.pull_request.is_some() {
+        if let Some(pr_view) = &model.pr_view
+            && let Some(pr_pill) = crate::components::pr_status::pill(ui, pr_view, false)
         {
             left_info = left_info.child(pr_pill);
-        } else {
-            let pr_summary: String = if pr.state == "not_published" {
+        } else if let Some((pr_state, pr_url)) = &model.pr_summary_state {
+            let pr_summary: String = if pr_state == "not_published" {
                 "No PR yet".into()
             } else {
                 "PR sync needed".into()
             };
             left_info = left_info.child(status(pr_summary, Tone::Neutral));
-            if !pr.url.is_empty() {
-                let url = pr.url.clone();
+            if !pr_url.is_empty() {
+                let url = pr_url.clone();
                 left_info =
                     left_info.child(compact_action("GitHub ↗", Variant::Quiet, move |_| {
                         crate::github::open_url(ui, url.clone());
@@ -1076,13 +1182,12 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
                 dispatch(ui, "github.pr.refresh", json!({ "card_id": refresh_cid }));
             },
         ));
-    } else if let Some(prt) = &pr_target {
-        let num = prt["number"].as_u64().unwrap_or(0);
-        let url = prt["url"].as_str().unwrap_or("").to_owned();
-        if num > 0 {
+    } else if let Some((num, url)) = &model.pr_target {
+        if *num > 0 {
             left_info = left_info.child(status(format!("PR #{num}"), Tone::Info));
         }
         if !url.is_empty() {
+            let url = url.clone();
             left_info = left_info.child(compact_action("GitHub ↗", Variant::Quiet, move |_| {
                 crate::github::open_url(ui, url.clone());
             }));
@@ -1091,62 +1196,61 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
 
     let mut right_controls = view().flex_row().flex_wrap().items_center().gap_1p5();
 
-    if c.active() && !c.resolved() {
-        let active_review = ui.snapshot.with(|s| super::active_review_run(s, &c.id));
-        if let Some((prof, started_at)) = active_review {
-            let cid = c.id.clone();
-            let now_ms = ui.runtime_clock.get();
-            let elapsed = started_at
-                .map(|t| {
-                    format!(
-                        " · {}",
-                        crate::components::activity::compact_duration(now_ms.saturating_sub(t))
-                    )
-                })
-                .unwrap_or_default();
-            right_controls = right_controls.child(
-                canban_ui_kit::press_target()
-                    .h(px(26.))
-                    .px_2()
-                    .rounded(px(13.))
-                    .flex_row()
-                    .items_center()
-                    .gap_1p5()
-                    .bg(SELECTED)
-                    .hover(|s| s.bg(CARD_HOVER))
-                    .on_press(move |_: &()| crate::terminals::open_card_quick(ui, &cid))
-                    .child(live_dot(ACCENT))
-                    .child(
-                        label(format!("@{prof} reviewing{elapsed}"))
-                            .text_size(px(11.5))
-                            .text_color(ACCENT),
-                    ),
-            );
-        } else {
-            let cid_quick = c.id.clone();
-            let default_prof = crate::sessions::default_review_profile(ui);
-            right_controls = right_controls.child(
-                compact_action(
-                    move || {
-                        if ui.is_method_pending("review.run_agent") {
-                            format!("Starting @{default_prof}…")
-                        } else {
-                            format!("Ask @{default_prof}")
-                        }
-                    },
-                    Variant::Secondary,
-                    move |_| super::start_agent_review(ui, &cid_quick, None, None),
-                )
-                .disabled(move || ui.is_method_pending("review.run_agent")),
-            );
-        }
+    if let Some((prof, started_at)) = model.active_review {
+        let cid = c.id.clone();
+        right_controls = right_controls.child(
+            canban_ui_kit::press_target()
+                .h(px(26.))
+                .px_2()
+                .rounded(px(13.))
+                .flex_row()
+                .items_center()
+                .gap_1p5()
+                .bg(SELECTED)
+                .hover(|s| s.bg(CARD_HOVER))
+                .on_press(move |_: &()| crate::terminals::open_card_quick(ui, &cid))
+                .child(live_dot(ACCENT))
+                .child(
+                    label(move || {
+                        let elapsed = started_at
+                            .map(|t| {
+                                format!(
+                                    " · {}",
+                                    crate::components::activity::compact_duration(
+                                        ui.runtime_clock.get().saturating_sub(t)
+                                    )
+                                )
+                            })
+                            .unwrap_or_default();
+                        format!("@{prof} reviewing{elapsed}")
+                    })
+                    .text_size(px(11.5))
+                    .text_color(ACCENT),
+                ),
+        );
+    } else if c.active() && !c.resolved() {
+        let cid_quick = c.id.clone();
+        let default_prof = model.default_prof;
+        right_controls = right_controls.child(
+            compact_action(
+                move || {
+                    if ui.is_method_pending("review.run_agent") {
+                        format!("Starting @{default_prof}…")
+                    } else {
+                        format!("Ask @{default_prof}")
+                    }
+                },
+                Variant::Secondary,
+                move |_| super::start_agent_review(ui, &cid_quick, None, None),
+            )
+            .disabled(move || ui.is_method_pending("review.run_agent")),
+        );
     }
 
-    // Unified Local / PR #N switcher when both local branch/worktree and PR exist
-    if let Some(prt) = &pr_target
-        && has_local
+    if let Some((pr_num, _)) = model.pr_target
+        && model.has_local
     {
-        let pr_num = prt["number"].as_u64().unwrap_or(0);
+        let is_remote = model.is_remote;
         right_controls = right_controls.child(
             view()
                 .flex_row()
@@ -1184,7 +1288,7 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
         );
     }
 
-    if card_for_return.stage != "develop" {
+    if c.stage != "develop" {
         let cid_outer = c.id.clone();
         let fallback_rev = c.revision;
         right_controls = right_controls.child(compact_action(
@@ -1209,16 +1313,9 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
         ));
     }
 
-    // Remote PR merge button when inspecting an open published delivery PR
-    if let Some(pr) = &c.pull_request
-        && pr.number > 0
-        && pr.state == "open"
-        && !pr.merged
-        && (is_remote || !has_worktree)
-    {
+    if let Some((head, _)) = model.merge_remote_pr {
         let merge_cid = c.id.clone();
         let fallback_rev = c.revision;
-        let head = pr.head.clone();
         right_controls = right_controls.child(
             compact_action("Merge PR", Variant::Primary, move |_| {
                 let rev = ui
@@ -1240,8 +1337,8 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
         );
     }
 
-    if has_worktree && !is_remote {
-        let default_msg_check = default_commit_msg.clone();
+    if model.has_worktree && !model.is_remote {
+        let default_msg_check = default_commit_msg;
         right_controls = right_controls
             .child(crate::github::choice(
                 ui,
@@ -1325,6 +1422,18 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
             );
     }
 
+    let warning_model = computed(move || {
+        let p = ui.review.get()?;
+        let live_warning = ui
+            .snapshot
+            .with(|s| canban_types::agent_activity_warning(&p.card_id, &s.terminals));
+        (p.reason.is_some() || live_warning.is_some()).then_some((
+            p.card_id,
+            p.reason,
+            live_warning,
+        ))
+    });
+
     view()
         .px_3()
         .py_1p5()
@@ -1358,36 +1467,368 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
             },
         ))
         .child(dynamic(move || {
-            if let Some(p) = ui.review.get() {
-                let mut col = view().flex_col().gap_1p5();
-                let mut any = false;
-                if let Some(reason) = p.reason {
-                    any = true;
-                    col = col.child(notice(reason, Tone::Attention));
-                }
-                let live_warning = ui
-                    .snapshot
-                    .with(|s| canban_types::agent_activity_warning(&p.card_id, &s.terminals));
-                if let Some(warning) = live_warning {
-                    any = true;
-                    let cid = p.card_id.clone();
-                    col = col.child(
-                        view()
-                            .flex_row()
-                            .flex_wrap()
-                            .items_center()
-                            .gap_2()
-                            .child(notice(warning, Tone::Info))
-                            .child(compact_action("Terminals ↗", Variant::Quiet, move |_| {
-                                crate::terminals::open_card(ui, &cid);
-                            })),
-                    );
-                }
-                if any {
-                    return col.into_element();
-                }
+            let Some((cid, reason, live_warning)) = warning_model.get() else {
+                return view().into_element();
+            };
+            let mut col = view().flex_col().gap_1p5();
+            if let Some(reason) = reason {
+                col = col.child(notice(reason, Tone::Attention));
             }
-            view().into_element()
+            if let Some(warning) = live_warning {
+                col = col.child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(notice(warning, Tone::Info))
+                        .child(compact_action("Terminals ↗", Variant::Quiet, move |_| {
+                            crate::terminals::open_card(ui, &cid);
+                        })),
+                );
+            }
+            col.into_element()
         }))
         .into_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use canban_types::{
+        ExecutionTrigger, Project, RuntimeState, Snapshot, TerminalEntry, Workflow,
+    };
+    use nsh_core::{
+        ApproxTextEngine, Core, EventKind, EventMask, EventPayload, MountBatch, MountItem, NodeId,
+        element::JsEvent,
+        geometry::{px, size},
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+
+    #[derive(Default)]
+    struct TreeState {
+        parents: BTreeMap<NodeId, NodeId>,
+        alive: BTreeSet<NodeId>,
+        deleted: BTreeSet<NodeId>,
+        texts: BTreeMap<NodeId, String>,
+        labels: BTreeMap<NodeId, String>,
+        events: BTreeMap<NodeId, EventMask>,
+    }
+
+    impl TreeState {
+        fn apply(&mut self, batch: &MountBatch) {
+            for item in &batch.items {
+                match item {
+                    MountItem::Create { id, .. } => {
+                        self.alive.insert(*id);
+                        self.deleted.remove(id);
+                    }
+                    MountItem::Insert { parent, child, .. } => {
+                        self.parents.insert(*child, *parent);
+                    }
+                    MountItem::Remove { id } => {
+                        self.parents.remove(id);
+                    }
+                    MountItem::Delete { id } => {
+                        self.alive.remove(id);
+                        self.deleted.insert(*id);
+                        self.parents.remove(id);
+                    }
+                    MountItem::Text { id, text, .. } => {
+                        self.texts.insert(*id, text.text.to_string());
+                    }
+                    MountItem::AccessibilityLabel { id, label } => {
+                        if let Some(label) = label {
+                            self.labels.insert(*id, label.to_string());
+                        } else {
+                            self.labels.remove(id);
+                        }
+                    }
+                    MountItem::ViewProps { id, props } => {
+                        if let Some(label) = &props.accessibility.label {
+                            self.labels.insert(*id, label.to_string());
+                        }
+                    }
+                    MountItem::Events { id, events } => {
+                        self.events.insert(*id, *events);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        fn is_mounted(&self, mut id: NodeId) -> bool {
+            if !self.alive.contains(&id) {
+                return false;
+            }
+            let mut guard = 0;
+            while id != nsh_core::ROOT_ID {
+                let Some(&parent) = self.parents.get(&id) else {
+                    return false;
+                };
+                id = parent;
+                guard += 1;
+                if guard > 256 {
+                    return false;
+                }
+            }
+            true
+        }
+
+        fn mounted_node_for_text(&self, needle: &str) -> Option<NodeId> {
+            self.texts
+                .iter()
+                .find(|(id, t)| *t == needle && self.is_mounted(**id))
+                .map(|(id, _)| *id)
+        }
+    }
+
+    fn pump(core: &mut Core<ApproxTextEngine>, tree: &mut TreeState) {
+        for _ in 0..16 {
+            let had_batch = if let Some(batch) = core.commit() {
+                tree.apply(&batch);
+                true
+            } else {
+                false
+            };
+            let mut events = Vec::new();
+            core.take_events(&mut events);
+            let mut dispatched = false;
+            for ev in events {
+                match ev {
+                    JsEvent::Event(id, kind, payload) => {
+                        core.component_event(id, kind, &payload);
+                        dispatched = true;
+                    }
+                    JsEvent::LayoutListener {
+                        host,
+                        id,
+                        listener,
+                        frame,
+                    } => {
+                        core.component_layout(host, id, &listener, frame);
+                        dispatched = true;
+                    }
+                    _ => {}
+                }
+            }
+            if !had_batch && !dispatched {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn delivery_banner_controls_survive_clock_runtime_and_unrelated_refreshes() {
+        #[component]
+        fn BannerHarness() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let mut snapshot = Snapshot::default();
+            snapshot.projects.push(Project {
+                id: "proj-1".into(),
+                name: "Canban".into(),
+                directory: "/tmp/canban".into(),
+                github: None,
+                detected_github: None,
+                github_disconnected: false,
+                delivery_mode: Default::default(),
+                agent_overrides: Default::default(),
+                tags: Vec::new(),
+                workflow: Workflow::default(),
+                target_branch: Some("main".into()),
+                created_at: 1,
+            });
+            snapshot.cards.push(
+                serde_json::from_value(json!({
+                    "id": "c-1",
+                    "project_id": "proj-1",
+                    "number": 1,
+                    "title": "Review Card",
+                    "body": "",
+                    "stage": "review",
+                    "worktree": "/tmp/wt-1",
+                    "branch": "canban/1",
+                    "revision": 1,
+                    "created_at": 1
+                }))
+                .unwrap(),
+            );
+            snapshot.cards.push(
+                serde_json::from_value(json!({
+                    "id": "c-2",
+                    "project_id": "proj-1",
+                    "number": 2,
+                    "title": "Other Active Card",
+                    "body": "",
+                    "stage": "develop",
+                    "revision": 1,
+                    "created_at": 2
+                }))
+                .unwrap(),
+            );
+            let mut review_term: TerminalEntry = serde_json::from_value(json!({
+                "id": "c-1:developer",
+                "conversation_id": "c-1:developer",
+                "number": 1,
+                "created_at": 1_750_000_000_000u64,
+                "agent": {
+                    "card_id": "c-1",
+                    "project_id": "proj-1",
+                    "stage": "review",
+                    "trigger": "workflow",
+                    "profile": { "id": "developer", "enabled": true, "identity": true },
+                    "instruction": "Review",
+                    "state": "running",
+                    "core_id": "core-1",
+                    "terminal": "pty-1",
+                    "connection_state": "connected",
+                    "observed": { "state": "live", "turn": 1, "status": { "state": "working" } },
+                    "lifecycle": { "observed_at": 1000 },
+                    "started_at": 1_750_000_000_000u64,
+                    "updated_at": 100
+                }
+            }))
+            .unwrap();
+            review_term.agent.as_mut().unwrap().trigger =
+                ExecutionTrigger::Custom("diff_review".into());
+            let other_term: TerminalEntry = serde_json::from_value(json!({
+                "id": "c-2:developer",
+                "conversation_id": "c-2:developer",
+                "number": 2,
+                "created_at": 1_750_000_000_000u64,
+                "agent": {
+                    "card_id": "c-2",
+                    "project_id": "proj-1",
+                    "stage": "develop",
+                    "trigger": "workflow",
+                    "profile": { "id": "developer", "enabled": true, "identity": true },
+                    "instruction": "Build",
+                    "state": "running",
+                    "core_id": "core-1",
+                    "terminal": "pty-2",
+                    "connection_state": "connected",
+                    "observed": { "state": "live", "turn": 1, "status": { "state": "working" } },
+                    "lifecycle": { "observed_at": 1000 },
+                    "started_at": 1_750_000_000_000u64,
+                    "updated_at": 100
+                }
+            }))
+            .unwrap();
+            snapshot.terminals.push(review_term);
+            snapshot.terminals.push(other_term);
+
+            ui.runtime_clock.set(1_750_000_010_000);
+            ui.accept_snapshot(snapshot);
+            ui.project.set("proj-1".into());
+            ui.card.set("c-1".into());
+            ui.page.set("review".into());
+            ui.review_state.mode.set("card_local".into());
+
+            view()
+                .w(px(1100.))
+                .h(px(300.))
+                .child(
+                    canban_ui_kit::press_target()
+                        .accessibility_label(Some("Tick clock and unrelated state".into()))
+                        .on_press(move |_: &()| {
+                            let mut terms = ui.snapshot.with_untracked(|s| s.terminals.clone());
+                            terms[1].agent.as_mut().unwrap().lifecycle.observed_at = Some(
+                                terms[1]
+                                    .agent
+                                    .as_ref()
+                                    .unwrap()
+                                    .lifecycle
+                                    .observed_at
+                                    .unwrap_or(0)
+                                    + 1_000,
+                            );
+                            ui.accept_runtime_state(RuntimeState {
+                                terminals: terms,
+                                ..Default::default()
+                            });
+                            let mut next = ui.snapshot.get_untracked();
+                            next.cards[1].title =
+                                format!("Peer rev {}", next.cards[1].revision + 1);
+                            next.cards[1].revision += 1;
+                            ui.accept_snapshot(next);
+                            ui.runtime_clock.set(1_750_000_015_000);
+                        }),
+                )
+                .child(render_card_delivery_banner(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1100.), px(300.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<BannerHarness>());
+        let mut tree = TreeState::default();
+        pump(&mut core, &mut tree);
+
+        let press_by_label = |tree: &TreeState, needle: &str| -> NodeId {
+            let mut id = *tree
+                .labels
+                .iter()
+                .find(|(id, lbl)| lbl.as_str() == needle && tree.is_mounted(**id))
+                .unwrap_or_else(|| panic!("mounted label `{needle}` not found"))
+                .0;
+            while id != nsh_core::ROOT_ID
+                && !tree
+                    .events
+                    .get(&id)
+                    .is_some_and(|m| m.contains(EventKind::Press))
+            {
+                id = tree.parents[&id];
+            }
+            id
+        };
+        let press_by_text = |tree: &TreeState, text: &str| -> NodeId {
+            let mut id = tree
+                .mounted_node_for_text(text)
+                .unwrap_or_else(|| panic!("mounted text `{text}` not found"));
+            while id != nsh_core::ROOT_ID
+                && !tree
+                    .events
+                    .get(&id)
+                    .is_some_and(|m| m.contains(EventKind::Press))
+            {
+                id = tree.parents[&id];
+            }
+            id
+        };
+
+        assert!(
+            tree.mounted_node_for_text("@developer reviewing · 10s")
+                .is_some(),
+            "expected leaf runtime clock duration pill"
+        );
+        let tick_btn = press_by_label(&tree, "Tick clock and unrelated state");
+        let customize_btn = press_by_label(&tree, "Customize delivery commit message");
+        let return_btn = press_by_text(&tree, "Return to Develop");
+
+        assert!(core.component_event(customize_btn, EventKind::PressDown, &EventPayload::None));
+        assert!(core.component_event(tick_btn, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+
+        assert!(
+            !tree.deleted.contains(&customize_btn) && tree.is_mounted(customize_btn),
+            "Customize button recreated across clock/runtime/snapshot tick"
+        );
+        assert!(
+            !tree.deleted.contains(&return_btn) && tree.is_mounted(return_btn),
+            "Return to Develop button recreated across clock/runtime/snapshot tick"
+        );
+        assert!(
+            tree.mounted_node_for_text("@developer reviewing · 15s")
+                .is_some(),
+            "expected leaf runtime clock label to update in place"
+        );
+
+        assert!(tree.mounted_node_for_text("Commit message:").is_none());
+        assert!(core.component_event(customize_btn, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert!(
+            tree.mounted_node_for_text("Commit message:").is_some(),
+            "expected Customize delivery commit message button to open commit message field"
+        );
+    }
 }

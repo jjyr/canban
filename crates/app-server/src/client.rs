@@ -481,6 +481,11 @@ impl AppClient {
         Ok(serde_json::from_value(state["snapshot"].take())?)
     }
 
+    pub fn runtime_state(&self) -> Result<RuntimeState> {
+        let mut state = self.call("runtime.state", json!({}))?;
+        Ok(serde_json::from_value(state["runtime"].take())?)
+    }
+
     pub(crate) fn set_cached_config(&self, cfg: Config) {
         *self.config.write().unwrap() = cfg;
     }
@@ -666,6 +671,8 @@ fn static_event_topic(raw: Option<&str>, previous: &Value, params: &Value) -> &'
         Some("desktop") => "desktop",
         Some("schedules") => "schedules",
         Some("terminals") => "terminals",
+        Some("reclaim") => "reclaim",
+        Some("runtime") => "runtime",
         Some("worktrees") => "worktrees",
         Some("execution") => "execution",
         Some("host") => "host",

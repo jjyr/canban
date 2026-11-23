@@ -363,11 +363,11 @@ fn row(ui: Ui, state: BoardDrag, card: ReadSignal<Card>) -> impl IntoElement {
         .label(move || {
             let c = card.get();
             let ui_merging = ui.merging_cards.with(|ids| ids.contains(&c.id));
-            let (merging, replies) = ui.index.with(|idx| {
-                let base_merging = idx.card_status.get(&c.id).is_some_and(|st| st.is_merging);
-                let merging = base_merging || (c.active() && !c.resolved() && ui_merging);
-                (merging, idx.reply_count(&c.id))
-            });
+            let base_merging = ui
+                .card_status
+                .with(|cs| cs.get(&c.id).is_some_and(|st| st.is_merging));
+            let replies = ui.index.with(|idx| idx.reply_count(&c.id));
+            let merging = base_merging || (c.active() && !c.resolved() && ui_merging);
             let count = ui
                 .reminder_counts
                 .with(|all| all.get(&c.id).map(|n| n.total).unwrap_or(0));

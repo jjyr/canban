@@ -1,10 +1,10 @@
 //! Shared derived `Snapshot` indexes so Board tiles, Card timelines, and Markdown readers
 //! borrow pre-indexed `O(log N)` maps instead of cloning or scanning the full `Snapshot`.
 use canban_types::{
-    Card, GitHubIssueSnapshot, Project, ReviewDraft, Snapshot, TerminalEntry, WorkflowStep,
-    normalize_tag,
+    Artifact, Card, CardEventSummary, GitHubIssueSnapshot, HerdrStatus, Project, ReviewDraft,
+    Snapshot, TerminalEntry, WorkflowRevision, WorkflowStep, normalize_tag,
 };
-use canban_ui_kit::Tone;
+use canban_ui_kit::{Icon, Tone};
 use std::{
     collections::{BTreeMap, BTreeSet},
     rc::Rc,
@@ -13,12 +13,24 @@ use std::{
 
 static NEXT_INDEX_GENERATION: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunningAgentBadge {
+    pub terminal_id: String,
+    pub card_id: String,
+    pub profile_id: String,
+    pub provider_icon: Icon,
+    pub provider_name: String,
+    pub herdr_status: HerdrStatus,
+    pub wait_detail: Option<String>,
+    pub started_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CardStatusDigest {
     pub is_merging: bool,
     pub specs_normal: Vec<(String, Tone, bool)>,
     pub specs_ui_merging: Vec<(String, Tone, bool)>,
-    pub running: Vec<(TerminalEntry, Option<u64>)>,
+    pub running: Vec<RunningAgentBadge>,
 }
 
 #[derive(Debug, Default)]
@@ -28,14 +40,30 @@ pub struct SnapshotIndex {
     pub project_order: Vec<Project>,
     pub project_has_deliver: BTreeSet<String>,
     pub cards: BTreeMap<String, Card>,
+    pub card_summaries: BTreeMap<String, CardEventSummary>,
     pub last_event_by_card: BTreeMap<String, u64>,
     pub reply_counts: BTreeMap<String, usize>,
+    pub artifacts: Vec<Artifact>,
     pub artifact_counts: BTreeMap<String, usize>,
     pub github_issues: BTreeMap<(String, u64, u64), GitHubIssueSnapshot>,
     pub project_has_github_cards: BTreeSet<String>,
     pub explicit_body_tags: Vec<String>,
-    pub card_status: BTreeMap<String, CardStatusDigest>,
     pub review_drafts: BTreeMap<String, ReviewDraft>,
+}
+
+fn deliver_projects(revisions: &[WorkflowRevision]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for rev in revisions {
+        if rev
+            .definition
+            .steps
+            .values()
+            .any(|st| matches!(st, WorkflowStep::Deliver { .. }))
+        {
+            out.insert(rev.project_id.clone());
+        }
+    }
+    out
 }
 
 impl SnapshotIndex {
@@ -47,18 +75,7 @@ impl SnapshotIndex {
             projects.insert(p.id.clone(), p.clone());
         }
         let project_order = snapshot.projects.clone();
-
-        let mut project_has_deliver = BTreeSet::new();
-        for rev in &snapshot.workflow_revisions {
-            if rev
-                .definition
-                .steps
-                .values()
-                .any(|st| matches!(st, WorkflowStep::Deliver { .. }))
-            {
-                project_has_deliver.insert(rev.project_id.clone());
-            }
-        }
+        let project_has_deliver = deliver_projects(&snapshot.workflow_revisions);
 
         let mut cards = BTreeMap::new();
         let mut project_has_github_cards = BTreeSet::new();
@@ -73,6 +90,7 @@ impl SnapshotIndex {
             }
         }
 
+        let card_summaries = snapshot.card_summaries.clone();
         let mut last_event_by_card: BTreeMap<String, u64> = BTreeMap::new();
         let mut reply_counts = BTreeMap::new();
         for (card_id, summary) in &snapshot.card_summaries {
@@ -84,6 +102,7 @@ impl SnapshotIndex {
             }
         }
 
+        let artifacts = snapshot.artifacts.clone();
         let mut artifact_counts: BTreeMap<String, usize> = BTreeMap::new();
         for art in &snapshot.artifacts {
             *artifact_counts.entry(art.card_id.clone()).or_default() += 1;
@@ -101,64 +120,6 @@ impl SnapshotIndex {
             );
         }
 
-        let mut terminals_by_card: BTreeMap<String, Vec<&TerminalEntry>> = BTreeMap::new();
-        for t in &snapshot.terminals {
-            if let Some(agent) = &t.agent {
-                terminals_by_card
-                    .entry(agent.card_id.clone())
-                    .or_default()
-                    .push(t);
-            }
-        }
-
-        // Snapshot::merge_queue_status constructs a full Card map. Compute queues
-        // once per Project, never once (or three times) per Card in this index.
-        let mut queue_status = BTreeMap::new();
-        for pid in snapshot
-            .cards
-            .iter()
-            .map(|c| c.project_id.as_str())
-            .collect::<BTreeSet<_>>()
-        {
-            let queue = snapshot.merge_queue(pid);
-            if let Some(&head) = queue.first() {
-                for (i, run) in queue.iter().enumerate() {
-                    if let Some(cid) = run.card_id.as_deref() {
-                        queue_status
-                            .entry(cid)
-                            .or_insert((i + 1, queue.len(), head));
-                    }
-                }
-            }
-        }
-        let mut card_status = BTreeMap::new();
-        for c in snapshot.cards.iter().filter(|c| c.active()) {
-            let queue = queue_status.get(c.id.as_str()).copied();
-            let is_merging = crate::components::activity::is_merging_indexed(snapshot, c, queue);
-            let specs_normal =
-                crate::components::activity::card_status_specs_indexed(snapshot, c, false, queue);
-            let specs_ui_merging = if c.resolved() || is_merging {
-                specs_normal.clone()
-            } else {
-                crate::components::activity::card_status_specs_indexed(snapshot, c, true, queue)
-            };
-            let running = running_agents_indexed(
-                terminals_by_card
-                    .get(&c.id)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]),
-            );
-            card_status.insert(
-                c.id.clone(),
-                CardStatusDigest {
-                    is_merging,
-                    specs_normal,
-                    specs_ui_merging,
-                    running,
-                },
-            );
-        }
-
         let mut review_drafts = BTreeMap::new();
         for draft in &snapshot.review_drafts {
             review_drafts.insert(draft.card_id.clone(), draft.clone());
@@ -170,15 +131,47 @@ impl SnapshotIndex {
             project_order,
             project_has_deliver,
             cards,
+            card_summaries,
             last_event_by_card,
             reply_counts,
+            artifacts,
             artifact_counts,
             github_issues,
             project_has_github_cards,
             explicit_body_tags,
-            card_status,
             review_drafts,
         }
+    }
+
+    pub fn matches_workspace(&self, snapshot: &Snapshot) -> bool {
+        self.project_order == snapshot.projects
+            && self.cards.len() == snapshot.cards.len()
+            && snapshot
+                .cards
+                .iter()
+                .all(|c| self.cards.get(&c.id) == Some(c))
+            && self.card_summaries == snapshot.card_summaries
+            && self.artifacts == snapshot.artifacts
+            && self.review_drafts.len() == snapshot.review_drafts.len()
+            && snapshot
+                .review_drafts
+                .iter()
+                .all(|d| self.review_drafts.get(&d.card_id) == Some(d))
+            && self.github_issues.len() == snapshot.github_issues.len()
+            && snapshot.github_issues.iter().all(|i| {
+                self.github_issue(&i.project_id, i.source.repository_id, i.source.issue_id)
+                    == Some(i)
+            })
+            && self.project_has_deliver == deliver_projects(&snapshot.workflow_revisions)
+    }
+
+    pub fn reuse_or_build(prev: Option<&Rc<Self>>, snapshot: &Snapshot) -> Rc<Self> {
+        if let Some(existing) = prev
+            && existing.matches_workspace(snapshot)
+        {
+            return Rc::clone(existing);
+        }
+        Rc::new(Self::build(snapshot))
     }
 
     pub fn review_draft(&self, card_id: &str) -> Option<&ReviewDraft> {
@@ -221,7 +214,7 @@ fn agent_started_at_indexed(entry: &TerminalEntry) -> Option<u64> {
     }
 }
 
-fn running_agents_indexed(card_terminals: &[&TerminalEntry]) -> Vec<(TerminalEntry, Option<u64>)> {
+fn running_agents_indexed(card_terminals: &[&TerminalEntry]) -> Vec<RunningAgentBadge> {
     let mut profiles = BTreeSet::new();
     let mut running: Vec<&TerminalEntry> = card_terminals
         .iter()
@@ -243,8 +236,88 @@ fn running_agents_indexed(card_terminals: &[&TerminalEntry]) -> Vec<(TerminalEnt
                 .as_ref()
                 .is_some_and(|a| profiles.insert(a.profile.id.clone()))
         })
-        .map(|t| (t.clone(), agent_started_at_indexed(t)))
+        .filter_map(|t| {
+            let agent = t.agent.as_ref()?;
+            let (provider_icon, provider_name) = crate::profiles::provider(&agent.profile);
+            let wait_detail = t
+                .runtime_wait()
+                .and_then(crate::terminals::entries::format_runtime_wait);
+            Some(RunningAgentBadge {
+                terminal_id: t.id.clone(),
+                card_id: agent.card_id.clone(),
+                profile_id: agent.profile.id.clone(),
+                provider_icon,
+                provider_name,
+                herdr_status: t.herdr_status(),
+                wait_detail,
+                started_at: agent_started_at_indexed(t),
+            })
+        })
         .collect()
+}
+
+/// Separate per-card runtime/workflow status projection (merging, workflow queue specs,
+/// and active agent badges without volatile `observed_at` timestamps).
+pub fn build_card_status(snapshot: &Snapshot) -> BTreeMap<String, CardStatusDigest> {
+    let mut terminals_by_card: BTreeMap<String, Vec<&TerminalEntry>> = BTreeMap::new();
+    for t in &snapshot.terminals {
+        if let Some(agent) = &t.agent {
+            terminals_by_card
+                .entry(agent.card_id.clone())
+                .or_default()
+                .push(t);
+        }
+    }
+
+    // Snapshot::merge_queue_status constructs a full Card map. Compute queues
+    // once per Project, never once (or three times) per Card.
+    let mut queue_status = BTreeMap::new();
+    for pid in snapshot
+        .cards
+        .iter()
+        .map(|c| c.project_id.as_str())
+        .collect::<BTreeSet<_>>()
+    {
+        let queue = snapshot.merge_queue(pid);
+        if let Some(&head) = queue.first() {
+            for (i, run) in queue.iter().enumerate() {
+                if let Some(cid) = run.card_id.as_deref() {
+                    queue_status
+                        .entry(cid)
+                        .or_insert((i + 1, queue.len(), head));
+                }
+            }
+        }
+    }
+
+    let mut card_status = BTreeMap::new();
+    for c in snapshot.cards.iter().filter(|c| c.active()) {
+        let queue = queue_status.get(c.id.as_str()).copied();
+        let is_merging = crate::components::activity::is_merging_indexed(snapshot, c, queue);
+        let specs_normal =
+            crate::components::activity::card_status_specs_indexed(snapshot, c, false, queue);
+        let specs_ui_merging = if c.resolved() || is_merging {
+            specs_normal.clone()
+        } else {
+            crate::components::activity::card_status_specs_indexed(snapshot, c, true, queue)
+        };
+        let running = running_agents_indexed(
+            terminals_by_card
+                .get(&c.id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        );
+        card_status.insert(
+            c.id.clone(),
+            CardStatusDigest {
+                is_merging,
+                specs_normal,
+                specs_ui_merging,
+                running,
+            },
+        );
+    }
+    card_status
 }
 
 /// Compact reference-resolution lookup for Markdown inline decoration (`#number`, GitHub ambiguity).
@@ -430,9 +503,9 @@ mod tests {
                 serde_json::Value::Null
             };
             s.cards[1].hold_auto_merge = paused;
-            let idx = SnapshotIndex::build(&s);
+            let status_map = build_card_status(&s);
             for c in &s.cards {
-                let digest = &idx.card_status[&c.id];
+                let digest = &status_map[&c.id];
                 assert_eq!(
                     digest.is_merging,
                     crate::components::activity::is_merging(&s, c)
@@ -507,5 +580,45 @@ mod tests {
         assert_ne!(idx1, idx2);
         let lookup2 = LinkLookup::build(&idx2);
         assert_eq!(lookup1, lookup2);
+    }
+
+    #[test]
+    fn reuse_or_build_preserves_index_generation_across_runtime_and_freshness_updates() {
+        let mut s1 = Snapshot::default();
+        s1.projects.push(make_project("p1", "Canban", vec!["perf"]));
+        s1.cards.push(make_card("c1", "p1", 1, "Task", ""));
+        let base_idx = SnapshotIndex::reuse_or_build(None, &s1);
+
+        // Runtime-only terminal/context/reclaim/merging changes must reuse the same Rc<SnapshotIndex>.
+        let mut s2 = s1.clone();
+        s2.terminals.push(
+            serde_json::from_value(json!({
+                "id": "term-1",
+                "number": 1,
+                "name": "Shell 1",
+                "created_at": 1
+            }))
+            .unwrap(),
+        );
+        s2.terminal_contexts.push(
+            serde_json::from_value(json!({
+                "terminal_id": "term-1",
+                "core_id": "core-1",
+                "terminal": "pty-1",
+                "cwd": "/tmp/p1"
+            }))
+            .unwrap(),
+        );
+        s2.merging_cards.push("c1".into());
+        let reused = SnapshotIndex::reuse_or_build(Some(&base_idx), &s2);
+        assert_eq!(base_idx, reused);
+        assert!(Rc::ptr_eq(&base_idx, &reused));
+
+        // Durable workspace edits (Card title) rebuild the index with a new generation.
+        let mut s3 = s2;
+        s3.cards[0].title = "Updated Task".into();
+        let rebuilt = SnapshotIndex::reuse_or_build(Some(&reused), &s3);
+        assert_ne!(reused, rebuilt);
+        assert!(!Rc::ptr_eq(&reused, &rebuilt));
     }
 }

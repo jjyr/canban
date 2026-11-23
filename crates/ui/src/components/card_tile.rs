@@ -12,7 +12,19 @@ use super::*;
 /// The `[>_]` button opens this Card's quick terminal split directly on the Card page
 /// (pinned with a highlighted icon when a session is running, or revealed on hover); active
 /// Agent pills pulse (or flag attention) and open that Agent tab on the Card.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EphemeralAgentBadge {
+    pub terminal_id: String,
+    pub title: String,
+    pub provider_icon: Icon,
+    pub provider_name: String,
+    pub display_status: String,
+    pub attention_reason: Option<String>,
+    pub herdr_status: canban_types::HerdrStatus,
+    pub started_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct CardTileModel {
     pub card: Card,
     pub has_terminal: bool,
@@ -21,8 +33,8 @@ pub(crate) struct CardTileModel {
     pub tags: Vec<String>,
     pub active_tags: Vec<String>,
     pub status_specs: Vec<(String, Tone, bool)>,
-    pub running: Vec<(TerminalEntry, Option<u64>)>,
-    pub ephemeral_agents: Vec<(crate::terminals::Entry, Option<u64>)>,
+    pub running: Vec<crate::index::RunningAgentBadge>,
+    pub ephemeral_agents: Vec<EphemeralAgentBadge>,
     pub replies: usize,
     pub review_draft: Option<canban_types::ReviewDraft>,
     pub review_running: bool,
@@ -38,22 +50,32 @@ impl CardTileModel {
                 .unwrap_or_default()
         });
         let ui_merging = ui.merging_cards.with(|ids| ids.contains(&card.id));
-        let live_entries = ui.terminal_entries.with(|rows| {
-            rows.iter()
+        let (has_terminal, terminal_tint, ephemeral_agents) = ui.terminal_entries.with(|rows| {
+            let live_entries: Vec<crate::terminals::Entry> = rows
+                .iter()
                 .filter(|e| crate::terminals::is_card_live_entry(e, &card.id))
                 .cloned()
-                .collect::<Vec<_>>()
+                .collect();
+            (
+                !live_entries.is_empty(),
+                card_terminal_icon_tint(&live_entries, false),
+                extract_ephemeral_badges(&live_entries),
+            )
         });
         let idx = ui.index.get();
+        let card_status = ui.card_status.get();
         let known_index = ui.known_tags.get();
         ui.snapshot.with(|snapshot| {
             Self::from_indexed(
                 snapshot,
                 &idx,
+                &card_status,
                 &known_index,
                 active_tags,
                 ui_merging,
-                live_entries,
+                has_terminal,
+                terminal_tint,
+                ephemeral_agents,
                 card,
             )
         })
@@ -68,38 +90,51 @@ impl CardTileModel {
         let ui_merging = ui
             .merging_cards
             .with_untracked(|ids| ids.contains(&card.id));
-        let live_entries = ui.terminal_entries.with_untracked(|rows| {
-            rows.iter()
-                .filter(|e| crate::terminals::is_card_live_entry(e, &card.id))
-                .cloned()
-                .collect::<Vec<_>>()
-        });
+        let (has_terminal, terminal_tint, ephemeral_agents) =
+            ui.terminal_entries.with_untracked(|rows| {
+                let live_entries: Vec<crate::terminals::Entry> = rows
+                    .iter()
+                    .filter(|e| crate::terminals::is_card_live_entry(e, &card.id))
+                    .cloned()
+                    .collect();
+                (
+                    !live_entries.is_empty(),
+                    card_terminal_icon_tint(&live_entries, false),
+                    extract_ephemeral_badges(&live_entries),
+                )
+            });
         let idx = ui.index.get_untracked();
+        let card_status = ui.card_status.get_untracked();
         let known_index = ui.known_tags.get_untracked();
         ui.snapshot.with_untracked(|snapshot| {
             Self::from_indexed(
                 snapshot,
                 &idx,
+                &card_status,
                 &known_index,
                 active_tags,
                 ui_merging,
-                live_entries,
+                has_terminal,
+                terminal_tint,
+                ephemeral_agents,
                 card,
             )
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn from_indexed(
         snapshot: &Snapshot,
         idx: &crate::index::SnapshotIndex,
+        card_status: &std::collections::BTreeMap<String, crate::index::CardStatusDigest>,
         known_index: &crate::index::KnownTagsIndex,
         active_tags: Vec<String>,
         ui_merging: bool,
-        live_entries: Vec<crate::terminals::Entry>,
+        has_terminal: bool,
+        terminal_tint: ThemeColor,
+        ephemeral_agents: Vec<EphemeralAgentBadge>,
         card: Card,
     ) -> Self {
-        let has_terminal = !live_entries.is_empty();
-        let terminal_tint = card_terminal_icon_tint(&live_entries, false);
         let github_cached = card.github_issue().and_then(|source| {
             idx.github_issue(&card.project_id, source.repository_id, source.issue_id)
                 .map(|v| (v.state.clone(), v.author_login.clone()))
@@ -112,7 +147,7 @@ impl CardTileModel {
             crate::tags::card_tags(&card, &known_tags)
         };
         let (mut status_specs, running) = if matches_indexed
-            && let Some(digest) = idx.card_status.get(&card.id)
+            && let Some(digest) = card_status.get(&card.id)
         {
             let specs = if ui_merging {
                 digest.specs_ui_merging.clone()
@@ -124,9 +159,23 @@ impl CardTileModel {
             let specs = crate::components::activity::card_status_specs(snapshot, &card, ui_merging);
             let running = crate::components::activity::running_agents(snapshot, &card)
                 .into_iter()
-                .map(|req| {
-                    let started = crate::components::activity::agent_started_at(snapshot, &req);
-                    (req, started)
+                .filter_map(|req| {
+                    let agent = req.agent.as_ref()?;
+                    let (provider_icon, provider_name) = crate::profiles::provider(&agent.profile);
+                    let wait_detail = req
+                        .runtime_wait()
+                        .and_then(crate::terminals::entries::format_runtime_wait);
+                    let started_at = crate::components::activity::agent_started_at(snapshot, &req);
+                    Some(crate::index::RunningAgentBadge {
+                        terminal_id: req.id.clone(),
+                        card_id: agent.card_id.clone(),
+                        profile_id: agent.profile.id.clone(),
+                        provider_icon,
+                        provider_name,
+                        herdr_status: req.herdr_status(),
+                        wait_detail,
+                        started_at,
+                    })
                 })
                 .collect();
             (specs, running)
@@ -136,16 +185,6 @@ impl CardTileModel {
             let (label, tone) = crate::hosts::sync_chip_spec(mark);
             status_specs.insert(0, (label.to_owned(), tone, false));
         }
-        let ephemeral_agents = live_entries
-            .iter()
-            .filter(|e| e.agent.is_none() && e.saved.has_active_agent())
-            .cloned()
-            .map(|entry| {
-                let started_at =
-                    (entry.saved.created_at > 1_000_000_000_000).then_some(entry.saved.created_at);
-                (entry, started_at)
-            })
-            .collect();
         let replies = idx.reply_count(&card.id);
         let review_draft = idx.review_draft(&card.id).cloned();
         let review_running = crate::review::active_review_run(snapshot, &card.id).is_some();
@@ -167,6 +206,35 @@ impl CardTileModel {
             sync_mark,
         }
     }
+}
+
+fn extract_ephemeral_badges(live_entries: &[crate::terminals::Entry]) -> Vec<EphemeralAgentBadge> {
+    live_entries
+        .iter()
+        .filter(|e| e.agent.is_none() && e.saved.has_active_agent())
+        .map(|entry| {
+            let (provider_icon, provider_name) = entry
+                .provider()
+                .unwrap_or_else(|| (Icon::Agent, "Agent".into()));
+            let title = entry
+                .saved
+                .name
+                .clone()
+                .unwrap_or_else(|| provider_name.clone());
+            let started_at =
+                (entry.saved.created_at > 1_000_000_000_000).then_some(entry.saved.created_at);
+            EphemeralAgentBadge {
+                terminal_id: entry.saved.id.clone(),
+                title,
+                provider_icon,
+                provider_name,
+                display_status: entry.display_status(),
+                attention_reason: entry.attention_reason(),
+                herdr_status: entry.herdr_status(),
+                started_at,
+            }
+        })
+        .collect()
 }
 
 pub fn card_tile(ui: Ui, card: Card) -> View {
@@ -496,16 +564,14 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
         }
         let mut pills: Vec<AnyElement> = running
             .into_iter()
-            .map(|(request, started_at)| {
-                let pill_key = format!("agent:{}", request.id);
-                agent_pill(ui, request, started_at)
-                    .key(pill_key)
-                    .into_element()
+            .map(|badge| {
+                let pill_key = format!("agent:{}", badge.terminal_id);
+                agent_pill(ui, badge).key(pill_key).into_element()
             })
             .collect();
-        pills.extend(ephemeral_agents.into_iter().map(|(entry, started_at)| {
-            let pill_key = format!("ephemeral:{}", entry.saved.id);
-            ephemeral_agent_pill(ui, &card.id, entry, started_at)
+        pills.extend(ephemeral_agents.into_iter().map(|badge| {
+            let pill_key = format!("ephemeral:{}", badge.terminal_id);
+            ephemeral_agent_pill(ui, &card.id, badge)
                 .key(pill_key)
                 .into_element()
         }));
@@ -723,26 +789,23 @@ fn terminal_button(ui: Ui, card: String, number: u64, tint: ThemeColor) -> View 
 }
 
 /// A live workflow/profile Agent: Herdr-aligned mark + provider icon + profile + compact elapsed runtime. Opens Card + Agent terminal.
-fn agent_pill(ui: Ui, entry: TerminalEntry, started_at: Option<u64>) -> View {
-    let herdr = entry.herdr_status();
-    let wait_detail = entry
-        .runtime_wait()
-        .and_then(crate::terminals::entries::format_runtime_wait);
-    let agent = entry
-        .agent
-        .as_ref()
-        .expect("agent_pill requires an Agent terminal");
-    let (mark, provider) = crate::profiles::provider(&agent.profile);
-    let profile = agent.profile.id.clone();
+fn agent_pill(ui: Ui, badge: crate::index::RunningAgentBadge) -> View {
+    let herdr = badge.herdr_status;
     let is_blocked = herdr == canban_types::HerdrStatus::Blocked;
     let hint = if is_blocked {
-        let reason = wait_detail
+        let reason = badge
+            .wait_detail
             .as_deref()
             .unwrap_or("Blocked on terminal input");
-        format!("{provider} · @{profile} · {reason} — open in Card")
+        format!(
+            "{} · @{} · {reason} — open in Card",
+            badge.provider_name, badge.profile_id
+        )
     } else {
         format!(
-            "{provider} · @{profile} is {} — open in Card",
+            "{} · @{} is {} — open in Card",
+            badge.provider_name,
+            badge.profile_id,
             herdr.label().to_lowercase()
         )
     };
@@ -753,7 +816,9 @@ fn agent_pill(ui: Ui, entry: TerminalEntry, started_at: Option<u64>) -> View {
     } else {
         SELECTED
     };
-    let id = entry.id.clone();
+    let id = badge.terminal_id;
+    let profile = badge.profile_id;
+    let started_at = badge.started_at;
     let lead_mark = if is_blocked {
         icon_tinted(Icon::ShieldAlert, ATTENTION)
             .w(px(12.))
@@ -777,7 +842,7 @@ fn agent_pill(ui: Ui, entry: TerminalEntry, started_at: Option<u64>) -> View {
             .focus(move |s| s.ring(px(1.)).ring_color(tone_color))
             .accessibility_label(move || Some(a11y.clone().into()))
             .child(lead_mark)
-            .child(icon(mark).w(px(12.)).h(px(12.)))
+            .child(icon(badge.provider_icon).w(px(12.)).h(px(12.)))
             .child(
                 text(move || {
                     if herdr.is_working()
@@ -804,21 +869,15 @@ fn agent_pill(ui: Ui, entry: TerminalEntry, started_at: Option<u64>) -> View {
 
 /// A live interactive CLI Agent (or manual Shell running an Agent) on this Card:
 /// opens the Card with that Agent tab selected, reflecting real-time Herdr status.
-fn ephemeral_agent_pill(
-    ui: Ui,
-    card_id: &str,
-    entry: crate::terminals::Entry,
-    started_at: Option<u64>,
-) -> View {
-    let herdr = entry.herdr_status();
-    let (mark, provider) = entry
-        .provider()
-        .unwrap_or_else(|| (Icon::Agent, "Agent".into()));
-    let title = entry.saved.name.clone().unwrap_or_else(|| provider.clone());
-    let attention = entry.attention_reason();
-    let hint = match &attention {
-        Some(reason) => format!("{provider} · {reason} — open in Card"),
-        None => format!("{provider} · {} — open in Card", entry.display_status()),
+fn ephemeral_agent_pill(ui: Ui, card_id: &str, badge: EphemeralAgentBadge) -> View {
+    let herdr = badge.herdr_status;
+    let title = badge.title;
+    let hint = match &badge.attention_reason {
+        Some(reason) => format!("{} · {reason} — open in Card", badge.provider_name),
+        None => format!(
+            "{} · {} — open in Card",
+            badge.provider_name, badge.display_status
+        ),
     };
     let a11y = hint.clone();
     let (bg_color, tone_color, lead_mark) = match herdr {
@@ -861,7 +920,8 @@ fn ephemeral_agent_pill(
     };
     let is_working = herdr.is_working();
     let cid = card_id.to_owned();
-    let tid = entry.saved.id;
+    let tid = badge.terminal_id;
+    let started_at = badge.started_at;
     view().flex_shrink_0().tooltip(hint_tooltip(hint)).child(
         press_target()
             .h(px(22.))
@@ -877,7 +937,7 @@ fn ephemeral_agent_pill(
             .focus(move |s| s.ring(px(1.)).ring_color(tone_color))
             .accessibility_label(move || Some(a11y.clone().into()))
             .child(lead_mark)
-            .child(icon(mark).w(px(12.)).h(px(12.)))
+            .child(icon(badge.provider_icon).w(px(12.)).h(px(12.)))
             .child(
                 text(move || {
                     if is_working && let Some(ts) = started_at {

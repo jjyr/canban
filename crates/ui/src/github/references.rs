@@ -83,21 +83,14 @@ pub(crate) fn related_indexed(
 }
 
 pub fn panel(ui: Ui) -> impl IntoElement {
-    dynamic(move || {
-        let Some(c) = ui.current_card() else {
-            return view().into_element();
-        };
+    let refs_model = computed(move || {
+        let c = ui.current_card()?;
         let card_events = ui.card_timeline_events(&c.id);
-        let refs = ui.index.with(|idx| related_indexed(&c, idx, &card_events));
-        let mut area = view().gap_1();
-        if !refs.is_empty() {
-            let mut row = view()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .gap_1()
-                .child(muted("References"));
-            for r in refs {
+        let refs: Vec<(String, String)> = ui
+            .index
+            .with(|idx| related_indexed(&c, idx, &card_events))
+            .into_iter()
+            .map(|r| {
                 let kind = match r.kind.as_str() {
                     "pr" => "PR",
                     "issue" => "Issue",
@@ -110,28 +103,57 @@ pub fn panel(ui: Ui) -> impl IntoElement {
                         .map(|n| format!("#{n}"))
                         .unwrap_or_else(|| format!("@{}", r.sha.clone().unwrap_or_default()))
                 );
+                (title, r.url)
+            })
+            .collect();
+        let delivery_pr = c
+            .pull_request
+            .clone()
+            .filter(|p| {
+                p.number > 0
+                    && !c.github_issue().is_some_and(|s| {
+                        s.repository.eq_ignore_ascii_case(&p.repository) && s.number == p.number
+                    })
+            })
+            .map(|pr| {
+                (
+                    format!(
+                        "Delivery PR {}#{} · {}",
+                        pr.repository,
+                        pr.number,
+                        if pr.merged { "merged" } else { &pr.state }
+                    ),
+                    pr.url,
+                )
+            });
+        if refs.is_empty() && delivery_pr.is_none() {
+            return None;
+        }
+        Some((refs, delivery_pr))
+    });
+    dynamic(move || {
+        let Some((refs, delivery_pr)) = refs_model.get() else {
+            return view().into_element();
+        };
+        let mut area = view().gap_1();
+        if !refs.is_empty() {
+            let mut row = view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap_1()
+                .child(muted("References"));
+            for (title, url) in refs {
                 row = row.child(compact_action(title, Variant::Quiet, move |_| {
-                    crate::links::open(ui, &r.url)
+                    crate::links::open(ui, &url)
                 }));
             }
             area = area.child(row);
         }
-        if let Some(pr) = c.pull_request.clone().filter(|p| {
-            p.number > 0
-                && !c.github_issue().is_some_and(|s| {
-                    s.repository.eq_ignore_ascii_case(&p.repository) && s.number == p.number
-                })
-        }) {
-            area = area.child(compact_action(
-                format!(
-                    "Delivery PR {}#{} · {}",
-                    pr.repository,
-                    pr.number,
-                    if pr.merged { "merged" } else { &pr.state }
-                ),
-                Variant::Quiet,
-                move |_| crate::links::open(ui, &pr.url),
-            ));
+        if let Some((title, url)) = delivery_pr {
+            area = area.child(compact_action(title, Variant::Quiet, move |_| {
+                crate::links::open(ui, &url)
+            }));
         }
         area.into_element()
     })

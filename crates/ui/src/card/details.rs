@@ -1,5 +1,15 @@
 use super::*;
 pub fn render(ui: Ui, draft: Signal<Draft>) -> impl IntoElement {
+    let attachments = computed(move || {
+        let card = ui.card_id();
+        ui.index.with(|idx| {
+            idx.artifacts
+                .iter()
+                .filter(|a| a.card_id == card)
+                .map(|a| (a.card_id.clone(), a.name.clone(), a.path.clone()))
+                .collect::<Vec<_>>()
+        })
+    });
     when(
         move || draft.with(|d| d.details),
         move || {
@@ -16,20 +26,18 @@ pub fn render(ui: Ui, draft: Signal<Draft>) -> impl IntoElement {
                         })),
                 )
                 .child(dynamic(move || {
-                    let card = ui.card_id();
-                    view().gap_1().children(ui.snapshot.with(|s| {
-                        s.artifacts
-                            .iter()
-                            .filter(|a| a.card_id == card)
-                            .map(|a| {
-                                let (id, path) = (a.card_id.clone(), a.path.clone());
-                                action(a.name.clone(), Variant::Quiet, move |_| {
+                    view().gap_1().children(
+                        attachments
+                            .get()
+                            .into_iter()
+                            .map(|(id, name, path)| {
+                                action(name, Variant::Quiet, move |_| {
                                     open_resource(ui, id.clone(), path.clone())
                                 })
                                 .into_element()
                             })
-                            .collect::<Vec<_>>()
-                    }))
+                            .collect::<Vec<_>>(),
+                    )
                 }))
         },
     )

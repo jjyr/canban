@@ -76,6 +76,13 @@ impl AppServer {
         }
         Ok(response)
     }
+
+    pub(super) fn runtime_state_response(&self, _p: &Value) -> Result<Value> {
+        Ok(json!({
+            "server_id": self.identity,
+            "runtime": self.runtime_state()?,
+        }))
+    }
 }
 
 /// Retain only small synchronization metadata, never a second JSON history tree.

@@ -1687,19 +1687,27 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
     match model.uses.as_str() {
         "agent" => {
             let pid = id.clone();
+            let agent_profiles = computed(move || {
+                let profiles = ui.profiles.get();
+                let proj = ui.current_project();
+                profiles
+                    .into_iter()
+                    .map(|prof| {
+                        let (mark, _, _) =
+                            crate::profiles::effective_provider(&prof, proj.as_ref());
+                        (prof.id, mark)
+                    })
+                    .collect::<Vec<_>>()
+            });
             form = form
                 .child(dynamic(move || {
-                    let profiles = ui.profiles.get();
+                    let profiles = agent_profiles.get();
                     let mut seg = view().flex_row().flex_wrap().gap_1();
-                    for prof in profiles {
-                        let (sel, chosen) = (prof.id.clone(), prof.id.clone());
-                        let (mark, _, _) = crate::profiles::effective_provider(
-                            &prof,
-                            ui.current_project().as_ref(),
-                        );
+                    for (prof_id, mark) in profiles {
+                        let (sel, chosen) = (prof_id.clone(), prof_id.clone());
                         let pid = pid.clone();
                         seg = seg.child(compact_segment(
-                            format!("@{}", prof.id),
+                            format!("@{prof_id}"),
                             Some(mark),
                             move || node.with(|n| n.profile == sel),
                             move |_| ctx.set_with(&pid, "profile", Some(json!(chosen.clone()))),
@@ -2079,47 +2087,61 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
                         },
                     ),
                 ))
-                .child(dynamic(move || {
-                    if node.with(|n| n.max_conflict == 0) {
-                        return view().into_element();
-                    }
-                    let profiles = ui.profiles.get();
-                    let mut seg = view().flex_row().flex_wrap().gap_1();
-                    for prof in profiles {
-                        let (sel, chosen) = (prof.id.clone(), prof.id.clone());
-                        let (mark, _, _) = crate::profiles::effective_provider(
-                            &prof,
-                            ui.current_project().as_ref(),
-                        );
-                        let pid = pid.clone();
-                        seg = seg.child(compact_segment(
-                            format!("@{}", prof.id),
-                            Some(mark),
-                            move || {
-                                node.with(|n| {
-                                    let active = if n.profile.is_empty() {
-                                        "merger"
-                                    } else {
-                                        n.profile.as_str()
-                                    };
-                                    active == sel
+                .child({
+                    let conflict_profiles = computed(move || {
+                        if node.with(|n| n.max_conflict == 0) {
+                            return None;
+                        }
+                        let profiles = ui.profiles.get();
+                        let proj = ui.current_project();
+                        Some(
+                            profiles
+                                .into_iter()
+                                .map(|prof| {
+                                    let (mark, _, _) =
+                                        crate::profiles::effective_provider(&prof, proj.as_ref());
+                                    (prof.id, mark)
                                 })
-                            },
-                            move |_| {
-                                ctx.set_with(
-                                    &pid,
-                                    "profile",
-                                    (chosen != "merger").then(|| json!(chosen.clone())),
-                                )
-                            },
-                        ));
-                    }
-                    view()
-                        .gap_1()
-                        .child(muted("Conflict Agent").text_size(px(12.)))
-                        .child(seg)
-                        .into_element()
-                }))
+                                .collect::<Vec<_>>(),
+                        )
+                    });
+                    dynamic(move || {
+                        let Some(profiles) = conflict_profiles.get() else {
+                            return view().into_element();
+                        };
+                        let mut seg = view().flex_row().flex_wrap().gap_1();
+                        for (prof_id, mark) in profiles {
+                            let (sel, chosen) = (prof_id.clone(), prof_id.clone());
+                            let pid = pid.clone();
+                            seg = seg.child(compact_segment(
+                                format!("@{prof_id}"),
+                                Some(mark),
+                                move || {
+                                    node.with(|n| {
+                                        let active = if n.profile.is_empty() {
+                                            "merger"
+                                        } else {
+                                            n.profile.as_str()
+                                        };
+                                        active == sel
+                                    })
+                                },
+                                move |_| {
+                                    ctx.set_with(
+                                        &pid,
+                                        "profile",
+                                        (chosen != "merger").then(|| json!(chosen.clone())),
+                                    )
+                                },
+                            ));
+                        }
+                        view()
+                            .gap_1()
+                            .child(muted("Conflict Agent").text_size(px(12.)))
+                            .child(seg)
+                            .into_element()
+                    })
+                })
                 .child(rework());
         }
         "approval" => {

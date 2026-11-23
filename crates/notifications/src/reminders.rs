@@ -165,6 +165,107 @@ fn event_is_audible_when_unread(id: &str, e: &Event) -> bool {
         )
 }
 
+fn runtime_reminder_for_reason(
+    s: &Snapshot,
+    row: &overview::OverviewRow,
+    reason: &overview::OverviewReason,
+) -> Option<Reminder> {
+    if !matches!(reason.source.as_str(), "runtime" | "recovery") {
+        return None;
+    }
+    let agent = row.agent();
+    let target = row
+        .terminal
+        .as_ref()
+        .map(|t| t.id.as_str())
+        .unwrap_or(&row.id);
+    let id = match reason.source.as_str() {
+        "runtime" => agent
+            .and_then(|a| a.lifecycle.waiting.as_ref())
+            .map(|w| format!("wait:{}", w.id))
+            .unwrap_or_else(|| {
+                let runtime = agent.map(|a| a.runtime_status()).unwrap_or("unknown");
+                if matches!(runtime, "idle" | "done") {
+                    let turn = agent
+                        .and_then(|a| a.observed.as_ref())
+                        .and_then(|v| v["turn"].as_u64())
+                        .unwrap_or(0);
+                    if agent.is_some_and(|a| a.trigger.is_automatic()) {
+                        let anchor = agent
+                            .and_then(|a| crate::unreported_idle_anchor(s, target, a))
+                            .unwrap_or(turn);
+                        format!("stalled:{target}:{anchor}")
+                    } else {
+                        format!("idle:{target}:{turn}")
+                    }
+                } else {
+                    format!("runtime:{target}")
+                }
+            }),
+        _ => format!("recovery:{target}"),
+    };
+    let created_at = agent
+        .and_then(|a| a.lifecycle.waiting.as_ref())
+        .map(|w| w.since)
+        .or_else(|| agent.and_then(|a| a.lifecycle.idle_since))
+        .unwrap_or(row.card.created_at);
+    Some(Reminder {
+        id,
+        project_id: row.card.project_id.clone(),
+        card_id: row.card.id.clone(),
+        message: reason.message.clone(),
+        unread: false,
+        pending: true,
+        sequence: 0,
+        created_at,
+        audible_when_unread: false,
+        event: None,
+    })
+}
+
+pub fn runtime_reminders(s: &Snapshot) -> Vec<Reminder> {
+    let mut out = Vec::new();
+    for row in overview(s).into_iter().filter(|r| r.card.active()) {
+        for reason in &row.reasons {
+            if let Some(rem) = runtime_reminder_for_reason(s, &row, reason) {
+                out.push(rem);
+            }
+        }
+    }
+    out
+}
+
+pub fn is_runtime_reminder_id(id: &str) -> bool {
+    id.starts_with("wait:")
+        || id.starts_with("stalled:")
+        || id.starts_with("idle:")
+        || id.starts_with("runtime:")
+        || id.starts_with("recovery:")
+}
+
+/// Recompute only runtime/recovery reminders after applying a partial `RuntimeState`
+/// while preserving event-derived unread/gate/delivery reminders in `s.reminders`.
+pub fn reconcile_runtime_reminders(s: &mut Snapshot) {
+    let mut items = BTreeMap::<String, Reminder>::new();
+    for rem in s
+        .reminders
+        .drain(..)
+        .filter(|r| !is_runtime_reminder_id(&r.id))
+    {
+        items.insert(rem.id.clone(), rem);
+    }
+    for rem in runtime_reminders(s) {
+        items
+            .entry(rem.id.clone())
+            .and_modify(|i| i.pending = true)
+            .or_insert(rem);
+    }
+    s.reminders = items
+        .into_values()
+        .filter(|i| i.pending || i.unread)
+        .collect();
+}
+
 pub fn reminders_from_events(s: &Snapshot, events: &[Event]) -> Vec<Reminder> {
     let active_cards: BTreeSet<&str> = s
         .cards
@@ -221,6 +322,13 @@ pub fn reminders_from_events(s: &Snapshot, events: &[Event]) -> Vec<Reminder> {
             if reason.source == "question" {
                 continue;
             }
+            if let Some(rem) = runtime_reminder_for_reason(s, &row, reason) {
+                items
+                    .entry(rem.id.clone())
+                    .and_modify(|i| i.pending = true)
+                    .or_insert(rem);
+                continue;
+            }
             let report = row
                 .card
                 .human_gate
@@ -251,46 +359,10 @@ pub fn reminders_from_events(s: &Snapshot, events: &[Event]) -> Vec<Reminder> {
                         None
                     }
                 });
-            let agent = row.agent();
-            let target = row
-                .terminal
-                .as_ref()
-                .map(|t| t.id.as_str())
-                .unwrap_or(&row.id);
-            let id = match reason.source.as_str() {
-                "task" | "review" => report
-                    .and_then(|e| message_id_in_refs(card_evs, e))
-                    .unwrap_or_else(|| format!("gate:{}", row.card.id)),
-                "runtime" => agent
-                    .and_then(|a| a.lifecycle.waiting.as_ref())
-                    .map(|w| format!("wait:{}", w.id))
-                    .unwrap_or_else(|| {
-                        let runtime = agent.map(|a| a.runtime_status()).unwrap_or("unknown");
-                        if matches!(runtime, "idle" | "done") {
-                            let turn = agent
-                                .and_then(|a| a.observed.as_ref())
-                                .and_then(|v| v["turn"].as_u64())
-                                .unwrap_or(0);
-                            if agent.is_some_and(|a| a.trigger.is_automatic()) {
-                                let anchor = agent
-                                    .and_then(|a| crate::unreported_idle_anchor(s, target, a))
-                                    .unwrap_or(turn);
-                                format!("stalled:{target}:{anchor}")
-                            } else {
-                                format!("idle:{target}:{turn}")
-                            }
-                        } else {
-                            format!("runtime:{target}")
-                        }
-                    }),
-                _ => format!("recovery:{target}"),
-            };
-            let created_at = agent
-                .and_then(|a| a.lifecycle.waiting.as_ref())
-                .map(|w| w.since)
-                .or_else(|| agent.and_then(|a| a.lifecycle.idle_since))
-                .or_else(|| report.map(|e| e.created_at))
-                .unwrap_or(row.card.created_at);
+            let id = report
+                .and_then(|e| message_id_in_refs(card_evs, e))
+                .unwrap_or_else(|| format!("gate:{}", row.card.id));
+            let created_at = report.map(|e| e.created_at).unwrap_or(row.card.created_at);
             items
                 .entry(id.clone())
                 .and_modify(|i| i.pending = true)

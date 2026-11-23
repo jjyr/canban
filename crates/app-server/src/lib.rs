@@ -684,12 +684,12 @@ impl AppServer {
             let hook_github_rev = github_revision.clone();
             let hook_push_seq = push_seq.clone();
             let hook_push_tx = push_tx.clone();
-            store.set_on_commit(move |after| {
+            store.set_on_commit(move |after, topic| {
                 hook_changes.store(after, Ordering::SeqCst);
                 let seq = hook_push_seq.fetch_add(1, Ordering::SeqCst) + 1;
                 let _ = hook_push_tx.send(state::PushEvent::StateChanged {
                     seq,
-                    topic: "application",
+                    topic,
                     card_id: None,
                     github_revision: hook_github_rev.load(Ordering::SeqCst),
                 });
@@ -1088,6 +1088,42 @@ impl AppServer {
         let mut snapshot = self.store.lock().unwrap().db().terminal_snapshot()?;
         self.populate_terminal_contexts(&mut snapshot);
         Ok(snapshot)
+    }
+
+    pub fn runtime_state(&self) -> Result<RuntimeState> {
+        let mut snapshot = self.store.lock().unwrap().db().admission_snapshot()?;
+        {
+            let guard = self.merging_cards.lock().unwrap();
+            if !guard.is_empty() {
+                snapshot.merging_cards = guard
+                    .iter()
+                    .filter(|id| {
+                        snapshot
+                            .cards
+                            .iter()
+                            .any(|c| &c.id == *id && c.active() && !c.resolved())
+                    })
+                    .cloned()
+                    .collect();
+            }
+        }
+        self.populate_terminal_contexts(&mut snapshot);
+        self.project_observation_freshness(&mut snapshot);
+        self.populate_reclaim_status(&mut snapshot);
+        let local_active = canban_scheduler::active_count(&snapshot);
+        let mut runtime = RuntimeState {
+            terminals: snapshot.terminals,
+            terminal_contexts: snapshot.terminal_contexts,
+            reclaim_status: snapshot.reclaim_status,
+            merging_cards: snapshot.merging_cards,
+            terminal_hosts: std::collections::BTreeMap::new(),
+            host_active_agents: std::collections::BTreeMap::from([(
+                "local".to_owned(),
+                local_active,
+            )]),
+        };
+        runtime.register_host("local");
+        Ok(runtime)
     }
 
     pub fn events(&self) -> Result<Vec<Event>> {

@@ -1774,32 +1774,60 @@ fn master_list(ui: Ui, items: Memo<Vec<ScheduleItem>>) -> impl IntoElement {
                                         .flex_1()
                                         .min_w(px(0.)),
                                     )
-                                    .child(dynamic(move || {
-                                        let enabled = item_sig.with(|i| i.effective_enabled);
-                                        let blocked = item_sig.with(|i| i.active_blocked);
-                                        let latest_failed = item_sig.with(|i| {
-                                            i.latest_run
-                                                .as_ref()
-                                                .is_some_and(|r| r.state == "failed")
-                                        });
-                                        let active_run = ui.snapshot.with(|snap| {
-                                            let s_id = item_sig.with(|i| i.schedule_id.clone());
-                                            snap.scheduled_runs
-                                                .iter()
-                                                .any(|r| r.schedule_id == s_id && r.active())
-                                        });
-                                        if blocked {
-                                            live_status("Needs you", Tone::Attention).into_element()
-                                        } else if active_run {
-                                            live_status("Running", Tone::Info).into_element()
-                                        } else if latest_failed {
-                                            status("Failed", Tone::Danger).into_element()
-                                        } else if enabled {
-                                            status("Active", Tone::Success).into_element()
-                                        } else {
-                                            status("Paused", Tone::Neutral).into_element()
+                                    .child({
+                                        #[derive(Clone, Copy, PartialEq, Eq)]
+                                        enum RowStatus {
+                                            NeedsYou,
+                                            Running,
+                                            Failed,
+                                            Active,
+                                            Paused,
                                         }
-                                    })),
+                                        let row_status = computed(move || {
+                                            let enabled = item_sig.with(|i| i.effective_enabled);
+                                            let blocked = item_sig.with(|i| i.active_blocked);
+                                            let latest_failed = item_sig.with(|i| {
+                                                i.latest_run
+                                                    .as_ref()
+                                                    .is_some_and(|r| r.state == "failed")
+                                            });
+                                            let active_run = ui.snapshot.with(|snap| {
+                                                let s_id = item_sig.with(|i| i.schedule_id.clone());
+                                                snap.scheduled_runs
+                                                    .iter()
+                                                    .any(|r| r.schedule_id == s_id && r.active())
+                                            });
+                                            if blocked {
+                                                RowStatus::NeedsYou
+                                            } else if active_run {
+                                                RowStatus::Running
+                                            } else if latest_failed {
+                                                RowStatus::Failed
+                                            } else if enabled {
+                                                RowStatus::Active
+                                            } else {
+                                                RowStatus::Paused
+                                            }
+                                        });
+                                        dynamic(move || match row_status.get() {
+                                            RowStatus::NeedsYou => {
+                                                live_status("Needs you", Tone::Attention)
+                                                    .into_element()
+                                            }
+                                            RowStatus::Running => {
+                                                live_status("Running", Tone::Info).into_element()
+                                            }
+                                            RowStatus::Failed => {
+                                                status("Failed", Tone::Danger).into_element()
+                                            }
+                                            RowStatus::Active => {
+                                                status("Active", Tone::Success).into_element()
+                                            }
+                                            RowStatus::Paused => {
+                                                status("Paused", Tone::Neutral).into_element()
+                                            }
+                                        })
+                                    }),
                             )
                             .child(
                                 view()

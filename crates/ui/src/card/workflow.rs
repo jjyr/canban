@@ -91,10 +91,37 @@ fn step_badge_label(id: &str, step: &WorkflowStep) -> String {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct MergeQueueInfo {
+    pos: usize,
+    total: usize,
+    head_card_num: Option<u64>,
+    head_pause: Option<String>,
+    head_resolving: bool,
+}
+
+#[derive(Clone, PartialEq)]
+struct WorkflowPanelModel {
+    card_id: String,
+    card_active: bool,
+    card_has_worktree: bool,
+    card_delivery_none: bool,
+    card_pr_merged: bool,
+    card_hold_auto_merge: bool,
+    card_reason: Option<String>,
+    runs: Vec<canban_types::WorkflowRun>,
+    has_any_active_run: bool,
+    idle_deliver_workflow: Option<(String, String)>,
+    had_previous_run: bool,
+    att_profiles: std::collections::BTreeMap<String, (String, Option<u64>, bool)>,
+    queue_info: Option<MergeQueueInfo>,
+    active_batch: Option<(canban_types::MergeBatch, usize, usize)>,
+}
+
 pub fn render(ui: Ui) -> impl IntoElement {
     let rework_open = signal(false);
     let rework_text = signal(String::new());
-    dynamic(move || {
+    let model = computed(move || {
         let card_id = ui.card_id();
         let card_opt = ui.current_card();
         let (
@@ -186,7 +213,13 @@ pub fn render(ui: Ui) -> impl IntoElement {
                     head.state.as_str(),
                     "waiting_agent" | "running" | "waiting_batch"
                 );
-                (pos, total, head_card_num, head_pause, head_resolving)
+                MergeQueueInfo {
+                    pos,
+                    total,
+                    head_card_num,
+                    head_pause,
+                    head_resolving,
+                }
             });
             let active_batch = s
                 .active_merge_batch_for_card(&card_id)
@@ -201,21 +234,61 @@ pub fn render(ui: Ui) -> impl IntoElement {
                 active_batch,
             )
         });
+        let card_reason = card_opt.as_ref().and_then(|c| {
+            c.human_gate
+                .as_ref()
+                .map(|g| g.reason.clone())
+                .or_else(|| c.attention.clone())
+                .filter(|r| !r.trim().is_empty())
+        });
+        WorkflowPanelModel {
+            card_id,
+            card_active: card_opt.as_ref().is_some_and(|c| c.active()),
+            card_has_worktree: card_opt.as_ref().is_some_and(|c| c.worktree.is_some()),
+            card_delivery_none: card_opt.as_ref().is_some_and(|c| c.delivery.is_none()),
+            card_pr_merged: card_opt
+                .as_ref()
+                .is_some_and(|c| c.pull_request.as_ref().is_some_and(|p| p.merged)),
+            card_hold_auto_merge: card_opt.as_ref().is_some_and(|c| c.hold_auto_merge),
+            card_reason,
+            runs,
+            has_any_active_run,
+            idle_deliver_workflow,
+            had_previous_run,
+            att_profiles,
+            queue_info,
+            active_batch,
+        }
+    });
+    dynamic(move || {
+        let WorkflowPanelModel {
+            card_id,
+            card_active,
+            card_has_worktree,
+            card_delivery_none,
+            card_pr_merged,
+            card_hold_auto_merge,
+            card_reason,
+            runs,
+            has_any_active_run,
+            idle_deliver_workflow,
+            had_previous_run,
+            att_profiles,
+            queue_info,
+            active_batch,
+        } = model.get();
 
         if runs.is_empty()
             && !has_any_active_run
-            && let Some(c) = &card_opt
-            && c.active()
-            && c.worktree.is_some()
-            && c.delivery.is_none()
-            && !c.pull_request.as_ref().is_some_and(|p| p.merged)
+            && card_active
+            && card_has_worktree
+            && card_delivery_none
+            && !card_pr_merged
             && let Some((wf_name, badge_text)) = idle_deliver_workflow
         {
-            let delivering = ui.is_method_pending("workflow.deliver");
-            let cid = c.id.clone();
-            let rev = c.revision;
-            let held = c.hold_auto_merge;
-            let hold_cid = c.id.clone();
+            let cid = card_id.clone();
+            let held = card_hold_auto_merge;
+            let hold_cid = card_id.clone();
             let state_label = if held {
                 "Auto-merge held"
             } else if had_previous_run {
@@ -232,18 +305,26 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         "Hold auto-merge"
                     },
                     Variant::Secondary,
-                    move |_| crate::presenter::hold_auto_merge(ui, &hold_cid, rev, !held),
+                    move |_| {
+                        let rev = ui.current_card().map(|c| c.revision).unwrap_or(0);
+                        crate::presenter::hold_auto_merge(ui, &hold_cid, rev, !held);
+                    },
                 )
-                .disabled(delivering || ui.is_method_pending("card.hold_auto_merge")),
+                .disabled(move || {
+                    ui.is_method_pending("workflow.deliver")
+                        || ui.is_method_pending("card.hold_auto_merge")
+                }),
             );
             actions = actions.child(
                 compact_action(
-                    if delivering {
-                        "Merging…"
-                    } else if had_previous_run {
-                        "Retry auto-merge"
-                    } else {
-                        "Trigger auto-merge"
+                    move || {
+                        if ui.is_method_pending("workflow.deliver") {
+                            "Merging…"
+                        } else if had_previous_run {
+                            "Retry auto-merge"
+                        } else {
+                            "Trigger auto-merge"
+                        }
                     },
                     Variant::Primary,
                     move |_| {
@@ -256,7 +337,7 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         }
                     },
                 )
-                .disabled(delivering),
+                .disabled(move || ui.is_method_pending("workflow.deliver")),
             );
             let mut body = view()
                 .p_2()
@@ -285,13 +366,7 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         .gap_2()
                         .child(status(format!("○ {badge_text}"), Tone::Neutral)),
                 );
-            if let Some(reason) = c
-                .human_gate
-                .as_ref()
-                .map(|g| g.reason.clone())
-                .or_else(|| c.attention.clone())
-                .filter(|r| !r.trim().is_empty())
-            {
+            if let Some(reason) = card_reason {
                 body = body.child(notice(reason, Tone::Attention));
             }
             return body.into_element();
@@ -439,18 +514,17 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         }
                     }
 
-                    let pending_action = ui.is_method_pending("workflow.decide")
-                        || ui.is_method_pending("workflow.deliver")
-                        || ui.is_method_pending("card.hold_auto_merge");
+                    let pending_action = move || {
+                        ui.is_method_pending("workflow.decide")
+                            || ui.is_method_pending("workflow.deliver")
+                            || ui.is_method_pending("card.hold_auto_merge")
+                    };
 
                     let mut actions = view().flex_row().flex_wrap().items_center().gap_2();
                     if run.active() {
-                        if has_deliver
-                            && let Some(c) = &card_opt
-                        {
-                            let held = c.hold_auto_merge;
-                            let cid = c.id.clone();
-                            let rev = c.revision;
+                        if has_deliver {
+                            let held = card_hold_auto_merge;
+                            let cid = card_id.clone();
                             actions = actions.child(
                                 compact_action(
                                     if held {
@@ -464,6 +538,10 @@ pub fn render(ui: Ui) -> impl IntoElement {
                                         Variant::Secondary
                                     },
                                     move |_| {
+                                        let rev = ui
+                                            .current_card()
+                                            .map(|c| c.revision)
+                                            .unwrap_or(0);
                                         crate::presenter::hold_auto_merge(ui, &cid, rev, !held)
                                     },
                                 )
@@ -552,10 +630,12 @@ pub fn render(ui: Ui) -> impl IntoElement {
                                     .disabled(pending_action),
                                 );
                                 actions = actions.child(compact_action(
-                                    if rework_open.get() {
-                                        "Hide note"
-                                    } else {
-                                        "With note…"
+                                    move || {
+                                        if rework_open.get() {
+                                            "Hide note"
+                                        } else {
+                                            "With note…"
+                                        }
                                     },
                                     Variant::Quiet,
                                     move |_| rework_open.update(|v| *v = !*v),
@@ -657,18 +737,19 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         "waiting_delivery" => {
                             if let Some((ref batch, idx, total)) = active_batch {
                                 batch_state_label(batch, idx, total, "Merging…".to_owned())
-                            } else if let Some((pos, total, head_num, _, head_resolving)) = &queue_info {
-                                if *pos > 1 {
-                                    if *head_resolving {
-                                        if let Some(num) = head_num {
+                            } else if let Some(q) = &queue_info {
+                                if q.pos > 1 {
+                                    if q.head_resolving {
+                                        if let Some(num) = q.head_card_num {
                                             format!(
-                                                "Queued for merge (#{pos} of {total} · waiting on #{num} conflict)"
+                                                "Queued for merge (#{} of {} · waiting on #{num} conflict)",
+                                                q.pos, q.total
                                             )
                                         } else {
-                                            format!("Queued for merge (#{pos} of {total})")
+                                            format!("Queued for merge (#{} of {})", q.pos, q.total)
                                         }
                                     } else {
-                                        format!("Queued for merge (#{pos} of {total})")
+                                        format!("Queued for merge (#{} of {})", q.pos, q.total)
                                     }
                                 } else if run.queue_pause_reason().is_some() {
                                     "Merge queue waiting".to_owned()
@@ -698,7 +779,7 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         }
                         "blocked" => "Blocked".to_owned(),
                         "failed" if is_deliver_step => {
-                            if card_opt.as_ref().is_some_and(|c| c.hold_auto_merge) {
+                            if card_hold_auto_merge {
                                 "Auto-merge held".to_owned()
                             } else {
                                 "Auto-merge failed".to_owned()
@@ -706,7 +787,7 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         }
                         "failed" => "Workflow failed".to_owned(),
                         _ if is_deliver_step => {
-                            if card_opt.as_ref().is_some_and(|c| c.hold_auto_merge) {
+                            if card_hold_auto_merge {
                                 "Auto-merge held".to_owned()
                             } else {
                                 "Auto-merge paused".to_owned()
@@ -812,8 +893,9 @@ pub fn render(ui: Ui) -> impl IntoElement {
                     if run.state == "waiting_delivery" {
                         if let Some(pause_reason) = run.queue_pause_reason() {
                             body = body.child(notice(pause_reason.to_owned(), Tone::Attention));
-                        } else if let Some((pos, _, _, Some(head_pause), _)) = &queue_info
-                            && *pos > 1
+                        } else if let Some(q) = &queue_info
+                            && q.pos > 1
+                            && let Some(head_pause) = &q.head_pause
                         {
                             body = body.child(notice(head_pause.clone(), Tone::Attention));
                         }
@@ -821,15 +903,8 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         run.state.as_str(),
                         "waiting_approval" | "stale" | "failed" | "blocked"
                     ) || deliver_retryable)
-                        && let Some(reason) = card_opt
-                            .as_ref()
-                            .and_then(|c| {
-                                c.human_gate
-                                    .as_ref()
-                                    .map(|g| g.reason.clone())
-                                    .or_else(|| c.attention.clone())
-                            })
-                            .filter(|r| !r.trim().is_empty())
+                        && let Some(reason) = card_reason
+                            .clone()
                             .or_else(|| run.error.clone().filter(|r| !r.trim().is_empty()))
                     {
                         let notice_tone = if run.state == "failed" {
@@ -840,39 +915,42 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         body = body.child(notice(reason, notice_tone));
                     }
 
-                    if rework_open.get() && (run.state == "waiting_approval" || run.state == "stale")
-                    {
+                    if run.state == "waiting_approval" || run.state == "stale" {
                         let id = run.id.clone();
                         let visit = run.visit;
-                        body = body.child(
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    field(
-                                        rework_text,
-                                        "Rework instructions for the Agent (optional)…",
+                        body = body.child(when(
+                            move || rework_open.get(),
+                            move || {
+                                let id = id.clone();
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        field(
+                                            rework_text,
+                                            "Rework instructions for the Agent (optional)…",
+                                        )
+                                        .flex_1(),
                                     )
-                                    .flex_1(),
-                                )
-                                .child(compact_action(
-                                    "Send rework",
-                                    Variant::Primary,
-                                    move |_| {
-                                        if let Some(card) = ui.current_card() {
-                                            let note = rework_text.get_untracked();
-                                            rework_open.set(false);
-                                            rework_text.set(String::new());
-                                            dispatch(
-                                                ui,
-                                                "workflow.decide",
-                                                json!({"run_id":id,"visit":visit,"revision":card.revision,"decision":"rework","feedback":note}),
-                                            );
-                                        }
-                                    },
-                                )),
-                        );
+                                    .child(compact_action(
+                                        "Send rework",
+                                        Variant::Primary,
+                                        move |_| {
+                                            if let Some(card) = ui.current_card() {
+                                                let note = rework_text.get_untracked();
+                                                rework_open.set(false);
+                                                rework_text.set(String::new());
+                                                dispatch(
+                                                    ui,
+                                                    "workflow.decide",
+                                                    json!({"run_id":id,"visit":visit,"revision":card.revision,"decision":"rework","feedback":note}),
+                                                );
+                                            }
+                                        },
+                                    ))
+                            },
+                        ));
                     }
                     body.into_element()
                 })

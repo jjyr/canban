@@ -1467,6 +1467,24 @@ pub struct Snapshot {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub scoped_env: BTreeMap<String, BTreeMap<String, EnvEntryMeta>>,
 }
+
+/// Bounded runtime-only projection returned by `runtime.state` for lightweight
+/// `terminals` / `reclaim` refreshes without cloning or serializing full workspace history.
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
+pub struct RuntimeState {
+    #[serde(default)]
+    pub terminals: Vec<TerminalEntry>,
+    #[serde(default)]
+    pub terminal_contexts: Vec<TerminalContext>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reclaim_status: Vec<TerminalReclaimStatus>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merging_cards: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub terminal_hosts: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub host_active_agents: BTreeMap<String, usize>,
+}
 impl Snapshot {
     pub fn reclaim_status_for(&self, terminal_id: &str) -> Option<&TerminalReclaimStatus> {
         self.reclaim_status

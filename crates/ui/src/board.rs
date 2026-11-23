@@ -361,33 +361,38 @@ fn stage_tabs(
     stages: Vec<canban_types::Stage>,
     focus: Signal<String>,
 ) -> impl IntoElement {
-    dynamic(move || {
+    let tab_counts = computed(move || {
         let cards = state.cards.get();
-        segmented().children(
+        let pid = ui.project.get();
+        ui.index.with(|idx| {
             stages
                 .iter()
                 .map(|stage| {
-                    let id = stage.id.clone();
+                    let visible = cards.iter().filter(|c| c.stage == stage.id).count();
+                    let total = idx
+                        .cards
+                        .values()
+                        .filter(|c| c.project_id == pid && c.active() && c.stage == stage.id)
+                        .count();
+                    let title = if visible == total {
+                        format!("{} {visible}", stage.name)
+                    } else {
+                        format!("{} {visible} / {total}", stage.name)
+                    };
+                    (stage.id.clone(), title)
+                })
+                .collect::<Vec<_>>()
+        })
+    });
+    dynamic(move || {
+        let items = tab_counts.get();
+        segmented().children(
+            items
+                .into_iter()
+                .map(|(id, title)| {
                     let selected = id.clone();
-                    let count = id.clone();
                     compact_segment(
-                        format!("{} {}", stage.name, {
-                            let visible = cards.iter().filter(|c| c.stage == count).count();
-                            let pid = ui.project.get();
-                            let total = ui.snapshot.with(|s| {
-                                s.cards
-                                    .iter()
-                                    .filter(|c| {
-                                        c.project_id == pid && c.active() && c.stage == count
-                                    })
-                                    .count()
-                            });
-                            if visible == total {
-                                visible.to_string()
-                            } else {
-                                format!("{visible} / {total}")
-                            }
-                        }),
+                        title,
                         None,
                         move || focus.get() == selected,
                         move |_| focus.set(id.clone()),

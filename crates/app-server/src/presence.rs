@@ -376,7 +376,7 @@ impl AppServer {
             self.project_observation_freshness(&mut s);
             let status = self.compute_reclaim_status(&s, at);
             if self.presence.sync_emitted_reclaim(&status) {
-                self.emit("runtime", None);
+                self.emit("reclaim", None);
             } else {
                 self.wake_runtime();
             }

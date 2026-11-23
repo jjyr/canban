@@ -633,9 +633,12 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                     },
                                 )),
                         )
-                        .child(scroll().max_h(px(560.)).p_3p5().child(dynamic(move || {
-                            activity_body(ui, project_scope.get(), stored(true), true)
-                        }))),
+                        .child(scroll().max_h(px(560.)).p_3p5().child(activity_panel(
+                            ui,
+                            project_scope,
+                            stored(true),
+                            true,
+                        ))),
                 ),
         )
 }
@@ -1494,68 +1497,83 @@ fn card_context_row(
 pub fn screen(ui: Ui) -> impl IntoElement {
     let focus_restored = stored(false);
     let project_scope = signal(String::new());
+    let valid_scope = computed(move || {
+        let scope = project_scope.get();
+        if scope.is_empty() {
+            return None;
+        }
+        let known = canban_types::is_global_project_id(&scope)
+            || ui.index.with(|idx| idx.projects.contains_key(&scope));
+        known.then_some(scope)
+    });
+    let header_counts = computed(move || {
+        let scope = valid_scope.get();
+        let scope_opt = scope.as_deref();
+        ui.snapshot.with(|s| {
+            ui.overview_rows.with(|all_rows| {
+                ui.terminal_entries.with(|entries| {
+                    let actionable_count = all_rows
+                        .iter()
+                        .filter(|r| {
+                            scope_opt.is_none_or(|pid| r.card.project_id == pid) && r.actionable()
+                        })
+                        .count()
+                        + entries
+                            .iter()
+                            .filter(|e| {
+                                scope_opt.is_none_or(|pid| e.project_id.as_deref() == Some(pid))
+                                    && standalone_terminal_needs_you(s, e)
+                            })
+                            .count();
+                    let running_count = running_agents_count_from(s, all_rows, entries, scope_opt);
+                    let queued_count = s
+                        .terminals
+                        .iter()
+                        .filter(|t| {
+                            t.agent.as_ref().is_some_and(|a| {
+                                scope_opt.is_none_or(|pid| a.project_id == pid)
+                                    && (a.state == "queued" || a.pending.is_some())
+                            })
+                        })
+                        .count();
+                    (actionable_count, running_count, queued_count)
+                })
+            })
+        })
+    });
+    let header_chips = computed(move || -> Option<Vec<(String, String)>> {
+        ui.snapshot.with(|s| {
+            ui.terminal_entries.with(|entries| {
+                let has_global = entries.iter().any(|e| {
+                    e.listed()
+                        && e.project_id
+                            .as_deref()
+                            .is_some_and(canban_types::is_global_project_id)
+                }) || s.scheduled_runs.iter().any(|r| {
+                    canban_types::is_global_project_id(&r.project_id)
+                        && (r.active() || r.state == "blocked")
+                });
+                if s.projects.len() <= 1 && !has_global {
+                    return None;
+                }
+                let mut chips = vec![(String::new(), "All".to_owned())];
+                if has_global {
+                    chips.push((canban_types::GLOBAL_PROJECT_ID.into(), "Global".into()));
+                }
+                for p in &s.projects {
+                    chips.push((p.id.clone(), p.name.clone()));
+                }
+                Some(chips)
+            })
+        })
+    });
     view()
         .flex_1()
         .min_h(px(0.))
         .p_5()
         .gap_4()
-        .child(dynamic(move || {
-            let s = ui.snapshot.get();
-            let all_rows = ui.overview_rows.get();
-            let entries = ui.terminal_entries.get();
-            let scope = project_scope.get();
-            let valid_scope = if !scope.is_empty()
-                && !canban_types::is_global_project_id(&scope)
-                && !s.projects.iter().any(|p| p.id == scope)
-            {
-                String::new()
-            } else {
-                scope
-            };
-            let scope_opt = (!valid_scope.is_empty()).then_some(valid_scope.as_str());
-            let actionable_count = all_rows
-                .iter()
-                .filter(|r| scope_opt.is_none_or(|pid| r.card.project_id == pid) && r.actionable())
-                .count()
-                + entries
-                    .iter()
-                    .filter(|e| {
-                        scope_opt.is_none_or(|pid| e.project_id.as_deref() == Some(pid))
-                            && standalone_terminal_needs_you(&s, e)
-                    })
-                    .count();
-            let running_count = running_agents_count_from(&s, &all_rows, &entries, scope_opt);
-            let queued_count = s
-                .terminals
-                .iter()
-                .filter(|t| {
-                    t.agent.as_ref().is_some_and(|a| {
-                        scope_opt.is_none_or(|pid| a.project_id == pid)
-                            && (a.state == "queued" || a.pending.is_some())
-                    })
-                })
-                .count();
-
-            let mut pills = view().flex_row().flex_wrap().items_center().gap_2();
-            if actionable_count > 0 {
-                pills = pills.child(status(
-                    format!("{actionable_count} needs you"),
-                    Tone::Attention,
-                ));
-            }
-            pills = pills.child(status(
-                format!("{running_count} running"),
-                if running_count > 0 {
-                    Tone::Info
-                } else {
-                    Tone::Neutral
-                },
-            ));
-            if queued_count > 0 {
-                pills = pills.child(badge(format!("Queued {queued_count}")));
-            }
-
-            let mut header = view()
+        .child(
+            view()
                 .max_w(px(1080.))
                 .w_full()
                 .flex_row()
@@ -1570,208 +1588,536 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         .items_center()
                         .gap_3()
                         .child(heading("Overview"))
-                        .child(pills),
-                );
-
-            let has_global = entries.iter().any(|e| {
-                e.listed()
-                    && e.project_id
-                        .as_deref()
-                        .is_some_and(canban_types::is_global_project_id)
-            }) || s.scheduled_runs.iter().any(|r| {
-                canban_types::is_global_project_id(&r.project_id)
-                    && (r.active() || r.state == "blocked")
-            });
-            if s.projects.len() > 1 || has_global {
-                let all_selected = valid_scope.is_empty();
-                let mut filter_seg = segmented().child(compact_segment(
-                    "All",
-                    None,
-                    move || all_selected,
-                    move |_| project_scope.set(String::new()),
-                ));
-                if has_global {
-                    let global_selected = canban_types::is_global_project_id(&valid_scope);
-                    filter_seg = filter_seg.child(compact_segment(
-                        "Global",
-                        None,
-                        move || global_selected,
-                        move |_| project_scope.set(canban_types::GLOBAL_PROJECT_ID.into()),
-                    ));
-                }
-                for p in &s.projects {
-                    let pid = p.id.clone();
-                    let is_selected = valid_scope == pid;
-                    filter_seg = filter_seg.child(compact_segment(
-                        p.name.clone(),
-                        None,
-                        move || is_selected,
-                        move |_| project_scope.set(pid.clone()),
-                    ));
-                }
-                header = header.child(filter_seg);
-            }
-
-            header.into_element()
-        }))
+                        .child(dynamic(move || {
+                            let (actionable_count, running_count, queued_count) =
+                                header_counts.get();
+                            let mut pills = view().flex_row().flex_wrap().items_center().gap_2();
+                            if actionable_count > 0 {
+                                pills = pills.child(status(
+                                    format!("{actionable_count} needs you"),
+                                    Tone::Attention,
+                                ));
+                            }
+                            pills = pills.child(status(
+                                format!("{running_count} running"),
+                                if running_count > 0 {
+                                    Tone::Info
+                                } else {
+                                    Tone::Neutral
+                                },
+                            ));
+                            if queued_count > 0 {
+                                pills = pills.child(badge(format!("Queued {queued_count}")));
+                            }
+                            pills.into_element()
+                        })),
+                )
+                .child(when(
+                    move || header_chips.with(Option::is_some),
+                    move || {
+                        dynamic(move || {
+                            let Some(chips) = header_chips.get() else {
+                                return view().into_element();
+                            };
+                            let mut filter_seg = segmented();
+                            for (scope_id, seg_label) in chips {
+                                let id_sel = scope_id.clone();
+                                let id_press = scope_id;
+                                filter_seg = filter_seg.child(compact_segment(
+                                    seg_label,
+                                    None,
+                                    move || {
+                                        valid_scope.with(|v| {
+                                            if id_sel.is_empty() {
+                                                v.is_none()
+                                            } else {
+                                                v.as_deref() == Some(id_sel.as_str())
+                                            }
+                                        })
+                                    },
+                                    move |_| project_scope.set(id_press.clone()),
+                                ));
+                            }
+                            filter_seg.into_element()
+                        })
+                    },
+                )),
+        )
         .child(
             scroll()
                 .flex_1()
                 .min_h(px(0.))
                 .content_offset(scroll_position(ui, "overview:list"))
                 .on_scroll(move |e: &ScrollEvent| capture_scroll(ui, "overview:list".into(), e))
-                .child(dynamic(move || {
-                    activity_body(ui, project_scope.get(), focus_restored, false)
-                })),
+                .child(activity_panel(ui, project_scope, focus_restored, false)),
         )
 }
 
-fn activity_body(
+#[derive(Clone, PartialEq)]
+struct ActivityBodyModel {
+    sections: Vec<ActivitySection>,
+}
+
+#[derive(Clone, PartialEq)]
+enum ActivitySection {
+    Updates(Vec<PreparedUnreadCard>),
+    Group(ActivityGroupModel),
+}
+
+#[derive(Clone, PartialEq)]
+struct ActivityGroupModel {
+    group: &'static str,
+    members: Vec<PreparedOverviewRow>,
+    configurations: Vec<PreparedStandaloneRow>,
+}
+
+#[derive(Clone, PartialEq)]
+struct PreparedOverviewRow {
+    row: OverviewRow,
+    event: RowEvent,
+    profile_tag: Option<String>,
+    remote_host: Option<String>,
+    waiting_since: Option<u64>,
+    unread: usize,
+    primary_label: &'static str,
+    runtime_blocked_with_terminal: bool,
+    has_non_runtime_reason: bool,
+    has_binding: bool,
+    checks_url: Option<String>,
+    pr_url: Option<String>,
+    quick_merge_card: Option<canban_types::Card>,
+    can_resume: bool,
+    show_project: bool,
+}
+
+#[derive(Clone, PartialEq)]
+struct PreparedStandaloneRow {
+    id: String,
+    title: String,
+    card_dest: Option<String>,
+    card_tag: Option<(u64, String)>,
+    event: RowEvent,
+    waiting_since: Option<u64>,
+    project_name: String,
+    provider_name: Option<String>,
+    remote_host: Option<String>,
+    context_title: String,
+    needs_attn: bool,
+    show_project: bool,
+}
+
+#[derive(Clone, PartialEq)]
+struct PreparedUnreadCard {
+    card_id: String,
+    card_number: u64,
+    card_title: String,
+    project_name: String,
+    show_project: bool,
+    event: RowEvent,
+    sequence: Option<u64>,
+    max_seq: u64,
+    unread_count: usize,
+    latest_pr_action: Option<(String, String)>,
+}
+
+fn normalize_overview_row(mut row: OverviewRow) -> OverviewRow {
+    if let Some(term) = row.terminal.as_mut()
+        && let Some(agent) = term.agent.as_mut()
+    {
+        agent.lifecycle.observed_at = None;
+        agent.lifecycle.last_interaction_at = None;
+        agent.updated_at = 0;
+    }
+    row
+}
+
+fn waiting_status_pill(ui: Ui, waiting_since: Option<u64>) -> Option<AnyElement> {
+    waiting_since.map(|since| {
+        status(
+            move || {
+                let _ = ui.runtime_clock.get();
+                crate::components::activity::age(since)
+                    .trim_end_matches(" ago")
+                    .to_owned()
+            },
+            Tone::Attention,
+        )
+        .into_element()
+    })
+}
+
+fn prepare_overview_row(
     ui: Ui,
-    raw_scope: String,
-    focus_restored: Stored<bool>,
-    compact_popover: bool,
-) -> View {
-    let s = ui.snapshot.get();
-    let scope = if !raw_scope.is_empty() && s.projects.iter().any(|p| p.id == raw_scope) {
-        Some(raw_scope)
+    s: &canban_types::Snapshot,
+    idx: &crate::index::SnapshotIndex,
+    counts: &std::collections::BTreeMap<String, canban_notifications::ReminderCount>,
+    profiles: &[canban_types::Profile],
+    row: OverviewRow,
+    show_project: bool,
+) -> PreparedOverviewRow {
+    let event = describe_row(s, &row);
+    let profile_tag = row.agent().map(|a| format!("@{}", a.profile.id));
+    let card_host = s.card_host(&row.card.id);
+    let remote_host = (card_host != "local" && !card_host.is_empty())
+        .then(|| crate::hosts::host_name(ui, card_host));
+    let waiting_since = row
+        .agent()
+        .and_then(|a| a.lifecycle.waiting.as_ref().map(|w| w.since));
+    let unread = counts.get(&row.card.id).map(|c| c.unread).unwrap_or(0);
+    let primary_label = primary(&row);
+    let is_runtime_blocked = runtime_blocked_with_terminal(&row);
+    let has_non_runtime_reason = row.reasons.iter().any(|r| r.source != "runtime");
+    let has_binding = crate::terminals::model::binding(&row).is_some();
+    let pr_view = crate::components::pr_status::from_card(s, idx, &row.card);
+    let checks_url = pr_view.as_ref().and_then(|pv| {
+        (pv.normalized_ci_state() == Some("failure"))
+            .then(|| pv.checks_url())
+            .flatten()
+    });
+    let pr_url = pr_view.as_ref().and_then(|pv| {
+        (row.reasons.iter().any(|r| {
+            r.message.starts_with("Changes requested on PR")
+                || r.message.starts_with("Delivery PR was closed")
+                || (r.message.starts_with("PR #") && r.message.contains("closed"))
+        }) && !pv.pr_url.is_empty())
+        .then(|| pv.pr_url.clone())
+    });
+    let quick_merge_card = if row.reasons.iter().any(|r| r.source == "review") {
+        let project = s.projects.iter().find(|p| p.id == row.card.project_id);
+        crate::card::quick_merge_eligible(&row.card, project).then(|| row.card.clone())
     } else {
         None
     };
-    let mut rows: Vec<_> = overview(&s)
-        .into_iter()
-        .filter(|r| scope.as_deref().is_none_or(|pid| r.card.project_id == pid))
+    let can_resume = crate::terminals::model::can_resume(&row, profiles);
+    PreparedOverviewRow {
+        row: normalize_overview_row(row),
+        event,
+        profile_tag,
+        remote_host,
+        waiting_since,
+        unread,
+        primary_label,
+        runtime_blocked_with_terminal: is_runtime_blocked,
+        has_non_runtime_reason,
+        has_binding,
+        checks_url,
+        pr_url,
+        quick_merge_card,
+        can_resume,
+        show_project,
+    }
+}
+
+fn prepare_standalone_row(
+    ui: Ui,
+    s: &canban_types::Snapshot,
+    entry: &crate::terminals::Entry,
+    show_project: bool,
+) -> PreparedStandaloneRow {
+    let id = entry.saved.id.clone();
+    let is_config = s.configuration_sessions.iter().any(|c| c.id == id);
+    let merge_batch = s.merge_batches.iter().find(|b| b.id == id);
+    let scheduled_run = s.scheduled_runs.iter().find(|r| r.id == id);
+    let needs_attn = standalone_terminal_needs_you(s, entry);
+    let event = describe_standalone_terminal(entry, is_config, merge_batch, scheduled_run);
+    let waiting_since = entry
+        .runtime_wait()
+        .map(|w| w.since)
+        .filter(|&since| since > 0);
+    let project_name = entry.project_name.clone();
+    let context_title = if is_config {
+        "Edit Project Workflows".into()
+    } else if let Some(batch) = merge_batch {
+        let live_cards = batch.items.iter().filter(|i| !i.evicted).count();
+        format!(
+            "Merge queue · {live_cards} Card(s) → {}",
+            batch.target_branch
+        )
+    } else {
+        entry.title()
+    };
+    let remote_host = (entry.host_id != "local" && !entry.host_id.is_empty())
+        .then(|| crate::hosts::host_name(ui, &entry.host_id));
+    PreparedStandaloneRow {
+        id,
+        title: entry.title(),
+        card_dest: entry.card.as_ref().map(|c| c.id.clone()),
+        card_tag: entry.card.as_ref().map(|c| (c.number, c.title.clone())),
+        event,
+        waiting_since,
+        project_name,
+        provider_name: entry.provider().map(|(_, p)| p),
+        remote_host,
+        context_title,
+        needs_attn,
+        show_project,
+    }
+}
+
+fn prepare_unread_cards(
+    s: &canban_types::Snapshot,
+    counts: &std::collections::BTreeMap<String, canban_notifications::ReminderCount>,
+    items: &[canban_notifications::Reminder],
+    all_rows: &[OverviewRow],
+    scope: Option<&str>,
+) -> Vec<PreparedUnreadCard> {
+    let show_project = scope.is_none();
+    let actionable: std::collections::BTreeSet<_> = all_rows
+        .iter()
+        .filter(|r| r.actionable())
+        .map(|r| r.card.id.clone())
         .collect();
-    // Stable task/profile order rather than continuously changing activity timestamps.
-    rows.sort_by(|a, b| {
-        (&a.project_name, a.card.number, &a.id).cmp(&(&a.project_name, b.card.number, &b.id))
-    });
-
-    let mut content = view()
-        .max_w(px(if compact_popover { 10000. } else { 1080. }))
-        .w_full()
-        .gap(px(if compact_popover { 16. } else { 24. }))
-        .pb_2()
-        .min_w(px(0.));
-    let mut updates = unread_updates(ui, scope.as_deref());
-    let mut any_rendered = false;
-
-    for group in ["Needs you", "Running", "Queued", "Idle", "Closed"] {
-        if group == "Running"
-            && let Some(v) = updates.take()
-        {
-            any_rendered = true;
-            content = content.child(v);
-        }
-        let members: Vec<_> = rows
-            .iter()
-            .filter(|r| match group {
-                "Needs you" => r.actionable(),
-                "Running" => r.group == "Working" && !r.actionable(),
-                other => r.group == other && !r.actionable(),
-            })
-            .cloned()
-            .collect();
-        let configurations: Vec<_> = if matches!(group, "Running" | "Needs you") {
-            crate::terminals::entries(&s)
-                .into_iter()
-                .filter(|e| {
-                    scope
-                        .as_deref()
-                        .is_none_or(|pid| e.project_id.as_deref() == Some(pid))
-                        && if group == "Needs you" {
-                            standalone_terminal_needs_you(&s, e)
-                        } else {
-                            standalone_terminal_is_running(&s, e)
-                        }
-                })
-                .collect()
-        } else {
-            vec![]
-        };
-        let count = members.len() + configurations.len();
-        if count == 0 {
-            continue;
-        }
-        any_rendered = true;
-
-        let show_project = scope.is_none();
-        let build_rows = |members: Vec<OverviewRow>,
-                          configurations: Vec<crate::terminals::Entry>| {
-            let mut stack = view().min_w(px(0.));
-            for row in members {
-                let selected = ui.overview_selection.get() == row.id;
-                stack = stack.child(row_view(ui, row, selected, focus_restored, show_project));
+    s.cards
+        .iter()
+        .filter(|c| {
+            scope.is_none_or(|pid| c.project_id == pid)
+                && counts.get(&c.id).is_some_and(|n| n.unread > 0)
+                && !actionable.contains(&c.id)
+        })
+        .map(|card| {
+            let latest = items
+                .iter()
+                .filter(|i| i.card_id == card.id && i.unread)
+                .max_by_key(|i| i.sequence);
+            let event = describe_unread_update(latest);
+            let sequence = latest.map(|i| i.sequence);
+            let max_seq = s
+                .card_summaries
+                .get(&card.id)
+                .map(|summary| summary.last_event_seq)
+                .unwrap_or(0);
+            let unread_count = counts[&card.id].unread;
+            let project_name = s
+                .projects
+                .iter()
+                .find(|p| p.id == card.project_id)
+                .map(|p| p.name.as_str())
+                .unwrap_or("")
+                .to_owned();
+            let latest_pr_action = latest.and_then(|rem| {
+                let meta = rem.event.as_ref()?;
+                let url = meta.action_url.as_deref().filter(|u| !u.is_empty())?;
+                let action_label = meta.action_label.as_deref().filter(|l| !l.is_empty())?;
+                Some((url.to_owned(), action_label.to_owned()))
+            });
+            PreparedUnreadCard {
+                card_id: card.id.clone(),
+                card_number: card.number,
+                card_title: card.title.clone(),
+                project_name,
+                show_project,
+                event,
+                sequence,
+                max_seq,
+                unread_count,
+                latest_pr_action,
             }
-            for entry in configurations {
-                stack = stack.child(config_session_row(ui, entry, show_project));
-            }
-            stack
-        };
+        })
+        .collect()
+}
 
-        if matches!(group, "Idle" | "Closed") {
-            let is_open = if group == "Closed" {
-                ui.overview_closed.get()
+fn activity_panel(
+    ui: Ui,
+    project_scope: Signal<String>,
+    focus_restored: Stored<bool>,
+    compact_popover: bool,
+) -> impl IntoElement {
+    let model = computed(move || {
+        let raw_scope = project_scope.get();
+        let all_rows = ui.overview_rows.get();
+        let entries = ui.terminal_entries.get();
+        let counts = ui.reminder_counts.get();
+        let items = ui.reminders.get();
+        let profiles = ui.profiles.get();
+        let idx = ui.index.get();
+        ui.snapshot.with(|s| {
+            let scope = if !raw_scope.is_empty()
+                && (canban_types::is_global_project_id(&raw_scope)
+                    || s.projects.iter().any(|p| p.id == raw_scope))
+            {
+                Some(raw_scope)
             } else {
-                ui.overview_idle.get()
+                None
             };
-            let title = if group == "Closed" {
-                "Closed conversations"
-            } else {
-                "Idle"
-            };
-            let body = if is_open {
-                build_rows(members, configurations).into_element()
-            } else {
-                view().into_element()
-            };
-            content = content.child(collapsible_section_group(
-                title,
-                Some(count),
-                is_open,
-                move |_| {
-                    if group == "Closed" {
-                        ui.overview_closed.update(|v| *v = !*v);
-                    } else {
-                        ui.overview_idle.update(|v| *v = !*v);
-                    }
-                },
-                body,
-            ));
-        } else {
-            let tone = match group {
-                "Needs you" => Tone::Attention,
-                "Running" => Tone::Info,
-                _ => Tone::Neutral,
-            };
-            let mut sec = section_group(group).count(count).tone(tone);
-            if group == "Running" {
-                sec = sec.trailing(compact_action("Terminals ↗", Variant::Quiet, move |_| {
-                    close(ui);
-                    ui.navigate("terminals");
+            let show_project = scope.is_none();
+            let mut rows: Vec<_> = all_rows
+                .iter()
+                .filter(|r| scope.as_deref().is_none_or(|pid| r.card.project_id == pid))
+                .cloned()
+                .collect();
+            // Stable task/profile order rather than continuously changing activity timestamps.
+            rows.sort_by(|a, b| {
+                (&a.project_name, a.card.number, &a.id).cmp(&(
+                    &b.project_name,
+                    b.card.number,
+                    &b.id,
+                ))
+            });
+
+            let updates = prepare_unread_cards(s, &counts, &items, &all_rows, scope.as_deref());
+            let mut pending_updates = (!updates.is_empty()).then_some(updates);
+            let mut sections = Vec::new();
+
+            for group in ["Needs you", "Running", "Queued", "Idle", "Closed"] {
+                if group == "Running"
+                    && let Some(u) = pending_updates.take()
+                {
+                    sections.push(ActivitySection::Updates(u));
+                }
+                let members: Vec<_> = rows
+                    .iter()
+                    .filter(|r| match group {
+                        "Needs you" => r.actionable(),
+                        "Running" => r.group == "Working" && !r.actionable(),
+                        other => r.group == other && !r.actionable(),
+                    })
+                    .cloned()
+                    .map(|r| prepare_overview_row(ui, s, &idx, &counts, &profiles, r, show_project))
+                    .collect();
+                let configurations: Vec<_> = if matches!(group, "Running" | "Needs you") {
+                    entries
+                        .iter()
+                        .filter(|e| {
+                            scope
+                                .as_deref()
+                                .is_none_or(|pid| e.project_id.as_deref() == Some(pid))
+                                && if group == "Needs you" {
+                                    standalone_terminal_needs_you(s, e)
+                                } else {
+                                    standalone_terminal_is_running(s, e)
+                                }
+                        })
+                        .map(|e| prepare_standalone_row(ui, s, e, show_project))
+                        .collect()
+                } else {
+                    vec![]
+                };
+                if members.is_empty() && configurations.is_empty() {
+                    continue;
+                }
+                sections.push(ActivitySection::Group(ActivityGroupModel {
+                    group,
+                    members,
+                    configurations,
                 }));
             }
-            content = content.child(sec.child(build_rows(members, configurations)));
+            if let Some(u) = pending_updates.take() {
+                sections.push(ActivitySection::Updates(u));
+            }
+            ActivityBodyModel { sections }
+        })
+    });
+
+    dynamic(move || {
+        let model = model.get();
+        let mut content = view()
+            .max_w(px(if compact_popover { 10000. } else { 1080. }))
+            .w_full()
+            .gap(px(if compact_popover { 16. } else { 24. }))
+            .pb_2()
+            .min_w(px(0.));
+
+        if model.sections.is_empty() {
+            return content
+                .child(crate::components::activity::empty(
+                    "All clear",
+                    "No pending gates, unread updates, or active Agent runs.",
+                ))
+                .into_element();
         }
-    }
 
-    if let Some(v) = updates.take() {
-        any_rendered = true;
-        content = content.child(v);
-    }
-
-    if !any_rendered {
-        content = content.child(crate::components::activity::empty(
-            "All clear",
-            "No pending gates, unread updates, or active Agent runs.",
-        ));
-    }
-    content
+        for section in model.sections {
+            match section {
+                ActivitySection::Updates(cards) => {
+                    content = content.child(render_unread_updates_section(ui, cards));
+                }
+                ActivitySection::Group(g) => {
+                    let count = g.members.len() + g.configurations.len();
+                    let group = g.group;
+                    let build_rows =
+                        |members: Vec<PreparedOverviewRow>,
+                         configurations: Vec<PreparedStandaloneRow>| {
+                            let mut stack = view().min_w(px(0.));
+                            for row in members {
+                                stack = stack.child(render_prepared_overview_row(
+                                    ui,
+                                    row,
+                                    None,
+                                    focus_restored,
+                                ));
+                            }
+                            for entry in configurations {
+                                stack = stack.child(render_standalone_row(ui, entry));
+                            }
+                            stack
+                        };
+                    if matches!(group, "Idle" | "Closed") {
+                        let is_open = if group == "Closed" {
+                            ui.overview_closed.get()
+                        } else {
+                            ui.overview_idle.get()
+                        };
+                        let title = if group == "Closed" {
+                            "Closed conversations"
+                        } else {
+                            "Idle"
+                        };
+                        let body = if is_open {
+                            build_rows(g.members, g.configurations).into_element()
+                        } else {
+                            view().into_element()
+                        };
+                        content = content.child(collapsible_section_group(
+                            title,
+                            Some(count),
+                            is_open,
+                            move |_| {
+                                if group == "Closed" {
+                                    ui.overview_closed.update(|v| *v = !*v);
+                                } else {
+                                    ui.overview_idle.update(|v| *v = !*v);
+                                }
+                            },
+                            body,
+                        ));
+                    } else {
+                        let tone = match group {
+                            "Needs you" => Tone::Attention,
+                            "Running" => Tone::Info,
+                            _ => Tone::Neutral,
+                        };
+                        let mut sec = section_group(group).count(count).tone(tone);
+                        if group == "Running" {
+                            sec = sec.trailing(compact_action(
+                                "Terminals ↗",
+                                Variant::Quiet,
+                                move |_| {
+                                    close(ui);
+                                    ui.navigate("terminals");
+                                },
+                            ));
+                        }
+                        content = content.child(sec.child(build_rows(g.members, g.configurations)));
+                    }
+                }
+            }
+        }
+        content.into_element()
+    })
 }
 
 /// Production row reused by Gallery. Destination controls remain available without hover.
 pub fn agent_row(ui: Ui, row: OverviewRow, selected: bool) -> impl IntoElement {
-    row_view(ui, row, selected, stored(true), true)
+    let prepared = ui.snapshot.with_untracked(|s| {
+        ui.index.with_untracked(|idx| {
+            ui.reminder_counts.with_untracked(|counts| {
+                ui.profiles.with_untracked(|profiles| {
+                    prepare_overview_row(ui, s, idx, counts, profiles, row, true)
+                })
+            })
+        })
+    });
+    render_prepared_overview_row(ui, prepared, Some(selected), stored(true))
 }
 
 fn describe_standalone_terminal(
@@ -1872,58 +2218,31 @@ fn describe_standalone_terminal(
     }
 }
 
-fn config_session_row(
-    ui: Ui,
-    entry: crate::terminals::Entry,
-    show_project: bool,
-) -> impl IntoElement {
-    let id = entry.saved.id.clone();
+fn render_standalone_row(ui: Ui, row: PreparedStandaloneRow) -> impl IntoElement {
+    let PreparedStandaloneRow {
+        id,
+        title,
+        card_dest,
+        card_tag,
+        event,
+        waiting_since,
+        project_name,
+        provider_name,
+        remote_host,
+        context_title,
+        needs_attn,
+        show_project,
+    } = row;
     let id_btn = id.clone();
-    let (is_config, merge_batch, scheduled_run, needs_attn) = ui.snapshot.with_untracked(|s| {
-        (
-            s.configuration_sessions.iter().any(|c| c.id == id),
-            s.merge_batches.iter().find(|b| b.id == id).cloned(),
-            s.scheduled_runs.iter().find(|r| r.id == id).cloned(),
-            standalone_terminal_needs_you(s, &entry),
-        )
-    });
-    let event = describe_standalone_terminal(
-        &entry,
-        is_config,
-        merge_batch.as_ref(),
-        scheduled_run.as_ref(),
-    );
-    let waiting_age = entry
-        .runtime_wait()
-        .map(|w| w.since)
-        .filter(|&s| s > 0)
-        .map(|since| {
-            crate::components::activity::age(since)
-                .trim_end_matches(" ago")
-                .to_owned()
-        });
-    let top_trailing = waiting_age.map(|wait| status(wait, Tone::Attention).into_element());
-    let project_name = entry.project_name.clone();
-    let context_title = if is_config {
-        "Edit Project Workflows".into()
-    } else if let Some(ref batch) = merge_batch {
-        let live_cards = batch.items.iter().filter(|i| !i.evicted).count();
-        format!(
-            "Merge queue · {live_cards} Card(s) → {}",
-            batch.target_branch
-        )
-    } else {
-        entry.title()
-    };
-    let card_dest = entry.card.as_ref().map(|c| c.id.clone());
     let card_dest_btn = card_dest.clone();
+    let top_trailing = waiting_status_pill(ui, waiting_since);
 
-    let mut context_parts = vec![match &entry.card {
-        Some(c) => {
-            if c.title.is_empty() {
-                format!("#{} · {}", c.number, entry.title())
+    let mut context_parts = vec![match card_tag {
+        Some((number, card_title)) => {
+            if card_title.is_empty() {
+                format!("#{number} · {title}")
             } else {
-                format!("#{} {} · {}", c.number, c.title, entry.title())
+                format!("#{number} {card_title} · {title}")
             }
         }
         None => context_title.clone(),
@@ -1931,11 +2250,9 @@ fn config_session_row(
     if show_project && !project_name.is_empty() {
         context_parts.push(project_name.clone());
     }
-    if let Some((_, prov_name)) = entry.provider() {
+    if let Some(prov_name) = provider_name {
         context_parts.push(prov_name);
     }
-    let remote_host = (entry.host_id != "local" && !entry.host_id.is_empty())
-        .then(|| crate::hosts::host_name(ui, &entry.host_id));
     let mut context_line = view()
         .flex_row()
         .w_full()
@@ -2035,31 +2352,33 @@ fn config_session_row(
         ))
 }
 
-fn row_view(
+fn render_prepared_overview_row(
     ui: Ui,
-    row: OverviewRow,
-    selected: bool,
+    prepared: PreparedOverviewRow,
+    selected_override: Option<bool>,
     focus_restored: Stored<bool>,
-    show_project: bool,
 ) -> impl IntoElement {
+    let PreparedOverviewRow {
+        row,
+        event,
+        profile_tag,
+        remote_host,
+        waiting_since,
+        unread,
+        primary_label,
+        runtime_blocked_with_terminal: is_runtime_blocked,
+        has_non_runtime_reason,
+        has_binding,
+        checks_url,
+        pr_url,
+        quick_merge_card,
+        can_resume,
+        show_project,
+    } = prepared;
     let reference = element_ref();
+    let row_id_bg = row.id.clone();
+    let row_id_focus = row.id.clone();
     let activate_row = row.clone();
-    let event = ui.snapshot.with(|s| describe_row(s, &row));
-    let profile_tag = row.agent().map(|a| format!("@{}", a.profile.id));
-    let card_host = ui.snapshot.with(|s| s.card_host(&row.card.id).to_owned());
-    let remote_host = (card_host != "local" && !card_host.is_empty())
-        .then(|| crate::hosts::host_name(ui, &card_host));
-    let waiting_age = row
-        .agent()
-        .and_then(|a| a.lifecycle.waiting.as_ref().map(|w| w.since))
-        .map(|since| {
-            crate::components::activity::age(since)
-                .trim_end_matches(" ago")
-                .to_owned()
-        });
-    let unread = ui
-        .reminder_counts
-        .with(|m| m.get(&row.card.id).map(|c| c.unread).unwrap_or(0));
 
     let event_summary = match &event.detail {
         Some(d) if !d.is_empty() => format!("{} · {d}", event.headline),
@@ -2074,7 +2393,7 @@ fn row_view(
         row.card.number, row.card.title
     );
 
-    let top_trailing = waiting_age.map(|wait| status(wait, Tone::Attention).into_element());
+    let top_trailing = waiting_status_pill(ui, waiting_since);
     let mut context_pills = Vec::new();
     if let Some(host_label) = remote_host {
         context_pills.push(badge(host_label).into_element());
@@ -2098,9 +2417,7 @@ fn row_view(
         .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
         .accessibility_label(format!(
             "{event_summary} · #{} {} · {metadata_str} · {}",
-            row.card.number,
-            row.card.title,
-            primary(&row)
+            row.card.number, row.card.title, primary_label
         ))
         .child(tone_icon_badge(event.icon, event.tone, event.live))
         .child(
@@ -2126,50 +2443,28 @@ fn row_view(
     let button_row = row.clone();
     let mut actions = view().flex_row().items_center().gap_1p5().flex_shrink_0();
 
-    if let Some(pr_view) = ui.snapshot.with_untracked(|s| {
-        ui.index
-            .with_untracked(|idx| crate::components::pr_status::from_card(s, idx, &row.card))
-    }) {
-        if pr_view.normalized_ci_state() == Some("failure")
-            && let Some(ci_url) = pr_view.checks_url()
-        {
-            actions = actions.child(compact_action("Checks ↗", Variant::Quiet, move |_| {
-                close(ui);
-                crate::github::open_url(ui, ci_url.clone());
-            }));
-        } else if (row.reasons.iter().any(|r| {
-            r.message.starts_with("Changes requested on PR")
-                || r.message.starts_with("Delivery PR was closed")
-                || (r.message.starts_with("PR #") && r.message.contains("closed"))
-        })) && let Some(pr_url) =
-            (!pr_view.pr_url.is_empty()).then(|| pr_view.pr_url.clone())
-        {
-            actions = actions.child(compact_action("PR ↗", Variant::Quiet, move |_| {
-                close(ui);
-                crate::github::open_url(ui, pr_url.clone());
-            }));
-        }
+    if let Some(ci_url) = checks_url {
+        actions = actions.child(compact_action("Checks ↗", Variant::Quiet, move |_| {
+            close(ui);
+            crate::github::open_url(ui, ci_url.clone());
+        }));
+    } else if let Some(pr_url) = pr_url {
+        actions = actions.child(compact_action("PR ↗", Variant::Quiet, move |_| {
+            close(ui);
+            crate::github::open_url(ui, pr_url.clone());
+        }));
     }
 
-    if row.reasons.iter().any(|r| r.source == "review") {
-        let project = ui.snapshot.with_untracked(|s| {
-            s.projects
-                .iter()
-                .find(|p| p.id == row.card.project_id)
-                .cloned()
-        });
-        if crate::card::quick_merge_eligible(&row.card, project.as_ref()) {
-            let merge_card = row.card.clone();
-            actions = actions.child(
-                compact_action("Merge", Variant::Quiet, move |_| {
-                    close(ui);
-                    crate::card::quick_merge_start(ui, merge_card.clone());
-                })
-                .disabled(move || crate::card::quick_merge_busy(ui)),
-            );
-        }
+    if let Some(merge_card) = quick_merge_card {
+        actions = actions.child(
+            compact_action("Merge", Variant::Quiet, move |_| {
+                close(ui);
+                crate::card::quick_merge_start(ui, merge_card.clone());
+            })
+            .disabled(move || crate::card::quick_merge_busy(ui)),
+        );
     }
-    if crate::terminals::model::can_resume(&row, &ui.profiles.get()) {
+    if can_resume {
         let id = row.id.clone();
         actions = actions.child(
             compact_action("Resume Agent", Variant::Quiet, move |_| {
@@ -2180,10 +2475,7 @@ fn row_view(
             .disabled(move || ui.pending.get()),
         );
     }
-    if !runtime_blocked_with_terminal(&row)
-        && row.reasons.iter().any(|r| r.source != "runtime")
-        && crate::terminals::model::binding(&row).is_some()
-    {
+    if !is_runtime_blocked && has_non_runtime_reason && has_binding {
         let id = row.id.clone();
         let cid = row.card.id.clone();
         actions = actions.child(compact_action("Terminal", Variant::Quiet, move |_| {
@@ -2197,7 +2489,7 @@ fn row_view(
     } else {
         Variant::Quiet
     };
-    actions = actions.child(compact_action(primary(&row), primary_variant, move |_| {
+    actions = actions.child(compact_action(primary_label, primary_variant, move |_| {
         activate(ui, &button_row)
     }));
 
@@ -2210,13 +2502,20 @@ fn row_view(
         .border_b_1()
         .border_color(BORDER)
         .rounded(px(4.))
-        .bg(if selected { SELECTED } else { CLEAR })
+        .bg(move || {
+            let is_selected = selected_override
+                .unwrap_or_else(|| ui.overview_selection.with(|s| s == &row_id_bg));
+            if is_selected { SELECTED } else { CLEAR }
+        })
         .child(
             view()
                 .flex_1()
                 .min_w(px(0.))
                 .on_layout(move |_: &Bounds<Points>| {
-                    if selected && !focus_restored.replace(true) {
+                    let is_selected = selected_override.unwrap_or_else(|| {
+                        ui.overview_selection.with_untracked(|s| s == &row_id_focus)
+                    });
+                    if is_selected && !focus_restored.replace(true) {
                         reference.focus();
                     }
                 })
@@ -2226,53 +2525,18 @@ fn row_view(
         .child(actions)
 }
 
-fn unread_updates(ui: Ui, scope: Option<&str>) -> Option<SectionGroup> {
-    let counts = ui.reminder_counts.get();
-    let s = ui.snapshot.get();
-    let items = ui.reminders.get();
-    let show_project = scope.is_none();
-    let actionable: std::collections::BTreeSet<_> = overview(&s)
-        .iter()
-        .filter(|r| r.actionable())
-        .map(|r| r.card.id.clone())
-        .collect();
-    let cards: Vec<_> = s
-        .cards
-        .iter()
-        .filter(|c| {
-            scope.is_none_or(|pid| c.project_id == pid)
-                && counts.get(&c.id).is_some_and(|n| n.unread > 0)
-                && !actionable.contains(&c.id)
-        })
-        .collect();
-    if cards.is_empty() {
-        return None;
-    }
-
+fn render_unread_updates_section(ui: Ui, cards: Vec<PreparedUnreadCard>) -> SectionGroup {
+    let count = cards.len();
     let mut rows = view().min_w(px(0.));
-    for card in &cards {
-        let id = card.id.clone();
+    for card in cards {
+        let id = card.card_id.clone();
         let id_btn = id.clone();
         let id_read = id.clone();
-        let latest = items
-            .iter()
-            .filter(|i| i.card_id == id && i.unread)
-            .max_by_key(|i| i.sequence);
-        let event = describe_unread_update(latest);
-        let sequence = latest.map(|i| i.sequence);
-        let max_seq = s
-            .card_summaries
-            .get(&id)
-            .map(|summary| summary.last_event_seq)
-            .unwrap_or(0);
-        let unread_count = counts[&id].unread;
-        let project = s
-            .projects
-            .iter()
-            .find(|p| p.id == card.project_id)
-            .map(|p| p.name.as_str())
-            .unwrap_or("")
-            .to_owned();
+        let event = card.event;
+        let sequence = card.sequence;
+        let max_seq = card.max_seq;
+        let unread_count = card.unread_count;
+        let project = card.project_name;
 
         let event_summary = match &event.detail {
             Some(d) if !d.is_empty() => format!("{} · {d}", event.headline),
@@ -2280,16 +2544,10 @@ fn unread_updates(ui: Ui, scope: Option<&str>) -> Option<SectionGroup> {
         };
         let hint = format!(
             "{event_summary}\n#{} {}\n{project}",
-            card.number, card.title
+            card.card_number, card.card_title
         );
         let extra_pill =
             (unread_count > 1).then(|| badge(format!("+{}", unread_count - 1)).into_element());
-        let latest_pr_action: Option<(String, String)> = latest.and_then(|rem| {
-            let meta = rem.event.as_ref()?;
-            let url = meta.action_url.as_deref().filter(|u| !u.is_empty())?;
-            let label = meta.action_label.as_deref().filter(|l| !l.is_empty())?;
-            Some((url.to_owned(), label.to_owned()))
-        });
 
         let mut row_view = view()
             .flex_row()
@@ -2319,7 +2577,7 @@ fn unread_updates(ui: Ui, scope: Option<&str>) -> Option<SectionGroup> {
                             .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
                             .accessibility_label(format!(
                                 "{event_summary} · #{} {} · {project} · Card →",
-                                card.number, card.title
+                                card.card_number, card.card_title
                             ))
                             .on_press(move |_: &()| {
                                 close(ui);
@@ -2339,16 +2597,16 @@ fn unread_updates(ui: Ui, scope: Option<&str>) -> Option<SectionGroup> {
                                         extra_pill,
                                     ))
                                     .child(card_context_row(
-                                        card.number,
-                                        card.title.clone(),
-                                        show_project.then_some(project),
+                                        card.card_number,
+                                        card.card_title,
+                                        card.show_project.then_some(project),
                                         None,
                                         Vec::new(),
                                     )),
                             ),
                     ),
             );
-        if let Some((action_url, action_label)) = latest_pr_action {
+        if let Some((action_url, action_label)) = card.latest_pr_action {
             row_view = row_view.child(compact_action(action_label, Variant::Quiet, move |_| {
                 close(ui);
                 crate::github::open_url(ui, action_url.clone());
@@ -2367,12 +2625,10 @@ fn unread_updates(ui: Ui, scope: Option<&str>) -> Option<SectionGroup> {
         );
     }
 
-    Some(
-        section_group("Updates")
-            .count(cards.len())
-            .tone(Tone::Info)
-            .child(rows),
-    )
+    section_group("Updates")
+        .count(count)
+        .tone(Tone::Info)
+        .child(rows)
 }
 
 #[cfg(test)]

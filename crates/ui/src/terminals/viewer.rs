@@ -1,58 +1,87 @@
 //! Selected conversation controls, retained context and one native attachment.
 use super::*;
 use serde_json::json;
+#[derive(Clone, PartialEq, Eq)]
+struct ViewerContextModel {
+    id: String,
+    reasons: Vec<String>,
+    archived: bool,
+    instruction: String,
+    run_number: u32,
+    state: String,
+    terminal: Option<String>,
+    host_name: String,
+    cwd: String,
+    outcome: Option<(String, String)>,
+}
+
 fn context(ui: Ui) -> impl IntoElement {
-    dynamic(move || {
-        let Some(row) = selected(ui) else {
-            return view();
-        };
-        let mut body = view().gap_3();
-        for reason in &row.reasons {
-            body = body.child(notice(reason.message.clone(), Tone::Attention));
-        }
-        if row.card.archived_at.is_some() {
-            body = body.child(notice(
-                "Archived Card · restore it before starting or resuming an Agent.",
-                Tone::Info,
-            ));
-        }
-        let att = row.agent().unwrap();
-        let id = row.id.clone();
+    let model = computed(move || {
+        let row = selected(ui)?;
+        let att = row.agent()?;
         let host_id = ui.snapshot.with(|s| s.card_host(&row.card.id).to_owned());
-        body = body
-            .child(label("Assignment"))
-            .child(read_text(att.instruction.clone()))
-            .child(label(format!(
-                "Run {} · {} · {}",
-                att.number,
-                att.state,
-                att.terminal.as_deref().unwrap_or("No terminal")
-            )))
-            .child(muted(format!(
-                "{} · {}",
-                crate::hosts::host_name(ui, &host_id),
-                att.cwd
-            )))
-            .child(action("Read saved output", Variant::Quiet, move |_| {
-                load_text(ui, "execution.output", json!({"terminal_id":id}))
-            }));
-        if let Some((state, message)) = ui.snapshot.with(|snapshot| {
+        let outcome = ui.snapshot.with(|snapshot| {
             snapshot
                 .reports
                 .iter()
                 .rev()
                 .find(|r| r.terminal_id.as_deref() == row.outcome_terminal_id())
                 .map(|report| (report.state.clone(), report.message.clone()))
-        }) {
+        });
+        Some(ViewerContextModel {
+            id: row.id.clone(),
+            reasons: row.reasons.iter().map(|r| r.message.clone()).collect(),
+            archived: row.card.archived_at.is_some(),
+            instruction: att.instruction.clone(),
+            run_number: att.number,
+            state: att.state.clone(),
+            terminal: att.terminal.clone(),
+            host_name: crate::hosts::host_name(ui, &host_id),
+            cwd: att.cwd.clone(),
+            outcome,
+        })
+    });
+    dynamic(move || {
+        let Some(m) = model.get() else {
+            return view();
+        };
+        let mut body = view().gap_3();
+        for reason in m.reasons {
+            body = body.child(notice(reason, Tone::Attention));
+        }
+        if m.archived {
+            body = body.child(notice(
+                "Archived Card · restore it before starting or resuming an Agent.",
+                Tone::Info,
+            ));
+        }
+        let id = m.id;
+        body = body
+            .child(label("Assignment"))
+            .child(read_text(m.instruction))
+            .child(label(format!(
+                "Run {} · {} · {}",
+                m.run_number,
+                m.state,
+                m.terminal.as_deref().unwrap_or("No terminal")
+            )))
+            .child(muted(format!("{} · {}", m.host_name, m.cwd)))
+            .child(action("Read saved output", Variant::Quiet, move |_| {
+                load_text(ui, "execution.output", json!({"terminal_id":id}))
+            }));
+        if let Some((state, message)) = m.outcome {
             body = body
                 .child(label("Saved outcome"))
                 .child(read_text(format!("{state} · {message}")));
         }
-        let output = ui.output.get();
-        if !output.is_empty() {
-            body = body.child(read_text(output));
-        }
-        body
+        body.child(dynamic(move || {
+            let output = ui.output.get();
+            if output.is_empty() {
+                view()
+            } else {
+                view().child(read_text(output))
+            }
+        }))
     })
 }
 pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {

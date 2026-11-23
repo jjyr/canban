@@ -184,121 +184,145 @@ impl AppServer {
         {
             return Ok(());
         }
+        let freshness_only = !changed
+            && !stall_crossed
+            && status != "blocked"
+            && run.lifecycle.waiting.is_none()
+            && (matches!(status, "idle" | "done") == run.lifecycle.idle_since.is_some())
+            && !(!matches!(status, "idle" | "done")
+                && run.close_state == "error"
+                && run.lifecycle.close_reason == "idle");
         let card_id = run.card_id.clone();
-        self.store.lock().unwrap().write(|db| {
-            let mut current_entry: TerminalEntry = db.get(&entry.id)?;
-            let Some(a) = &mut current_entry.agent else {
-                return Ok(());
-            };
-            a.lifecycle.observed_at = Some(now());
-            if activity.last_at > a.lifecycle.last_interaction_at.unwrap_or(0) {
-                a.lifecycle.last_interaction_at = Some(activity.last_at);
-            }
-            let was_settled = a.lifecycle.idle_since.is_some();
-            let is_completed = matches!(a.state.as_str(), "completed" | "backlog");
-            let observed_turn = observed["turn"].as_u64();
-            let live = observed["state"] != "finished";
-            if matches!(status, "idle" | "done") && live {
-                if is_completed {
-                    if !was_settled && !a.lifecycle.interactive_followup {
-                        if let Some(turn) = observed_turn {
-                            if a.completion_turn
-                                .is_some_and(|ct| turn > ct.saturating_add(1))
-                            {
-                                a.lifecycle.interactive_followup = true;
-                            } else {
-                                a.completion_turn = Some(turn);
+        self.store.lock().unwrap().write_topic(
+            if freshness_only {
+                "terminals"
+            } else {
+                "application"
+            },
+            |db| {
+                let mut current_entry: TerminalEntry = db.get(&entry.id)?;
+                let Some(a) = &mut current_entry.agent else {
+                    return Ok(());
+                };
+                a.lifecycle.observed_at = Some(now());
+                if activity.last_at > a.lifecycle.last_interaction_at.unwrap_or(0) {
+                    a.lifecycle.last_interaction_at = Some(activity.last_at);
+                }
+                if freshness_only {
+                    return db.save(&current_entry);
+                }
+                let was_settled = a.lifecycle.idle_since.is_some();
+                let is_completed = matches!(a.state.as_str(), "completed" | "backlog");
+                let observed_turn = observed["turn"].as_u64();
+                let live = observed["state"] != "finished";
+                if matches!(status, "idle" | "done") && live {
+                    if is_completed {
+                        if !was_settled && !a.lifecycle.interactive_followup {
+                            if let Some(turn) = observed_turn {
+                                if a.completion_turn
+                                    .is_some_and(|ct| turn > ct.saturating_add(1))
+                                {
+                                    a.lifecycle.interactive_followup = true;
+                                } else {
+                                    a.completion_turn = Some(turn);
+                                }
                             }
+                        } else if was_settled
+                            && a.completion_turn
+                                .zip(observed_turn)
+                                .is_some_and(|(ct, turn)| turn > ct)
+                        {
+                            a.lifecycle.interactive_followup = true;
                         }
-                    } else if was_settled
-                        && a.completion_turn
-                            .zip(observed_turn)
-                            .is_some_and(|(ct, turn)| turn > ct)
+                    }
+                    if changed || a.lifecycle.idle_since.is_none() {
+                        a.lifecycle.idle_since = Some(now());
+                    }
+                } else {
+                    if live
+                        && is_completed
+                        && matches!(status, "working" | "running" | "blocked")
+                        && (was_settled
+                            || a.completion_turn
+                                .zip(observed_turn)
+                                .is_some_and(|(ct, turn)| turn > ct))
                     {
                         a.lifecycle.interactive_followup = true;
                     }
+                    a.lifecycle.idle_since = None;
                 }
-                if changed || a.lifecycle.idle_since.is_none() {
-                    a.lifecycle.idle_since = Some(now());
-                }
-            } else {
-                if live
-                    && is_completed
-                    && matches!(status, "working" | "running" | "blocked")
-                    && (was_settled
-                        || a.completion_turn
-                            .zip(observed_turn)
-                            .is_some_and(|(ct, turn)| turn > ct))
+                if !matches!(status, "idle" | "done")
+                    && a.close_state == "error"
+                    && a.lifecycle.close_reason == "idle"
                 {
-                    a.lifecycle.interactive_followup = true;
+                    a.lifecycle.close_reason.clear();
                 }
-                a.lifecycle.idle_since = None;
-            }
-            if !matches!(status, "idle" | "done")
-                && a.close_state == "error"
-                && a.lifecycle.close_reason == "idle"
-            {
-                a.lifecycle.close_reason.clear();
-            }
-            let card: Card = db.get(&a.card_id)?;
-            if status == "blocked" && observed["state"] != "finished" {
-                let kind = observed["status"]["kind"]
-                    .as_str()
-                    .unwrap_or("input")
-                    .to_owned();
-                let title = observed["status"]["title"]
-                    .as_str()
-                    .unwrap_or("Agent needs input")
-                    .to_owned();
-                let message = observed["status"]["msg"].as_str().unwrap_or("").to_owned();
-                let old = a.lifecycle.waiting.as_ref();
-                if old.is_none_or(|w| w.kind != kind || w.title != title || w.message != message) {
-                    let w = RuntimeWait {
-                        id: old.map(|w| w.id.clone()).unwrap_or_else(id),
-                        since: old.map(|w| w.since).unwrap_or_else(now),
-                        kind,
-                        title,
-                        message,
-                    };
-                    let mut notice = canban_notifications::attention(
-                        &a.project_id,
-                        &a.card_id,
-                        &format!("Agent input required: {} — {}", w.title, w.message),
-                    );
-                    notice.id = w.id.clone();
-                    db.save(&notice)?;
+                let card: Card = db.get(&a.card_id)?;
+                if status == "blocked" && observed["state"] != "finished" {
+                    let kind = observed["status"]["kind"]
+                        .as_str()
+                        .unwrap_or("input")
+                        .to_owned();
+                    let title = observed["status"]["title"]
+                        .as_str()
+                        .unwrap_or("Agent needs input")
+                        .to_owned();
+                    let message = observed["status"]["msg"].as_str().unwrap_or("").to_owned();
+                    let old = a.lifecycle.waiting.as_ref();
+                    if old
+                        .is_none_or(|w| w.kind != kind || w.title != title || w.message != message)
+                    {
+                        let w = RuntimeWait {
+                            id: old.map(|w| w.id.clone()).unwrap_or_else(id),
+                            since: old.map(|w| w.since).unwrap_or_else(now),
+                            kind,
+                            title,
+                            message,
+                        };
+                        let mut notice = canban_notifications::attention(
+                            &a.project_id,
+                            &a.card_id,
+                            &format!("Agent input required: {} — {}", w.title, w.message),
+                        );
+                        notice.id = w.id.clone();
+                        db.save(&notice)?;
+                        log(
+                            db,
+                            &card,
+                            "execution.input_required",
+                            "herdr",
+                            &notice.message,
+                            Some(entry.id.clone()),
+                            json!({"wait":w,"run_number":a.number}),
+                        )?;
+                        a.lifecycle.waiting = Some(w);
+                    }
+                } else if let Some(w) = a.lifecycle.waiting.take() {
+                    if let Ok(mut n) = db.get::<Notice>(&w.id) {
+                        n.read = true;
+                        db.save(&n)?;
+                    }
                     log(
                         db,
                         &card,
-                        "execution.input_required",
+                        "execution.input_resolved",
                         "herdr",
-                        &notice.message,
+                        "Runtime input wait ended; workflow approval is unchanged",
                         Some(entry.id.clone()),
-                        json!({"wait":w,"run_number":a.number}),
+                        json!({"wait_id":w.id,"run_number":a.number}),
                     )?;
-                    a.lifecycle.waiting = Some(w);
                 }
-            } else if let Some(w) = a.lifecycle.waiting.take() {
-                if let Ok(mut n) = db.get::<Notice>(&w.id) {
-                    n.read = true;
-                    db.save(&n)?;
-                }
-                log(
-                    db,
-                    &card,
-                    "execution.input_resolved",
-                    "herdr",
-                    "Runtime input wait ended; workflow approval is unchanged",
-                    Some(entry.id.clone()),
-                    json!({"wait_id":w.id,"run_number":a.number}),
-                )?;
-            }
-            db.save(&current_entry)
-        })?;
+                db.save(&current_entry)
+            },
+        )?;
         if matches!(status, "idle" | "done") {
             let _ = self.try_auto_archive_resolved(&card_id);
         }
-        self.emit("runtime", Some(card_id));
+        if freshness_only {
+            self.emit("terminals", None);
+        } else {
+            self.emit("runtime", Some(card_id));
+        }
         Ok(())
     }
 

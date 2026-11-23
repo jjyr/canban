@@ -318,8 +318,8 @@ fn change_tab(ui: Ui, tab: &str) {
 
 fn account_button(ui: Ui) -> impl IntoElement {
     let b = ui.github;
-    dynamic(move || {
-        let app_auth = ui.snapshot.with(|s| s.github.clone());
+    let badge_state = computed(move || {
+        let app_auth = ui.github_account.get();
         let gh = b.gh_status.get();
         let app_login = app_auth
             .login
@@ -378,6 +378,10 @@ fn account_button(ui: Ui) -> impl IntoElement {
                 "Install and sign into GitHub CLI (`gh`) to connect GitHub.".into(),
             )
         };
+        (mismatch, dot_color, text, tip)
+    });
+    dynamic(move || {
+        let (mismatch, dot_color, text, tip) = badge_state.get();
 
         view()
             .flex_shrink_0()
@@ -526,6 +530,10 @@ pub fn screen(ui: Ui) -> impl IntoElement {
 
 fn filter_bar(ui: Ui) -> impl IntoElement {
     let b = ui.github;
+    let project_repo = computed(move || {
+        ui.current_project()
+            .and_then(|p| p.github.map(|g| g.repository))
+    });
     dynamic(move || {
         let tab = b.tab.get();
         if tab == "notifications" {
@@ -608,14 +616,7 @@ fn filter_bar(ui: Ui) -> impl IntoElement {
                     ("all", "All accessible"),
                 ]
             };
-            let project_repo = ui.snapshot.with(|s| {
-                let current = ui.project.get();
-                s.projects
-                    .iter()
-                    .find(|p| p.id == current)
-                    .and_then(|p| p.github.as_ref().map(|g| g.repository.clone()))
-            });
-            let mut row = view()
+            let row = view()
                 .flex_row()
                 .flex_wrap()
                 .items_center()
@@ -652,33 +653,37 @@ fn filter_bar(ui: Ui) -> impl IntoElement {
                     )
                     .w(px(190.))
                     .key("github-repository-filter"),
-                );
-            if let Some(repo) = project_repo {
-                let repo_active = repo.clone();
-                let repo_toggle = repo.clone();
-                row = row.child(compact_action(
-                    move || {
-                        if b.repository.get().eq_ignore_ascii_case(&repo_active) {
-                            format!("{repo_active} ×")
-                        } else {
-                            repo_active.clone()
-                        }
-                    },
-                    Variant::Quiet,
-                    move |_| {
-                        if b.repository
-                            .get_untracked()
-                            .eq_ignore_ascii_case(&repo_toggle)
-                        {
-                            b.repository.set(String::new());
-                        } else {
-                            b.repository.set(repo_toggle.clone());
-                        }
-                        b.page.set(1);
-                        b.list.set(json!({}));
-                    },
-                ));
-            }
+                )
+                .child(dynamic(move || {
+                    let Some(repo) = project_repo.get() else {
+                        return view().into_element();
+                    };
+                    let repo_active = repo.clone();
+                    let repo_toggle = repo;
+                    compact_action(
+                        move || {
+                            if b.repository.get().eq_ignore_ascii_case(&repo_active) {
+                                format!("{repo_active} ×")
+                            } else {
+                                repo_active.clone()
+                            }
+                        },
+                        Variant::Quiet,
+                        move |_| {
+                            if b.repository
+                                .get_untracked()
+                                .eq_ignore_ascii_case(&repo_toggle)
+                            {
+                                b.repository.set(String::new());
+                            } else {
+                                b.repository.set(repo_toggle.clone());
+                            }
+                            b.page.set(1);
+                            b.list.set(json!({}));
+                        },
+                    )
+                    .into_element()
+                }));
             row.child(choice(ui, b.state, state_options))
                 .child(choice(ui, b.relation, relation_options))
                 .into_element()
@@ -724,7 +729,7 @@ fn list_panel(ui: Ui) -> impl IntoElement {
                         }
                         let gh = b.gh_status.get();
                         let gh_connected = gh["state"] == "connected";
-                        let app_connected = ui.snapshot.with(|s| s.github.state == "connected");
+                        let app_connected = ui.github_account.with(|g| g.state == "connected");
                         let tab = b.tab.get();
                         let needs_gh = if tab == "notifications" {
                             !gh_connected
@@ -1028,15 +1033,22 @@ fn list_row(ui: Ui, row: Value) -> AnyElement {
 
     if let Some(r_for_card) = card_ref {
         let title_for_add = fallback_title.clone();
+        let r_lookup = r_for_card.clone();
+        let card_link = computed(move || {
+            ui.snapshot.with(|s| {
+                let cards = super::matching_cards(s, &r_lookup);
+                cards.first().map(|first| {
+                    let btn_text = if cards.len() > 1 {
+                        format!("Card #{} (+{}) ↗", first.number, cards.len() - 1)
+                    } else {
+                        format!("Card #{} ↗", first.number)
+                    };
+                    (first.id.clone(), btn_text)
+                })
+            })
+        });
         trailing = trailing.child(dynamic(move || {
-            let cards = ui.snapshot.with(|s| super::matching_cards(s, &r_for_card));
-            if let Some(first) = cards.first() {
-                let card_id = first.id.clone();
-                let btn_text = if cards.len() > 1 {
-                    format!("Card #{} (+{}) ↗", first.number, cards.len() - 1)
-                } else {
-                    format!("Card #{} ↗", first.number)
-                };
+            if let Some((card_id, btn_text)) = card_link.get() {
                 compact_action(btn_text, Variant::Secondary, move |_| {
                     ui.open_card(card_id.clone())
                 })
@@ -1237,7 +1249,7 @@ pub fn account(ui: Ui) -> impl IntoElement {
                     .gap_6()
                     .pb_6()
                     .child(dynamic(move || {
-                        let app_auth = ui.snapshot.with(|s| s.github.clone());
+                        let app_auth = ui.github_account.get();
                         let gh = ui.github.gh_status.get();
                         let app_login = app_auth
                             .login

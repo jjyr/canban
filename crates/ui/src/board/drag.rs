@@ -159,7 +159,8 @@ impl BoardDrag {
             ghost: signal(None),
         };
         effect(move || {
-            ui.snapshot.with(|_| ());
+            ui.index.with(|_| ());
+            ui.card_status.with(|_| ());
             ui.github.filters.with(|_| ());
             ui.github.gh_status.with(|_| ());
             ui.merging_cards.with(|_| ());

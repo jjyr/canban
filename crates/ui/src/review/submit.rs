@@ -505,13 +505,13 @@ fn render_submit_drawer(ui: Ui) -> impl IntoElement {
 }
 
 fn profile_picker(ui: Ui, selected: Signal<String>) -> impl IntoElement {
-    dynamic(move || {
+    let trigger = computed(move || {
         let profiles = ui.profiles.get();
         let current = selected.get();
         let display = if current.is_empty() {
             default_profile_id(ui)
         } else {
-            current.clone()
+            current
         };
         let proj_for_icon = ui.current_project();
         let mark = profiles
@@ -519,19 +519,23 @@ fn profile_picker(ui: Ui, selected: Signal<String>) -> impl IntoElement {
             .find(|p| p.id == display)
             .map(|p| crate::profiles::effective_provider(p, proj_for_icon.as_ref()).0)
             .unwrap_or(Icon::Agent);
+        (mark, display)
+    });
+    dynamic(move || {
+        let (mark, display) = trigger.get();
         action_with_icon(
             mark,
             format!("@{display} ▾"),
             Variant::Secondary,
             move |_| {
-                let list = profiles.clone();
+                let list = ui.profiles.get_untracked();
                 ui.spawn(async move {
                     let items: Vec<MenuItem> = if list.is_empty() {
                         vec![MenuItem::new("@developer").on_select(move || {
                             selected.try_set("developer".into());
                         })]
                     } else {
-                        let proj = ui.current_project();
+                        let proj = untracked(|| ui.current_project());
                         list.into_iter()
                             .map(|p| {
                                 let pid = p.id.clone();

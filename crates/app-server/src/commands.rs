@@ -114,6 +114,7 @@ impl AppServer {
                 "app.ping"
                     | "app.shutdown"
                     | "app.state"
+                    | "runtime.state"
                     | "app.snapshot"
                     | "device.list"
                     | "host.probe"
@@ -209,6 +210,7 @@ impl AppServer {
                 Ok(json!({"stopping":true}))
             }
             "app.state" => self.state_response(&p),
+            "runtime.state" => self.runtime_state_response(&p),
             "host.probe" => Ok(self.host_probe_payload()),
             "host.env.refresh" => {
                 let snapshot = canban_exec::shell_env::refresh_local_shell_env();

@@ -21,14 +21,12 @@ pub(crate) fn next_stage_for_card(
 }
 
 pub(crate) fn next_stage_for_ui(ui: Ui, card: &canban_types::Card) -> Option<canban_types::Stage> {
-    let (project, snapshot_merging) = ui.index.with_untracked(|idx| {
-        (
-            idx.projects.get(&card.project_id).cloned(),
-            idx.card_status
-                .get(&card.id)
-                .is_some_and(|st| st.is_merging),
-        )
-    });
+    let project = ui
+        .index
+        .with_untracked(|idx| idx.projects.get(&card.project_id).cloned());
+    let snapshot_merging = ui
+        .card_status
+        .with_untracked(|cs| cs.get(&card.id).is_some_and(|st| st.is_merging));
     let ui_merging = ui
         .merging_cards
         .with_untracked(|ids| ids.contains(&card.id));
@@ -48,14 +46,12 @@ pub(crate) fn advance_stage(ui: Ui) {
         ui.notify("Current Card is already resolved");
         return;
     }
-    let (project, snapshot_merging) = ui.index.with_untracked(|idx| {
-        (
-            idx.projects.get(&card.project_id).cloned(),
-            idx.card_status
-                .get(&card.id)
-                .is_some_and(|st| st.is_merging),
-        )
-    });
+    let project = ui
+        .index
+        .with_untracked(|idx| idx.projects.get(&card.project_id).cloned());
+    let snapshot_merging = ui
+        .card_status
+        .with_untracked(|cs| cs.get(&card.id).is_some_and(|st| st.is_merging));
     let ui_merging = ui
         .merging_cards
         .with_untracked(|ids| ids.contains(&card.id));
@@ -342,6 +338,85 @@ fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
         popup_menu(items).await;
     });
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum HeaderTopModel {
+    GitHub {
+        is_pr: bool,
+        repository: String,
+        number: u64,
+        state: String,
+        url: String,
+        source_kind: String,
+        gh_connected: bool,
+    },
+    Local {
+        crumb: String,
+        schedule: Option<(String, String, u64, String)>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StagePickerModel {
+    card_id: String,
+    active: bool,
+    stage_id: String,
+    stage_name: String,
+    stages: Vec<(String, String)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ResolvedOrMergingModel {
+    Resolved(Option<String>),
+    Merging,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum HeaderWorkspaceModel {
+    Branch(String),
+    NotCreated,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum HeaderReviewModel {
+    PrActive {
+        card_id: String,
+        profile: String,
+        started_at: Option<u64>,
+        in_review_stage: bool,
+    },
+    PrDraft {
+        card_id: String,
+        count: usize,
+    },
+    PrIdle {
+        card_id: String,
+        default_prof: String,
+        in_review_stage: bool,
+    },
+    LocalDiff {
+        in_review_stage: bool,
+        is_review_stage_id: bool,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum HeaderResolutionModel {
+    QuickMerge { target: String },
+    Resolve,
+    Reopen,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HeaderAdvanceModel {
+    card_id: String,
+    target_stage_id: String,
+    button_label: String,
+    a11y_label: String,
+    tooltip: String,
+    has_automation: bool,
+    primary: bool,
+}
+
 pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElement {
     let summary = changes::observe(ui);
     let is_review = computed(move || ui.page.get() == "review");
@@ -350,6 +425,327 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             && (ui.narrow.get() || ui.card_standalone.get() || ui.card_terminal_open.get())
     });
     let show_expand = computed(move || !is_review.get() && !ui.card_terminal_open.get());
+
+    let top_model = computed(move || {
+        let c = ui.current_card()?;
+        if let Some(source) = c.github_issue() {
+            let state = ui
+                .index
+                .with(|idx| {
+                    idx.github_issue(&c.project_id, source.repository_id, source.issue_id)
+                        .map(|i| i.state.clone())
+                })
+                .unwrap_or_else(|| "Status unavailable".into());
+            let gh_connected = ui.snapshot.with(|s| {
+                ui.github
+                    .gh_status
+                    .with(|gh| crate::github::active_login_from(s, gh).is_some())
+            });
+            Some(HeaderTopModel::GitHub {
+                is_pr: c.is_github_pr(),
+                repository: source.repository.clone(),
+                number: source.number,
+                state,
+                url: source.url.clone(),
+                source_kind: c.source_kind().into(),
+                gh_connected,
+            })
+        } else {
+            let project = ui
+                .index
+                .with(|idx| idx.projects.get(&c.project_id).map(|p| p.name.clone()))
+                .unwrap_or_default();
+            let crumb = if c.number == 0 {
+                format!("{project} / Local")
+            } else {
+                format!("{project} / Card #{}", c.number)
+            };
+            let schedule = c.schedule_source.as_ref().map(|sched| {
+                (
+                    sched.schedule_id.clone(),
+                    sched.workflow_name.clone(),
+                    sched.run_number,
+                    sched.cron.clone(),
+                )
+            });
+            Some(HeaderTopModel::Local { crumb, schedule })
+        }
+    });
+
+    let has_card = computed(move || ui.current_card().is_some());
+    let is_merging = computed(move || {
+        let Some(c) = ui.current_card() else {
+            return false;
+        };
+        if !c.active() || c.resolved() {
+            return false;
+        }
+        let snapshot_merging = ui
+            .card_status
+            .with(|cs| cs.get(&c.id).is_some_and(|s| s.is_merging));
+        let ui_merging = ui.merging_cards.with(|ids| ids.contains(&c.id));
+        snapshot_merging || ui_merging
+    });
+
+    let stage_picker_model = computed(move || {
+        let c = ui.current_card()?;
+        let project_stages = ui.index.with(|idx| {
+            idx.projects
+                .get(&c.project_id)
+                .map(|p| p.workflow.stages.clone())
+                .unwrap_or_default()
+        });
+        let stage_name = project_stages
+            .iter()
+            .find(|t| t.id == c.stage)
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| c.stage.clone());
+        let stages = project_stages
+            .into_iter()
+            .map(|st| (st.id, st.name))
+            .collect();
+        let active = c.active();
+        Some(StagePickerModel {
+            card_id: c.id,
+            active,
+            stage_id: c.stage,
+            stage_name,
+            stages,
+        })
+    });
+
+    let resolved_or_merging = computed(move || {
+        let c = ui.current_card()?;
+        if c.resolved() {
+            Some(ResolvedOrMergingModel::Resolved(resolve::tooltip(&c)))
+        } else if is_merging.get() {
+            Some(ResolvedOrMergingModel::Merging)
+        } else {
+            None
+        }
+    });
+
+    let show_hold_auto_merge = computed(move || {
+        let Some(c) = ui.current_card() else {
+            return false;
+        };
+        if !c.active() || c.resolved() || !c.hold_auto_merge {
+            return false;
+        }
+        ui.index
+            .with(|idx| idx.project_has_deliver.contains(&c.project_id))
+    });
+
+    let sync_mark_model = computed(move || {
+        let c = ui.current_card()?;
+        ui.snapshot.with(|s| s.pending_sync.get(&c.id).copied())
+    });
+
+    let workspace_model = computed(move || {
+        let c = ui.current_card()?;
+        if let Some(branch) = c.branch.as_ref().filter(|b| !b.is_empty()) {
+            Some(HeaderWorkspaceModel::Branch(branch.clone()))
+        } else if c.worktree.is_none() && !c.is_github_pr() && c.pull_request.is_none() {
+            Some(HeaderWorkspaceModel::NotCreated)
+        } else {
+            None
+        }
+    });
+
+    let pr_view_model = computed(move || {
+        let c = ui.current_card()?;
+        ui.snapshot.with(|s| {
+            ui.index
+                .with(|idx| crate::components::pr_status::from_card(s, idx, &c))
+        })
+    });
+
+    let attachment_count_model = computed(move || {
+        let Some(c) = ui.current_card() else {
+            return 0;
+        };
+        ui.index
+            .with(|idx| idx.artifact_counts.get(&c.id).copied().unwrap_or(0))
+    });
+
+    let review_model = computed(move || {
+        if is_review.get() {
+            return None;
+        }
+        let c = ui.current_card()?;
+        let project = ui
+            .index
+            .with(|idx| idx.projects.get(&c.project_id).cloned());
+        let stage_require_review = project
+            .as_ref()
+            .and_then(|p| p.workflow.stages.iter().find(|t| t.id == c.stage))
+            .is_some_and(|t| t.require_human_review);
+        let in_review_stage = c.stage == "review" || stage_require_review;
+        let is_pr = crate::review::card_has_pr(&c);
+        let can_review_diff = in_review_stage
+            || c.worktree.is_some()
+            || c.branch.as_ref().is_some_and(|b| !b.is_empty())
+            || is_pr;
+
+        if c.active() && !c.resolved() && is_pr {
+            let (review_draft, active_review) = ui.snapshot.with(|s| {
+                let d = ui.index.with(|idx| idx.review_draft(&c.id).cloned());
+                let r = crate::review::active_review_run(s, &c.id);
+                (d, r)
+            });
+            if let Some((profile, started_at)) = active_review {
+                Some(HeaderReviewModel::PrActive {
+                    card_id: c.id,
+                    profile,
+                    started_at,
+                    in_review_stage,
+                })
+            } else if let Some(d) = review_draft {
+                Some(HeaderReviewModel::PrDraft {
+                    card_id: c.id,
+                    count: d.comments.len(),
+                })
+            } else {
+                let _ = ui.default_agent.get();
+                let default_prof = crate::sessions::default_review_profile(ui);
+                Some(HeaderReviewModel::PrIdle {
+                    card_id: c.id,
+                    default_prof,
+                    in_review_stage,
+                })
+            }
+        } else if can_review_diff
+            && (in_review_stage || c.branch.as_ref().is_none_or(|b| b.is_empty()))
+        {
+            Some(HeaderReviewModel::LocalDiff {
+                in_review_stage,
+                is_review_stage_id: c.stage == "review",
+            })
+        } else {
+            None
+        }
+    });
+
+    let resolution_model = computed(move || {
+        if is_review.get() {
+            return None;
+        }
+        let c = ui.current_card()?;
+        let project = ui
+            .index
+            .with(|idx| idx.projects.get(&c.project_id).cloned());
+        let is_pr = crate::review::card_has_pr(&c);
+        if quick_merge::eligible(&c, project.as_ref()) {
+            let target = project
+                .as_ref()
+                .and_then(|p| p.target_branch.clone())
+                .unwrap_or_else(|| "main".into());
+            Some(HeaderResolutionModel::QuickMerge { target })
+        } else if c.active() && !c.resolved() && !is_pr {
+            Some(HeaderResolutionModel::Resolve)
+        } else if c.active() && c.resolved() && !c.merged() {
+            Some(HeaderResolutionModel::Reopen)
+        } else {
+            None
+        }
+    });
+
+    let show_continue_workflow = computed(move || {
+        let Some(c) = ui.current_card() else {
+            return false;
+        };
+        let stage_require_review = ui.index.with(|idx| {
+            idx.projects
+                .get(&c.project_id)
+                .and_then(|p| p.workflow.stages.iter().find(|t| t.id == c.stage))
+                .is_some_and(|t| t.require_human_review)
+        });
+        let in_review_stage = c.stage == "review" || stage_require_review;
+        !in_review_stage && c.human_gate.is_some()
+    });
+
+    let attention_reason = computed(move || {
+        let c = ui.current_card()?;
+        c.attention.or_else(|| c.human_gate.map(|g| g.reason))
+    });
+
+    let advance_model = computed(move || {
+        let c = ui.current_card()?;
+        let review_mode = is_review.get();
+        let merging = is_merging.get();
+        let has_running_agent = ui
+            .card_status
+            .with(|cs| cs.get(&c.id).is_some_and(|s| !s.running.is_empty()));
+        let (project, review_draft) = ui.index.with(|idx| {
+            (
+                idx.projects.get(&c.project_id).cloned(),
+                idx.review_draft(&c.id).cloned(),
+            )
+        });
+        let next = next_stage_for_card(&c, project.as_ref(), merging)?;
+        let stage_require_review = project
+            .as_ref()
+            .and_then(|p| p.workflow.stages.iter().find(|t| t.id == c.stage))
+            .is_some_and(|t| t.require_human_review);
+        let in_review_stage = c.stage == "review" || stage_require_review;
+        let is_pr = crate::review::card_has_pr(&c);
+        let can_review_diff = in_review_stage
+            || c.worktree.is_some()
+            || c.branch.as_ref().is_some_and(|b| !b.is_empty())
+            || is_pr;
+        let (has_active_workflow, next_automation) = ui.snapshot.with(|s| {
+            let active_wf = s
+                .workflow_runs
+                .iter()
+                .any(|run| run.card_id.as_deref() == Some(c.id.as_str()) && run.active());
+            let files: Vec<_> = s
+                .workflow_sources
+                .iter()
+                .filter(|f| f.project_id == c.project_id)
+                .cloned()
+                .collect();
+            let auto = canban_workflow_engine::source::column_automation(
+                &next.id,
+                &files,
+                &s.workflow_revisions,
+                &s.event_subscriptions,
+            );
+            (active_wf, auto)
+        });
+        let pr_primary = !review_mode
+            && c.active()
+            && !c.resolved()
+            && is_pr
+            && (review_draft.is_some() || in_review_stage);
+        let diff_primary = !review_mode
+            && !is_pr
+            && can_review_diff
+            && (in_review_stage || c.branch.as_ref().is_none_or(|b| b.is_empty()))
+            && c.stage == "review";
+        let variant = advance_button_variant(
+            pr_primary || diff_primary,
+            has_active_workflow,
+            has_running_agent,
+            c.human_gate.is_some(),
+            c.attention.is_some(),
+        );
+        let button_label = format!("{} →", next.name);
+        let a11y_label = match &next_automation {
+            Some(auto) => format!("Move to {} · {}", next.name, auto.label),
+            None => format!("Move to {}", next.name),
+        };
+        let tooltip = advance_tooltip(&next.name, next_automation.as_ref(), has_active_workflow);
+        Some(HeaderAdvanceModel {
+            card_id: c.id,
+            target_stage_id: next.id,
+            button_label,
+            a11y_label,
+            tooltip,
+            has_automation: next_automation.is_some(),
+            primary: matches!(variant, Variant::Primary),
+        })
+    });
+
     view()
         .px_3()
         .py_2()
@@ -358,80 +754,67 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
         .border_color(BORDER)
         .flex_shrink_0()
         .child(dynamic(move || {
-            let Some(c) = ui.current_card() else {
+            let Some(model) = top_model.get() else {
                 return view().into_element();
             };
             let mut row = view().flex_row().flex_wrap().items_center().gap_2();
-            if let Some(source) = c.github_issue() {
-                let state = ui
-                    .index
-                    .with(|idx| {
-                        idx.github_issue(&c.project_id, source.repository_id, source.issue_id)
-                            .map(|i| i.state.clone())
-                    })
-                    .unwrap_or_else(|| "Status unavailable".into());
-                row = row.child(icon(Icon::GitHub)).child(muted(format!(
-                    "{} {}#{} · {}",
-                    if c.is_github_pr() { "PR" } else { "Issue" },
-                    source.repository,
-                    source.number,
-                    state
-                )));
-                let url = source.url.clone();
-                let gh_ref = canban_types::GitHubReference {
-                    repository: source.repository.clone(),
-                    kind: c.source_kind().into(),
-                    number: Some(source.number),
-                    sha: None,
-                    url: source.url.clone(),
-                };
-                let gh_connected = ui.snapshot.with(|s| {
-                    ui.github
-                        .gh_status
-                        .with(|gh| crate::github::active_login_from(s, gh).is_some())
-                });
-                row = row.child(view().flex_1());
-                if gh_connected {
+            match model {
+                HeaderTopModel::GitHub {
+                    is_pr,
+                    repository,
+                    number,
+                    state,
+                    url,
+                    source_kind,
+                    gh_connected,
+                } => {
+                    row = row.child(icon(Icon::GitHub)).child(muted(format!(
+                        "{} {}#{} · {}",
+                        if is_pr { "PR" } else { "Issue" },
+                        repository,
+                        number,
+                        state
+                    )));
+                    let gh_ref = canban_types::GitHubReference {
+                        repository,
+                        kind: source_kind,
+                        number: Some(number),
+                        sha: None,
+                        url: url.clone(),
+                    };
+                    row = row.child(view().flex_1());
+                    if gh_connected {
+                        row = row.child(compact_action(
+                            "GitHub discussion",
+                            Variant::Quiet,
+                            move |_| crate::github::open_section(ui, gh_ref.clone(), "discussion"),
+                        ));
+                    }
                     row = row.child(compact_action(
-                        "GitHub discussion",
+                        "Open in GitHub ↗",
                         Variant::Quiet,
-                        move |_| crate::github::open_section(ui, gh_ref.clone(), "discussion"),
+                        move |_| crate::github::open_url(ui, url.clone()),
                     ));
                 }
-                row = row.child(compact_action(
-                    "Open in GitHub ↗",
-                    Variant::Quiet,
-                    move |_| crate::github::open_url(ui, url.clone()),
-                ));
-            } else {
-                let project = ui
-                    .index
-                    .with(|idx| idx.projects.get(&c.project_id).map(|p| p.name.clone()))
-                    .unwrap_or_default();
-                let crumb = if c.number == 0 {
-                    format!("{project} / Local")
-                } else {
-                    format!("{project} / Card #{}", c.number)
-                };
-                row = row.child(muted(crumb));
-                if let Some(sched) = &c.schedule_source {
-                    let sid = sched.schedule_id.clone();
-                    row = row
-                        .child(muted("·"))
-                        .child(icon_tinted(Icon::Clock, ACCENT).w(px(13.)).h(px(13.)))
-                        .child(muted(format!(
-                            "Scheduled · {} #{}",
-                            sched.workflow_name, sched.run_number
-                        )))
-                        .child(badge(sched.cron.clone()))
-                        .child(view().flex_1())
-                        .child(compact_action(
-                            "View Schedule →",
-                            Variant::Quiet,
-                            move |_| {
-                                crate::workflows::open_schedules(ui, Some(sid.clone()));
-                            },
-                        ));
+                HeaderTopModel::Local { crumb, schedule } => {
+                    row = row.child(muted(crumb));
+                    if let Some((sid, workflow_name, run_number, cron)) = schedule {
+                        row = row
+                            .child(muted("·"))
+                            .child(icon_tinted(Icon::Clock, ACCENT).w(px(13.)).h(px(13.)))
+                            .child(muted(format!(
+                                "Scheduled · {workflow_name} #{run_number}"
+                            )))
+                            .child(badge(cron))
+                            .child(view().flex_1())
+                            .child(compact_action(
+                                "View Schedule →",
+                                Variant::Quiet,
+                                move |_| {
+                                    crate::workflows::open_schedules(ui, Some(sid.clone()));
+                                },
+                            ));
+                    }
                 }
             }
             row.into_element()
@@ -491,233 +874,182 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     move || chrome_button(Icon::Close, "Close Card details", move |_| close(ui)),
                 )),
         )
-        .child(dynamic(move || {
-            let Some(c) = ui.current_card() else {
-                return view();
-            };
-            let review_mode = is_review.get();
-            let ui_merging = c.active()
-                && !c.resolved()
-                && ui.merging_cards.with(|ids| ids.contains(&c.id));
-            let (
-                project,
-                has_deliver_in_project,
-                attachment_count,
-                snapshot_merging,
-                has_running_agent,
-            ) = ui.index.with(|idx| {
-                let st = idx.card_status.get(&c.id);
-                (
-                    idx.projects.get(&c.project_id).cloned(),
-                    idx.project_has_deliver.contains(&c.project_id),
-                    idx.artifact_counts.get(&c.id).copied().unwrap_or(0),
-                    st.is_some_and(|s| s.is_merging),
-                    st.is_some_and(|s| !s.running.is_empty()),
-                )
-            });
-            let project_stages = project
-                .as_ref()
-                .map(|p| p.workflow.stages.clone())
-                .unwrap_or_default();
-            let stage = project_stages.iter().find(|t| t.id == c.stage);
-            let stage_name = stage
-                .map(|t| t.name.clone())
-                .unwrap_or_else(|| c.stage.clone());
-            let stage_a11y = stage_name.clone();
-            let stage_anchor = element_ref();
-            let stage_card = c.clone();
-            let stages_for_menu = project_stages.clone();
-            let mut row = view()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .gap_2()
-                .min_w(px(0.))
-                .child(
-                    canban_ui_kit::press_target()
-                        .element_ref(&stage_anchor)
-                        .h(px(24.))
-                        .px_2()
-                        .rounded(px(5.))
-                        .flex_row()
-                        .items_center()
-                        .gap_1()
-                        .bg(INSET)
-                        .hover(|st| st.bg(CARD_HOVER))
-                        .focus(|st| st.border_1().border_color(ACCENT))
-                        .disabled(!c.active() || stages_for_menu.is_empty())
-                        .accessibility_label(move || {
-                            Some(format!("Change stage · {stage_a11y}").into())
-                        })
-                        .child(muted(format!("{stage_name} ▾")))
-                        .on_press(move |_: &()| {
-                            use nsh_core::element::desktop::popup_menu_at;
-                            let stages = stages_for_menu.clone();
-                            let card = stage_card.clone();
-                            ui.spawn(async move {
-                                let Some(bounds) = stage_anchor.measure().await else {
-                                    return;
-                                };
-                                let items = stages
-                                    .into_iter()
-                                    .map(|st| {
-                                        let cid = card.id.clone();
-                                        let target = st.id.clone();
-                                        let prefix = if st.id == card.stage { "✓ " } else { "" };
-                                        MenuItem::new(format!("{prefix}{}", st.name))
-                                            .disabled(st.id == card.stage || !card.active())
-                                            .on_select(move || {
-                                                crate::presenter::move_card(ui, &cid, &target)
-                                            })
-                                    })
-                                    .collect::<Vec<_>>();
-                                popup_menu_at(
-                                    items,
-                                    point(bounds.page.x, bounds.page.y + bounds.frame.size.height),
-                                )
-                                .await;
-                            });
-                        }),
-                );
-            if c.resolved() {
-                let badge = status("Resolved", Tone::Success);
-                if let Some(tip) = resolve::tooltip(&c) {
-                    row = row.child(view().tooltip(hint_tooltip(tip)).child(badge));
-                } else {
-                    row = row.child(badge);
-                }
-            } else if snapshot_merging || ui_merging {
-                row = row.child(live_status("Merging", Tone::Info));
-            }
-            if c.active() && !c.resolved() && has_deliver_in_project && c.hold_auto_merge {
-                row = row.child(status("Auto-merge held", Tone::Attention));
-            }
-            if let Some(mark) = ui.snapshot.with(|s| s.pending_sync.get(&c.id).cloned()) {
-                let (chip_label, chip_tone) = crate::hosts::sync_chip_spec(mark);
-                row = row.child(status(chip_label, chip_tone));
-            }
-            if let Some(branch) = c.branch.clone().filter(|b| !b.is_empty()) {
-                row = row.child(changes::button(ui, branch, summary));
-            } else if c.worktree.is_none() && !c.is_github_pr() && c.pull_request.is_none() {
-                row = row.child(muted("Workspace not created"));
-            }
-            let pr_view = ui.snapshot.with(|s| {
-                ui.index
-                    .with(|idx| crate::components::pr_status::from_card(s, idx, &c))
-            });
-            if let Some(pr_pill) = pr_view
-                .as_ref()
-                .and_then(|info| crate::components::pr_status::pill(ui, info, false))
-            {
-                row = row.child(pr_pill);
-            }
-
-            if attachment_count > 0 {
-                row = row.child(
-                    canban_ui_kit::press_target()
-                        .h(px(24.))
-                        .px_2()
-                        .rounded(px(5.))
-                        .flex_row()
-                        .items_center()
-                        .gap_1()
-                        .bg(CLEAR)
-                        .hover(|st| st.bg(INSET))
-                        .focus(|st| st.border_1().border_color(ACCENT))
-                        .accessibility_label(move || {
-                            Some(format!("Toggle attachments ({attachment_count})").into())
-                        })
-                        .child(icon(Icon::Paperclip).w(px(12.)).h(px(12.)))
-                        .child(muted(attachment_count.to_string()))
-                        .on_press(move |_: &()| {
-                            draft.update(|d| d.details = !d.details);
-                            reading.top();
-                        }),
-                );
-            }
-            row = row.child(view().flex_1().min_w(px(0.)));
-            let in_review_stage =
-                c.stage == "review" || stage.is_some_and(|t| t.require_human_review);
-            let is_pr = crate::review::card_has_pr(&c);
-            let can_review_diff = in_review_stage
-                || c.worktree.is_some()
-                || c.branch.as_ref().is_some_and(|b| !b.is_empty())
-                || is_pr;
-            let next_stage =
-                next_stage_for_card(&c, project.as_ref(), snapshot_merging || ui_merging);
-            let (review_draft, active_review, has_active_workflow, next_automation) =
-                ui.snapshot.with(|s| {
-                    let d = ui.index.with(|idx| idx.review_draft(&c.id).cloned());
-                    let r = crate::review::active_review_run(s, &c.id);
-                    let active_wf = s.workflow_runs.iter().any(|run| {
-                        run.card_id.as_deref() == Some(c.id.as_str()) && run.active()
-                    });
-                    let auto = next_stage.as_ref().and_then(|next| {
-                        let files: Vec<_> = s
-                            .workflow_sources
-                            .iter()
-                            .filter(|f| f.project_id == c.project_id)
-                            .cloned()
-                            .collect();
-                        canban_workflow_engine::source::column_automation(
-                            &next.id,
-                            &files,
-                            &s.workflow_revisions,
-                            &s.event_subscriptions,
-                        )
-                    });
-                    (d, r, active_wf, auto)
-                });
-            if !review_mode && c.active() && !c.resolved() && is_pr {
-                if let Some((prof, started_at)) = active_review {
-                    let cid_term = c.id.clone();
-                    row = row.child(
-                        canban_ui_kit::press_target()
-                            .h(px(26.))
-                            .px_2()
-                            .rounded(px(13.))
-                            .flex_row()
-                            .items_center()
-                            .gap_1p5()
-                            .bg(SELECTED)
-                            .hover(|st| st.bg(CARD_HOVER))
-                            .on_press(move |_: &()| {
-                                if ui.page.get_untracked() == "card" {
-                                    crate::card::terminal::toggle(ui);
-                                } else {
-                                    crate::terminals::open_card_quick(ui, &cid_term);
-                                }
-                            })
-                            .child(live_dot(ACCENT))
-                            .child(
-                                label(move || {
-                                    let elapsed = started_at
-                                        .map(|t| {
-                                            format!(
-                                                " · {}",
-                                                crate::components::activity::compact_duration(
-                                                    ui.runtime_clock.get().saturating_sub(t)
-                                                )
-                                            )
-                                        })
-                                        .unwrap_or_default();
-                                    format!("@{prof} reviewing{elapsed}")
+        .child(when(
+            move || has_card.get(),
+            move || {
+                view()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .min_w(px(0.))
+                    .child(dynamic(move || {
+                        let m = stage_picker_model.get()?;
+                        let stage_anchor = element_ref();
+                        let stage_a11y = m.stage_name.clone();
+                        let stages_for_menu = m.stages;
+                        let card_id = m.card_id;
+                        let current_stage = m.stage_id;
+                        let active = m.active;
+                        let disabled = !active || stages_for_menu.is_empty();
+                        Some(
+                            canban_ui_kit::press_target()
+                                .element_ref(&stage_anchor)
+                                .h(px(24.))
+                                .px_2()
+                                .rounded(px(5.))
+                                .flex_row()
+                                .items_center()
+                                .gap_1()
+                                .bg(INSET)
+                                .hover(|st| st.bg(CARD_HOVER))
+                                .focus(|st| st.border_1().border_color(ACCENT))
+                                .disabled(disabled)
+                                .accessibility_label(move || {
+                                    Some(format!("Change stage · {stage_a11y}").into())
                                 })
-                                .text_size(px(11.5))
-                                .text_color(ACCENT),
-                            ),
-                    );
-                } else if let Some(ref d) = review_draft {
-                    let count = d.comments.len();
-                    let cid_rerun = c.id.clone();
-                    let cid_open = c.id.clone();
-                    let btn_label = if count > 0 {
-                        format!("Review Drafts ({count}) →")
-                    } else {
-                        "Review Ready →".into()
-                    };
-                    row = row
-                        .child(
+                                .child(muted(format!("{} ▾", m.stage_name)))
+                                .on_press(move |_: &()| {
+                                    use nsh_core::element::desktop::popup_menu_at;
+                                    let stages = stages_for_menu.clone();
+                                    let cid_menu = card_id.clone();
+                                    let cur_stage = current_stage.clone();
+                                    ui.spawn(async move {
+                                        let Some(bounds) = stage_anchor.measure().await else {
+                                            return;
+                                        };
+                                        let items = stages
+                                            .into_iter()
+                                            .map(|(st_id, st_name)| {
+                                                let cid = cid_menu.clone();
+                                                let target = st_id.clone();
+                                                let prefix =
+                                                    if st_id == cur_stage { "✓ " } else { "" };
+                                                MenuItem::new(format!("{prefix}{st_name}"))
+                                                    .disabled(st_id == cur_stage || !active)
+                                                    .on_select(move || {
+                                                        crate::presenter::move_card(
+                                                            ui, &cid, &target,
+                                                        )
+                                                    })
+                                            })
+                                            .collect::<Vec<_>>();
+                                        popup_menu_at(
+                                            items,
+                                            point(
+                                                bounds.page.x,
+                                                bounds.page.y + bounds.frame.size.height,
+                                            ),
+                                        )
+                                        .await;
+                                    });
+                                }),
+                        )
+                    }))
+                    .child(dynamic(move || match resolved_or_merging.get()? {
+                        ResolvedOrMergingModel::Resolved(tip) => {
+                            let badge = status("Resolved", Tone::Success);
+                            if let Some(tip) = tip {
+                                Some(view().tooltip(hint_tooltip(tip)).child(badge))
+                            } else {
+                                Some(view().child(badge))
+                            }
+                        }
+                        ResolvedOrMergingModel::Merging => {
+                            Some(view().child(live_status("Merging", Tone::Info)))
+                        }
+                    }))
+                    .child(dynamic(move || {
+                        show_hold_auto_merge
+                            .get()
+                            .then(|| status("Auto-merge held", Tone::Attention))
+                    }))
+                    .child(dynamic(move || {
+                        let mark = sync_mark_model.get()?;
+                        let (chip_label, chip_tone) = crate::hosts::sync_chip_spec(mark);
+                        Some(status(chip_label, chip_tone))
+                    }))
+                    .child(dynamic(move || match workspace_model.get()? {
+                        HeaderWorkspaceModel::Branch(branch) => {
+                            Some(changes::button(ui, branch, summary).into_element())
+                        }
+                        HeaderWorkspaceModel::NotCreated => {
+                            Some(muted("Workspace not created").into_element())
+                        }
+                    }))
+                    .child(dynamic(move || {
+                        let info = pr_view_model.get()?;
+                        crate::components::pr_status::pill(ui, &info, false)
+                    }))
+                    .child(dynamic(move || {
+                        let attachment_count = attachment_count_model.get();
+                        (attachment_count > 0).then(|| {
+                            canban_ui_kit::press_target()
+                                .h(px(24.))
+                                .px_2()
+                                .rounded(px(5.))
+                                .flex_row()
+                                .items_center()
+                                .gap_1()
+                                .bg(CLEAR)
+                                .hover(|st| st.bg(INSET))
+                                .focus(|st| st.border_1().border_color(ACCENT))
+                                .accessibility_label(move || {
+                                    Some(format!("Toggle attachments ({attachment_count})").into())
+                                })
+                                .child(icon(Icon::Paperclip).w(px(12.)).h(px(12.)))
+                                .child(muted(attachment_count.to_string()))
+                                .on_press(move |_: &()| {
+                                    draft.update(|d| d.details = !d.details);
+                                    reading.top();
+                                })
+                        })
+                    }))
+                    .child(view().flex_1().min_w(px(0.)))
+                    .child(dynamic(move || match review_model.get()? {
+                        HeaderReviewModel::PrActive {
+                            card_id,
+                            profile,
+                            started_at,
+                            ..
+                        } => Some(
+                            canban_ui_kit::press_target()
+                                .h(px(26.))
+                                .px_2()
+                                .rounded(px(13.))
+                                .flex_row()
+                                .items_center()
+                                .gap_1p5()
+                                .bg(SELECTED)
+                                .hover(|st| st.bg(CARD_HOVER))
+                                .on_press(move |_: &()| {
+                                    if ui.page.get_untracked() == "card" {
+                                        crate::card::terminal::toggle(ui);
+                                    } else {
+                                        crate::terminals::open_card_quick(ui, &card_id);
+                                    }
+                                })
+                                .child(live_dot(ACCENT))
+                                .child(
+                                    label(move || {
+                                        let elapsed = started_at
+                                            .map(|t| {
+                                                format!(
+                                                    " · {}",
+                                                    crate::components::activity::compact_duration(
+                                                        ui.runtime_clock.get().saturating_sub(t)
+                                                    )
+                                                )
+                                            })
+                                            .unwrap_or_default();
+                                        format!("@{profile} reviewing{elapsed}")
+                                    })
+                                    .text_size(px(11.5))
+                                    .text_color(ACCENT),
+                                )
+                                .into_element(),
+                        ),
+                        HeaderReviewModel::PrDraft { card_id, .. } => Some(
                             compact_action(
                                 move || {
                                     if ui.is_method_pending("review.run_agent") {
@@ -728,208 +1060,215 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                                 },
                                 Variant::Quiet,
                                 move |_| {
-                                    crate::review::start_agent_review(ui, &cid_rerun, None, None);
+                                    crate::review::start_agent_review(ui, &card_id, None, None);
                                 },
                             )
-                            .disabled(move || ui.is_method_pending("review.run_agent")),
-                        )
-                        .child(compact_action(
-                            btn_label,
-                            Variant::Primary,
-                            move |_| crate::review::open_card_pr(ui, &cid_open),
-                        ));
-                } else {
-                    let cid_run = c.id.clone();
-                    let default_prof = crate::sessions::default_review_profile(ui);
-                    row = row.child(
-                        compact_action(
-                            move || {
-                                if ui.is_method_pending("review.run_agent") {
-                                    format!("Starting @{default_prof}…")
-                                } else {
-                                    format!("Agent Review (@{default_prof})")
-                                }
-                            },
-                            Variant::Secondary,
-                            move |_| {
-                                crate::review::start_agent_review(ui, &cid_run, None, None)
-                            },
-                        )
-                        .disabled(move || ui.is_method_pending("review.run_agent")),
-                    );
-                }
-                if review_draft.is_none() {
-                    row = row.child(compact_action(
-                        "View PR diff",
-                        if in_review_stage {
-                            Variant::Primary
-                        } else {
-                            Variant::Secondary
-                        },
-                        move |_| changes::open(ui),
-                    ));
-                }
-            } else if !review_mode
-                && can_review_diff
-                && (in_review_stage || c.branch.as_ref().is_none_or(|b| b.is_empty()))
-            {
-                row = row.child(compact_action(
-                    if in_review_stage { "Review" } else { "Diff" },
-                    if c.stage == "review" {
-                        Variant::Primary
-                    } else {
-                        Variant::Secondary
-                    },
-                    move |_| changes::open(ui),
-                ));
-            }
-            let quick_merge_visible = !review_mode && quick_merge::eligible(&c, project.as_ref());
-            if quick_merge_visible {
-                let target = project
-                    .as_ref()
-                    .and_then(|p| p.target_branch.clone())
-                    .unwrap_or_else(|| "main".into());
-                let card = c.clone();
-                let a11y = format!("Quick merge into {target}");
-                row = row.child(
-                    view()
-                        .tooltip(hint_tooltip(format!(
-                            "Merge into {target} with the default commit message, without opening the diff"
-                        )))
-                        .child(
+                            .disabled(move || ui.is_method_pending("review.run_agent"))
+                            .into_element(),
+                        ),
+                        HeaderReviewModel::PrIdle {
+                            card_id,
+                            default_prof,
+                            ..
+                        } => Some(
                             compact_action(
                                 move || {
-                                    if quick_merge::busy(ui) {
-                                        "Merging…"
+                                    if ui.is_method_pending("review.run_agent") {
+                                        format!("Starting @{default_prof}…")
                                     } else {
-                                        "Merge"
+                                        format!("Agent Review (@{default_prof})")
                                     }
                                 },
                                 Variant::Secondary,
-                                move |_| quick_merge::start(ui, card.clone()),
+                                move |_| {
+                                    crate::review::start_agent_review(ui, &card_id, None, None)
+                                },
                             )
-                            .accessibility_label(move || Some(a11y.clone().into()))
-                            .disabled(move || quick_merge::busy(ui)),
+                            .disabled(move || ui.is_method_pending("review.run_agent"))
+                            .into_element(),
                         ),
-                );
-            } else if !review_mode && c.active() && !c.resolved() && !is_pr {
-                let card = c.clone();
-                row = row.child(
-                    view()
-                        .tooltip(hint_tooltip(
-                            "Mark this Card as resolved without merging code (auto-archives tomorrow)",
-                        ))
-                        .child(
-                            compact_action_with_icon(
-                                Icon::Check,
-                                "Resolve",
-                                Variant::Secondary,
-                                move |_| resolve::start(ui, card.clone()),
+                        HeaderReviewModel::LocalDiff {
+                            in_review_stage,
+                            is_review_stage_id,
+                        } => Some(
+                            compact_action(
+                                if in_review_stage { "Review" } else { "Diff" },
+                                if is_review_stage_id {
+                                    Variant::Primary
+                                } else {
+                                    Variant::Secondary
+                                },
+                                move |_| changes::open(ui),
                             )
-                            .accessibility_label(|| Some("Mark Card as resolved".into()))
-                            .disabled(move || resolve::busy(ui) || ui.pending.get()),
+                            .into_element(),
                         ),
-                );
-            } else if !review_mode && c.active() && c.resolved() && !c.merged() {
-                let card = c.clone();
-                row = row.child(
-                    view()
-                        .tooltip(hint_tooltip("Reopen this resolved Card"))
-                        .child(
-                            compact_action_with_icon(
-                                Icon::Undo,
-                                "Reopen",
-                                Variant::Secondary,
-                                move |_| resolve::reopen(ui, card.clone()),
-                            )
-                            .accessibility_label(|| Some("Reopen resolved Card".into()))
-                            .disabled(move || resolve::busy(ui) || ui.pending.get()),
-                        ),
-                );
-            }
-            if !in_review_stage && c.human_gate.is_some() {
-                row = row.child(
-                    compact_action("Continue workflow", Variant::Secondary, move |_| {
-                        if let Some(c) = ui.current_card() {
-                            dispatch(
-                                ui,
-                                "card.continue",
-                                json!({"card_id":c.id,"revision":c.revision}),
-                            );
+                    }))
+                    .child(dynamic(move || match review_model.get()? {
+                        HeaderReviewModel::PrDraft { card_id, count } => {
+                            let btn_label = if count > 0 {
+                                format!("Review Drafts ({count}) →")
+                            } else {
+                                "Review Ready →".into()
+                            };
+                            Some(compact_action(btn_label, Variant::Primary, move |_| {
+                                crate::review::open_card_pr(ui, &card_id)
+                            }))
                         }
-                    })
-                    .disabled(move || ui.is_method_pending("card.continue")),
-                );
-            }
-            if let Some(reason) = c.attention.clone().or_else(|| c.human_gate.as_ref().map(|g| g.reason.clone())) {
-                row = row.child(
-                    view()
-                        .tooltip(hint_tooltip(reason))
-                        .child(
-                            compact_action("Needs attention", Variant::Secondary, move |_| {
-                                crate::overview::show_card_attention(
-                                    ui,
-                                    &untracked(|| ui.card_id()),
-                                );
-                            })
-                            .text_color(ATTENTION),
-                        ),
-                );
-            }
-            if let Some(next) = next_stage {
-                let pr_primary = !review_mode
-                    && c.active()
-                    && !c.resolved()
-                    && is_pr
-                    && (review_draft.is_some() || in_review_stage);
-                let diff_primary = !review_mode
-                    && !is_pr
-                    && can_review_diff
-                    && (in_review_stage || c.branch.as_ref().is_none_or(|b| b.is_empty()))
-                    && c.stage == "review";
-                let variant = advance_button_variant(
-                    pr_primary || diff_primary,
-                    has_active_workflow,
-                    has_running_agent,
-                    c.human_gate.is_some(),
-                    c.attention.is_some(),
-                );
-                let button_label = format!("{} →", next.name);
-                let a11y_label = match &next_automation {
-                    Some(auto) => format!("Move to {} · {}", next.name, auto.label),
-                    None => format!("Move to {}", next.name),
-                };
-                let cid = c.id.clone();
-                let target_stage = next.id.clone();
-                let btn = if next_automation.is_some() {
-                    compact_action_with_icon(Icon::Zap, button_label, variant, move |_| {
-                        crate::presenter::move_card(ui, &cid, &target_stage);
-                    })
-                } else {
-                    compact_action(button_label, variant, move |_| {
-                        crate::presenter::move_card(ui, &cid, &target_stage);
-                    })
-                }
-                .accessibility_label(move || Some(a11y_label.clone().into()))
-                .disabled(move || ui.is_method_pending("card.move"));
-                let tip = advance_tooltip(&next.name, next_automation.as_ref(), has_active_workflow);
-                row = row.child(
-                    view()
-                        .tooltip(
-                            tooltip_box()
-                                .placement(Placement::Bottom)
-                                .max_w(px(320.))
+                        HeaderReviewModel::PrActive {
+                            in_review_stage, ..
+                        }
+                        | HeaderReviewModel::PrIdle {
+                            in_review_stage, ..
+                        } => Some(compact_action(
+                            "View PR diff",
+                            if in_review_stage {
+                                Variant::Primary
+                            } else {
+                                Variant::Secondary
+                            },
+                            move |_| changes::open(ui),
+                        )),
+                        HeaderReviewModel::LocalDiff { .. } => None,
+                    }))
+                    .child(dynamic(move || match resolution_model.get()? {
+                        HeaderResolutionModel::QuickMerge { target } => {
+                            let a11y = format!("Quick merge into {target}");
+                            Some(
+                                view()
+                                    .tooltip(hint_tooltip(format!(
+                                        "Merge into {target} with the default commit message, without opening the diff"
+                                    )))
+                                    .child(
+                                        compact_action(
+                                            move || {
+                                                if quick_merge::busy(ui) {
+                                                    "Merging…"
+                                                } else {
+                                                    "Merge"
+                                                }
+                                            },
+                                            Variant::Secondary,
+                                            move |_| {
+                                                if let Some(card) = untracked(|| ui.current_card()) {
+                                                    quick_merge::start(ui, card);
+                                                }
+                                            },
+                                        )
+                                        .accessibility_label(move || Some(a11y.clone().into()))
+                                        .disabled(move || quick_merge::busy(ui)),
+                                    ),
+                            )
+                        }
+                        HeaderResolutionModel::Resolve => Some(
+                            view()
+                                .tooltip(hint_tooltip(
+                                    "Mark this Card as resolved without merging code (auto-archives tomorrow)",
+                                ))
                                 .child(
-                                    text(tip)
-                                        .text_size(px(CAPTION_SIZE))
-                                        .text_color(TEXT),
+                                    compact_action_with_icon(
+                                        Icon::Check,
+                                        "Resolve",
+                                        Variant::Secondary,
+                                        move |_| {
+                                            if let Some(card) = untracked(|| ui.current_card()) {
+                                                resolve::start(ui, card);
+                                            }
+                                        },
+                                    )
+                                    .accessibility_label(|| Some("Mark Card as resolved".into()))
+                                    .disabled(move || resolve::busy(ui) || ui.pending.get()),
                                 ),
+                        ),
+                        HeaderResolutionModel::Reopen => Some(
+                            view()
+                                .tooltip(hint_tooltip("Reopen this resolved Card"))
+                                .child(
+                                    compact_action_with_icon(
+                                        Icon::Undo,
+                                        "Reopen",
+                                        Variant::Secondary,
+                                        move |_| {
+                                            if let Some(card) = untracked(|| ui.current_card()) {
+                                                resolve::reopen(ui, card);
+                                            }
+                                        },
+                                    )
+                                    .accessibility_label(|| Some("Reopen resolved Card".into()))
+                                    .disabled(move || resolve::busy(ui) || ui.pending.get()),
+                                ),
+                        ),
+                    }))
+                    .child(dynamic(move || {
+                        show_continue_workflow.get().then(|| {
+                            compact_action("Continue workflow", Variant::Secondary, move |_| {
+                                if let Some(c) = untracked(|| ui.current_card()) {
+                                    dispatch(
+                                        ui,
+                                        "card.continue",
+                                        json!({"card_id":c.id,"revision":c.revision}),
+                                    );
+                                }
+                            })
+                            .disabled(move || ui.is_method_pending("card.continue"))
+                        })
+                    }))
+                    .child(dynamic(move || {
+                        let reason = attention_reason.get()?;
+                        Some(
+                            view().tooltip(hint_tooltip(reason)).child(
+                                compact_action("Needs attention", Variant::Secondary, move |_| {
+                                    crate::overview::show_card_attention(
+                                        ui,
+                                        &untracked(|| ui.card_id()),
+                                    );
+                                })
+                                .text_color(ATTENTION),
+                            ),
                         )
-                        .child(btn),
-                );
-            }
-            row
-        }))
+                    }))
+                    .child(dynamic(move || {
+                        let m = advance_model.get()?;
+                        let variant = if m.primary {
+                            Variant::Primary
+                        } else {
+                            Variant::Secondary
+                        };
+                        let cid = m.card_id;
+                        let target_stage = m.target_stage_id;
+                        let a11y_label = m.a11y_label;
+                        let btn = if m.has_automation {
+                            compact_action_with_icon(
+                                Icon::Zap,
+                                m.button_label,
+                                variant,
+                                move |_| {
+                                    crate::presenter::move_card(ui, &cid, &target_stage);
+                                },
+                            )
+                        } else {
+                            compact_action(m.button_label, variant, move |_| {
+                                crate::presenter::move_card(ui, &cid, &target_stage);
+                            })
+                        }
+                        .accessibility_label(move || Some(a11y_label.clone().into()))
+                        .disabled(move || ui.is_method_pending("card.move"));
+                        Some(
+                            view()
+                                .tooltip(
+                                    tooltip_box()
+                                        .placement(Placement::Bottom)
+                                        .max_w(px(320.))
+                                        .child(
+                                            text(m.tooltip)
+                                                .text_size(px(CAPTION_SIZE))
+                                                .text_color(TEXT),
+                                        ),
+                                )
+                                .child(btn),
+                        )
+                    }))
+            },
+        ))
         .child(quick_merge::confirm_dialog(ui))
         .child(resolve::confirm_dialog(ui))
 }

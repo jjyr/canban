@@ -483,40 +483,47 @@ fn checks_section(data: &Value, loading: bool) -> AnyElement {
 }
 
 fn card_actions(ui: Ui, r: GitHubReference) -> impl IntoElement {
-    dynamic(move || {
-        let snapshot = ui.snapshot.get();
-        let matches = super::matching_cards(&snapshot, &r);
-        let mut area = view().flex_row().flex_wrap().items_center().gap_1p5();
-        if let Some(first) = matches.first() {
-            let first_id = first.id.clone();
+    let lookup_ref = r.clone();
+    let matches_model = computed(move || {
+        ui.snapshot.with(|snapshot| {
+            let matches = super::matching_cards(snapshot, &lookup_ref);
             let multi_project = snapshot.projects.len() > 1;
-            let proj_prefix = if multi_project {
-                snapshot
-                    .projects
-                    .iter()
-                    .find(|p| p.id == first.project_id)
-                    .map(|p| format!("{} ", p.name))
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
-            let archived_suffix = if first.archived_at.is_some() {
-                " (archived)"
-            } else {
-                ""
-            };
+            matches
+                .into_iter()
+                .map(|card| {
+                    let proj_prefix = if multi_project {
+                        snapshot
+                            .projects
+                            .iter()
+                            .find(|p| p.id == card.project_id)
+                            .map(|p| format!("{} ", p.name))
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    (
+                        card.id,
+                        card.number,
+                        proj_prefix,
+                        card.archived_at.is_some(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+    });
+    dynamic(move || {
+        let matches = matches_model.get();
+        let mut area = view().flex_row().flex_wrap().items_center().gap_1p5();
+        if let Some((first_id, first_num, proj_prefix, archived)) = matches.first().cloned() {
+            let archived_suffix = if archived { " (archived)" } else { "" };
             area = area.child(compact_action(
-                format!(
-                    "Open {proj_prefix}Card #{}{archived_suffix} →",
-                    first.number
-                ),
+                format!("Open {proj_prefix}Card #{first_num}{archived_suffix} →"),
                 Variant::Primary,
                 move |_| ui.open_card(first_id.clone()),
             ));
-            for extra in matches.iter().skip(1) {
-                let extra_id = extra.id.clone();
+            for (extra_id, extra_num, _, _) in matches.into_iter().skip(1) {
                 area = area.child(compact_action(
-                    format!("#{} →", extra.number),
+                    format!("#{extra_num} →"),
                     Variant::Secondary,
                     move |_| ui.open_card(extra_id.clone()),
                 ));
@@ -1731,4 +1738,315 @@ fn review_form(ui: Ui, d: Signal<Draft>, r: GitHubReference) -> impl IntoElement
                     }),
                 ),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nsh_core::{
+        ApproxTextEngine, Core, EventKind, EventMask, EventPayload, MountBatch, MountItem, NodeId,
+        element::JsEvent,
+        geometry::{px, size},
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+
+    #[derive(Default)]
+    struct TreeState {
+        parents: BTreeMap<NodeId, NodeId>,
+        alive: BTreeSet<NodeId>,
+        deleted: BTreeSet<NodeId>,
+        texts: BTreeMap<NodeId, String>,
+        labels: BTreeMap<NodeId, String>,
+        events: BTreeMap<NodeId, EventMask>,
+    }
+
+    impl TreeState {
+        fn apply(&mut self, batch: &MountBatch) {
+            for item in &batch.items {
+                match item {
+                    MountItem::Create { id, .. } => {
+                        self.alive.insert(*id);
+                        self.deleted.remove(id);
+                    }
+                    MountItem::Insert { parent, child, .. } => {
+                        self.parents.insert(*child, *parent);
+                    }
+                    MountItem::Remove { id } => {
+                        self.parents.remove(id);
+                    }
+                    MountItem::Delete { id } => {
+                        self.alive.remove(id);
+                        self.deleted.insert(*id);
+                        self.parents.remove(id);
+                    }
+                    MountItem::Text { id, text, .. } => {
+                        self.texts.insert(*id, text.text.to_string());
+                    }
+                    MountItem::AccessibilityLabel { id, label } => {
+                        if let Some(label) = label {
+                            self.labels.insert(*id, label.to_string());
+                        } else {
+                            self.labels.remove(id);
+                        }
+                    }
+                    MountItem::ViewProps { id, props } => {
+                        if let Some(label) = &props.accessibility.label {
+                            self.labels.insert(*id, label.to_string());
+                        }
+                    }
+                    MountItem::Events { id, events } => {
+                        self.events.insert(*id, *events);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        fn is_mounted(&self, mut id: NodeId) -> bool {
+            if !self.alive.contains(&id) {
+                return false;
+            }
+            let mut guard = 0;
+            while id != nsh_core::ROOT_ID {
+                let Some(&parent) = self.parents.get(&id) else {
+                    return false;
+                };
+                id = parent;
+                guard += 1;
+                if guard > 256 {
+                    return false;
+                }
+            }
+            true
+        }
+
+        fn mounted_node_for_text(&self, needle: &str) -> Option<NodeId> {
+            self.texts
+                .iter()
+                .find(|(id, t)| *t == needle && self.is_mounted(**id))
+                .map(|(id, _)| *id)
+        }
+    }
+
+    fn pump(core: &mut Core<ApproxTextEngine>, tree: &mut TreeState) {
+        for _ in 0..16 {
+            let had_batch = if let Some(batch) = core.commit() {
+                tree.apply(&batch);
+                true
+            } else {
+                false
+            };
+            let mut events = Vec::new();
+            core.take_events(&mut events);
+            let mut dispatched = false;
+            for ev in events {
+                match ev {
+                    JsEvent::Event(id, kind, payload) => {
+                        core.component_event(id, kind, &payload);
+                        dispatched = true;
+                    }
+                    JsEvent::LayoutListener {
+                        host,
+                        id,
+                        listener,
+                        frame,
+                    } => {
+                        core.component_layout(host, id, &listener, frame);
+                        dispatched = true;
+                    }
+                    _ => {}
+                }
+            }
+            if !had_batch && !dispatched {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn card_actions_button_survives_runtime_and_unrelated_refreshes_and_navigates() {
+        #[component]
+        fn DetailActionsHarness() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let mut snapshot = Snapshot::default();
+            snapshot.projects.push(
+                serde_json::from_value(json!({
+                    "id": "proj-1",
+                    "name": "Canban",
+                    "directory": "/tmp/canban",
+                    "workflow": Workflow::default(),
+                    "created_at": 1
+                }))
+                .unwrap(),
+            );
+            let mut card1: Card = serde_json::from_value(json!({
+                "id": "c-1",
+                "project_id": "proj-1",
+                "number": 1,
+                "title": "Linked Card",
+                "body": "",
+                "stage": "develop",
+                "revision": 1,
+                "created_at": 1
+            }))
+            .unwrap();
+            card1.content = canban_types::CardContent::GitHubIssue {
+                source: canban_types::GitHubIssueRef {
+                    repository: "owner/repo".into(),
+                    repository_id: 10,
+                    issue_id: 100,
+                    number: 42,
+                    url: "https://github.com/owner/repo/issues/42".into(),
+                },
+            };
+            snapshot.cards.push(card1);
+            snapshot.cards.push(
+                serde_json::from_value(json!({
+                    "id": "c-2",
+                    "project_id": "proj-1",
+                    "number": 2,
+                    "title": "Unrelated Peer",
+                    "body": "",
+                    "stage": "develop",
+                    "revision": 1,
+                    "created_at": 2
+                }))
+                .unwrap(),
+            );
+            let term: TerminalEntry = serde_json::from_value(json!({
+                "id": "c-2:developer",
+                "conversation_id": "c-2:developer",
+                "number": 1,
+                "created_at": 10,
+                "agent": {
+                    "card_id": "c-2",
+                    "project_id": "proj-1",
+                    "stage": "develop",
+                    "trigger": "workflow",
+                    "profile": { "id": "developer", "enabled": true, "identity": true },
+                    "instruction": "Work",
+                    "state": "running",
+                    "core_id": "core-1",
+                    "terminal": "pty-2",
+                    "connection_state": "connected",
+                    "observed": { "state": "live", "turn": 1, "status": { "state": "working" } },
+                    "lifecycle": { "observed_at": 1000 },
+                    "started_at": 1_750_000_000_000u64,
+                    "updated_at": 100
+                }
+            }))
+            .unwrap();
+            snapshot.terminals.push(term);
+            ui.accept_snapshot(snapshot);
+            ui.page.set("github".into());
+
+            let reference = GitHubReference {
+                repository: "owner/repo".into(),
+                kind: "issue".into(),
+                number: Some(42),
+                sha: None,
+                url: "https://github.com/owner/repo/issues/42".into(),
+            };
+
+            view()
+                .w(px(700.))
+                .h(px(200.))
+                .child(label(move || {
+                    format!("STATE:{}:{}", ui.page.get(), ui.card.get())
+                }))
+                .child(
+                    canban_ui_kit::press_target()
+                        .accessibility_label(Some("Refresh unrelated state".into()))
+                        .on_press(move |_: &()| {
+                            let mut rt_term =
+                                ui.snapshot.with_untracked(|s| s.terminals[0].clone());
+                            rt_term.agent.as_mut().unwrap().lifecycle.observed_at = Some(
+                                rt_term
+                                    .agent
+                                    .as_ref()
+                                    .unwrap()
+                                    .lifecycle
+                                    .observed_at
+                                    .unwrap_or(0)
+                                    + 1_000,
+                            );
+                            ui.accept_runtime_state(RuntimeState {
+                                terminals: vec![rt_term],
+                                ..Default::default()
+                            });
+                            let mut next = ui.snapshot.get_untracked();
+                            next.cards[1].title =
+                                format!("Peer rev {}", next.cards[1].revision + 1);
+                            next.cards[1].revision += 1;
+                            ui.accept_snapshot(next);
+                        }),
+                )
+                .child(card_actions(ui, reference))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(700.), px(200.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<DetailActionsHarness>());
+        let mut tree = TreeState::default();
+        pump(&mut core, &mut tree);
+
+        let press_target_for_text = |tree: &TreeState, text: &str| -> NodeId {
+            let mut id = tree
+                .mounted_node_for_text(text)
+                .unwrap_or_else(|| panic!("mounted text `{text}` not found"));
+            while id != nsh_core::ROOT_ID
+                && !tree
+                    .events
+                    .get(&id)
+                    .is_some_and(|m| m.contains(EventKind::Press))
+            {
+                id = tree.parents[&id];
+            }
+            assert!(
+                tree.events
+                    .get(&id)
+                    .is_some_and(|m| m.contains(EventKind::Press)),
+                "expected pressable node for `{text}`"
+            );
+            id
+        };
+
+        let tick_btn = {
+            let mut id = *tree
+                .labels
+                .iter()
+                .find(|(id, lbl)| {
+                    lbl.as_str() == "Refresh unrelated state" && tree.is_mounted(**id)
+                })
+                .expect("tick button")
+                .0;
+            while id != nsh_core::ROOT_ID
+                && !tree
+                    .events
+                    .get(&id)
+                    .is_some_and(|m| m.contains(EventKind::Press))
+            {
+                id = tree.parents[&id];
+            }
+            id
+        };
+        let open_btn = press_target_for_text(&tree, "Open Card #1 →");
+
+        assert!(tree.mounted_node_for_text("STATE:github:").is_some());
+        assert!(core.component_event(open_btn, EventKind::PressDown, &EventPayload::None));
+        assert!(core.component_event(tick_btn, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert!(
+            !tree.deleted.contains(&open_btn) && tree.is_mounted(open_btn),
+            "Open Card button recreated between PressDown and Press"
+        );
+        assert!(core.component_event(open_btn, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+
+        assert!(
+            tree.mounted_node_for_text("STATE:card:c-1").is_some(),
+            "expected pressing Open Card #1 → to navigate to Card c-1"
+        );
+    }
 }

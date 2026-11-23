@@ -85,6 +85,14 @@ pub struct Location {
     pub card_tab: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum RefreshPending {
+    #[default]
+    None,
+    Runtime,
+    Full,
+}
+
 #[derive(Clone, Copy)]
 pub struct Ui {
     /// Commands outlive transient buttons/lists, but end with the window.
@@ -147,12 +155,17 @@ pub struct Ui {
     pub snapshot: Signal<Snapshot>,
     pub snapshot_ready: Signal<bool>,
     pub index: Memo<Rc<crate::index::SnapshotIndex>>,
+    pub card_status: Memo<Rc<BTreeMap<String, crate::index::CardStatusDigest>>>,
     pub link_lookup: Memo<Rc<crate::index::LinkLookup>>,
     pub known_tags: Memo<Rc<crate::index::KnownTagsIndex>>,
     pub overview_rows: Memo<Rc<Vec<canban_notifications::OverviewRow>>>,
     pub reminders: Memo<Vec<canban_notifications::Reminder>>,
     pub sound_items: Memo<Vec<String>>,
     pub reminder_counts: Memo<BTreeMap<String, canban_notifications::ReminderCount>>,
+    pub active_card: Memo<Option<Card>>,
+    pub card_view_card: Option<Memo<Option<Card>>>,
+    pub active_project: Memo<Option<Project>>,
+    pub github_account: Memo<GitHubAccount>,
     pub notification_delivery: Stored<canban_notifications::DeliveryTracker>,
     pub notification_resync: Stored<bool>,
     pub profiles: Signal<Vec<Profile>>,
@@ -200,7 +213,7 @@ pub struct Ui {
     pub(crate) dwell: Stored<crate::activity::DwellMachine>,
     pub activity_flush_seq: Signal<u64>,
     pub refreshing: Signal<bool>,
-    pub(crate) refresh_requested: Signal<bool>,
+    pub(crate) refresh_pending: Signal<RefreshPending>,
     pub snapshot_epoch: Signal<u64>,
     pub card_timelines: Signal<BTreeMap<String, CardTimelineState>>,
     pub(crate) committed_writes: Stored<submission::CommittedWrites>,
@@ -297,6 +310,38 @@ impl Ui {
         {
             self.snapshot.try_set(snapshot);
         }
+    }
+
+    pub(crate) fn accept_runtime_state(self, runtime: RuntimeState) -> bool {
+        let mut next = self.snapshot.get_untracked();
+        if runtime_references_unknown_entity(&next, &runtime) {
+            return false;
+        }
+        next.apply_runtime_state(runtime);
+        canban_notifications::reconcile_runtime_reminders(&mut next);
+        if self
+            .committed_writes
+            .try_with(|writes| writes.reconcile_runtime(&mut next))
+            .is_none()
+        {
+            return false;
+        }
+        let summaries = snapshot_summaries(&next);
+        let different = self.snapshot.with_untracked(|old| old != &next);
+        let hosts_changed =
+            !summaries.is_empty() && self.hosts.with_untracked(|old| *old != summaries);
+        if different || hosts_changed {
+            batch(move || {
+                if hosts_changed {
+                    self.hosts.try_set(summaries);
+                }
+                if different {
+                    self.runtime_clock.try_set(now());
+                    self.snapshot.try_set(next);
+                }
+            });
+        }
+        true
     }
 
     pub fn apply_config(self, cfg: &Config) {
@@ -478,8 +523,19 @@ impl Ui {
     pub fn new() -> Self {
         let snapshot = signal(Snapshot::default());
         let local_tags = signal(BTreeSet::new());
-        let index =
-            computed(move || snapshot.with(|s| Rc::new(crate::index::SnapshotIndex::build(s))));
+        let project = signal(String::new());
+        let card = signal(String::new());
+        let prev_index = stored(Option::<Rc<crate::index::SnapshotIndex>>::None);
+        let index = computed(move || {
+            let next = snapshot.with(|s| {
+                prev_index
+                    .with(|prev| crate::index::SnapshotIndex::reuse_or_build(prev.as_ref(), s))
+            });
+            prev_index.replace(Some(Rc::clone(&next)));
+            next
+        });
+        let card_status =
+            computed(move || snapshot.with(|s| Rc::new(crate::index::build_card_status(s))));
         let link_lookup = computed(move || Rc::new(crate::index::LinkLookup::build(&index.get())));
         let known_tags = computed(move || {
             local_tags.with(|lt| Rc::new(crate::index::KnownTagsIndex::build(&index.get(), lt)))
@@ -494,6 +550,21 @@ impl Ui {
         });
         let reminder_counts = computed(move || reminders.with(|r| canban_notifications::counts(r)));
         let terminal_entries = computed(move || snapshot.with(crate::terminals::entries));
+        let active_card = computed(move || {
+            let cid = card.get();
+            if cid.is_empty() {
+                return None;
+            }
+            snapshot.with(|s| s.cards.iter().find(|c| c.id == cid).cloned())
+        });
+        let active_project = computed(move || {
+            let pid = project.get();
+            if pid.is_empty() {
+                return None;
+            }
+            snapshot.with(|s| s.projects.iter().find(|p| p.id == pid).cloned())
+        });
+        let github_account = computed(move || snapshot.with(|s| s.github.clone()));
         Self {
             owner: Owner::current(),
             github: crate::github::Browser::new(),
@@ -544,12 +615,17 @@ impl Ui {
             snapshot,
             snapshot_ready: signal(false),
             index,
+            card_status,
             link_lookup,
             known_tags,
             overview_rows,
             reminders,
             sound_items,
             reminder_counts,
+            active_card,
+            card_view_card: None,
+            active_project,
+            github_account,
             notification_delivery: stored(Default::default()),
             notification_resync: stored(true),
             quick_open: signal(false),
@@ -596,10 +672,10 @@ impl Ui {
             agent_catalog_loading_host: stored(None),
             agent_catalog_requested: stored(None),
             pending_catalog_ops: stored(Vec::new()),
-            project: signal(String::new()),
+            project,
             archive_query: signal(String::new()),
             archive_folds: signal(BTreeSet::new()),
-            card: signal(String::new()),
+            card,
             card_view: None,
             request: signal(String::new()),
             page: signal("board".into()),
@@ -613,7 +689,7 @@ impl Ui {
             runtime_clock: signal(now()),
             utility_clock: signal(now() / 1000),
             refreshing: signal(false),
-            refresh_requested: signal(false),
+            refresh_pending: signal(RefreshPending::None),
             snapshot_epoch: signal(0),
             card_timelines: signal(BTreeMap::new()),
             committed_writes: stored(Default::default()),
@@ -795,12 +871,17 @@ impl Ui {
             .unwrap_or_else(|| self.card.get())
     }
     pub fn current_card(self) -> Option<Card> {
-        let cid = self.card_id();
-        self.index.with(|idx| idx.cards.get(&cid).cloned())
+        if let Some(memo) = self.card_view_card {
+            return memo.try_get().flatten();
+        }
+        if let Some(id_sig) = self.card_view {
+            let cid = id_sig.try_get()?;
+            return self.index.with(|idx| idx.cards.get(&cid).cloned());
+        }
+        self.active_card.get()
     }
     pub fn current_project(self) -> Option<Project> {
-        let pid = self.project.get();
-        self.index.with(|idx| idx.projects.get(&pid).cloned())
+        self.active_project.get()
     }
     pub fn parse_markdown_cached(self, source: &str) -> nsh_base::text_view::Document {
         if source.len() <= MAX_CACHED_MARKDOWN_BYTES {
@@ -1310,9 +1391,44 @@ impl Ui {
         });
     }
 }
+fn runtime_references_unknown_entity(snapshot: &Snapshot, runtime: &RuntimeState) -> bool {
+    let has_card = |cid: &str| snapshot.cards.iter().any(|c| c.id == cid);
+    let has_project = |pid: &str| {
+        canban_types::is_global_project_id(pid) || snapshot.projects.iter().any(|p| p.id == pid)
+    };
+    runtime.terminals.iter().any(|t| {
+        t.agent.as_ref().is_some_and(|a| {
+            !has_card(&a.card_id) || (!a.project_id.is_empty() && !has_project(&a.project_id))
+        }) || t
+            .origin_card_id
+            .as_deref()
+            .is_some_and(|cid| !has_card(cid))
+            || t.origin_project_id
+                .as_deref()
+                .is_some_and(|pid| !has_project(pid))
+    }) || runtime.terminal_contexts.iter().any(|ctx| {
+        ctx.card_id.as_deref().is_some_and(|cid| !has_card(cid))
+            || ctx
+                .project_id
+                .as_deref()
+                .is_some_and(|pid| !has_project(pid))
+    })
+}
+
+fn finish_refresh(ui: Ui) {
+    ui.refreshing.set(false);
+    let next = ui.refresh_pending.get_untracked();
+    ui.refresh_pending.set(RefreshPending::None);
+    match next {
+        RefreshPending::Full => refresh(ui),
+        RefreshPending::Runtime => refresh_runtime(ui),
+        RefreshPending::None => {}
+    }
+}
+
 pub fn refresh(ui: Ui) {
     if ui.refreshing.get_untracked() {
-        ui.refresh_requested.set(true);
+        ui.refresh_pending.set(RefreshPending::Full);
         return;
     }
     let Some(backend) = crate::backend::get() else {
@@ -1321,7 +1437,7 @@ pub fn refresh(ui: Ui) {
         return;
     };
     ui.refreshing.set(true);
-    ui.refresh_requested.set(false);
+    ui.refresh_pending.set(RefreshPending::None);
     let epoch = ui.snapshot_epoch.get_untracked();
     let restore_project = ui.project.get_untracked().is_empty();
     let cfg_host = ui.effective_config_host();
@@ -1411,10 +1527,54 @@ pub fn refresh(ui: Ui) {
             Ok(Err(e)) => ui.operation_error.set(format!("Could not refresh: {e:#}")),
             Err(e) => ui.operation_error.set(format!("Refresh worker: {e}")),
         }
-        ui.refreshing.set(false);
-        if ui.refresh_requested.get_untracked() {
-            refresh(ui);
+        finish_refresh(ui);
+    });
+}
+
+pub fn refresh_runtime(ui: Ui) {
+    if !ui.snapshot_ready.get_untracked() {
+        refresh(ui);
+        return;
+    }
+    if ui.refreshing.get_untracked() {
+        ui.refresh_pending.update(|pending| {
+            if *pending == RefreshPending::None {
+                *pending = RefreshPending::Runtime;
+            }
+        });
+        return;
+    }
+    if crate::backend::get().is_none() {
+        return;
+    }
+    ui.refreshing.set(true);
+    ui.refresh_pending.set(RefreshPending::None);
+    let epoch = ui.snapshot_epoch.get_untracked();
+    ui.spawn(async move {
+        let result = blocking(crate::merged_runtime_state).await;
+        if ui.snapshot_epoch.get_untracked() != epoch {
+            ui.refresh_pending.update(|pending| {
+                if *pending == RefreshPending::None {
+                    *pending = RefreshPending::Runtime;
+                }
+            });
+            finish_refresh(ui);
+            return;
         }
+        match result {
+            Ok(Ok(Some(runtime))) => {
+                if !ui.accept_runtime_state(runtime) {
+                    ui.refresh_pending.set(RefreshPending::Full);
+                }
+            }
+            Ok(Ok(None)) | Ok(Err(_)) => {
+                ui.refresh_pending.set(RefreshPending::Full);
+            }
+            Err(e) => ui
+                .operation_error
+                .set(format!("Runtime refresh worker: {e}")),
+        }
+        finish_refresh(ui);
     });
 }
 
@@ -2412,6 +2572,710 @@ mod tests {
                 .unwrap()
                 .sequence,
             6
+        );
+    }
+
+    #[test]
+    fn accept_runtime_state_updates_runtime_slice_without_bumping_workspace_index() {
+        let runtime = nsh_core::element::Runtime::default();
+        let _entered = runtime.enter();
+        let (_owner, ()) = nsh_core::element::create_root(|| {
+            let ui = Ui::new();
+            let mut snap = Snapshot::default();
+            snap.projects.push(
+                serde_json::from_value(json!({
+                    "id": "p1",
+                    "name": "Canban",
+                    "directory": "/tmp/p1",
+                    "workflow": Workflow::default(),
+                    "created_at": 1
+                }))
+                .unwrap(),
+            );
+            let card: Card = serde_json::from_value(json!({
+                "id": "c1",
+                "project_id": "p1",
+                "number": 1,
+                "title": "Card 1",
+                "body": "",
+                "stage": "develop",
+                "revision": 1,
+                "created_at": 1
+            }))
+            .unwrap();
+            snap.cards.push(card.clone());
+            snap.host_summaries.insert(
+                "local".into(),
+                HostSummary {
+                    id: "local".into(),
+                    name: "This Mac".into(),
+                    is_local: true,
+                    transport_label: "Local socket".into(),
+                    endpoint_label: "/tmp/app.sock".into(),
+                    ssh_target: None,
+                    server_id: None,
+                    connection: HostConnectionState::Offline {
+                        error: "n/a".into(),
+                        cached_at: None,
+                    },
+                    active_agents: 0,
+                    max_agents: 4,
+                    project_count: 1,
+                    reconnect_count: 0,
+                    last_synced_at: None,
+                    pending_mutations: 0,
+                    sync_conflicts: 0,
+                },
+            );
+            ui.accept_snapshot(snap);
+
+            let initial_gen = ui.index.with(|idx| idx.generation);
+            let initial_tile = crate::components::card_tile::CardTileModel::build(ui, card.clone());
+
+            // 1. Fresh working agent + context + reclaim updates runtime slices and host active count,
+            //    keeping `SnapshotIndex::generation` unchanged.
+            let mut agent_entry: TerminalEntry = serde_json::from_value(json!({
+                "id": "c1:developer",
+                "conversation_id": "c1:developer",
+                "number": 1,
+                "created_at": 1_750_000_000_000u64,
+                "agent": {
+                    "project_id": "p1",
+                    "card_id": "c1",
+                    "number": 1,
+                    "stage": "develop",
+                    "trigger": "interactive",
+                    "profile": { "id": "developer", "enabled": true, "identity": true },
+                    "instruction": "Work",
+                    "state": "running",
+                    "core_id": "core-1",
+                    "terminal": "pty-1",
+                    "connection_state": "connected",
+                    "observed": { "state": "live", "turn": 1, "status": { "state": "working" } },
+                    "lifecycle": { "observed_at": canban_types::now() },
+                    "started_at": 1_750_000_000_000u64,
+                    "updated_at": 100
+                }
+            }))
+            .unwrap();
+            let applied = ui.accept_runtime_state(RuntimeState {
+                terminals: vec![agent_entry.clone()],
+                terminal_contexts: vec![TerminalContext {
+                    terminal_id: "c1:developer".into(),
+                    core_id: "core-1".into(),
+                    terminal: "pty-1".into(),
+                    cwd: Some("/tmp/p1".into()),
+                    project_id: Some("p1".into()),
+                    card_id: Some("c1".into()),
+                    ..Default::default()
+                }],
+                reclaim_status: vec![TerminalReclaimStatus {
+                    terminal_id: "c1:developer".into(),
+                    paused: true,
+                    reclaiming_soon: false,
+                    auto_reclaiming: false,
+                    interactive_followup: false,
+                    deadline_at: None,
+                }],
+                host_active_agents: BTreeMap::from([("local".into(), 1)]),
+                ..Default::default()
+            });
+            assert!(applied);
+            assert_eq!(ui.index.with(|idx| idx.generation), initial_gen);
+            assert_eq!(
+                ui.snapshot
+                    .with(|s| s.host_summaries["local"].active_agents),
+                1
+            );
+
+            let working_tile = crate::components::card_tile::CardTileModel::build(ui, card.clone());
+            assert_ne!(working_tile, initial_tile);
+
+            // 2. Subsequent `observed_at` + context churn while agent remains `working` keeps
+            //    `CardTileModel` equal so Board tiles do not rebuild.
+            agent_entry.agent.as_mut().unwrap().lifecycle.observed_at =
+                Some(canban_types::now() + 1_000);
+            assert!(ui.accept_runtime_state(RuntimeState {
+                terminals: vec![agent_entry.clone()],
+                terminal_contexts: vec![TerminalContext {
+                    terminal_id: "c1:developer".into(),
+                    core_id: "core-1".into(),
+                    terminal: "pty-1".into(),
+                    cwd: Some("/tmp/p1".into()),
+                    project_id: Some("p1".into()),
+                    card_id: Some("c1".into()),
+                    additions: 14,
+                    ..Default::default()
+                }],
+                host_active_agents: BTreeMap::from([("local".into(), 1)]),
+                ..Default::default()
+            }));
+            assert_eq!(
+                crate::components::card_tile::CardTileModel::build(ui, card),
+                working_tile
+            );
+
+            // 3. Blocked agent wait reminder is reconciled alongside `sound_items`.
+            agent_entry.agent.as_mut().unwrap().observed =
+                Some(json!({ "state": "live", "turn": 1, "status": { "state": "blocked" } }));
+            agent_entry.agent.as_mut().unwrap().lifecycle.waiting = Some(RuntimeWait {
+                id: "w-runtime-1".into(),
+                kind: "permission".into(),
+                title: "Allow".into(),
+                message: "Run test".into(),
+                since: 55,
+            });
+            assert!(ui.accept_runtime_state(RuntimeState {
+                terminals: vec![agent_entry],
+                ..Default::default()
+            }));
+            assert!(
+                ui.reminders
+                    .with(|r| r.iter().any(|x| x.id == "wait:w-runtime-1"))
+            );
+            assert!(
+                ui.sound_items
+                    .with(|ids| ids.iter().any(|id| id == "wait:w-runtime-1"))
+            );
+
+            // 4. Unknown Card reference triggers `false` so caller escalates to full `app.state`.
+            assert!(!ui.accept_runtime_state(RuntimeState {
+                terminals: vec![serde_json::from_value(json!({
+                    "id": "unknown-card-term",
+                    "number": 2,
+                    "origin_card_id": "missing-card",
+                    "created_at": 1
+                }))
+                .unwrap()],
+                ..Default::default()
+            }));
+        });
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct DynamicViolation {
+        line: usize,
+        snippet: String,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum ScanTok {
+        Ident(String, usize),
+        Punct(char, usize),
+        DoublePipe(usize),
+        Arrow(usize),
+        FatArrow(usize),
+    }
+
+    fn lex_non_test_tokens(src: &str) -> Vec<ScanTok> {
+        // Store each char with its 1-based line number, replacing comments and literals with spaces.
+        let raw: Vec<(char, usize)> = {
+            let mut line = 1usize;
+            src.chars()
+                .map(|c| {
+                    let cur = line;
+                    if c == '\n' {
+                        line += 1;
+                    }
+                    (c, cur)
+                })
+                .collect()
+        };
+        let mut clean = raw.clone();
+        let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        let raw_str_start = |pos: usize, prefix_b: bool| -> Option<(usize, usize)> {
+            let mut p = pos;
+            if prefix_b {
+                if raw.get(p)?.0 != 'b' {
+                    return None;
+                }
+                p += 1;
+            }
+            if raw.get(p)?.0 != 'r' {
+                return None;
+            }
+            p += 1;
+            let mut hashes = 0usize;
+            while raw.get(p).is_some_and(|(c, _)| *c == '#') {
+                hashes += 1;
+                p += 1;
+            }
+            (raw.get(p).is_some_and(|(c, _)| *c == '"')).then_some((p + 1, hashes))
+        };
+
+        let mut i = 0usize;
+        while i < raw.len() {
+            let ch = raw[i].0;
+            if ch == '/' && raw.get(i + 1).is_some_and(|(c, _)| *c == '/') {
+                while i < raw.len() && raw[i].0 != '\n' {
+                    clean[i].0 = ' ';
+                    i += 1;
+                }
+                continue;
+            }
+            if ch == '/' && raw.get(i + 1).is_some_and(|(c, _)| *c == '*') {
+                clean[i].0 = ' ';
+                clean[i + 1].0 = ' ';
+                i += 2;
+                let mut depth = 1usize;
+                while i < raw.len() && depth > 0 {
+                    if raw[i].0 == '/' && raw.get(i + 1).is_some_and(|(c, _)| *c == '*') {
+                        clean[i].0 = ' ';
+                        clean[i + 1].0 = ' ';
+                        depth += 1;
+                        i += 2;
+                    } else if raw[i].0 == '*' && raw.get(i + 1).is_some_and(|(c, _)| *c == '/') {
+                        clean[i].0 = ' ';
+                        clean[i + 1].0 = ' ';
+                        depth -= 1;
+                        i += 2;
+                    } else {
+                        clean[i].0 = ' ';
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+            if let Some((start, hashes)) =
+                raw_str_start(i, false).or_else(|| raw_str_start(i, true))
+                && (i == 0 || !is_ident(raw[i - 1].0))
+            {
+                for item in &mut clean[i..start] {
+                    item.0 = ' ';
+                }
+                i = start;
+                while i < raw.len() {
+                    if raw[i].0 == '"' {
+                        let mut matched = 0usize;
+                        while matched < hashes
+                            && raw.get(i + 1 + matched).is_some_and(|(c, _)| *c == '#')
+                        {
+                            matched += 1;
+                        }
+                        if matched == hashes {
+                            for item in &mut clean[i..=i + hashes] {
+                                item.0 = ' ';
+                            }
+                            i += 1 + hashes;
+                            break;
+                        }
+                    }
+                    clean[i].0 = ' ';
+                    i += 1;
+                }
+                continue;
+            }
+            if (ch == '"' || (ch == 'b' && raw.get(i + 1).is_some_and(|(c, _)| *c == '"')))
+                && (ch == '"' || i == 0 || !is_ident(raw[i - 1].0))
+            {
+                let end_prefix = i + if ch == 'b' { 2 } else { 1 };
+                for item in &mut clean[i..end_prefix] {
+                    item.0 = ' ';
+                }
+                i = end_prefix;
+                while i < raw.len() {
+                    if raw[i].0 == '\\' {
+                        clean[i].0 = ' ';
+                        if let Some(next) = clean.get_mut(i + 1) {
+                            next.0 = ' ';
+                        }
+                        i += 2;
+                    } else if raw[i].0 == '"' {
+                        clean[i].0 = ' ';
+                        i += 1;
+                        break;
+                    } else {
+                        clean[i].0 = ' ';
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+            if ch == '\'' || (ch == 'b' && raw.get(i + 1).is_some_and(|(c, _)| *c == '\'')) {
+                let q = if ch == 'b' { i + 1 } else { i };
+                if raw.get(q + 1).is_some_and(|(c, _)| *c == '\\') {
+                    let end = (q + 1).min(clean.len() - 1);
+                    for item in &mut clean[i..=end] {
+                        item.0 = ' ';
+                    }
+                    i = q + 2;
+                    while i < raw.len() {
+                        if raw[i].0 == '\\' {
+                            clean[i].0 = ' ';
+                            if let Some(next) = clean.get_mut(i + 1) {
+                                next.0 = ' ';
+                            }
+                            i += 2;
+                        } else if raw[i].0 == '\'' {
+                            clean[i].0 = ' ';
+                            i += 1;
+                            break;
+                        } else {
+                            clean[i].0 = ' ';
+                            i += 1;
+                        }
+                    }
+                    continue;
+                } else if raw.get(q + 1).is_some_and(|(c, _)| *c != '\'')
+                    && raw.get(q + 2).is_some_and(|(c, _)| *c == '\'')
+                {
+                    for item in &mut clean[i..=q + 2] {
+                        item.0 = ' ';
+                    }
+                    i = q + 3;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+
+        // Tokenize cleaned source
+        let mut raw_tokens = Vec::new();
+        let mut p = 0usize;
+        while p < clean.len() {
+            let (ch, line) = clean[p];
+            if ch.is_whitespace() {
+                p += 1;
+                continue;
+            }
+            if ch.is_ascii_alphabetic() || ch == '_' {
+                let start = p;
+                while p < clean.len() && is_ident(clean[p].0) {
+                    p += 1;
+                }
+                let text: String = clean[start..p].iter().map(|(c, _)| *c).collect();
+                raw_tokens.push(ScanTok::Ident(text, line));
+                continue;
+            }
+            if ch == '|' && clean.get(p + 1).is_some_and(|(c, _)| *c == '|') {
+                raw_tokens.push(ScanTok::DoublePipe(line));
+                p += 2;
+                continue;
+            }
+            if ch == '-' && clean.get(p + 1).is_some_and(|(c, _)| *c == '>') {
+                raw_tokens.push(ScanTok::Arrow(line));
+                p += 2;
+                continue;
+            }
+            if ch == '=' && clean.get(p + 1).is_some_and(|(c, _)| *c == '>') {
+                raw_tokens.push(ScanTok::FatArrow(line));
+                p += 2;
+                continue;
+            }
+            raw_tokens.push(ScanTok::Punct(ch, line));
+            p += 1;
+        }
+
+        // Filter out `#[cfg(test)]` annotated items
+        let mut tokens = Vec::with_capacity(raw_tokens.len());
+        let mut k = 0usize;
+        while k < raw_tokens.len() {
+            let is_cfg_test = matches!(
+                raw_tokens.get(k..k + 7),
+                Some([
+                    ScanTok::Punct('#', _),
+                    ScanTok::Punct('[', _),
+                    ScanTok::Ident(cfg, _),
+                    ScanTok::Punct('(', _),
+                    ScanTok::Ident(test, _),
+                    ScanTok::Punct(')', _),
+                    ScanTok::Punct(']', _),
+                ]) if cfg == "cfg" && test == "test"
+            );
+            if is_cfg_test {
+                k += 7;
+                // Skip any chained outer attributes `#[...]`
+                while matches!(
+                    raw_tokens.get(k..k + 2),
+                    Some([ScanTok::Punct('#', _), ScanTok::Punct('[', _)])
+                ) {
+                    k += 2;
+                    let mut adepth = 1usize;
+                    while k < raw_tokens.len() && adepth > 0 {
+                        match raw_tokens[k] {
+                            ScanTok::Punct('[', _) => adepth += 1,
+                            ScanTok::Punct(']', _) => adepth -= 1,
+                            _ => {}
+                        }
+                        k += 1;
+                    }
+                }
+                // Skip item up to matching `{ ... }` or `;`
+                let mut depth = 0usize;
+                while k < raw_tokens.len() {
+                    match raw_tokens[k] {
+                        ScanTok::Punct('{', _) => {
+                            depth += 1;
+                            k += 1;
+                            while k < raw_tokens.len() && depth > 0 {
+                                match raw_tokens[k] {
+                                    ScanTok::Punct('{', _) => depth += 1,
+                                    ScanTok::Punct('}', _) => depth -= 1,
+                                    _ => {}
+                                }
+                                k += 1;
+                            }
+                            break;
+                        }
+                        ScanTok::Punct(';', _) if depth == 0 => {
+                            k += 1;
+                            break;
+                        }
+                        _ => k += 1,
+                    }
+                }
+                continue;
+            }
+            tokens.push(raw_tokens[k].clone());
+            k += 1;
+        }
+        tokens
+    }
+
+    fn skip_balanced(tokens: &[ScanTok], start: usize, open: char, close: char) -> usize {
+        let mut depth = 0usize;
+        let mut i = start;
+        while i < tokens.len() {
+            match tokens[i] {
+                ScanTok::Punct(c, _) if c == open => depth += 1,
+                ScanTok::Punct(c, _) if c == close => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return i + 1;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        tokens.len()
+    }
+
+    fn can_start_closure_before(prev: Option<&ScanTok>) -> bool {
+        match prev {
+            None => true,
+            Some(
+                ScanTok::Punct('(' | '[' | '{' | ',' | ';' | '=' | ':', _)
+                | ScanTok::Arrow(_)
+                | ScanTok::FatArrow(_),
+            ) => true,
+            Some(ScanTok::Ident(id, _)) => matches!(id.as_str(), "move" | "return" | "else"),
+            _ => false,
+        }
+    }
+
+    fn match_closure_header(tokens: &[ScanTok], pos: usize) -> Option<usize> {
+        let mut p = pos;
+        let has_move = matches!(tokens.get(p), Some(ScanTok::Ident(id, _)) if id == "move");
+        if has_move {
+            p += 1;
+        } else if !can_start_closure_before(pos.checked_sub(1).and_then(|i| tokens.get(i))) {
+            return None;
+        }
+        match tokens.get(p) {
+            Some(ScanTok::DoublePipe(_)) => p += 1,
+            Some(ScanTok::Punct('|', _)) => {
+                p += 1;
+                let mut angle = 0usize;
+                let mut paren = 0usize;
+                while p < tokens.len() {
+                    match &tokens[p] {
+                        ScanTok::Punct('|', _) if angle == 0 && paren == 0 => {
+                            p += 1;
+                            break;
+                        }
+                        ScanTok::Punct('<', _) => angle += 1,
+                        ScanTok::Punct('>', _) => angle = angle.saturating_sub(1),
+                        ScanTok::Punct('(', _) => paren += 1,
+                        ScanTok::Punct(')', _) => paren = paren.saturating_sub(1),
+                        ScanTok::Punct(';' | '{' | '}', _) => return None,
+                        _ => {}
+                    }
+                    p += 1;
+                }
+            }
+            _ => return None,
+        }
+        Some(p)
+    }
+
+    fn skip_closure_body(tokens: &[ScanTok], after_params: usize, limit: usize) -> usize {
+        let mut p = after_params;
+        if matches!(tokens.get(p), Some(ScanTok::Arrow(_))) {
+            while p < limit && !matches!(tokens.get(p), Some(ScanTok::Punct('{' | ',' | ')', _))) {
+                p += 1;
+            }
+        }
+        if p < limit && matches!(tokens.get(p), Some(ScanTok::Punct('{', _))) {
+            return skip_balanced(tokens, p, '{', '}').min(limit);
+        }
+        let mut p_depth = 0usize;
+        let mut b_depth = 0usize;
+        let mut c_depth = 0usize;
+        while p < limit {
+            match &tokens[p] {
+                ScanTok::Punct('(', _) => p_depth += 1,
+                ScanTok::Punct(')', _) => {
+                    if p_depth == 0 && b_depth == 0 && c_depth == 0 {
+                        return p;
+                    }
+                    p_depth = p_depth.saturating_sub(1);
+                }
+                ScanTok::Punct('[', _) => b_depth += 1,
+                ScanTok::Punct(']', _) => b_depth = b_depth.saturating_sub(1),
+                ScanTok::Punct('{', _) => c_depth += 1,
+                ScanTok::Punct('}', _) => {
+                    if p_depth == 0 && b_depth == 0 && c_depth == 0 {
+                        return p;
+                    }
+                    c_depth = c_depth.saturating_sub(1);
+                }
+                ScanTok::Punct(',' | ';', _) if p_depth == 0 && b_depth == 0 && c_depth == 0 => {
+                    return p;
+                }
+                _ => {}
+            }
+            p += 1;
+        }
+        limit
+    }
+
+    fn scan_dynamic_violations(src: &str) -> Vec<DynamicViolation> {
+        let tokens = lex_non_test_tokens(src);
+        let mut violations = Vec::new();
+        let mut i = 0usize;
+        while i + 1 < tokens.len() {
+            let is_dynamic = matches!(
+                (&tokens[i], &tokens[i + 1]),
+                (ScanTok::Ident(name, _), ScanTok::Punct('(', _)) if name == "dynamic"
+            );
+            if !is_dynamic {
+                i += 1;
+                continue;
+            }
+            let arg_start = i + 2;
+            let arg_end = skip_balanced(&tokens, i + 1, '(', ')');
+            let body_end = arg_end.saturating_sub(1);
+            let mut cursor = match_closure_header(&tokens, arg_start).unwrap_or(arg_start);
+            if matches!(tokens.get(cursor), Some(ScanTok::Arrow(_))) {
+                while cursor < body_end
+                    && !matches!(tokens.get(cursor), Some(ScanTok::Punct('{', _)))
+                {
+                    cursor += 1;
+                }
+            }
+            while cursor < body_end {
+                if matches!(
+                    (tokens.get(cursor), tokens.get(cursor + 1)),
+                    (Some(ScanTok::Ident(name, _)), Some(ScanTok::Punct('(', _)))
+                        if name == "computed" || name == "untracked"
+                ) {
+                    cursor = skip_balanced(&tokens, cursor + 1, '(', ')').min(body_end);
+                    continue;
+                }
+                if let Some(after_params) = match_closure_header(&tokens, cursor) {
+                    cursor = skip_closure_body(&tokens, after_params, body_end);
+                    continue;
+                }
+                if let (
+                    Some(ScanTok::Punct('.', _)),
+                    Some(ScanTok::Ident(field, line)),
+                    Some(ScanTok::Punct('.', _)),
+                    Some(ScanTok::Ident(method, _)),
+                    Some(ScanTok::Punct('(', _)),
+                ) = (
+                    tokens.get(cursor),
+                    tokens.get(cursor + 1),
+                    tokens.get(cursor + 2),
+                    tokens.get(cursor + 3),
+                    tokens.get(cursor + 4),
+                ) && matches!(field.as_str(), "snapshot" | "runtime_clock")
+                    && matches!(method.as_str(), "get" | "with")
+                {
+                    violations.push(DynamicViolation {
+                        line: *line,
+                        snippet: format!("{field}.{method}(...)"),
+                    });
+                }
+                cursor += 1;
+            }
+            i += 1;
+        }
+        violations
+    }
+
+    #[test]
+    fn dynamic_guard_scanner_catches_direct_reads_and_allows_leaf_closures() {
+        let bad = r#"
+            fn broken(ui: Ui) {
+                dynamic(move || {
+                    let s = ui.snapshot.get();
+                    view().child(label(move || ui.runtime_clock.get().to_string()))
+                });
+                dynamic(move || if flag || ui.runtime_clock.get() > 0 { 1 } else { 0 });
+            }
+        "#;
+        let v = scan_dynamic_violations(bad);
+        assert_eq!(
+            v.iter().map(|x| x.snippet.as_str()).collect::<Vec<_>>(),
+            vec!["snapshot.get(...)", "runtime_clock.get(...)"]
+        );
+
+        let good = r#"
+            fn safe(ui: Ui) {
+                let model = computed(move || ui.snapshot.with(|s| s.cards.len()));
+                dynamic(move || {
+                    let n = model.get();
+                    let now_untracked = ui.runtime_clock.get_untracked();
+                    view()
+                        .child(label(move || format!("{n} {}", ui.runtime_clock.get())))
+                        .child(compact_action("Go", Variant::Quiet, move |_| {
+                            let _ = ui.snapshot.with_untracked(|s| s.cards.len());
+                        }))
+                        .disabled(move || ui.snapshot.with(|s| s.cards.is_empty()))
+                        .child(when(move || ui.snapshot.with(|s| !s.cards.is_empty()), move || {
+                            view()
+                        }))
+                });
+            }
+            #[cfg(test)]
+            mod tests {
+                fn allowed_in_tests(ui: Ui) {
+                    dynamic(move || ui.snapshot.get());
+                }
+            }
+        "#;
+        assert!(scan_dynamic_violations(good).is_empty());
+    }
+
+    #[test]
+    fn dynamic_blocks_do_not_directly_track_full_snapshot_or_runtime_clock() {
+        fn collect_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    collect_rs(&path, out);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        collect_rs(&src_dir, &mut files);
+        files.sort();
+        let mut all_violations = Vec::new();
+        for path in files {
+            let src = std::fs::read_to_string(&path).unwrap();
+            for v in scan_dynamic_violations(&src) {
+                let rel = path.strip_prefix(&src_dir).unwrap_or(&path);
+                all_violations.push(format!("{}:{}: {}", rel.display(), v.line, v.snippet));
+            }
+        }
+        assert!(
+            all_violations.is_empty(),
+            "Found direct tracked ui.snapshot / ui.runtime_clock reads inside dynamic(...) blocks:\n{}",
+            all_violations.join("\n")
         );
     }
 }

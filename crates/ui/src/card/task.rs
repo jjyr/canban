@@ -156,38 +156,41 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     )
                     .into_element();
             }
+            let github_desc_model = computed(move || {
+                let c = ui.current_card()?;
+                let source = c.github_issue()?;
+                let cached = ui.index.with(|idx| {
+                    idx.github_issue(&c.project_id, source.repository_id, source.issue_id)
+                        .map(|issue| issue.body.clone())
+                });
+                Some((cached, !c.body.trim().is_empty()))
+            });
+            let show_empty_body_prompt = computed(move || {
+                ui.current_card()
+                    .is_some_and(|c| c.body.trim().is_empty() && c.github_issue().is_none())
+            });
+            let card_body = computed(move || ui.current_card().map(|c| c.body).unwrap_or_default());
             view()
                 .gap_2()
                 .child(dynamic(move || {
-                    let Some(c) = ui.current_card() else {
+                    let Some((cached, has_local_body)) = github_desc_model.get() else {
                         return view().into_element();
                     };
-                    let Some(source) = c.github_issue() else {
-                        return view().into_element();
-                    };
-                    let cached = ui.index.with(|idx| {
-                        idx.github_issue(&c.project_id, source.repository_id, source.issue_id)
-                            .cloned()
-                    });
                     let mut area = view().gap_2();
-                    if let Some(issue) = cached {
-                        area = area.child(super::markdown(ui, move || issue.body.clone()));
+                    if let Some(issue_body) = cached {
+                        area = area.child(super::markdown(ui, move || issue_body.clone()));
                     } else {
                         area = area.child(muted(
                             "GitHub description unavailable · Open in GitHub to view source",
                         ));
                     }
-                    if !c.body.trim().is_empty() {
+                    if has_local_body {
                         area = area.child(muted("Local context"));
                     }
                     area.into_element()
                 }))
                 .child(dynamic(move || {
-                    let body_text = ui.current_card().map(|c| c.body).unwrap_or_default();
-                    let has_github_issue = ui
-                        .current_card()
-                        .is_some_and(|c| c.github_issue().is_some());
-                    if body_text.trim().is_empty() && !has_github_issue {
+                    if show_empty_body_prompt.get() {
                         return canban_ui_kit::press_target()
                             .self_start()
                             .py_1()
@@ -206,10 +209,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                             })
                             .into_element();
                     }
-                    super::markdown(ui, move || {
-                        ui.current_card().map(|c| c.body).unwrap_or_default()
-                    })
-                    .into_element()
+                    super::markdown(ui, move || card_body.get()).into_element()
                 }))
                 .child(crate::github::references::panel(ui))
                 .into_element()

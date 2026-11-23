@@ -74,8 +74,15 @@ pub fn at(ui: Ui, id: String) -> impl IntoElement {
     if std::env::var_os("CANBAN_MOTION_TRACE").is_some() {
         eprintln!("motion card mounted id={id}");
     }
+    let view_id = signal(id);
+    let view_card = computed(move || {
+        let cid = view_id.get();
+        ui.snapshot
+            .with(|s| s.cards.iter().find(|c| c.id == cid).cloned())
+    });
     screen(Ui {
-        card_view: Some(signal(id)),
+        card_view: Some(view_id),
+        card_view_card: Some(view_card),
         ..ui
     })
 }
@@ -398,16 +405,21 @@ pub(crate) fn proxy(draft: Signal<Draft>, comment: bool) -> Signal<String> {
     text
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct ReviewDraftBannerModel {
+    card_id: String,
+    author: String,
+    head_note: String,
+    summary_preview: String,
+    files_summary: String,
+}
+
 /// Local unpublished PR review draft banner on the Card detail view.
 fn review_draft_banner(ui: Ui) -> impl IntoElement {
-    dynamic(move || {
-        let Some(card) = ui.current_card() else {
-            return view().into_element();
-        };
-        let Some(draft) = ui.index.with(|idx| idx.review_draft(&card.id).cloned()) else {
-            return view().into_element();
-        };
-        let author = draft.author.as_deref().unwrap_or("Agent");
+    let model = computed(move || {
+        let card = ui.current_card()?;
+        let draft = ui.index.with(|idx| idx.review_draft(&card.id).cloned())?;
+        let author = draft.author.as_deref().unwrap_or("Agent").to_owned();
         let head_note = draft
             .compare_sha
             .as_deref()
@@ -444,8 +456,20 @@ fn review_draft_banner(ui: Ui) -> impl IntoElement {
             .find(|l| !l.is_empty())
             .unwrap_or("")
             .to_owned();
-        let cid_discard = card.id.clone();
-        let cid_open = card.id;
+        Some(ReviewDraftBannerModel {
+            card_id: card.id,
+            author,
+            head_note,
+            summary_preview,
+            files_summary,
+        })
+    });
+    dynamic(move || {
+        let Some(m) = model.get() else {
+            return view().into_element();
+        };
+        let cid_discard = m.card_id.clone();
+        let cid_open = m.card_id;
         let mut box_view = view()
             .p_3()
             .rounded(px(RADIUS))
@@ -468,7 +492,8 @@ fn review_draft_banner(ui: Ui) -> impl IntoElement {
                             .child(icon_tinted(Icon::Eye, ACCENT).w(px(14.)).h(px(14.)))
                             .child(
                                 label(format!(
-                                    "{author} prepared a local PR review draft (unpublished{head_note})"
+                                    "{} prepared a local PR review draft (unpublished{})",
+                                    m.author, m.head_note
                                 ))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_size(px(12.5)),
@@ -492,11 +517,11 @@ fn review_draft_banner(ui: Ui) -> impl IntoElement {
                             )),
                     ),
             );
-        if !summary_preview.is_empty() {
-            box_view = box_view.child(muted(summary_preview).truncate());
+        if !m.summary_preview.is_empty() {
+            box_view = box_view.child(muted(m.summary_preview).truncate());
         }
         box_view
-            .child(muted(files_summary).text_size(px(11.5)))
+            .child(muted(m.files_summary).text_size(px(11.5)))
             .into_element()
     })
 }
@@ -524,7 +549,9 @@ mod tests {
         parents: HashMap<NodeId, NodeId>,
         kinds: HashMap<NodeId, ViewKind>,
         texts: HashMap<NodeId, String>,
+        labels: HashMap<NodeId, String>,
         events: HashMap<NodeId, EventMask>,
+        deleted: HashSet<NodeId>,
         scroll_commands: Vec<(NodeId, f32)>,
     }
 
@@ -543,14 +570,28 @@ mod tests {
                         self.parents.remove(id);
                     }
                     MountItem::Delete { id } => {
+                        self.deleted.insert(*id);
                         self.alive.remove(id);
                         self.parents.remove(id);
                         self.kinds.remove(id);
                         self.texts.remove(id);
+                        self.labels.remove(id);
                         self.events.remove(id);
                     }
                     MountItem::Text { id, text, .. } => {
                         self.texts.insert(*id, text.text.to_string());
+                    }
+                    MountItem::AccessibilityLabel { id, label } => {
+                        if let Some(label) = label {
+                            self.labels.insert(*id, label.to_string());
+                        } else {
+                            self.labels.remove(id);
+                        }
+                    }
+                    MountItem::ViewProps { id, props } => {
+                        if let Some(label) = &props.accessibility.label {
+                            self.labels.insert(*id, label.to_string());
+                        }
                     }
                     MountItem::Events { id, events } => {
                         self.events.insert(*id, *events);
@@ -951,5 +992,192 @@ mod tests {
         press(&mut core, &mut tree, "select-merged");
         assert!(tree.mounted_node_for_text("Resolved").is_some());
         assert!(tree.mounted_node_for_text("Reopen").is_none());
+    }
+
+    #[test]
+    fn card_header_advance_button_survives_unrelated_snapshot_refreshes_and_moves_card() {
+        #[component]
+        fn AdvanceStabilityHarness() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let mut snapshot = Snapshot::default();
+            snapshot.projects.push(Project {
+                id: "proj-1".into(),
+                name: "Canban".into(),
+                directory: "/tmp/canban".into(),
+                github: None,
+                detected_github: None,
+                github_disconnected: false,
+                delivery_mode: Default::default(),
+                agent_overrides: Default::default(),
+                tags: Vec::new(),
+                workflow: Workflow::default(),
+                target_branch: Some("main".into()),
+                created_at: 1,
+            });
+            snapshot.cards.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "c-1",
+                    "project_id": "proj-1",
+                    "number": 1,
+                    "title": "Target Card",
+                    "body": "",
+                    "stage": "backlog",
+                    "revision": 1,
+                    "created_at": 1
+                }))
+                .unwrap(),
+            );
+            snapshot.cards.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "c-2",
+                    "project_id": "proj-1",
+                    "number": 2,
+                    "title": "Other Active Card",
+                    "body": "",
+                    "stage": "develop",
+                    "revision": 1,
+                    "created_at": 2
+                }))
+                .unwrap(),
+            );
+            snapshot.terminals.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "t-other",
+                    "number": 1,
+                    "created_at": 10,
+                    "agent": {
+                        "card_id": "c-2",
+                        "project_id": "proj-1",
+                        "stage": "develop",
+                        "trigger": "workflow",
+                        "profile": {
+                            "id": "developer",
+                            "name": "Developer",
+                            "preset": "codex",
+                            "command": "codex",
+                            "enabled": true,
+                            "identity": true
+                        },
+                        "instruction": "Build",
+                        "state": "running",
+                        "number": 1,
+                        "core_id": "core-1",
+                        "terminal": "term-other",
+                        "connection_state": "connected",
+                        "observed": { "state": "live", "status": { "state": "working" } },
+                        "lifecycle": { "observed_at": 1000 },
+                        "created_at": 10
+                    }
+                }))
+                .unwrap(),
+            );
+            ui.accept_snapshot(snapshot);
+            ui.project.set("proj-1".into());
+            ui.card.set("c-1".into());
+            ui.page.set("card".into());
+            view()
+                .w(px(900.))
+                .h(px(600.))
+                .child(
+                    canban_ui_kit::press_target()
+                        .accessibility_label(Some("Tick unrelated snapshot".into()))
+                        .on_press(move |_: &()| {
+                            let mut next = ui.snapshot.get_untracked();
+                            let a = next.terminals[0].agent.as_mut().unwrap();
+                            a.lifecycle.observed_at =
+                                Some(a.lifecycle.observed_at.unwrap_or(0) + 1_000);
+                            next.cards[1].title = format!(
+                                "Other Active Card rev {}",
+                                a.lifecycle.observed_at.unwrap()
+                            );
+                            next.cards[0].revision += 1;
+                            ui.accept_snapshot(next);
+                        }),
+                )
+                .child(screen(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(900.), px(600.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<AdvanceStabilityHarness>());
+        let mut tree = TreeState::default();
+        pump(&mut core, &mut tree);
+
+        let find_button = |tree: &TreeState, prefix: &str| -> NodeId {
+            let mut id = *tree
+                .labels
+                .iter()
+                .find(|(id, lbl)| lbl.starts_with(prefix) && tree.is_mounted(**id))
+                .unwrap_or_else(|| panic!("mounted button with label `{prefix}` not found"))
+                .0;
+            while id != nsh_core::ROOT_ID
+                && !tree
+                    .events
+                    .get(&id)
+                    .is_some_and(|m| m.contains(EventKind::Press))
+            {
+                id = tree.parents[&id];
+            }
+            assert!(
+                tree.events
+                    .get(&id)
+                    .is_some_and(|m| m.contains(EventKind::Press)),
+                "expected pressable node for `{prefix}`"
+            );
+            id
+        };
+
+        let tick_btn = find_button(&tree, "Tick unrelated snapshot");
+        let develop_btn = find_button(&tree, "Move to Develop");
+        let stage_btn = find_button(&tree, "Change stage · Backlog");
+        let resolve_btn = find_button(&tree, "Mark Card as resolved");
+        let empty_prompt_text = tree
+            .mounted_node_for_text("No description yet · Click to add context")
+            .expect("empty prompt mounted");
+
+        // Three unrelated snapshot refreshes (observed_at + peer card + target card revision)
+        // must not tear down any header action button or card description prompt.
+        for step in 0..3 {
+            assert!(core.component_event(tick_btn, EventKind::Press, &EventPayload::None));
+            pump(&mut core, &mut tree);
+            assert!(
+                !tree.deleted.contains(&develop_btn) && tree.is_mounted(develop_btn),
+                "Develop button recreated on unrelated snapshot tick #{step}"
+            );
+            assert!(
+                !tree.deleted.contains(&stage_btn) && tree.is_mounted(stage_btn),
+                "Stage dropdown recreated on unrelated snapshot tick #{step}"
+            );
+            assert!(
+                !tree.deleted.contains(&resolve_btn) && tree.is_mounted(resolve_btn),
+                "Resolve button recreated on unrelated snapshot tick #{step}"
+            );
+            assert!(
+                !tree.deleted.contains(&empty_prompt_text) && tree.is_mounted(empty_prompt_text),
+                "Card description prompt recreated on unrelated snapshot tick #{step}"
+            );
+        }
+
+        // Simulate pointer press interleaved with a snapshot refresh between PressDown and Press
+        // on the ORIGINAL Develop button NodeId.
+        assert!(core.component_event(develop_btn, EventKind::PressDown, &EventPayload::None));
+        assert!(core.component_event(tick_btn, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert!(
+            !tree.deleted.contains(&develop_btn) && tree.is_mounted(develop_btn),
+            "Develop button deleted between PressDown and Press"
+        );
+        assert!(core.component_event(develop_btn, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+
+        assert!(
+            tree.mounted_node_for_text("Develop ▾").is_some(),
+            "expected stage dropdown to update to Develop ▾ after pressing Develop →"
+        );
+        assert!(
+            tree.mounted_node_for_text("Review →").is_some(),
+            "expected advance button to update to Review → after moving to Develop"
+        );
     }
 }
