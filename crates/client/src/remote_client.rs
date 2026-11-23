@@ -34,7 +34,13 @@ const DEFAULT_READ_CACHE_BUDGET: u64 = 20 * 1024 * 1024;
 const PUSH_DEBOUNCE: Duration = Duration::from_millis(30);
 const PUSH_MAX_DEBOUNCE: Duration = Duration::from_millis(100);
 const MAX_BACKOFF: Duration = Duration::from_secs(10);
+const LEGACY_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const SUBSCRIBE_TOPICS: &[&str] = &["snapshot", "update", "utilities", "usage", "herdr"];
+
+fn is_unsupported_subscribe_error(err: &anyhow::Error) -> bool {
+    let msg = format!("{err:#}");
+    msg.contains("Unknown operation") && msg.contains("app.subscribe")
+}
 
 fn count_active_agents_in(terminals: &[TerminalEntry]) -> usize {
     terminals
@@ -2108,6 +2114,50 @@ struct PendingRefresh {
     max_deadline: tokio::time::Instant,
 }
 
+async fn run_legacy_poll_loop(
+    rc: &Arc<RemoteClient>,
+    host_id: &str,
+    epoch: u64,
+    conn_gen: u64,
+    transport: &Arc<ClientTransport>,
+    notify: &Arc<Notify>,
+    shutdown_rx: &mut watch::Receiver<bool>,
+) -> bool {
+    let slot_active = || {
+        let guard = rc.hosts.read().unwrap();
+        guard.get(host_id).is_some_and(|s| {
+            s.saved.enabled
+                && s.supervisor_epoch == epoch
+                && s.conn_gen == conn_gen
+                && s.client.is_some()
+        })
+    };
+    while slot_active() {
+        tokio::select! {
+            _ = tokio::time::sleep(LEGACY_POLL_INTERVAL) => {}
+            _ = notify.notified() => {}
+            _ = shutdown_rx.changed() => { return true; }
+        }
+        if !slot_active() {
+            break;
+        }
+        match rc
+            .refresh_host_now_async(host_id, transport, None, None)
+            .await
+        {
+            Ok(()) => {
+                let _ = rc.drain_outbox_async(host_id).await;
+            }
+            Err(err) if is_connection_error(&err) || is_auth_error(&err) => {
+                rc.mark_slot_disconnected(host_id, Some(conn_gen), err.to_string(), false);
+                break;
+            }
+            Err(_) => {}
+        }
+    }
+    false
+}
+
 async fn host_supervisor_task(
     weak_client: Weak<RemoteClient>,
     host_id: String,
@@ -2159,7 +2209,6 @@ async fn host_supervisor_task(
             } else {
                 match rc.connect_slot_async(&host_id).await {
                     Ok((c, conn_gen)) => {
-                        backoff = Duration::from_millis(250);
                         let marker = rc
                             .hosts
                             .read()
@@ -2202,7 +2251,27 @@ async fn host_supervisor_task(
         )
         .await;
         let (mut stream, handshake) = match sub_res {
-            Ok(res) => res,
+            Ok(res) => {
+                backoff = Duration::from_millis(250);
+                res
+            }
+            Err(err) if is_unsupported_subscribe_error(&err) => {
+                backoff = Duration::from_millis(250);
+                if run_legacy_poll_loop(
+                    &rc,
+                    &host_id,
+                    epoch,
+                    conn_gen,
+                    &transport,
+                    &notify,
+                    &mut shutdown_rx,
+                )
+                .await
+                {
+                    return;
+                }
+                continue;
+            }
             Err(err) => {
                 rc.mark_slot_disconnected(&host_id, Some(conn_gen), err.to_string(), false);
                 if is_auth_error(&err) {
@@ -3133,6 +3202,193 @@ mod tests {
         assert_eq!(snap.projects.len(), 1);
         assert_eq!(snap.cards.len(), 1);
         assert_eq!(snap.cards[0].id, "c-rt");
+
+        let _ = stop_tx.send(true);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn supervisor_falls_back_to_polling_when_daemon_lacks_app_subscribe() {
+        use canban_transport::{
+            AcceptedStream, DeviceTokenStore, MAX_FRAME_BYTES, PairingCodeStore, RevocationBus,
+            ServerTransportConfig, read_bounded_line, spawn_tcp_listener, write_json_line_async,
+        };
+        use canban_types::Workflow;
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::BufReader;
+
+        assert!(is_unsupported_subscribe_error(&anyhow!(
+            "Unknown operation: app.subscribe"
+        )));
+        assert!(!is_unsupported_subscribe_error(&anyhow!(
+            "auth_failed: bad token"
+        )));
+
+        let dir = tempfile::tempdir().unwrap();
+        let server_home = dir.path().join("legacy-server");
+        let client_dir = dir.path().join("legacy-client");
+        std::fs::create_dir_all(&server_home).unwrap();
+
+        let store = Arc::new(DeviceTokenStore::open(&server_home));
+        let (_dev, token) = store.issue_device("ios-legacy-poll-test").unwrap();
+        let pairing_codes = Arc::new(PairingCodeStore::open(&server_home));
+        let revocations = RevocationBus::new();
+        let active_tcp = Arc::new(AtomicUsize::new(0));
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let sub_rejected = Arc::new(Notify::new());
+
+        let proj: Project = serde_json::from_value(json!({
+            "id": "p-legacy",
+            "name": "fiber",
+            "directory": "/srv/fiber",
+            "workflow": Workflow::default(),
+            "created_at": 1000,
+        }))
+        .unwrap();
+        let mut snap_typed = Snapshot::default();
+        snap_typed.projects.push(proj);
+        let snap_ref = Arc::new(serde_json::to_value(&snap_typed).unwrap());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let cfg = Arc::new(ServerTransportConfig {
+            home: server_home,
+            server_id: "srv-legacy-76".into(),
+            api_version: 76,
+            device_store: store,
+            pairing_codes,
+            revocations,
+            active_tcp_connections: active_tcp,
+        });
+
+        let handle = tokio::runtime::Handle::current();
+        let rej_notify = sub_rejected.clone();
+        spawn_tcp_listener(
+            &handle,
+            listener,
+            cfg,
+            stop_rx,
+            move |accepted: AcceptedStream| {
+                let rej_notify = rej_notify.clone();
+                let snap_ref = snap_ref.clone();
+                async move {
+                    let (read_half, mut writer) = tokio::io::split(accepted.stream);
+                    let mut reader = BufReader::new(read_half);
+                    let mut first_req = accepted.initial_request;
+                    loop {
+                        let req: Value = match first_req.take() {
+                            Some(v) => v,
+                            None => {
+                                let Ok(Some(line)) =
+                                    read_bounded_line(&mut reader, MAX_FRAME_BYTES).await
+                                else {
+                                    break;
+                                };
+                                serde_json::from_str(&line).unwrap()
+                            }
+                        };
+                        let id = req["id"].clone();
+                        match req["method"].as_str() {
+                            Some("host.probe") => {
+                                let _ = write_json_line_async(
+                                    &mut writer,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "server_id": "srv-legacy-76",
+                                            "api_version": 76,
+                                            "version": "20261122-1",
+                                            "platform": "linux-x86_64",
+                                        }
+                                    }),
+                                )
+                                .await;
+                            }
+                            Some("app.state") => {
+                                let _ = write_json_line_async(
+                                    &mut writer,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "changed": true,
+                                            "revision": 1,
+                                            "github_revision": 0,
+                                            "server_id": "srv-legacy-76",
+                                            "snapshot": *snap_ref,
+                                            "config": Config::default(),
+                                            "home": "/srv/.canban",
+                                        }
+                                    }),
+                                )
+                                .await;
+                            }
+                            Some("app.subscribe") => {
+                                let _ = write_json_line_async(
+                                    &mut writer,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "error": {
+                                            "code": -32000,
+                                            "message": "Unknown operation: app.subscribe"
+                                        }
+                                    }),
+                                )
+                                .await;
+                                rej_notify.notify_waiters();
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            },
+        );
+
+        let creds = Arc::new(MemoryCredentialStore::new());
+        let client = RemoteClient::with_runtime(
+            RemoteClientConfig::new(client_dir),
+            creds,
+            tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+
+        let sum = client
+            .add_host_async(SavedHost {
+                id: "host-legacy".into(),
+                name: "Legacy Host".into(),
+                transport: HostTransport::Tcp { addr, token },
+                ssh_target: None,
+                server_id: Some("srv-legacy-76".into()),
+                enabled: true,
+                added_at: now(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(sum.id, "host-legacy");
+
+        tokio::time::timeout(Duration::from_secs(3), sub_rejected.notified())
+            .await
+            .expect("supervisor attempted app.subscribe");
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let summaries = client.host_summaries();
+        assert_eq!(summaries.len(), 1);
+        assert!(
+            matches!(
+                summaries[0].connection,
+                HostConnectionState::Connected {
+                    api_version: 76,
+                    ..
+                }
+            ),
+            "expected host to remain Connected on legacy poll fallback, got {:?}",
+            summaries[0].connection
+        );
+        let snap = client.merged_snapshot().unwrap();
+        assert_eq!(snap.projects.len(), 1);
+        assert_eq!(snap.projects[0].name, "fiber");
 
         let _ = stop_tx.send(true);
     }
