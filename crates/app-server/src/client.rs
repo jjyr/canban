@@ -516,6 +516,7 @@ impl AppClient {
                 &weak,
                 &["snapshot"],
                 || false,
+                || {},
                 |ev| match ev {
                     ClientPushEvent::State(app_ev) => tx.send(app_ev).is_ok(),
                     _ => true,
@@ -532,6 +533,31 @@ impl AppClient {
         self.subscribe_mapped(topics, |ev| ev)
     }
 
+    #[cfg(test)]
+    pub(crate) fn subscribe_topics_ready(
+        self: &Arc<Self>,
+        topics: &'static [&'static str],
+    ) -> (
+        tokio::sync::mpsc::UnboundedReceiver<ClientPushEvent>,
+        mpsc::Receiver<()>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let weak = Arc::downgrade(self);
+        std::thread::spawn(move || {
+            run_subscribe_worker(
+                &weak,
+                topics,
+                || tx.is_closed(),
+                || {
+                    let _ = ready_tx.send(());
+                },
+                |ev| tx.send(ev).is_ok(),
+            );
+        });
+        (rx, ready_rx)
+    }
+
     pub fn subscribe_mapped<T: Send + 'static>(
         self: &Arc<Self>,
         topics: &'static [&'static str],
@@ -544,6 +570,7 @@ impl AppClient {
                 &weak,
                 topics,
                 || tx.is_closed(),
+                || {},
                 |ev| tx.send(map(ev)).is_ok(),
             );
         });
@@ -555,6 +582,7 @@ fn run_subscribe_worker(
     weak: &std::sync::Weak<AppClient>,
     topics: &[&str],
     is_closed: impl Fn() -> bool,
+    mut on_ready: impl FnMut(),
     mut emit: impl FnMut(ClientPushEvent) -> bool,
 ) {
     let mut last = Value::Null;
@@ -572,6 +600,7 @@ fn run_subscribe_worker(
             &mut last,
             &mut connected,
             &is_closed,
+            &mut on_ready,
             &mut emit,
         ) {
             Ok(true) => return,
@@ -594,6 +623,7 @@ fn subscribe_session(
     last: &mut Value,
     connected: &mut bool,
     is_closed: &impl Fn() -> bool,
+    on_ready: &mut impl FnMut(),
     emit: &mut impl FnMut(ClientPushEvent) -> bool,
 ) -> Result<bool> {
     let stream =
@@ -638,6 +668,7 @@ fn subscribe_session(
         *last = super::state::state_marker(result);
     }
     *connected = true;
+    on_ready();
 
     loop {
         line.clear();

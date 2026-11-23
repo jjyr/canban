@@ -1123,6 +1123,8 @@ fn idle_remote_host_receives_heartbeats_without_polling_app_state() {
     let stop_srv = Arc::new(AtomicBool::new(false));
     let stop_srv_clone = stop_srv.clone();
     let (sub_open_tx, sub_open_rx) = mpsc::channel::<()>();
+    let (hb_tx, hb_rx) = mpsc::channel::<()>();
+    let (state_call_tx, state_call_rx) = mpsc::channel::<usize>();
     let (push_trigger_tx, push_trigger_rx) = mpsc::channel::<u64>();
     let push_trigger_rx = Arc::new(Mutex::new(push_trigger_rx));
     let cur_change = Arc::new(AtomicU64::new(1));
@@ -1140,6 +1142,8 @@ fn idle_remote_host_receives_heartbeats_without_polling_app_state() {
             let state_calls_w = state_calls_srv.clone();
             let stop_w = stop_srv_clone.clone();
             let sub_open_tx_w = sub_open_tx.clone();
+            let hb_tx_w = hb_tx.clone();
+            let state_call_tx_w = state_call_tx.clone();
             let push_trigger_rx_w = push_trigger_rx.clone();
             let cur_change_w = cur_change_srv.clone();
             workers.push(std::thread::spawn(move || {
@@ -1176,7 +1180,8 @@ fn idle_remote_host_receives_heartbeats_without_polling_app_state() {
                             let _ = writer.flush();
                         }
                         "app.state" => {
-                            state_calls_w.fetch_add(1, Ordering::SeqCst);
+                            let count = state_calls_w.fetch_add(1, Ordering::SeqCst) + 1;
+                            let _ = state_call_tx_w.send(count);
                             let rev_num = cur_change_w.load(Ordering::SeqCst);
                             let rev = json!(["srv-mock-push", "inst-1", rev_num, 0, 0]);
                             let changed = req["params"]["after"] != rev;
@@ -1227,7 +1232,7 @@ fn idle_remote_host_receives_heartbeats_without_polling_app_state() {
                             let _ = writer.flush();
                             let _ = sub_open_tx_w.send(());
                             while !stop_w.load(Ordering::SeqCst) {
-                                if let Ok(new_rev) = push_trigger_rx_w
+                                let sent_heartbeat = if let Ok(new_rev) = push_trigger_rx_w
                                     .lock()
                                     .unwrap()
                                     .recv_timeout(Duration::from_millis(80))
@@ -1247,6 +1252,7 @@ fn idle_remote_host_receives_heartbeats_without_polling_app_state() {
                                             }
                                         })
                                     );
+                                    false
                                 } else {
                                     let _ = writeln!(
                                         writer,
@@ -1257,9 +1263,13 @@ fn idle_remote_host_receives_heartbeats_without_polling_app_state() {
                                             "params": { "ts": now(), "server_id": "srv-mock-push" }
                                         })
                                     );
-                                }
+                                    true
+                                };
                                 if writer.flush().is_err() {
                                     break;
+                                }
+                                if sent_heartbeat {
+                                    let _ = hb_tx_w.send(());
                                 }
                             }
                             break;
@@ -1297,8 +1307,13 @@ fn idle_remote_host_receives_heartbeats_without_polling_app_state() {
         .expect("app.subscribe should connect");
     let baseline = state_calls.load(Ordering::SeqCst);
 
-    // Stay idle across ~4 heartbeats: ZERO `app.state` calls may occur while idle.
-    std::thread::sleep(Duration::from_millis(350));
+    // Stay idle across 4 explicit heartbeats: ZERO `app.state` calls may occur while idle.
+    while hb_rx.try_recv().is_ok() {}
+    for _ in 0..4 {
+        hb_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("expected idle heartbeat");
+    }
     assert_eq!(
         state_calls.load(Ordering::SeqCst),
         baseline,
@@ -1306,14 +1321,26 @@ fn idle_remote_host_receives_heartbeats_without_polling_app_state() {
     );
 
     // Push a state invalidation event and verify exactly one conditional `app.state` follows.
+    while state_call_rx.try_recv().is_ok() {}
     cur_change.store(2, Ordering::SeqCst);
     push_trigger_tx.send(2).unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while state_calls.load(Ordering::SeqCst) < baseline + 1 {
-        assert!(std::time::Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(15));
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for conditional app.state"
+        );
+        if state_call_rx.recv_timeout(remaining).unwrap() > baseline {
+            break;
+        }
     }
-    std::thread::sleep(Duration::from_millis(150));
+    while hb_rx.try_recv().is_ok() {}
+    for _ in 0..2 {
+        hb_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("expected post-push heartbeat");
+    }
     assert_eq!(state_calls.load(Ordering::SeqCst), baseline + 1);
 
     stop_srv.store(true, Ordering::SeqCst);

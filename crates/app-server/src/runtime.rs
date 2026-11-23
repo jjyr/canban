@@ -353,14 +353,30 @@ async fn handle_subscribe(
     server: Arc<AppServer>,
     id: Value,
     params: Value,
-    mut reader: tokio::io::BufReader<tokio::io::ReadHalf<TransportStream>>,
-    mut writer: tokio::io::WriteHalf<TransportStream>,
-    mut stop_rx: tokio::sync::watch::Receiver<bool>,
+    reader: tokio::io::BufReader<tokio::io::ReadHalf<TransportStream>>,
+    writer: tokio::io::WriteHalf<TransportStream>,
+    stop_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
+    let push_rx = server.subscribe_push();
+    handle_subscribe_with_rx(server, id, params, reader, writer, stop_rx, push_rx).await
+}
+
+pub(crate) async fn handle_subscribe_with_rx<R, W>(
+    server: Arc<AppServer>,
+    id: Value,
+    params: Value,
+    mut reader: tokio::io::BufReader<R>,
+    mut writer: W,
+    mut stop_rx: tokio::sync::watch::Receiver<bool>,
+    mut push_rx: tokio::sync::broadcast::Receiver<state::PushEvent>,
+) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
     if *stop_rx.borrow() || server.stopped() {
         return Ok(());
     }
-    let mut push_rx = server.subscribe_push();
     let srv = server.clone();
     let (revision, server_id, github_revision) = tokio::task::spawn_blocking(move || {
         (

@@ -140,12 +140,18 @@ fn push_subscription_observes_worker_commits_without_emit_side_channels_and_hear
 
     let next_matching =
         |reader: &mut BufReader<std::net::TcpStream>, pred: &dyn Fn(&Value) -> bool| -> Value {
-            for _ in 0..24 {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut non_hb = 0usize;
+            while std::time::Instant::now() < deadline && non_hb < 64 {
                 let mut buf = String::new();
                 let n = reader.read_line(&mut buf).unwrap();
                 assert!(n > 0, "unexpected EOF waiting for push frame");
                 let v: Value = serde_json::from_str(&buf).unwrap();
-                if v["method"] != "heartbeat" && pred(&v) {
+                if v["method"] == "heartbeat" {
+                    continue;
+                }
+                non_hb += 1;
+                if pred(&v) {
                     return v;
                 }
             }
@@ -210,7 +216,11 @@ fn push_subscription_observes_worker_commits_without_emit_side_channels_and_hear
 
     // Idle heartbeat arrives within expected cadence.
     let mut saw_hb = false;
-    for _ in 0..10 {
+    let hb_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    for _ in 0..64 {
+        if std::time::Instant::now() >= hb_deadline {
+            break;
+        }
         let mut buf = String::new();
         tcp_reader.read_line(&mut buf).unwrap();
         let msg: Value = serde_json::from_str(&buf).unwrap();
@@ -252,7 +262,7 @@ fn push_subscription_handles_auth_second_frame_lagged_resync_and_client_subscrib
         }))
         .unwrap();
     let addr = app.bound_tcp_addrs().into_iter().next().unwrap();
-    let (_, token) = app.issue_device_token("memory-test-1").unwrap();
+    let _ = app.issue_device_token("memory-test-1").unwrap();
 
     // 1. Unauthenticated TCP subscribe is rejected with -32001.
     let mut bad = std::net::TcpStream::connect(&addr).unwrap();
@@ -302,38 +312,48 @@ fn push_subscription_handles_auth_second_frame_lagged_resync_and_client_subscrib
             .contains("first frame")
     );
 
-    // 3. Overflowing broadcast capacity surfaces resync.
-    let mut lag_tcp = std::net::TcpStream::connect(&addr).unwrap();
-    lag_tcp
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    writeln!(
-        lag_tcp,
-        "{}",
-        json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "app.subscribe",
-            "auth": token,
-            "params": { "topics": ["snapshot"], "heartbeat_ms": 60_000 }
-        })
-    )
-    .unwrap();
-    lag_tcp.flush().unwrap();
-    let mut lag_reader = BufReader::new(lag_tcp.try_clone().unwrap());
-    let mut hs = String::new();
-    lag_reader.read_line(&mut hs).unwrap();
-    for _ in 0..320 {
-        app.emit("application", None);
+    // 3. Overflowing broadcast capacity surfaces resync deterministically via handle_subscribe_with_rx.
+    {
+        use tokio::io::AsyncBufReadExt;
+
+        let lag_rx = app.subscribe_push();
+        for _ in 0..320 {
+            app.emit("application", None);
+        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (client_io, server_io) = tokio::io::duplex(4096);
+            let (srv_read, srv_write) = tokio::io::split(server_io);
+            let (cli_read, _cli_write) = tokio::io::split(client_io);
+            let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+            let srv_task = tokio::spawn(crate::runtime::handle_subscribe_with_rx(
+                app.clone(),
+                json!(1),
+                json!({ "topics": ["snapshot"], "heartbeat_ms": 60_000 }),
+                tokio::io::BufReader::new(srv_read),
+                srv_write,
+                stop_rx,
+                lag_rx,
+            ));
+
+            let mut lines = tokio::io::BufReader::new(cli_read).lines();
+            let hs_line = lines.next_line().await.unwrap().unwrap();
+            let hs: Value = serde_json::from_str(&hs_line).unwrap();
+            assert_eq!(hs["result"]["subscribed"], true);
+
+            let lag_line = lines.next_line().await.unwrap().unwrap();
+            let lag_msg: Value = serde_json::from_str(&lag_line).unwrap();
+            assert_eq!(lag_msg["method"], "event");
+            assert_eq!(lag_msg["params"]["topic"], "resync");
+            assert!(lag_msg["params"]["lagged"].as_u64().unwrap() >= 64);
+
+            let _ = stop_tx.send(true);
+            srv_task.await.unwrap().unwrap();
+        });
     }
-    let mut lag_line = String::new();
-    lag_reader.read_line(&mut lag_line).unwrap();
-    let lag_msg: Value = serde_json::from_str(&lag_line).unwrap();
-    assert_eq!(lag_msg["method"], "event");
-    assert_eq!(lag_msg["params"]["topic"], "resync");
-    assert!(lag_msg["params"]["lagged"].as_u64().unwrap() > 0);
-    drop(lag_reader);
-    drop(lag_tcp);
 
     // 4. AppClient::subscribe receives live push events over Unix socket and observes server shutdown cleanly.
     let client = AppClient::connect_home(home, Path::new("/bin/echo")).unwrap();
@@ -349,8 +369,21 @@ fn push_subscription_handles_auth_second_frame_lagged_resync_and_client_subscrib
     let _ = client
         .call("card.create", json!({"project_id":p.id,"title":"Pushed"}))
         .unwrap();
-    let pushed = rx.recv_timeout(Duration::from_secs(3)).unwrap();
-    assert!(matches!(pushed, AppEvent::Changed { .. }));
+    let push_deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let mut saw_application = false;
+    while std::time::Instant::now() < push_deadline {
+        let remaining = push_deadline.saturating_duration_since(std::time::Instant::now());
+        if let Ok(AppEvent::Changed { topic, .. }) = rx.recv_timeout(remaining)
+            && topic == "application"
+        {
+            saw_application = true;
+            break;
+        }
+    }
+    assert!(
+        saw_application,
+        "expected AppEvent::Changed for application after card.create"
+    );
     drop(client);
     drop(running);
 }
@@ -449,9 +482,10 @@ fn active_update_checks_push_update_changed_progress_without_ui_polling() {
         .unwrap();
 
     let client = AppClient::connect_home(home.clone(), Path::new("/bin/echo")).unwrap();
-    let mut push_rx = client.subscribe_topics(&["update"]);
-    // Give subscribe stream a brief moment to complete handshake before writing updater state.
-    std::thread::sleep(Duration::from_millis(60));
+    let (mut push_rx, ready_rx) = client.subscribe_topics_ready(&["update"]);
+    ready_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("app.subscribe handshake should complete");
 
     let _op_lock = canban_updater::lock(&home, "operation.lock").unwrap();
     let mut state = canban_updater::load_state(&home);
