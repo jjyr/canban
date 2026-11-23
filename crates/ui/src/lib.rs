@@ -293,6 +293,28 @@ pub(crate) fn handle_backend_events(ui: Ui, events: Vec<backend::BackendEvent>) 
         ui.github.epoch.update(|v| *v += 1);
     }
     review::handle_host_events(ui, &host_events);
+    if host_events.iter().any(|e| {
+        matches!(
+            e.app_event(),
+            Some(canban_types::AppEvent::Changed {
+                topic: "global_env_sync" | "configuration" | "host" | "resync",
+                ..
+            })
+        )
+    }) {
+        ui.env_sync_epoch.update(|v| *v += 1);
+    }
+    if host_events.iter().all(|e| {
+        matches!(
+            e.app_event(),
+            Some(canban_types::AppEvent::Changed {
+                topic: "global_env_sync",
+                ..
+            })
+        )
+    }) {
+        return;
+    }
     if ui.snapshot_ready.get_untracked() && is_runtime_only_event_batch(&host_events) {
         refresh_runtime(ui);
     } else {

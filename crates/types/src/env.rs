@@ -73,6 +73,30 @@ pub struct GlobalEnvSyncSummary {
     pub total_remote_hosts: usize,
 }
 
+/// Failure detail for one remote host when syncing Global Environment & Secrets.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GlobalEnvSyncHostFailure {
+    pub host_id: String,
+    pub host_name: String,
+    pub message: String,
+}
+
+/// Detailed per-host replication status for Global Environment & Secrets.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GlobalEnvSyncStatus {
+    pub total_remote_hosts: usize,
+    #[serde(default)]
+    pub synced_hosts: Vec<String>,
+    #[serde(default)]
+    pub syncing_hosts: Vec<String>,
+    #[serde(default)]
+    pub queued_hosts: Vec<String>,
+    #[serde(default)]
+    pub unsynced_hosts: Vec<String>,
+    #[serde(default)]
+    pub failed_hosts: Vec<GlobalEnvSyncHostFailure>,
+}
+
 /// Validate a POSIX-compatible environment variable name.
 pub fn is_valid_env_key(key: &str) -> bool {
     !key.is_empty()

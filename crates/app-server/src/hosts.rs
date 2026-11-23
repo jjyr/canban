@@ -166,6 +166,7 @@ struct RemoteSlot {
     draining: Arc<AtomicBool>,
     prefetching: Arc<AtomicBool>,
     connect_gate: Arc<Mutex<()>>,
+    global_env_synced_fingerprint: Option<String>,
 }
 
 struct AtomicFlagGuard(Arc<AtomicBool>);
@@ -404,8 +405,10 @@ impl HostRegistry {
             } else {
                 HostConnectionState::Connecting
             };
+            let host_id = saved.id.clone();
+            let synced_fp = Self::load_host_global_env_sync_fingerprint(&local_home, &host_id);
             map.insert(
-                saved.id.clone(),
+                host_id,
                 RemoteSlot {
                     saved,
                     client: None,
@@ -423,6 +426,7 @@ impl HostRegistry {
                     draining: Arc::new(AtomicBool::new(false)),
                     prefetching: Arc::new(AtomicBool::new(false)),
                     connect_gate: Arc::new(Mutex::new(())),
+                    global_env_synced_fingerprint: synced_fp,
                 },
             );
         }
@@ -483,6 +487,41 @@ impl HostRegistry {
     fn outbox_path(home: &Path, host_id: &str) -> PathBuf {
         home.join("cache/hosts")
             .join(format!("{host_id}.outbox.json"))
+    }
+
+    fn global_env_sync_state_path(home: &Path, host_id: &str) -> PathBuf {
+        home.join("cache/hosts")
+            .join(host_id)
+            .join("global-env-sync.json")
+    }
+
+    fn load_host_global_env_sync_fingerprint(home: &Path, host_id: &str) -> Option<String> {
+        std::fs::read(Self::global_env_sync_state_path(home, host_id))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .and_then(|v| {
+                v.get("fingerprint")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+    }
+
+    fn save_host_global_env_sync_fingerprint(
+        home: &Path,
+        host_id: &str,
+        fingerprint: Option<&str>,
+    ) {
+        let path = Self::global_env_sync_state_path(home, host_id);
+        match fingerprint {
+            Some(fp) => {
+                if let Ok(bytes) = serde_json::to_vec(&json!({ "fingerprint": fp })) {
+                    let _ = canban_context::atomic(&path, &bytes);
+                }
+            }
+            None => {
+                let _ = std::fs::remove_file(path);
+            }
+        }
     }
 
     fn reads_dir(home: &Path, host_id: &str) -> PathBuf {
@@ -711,6 +750,7 @@ impl HostRegistry {
                 draining: Arc::new(AtomicBool::new(false)),
                 prefetching: Arc::new(AtomicBool::new(false)),
                 connect_gate: Arc::new(Mutex::new(())),
+                global_env_synced_fingerprint: None,
             };
             let sum = Self::slot_summary(&slot);
             guard.insert(slot.saved.id.clone(), slot);
@@ -721,11 +761,6 @@ impl HostRegistry {
         };
         if !initial_entities.is_empty() {
             self.replace_host_entity_owners(&summary.id, &initial_entities);
-        }
-        if canban_storage::env::has_global_env_sync_rows_from_home(&self.local_home)
-            .unwrap_or(false)
-        {
-            self.enqueue_global_env_sync_for(Some(std::slice::from_ref(&summary.id)));
         }
 
         if summary.connection.is_connected() {
@@ -1818,18 +1853,23 @@ impl HostRegistry {
         Ok(combined)
     }
 
-    /// Enqueue a pointer-only `SyncGlobalEnv` mutation into matching remote hosts' outboxes
+    /// Enqueue a pointer-only `SyncGlobalEnv` mutation into matching enabled remote hosts' outboxes
     /// and immediately trigger drain on connected hosts. Zero secrets are persisted to `.outbox.json`.
     pub fn enqueue_global_env_sync_for(&self, host_ids: Option<&[String]>) {
         let targets: Vec<(String, Arc<Mutex<Outbox>>, bool)> = {
             let guard = self.remotes.lock().unwrap();
             guard
                 .iter()
-                .filter(|(id, _)| host_ids.is_none_or(|list| list.iter().any(|x| x == *id)))
+                .filter(|(id, slot)| {
+                    slot.saved.enabled && host_ids.is_none_or(|list| list.iter().any(|x| x == *id))
+                })
                 .map(|(id, slot)| (id.clone(), slot.outbox.clone(), slot.client.is_some()))
                 .collect()
         };
-        for (hid, outbox_arc, connected) in targets {
+        if targets.is_empty() {
+            return;
+        }
+        for (hid, outbox_arc, _) in &targets {
             let mutation = Mutation {
                 id: canban_types::uuid_v4(),
                 host_id: hid.clone(),
@@ -1846,34 +1886,112 @@ impl HostRegistry {
             if let Ok(mut ob) = outbox_arc.lock() {
                 let _ = ob.enqueue(mutation);
             }
+        }
+        self.emit(
+            "local",
+            AppEvent::Changed {
+                topic: "global_env_sync",
+                card_id: None,
+            },
+        );
+        for (hid, _, connected) in targets {
             if connected {
                 self.spawn_drain_and_prefetch(&hid);
             }
         }
     }
 
-    pub fn global_env_sync_summary(&self) -> canban_types::GlobalEnvSyncSummary {
+    /// Manually trigger a background replication of Global Environment & Secrets to all enabled remote hosts.
+    pub fn sync_global_env_now(&self) {
+        self.enqueue_global_env_sync_for(None);
+    }
+
+    pub fn global_env_sync_status(&self) -> canban_types::GlobalEnvSyncStatus {
+        let local_fp =
+            canban_storage::env::global_env_state_fingerprint_from_home(&self.local_home)
+                .ok()
+                .flatten();
         let guard = self.remotes.lock().unwrap();
-        let mut total_remote_hosts = 0usize;
-        let mut pending_hosts = Vec::new();
+        let mut status = canban_types::GlobalEnvSyncStatus::default();
         for slot in guard.values() {
             if !slot.saved.enabled {
                 continue;
             }
-            total_remote_hosts += 1;
-            let has_pending = slot
-                .outbox
-                .lock()
-                .ok()
-                .is_some_and(|ob| ob.ops.iter().any(|m| m.kind == MutationKind::SyncGlobalEnv));
-            if has_pending {
-                pending_hosts.push(slot.saved.name.clone());
+            status.total_remote_hosts += 1;
+            let mut failed_message: Option<String> = None;
+            let mut has_in_flight = false;
+            let mut has_queued = false;
+            if let Ok(ob) = slot.outbox.lock() {
+                for m in &ob.ops {
+                    if m.kind != MutationKind::SyncGlobalEnv {
+                        continue;
+                    }
+                    match &m.state {
+                        MutationState::Failed { message } => {
+                            if failed_message.is_none() {
+                                failed_message = Some(message.clone());
+                            }
+                        }
+                        MutationState::Conflict { .. } => {
+                            if failed_message.is_none() {
+                                failed_message = Some("Sync conflict".into());
+                            }
+                        }
+                        MutationState::InFlight => has_in_flight = true,
+                        MutationState::Queued => has_queued = true,
+                    }
+                }
+            }
+            let host_name = slot.saved.name.clone();
+            if let Some(message) = failed_message {
+                status
+                    .failed_hosts
+                    .push(canban_types::GlobalEnvSyncHostFailure {
+                        host_id: slot.saved.id.clone(),
+                        host_name,
+                        message,
+                    });
+            } else if has_in_flight
+                || (has_queued && (slot.client.is_some() || slot.draining.load(Ordering::SeqCst)))
+            {
+                status.syncing_hosts.push(host_name);
+            } else if has_queued {
+                status.queued_hosts.push(host_name);
+            } else if local_fp
+                .as_deref()
+                .is_some_and(|fp| slot.global_env_synced_fingerprint.as_deref() != Some(fp))
+            {
+                status.unsynced_hosts.push(host_name);
+            } else {
+                status.synced_hosts.push(host_name);
+            }
+        }
+        status
+    }
+
+    pub fn global_env_sync_summary(&self) -> canban_types::GlobalEnvSyncSummary {
+        let status = self.global_env_sync_status();
+        let mut pending_hosts = Vec::with_capacity(
+            status.syncing_hosts.len()
+                + status.queued_hosts.len()
+                + status.unsynced_hosts.len()
+                + status.failed_hosts.len(),
+        );
+        for name in status
+            .syncing_hosts
+            .iter()
+            .chain(status.queued_hosts.iter())
+            .chain(status.unsynced_hosts.iter())
+            .chain(status.failed_hosts.iter().map(|f| &f.host_name))
+        {
+            if !pending_hosts.contains(name) {
+                pending_hosts.push(name.clone());
             }
         }
         canban_types::GlobalEnvSyncSummary {
-            synced_hosts: total_remote_hosts.saturating_sub(pending_hosts.len()),
+            synced_hosts: status.synced_hosts.len(),
             pending_hosts,
-            total_remote_hosts,
+            total_remote_hosts: status.total_remote_hosts,
         }
     }
 
@@ -2041,7 +2159,6 @@ impl HostRegistry {
                 obj.remove("host_id");
             }
             let res = self.local.call(method, params)?;
-            self.enqueue_global_env_sync_for(None);
             self.emit(
                 "local",
                 AppEvent::Changed {
@@ -2630,26 +2747,42 @@ impl HostRegistry {
                     };
 
                     let allow_rebuild = !rebuilt_ids.contains(&mutation_id);
-                    let payload = if method == "env.global.sync" {
+                    let is_global_env_sync = method == "env.global.sync";
+                    let (payload, sync_fingerprint) = if is_global_env_sync {
                         let tcp_token = match client.endpoint() {
                             ClientEndpoint::Tcp { token, .. } => Some(token.as_str()),
                             ClientEndpoint::Unix(_) => None,
                         };
-                        canban_storage::env::list_global_env_for_sync_from_home(&local_home)
-                            .and_then(|records| {
-                                let mut wire = Vec::with_capacity(records.len());
-                                for r in records {
-                                    wire.push(r.to_wire(tcp_token)?);
-                                }
-                                Ok(json!({ "records": wire }))
-                            })
+                        match canban_storage::env::list_global_env_for_sync_with_fingerprint_from_home(
+                            &local_home,
+                        ) {
+                            Ok((records, fp)) => {
+                                let built = (|| {
+                                    let mut wire = Vec::with_capacity(records.len());
+                                    for r in records {
+                                        wire.push(r.to_wire(tcp_token)?);
+                                    }
+                                    Ok(json!({ "records": wire }))
+                                })();
+                                (built, fp)
+                            }
+                            Err(e) => (Err(e), None),
+                        }
                     } else {
-                        Ok(sent_params)
+                        (Ok(sent_params), None)
                     };
                     let result = match payload {
                         Ok(params_to_send) => client.call(method, params_to_send),
                         Err(e) => Err(e),
                     };
+                    let sync_succeeded = result.is_ok();
+                    if is_global_env_sync && sync_succeeded {
+                        Self::save_host_global_env_sync_fingerprint(
+                            &local_home,
+                            host_id,
+                            sync_fingerprint.as_deref(),
+                        );
+                    }
 
                     let Some(reg) = weak.upgrade() else {
                         break;
@@ -2691,15 +2824,27 @@ impl HostRegistry {
                             &mut blocked,
                             &mut report,
                         );
-                        if let Some(slot) = guard.get_mut(host_id)
-                            && let Some(cached) = slot.cached.as_mut()
-                        {
-                            let mut next_snap = snapshot.clone();
-                            next_snap.register_host_entities(host_id);
-                            cached.snapshot = next_snap;
+                        if let Some(slot) = guard.get_mut(host_id) {
+                            if is_global_env_sync && sync_succeeded {
+                                slot.global_env_synced_fingerprint = sync_fingerprint.clone();
+                            }
+                            if let Some(cached) = slot.cached.as_mut() {
+                                let mut next_snap = snapshot.clone();
+                                next_snap.register_host_entities(host_id);
+                                cached.snapshot = next_snap;
+                            }
                         }
                         outcome
                     };
+                    if is_global_env_sync {
+                        reg.emit(
+                            host_id,
+                            AppEvent::Changed {
+                                topic: "global_env_sync",
+                                card_id: None,
+                            },
+                        );
+                    }
                     drop(reg);
                     match outcome {
                         FinishOutcome::Continue => {}

@@ -178,6 +178,24 @@ pub trait UiBackend: Send + Sync + 'static {
         Default::default()
     }
 
+    fn global_env_sync_status(&self) -> canban_types::GlobalEnvSyncStatus {
+        let summary = self.global_env_sync_summary();
+        canban_types::GlobalEnvSyncStatus {
+            total_remote_hosts: summary.total_remote_hosts,
+            synced_hosts: (0..summary.synced_hosts)
+                .map(|i| format!("Host {}", i + 1))
+                .collect(),
+            syncing_hosts: Vec::new(),
+            queued_hosts: summary.pending_hosts,
+            unsynced_hosts: Vec::new(),
+            failed_hosts: Vec::new(),
+        }
+    }
+
+    fn trigger_global_env_sync(&self) -> Result<()> {
+        anyhow::bail!("Global environment sync is not supported by this backend")
+    }
+
     /// Notifies a pure-remote client that the mobile/desktop app returned to foreground.
     fn on_foreground(&self) {}
 
@@ -315,6 +333,20 @@ pub fn global_env_sync_summary() -> canban_types::GlobalEnvSyncSummary {
         .get()
         .map(|b| b.global_env_sync_summary())
         .unwrap_or_default()
+}
+
+pub fn global_env_sync_status() -> canban_types::GlobalEnvSyncStatus {
+    BACKEND
+        .get()
+        .map(|b| b.global_env_sync_status())
+        .unwrap_or_default()
+}
+
+pub fn trigger_global_env_sync() -> Result<()> {
+    let backend = BACKEND
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("Gallery preview: no AppServer connected"))?;
+    backend.trigger_global_env_sync()
 }
 
 pub fn on_foreground() {
@@ -714,6 +746,22 @@ impl UiBackend for LocalBackend {
             .as_ref()
             .map(|h| h.global_env_sync_summary())
             .unwrap_or_default()
+    }
+
+    fn global_env_sync_status(&self) -> canban_types::GlobalEnvSyncStatus {
+        self.hosts
+            .as_ref()
+            .map(|h| h.global_env_sync_status())
+            .unwrap_or_default()
+    }
+
+    fn trigger_global_env_sync(&self) -> Result<()> {
+        let hosts = self
+            .hosts
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Host registry unavailable"))?;
+        hosts.sync_global_env_now();
+        Ok(())
     }
 }
 

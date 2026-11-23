@@ -129,6 +129,7 @@ pub struct EnvTableConfig {
     pub source_meta: Memo<BTreeMap<String, EnvEntryMeta>>,
     pub save_label: &'static str,
     pub on_save: SaveCallback,
+    pub dirty_out: Option<Signal<bool>>,
 }
 
 fn build_drafts_from_meta(
@@ -230,7 +231,8 @@ pub fn env_table(ui: Ui, cfg: EnvTableConfig) -> impl IntoElement {
     let last_synced_meta = stored(initial_meta.clone());
     let rows: Signal<Vec<EnvRowDraft>> =
         signal(build_drafts_from_meta(table_owner, next_uid, &initial_meta));
-    let dirty = signal(false);
+    let dirty = cfg.dirty_out.unwrap_or_else(|| signal(false));
+    dirty.try_set(false);
     let save_epoch = signal(0_u64);
     let last_save_epoch = stored(0_u64);
     let error = signal(String::new());

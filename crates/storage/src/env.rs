@@ -5,6 +5,7 @@ use anyhow::{Context, Result, bail, ensure};
 use canban_types::{EnvEntryMeta, EnvWriteEntry, Snapshot, is_valid_env_key};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -430,11 +431,95 @@ fn open_read_only_home_db(home: &Path) -> Result<Option<Connection>> {
     Ok(has_table.then_some(conn))
 }
 
-pub fn list_global_env_for_sync_from_home(home: &Path) -> Result<Vec<GlobalEnvSyncRecord>> {
+fn update_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+/// Compute a deterministic SHA-256 fingerprint of the local Global Environment & Secrets state
+/// (active entries, deletion tombstones, and sealed vault nonces/ciphertexts) without decrypting secrets.
+pub fn compute_global_env_fingerprint(conn: &Connection) -> Result<Option<String>> {
+    let mut env_stmt = conn.prepare(
+        "SELECT key, kind, value, updated_at, deleted \
+         FROM env_entries WHERE scope=?1 AND target_id='' ORDER BY key ASC",
+    )?;
+    let mut rows = env_stmt.query([SCOPE_GLOBAL])?;
+    let mut hasher = Sha256::new();
+    let mut row_count = 0usize;
+    while let Some(row) = rows.next()? {
+        row_count += 1;
+        let key: String = row.get(0)?;
+        let kind: String = row.get(1)?;
+        let value: Option<String> = row.get(2)?;
+        let updated_at: i64 = row.get(3)?;
+        let deleted: i64 = row.get(4)?;
+        update_len_prefixed(&mut hasher, key.as_bytes());
+        update_len_prefixed(&mut hasher, kind.as_bytes());
+        match value {
+            Some(v) => {
+                hasher.update([1u8]);
+                update_len_prefixed(&mut hasher, v.as_bytes());
+            }
+            None => hasher.update([0u8]),
+        }
+        hasher.update(updated_at.to_le_bytes());
+        hasher.update(deleted.to_le_bytes());
+    }
+    if row_count == 0 {
+        return Ok(None);
+    }
+
+    let global_vault_scope = vault_scope(SCOPE_GLOBAL, "");
+    let mut vault_stmt = conn.prepare(
+        "SELECT key, nonce, ciphertext, updated_at \
+         FROM vault_entries WHERE namespace=?1 AND scope=?2 ORDER BY key ASC",
+    )?;
+    let mut vrows = vault_stmt.query(params![NAMESPACE_ENV, global_vault_scope])?;
+    while let Some(row) = vrows.next()? {
+        let key: String = row.get(0)?;
+        let nonce: Vec<u8> = row.get(1)?;
+        let ciphertext: Vec<u8> = row.get(2)?;
+        let updated_at: i64 = row.get(3)?;
+        hasher.update([2u8]);
+        update_len_prefixed(&mut hasher, key.as_bytes());
+        update_len_prefixed(&mut hasher, &nonce);
+        update_len_prefixed(&mut hasher, &ciphertext);
+        hasher.update(updated_at.to_le_bytes());
+    }
+
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        use std::fmt::Write;
+        let _ = write!(&mut hex, "{b:02x}");
+    }
+    Ok(Some(hex))
+}
+
+pub fn global_env_state_fingerprint_from_home(home: &Path) -> Result<Option<String>> {
     let Some(conn) = open_read_only_home_db(home)? else {
-        return Ok(Vec::new());
+        return Ok(None);
     };
-    list_global_env_for_sync(&conn, home)
+    compute_global_env_fingerprint(&conn)
+}
+
+pub fn list_global_env_for_sync_with_fingerprint_from_home(
+    home: &Path,
+) -> Result<(Vec<GlobalEnvSyncRecord>, Option<String>)> {
+    let Some(conn) = open_read_only_home_db(home)? else {
+        return Ok((Vec::new(), None));
+    };
+    // Read records and fingerprint inside one deferred read transaction so concurrent writes cannot
+    // cause the outbox drain to attribute a newer fingerprint to an older record payload.
+    let tx = conn.unchecked_transaction()?;
+    let fingerprint = compute_global_env_fingerprint(&tx)?;
+    let records = list_global_env_for_sync(&tx, home)?;
+    tx.commit()?;
+    Ok((records, fingerprint))
+}
+
+pub fn list_global_env_for_sync_from_home(home: &Path) -> Result<Vec<GlobalEnvSyncRecord>> {
+    Ok(list_global_env_for_sync_with_fingerprint_from_home(home)?.0)
 }
 
 pub fn has_global_env_sync_rows_from_home(home: &Path) -> Result<bool> {
@@ -656,5 +741,88 @@ mod tests {
                 .unwrap()
                 .contains_key("API_KEY")
         );
+    }
+
+    #[test]
+    fn global_env_fingerprint_tracks_plain_secret_rotation_and_tombstones() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+        assert_eq!(
+            global_env_state_fingerprint_from_home(home.path()).unwrap(),
+            None
+        );
+
+        apply_env_writes(
+            &store.conn,
+            home.path(),
+            SCOPE_GLOBAL,
+            "",
+            &BTreeMap::from([
+                (
+                    "G_VAR".into(),
+                    EnvWriteEntry::Plain {
+                        value: "one".into(),
+                    },
+                ),
+                (
+                    "G_SEC".into(),
+                    EnvWriteEntry::Secret {
+                        value: Some("secret-v1".into()),
+                        keep_existing: false,
+                    },
+                ),
+            ]),
+            100,
+        )
+        .unwrap();
+        let fp1 = global_env_state_fingerprint_from_home(home.path())
+            .unwrap()
+            .expect("fingerprint after initial save");
+
+        // Rotating a secret with the same timestamp still changes the sealed ciphertext/nonce.
+        apply_env_writes(
+            &store.conn,
+            home.path(),
+            SCOPE_GLOBAL,
+            "",
+            &BTreeMap::from([
+                (
+                    "G_VAR".into(),
+                    EnvWriteEntry::Plain {
+                        value: "one".into(),
+                    },
+                ),
+                (
+                    "G_SEC".into(),
+                    EnvWriteEntry::Secret {
+                        value: Some("secret-v2".into()),
+                        keep_existing: false,
+                    },
+                ),
+            ]),
+            100,
+        )
+        .unwrap();
+        let fp2 = global_env_state_fingerprint_from_home(home.path())
+            .unwrap()
+            .expect("fingerprint after secret rotation");
+        assert_ne!(fp1, fp2);
+
+        // Deleting all global entries leaves tombstones, producing a distinct non-None fingerprint.
+        apply_env_writes(
+            &store.conn,
+            home.path(),
+            SCOPE_GLOBAL,
+            "",
+            &BTreeMap::new(),
+            200,
+        )
+        .unwrap();
+        let (records, fp3) =
+            list_global_env_for_sync_with_fingerprint_from_home(home.path()).unwrap();
+        let fp3 = fp3.expect("tombstone rows still produce a fingerprint");
+        assert_ne!(fp2, fp3);
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().all(|r| r.deleted));
     }
 }

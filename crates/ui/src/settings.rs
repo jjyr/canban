@@ -482,37 +482,232 @@ pub fn acknowledgements_section(ui: Ui) -> impl IntoElement {
     }))
 }
 
+#[derive(Clone)]
+struct SyncBarPresentation {
+    status_text: String,
+    button_label: &'static str,
+    variant: Variant,
+    disabled: bool,
+    highlights_unsynced: bool,
+}
+
+fn describe_sync_bar(
+    status: &canban_types::GlobalEnvSyncStatus,
+    dirty: bool,
+) -> SyncBarPresentation {
+    let total = status.total_remote_hosts;
+    let synced_count = status.synced_hosts.len();
+    if dirty {
+        return SyncBarPresentation {
+            status_text: "Save changes before syncing.".into(),
+            button_label: "Sync to hosts",
+            variant: Variant::Secondary,
+            disabled: true,
+            highlights_unsynced: false,
+        };
+    }
+    if total == 0 {
+        return SyncBarPresentation {
+            status_text:
+                "Local only — connect a remote host in Hosts to replicate global env & secrets."
+                    .into(),
+            button_label: "Sync to hosts",
+            variant: Variant::Secondary,
+            disabled: true,
+            highlights_unsynced: false,
+        };
+    }
+    if !status.syncing_hosts.is_empty() {
+        let mut msg = format!(
+            "Syncing to {} in background…",
+            status.syncing_hosts.join(", ")
+        );
+        if !status.queued_hosts.is_empty() {
+            msg.push_str(&format!(
+                " Queued for offline: {}.",
+                status.queued_hosts.join(", ")
+            ));
+        }
+        return SyncBarPresentation {
+            status_text: msg,
+            button_label: "Syncing…",
+            variant: Variant::Secondary,
+            disabled: true,
+            highlights_unsynced: false,
+        };
+    }
+    if !status.failed_hosts.is_empty() {
+        let failed_names: Vec<&str> = status
+            .failed_hosts
+            .iter()
+            .map(|f| f.host_name.as_str())
+            .collect();
+        let mut msg = format!("Sync failed for {}.", failed_names.join(", "));
+        if synced_count > 0 {
+            msg.push_str(&format!(" {synced_count}/{total} hosts synced."));
+        }
+        if !status.unsynced_hosts.is_empty() {
+            msg.push_str(&format!(
+                " Not yet synced: {}.",
+                status.unsynced_hosts.join(", ")
+            ));
+        }
+        return SyncBarPresentation {
+            status_text: msg,
+            button_label: "Retry sync",
+            variant: Variant::Primary,
+            disabled: false,
+            highlights_unsynced: false,
+        };
+    }
+    if !status.queued_hosts.is_empty() {
+        let mut parts = Vec::new();
+        if synced_count > 0 {
+            parts.push(format!("{synced_count}/{total} synced"));
+        }
+        parts.push(format!(
+            "Queued for offline: {} (will sync automatically on reconnect)",
+            status.queued_hosts.join(", ")
+        ));
+        if !status.unsynced_hosts.is_empty() {
+            parts.push(format!(
+                "Not yet synced: {}",
+                status.unsynced_hosts.join(", ")
+            ));
+        }
+        return SyncBarPresentation {
+            status_text: format!("{}.", parts.join(" · ")),
+            button_label: "Sync to hosts",
+            variant: if status.unsynced_hosts.is_empty() {
+                Variant::Secondary
+            } else {
+                Variant::Primary
+            },
+            disabled: false,
+            highlights_unsynced: !status.unsynced_hosts.is_empty(),
+        };
+    }
+    if !status.unsynced_hosts.is_empty() {
+        let msg = if synced_count == 0 {
+            format!(
+                "Not yet synced to {total} host{}: {}.",
+                if total == 1 { "" } else { "s" },
+                status.unsynced_hosts.join(", ")
+            )
+        } else {
+            format!(
+                "Not yet synced to {} ({synced_count}/{total} synced).",
+                status.unsynced_hosts.join(", ")
+            )
+        };
+        return SyncBarPresentation {
+            status_text: msg,
+            button_label: "Sync to hosts",
+            variant: Variant::Primary,
+            disabled: false,
+            highlights_unsynced: true,
+        };
+    }
+    SyncBarPresentation {
+        status_text: format!(
+            "Synced to {synced_count}/{total} host{} ({}).",
+            if total == 1 { "" } else { "s" },
+            status.synced_hosts.join(", ")
+        ),
+        button_label: "Sync to hosts",
+        variant: Variant::Secondary,
+        disabled: false,
+        highlights_unsynced: false,
+    }
+}
+
+/// Reusable bottom cross-host sync status & trigger bar for Global Environment & Secrets.
+pub fn global_env_sync_bar(
+    status: canban_types::GlobalEnvSyncStatus,
+    dirty: bool,
+    trigger_error: Option<&str>,
+    on_sync: impl Fn() + 'static,
+) -> impl IntoElement {
+    let pres = describe_sync_bar(&status, dirty);
+    let status_line = if !status.failed_hosts.is_empty() || trigger_error.is_some() {
+        text(pres.status_text)
+            .text_size(px(12.))
+            .text_color(DANGER)
+            .into_element()
+    } else if pres.highlights_unsynced {
+        text(pres.status_text)
+            .text_size(px(12.))
+            .text_color(ATTENTION)
+            .into_element()
+    } else {
+        muted(pres.status_text).text_size(px(12.)).into_element()
+    };
+
+    let mut box_view = view()
+        .flex_col()
+        .gap_2()
+        .p_3()
+        .rounded(px(RADIUS))
+        .border_1()
+        .border_color(BORDER)
+        .bg(INSET)
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(
+                    view()
+                        .flex_col()
+                        .gap_0p5()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            label("Cross-host sync")
+                                .text_size(px(12.5))
+                                .font_weight(FontWeight::SEMIBOLD),
+                        )
+                        .child(status_line),
+                )
+                .child(
+                    compact_action_with_icon(
+                        Icon::Refresh,
+                        pres.button_label,
+                        pres.variant,
+                        move |_| on_sync(),
+                    )
+                    .flex_shrink_0()
+                    .disabled(pres.disabled),
+                ),
+        );
+
+    for failure in &status.failed_hosts {
+        box_view = box_view.child(notice(
+            format!("{}: {}", failure.host_name, failure.message),
+            Tone::Danger,
+        ));
+    }
+    if let Some(err) = trigger_error.filter(|s| !s.trim().is_empty()) {
+        box_view = box_view.child(notice(err.to_owned(), Tone::Danger));
+    }
+    box_view
+}
+
 pub(crate) fn global_env_section(ui: Ui) -> impl IntoElement {
     let local_host = signal("local".to_owned());
     let scope_key = computed(|| "global".to_owned());
     let source_meta = computed(move || ui.snapshot.with(|s| s.global_env.clone()));
     let on_save =
         crate::components::env_table::env_save_callback(ui, local_host, "global", || None);
+    let env_dirty = signal(false);
+    let sync_error = signal(String::new());
+    let triggering = signal(false);
 
     settings_section(
         "Environment & Secrets",
-        "Global secrets (${{ secrets.KEY }}) and variables (${{ vars.KEY }}) injected into all Agents, Scripts, and Terminals across connected hosts.",
+        "Global secrets (${{ secrets.KEY }}) and variables (${{ vars.KEY }}) injected into Agents, Scripts, and Terminals; replicated on demand via Cross-host sync.",
     )
-    .trailing(dynamic(move || {
-        let _ = ui.snapshot_epoch.get();
-        let _ = ui.hosts.get();
-        let summary = crate::backend::global_env_sync_summary();
-        if summary.total_remote_hosts == 0 {
-            badge("Local only").into_element()
-        } else if summary.pending_hosts.is_empty() {
-            badge(format!(
-                "Synced to {}/{} hosts",
-                summary.synced_hosts, summary.total_remote_hosts
-            ))
-            .into_element()
-        } else {
-            notice(
-                format!("Pending sync: {}", summary.pending_hosts.join(", ")),
-                Tone::Attention,
-            )
-            .into_element()
-        }
-    }))
     .child(crate::components::env_table::env_table(
         ui,
         crate::components::env_table::EnvTableConfig {
@@ -522,10 +717,57 @@ pub(crate) fn global_env_section(ui: Ui) -> impl IntoElement {
             source_meta,
             save_label: "Save Global Env",
             on_save,
+            dirty_out: Some(env_dirty),
         },
     ))
+    .child(dynamic(move || {
+        let _ = ui.env_sync_epoch.get();
+        let _ = ui.snapshot_epoch.get();
+        let _ = ui.hosts.get();
+        let is_dirty = env_dirty.get();
+        let is_triggering = triggering.get();
+        let err_msg = sync_error.get();
+        let mut status = crate::backend::global_env_sync_status();
+        if is_triggering
+            && status.total_remote_hosts > 0
+            && status.syncing_hosts.is_empty()
+            && !is_dirty
+        {
+            let mut active: Vec<String> = Vec::new();
+            active.append(&mut status.unsynced_hosts);
+            active.append(&mut status.synced_hosts);
+            active.extend(status.failed_hosts.drain(..).map(|f| f.host_name));
+            if active.is_empty() {
+                active.push(format!(
+                    "{} remote host{}",
+                    status.total_remote_hosts,
+                    if status.total_remote_hosts == 1 { "" } else { "s" }
+                ));
+            }
+            status.syncing_hosts = active;
+        }
+        let trigger_err = (!err_msg.is_empty()).then_some(err_msg.as_str());
+        global_env_sync_bar(status, is_dirty, trigger_err, move || {
+            if triggering.get_untracked() || env_dirty.get_untracked() {
+                return;
+            }
+            triggering.set(true);
+            sync_error.set(String::new());
+            ui.spawn(async move {
+                let res = blocking(crate::backend::trigger_global_env_sync).await;
+                triggering.set(false);
+                match res {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => sync_error.set(format!("{e:#}")),
+                    Err(e) => sync_error.set(format!("Sync trigger failed: {e}")),
+                }
+                ui.env_sync_epoch.update(|v| *v += 1);
+            });
+        })
+        .into_element()
+    }))
     .child(
-        muted("Secrets are encrypted locally per host (vault.key + SQLite WAL) and replicated over the unified host Outbox.")
+        muted("Secrets are encrypted locally per host (vault.key + SQLite WAL) and replicated on demand over the unified host Outbox with zero plaintext secrets on disk.")
             .text_size(px(12.)),
     )
 }
@@ -1290,5 +1532,133 @@ mod tests {
             assert!(!credit.subtitle.contains("herdr-app"));
             assert!(!credit.description.contains("herdr-app"));
         }
+    }
+
+    #[test]
+    fn global_env_sync_bar_renders_expected_copy_across_all_states() {
+        use canban_types::{GlobalEnvSyncHostFailure, GlobalEnvSyncStatus};
+        use nsh_core::{ApproxTextEngine, Core, MountBatch, MountItem, geometry::size};
+
+        fn collect_texts(batch: MountBatch) -> Vec<String> {
+            batch
+                .items
+                .into_iter()
+                .filter_map(|item| match item {
+                    MountItem::Text { text, .. } => Some(text.text.to_string()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        #[component]
+        fn ProbeSyncBars() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            view()
+                .w(px(900.))
+                .flex_col()
+                .gap_3()
+                .child(global_env_sync_bar(
+                    GlobalEnvSyncStatus::default(),
+                    true,
+                    None,
+                    || {},
+                ))
+                .child(global_env_sync_bar(
+                    GlobalEnvSyncStatus::default(),
+                    false,
+                    None,
+                    || {},
+                ))
+                .child(global_env_sync_bar(
+                    GlobalEnvSyncStatus {
+                        total_remote_hosts: 2,
+                        synced_hosts: vec!["Studio Mac".into()],
+                        unsynced_hosts: vec!["Home Linux".into()],
+                        ..Default::default()
+                    },
+                    false,
+                    None,
+                    || {},
+                ))
+                .child(global_env_sync_bar(
+                    GlobalEnvSyncStatus {
+                        total_remote_hosts: 1,
+                        syncing_hosts: vec!["Home Linux".into()],
+                        ..Default::default()
+                    },
+                    false,
+                    None,
+                    || {},
+                ))
+                .child(global_env_sync_bar(
+                    GlobalEnvSyncStatus {
+                        total_remote_hosts: 1,
+                        queued_hosts: vec!["Offline Box".into()],
+                        ..Default::default()
+                    },
+                    false,
+                    None,
+                    || {},
+                ))
+                .child(global_env_sync_bar(
+                    GlobalEnvSyncStatus {
+                        total_remote_hosts: 1,
+                        failed_hosts: vec![GlobalEnvSyncHostFailure {
+                            host_id: "h1".into(),
+                            host_name: "Home Linux".into(),
+                            message: "unauthorized token".into(),
+                        }],
+                        ..Default::default()
+                    },
+                    false,
+                    None,
+                    || {},
+                ))
+                .child(global_env_sync_bar(
+                    GlobalEnvSyncStatus {
+                        total_remote_hosts: 2,
+                        synced_hosts: vec!["Home Linux".into(), "Studio Mac".into()],
+                        ..Default::default()
+                    },
+                    false,
+                    None,
+                    || {},
+                ))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(900.), px(900.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<ProbeSyncBars>());
+        let texts = collect_texts(core.commit().expect("mount sync bars"));
+
+        assert!(texts.iter().any(|t| t == "Save changes before syncing."));
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Local only — connect a remote host"))
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t == "Not yet synced to Home Linux (1/2 synced).")
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t == "Syncing to Home Linux in background…")
+        );
+        assert!(texts.iter().any(|t| t == "Syncing…"));
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Queued for offline: Offline Box"))
+        );
+        assert!(texts.iter().any(|t| t == "Home Linux: unauthorized token"));
+        assert!(texts.iter().any(|t| t == "Retry sync"));
+        assert!(
+            texts
+                .iter()
+                .any(|t| t == "Synced to 2/2 hosts (Home Linux, Studio Mac).")
+        );
     }
 }

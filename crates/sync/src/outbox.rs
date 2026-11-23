@@ -183,18 +183,27 @@ impl Outbox {
         if let Some(existing) = self.ops.iter().find(|m| m.id == mutation.id) {
             return Ok((existing.clone(), false));
         }
-        if mutation.kind == MutationKind::SyncGlobalEnv
-            && let Some(existing) = self.ops.iter_mut().find(|m| {
-                m.kind == MutationKind::SyncGlobalEnv
-                    && matches!(m.state, MutationState::Queued)
-                    && !m.retry_same_params
-            })
-        {
-            existing.params = mutation.params;
-            existing.created_at = mutation.created_at;
-            let updated = existing.clone();
-            self.save()?;
-            return Ok((updated, true));
+        if mutation.kind == MutationKind::SyncGlobalEnv {
+            // Explicit sync retries clear prior failed/conflict SyncGlobalEnv entries so
+            // `"__global_env__"` is unblocked before queuing/coalescing the next attempt.
+            self.ops.retain(|m| {
+                !(m.kind == MutationKind::SyncGlobalEnv
+                    && matches!(
+                        m.state,
+                        MutationState::Failed { .. } | MutationState::Conflict { .. }
+                    ))
+            });
+            if let Some(existing) = self.ops.iter_mut().find(|m| {
+                m.kind == MutationKind::SyncGlobalEnv && matches!(m.state, MutationState::Queued)
+            }) {
+                existing.params = mutation.params;
+                existing.created_at = mutation.created_at;
+                existing.retry_same_params = false;
+                existing.attempts = 0;
+                let updated = existing.clone();
+                self.save()?;
+                return Ok((updated, true));
+            }
         }
         if mutation.kind == MutationKind::UpdateCard
             && let Some(create) = self.ops.iter_mut().find(|m| {
@@ -354,5 +363,36 @@ mod tests {
         assert_eq!(merged.params["generation"], 2);
         let disk = std::fs::read_to_string(&path).unwrap();
         assert!(disk.contains("sync_global_env"));
+    }
+
+    #[test]
+    fn reenqueue_global_env_sync_clears_prior_failed_op_and_unblocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("host.outbox.json");
+        let mut outbox = Outbox::load(path.clone());
+        let mut failed_op = mk_op("g-fail", "", MutationKind::SyncGlobalEnv, json!({}));
+        failed_op.state = MutationState::Failed {
+            message: "token rejected".into(),
+        };
+        failed_op.attempts = 1;
+        outbox.enqueue(failed_op).unwrap();
+        assert!(outbox.blocked_cards().contains("__global_env__"));
+
+        let fresh = mk_op(
+            "g-retry",
+            "",
+            MutationKind::SyncGlobalEnv,
+            json!({"retry": true}),
+        );
+        let (queued, coalesced) = outbox.enqueue(fresh).unwrap();
+        assert!(!coalesced);
+        assert!(!outbox.blocked_cards().contains("__global_env__"));
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(queued.id, "g-retry");
+        assert!(matches!(queued.state, MutationState::Queued));
+
+        let reloaded = Outbox::load(path);
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded.ops[0].id, "g-retry");
     }
 }

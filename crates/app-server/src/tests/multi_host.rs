@@ -1965,7 +1965,7 @@ fn global_env_replicates_via_outbox_with_coalescing_tombstones_lww_and_zero_plai
         })
         .unwrap();
 
-    // 1. Connected save replicates Global Plain + Secret over TCP and re-encrypts under remote vault.key.
+    // 1. Saving Global env writes locally without auto-syncing; status accurately reports host as unsynced.
     let sec_v1 = "multi_global_secret_v1_alpha";
     registry
         .call_routed(
@@ -1988,9 +1988,26 @@ fn global_env_replicates_via_outbox_with_coalescing_tombstones_lww_and_zero_plai
         )
         .unwrap();
 
+    let status_before_manual_sync = registry.global_env_sync_status();
+    assert_eq!(status_before_manual_sync.unsynced_hosts, vec!["Home Linux"]);
+    assert!(status_before_manual_sync.synced_hosts.is_empty());
+    assert!(
+        !remote_app
+            .snapshot()
+            .unwrap()
+            .global_env
+            .contains_key("G_SECRET"),
+        "Global env save must not auto-replicate until user triggers Sync to hosts"
+    );
+
+    // Explicit trigger replicates Global Plain + Secret over TCP and re-encrypts under remote vault.key.
+    registry.sync_global_env_now();
+
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        if registry.global_env_sync_summary().pending_hosts.is_empty()
+        let status = registry.global_env_sync_status();
+        if status.synced_hosts == vec!["Home Linux"]
+            && status.unsynced_hosts.is_empty()
             && remote_app
                 .snapshot()
                 .unwrap()
@@ -2001,10 +2018,47 @@ fn global_env_replicates_via_outbox_with_coalescing_tombstones_lww_and_zero_plai
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "Timed out waiting for initial global env sync"
+            "Timed out waiting for explicit global env sync"
         );
         std::thread::sleep(Duration::from_millis(25));
     }
+
+    // Adding a second host when local global env already exists must NOT auto-sync;
+    // Home Linux stays synced while the new host is reported unsynced until manual sync.
+    let remote2_home = dir.path().join("remote2-home");
+    let remote2_app = AppServer::open(remote2_home, PathBuf::from("/bin/echo")).unwrap();
+    let (_, remote2_token) = remote2_app.issue_device_token("remote2-test").unwrap();
+    let _remote2_running = remote2_app
+        .start_with_listen(Some(ServerListenConfig {
+            tailscale: false,
+            port: 0,
+            listen: Some("127.0.0.1:0".into()),
+            allow_insecure_bind: false,
+        }))
+        .unwrap();
+    let remote2_addr = remote2_app.bound_tcp_addrs()[0].clone();
+    registry
+        .add_host(SavedHost {
+            id: "studio-mac".into(),
+            name: "Studio Mac".into(),
+            transport: HostTransport::Tcp {
+                addr: remote2_addr,
+                token: remote2_token,
+            },
+            ssh_target: None,
+            server_id: None,
+            enabled: true,
+            added_at: now(),
+        })
+        .unwrap();
+
+    let status_after_add = registry.global_env_sync_status();
+    assert_eq!(status_after_add.synced_hosts, vec!["Home Linux"]);
+    assert_eq!(status_after_add.unsynced_hosts, vec!["Studio Mac"]);
+    assert!(
+        remote2_app.snapshot().unwrap().global_env.is_empty(),
+        "Newly paired host must not auto-receive global env before explicit Sync to hosts"
+    );
 
     // Distinct vault.key files with 0600 permissions on each host.
     let local_key = std::fs::read(local_home.join("vault.key")).unwrap();
@@ -2027,7 +2081,11 @@ fn global_env_replicates_via_outbox_with_coalescing_tombstones_lww_and_zero_plai
         Some(sec_v1)
     );
 
-    // 2. Take remote offline and make 3 rapid global edits: coalesce to 1 pointer-only outbox op.
+    // 2. Take remotes offline, make 2 rapid global edits -> unsynced until user triggers sync,
+    // then two manual sync triggers coalesce to 1 pointer-only outbox op.
+    registry.remove_host("studio-mac").unwrap();
+    drop(_remote2_running);
+    drop(remote2_app);
     drop(remote_running);
     drop(remote_app);
     registry.poll_remotes_once();
@@ -2076,8 +2134,17 @@ fn global_env_replicates_via_outbox_with_coalescing_tombstones_lww_and_zero_plai
         )
         .unwrap();
 
-    let summary_offline = registry.global_env_sync_summary();
-    assert_eq!(summary_offline.pending_hosts, vec!["Home Linux"]);
+    assert_eq!(
+        registry.global_env_sync_status().unsynced_hosts,
+        vec!["Home Linux"]
+    );
+    assert!(registry.global_env_sync_status().queued_hosts.is_empty());
+
+    registry.sync_global_env_now();
+    registry.sync_global_env_now();
+
+    let status_offline = registry.global_env_sync_status();
+    assert_eq!(status_offline.queued_hosts, vec!["Home Linux"]);
     assert!(
         registry.sync_items().is_empty(),
         "Global sync must stay out of card pending counts"
@@ -2086,7 +2153,7 @@ fn global_env_replicates_via_outbox_with_coalescing_tombstones_lww_and_zero_plai
     // Outbox file must be coalesced to 1 SyncGlobalEnv entry and contain zero plaintext secrets.
     let outbox_path = local_home.join("cache/hosts/home-linux.outbox.json");
     let outbox_bytes = std::fs::read_to_string(&outbox_path).unwrap();
-    let parsed_ob = canban_sync::Outbox::load(outbox_path);
+    let parsed_ob = canban_sync::Outbox::load(outbox_path.clone());
     assert_eq!(
         parsed_ob
             .ops
@@ -2160,7 +2227,9 @@ fn global_env_replicates_via_outbox_with_coalescing_tombstones_lww_and_zero_plai
 
     let deadline2 = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        if registry.global_env_sync_summary().pending_hosts.is_empty()
+        let status = registry.global_env_sync_status();
+        if status.synced_hosts == vec!["Home Linux"]
+            && status.queued_hosts.is_empty()
             && remote_app2.snapshot().unwrap().global_env.get("G_PLAIN")
                 == Some(&EnvEntryMeta::Plain {
                     value: "offline_2".into(),
@@ -2197,6 +2266,58 @@ fn global_env_replicates_via_outbox_with_coalescing_tombstones_lww_and_zero_plai
         remote_resolved2.env.get("G_PLAIN").map(String::as_str),
         Some("offline_2")
     );
+
+    // 4. Watermark persistence across HostRegistry restart & failure retry flow.
+    drop(registry);
+    let local_client2 =
+        AppClient::connect_home(local_home.clone(), Path::new("/bin/echo")).unwrap();
+    let registry2 = HostRegistry::new(local_client2);
+    let restored_status = registry2.global_env_sync_status();
+    assert_eq!(restored_status.synced_hosts, vec!["Home Linux"]);
+    assert!(restored_status.unsynced_hosts.is_empty());
+
+    // Inject a failed SyncGlobalEnv in the outbox to verify failure reporting + manual Retry recovery.
+    let mut ob_with_fail = canban_sync::Outbox::load(outbox_path.clone());
+    ob_with_fail
+        .enqueue(canban_sync::Mutation {
+            id: "failed-global-sync".into(),
+            host_id: "home-linux".into(),
+            card_id: String::new(),
+            kind: canban_sync::MutationKind::SyncGlobalEnv,
+            params: json!({}),
+            base: Default::default(),
+            sent_params: serde_json::Value::Null,
+            retry_same_params: false,
+            state: canban_sync::MutationState::Failed {
+                message: "simulated rpc error".into(),
+            },
+            created_at: now(),
+            attempts: 1,
+        })
+        .unwrap();
+    drop(registry2);
+
+    let local_client3 = AppClient::connect_home(local_home, Path::new("/bin/echo")).unwrap();
+    let registry3 = HostRegistry::new(local_client3);
+    registry3.poll_remotes_once();
+    let failed_status = registry3.global_env_sync_status();
+    assert_eq!(failed_status.failed_hosts.len(), 1);
+    assert_eq!(failed_status.failed_hosts[0].host_name, "Home Linux");
+    assert_eq!(failed_status.failed_hosts[0].message, "simulated rpc error");
+
+    registry3.sync_global_env_now();
+    let deadline3 = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = registry3.global_env_sync_status();
+        if status.failed_hosts.is_empty() && status.synced_hosts == vec!["Home Linux"] {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline3,
+            "Timed out waiting for retry recovery of failed global env sync"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 #[test]

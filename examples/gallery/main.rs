@@ -837,7 +837,73 @@ fn controls() -> impl IntoElement {
                                 source_meta: env_meta_memo,
                                 save_label: "Save Env",
                                 on_save: env_on_save,
+                                dirty_out: None,
                             },
+                        ))
+                        .child(label("Global env cross-host sync bar states (Settings -> Environment & Secrets)"))
+                        .child(canban_ui::settings::global_env_sync_bar(
+                            canban_types::GlobalEnvSyncStatus::default(),
+                            true,
+                            None,
+                            || {},
+                        ))
+                        .child(canban_ui::settings::global_env_sync_bar(
+                            canban_types::GlobalEnvSyncStatus {
+                                total_remote_hosts: 2,
+                                synced_hosts: vec!["Studio Mac".into()],
+                                unsynced_hosts: vec!["Home Linux".into()],
+                                ..Default::default()
+                            },
+                            false,
+                            None,
+                            || {},
+                        ))
+                        .child(canban_ui::settings::global_env_sync_bar(
+                            canban_types::GlobalEnvSyncStatus {
+                                total_remote_hosts: 2,
+                                synced_hosts: vec!["Studio Mac".into()],
+                                syncing_hosts: vec!["Home Linux".into()],
+                                ..Default::default()
+                            },
+                            false,
+                            None,
+                            || {},
+                        ))
+                        .child(canban_ui::settings::global_env_sync_bar(
+                            canban_types::GlobalEnvSyncStatus {
+                                total_remote_hosts: 2,
+                                synced_hosts: vec!["Studio Mac".into()],
+                                queued_hosts: vec!["Offline Linux".into()],
+                                ..Default::default()
+                            },
+                            false,
+                            None,
+                            || {},
+                        ))
+                        .child(canban_ui::settings::global_env_sync_bar(
+                            canban_types::GlobalEnvSyncStatus {
+                                total_remote_hosts: 2,
+                                synced_hosts: vec!["Studio Mac".into()],
+                                failed_hosts: vec![canban_types::GlobalEnvSyncHostFailure {
+                                    host_id: "home-linux".into(),
+                                    host_name: "Home Linux".into(),
+                                    message: "device token rejected (401)".into(),
+                                }],
+                                ..Default::default()
+                            },
+                            false,
+                            None,
+                            || {},
+                        ))
+                        .child(canban_ui::settings::global_env_sync_bar(
+                            canban_types::GlobalEnvSyncStatus {
+                                total_remote_hosts: 2,
+                                synced_hosts: vec!["Home Linux".into(), "Studio Mac".into()],
+                                ..Default::default()
+                            },
+                            false,
+                            None,
+                            || {},
                         )),
                 )
                 .child(

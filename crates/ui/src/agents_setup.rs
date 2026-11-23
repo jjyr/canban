@@ -2965,6 +2965,7 @@ fn agent_env_inline_editor(
                 source_meta,
                 save_label: "Save Env",
                 on_save,
+                dirty_out: None,
             },
         ))
         .into_element()
@@ -4726,6 +4727,7 @@ pub fn project_agents_screen(ui: Ui) -> impl IntoElement {
                                     source_meta: env_source_meta,
                                     save_label: "Save Project Env",
                                     on_save: on_project_env_save,
+                                    dirty_out: None,
                                 },
                             )),
                     ),
