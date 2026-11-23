@@ -252,6 +252,63 @@ impl AppServer {
     }
 }
 
+pub(crate) fn update_check_step(
+    weak: &std::sync::Weak<AppServer>,
+    home: &Path,
+    github: &Arc<canban_github::auth::Service>,
+    updates_disabled: bool,
+    allow_auto_check: bool,
+    prev_payload: Option<Value>,
+    mut next: std::time::Instant,
+) -> Option<(Option<Value>, std::time::Instant, Duration)> {
+    weak.upgrade().filter(|s| !s.stopped())?;
+    let handoff_active = canban_updater::handoff::active(home);
+    let mut emitted_auto = false;
+    if !handoff_active {
+        let _ = canban_updater::handoff::flush_settled(home);
+        if !updates_disabled && allow_auto_check && std::time::Instant::now() >= next {
+            let result = canban_updater::feed::check_automatically(home, github.client().ok());
+            let delay = if result.is_ok() {
+                if let Some(server) = weak.upgrade() {
+                    server.emit_update();
+                    emitted_auto = true;
+                }
+                canban_updater::load_state(home)
+                    .automatic_delay(canban_updater::now())
+                    .max(1)
+            } else {
+                60
+            };
+            next = std::time::Instant::now() + Duration::from_secs(delay);
+        }
+    }
+
+    let phase = canban_updater::load_state(home).phase;
+    let active_op =
+        handoff_active || matches!(phase.as_str(), "checking" | "downloading" | "installing");
+    if active_op {
+        let mut next_payload = prev_payload;
+        if let Some(server) = weak.upgrade() {
+            let payload = server.update_state_payload();
+            if next_payload.as_ref() != Some(&payload) {
+                next_payload = Some(payload);
+                if !emitted_auto {
+                    server.emit_update();
+                }
+            }
+        }
+        return Some((next_payload, next, Duration::from_millis(500)));
+    }
+
+    if prev_payload.is_some()
+        && !emitted_auto
+        && let Some(server) = weak.upgrade()
+    {
+        server.emit_update();
+    }
+    Some((None, next, Duration::from_secs(1)))
+}
+
 async fn update_checks_loop(
     weak: std::sync::Weak<AppServer>,
     updates_disabled: bool,
@@ -261,6 +318,7 @@ async fn update_checks_loop(
 ) {
     let mut next = std::time::Instant::now();
     let mut last_active_payload: Option<Value> = None;
+    let allow_auto_check = !cfg!(test) && std::env::var_os("CANBAN_UPDATES_DISABLED").is_none();
     while !*stop_rx.borrow() {
         let step_weak = weak.clone();
         let step_home = home.clone();
@@ -269,54 +327,15 @@ async fn update_checks_loop(
         // A dead service cannot keep checking. The socket probe does not
         // acquire database state or retain an AppServer Arc during I/O.
         let step = tokio::task::spawn_blocking(move || {
-            if step_weak.upgrade().is_none_or(|s| s.stopped()) {
-                return None;
-            }
-            let handoff_active = canban_updater::handoff::active(&step_home);
-            let phase = canban_updater::load_state(&step_home).phase;
-            let active_op = handoff_active
-                || matches!(phase.as_str(), "checking" | "downloading" | "installing");
-            if active_op {
-                let mut next_payload = prev_payload;
-                if let Some(server) = step_weak.upgrade() {
-                    let payload = server.update_state_payload();
-                    if next_payload.as_ref() != Some(&payload) {
-                        next_payload = Some(payload);
-                        server.emit_update();
-                    }
-                }
-                return Some((next_payload, next, Duration::from_millis(500)));
-            }
-
-            let _ = canban_updater::handoff::flush_settled(&step_home);
-            if prev_payload.is_some()
-                && let Some(server) = step_weak.upgrade()
-            {
-                server.emit_update();
-            }
-
-            if !updates_disabled
-                && !cfg!(test)
-                && std::time::Instant::now() >= next
-                && std::env::var_os("CANBAN_UPDATES_DISABLED").is_none()
-            {
-                let result = canban_updater::feed::check_automatically(
-                    &step_home,
-                    step_github.client().ok(),
-                );
-                let delay = if result.is_ok() {
-                    if let Some(server) = step_weak.upgrade() {
-                        server.emit_update();
-                    }
-                    canban_updater::load_state(&step_home)
-                        .automatic_delay(canban_updater::now())
-                        .max(1)
-                } else {
-                    60
-                };
-                next = std::time::Instant::now() + Duration::from_secs(delay);
-            }
-            Some((None, next, Duration::from_secs(1)))
+            update_check_step(
+                &step_weak,
+                &step_home,
+                &step_github,
+                updates_disabled,
+                allow_auto_check,
+                prev_payload,
+                next,
+            )
         })
         .await;
         let Ok(Some((next_payload, next_at, sleep_dur))) = step else {

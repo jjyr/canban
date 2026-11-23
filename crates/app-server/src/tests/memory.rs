@@ -481,3 +481,87 @@ fn active_update_checks_push_update_changed_progress_without_ui_polling() {
         other => panic!("unexpected ClientPushEvent: {other:?}"),
     }
 }
+
+#[test]
+fn interrupted_update_check_recovers_while_live_operation_keeps_pushing_progress() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let app = AppServer::open(home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let mut push_rx = app.subscribe_push();
+
+    // 1. Stale interrupted "checking" state (no operation.lock held) transitions to "error" on step.
+    let now_s = canban_updater::now();
+    let mut state = canban_updater::load_state(&home);
+    state.phase = "checking".into();
+    state.checked_at = now_s;
+    state.last_check_started_at = now_s;
+    state.error = None;
+    canban_updater::save_state(&home, &state).unwrap();
+
+    let (next_payload, _, sleep_dur) = crate::updates::update_check_step(
+        &Arc::downgrade(&app),
+        &home,
+        &app.github,
+        false,
+        true,
+        None,
+        std::time::Instant::now(),
+    )
+    .expect("step must return active state");
+    assert_eq!(next_payload, None);
+    assert_eq!(sleep_dur, Duration::from_secs(1));
+
+    let recovered = canban_updater::load_state(&home);
+    assert_eq!(recovered.phase, "error");
+    assert!(
+        recovered
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("interrupted"),
+        "expected interrupted error message, got {:?}",
+        recovered.error
+    );
+    match push_rx.try_recv().expect("expected UpdateChanged push") {
+        crate::state::PushEvent::UpdateChanged { state, .. } => {
+            assert_eq!(state["state"]["phase"], "error");
+        }
+        other => panic!("unexpected PushEvent: {other:?}"),
+    }
+
+    // 2. Live operation holding operation.lock keeps "downloading" phase and emits progress updates.
+    let op_lock = canban_updater::lock(&home, "operation.lock").unwrap();
+    let mut live_state = recovered;
+    live_state.phase = "downloading".into();
+    live_state.progress = 40;
+    live_state.error = None;
+    canban_updater::save_state(&home, &live_state).unwrap();
+
+    let (next_payload, _, sleep_dur) = crate::updates::update_check_step(
+        &Arc::downgrade(&app),
+        &home,
+        &app.github,
+        false,
+        true,
+        None,
+        std::time::Instant::now(),
+    )
+    .expect("step must continue while downloading");
+    assert!(next_payload.is_some());
+    assert_eq!(sleep_dur, Duration::from_millis(500));
+
+    let untouched = canban_updater::load_state(&home);
+    assert_eq!(untouched.phase, "downloading");
+    assert_eq!(untouched.progress, 40);
+    match push_rx
+        .try_recv()
+        .expect("expected live downloading UpdateChanged push")
+    {
+        crate::state::PushEvent::UpdateChanged { state, .. } => {
+            assert_eq!(state["state"]["phase"], "downloading");
+            assert_eq!(state["state"]["progress"], 40);
+        }
+        other => panic!("unexpected PushEvent: {other:?}"),
+    }
+    drop(op_lock);
+}
