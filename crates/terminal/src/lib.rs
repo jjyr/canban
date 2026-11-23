@@ -12,6 +12,7 @@ pub mod ffi {
 #[cfg(target_os = "macos")]
 pub mod apple;
 pub mod input;
+pub mod mobile_bar;
 pub mod model;
 #[cfg(target_os = "macos")]
 pub use apple::macos as native;
@@ -21,6 +22,7 @@ pub mod session;
 pub mod view;
 pub mod view_state;
 
+pub use mobile_bar::AccessoryKey;
 pub use remote::RemotePtyTransport;
 pub use view::{
     FocusRequest, FontSpec, LiveBinding, TerminalView, decode_file_uri, parse_font_value,

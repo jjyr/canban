@@ -596,6 +596,11 @@ impl RemoteClient {
         });
     }
 
+    /// Executes a future on this client's managed multi-thread Tokio runtime.
+    pub fn block_on<F: std::future::Future>(&self, future: F) -> F::Output {
+        self.runtime_handle.block_on(future)
+    }
+
     /// Subscribes to [`ClientEvent`] notifications on an unbounded mpsc channel.
     pub fn subscribe(&self) -> mpsc::UnboundedReceiver<ClientEvent> {
         self.subscribe_mapped(|ev| ev)

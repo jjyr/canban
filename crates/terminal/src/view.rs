@@ -163,6 +163,9 @@ pub struct TerminalView {
     ui_command_keys: Option<Vec<String>>,
     hidden: Option<Rc<dyn Fn() -> bool>>,
     height: Option<Length>,
+    mobile_controls: bool,
+    on_fullscreen: Option<Rc<dyn Fn()>>,
+    offline_notice: Option<Rc<dyn Fn() -> String>>,
 }
 
 impl TerminalView {
@@ -183,6 +186,9 @@ impl TerminalView {
             ui_command_keys: None,
             hidden: None,
             height: None,
+            mobile_controls: false,
+            on_fullscreen: None,
+            offline_notice: None,
         }
     }
 
@@ -203,6 +209,9 @@ impl TerminalView {
             ui_command_keys: None,
             hidden: None,
             height: None,
+            mobile_controls: false,
+            on_fullscreen: None,
+            offline_notice: None,
         }
     }
 
@@ -239,12 +248,27 @@ impl TerminalView {
         self.height = Some(height.into());
         self
     }
+
+    pub fn mobile_controls(mut self, enabled: bool) -> Self {
+        self.mobile_controls = enabled;
+        self
+    }
+
+    pub fn on_fullscreen_toggle(mut self, f: impl Fn() + 'static) -> Self {
+        self.on_fullscreen = Some(Rc::new(f));
+        self
+    }
+
+    pub fn offline_notice(mut self, offline_notice: impl Fn() -> String + 'static) -> Self {
+        self.offline_notice = Some(Rc::new(offline_notice));
+        self
+    }
 }
 
 impl IntoElement for TerminalView {
     fn into_element(self) -> AnyElement {
         #[cfg(target_os = "macos")]
-        {
+        if !self.mobile_controls {
             let theme = self.theme;
             let font = self.font;
             let focus = self.focus;
@@ -288,14 +312,13 @@ impl IntoElement for TerminalView {
                 Some(h) => el.h(h),
                 None => el.flex_1().min_h(px(0.)),
             };
-            match self.hidden {
+            return match self.hidden {
                 Some(hidden) => el
                     .style_when(move || hidden(), |s| s.hidden())
                     .into_element(),
                 None => el.into_element(),
-            }
+            };
         }
-        #[cfg(not(target_os = "macos"))]
         {
             let _ = self.ui_command_keys;
             let theme = self.theme;
@@ -304,17 +327,25 @@ impl IntoElement for TerminalView {
             let read_only = self.read_only;
             let input_status = self.input_status;
             let notice_status = self.notice_status;
+            let options = crate::portable::PortableOptions {
+                mobile_controls: self.mobile_controls,
+                on_fullscreen: self.on_fullscreen,
+                offline_notice: self.offline_notice,
+            };
 
             let el = match self.surface {
-                TerminalSurface::Preview(content) => crate::portable::preview_terminal_with_status(
-                    content,
-                    move || theme(),
-                    move || font(),
-                    move || focus(),
-                    move || input_status(),
-                    move || notice_status(),
-                ),
-                TerminalSurface::Live(binding) => crate::portable::live_terminal(
+                TerminalSurface::Preview(content) => {
+                    crate::portable::preview_terminal_with_options(
+                        content,
+                        move || theme(),
+                        move || font(),
+                        move || focus(),
+                        move || input_status(),
+                        move || notice_status(),
+                        options,
+                    )
+                }
+                TerminalSurface::Live(binding) => crate::portable::live_terminal_with_options(
                     move || binding(),
                     move || theme(),
                     move || font(),
@@ -322,6 +353,7 @@ impl IntoElement for TerminalView {
                     move || read_only(),
                     move || input_status(),
                     move || notice_status(),
+                    options,
                 ),
             }
             .w_full();

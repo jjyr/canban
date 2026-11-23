@@ -177,6 +177,14 @@ pub trait UiBackend: Send + Sync + 'static {
     fn global_env_sync_summary(&self) -> canban_types::GlobalEnvSyncSummary {
         Default::default()
     }
+
+    /// Notifies a pure-remote client that the mobile/desktop app returned to foreground.
+    fn on_foreground(&self) {}
+
+    /// Returns the underlying [`canban_client::RemoteClient`] when running pure-remote.
+    fn remote_client(&self) -> Option<Arc<canban_client::RemoteClient>> {
+        None
+    }
 }
 
 static BACKEND: OnceLock<Arc<dyn UiBackend>> = OnceLock::new();
@@ -307,6 +315,16 @@ pub fn global_env_sync_summary() -> canban_types::GlobalEnvSyncSummary {
         .get()
         .map(|b| b.global_env_sync_summary())
         .unwrap_or_default()
+}
+
+pub fn on_foreground() {
+    if let Some(backend) = BACKEND.get() {
+        backend.on_foreground();
+    }
+}
+
+pub fn remote_client() -> Option<Arc<canban_client::RemoteClient>> {
+    BACKEND.get().and_then(|b| b.remote_client())
 }
 
 /// Desktop API version used for compatibility displays and fixture metadata.
@@ -828,6 +846,14 @@ impl UiBackend for RemoteBackend {
 
     fn sync_action(&self, host_id: &str, mutation_id: &str, action: SyncAction) -> Result<()> {
         self.client.sync_action(host_id, mutation_id, action)
+    }
+
+    fn on_foreground(&self) {
+        self.client.on_foreground();
+    }
+
+    fn remote_client(&self) -> Option<Arc<canban_client::RemoteClient>> {
+        Some(self.client.clone())
     }
 }
 

@@ -1446,9 +1446,14 @@ pub fn refresh(ui: Ui) {
             let snapshot = crate::merged_snapshot()?;
             let summaries = snapshot_summaries(&snapshot);
             let saved_project = if restore_project {
-                backend.call_local("utilities.state", json!({}))?["preferences"]["last_project"]
-                    .as_str()
-                    .map(str::to_owned)
+                backend
+                    .call_local("utilities.state", json!({}))
+                    .ok()
+                    .and_then(|state| {
+                        state["preferences"]["last_project"]
+                            .as_str()
+                            .map(str::to_owned)
+                    })
             } else {
                 None
             };

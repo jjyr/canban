@@ -1,5 +1,6 @@
 //! Standalone native component gallery. Never opens a Canban home or runtime.
 mod fixtures;
+mod mobile;
 use canban_ui::{presenter::Ui, profiles, review};
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
@@ -1098,6 +1099,8 @@ fn board_transitions_bar(
 pub fn Gallery() -> impl IntoElement {
     canban_ui_kit::tokens::install_theme();
     let scene = signal("workspace".to_string());
+    let mobile_state = canban_ui::mobile::MobileState::new();
+    let mobile_viewport = signal((390.0_f32, 844.0_f32));
     let constrained = signal(false);
     let ui = Ui::new();
     canban_ui::links::install(ui);
@@ -2853,6 +2856,12 @@ pub fn Gallery() -> impl IntoElement {
             )
             .into_element();
     }
+    if let Ok(env_scene) = std::env::var("CANBAN_GALLERY_SCENE")
+        && mobile::SCENES.iter().any(|&(slug, _)| slug == env_scene)
+    {
+        mobile::apply_scene(ui, mobile_state, &env_scene);
+        return mobile::viewport_wrapper(ui, mobile_state, mobile_viewport).into_element();
+    }
 
     view()
         .flex_1()
@@ -3635,6 +3644,12 @@ pub fn Gallery() -> impl IntoElement {
                 }))
                 .child(action("Full viewport", Variant::Quiet, move |_| {
                     constrained.set(false)
+                }))
+                .children(mobile::SCENES.iter().map(|&(slug, label_text)| {
+                    action(label_text, Variant::Quiet, move |_| {
+                        mobile::apply_scene(ui, mobile_state, slug);
+                        scene.set(slug.into());
+                    })
                 })),
         )
         .child(dynamic(move || {
@@ -3664,6 +3679,9 @@ pub fn Gallery() -> impl IntoElement {
                     }),
                 )
                 .into_element();
+            }
+            if scene.get().starts_with("mobile-") {
+                return mobile::viewport_wrapper(ui, mobile_state, mobile_viewport).into_element();
             }
             let narrow_preview = constrained.get();
             let current_scene = scene.get();

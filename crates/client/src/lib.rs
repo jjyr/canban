@@ -8,7 +8,7 @@ pub mod store;
 
 pub use pairing::{
     AddrProbeResult, PairingInvite, TransportSecurity, format_pairing_uri, is_tailscale_ip,
-    parse_pairing_invite, probe_addr,
+    parse_pairing_invite, probe_addr, probe_addr_blocking,
 };
 pub use remote_client::{ClientEvent, RemoteClient, RemoteClientConfig};
 pub use store::{CredentialStore, FileCredentialStore, MemoryCredentialStore};

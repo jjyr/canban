@@ -1,0 +1,16 @@
+[package]
+name = "canban-ios"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Canban iOS mobile app shell hosted on nsh-platform-ios."
+homepage.workspace = true
+repository.workspace = true
+
+[target.'cfg(target_os = "ios")'.dependencies]
+canban-client.workspace = true
+canban-ui = { path = "../ui", default-features = false }
+nsh-base.workspace = true
+nsh-core.workspace = true
+nsh-platform-ios.workspace = true

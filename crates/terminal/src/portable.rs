@@ -591,6 +591,14 @@ fn adaptive_rgba(c: [u8; 3], alpha: f32) -> AdaptiveColor {
     }
 }
 
+/// Optional mobile interaction & offline display hooks for portable terminals.
+#[derive(Clone, Default)]
+pub struct PortableOptions {
+    pub mobile_controls: bool,
+    pub on_fullscreen: Option<Rc<dyn Fn()>>,
+    pub offline_notice: Option<Rc<dyn Fn() -> String>>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn mount_terminal_surface(
     initial_preview: Option<String>,
@@ -601,6 +609,7 @@ fn mount_terminal_surface(
     read_only: impl Fn() -> bool + 'static,
     input_status: impl Fn() -> String + 'static,
     notice_status: impl Fn() -> String + 'static,
+    options: PortableOptions,
 ) -> View {
     let is_preview = initial_preview.is_some();
     let binding = Rc::new(binding);
@@ -610,9 +619,14 @@ fn mount_terminal_surface(
     let read_only = Rc::new(read_only);
     let input_status = Rc::new(input_status);
     let notice_status = Rc::new(notice_status);
+    let mobile_controls = options.mobile_controls;
+    let on_fullscreen = options.on_fullscreen;
+    let offline_notice = options.offline_notice;
 
     view().relative().overflow_hidden().child(dynamic(move || {
         let slot = Rc::new(RefCell::new(ControllerSlot::new(is_preview)));
+        let ctrl_sticky = signal(false);
+        let zoom_size = signal(Option::<f32>::None);
         if let Some(ref content) = initial_preview {
             let state_arc = slot.borrow().state.clone();
             let mut s = state_arc.lock().unwrap();
@@ -646,7 +660,15 @@ fn mount_terminal_surface(
         });
         let font_memo = computed({
             let font = font.clone();
-            move || parse_font_value(&font())
+            move || {
+                let mut spec = parse_font_value(&font());
+                if let Some(zoomed) = zoom_size.get() {
+                    let size = crate::mobile_bar::clamp_terminal_font_size(zoomed);
+                    spec.size = size;
+                    spec.line_height = (size * 1.385).round().max(size + 3.0);
+                }
+                spec
+            }
         });
         let binding_memo = computed({
             let binding = binding.clone();
@@ -882,13 +904,29 @@ fn mount_terminal_surface(
                     }
                 };
                 if can_send {
+                    if ctrl_sticky.get_untracked()
+                        && let Some(ctrl_bytes) =
+                            crate::mobile_bar::apply_sticky_ctrl(data.as_str())
+                    {
+                        ctrl_sticky.set(false);
+                        guard.send_bytes(ctrl_bytes);
+                        return;
+                    }
                     guard.send_bytes(data.as_str().as_bytes().to_vec());
                 }
             })
             .size_full();
 
-        view()
-            .size_full()
+        let slot_bar_key = slot.clone();
+        let slot_bar_paste = slot.clone();
+        let ro_bar = ro_memo;
+        let on_fullscreen_cb = on_fullscreen.clone();
+        let offline_notice_cb = offline_notice.clone();
+
+        let mut surface = view()
+            .flex_1()
+            .min_h(px(0.0))
+            .w_full()
             .relative()
             .overflow_hidden()
             .bg(move || adaptive_rgb(parse_rgb_or(&theme_memo.get()["background"], [24, 24, 28])))
@@ -936,29 +974,125 @@ fn mount_terminal_surface(
                 if let WheelOutput::Pty(bytes) = out {
                     guard.send_bytes(bytes);
                 }
-            })
-            .child(term_el)
-            .child(when(
-                move || !status_sig.get().is_empty(),
+            });
+
+        if mobile_controls {
+            let base_font_memo = font_memo;
+            surface = surface.on_pinch(move |ev: &PinchEvent| {
+                if ev.delta.0.abs() > f32::EPSILON {
+                    let current = zoom_size
+                        .get_untracked()
+                        .unwrap_or_else(|| base_font_memo.get_untracked().size);
+                    zoom_size.set(Some(crate::mobile_bar::scale_font_size(
+                        current, ev.delta.0,
+                    )));
+                }
+            });
+        }
+
+        let surface = surface.child(term_el).child(when(
+            move || !status_sig.get().is_empty(),
+            move || {
+                view()
+                    .absolute()
+                    .top(px(8.0))
+                    .right(px(12.0))
+                    .pointer_events(PointerEvents::None)
+                    .px(px(8.0))
+                    .py(px(3.0))
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(adaptive_rgba([255, 255, 255], 0.14))
+                    .bg(adaptive_rgba([20, 22, 28], 0.86))
+                    .child(
+                        text(move || SharedString::from(status_sig.get()))
+                            .text_size(px(11.0))
+                            .text_color(adaptive_rgb([214, 220, 230])),
+                    )
+            },
+        ));
+
+        if !mobile_controls {
+            return surface.into_element();
+        }
+
+        let offline_banner = offline_notice_cb.map(|notice_fn| {
+            let notice_text_fn = notice_fn.clone();
+            when(
+                move || !notice_fn().trim().is_empty(),
                 move || {
+                    let notice_line = notice_text_fn();
                     view()
-                        .absolute()
-                        .top(px(8.0))
-                        .right(px(12.0))
-                        .pointer_events(PointerEvents::None)
-                        .px(px(8.0))
-                        .py(px(3.0))
-                        .rounded(px(6.0))
-                        .border_1()
-                        .border_color(adaptive_rgba([255, 255, 255], 0.14))
-                        .bg(adaptive_rgba([20, 22, 28], 0.86))
+                        .w_full()
+                        .flex_shrink_0()
+                        .px(px(12.0))
+                        .py(px(6.0))
+                        .border_b_1()
+                        .border_color(adaptive_rgba([240, 175, 70], 0.35))
+                        .bg(adaptive_rgba([240, 175, 70], 0.14))
                         .child(
-                            text(move || SharedString::from(status_sig.get()))
-                                .text_size(px(11.0))
-                                .text_color(adaptive_rgb([214, 220, 230])),
+                            text(format!("Offline · {notice_line}"))
+                                .text_size(px(12.0))
+                                .text_color(adaptive_rgb([245, 210, 140])),
                         )
                 },
-            ))
+            )
+        });
+
+        let bar = crate::mobile_bar::accessory_bar(
+            ctrl_sticky,
+            move || ro_bar.get(),
+            move |key| {
+                let guard = slot_bar_key.borrow();
+                if guard.is_preview || guard.read_only {
+                    return;
+                }
+                let (can_send, bytes) = {
+                    let mut s = guard.state.lock().unwrap();
+                    if !session::accepts_pty_input(&s, guard.read_only) {
+                        (false, Vec::new())
+                    } else {
+                        s.clear_attach_settle();
+                        s.model.clear_selection();
+                        s.model.scroll_to_bottom();
+                        let modes = s.model.terminal_modes();
+                        (
+                            true,
+                            crate::mobile_bar::encode_accessory_key(key, modes).to_vec(),
+                        )
+                    }
+                };
+                if can_send {
+                    guard.send_bytes(bytes);
+                }
+            },
+            move || {
+                let slot_async = slot_bar_paste.clone();
+                spawn(async move {
+                    let text = clipboard_string().await;
+                    if !text.is_empty() {
+                        slot_async.borrow().paste_text_to_pty(&text);
+                    }
+                });
+            },
+            on_fullscreen_cb,
+        );
+
+        view()
+            .size_full()
+            .flex_col()
+            .min_h(px(0.0))
+            .pb(move || {
+                if try_os() == Some(nsh_core::platform::Os::Ios) {
+                    px(keyboard_height().0.max(safe_area().bottom.0))
+                } else {
+                    px(0.0)
+                }
+            })
+            .children(offline_banner)
+            .child(surface)
+            .child(bar)
+            .into_element()
     }))
 }
 
@@ -973,6 +1107,30 @@ pub fn live_terminal(
     input_status: impl Fn() -> String + 'static,
     notice_status: impl Fn() -> String + 'static,
 ) -> View {
+    live_terminal_with_options(
+        binding,
+        theme,
+        font,
+        focus,
+        read_only,
+        input_status,
+        notice_status,
+        PortableOptions::default(),
+    )
+}
+
+/// Mounts a live Herdr-backed `<nsh_base::Terminal />` with configurable mobile options.
+#[allow(clippy::too_many_arguments)]
+pub fn live_terminal_with_options(
+    binding: impl Fn() -> Option<LiveBinding> + 'static,
+    theme: impl Fn() -> Value + 'static,
+    font: impl Fn() -> Value + 'static,
+    focus: impl Fn() -> FocusRequest + 'static,
+    read_only: impl Fn() -> bool + 'static,
+    input_status: impl Fn() -> String + 'static,
+    notice_status: impl Fn() -> String + 'static,
+    options: PortableOptions,
+) -> View {
     mount_terminal_surface(
         None,
         binding,
@@ -982,6 +1140,7 @@ pub fn live_terminal(
         read_only,
         input_status,
         notice_status,
+        options,
     )
 }
 
@@ -994,6 +1153,27 @@ pub fn preview_terminal_with_status(
     input_status: impl Fn() -> String + 'static,
     notice_status: impl Fn() -> String + 'static,
 ) -> View {
+    preview_terminal_with_options(
+        content,
+        theme,
+        font,
+        focus,
+        input_status,
+        notice_status,
+        PortableOptions::default(),
+    )
+}
+
+/// Mounts a static read-only `<nsh_base::Terminal />` preview with configurable mobile options.
+pub fn preview_terminal_with_options(
+    content: impl Into<String>,
+    theme: impl Fn() -> Value + 'static,
+    font: impl Fn() -> Value + 'static,
+    focus: impl Fn() -> FocusRequest + 'static,
+    input_status: impl Fn() -> String + 'static,
+    notice_status: impl Fn() -> String + 'static,
+    options: PortableOptions,
+) -> View {
     mount_terminal_surface(
         Some(content.into()),
         || None,
@@ -1003,6 +1183,7 @@ pub fn preview_terminal_with_status(
         || true,
         input_status,
         notice_status,
+        options,
     )
 }
 

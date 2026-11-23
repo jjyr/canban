@@ -139,6 +139,22 @@ pub fn pull_refresh_scroll(
     refreshing: impl Fn() -> bool + Copy + 'static,
     on_refresh: impl Fn() + Copy + 'static,
 ) -> View {
+    if cfg!(target_os = "ios") {
+        return view()
+            .relative()
+            .flex_1()
+            .min_h(px(0.))
+            .min_w(px(0.))
+            .child(
+                scroll_el
+                    .flex_1()
+                    .min_h(px(0.))
+                    .element_ref(&scroll_ref)
+                    .refreshing(refreshing)
+                    .on_refresh(move |_: &()| on_refresh()),
+            );
+    }
+
     let pull = animated_value(0.0);
     let last_offset_y = stored(Option::<f32>::None);
     let wheel_overscroll = stored((0.0_f32, nsh_core::time::now()));

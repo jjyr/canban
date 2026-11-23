@@ -296,6 +296,26 @@ pub async fn probe_addr(addr: &str, timeout: Duration) -> AddrProbeResult {
     }
 }
 
+/// Blocking wrapper around [`probe_addr`] suitable for UI `blocking(...)` thread-pool calls.
+pub fn probe_addr_blocking(addr: &str, timeout: Duration) -> AddrProbeResult {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        return handle.block_on(probe_addr(addr, timeout));
+    }
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt.block_on(probe_addr(addr, timeout)),
+        Err(e) => AddrProbeResult {
+            addr: normalize_daemon_addr(addr),
+            security: TransportSecurity::classify_tcp_addr(addr),
+            reachable: false,
+            rtt_ms: None,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

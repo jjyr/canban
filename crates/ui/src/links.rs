@@ -247,8 +247,14 @@ pub fn open(ui: Ui, url: &str) {
                 return;
             }
             ui.spawn(async move {
-                let result = blocking(move || crate::platform::open_external(&url)).await;
-                if !matches!(result, Ok(Ok(()))) {
+                #[cfg(feature = "local-host")]
+                let opened = matches!(
+                    blocking(move || crate::platform::open_external(&url)).await,
+                    Ok(Ok(()))
+                );
+                #[cfg(not(feature = "local-host"))]
+                let opened = nsh_core::prelude::open_url(url).await;
+                if !opened {
                     ui.operation_error
                         .try_set("Could not open the link in your browser".into());
                 }

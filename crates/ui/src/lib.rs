@@ -19,6 +19,7 @@ pub mod hosts;
 pub(crate) mod index;
 pub mod insights;
 pub mod links;
+pub mod mobile;
 pub mod navigation;
 pub mod overview;
 pub mod platform;

@@ -32,14 +32,28 @@ run = [
 ]
 
 [tasks.check-ios]
-description = "Cross-compile canban-terminal (libghostty-vt) for iOS device and simulator"
+description = "Cross-compile canban-terminal and canban-ios for iOS device and simulator"
 depends = ["terminal-deps"]
-env = { IPHONEOS_DEPLOYMENT_TARGET = "14.0" }
+env = { IPHONEOS_DEPLOYMENT_TARGET = "15.0" }
 run = [
   "rustup target add aarch64-apple-ios aarch64-apple-ios-sim",
   "cargo build -p canban-terminal --no-default-features --locked --target aarch64-apple-ios-sim --example vt_smoke",
   "cargo build -p canban-terminal --no-default-features --locked --target aarch64-apple-ios --example vt_smoke",
+  "cargo check -p canban-ios --locked --target aarch64-apple-ios-sim",
+  "cargo check -p canban-ios --locked --target aarch64-apple-ios",
 ]
+
+[tasks.build-ios-sim]
+description = "Build and bundle Canban.app for the iOS Simulator"
+depends = ["terminal-deps"]
+env = { IPHONEOS_DEPLOYMENT_TARGET = "15.0" }
+run = "python3 scripts/ios.py build-sim"
+
+[tasks.ios-sim]
+description = "Build, install, and launch Canban in the booted iOS Simulator"
+depends = ["build-ios-sim"]
+env = { IPHONEOS_DEPLOYMENT_TARGET = "15.0" }
+run = "python3 scripts/ios.py run-sim --no-build"
 
 [tasks.test]
 depends = ["terminal-deps"]
