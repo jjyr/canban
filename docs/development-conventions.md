@@ -1,6 +1,6 @@
 # Development conventions
 
-Status: user-selected conventions, updated 2026-11-19. Applied by the Rust workspace and macOS MVP; documentation/evidence rules below consolidate the subsequent product discussions.
+Status: user-selected conventions, updated 2026-11-23. Applied by the Rust workspace and macOS MVP; documentation/evidence rules below consolidate the subsequent product discussions.
 
 ## Scope and application operations
 
@@ -83,6 +83,15 @@ Follow the user-approved [UI architecture and design system](ui-architecture.md)
 - Retain heavy stateful/native subtrees (such as Terminals and Diff/Review context) across navigation instead of tearing down and remounting them. Keep the macOS main thread free of synchronous heavy system/git/snapshot work (avoid main-thread `NSFontManager` calls and pre-layout snapshot polls; use lightweight targeted previews rather than full workspace refreshes on click/preview paths).
 
 The implementation now includes UI Kit, a native Gallery and an opt-in real-Herdr acceptance harness. See [component inventory](ui-components.md) and [implementation/acceptance](implementation.md) for coverage; further components and tooling remain refinements.
+
+## Time-dependent logic and deterministic testing
+
+Keep time-based state transitions deterministic and decouple them from OS thread scheduling and wall-clock sleeps:
+
+- **Explicit `now` for pure state machines and policies:** For timeouts, coalesce/debounce windows, grace periods, retry backoff, cooldowns, and animation cadences, isolate state transitions and next-timeout calculation into pure functions or structs that take an explicit `now` (`Instant`, `u64`, or `f64`) rather than reading the system clock internally. Reference implementations: `canban_terminal::view_state`, `canban_scheduler::timers`, and `canban_terminal::session::AttachSettle`. Cover exact boundary conditions with zero-sleep unit tests over synthetic timestamps.
+- **Do not race short wall-clock windows in concurrent tests:** Multi-threaded or async integration tests must not assume multi-step setup completes within a narrow production timeout (e.g. tens of milliseconds) or rely on brief `sleep`s to prove propagation or absence of an event. Use explicit synchronization primitives (channels, barriers, watches), injected relaxed test timings (such as `*_with_timings`), or explicit deadline expiration to test wiring cleanly.
+- **Wait for complete post-conditions, not wall-clock proxies:** When a worker mutates state under a lock and emits side effects (such as `wake.notify()` or push events) after releasing the lock, test poll loops must wait until both the worker-side state update and the observable side effect have occurred—never exit early on a wall-clock predicate (like `is_attach_settling()`) alone.
+- **Prefer scoped clock control over global mutable clocks:** Do not introduce global mutable static clocks (which break parallel `cargo test` isolation and fail to wake blocking OS `sleep`/`recv_timeout`) or a workspace-wide `clippy.toml` ban on `Instant::now()` (real I/O timeouts, `canban-profiler`, and test-loop safety deadlines genuinely need the real monotonic clock). For pure `tokio` background loops that need end-to-end time advancement in tests, prefer `tokio::time::Instant` / `tokio::time::sleep` with `tokio::time::pause()` and `advance()`; only introduce a small explicitly injected `Clock` value if multiple non-Tokio cross-thread components genuinely require shared controllable time.
 
 ## Verification and documentation updates
 

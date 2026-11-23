@@ -17,6 +17,7 @@ pub const CONNECTING_GRACE: Duration = Duration::from_millis(180);
 pub const ATTACH_RESIZE_COALESCE: Duration = Duration::from_millis(75);
 pub const ATTACH_RESIZE_SYNC_CAP: Duration = Duration::from_millis(160);
 const ATTACH_POST_SNAPSHOT_BURST: Duration = Duration::from_millis(2);
+const DEFAULT_RECV_TIMEOUT: Duration = Duration::from_millis(15);
 pub const MAX_POOLED_SESSIONS: usize = 8;
 
 static LAST_VIEWPORT_SIZE: AtomicU32 = AtomicU32::new(0);
@@ -567,7 +568,208 @@ pub fn display_facts_for_model(model: &Model, theme: Option<&Value>) -> DisplayF
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct AttachSettleTimings {
+    coalesce: Duration,
+    sync_cap: Duration,
+    post_snapshot_burst: Duration,
+}
+
+impl Default for AttachSettleTimings {
+    fn default() -> Self {
+        Self {
+            coalesce: ATTACH_RESIZE_COALESCE,
+            sync_cap: ATTACH_RESIZE_SYNC_CAP,
+            post_snapshot_burst: ATTACH_POST_SNAPSHOT_BURST,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttachSettlePhase {
+    Inactive,
+    AwaitingInitialSnapshot,
+    AwaitingRedraw {
+        snapshot_at: Instant,
+        saw_render_hold: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SettleDataOutcome {
+    should_wake: bool,
+    released: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AttachSettle {
+    phase: AttachSettlePhase,
+    sync_deadline: Instant,
+    post_snapshot_burst: Duration,
+}
+
+impl AttachSettle {
+    fn start(
+        now: Instant,
+        needs_settle: bool,
+        timings: AttachSettleTimings,
+        deadline_out: &mut Option<Instant>,
+    ) -> Self {
+        let sync_deadline = now + timings.sync_cap;
+        let phase = if needs_settle {
+            *deadline_out = Some(now + timings.coalesce);
+            AttachSettlePhase::AwaitingInitialSnapshot
+        } else {
+            *deadline_out = None;
+            AttachSettlePhase::Inactive
+        };
+        Self {
+            phase,
+            sync_deadline,
+            post_snapshot_burst: timings.post_snapshot_burst,
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        self.phase != AttachSettlePhase::Inactive
+    }
+
+    fn next_recv_timeout(
+        &mut self,
+        now: Instant,
+        deadline: Option<Instant>,
+        render_held: bool,
+    ) -> Duration {
+        if !self.is_active() {
+            return DEFAULT_RECV_TIMEOUT;
+        }
+        let Some(deadline) = deadline else {
+            self.phase = AttachSettlePhase::Inactive;
+            return DEFAULT_RECV_TIMEOUT;
+        };
+        let target = if render_held {
+            deadline.max(self.sync_deadline)
+        } else {
+            deadline
+        };
+        let remaining = target.saturating_duration_since(now);
+        if remaining.is_zero() {
+            Duration::ZERO
+        } else {
+            remaining.clamp(Duration::from_millis(1), DEFAULT_RECV_TIMEOUT)
+        }
+    }
+
+    fn on_data(
+        &mut self,
+        now: Instant,
+        deadline: &mut Option<Instant>,
+        render_held: bool,
+        render_state_dirty: bool,
+    ) -> SettleDataOutcome {
+        let Some(current_deadline) = *deadline else {
+            self.phase = AttachSettlePhase::Inactive;
+            return SettleDataOutcome {
+                should_wake: !render_held || render_state_dirty,
+                released: false,
+            };
+        };
+        match self.phase {
+            AttachSettlePhase::Inactive => {
+                *deadline = None;
+                SettleDataOutcome {
+                    should_wake: !render_held || render_state_dirty,
+                    released: false,
+                }
+            }
+            AttachSettlePhase::AwaitingInitialSnapshot => {
+                if now >= current_deadline && !render_held {
+                    *deadline = None;
+                    self.phase = AttachSettlePhase::Inactive;
+                    SettleDataOutcome {
+                        should_wake: true,
+                        released: true,
+                    }
+                } else {
+                    self.phase = AttachSettlePhase::AwaitingRedraw {
+                        snapshot_at: now,
+                        saw_render_hold: render_held,
+                    };
+                    SettleDataOutcome {
+                        should_wake: false,
+                        released: false,
+                    }
+                }
+            }
+            AttachSettlePhase::AwaitingRedraw {
+                snapshot_at,
+                saw_render_hold,
+            } => {
+                let now_saw_hold = saw_render_hold || render_held;
+                if render_held {
+                    *deadline = Some(self.sync_deadline);
+                    self.phase = AttachSettlePhase::AwaitingRedraw {
+                        snapshot_at,
+                        saw_render_hold: true,
+                    };
+                    SettleDataOutcome {
+                        should_wake: false,
+                        released: false,
+                    }
+                } else if now_saw_hold
+                    || now.saturating_duration_since(snapshot_at) >= self.post_snapshot_burst
+                    || now >= current_deadline
+                {
+                    *deadline = None;
+                    self.phase = AttachSettlePhase::Inactive;
+                    SettleDataOutcome {
+                        should_wake: true,
+                        released: true,
+                    }
+                } else {
+                    self.phase = AttachSettlePhase::AwaitingRedraw {
+                        snapshot_at,
+                        saw_render_hold: now_saw_hold,
+                    };
+                    SettleDataOutcome {
+                        should_wake: false,
+                        released: false,
+                    }
+                }
+            }
+        }
+    }
+
+    fn on_tick(&mut self, now: Instant, deadline: &mut Option<Instant>, render_held: bool) -> bool {
+        if !self.is_active() {
+            return false;
+        }
+        let Some(current_deadline) = *deadline else {
+            self.phase = AttachSettlePhase::Inactive;
+            return false;
+        };
+        if now < current_deadline {
+            return false;
+        }
+        if render_held && now < self.sync_deadline {
+            *deadline = Some(self.sync_deadline);
+            false
+        } else {
+            *deadline = None;
+            self.phase = AttachSettlePhase::Inactive;
+            true
+        }
+    }
+}
+
 pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
+    spawn_session_with_timings(init, AttachSettleTimings::default())
+}
+
+fn spawn_session_with_timings(
+    init: SessionInit,
+    settle_timings: AttachSettleTimings,
+) -> Arc<LiveSession> {
     let SessionInit {
         config,
         core,
@@ -703,16 +905,7 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                 for _ in rx.lock().unwrap().try_iter() {}
             }
             first_attach = false;
-            #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-            enum AttachSettlePhase {
-                Inactive,
-                AwaitingInitialSnapshot,
-                AwaitingRedraw {
-                    snapshot_at: Instant,
-                    saw_render_hold: bool,
-                },
-            }
-            let (effective_size, settle_sync_deadline, mut settle_phase) = {
+            let (effective_size, mut settle) = {
                 let mut s = state.lock().unwrap();
                 let size = (s.model.cols, s.model.height);
                 if !was_first_attach {
@@ -759,19 +952,16 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                     continue;
                 }
                 let needs_settle = attach.resized_on_attach() || effective_size != attached_size;
-                let now_inst = Instant::now();
-                let settle_sync_deadline = now_inst + ATTACH_RESIZE_SYNC_CAP;
-                let settle_phase = if needs_settle {
-                    s.attach_settle_until = Some(now_inst + ATTACH_RESIZE_COALESCE);
-                    AttachSettlePhase::AwaitingInitialSnapshot
-                } else {
-                    s.attach_settle_until = None;
-                    AttachSettlePhase::Inactive
-                };
+                let settle = AttachSettle::start(
+                    Instant::now(),
+                    needs_settle,
+                    settle_timings,
+                    &mut s.attach_settle_until,
+                );
                 s.connected = true;
-                (effective_size, settle_sync_deadline, settle_phase)
+                (effective_size, settle)
             };
-            if settle_phase == AttachSettlePhase::Inactive {
+            if !settle.is_active() {
                 wake.notify();
             }
 
@@ -818,25 +1008,15 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                 let next_event = if let Some(ev) = pending_event.take() {
                     ev
                 } else {
-                    let recv_timeout = if settle_phase != AttachSettlePhase::Inactive {
+                    let recv_timeout = if settle.is_active() {
                         let s = state.lock().unwrap();
-                        if s.attach_settle_until.is_none() {
-                            settle_phase = AttachSettlePhase::Inactive;
-                            Duration::from_millis(15)
-                        } else if let Some(deadline) = s.attach_settle_until {
-                            let target = if s.model.is_render_held() {
-                                deadline.max(settle_sync_deadline)
-                            } else {
-                                deadline
-                            };
-                            target
-                                .saturating_duration_since(Instant::now())
-                                .clamp(Duration::from_millis(1), Duration::from_millis(15))
-                        } else {
-                            Duration::from_millis(15)
-                        }
+                        settle.next_recv_timeout(
+                            Instant::now(),
+                            s.attach_settle_until,
+                            s.model.is_render_held(),
+                        )
                     } else {
-                        Duration::from_millis(15)
+                        DEFAULT_RECV_TIMEOUT
                     };
                     attach.recv(recv_timeout)
                 };
@@ -859,68 +1039,18 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                             for chunk in &chunks {
                                 s.model.write(chunk);
                             }
-                            let now = Instant::now();
-                            let should_wake = if s.attach_settle_until.is_none() {
-                                settle_phase = AttachSettlePhase::Inactive;
-                                !s.model.is_render_held() || s.model.render_state_dirty()
-                            } else {
-                                match settle_phase {
-                                    AttachSettlePhase::Inactive => {
-                                        s.attach_settle_until = None;
-                                        !s.model.is_render_held() || s.model.render_state_dirty()
-                                    }
-                                    AttachSettlePhase::AwaitingInitialSnapshot => {
-                                        let expired =
-                                            s.attach_settle_until.is_some_and(|d| now >= d)
-                                                && !s.model.is_render_held();
-                                        if expired {
-                                            s.attach_settle_until = None;
-                                            settle_phase = AttachSettlePhase::Inactive;
-                                            s.model.revision += 1;
-                                            true
-                                        } else {
-                                            settle_phase = AttachSettlePhase::AwaitingRedraw {
-                                                snapshot_at: now,
-                                                saw_render_hold: s.model.is_render_held(),
-                                            };
-                                            false
-                                        }
-                                    }
-                                    AttachSettlePhase::AwaitingRedraw {
-                                        snapshot_at,
-                                        saw_render_hold,
-                                    } => {
-                                        let held = s.model.is_render_held();
-                                        let now_saw_hold = saw_render_hold || held;
-                                        if held {
-                                            let capped = settle_sync_deadline
-                                                .max(now)
-                                                .min(settle_sync_deadline);
-                                            s.attach_settle_until = Some(capped);
-                                            settle_phase = AttachSettlePhase::AwaitingRedraw {
-                                                snapshot_at,
-                                                saw_render_hold: true,
-                                            };
-                                            false
-                                        } else if now_saw_hold
-                                            || now.duration_since(snapshot_at)
-                                                >= ATTACH_POST_SNAPSHOT_BURST
-                                            || s.attach_settle_until.is_some_and(|d| now >= d)
-                                        {
-                                            s.attach_settle_until = None;
-                                            settle_phase = AttachSettlePhase::Inactive;
-                                            s.model.revision += 1;
-                                            true
-                                        } else {
-                                            settle_phase = AttachSettlePhase::AwaitingRedraw {
-                                                snapshot_at,
-                                                saw_render_hold: now_saw_hold,
-                                            };
-                                            false
-                                        }
-                                    }
-                                }
-                            };
+                            let render_held = s.model.is_render_held();
+                            let render_dirty = s.model.render_state_dirty();
+                            let outcome = settle.on_data(
+                                Instant::now(),
+                                &mut s.attach_settle_until,
+                                render_held,
+                                render_dirty,
+                            );
+                            if outcome.released {
+                                s.model.revision += 1;
+                            }
+                            let should_wake = outcome.should_wake;
                             (s.model.replies(), should_wake)
                         };
                         if should_wake {
@@ -990,29 +1120,15 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                             let mut s = state.lock().unwrap();
                             let held_expired = s.model.expire_render_hold_if_due();
                             let anim_due = s.model.advance_animation_if_due();
-                            let settle_released = if settle_phase != AttachSettlePhase::Inactive {
-                                let now = Instant::now();
-                                if let Some(deadline) = s.attach_settle_until {
-                                    if now >= deadline {
-                                        if s.model.is_render_held() && now < settle_sync_deadline {
-                                            s.attach_settle_until = Some(settle_sync_deadline);
-                                            false
-                                        } else {
-                                            s.attach_settle_until = None;
-                                            settle_phase = AttachSettlePhase::Inactive;
-                                            s.model.revision += 1;
-                                            true
-                                        }
-                                    } else {
-                                        false
-                                    }
-                                } else {
-                                    settle_phase = AttachSettlePhase::Inactive;
-                                    false
-                                }
-                            } else {
-                                false
-                            };
+                            let render_held = s.model.is_render_held();
+                            let settle_released = settle.on_tick(
+                                Instant::now(),
+                                &mut s.attach_settle_until,
+                                render_held,
+                            );
+                            if settle_released {
+                                s.model.revision += 1;
+                            }
                             held_expired || anim_due || settle_released
                         };
                         if should_wake {
@@ -1352,7 +1468,7 @@ mod tests {
             }),
         );
 
-        for _ in 0..50 {
+        for _ in 0..200 {
             if session.state.lock().unwrap().connected {
                 break;
             }
@@ -1361,22 +1477,213 @@ mod tests {
         assert!(session.state.lock().unwrap().connected);
         assert!(!session.state.lock().unwrap().is_attach_settling());
 
+        let wakes_before = wakes.load(Ordering::SeqCst);
         session.wake.ack();
         ev_tx.send(PtyEvent::Data(b"ready\r\n".to_vec())).unwrap();
-        for _ in 0..50 {
-            if session
+        for _ in 0..200 {
+            let has_ready = session
+                .state
+                .lock()
+                .unwrap()
+                .model
+                .viewport_text()
+                .contains("ready");
+            if has_ready && wakes.load(Ordering::SeqCst) > wakes_before {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            session
                 .state
                 .lock()
                 .unwrap()
                 .model
                 .viewport_text()
                 .contains("ready")
-            {
-                break;
+        );
+        assert!(wakes.load(Ordering::SeqCst) > wakes_before);
+    }
+
+    #[test]
+    fn attach_settle_same_size_is_inactive_and_wakes_normal_data() {
+        let t0 = Instant::now();
+        let mut deadline = None;
+        let mut settle =
+            AttachSettle::start(t0, false, AttachSettleTimings::default(), &mut deadline);
+        assert_eq!(deadline, None);
+        assert!(!settle.is_active());
+        assert_eq!(
+            settle.next_recv_timeout(t0, deadline, false),
+            DEFAULT_RECV_TIMEOUT
+        );
+        assert!(!settle.on_tick(t0 + Duration::from_millis(100), &mut deadline, false));
+
+        assert_eq!(
+            settle.on_data(t0 + Duration::from_millis(1), &mut deadline, false, false),
+            SettleDataOutcome {
+                should_wake: true,
+                released: false,
             }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert!(wakes.load(Ordering::SeqCst) >= 1);
+        );
+        assert_eq!(
+            settle.on_data(t0 + Duration::from_millis(2), &mut deadline, true, false),
+            SettleDataOutcome {
+                should_wake: false,
+                released: false,
+            }
+        );
+        assert_eq!(
+            settle.on_data(t0 + Duration::from_millis(3), &mut deadline, true, true),
+            SettleDataOutcome {
+                should_wake: true,
+                released: false,
+            }
+        );
+    }
+
+    #[test]
+    fn attach_settle_coalesces_snapshot_burst_and_sync_redraw_until_release() {
+        let t0 = Instant::now();
+        let mut deadline = None;
+        let mut settle =
+            AttachSettle::start(t0, true, AttachSettleTimings::default(), &mut deadline);
+        assert!(settle.is_active());
+        assert_eq!(deadline, Some(t0 + ATTACH_RESIZE_COALESCE));
+        assert_eq!(
+            settle.next_recv_timeout(t0, deadline, false),
+            DEFAULT_RECV_TIMEOUT
+        );
+
+        // Initial reflow snapshot arrives at t0 + 1ms; stay quiet while waiting for redraw/burst.
+        assert_eq!(
+            settle.on_data(t0 + Duration::from_millis(1), &mut deadline, false, false),
+            SettleDataOutcome {
+                should_wake: false,
+                released: false,
+            }
+        );
+        assert!(settle.is_active());
+
+        // Follow-up chunk within the 2ms burst window keeps coalescing.
+        assert_eq!(
+            settle.on_data(t0 + Duration::from_millis(2), &mut deadline, false, false),
+            SettleDataOutcome {
+                should_wake: false,
+                released: false,
+            }
+        );
+        assert!(settle.is_active());
+
+        // Synchronized redraw (?2026h -> render_held = true) extends deadline to sync_cap (160ms).
+        assert_eq!(
+            settle.on_data(t0 + Duration::from_millis(5), &mut deadline, true, true),
+            SettleDataOutcome {
+                should_wake: false,
+                released: false,
+            }
+        );
+        assert_eq!(deadline, Some(t0 + ATTACH_RESIZE_SYNC_CAP));
+
+        // Passing the 75ms mark while render_held remains true still suppresses wake.
+        assert!(!settle.on_tick(t0 + Duration::from_millis(90), &mut deadline, true));
+        assert!(settle.is_active());
+
+        // Closing synchronized redraw (?2026l -> render_held = false) releases immediately.
+        assert_eq!(
+            settle.on_data(t0 + Duration::from_millis(100), &mut deadline, false, true),
+            SettleDataOutcome {
+                should_wake: true,
+                released: true,
+            }
+        );
+        assert_eq!(deadline, None);
+        assert!(!settle.is_active());
+    }
+
+    #[test]
+    fn attach_settle_handles_plain_redraw_coalesce_timeout_sync_cap_and_external_clear() {
+        let t0 = Instant::now();
+
+        // 1. Plain redraw after >= 2ms post-snapshot burst releases immediately.
+        let mut deadline = None;
+        let mut settle =
+            AttachSettle::start(t0, true, AttachSettleTimings::default(), &mut deadline);
+        assert_eq!(
+            settle.on_data(t0 + Duration::from_millis(1), &mut deadline, false, false),
+            SettleDataOutcome {
+                should_wake: false,
+                released: false,
+            }
+        );
+        assert_eq!(
+            settle.on_data(t0 + Duration::from_millis(3), &mut deadline, false, false),
+            SettleDataOutcome {
+                should_wake: true,
+                released: true,
+            }
+        );
+        assert_eq!(deadline, None);
+        assert!(!settle.is_active());
+
+        // 2. No redraw after initial snapshot releases cleanly at 75ms without 1ms extra clamp.
+        let mut deadline = None;
+        let mut settle =
+            AttachSettle::start(t0, true, AttachSettleTimings::default(), &mut deadline);
+        assert_eq!(
+            settle.on_data(t0 + Duration::from_millis(1), &mut deadline, false, false),
+            SettleDataOutcome {
+                should_wake: false,
+                released: false,
+            }
+        );
+        assert!(!settle.on_tick(t0 + Duration::from_millis(74), &mut deadline, false));
+        assert_eq!(
+            settle.next_recv_timeout(t0 + Duration::from_millis(74), deadline, false),
+            Duration::from_millis(1)
+        );
+        assert_eq!(
+            settle.next_recv_timeout(t0 + Duration::from_millis(75), deadline, false),
+            Duration::ZERO
+        );
+        assert!(settle.on_tick(t0 + Duration::from_millis(75), &mut deadline, false));
+        assert_eq!(deadline, None);
+        assert!(!settle.is_active());
+
+        // 3. Unclosed ?2026h hold still releases at the 160ms sync cap.
+        let mut deadline = None;
+        let mut settle =
+            AttachSettle::start(t0, true, AttachSettleTimings::default(), &mut deadline);
+        assert_eq!(
+            settle.on_data(t0 + Duration::from_millis(1), &mut deadline, true, false),
+            SettleDataOutcome {
+                should_wake: false,
+                released: false,
+            }
+        );
+        assert!(!settle.on_tick(t0 + Duration::from_millis(159), &mut deadline, true));
+        assert!(settle.on_tick(t0 + Duration::from_millis(160), &mut deadline, true));
+        assert_eq!(deadline, None);
+        assert!(!settle.is_active());
+
+        // 4. External UI clear (deadline = None) deactivates settle without extra release revision.
+        let mut deadline = None;
+        let mut settle =
+            AttachSettle::start(t0, true, AttachSettleTimings::default(), &mut deadline);
+        deadline = None;
+        assert_eq!(
+            settle.next_recv_timeout(t0 + Duration::from_millis(1), deadline, false),
+            DEFAULT_RECV_TIMEOUT
+        );
+        assert!(!settle.is_active());
+        assert!(!settle.on_tick(t0 + Duration::from_millis(2), &mut deadline, false));
+        assert_eq!(
+            settle.on_data(t0 + Duration::from_millis(3), &mut deadline, false, false),
+            SettleDataOutcome {
+                should_wake: true,
+                released: false,
+            }
+        );
     }
 
     #[test]
@@ -1394,18 +1701,25 @@ mod tests {
         });
         let wakes = Arc::new(AtomicUsize::new(0));
         let wakes_cb = wakes.clone();
-        let session = spawn_session(SessionInit {
-            config: Config::default(),
-            core: "c-sync".into(),
-            terminal: "t-sync".into(),
-            initial_cols: 100,
-            initial_rows: 30,
-            initial_cell: (8, 18),
-            size_ready: true,
-            focused: false,
-            theme: None,
-            transport: Some(transport),
-        });
+        let session = spawn_session_with_timings(
+            SessionInit {
+                config: Config::default(),
+                core: "c-sync".into(),
+                terminal: "t-sync".into(),
+                initial_cols: 100,
+                initial_rows: 30,
+                initial_cell: (8, 18),
+                size_ready: true,
+                focused: false,
+                theme: None,
+                transport: Some(transport),
+            },
+            AttachSettleTimings {
+                coalesce: Duration::from_secs(10),
+                sync_cap: Duration::from_secs(20),
+                post_snapshot_burst: Duration::ZERO,
+            },
+        );
         session.wake.attach(
             101,
             Arc::new(move || {
@@ -1413,12 +1727,13 @@ mod tests {
             }),
         );
 
-        for _ in 0..50 {
+        for _ in 0..200 {
             if session.state.lock().unwrap().connected {
                 break;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+        assert!(session.state.lock().unwrap().connected);
         assert!(session.state.lock().unwrap().is_attach_settling());
         assert_eq!(wakes.load(Ordering::SeqCst), 0);
 
@@ -1426,7 +1741,7 @@ mod tests {
         ev_tx
             .send(PtyEvent::Data(b"GARBLED_INIT".to_vec()))
             .unwrap();
-        for _ in 0..20 {
+        for _ in 0..200 {
             if session
                 .state
                 .lock()
@@ -1437,24 +1752,33 @@ mod tests {
             {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(2));
+            std::thread::sleep(Duration::from_millis(5));
         }
+        assert!(
+            session
+                .state
+                .lock()
+                .unwrap()
+                .model
+                .viewport_text()
+                .contains("GARBLED_INIT")
+        );
         assert!(session.state.lock().unwrap().is_attach_settling());
         assert_eq!(wakes.load(Ordering::SeqCst), 0);
 
         // 2. Partial synchronized redraw (?2026h without ?2026l yet) must keep settling.
-        std::thread::sleep(Duration::from_millis(4));
         ev_tx
             .send(PtyEvent::Data(
                 b"\x1b[?2026h\x1b[2J\x1b[HCLEAN_PART".to_vec(),
             ))
             .unwrap();
-        for _ in 0..20 {
+        for _ in 0..200 {
             if session.state.lock().unwrap().model.is_render_held() {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(2));
+            std::thread::sleep(Duration::from_millis(5));
         }
+        assert!(session.state.lock().unwrap().model.is_render_held());
         assert!(session.state.lock().unwrap().is_attach_settling());
         assert_eq!(wakes.load(Ordering::SeqCst), 0);
 
@@ -1462,12 +1786,14 @@ mod tests {
         ev_tx
             .send(PtyEvent::Data(b"_DONE\x1b[?2026l".to_vec()))
             .unwrap();
-        for _ in 0..50 {
-            if !session.state.lock().unwrap().is_attach_settling() {
+        for _ in 0..200 {
+            let released = session.state.lock().unwrap().attach_settle_until.is_none();
+            if released && wakes.load(Ordering::SeqCst) >= 1 {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(2));
+            std::thread::sleep(Duration::from_millis(5));
         }
+        assert!(session.state.lock().unwrap().attach_settle_until.is_none());
         assert!(!session.state.lock().unwrap().is_attach_settling());
         assert!(wakes.load(Ordering::SeqCst) >= 1);
         assert!(
@@ -1496,18 +1822,25 @@ mod tests {
         });
         let wakes = Arc::new(AtomicUsize::new(0));
         let wakes_cb = wakes.clone();
-        let session = spawn_session(SessionInit {
-            config: Config::default(),
-            core: "c-plain".into(),
-            terminal: "t-plain".into(),
-            initial_cols: 100,
-            initial_rows: 30,
-            initial_cell: (8, 18),
-            size_ready: true,
-            focused: false,
-            theme: None,
-            transport: Some(transport),
-        });
+        let session = spawn_session_with_timings(
+            SessionInit {
+                config: Config::default(),
+                core: "c-plain".into(),
+                terminal: "t-plain".into(),
+                initial_cols: 100,
+                initial_rows: 30,
+                initial_cell: (8, 18),
+                size_ready: true,
+                focused: false,
+                theme: None,
+                transport: Some(transport),
+            },
+            AttachSettleTimings {
+                coalesce: Duration::from_secs(10),
+                sync_cap: Duration::from_secs(20),
+                post_snapshot_burst: Duration::ZERO,
+            },
+        );
         session.wake.attach(
             102,
             Arc::new(move || {
@@ -1515,16 +1848,17 @@ mod tests {
             }),
         );
 
-        for _ in 0..50 {
+        for _ in 0..200 {
             if session.state.lock().unwrap().connected {
                 break;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+        assert!(session.state.lock().unwrap().connected);
         ev_tx
             .send(PtyEvent::Data(b"PLAIN_SHELL>".to_vec()))
             .unwrap();
-        for _ in 0..20 {
+        for _ in 0..200 {
             if session
                 .state
                 .lock()
@@ -1535,19 +1869,41 @@ mod tests {
             {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(2));
+            std::thread::sleep(Duration::from_millis(5));
         }
+        assert!(
+            session
+                .state
+                .lock()
+                .unwrap()
+                .model
+                .viewport_text()
+                .contains("PLAIN_SHELL>")
+        );
         assert!(session.state.lock().unwrap().is_attach_settling());
         assert_eq!(wakes.load(Ordering::SeqCst), 0);
 
-        for _ in 0..40 {
-            if !session.state.lock().unwrap().is_attach_settling() {
+        let rev_before = {
+            let mut s = session.state.lock().unwrap();
+            let rev = s.model.revision;
+            s.attach_settle_until = Some(
+                Instant::now()
+                    .checked_sub(Duration::from_millis(1))
+                    .unwrap_or_else(Instant::now),
+            );
+            rev
+        };
+        for _ in 0..200 {
+            let released = session.state.lock().unwrap().attach_settle_until.is_none();
+            if released && wakes.load(Ordering::SeqCst) >= 1 {
                 break;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+        assert!(session.state.lock().unwrap().attach_settle_until.is_none());
         assert!(!session.state.lock().unwrap().is_attach_settling());
         assert!(wakes.load(Ordering::SeqCst) >= 1);
+        assert!(session.state.lock().unwrap().model.revision > rev_before);
     }
 
     #[test]
