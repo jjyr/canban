@@ -53,6 +53,28 @@ fn contextual_commands(ui: Ui, raw_query: &str) -> Vec<(usize, SearchChoice)> {
     let cmd_query = trimmed.strip_prefix('>').unwrap_or(trimmed).trim();
     let mut dynamic_cmds = Vec::<DynamicCommand>::new();
 
+    let update = ui.update.get();
+    if crate::updates::can_install_value(&update) && !ui.update_busy.get() {
+        let ver = crate::updates::available_version(&update).unwrap_or("update");
+        if update["state"]["phase"] == "error" {
+            dynamic_cmds.push(DynamicCommand {
+                id: "cmd:install-update".into(),
+                title: format!("Retry Application Update ({ver})"),
+                detail: "System · Updates".into(),
+                icon: Icon::Refresh,
+                keywords: "update upgrade retry download install restart".into(),
+            });
+        } else {
+            dynamic_cmds.push(DynamicCommand {
+                id: "cmd:install-update".into(),
+                title: format!("Install Application Update ({ver}) and Restart"),
+                detail: "System · Updates".into(),
+                icon: Icon::Update,
+                keywords: "update upgrade download install restart".into(),
+            });
+        }
+    }
+
     if ui.page.get() == "review" {
         let st = ui.review_state;
         let collapsed = st.collapsed_files.get();

@@ -1273,13 +1273,28 @@ pub fn Gallery() -> impl IntoElement {
     }
     if matches!(
         std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
-        Ok("updates" | "updates-disabled")
+        Ok("updates" | "updates-disabled" | "updates-failed" | "updates-downloading")
     ) {
         ui.card.set(String::new());
         ui.page.set("board".into());
-        ui.update.set(json!({"build":canban_updater::Build::current(),"disabled":std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("updates-disabled"),"state":{"phase":"available","available":{"manifest":{"version":"20261110-3"}}}}));
-        if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("updates-disabled") {
-            ui.page.set("settings".into());
+        ui.update_busy.set(false);
+        let scene_name = std::env::var("CANBAN_GALLERY_SCENE").unwrap_or_default();
+        match scene_name.as_str() {
+            "updates-disabled" => {
+                ui.update.set(json!({"build":canban_updater::Build::current(),"disabled":true,"state":{"phase":"available","available":{"manifest":{"version":"20261110-3"}}}}));
+                ui.open_settings_section("updates");
+            }
+            "updates-failed" => {
+                ui.update.set(json!({"build":canban_updater::Build::current(),"state":{"phase":"error","error":"Previous update download was interrupted.","available":{"manifest":{"version":"20261110-3"}}}}));
+                ui.open_settings_section("updates");
+            }
+            "updates-downloading" => {
+                ui.update.set(json!({"build":canban_updater::Build::current(),"state":{"phase":"downloading","progress":42,"available":{"manifest":{"version":"20261110-3"}}}}));
+                ui.open_settings_section("updates");
+            }
+            _ => {
+                ui.update.set(json!({"build":canban_updater::Build::current(),"disabled":false,"state":{"phase":"available","available":{"manifest":{"version":"20261110-3"}}}}));
+            }
         }
         return canban_ui::frame::screen(ui).into_element();
     }
@@ -3173,8 +3188,9 @@ pub fn Gallery() -> impl IntoElement {
                 .child(action("Scheduling", Variant::Quiet, move |_| {
                     scene.set("scheduling".into());
                 }))
-                .child(action("Update available",Variant::Quiet,move |_|{scene.set("workspace".into());ui.update.set(json!({"build":canban_updater::Build::current(),"state":{"phase":"available","available":{"manifest":{"version":"20261110-3"}}}}));}))
-                .child(action("Update failed",Variant::Quiet,move |_|{scene.set("workspace".into());ui.update.set(json!({"build":canban_updater::Build::current(),"state":{"phase":"error","error":"Download interrupted. Retry the update.","available":{"manifest":{"version":"20261110-3"}}}}));}))
+                .child(action("Update available",Variant::Quiet,move |_|{scene.set("workspace".into());ui.update_busy.set(false);ui.update.set(json!({"build":canban_updater::Build::current(),"state":{"phase":"available","available":{"manifest":{"version":"20261110-3"}}}}));}))
+                .child(action("Update downloading",Variant::Quiet,move |_|{scene.set("workspace".into());ui.update_busy.set(false);ui.update.set(json!({"build":canban_updater::Build::current(),"state":{"phase":"downloading","progress":42,"available":{"manifest":{"version":"20261110-3"}}}}));ui.open_settings_section("updates");}))
+                .child(action("Update failed",Variant::Quiet,move |_|{scene.set("workspace".into());ui.update_busy.set(false);ui.update.set(json!({"build":canban_updater::Build::current(),"state":{"phase":"error","error":"Update download timed out after 30s without data","available":{"manifest":{"version":"20261110-3"}}}}));ui.open_settings_section("updates");}))
                 .child(action("Archived Cards", Variant::Quiet, move |_| {
                     ui.snapshot.set(fixtures::archive());ui.project.set("gallery-project".into());ui.card.set(String::new());ui.page.set("archive".into());scene.set("workspace".into());
                 }))

@@ -536,6 +536,7 @@ impl AppServer {
         let startup_progress = startup_progress::StartupProgressWriter::new(&home);
         startup_progress.set("lock", "LOCK", "Acquiring local service lock…");
         let service_lock = canban_updater::service_lock(&home)?;
+        let _ = canban_updater::recover_stale_state(&home);
         startup_progress.set(
             "lock",
             "LOCK",

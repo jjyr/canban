@@ -1591,6 +1591,7 @@ pub fn execute(ui: Ui, id: &str) {
         "copy-skill-command" => crate::agents_setup::copy_skill_command(ui),
         "check-herdr" => dispatch(ui, "herdr.status", json!({})),
         "check-updates" => crate::updates::check(ui),
+        "install-update" => crate::updates::install(ui),
         "report-issue" => crate::utilities::report::open(ui),
         "git-compare" => crate::review::toggle_comparison(ui),
         "git-related-card" => crate::review::open_related_card(ui),

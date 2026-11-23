@@ -49,6 +49,336 @@ fn stop_process(p: &Process) -> Result<()> {
     }
     Ok(())
 }
+
+pub fn strip_deleted_suffix(path: &Path) -> PathBuf {
+    if let Some(s) = path.to_str()
+        && let Some(stripped) = s.strip_suffix(" (deleted)")
+    {
+        return PathBuf::from(stripped);
+    }
+    let lossy = path.to_string_lossy();
+    if let Some(stripped) = lossy.strip_suffix(" (deleted)") {
+        return PathBuf::from(stripped);
+    }
+    path.to_path_buf()
+}
+
+/// If `path` points inside a retired/staged backup bundle directory created by an earlier
+/// in-place installation swap (e.g. `.canban-install-*/canban-previous/bin/canban` or
+/// `.canban-previous-*/bin/canban`), map it to the corresponding binary inside sibling `canban/`
+/// (or `Canban.app`).
+pub fn map_retired_bundle_binary(path: &Path) -> Option<PathBuf> {
+    let clean = strip_deleted_suffix(path);
+    let comps: Vec<std::path::Component<'_>> = clean.components().collect();
+    let mut prefix = PathBuf::new();
+    for (idx, comp) in comps.iter().enumerate() {
+        let std::path::Component::Normal(os) = comp else {
+            prefix.push(comp.as_os_str());
+            continue;
+        };
+        if let Some(name) = os.to_str() {
+            if name.starts_with(".canban-install-") {
+                let rest = &comps[idx + 1..];
+                let Some(std::path::Component::Normal(inner_os)) = rest.first() else {
+                    return None;
+                };
+                let inner_name = inner_os.to_str()?;
+                let tail: PathBuf = rest[1..].iter().map(|c| c.as_os_str()).collect();
+                if tail.as_os_str().is_empty() {
+                    return None;
+                }
+                if inner_name.ends_with(".app") {
+                    return Some(prefix.join("Canban.app").join(tail));
+                }
+                if matches!(inner_name, "canban-previous" | "canban" | "stage") {
+                    return Some(prefix.join("canban").join(tail));
+                }
+            }
+            let is_linux_retired = (name.starts_with(".canban-previous-")
+                || name.starts_with(".canban-prev-")
+                || name.starts_with(".canban-failed-")
+                || name.starts_with(".canban-next-")
+                || name == "canban-previous")
+                && !name.ends_with(".app");
+            if is_linux_retired {
+                let tail: PathBuf = comps[idx + 1..].iter().map(|c| c.as_os_str()).collect();
+                if tail.as_os_str().is_empty() {
+                    return None;
+                }
+                return Some(prefix.join("canban").join(tail));
+            }
+            let is_macos_retired = (name.starts_with(".Canban-previous-")
+                || name.starts_with(".Canban-failed-")
+                || name.starts_with(".Canban-next-")
+                || name == "Canban-previous.app")
+                && name.ends_with(".app");
+            if is_macos_retired {
+                let tail: PathBuf = comps[idx + 1..].iter().map(|c| c.as_os_str()).collect();
+                if tail.as_os_str().is_empty() {
+                    return None;
+                }
+                return Some(prefix.join("Canban.app").join(tail));
+            }
+        }
+        prefix.push(os);
+    }
+    None
+}
+
+fn canonicalize_or_self(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn default_canban_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|h| canonicalize_or_self(&h.join(".canban")))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cmd_contains_bounded(cmd: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let bytes = cmd.as_bytes();
+    let mut offset = 0;
+    while let Some(pos) = cmd[offset..].find(needle) {
+        let start = offset + pos;
+        let end = start + needle.len();
+        let before_ok = start == 0 || bytes[start - 1].is_ascii_whitespace();
+        let after_ok = end == bytes.len() || bytes[end].is_ascii_whitespace();
+        if before_ok && after_ok {
+            return true;
+        }
+        offset = start + 1;
+    }
+    false
+}
+
+#[cfg(not(target_os = "linux"))]
+fn extract_env_var<'a>(tail: &'a str, key: &str) -> Option<&'a str> {
+    let bytes = tail.as_bytes();
+    let needle = format!("{key}=");
+    let mut start = None;
+    let mut offset = 0;
+    while let Some(pos) = tail[offset..].find(&needle) {
+        let idx = offset + pos;
+        if idx == 0 || bytes[idx - 1].is_ascii_whitespace() {
+            start = Some(idx + needle.len());
+            break;
+        }
+        offset = idx + 1;
+    }
+    let val_start = start?;
+    let rest = &tail[val_start..];
+    let rest_bytes = rest.as_bytes();
+    for (i, &b) in rest_bytes.iter().enumerate() {
+        if b.is_ascii_whitespace() {
+            let after_ws = rest[i..].trim_start();
+            if let Some(eq_idx) = after_ws.find('=') {
+                let ident = &after_ws[..eq_idx];
+                if !ident.is_empty()
+                    && (ident.as_bytes()[0].is_ascii_alphabetic() || ident.as_bytes()[0] == b'_')
+                    && ident
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                {
+                    return Some(rest[..i].trim_end());
+                }
+            }
+        }
+    }
+    Some(rest.trim_end())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn ps_command(pid: u32, include_env: bool) -> Option<String> {
+    let mut args = vec!["-ww"];
+    if include_env {
+        args.push("-E");
+    }
+    let pid_str = pid.to_string();
+    args.extend(["-p", &pid_str, "-o", "command="]);
+    let out = canban_exec::raw_command("ps").args(&args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    (!s.is_empty()).then_some(s)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn env_matches_home(pid: u32, home: &Path, home_canon: &Path) -> bool {
+    let Some(plain) = ps_command(pid, false) else {
+        return false;
+    };
+    let Some(with_env) = ps_command(pid, true) else {
+        return true;
+    };
+    let tail = with_env
+        .strip_prefix(&plain)
+        .map(str::trim_start)
+        .unwrap_or("");
+    if tail.is_empty() || !tail.contains('=') {
+        return true;
+    }
+    if let Some(val) = extract_env_var(tail, "CANBAN_HOME") {
+        let p = PathBuf::from(val);
+        return p == home || canonicalize_or_self(&p) == home_canon;
+    }
+    default_canban_home().is_none_or(|d| d == home_canon)
+}
+
+/// Find a live local `canban-ui` process belonging to `bundle` and targeting `home`.
+pub fn find_local_ui(bundle: &Path, home: &Path) -> Option<Process> {
+    let ui_bin = crate::bundle_ui(bundle);
+    let ui_canon = canonicalize_or_self(&ui_bin);
+    let home_canon = canonicalize_or_self(home);
+    let self_pid = std::process::id();
+
+    #[cfg(target_os = "linux")]
+    {
+        let default_home = default_canban_home();
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return None;
+        };
+        let mut best: Option<Process> = None;
+        for entry in entries.flatten() {
+            let pid_os = entry.file_name();
+            let Some(pid_str) = pid_os.to_str() else {
+                continue;
+            };
+            if !pid_str.bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+            let Ok(pid) = pid_str.parse::<u32>() else {
+                continue;
+            };
+            if pid == self_pid {
+                continue;
+            }
+            if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid_str}/stat"))
+                && let Some(rparen) = stat.rfind(')')
+                && stat[rparen + 1..].trim_start().starts_with('Z')
+            {
+                continue;
+            }
+            let exe_matches = std::fs::read_link(format!("/proc/{pid_str}/exe"))
+                .ok()
+                .is_some_and(|exe| {
+                    let clean = strip_deleted_suffix(&exe);
+                    let mapped = map_retired_bundle_binary(&clean);
+                    clean == ui_bin
+                        || clean == ui_canon
+                        || mapped.as_deref() == Some(ui_bin.as_path())
+                        || mapped.as_deref() == Some(ui_canon.as_path())
+                });
+            let cmdline_matches = !exe_matches
+                && std::fs::read(format!("/proc/{pid_str}/cmdline"))
+                    .ok()
+                    .is_some_and(|bytes| {
+                        bytes.split(|&b| b == 0).any(|arg| {
+                            !arg.is_empty()
+                                && std::str::from_utf8(arg).ok().is_some_and(|s| {
+                                    let p = Path::new(s);
+                                    let mapped = map_retired_bundle_binary(p);
+                                    p == ui_bin
+                                        || p == ui_canon
+                                        || mapped.as_deref() == Some(ui_bin.as_path())
+                                        || mapped.as_deref() == Some(ui_canon.as_path())
+                                })
+                        })
+                    });
+            if !exe_matches && !cmdline_matches {
+                continue;
+            }
+            if let Ok(env_bytes) = std::fs::read(format!("/proc/{pid_str}/environ")) {
+                let mut proc_home: Option<PathBuf> = None;
+                for kv in env_bytes.split(|&b| b == 0) {
+                    if let Ok(s) = std::str::from_utf8(kv)
+                        && let Some(val) = s.strip_prefix("CANBAN_HOME=")
+                        && !val.is_empty()
+                    {
+                        proc_home = Some(canonicalize_or_self(Path::new(val)));
+                        break;
+                    }
+                }
+                match proc_home {
+                    Some(ph) if ph == home_canon => {}
+                    Some(_) => continue,
+                    None if default_home.as_ref() == Some(&home_canon) => {}
+                    None => continue,
+                }
+            }
+            if let Ok(proc_info) = process(pid)
+                && best.as_ref().is_none_or(|cur| proc_info.pid > cur.pid)
+            {
+                best = Some(proc_info);
+            }
+        }
+        best
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let ui_str = ui_bin.to_string_lossy();
+        let ui_canon_str = ui_canon.to_string_lossy();
+        let Ok(out) = canban_exec::raw_command("ps")
+            .args(["-ww", "-x", "-o", "pid=,state=,command="])
+            .output()
+        else {
+            return None;
+        };
+        if !out.status.success() {
+            return None;
+        }
+        let mut best: Option<Process> = None;
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Some((pid_str, rest)) = trimmed.split_once(char::is_whitespace) else {
+                continue;
+            };
+            let Ok(pid) = pid_str.trim().parse::<u32>() else {
+                continue;
+            };
+            if pid == self_pid {
+                continue;
+            }
+            let rest = rest.trim_start();
+            let Some((state, cmd)) = rest.split_once(char::is_whitespace) else {
+                continue;
+            };
+            if state.starts_with('Z') {
+                continue;
+            }
+            let cmd = cmd.trim();
+            if !cmd.contains("canban-ui") {
+                continue;
+            }
+            let cmd_matches = cmd_contains_bounded(cmd, &ui_str)
+                || cmd_contains_bounded(cmd, &ui_canon_str)
+                || cmd.split_whitespace().any(|tok| {
+                    tok == ui_str
+                        || tok == ui_canon_str
+                        || (tok.ends_with("/canban-ui")
+                            && std::fs::canonicalize(tok).ok().as_deref()
+                                == Some(ui_canon.as_path()))
+                });
+            if !cmd_matches || !env_matches_home(pid, home, &home_canon) {
+                continue;
+            }
+            if let Ok(proc_info) = process(pid)
+                && best.as_ref().is_none_or(|cur| proc_info.pid > cur.pid)
+            {
+                best = Some(proc_info);
+            }
+        }
+        best
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Journal {
     #[serde(default)]
@@ -150,65 +480,92 @@ pub fn prepare_locked(
         .context("Check for an update first")?;
     let target = bundle(cli)?;
     let staged = feed::stage(home, &release, client.as_ref())?;
+    let stage_job = staged.parent().map(Path::to_path_buf);
     let token = canban_types::token_id();
     let parent = target.parent().context("App parent missing")?;
     // Copy into the target's filesystem before shutdown, so bundle switches are renames.
     let candidate = parent.join(crate::next_bundle_name(&target, &token));
-    copy_bundle(&staged, &candidate)?;
-    if crate::is_app_bundle(&candidate) {
-        crate::quarantine::prepare(&candidate)?;
-    } else {
-        crate::feed::verify_bundle_tree(&candidate)?;
+    let job_dir = home.join("updates/jobs").join(&token);
+    let mut journal_written = false;
+    let prep = (|| -> Result<()> {
+        copy_bundle(&staged, &candidate)?;
+        if crate::is_app_bundle(&candidate) {
+            crate::quarantine::prepare(&candidate)?;
+        } else {
+            crate::feed::verify_bundle_tree(&candidate)?;
+        }
+        let helper = job_dir.join("canban-updater");
+        std::fs::create_dir_all(&job_dir)?;
+        std::fs::copy(crate::bundle_updater(&target), &helper)?;
+        let before: Build = serde_json::from_value(
+            handoff::rpc(&home.join("app.sock"), "app.ping", json!({}))?["build"].clone(),
+        )?;
+        let schema_before = before.schema;
+        let ui = match ui {
+            Some(orig) if process(orig.pid).is_ok_and(|p| p.identity == orig.identity) => {
+                Some(orig)
+            }
+            Some(_) => find_local_ui(&target, home),
+            None => None,
+        };
+        let j = Journal {
+            local: None,
+            token: token.clone(),
+            phase: "prepared".into(),
+            home: home.into(),
+            target: target.clone(),
+            staged: candidate.clone(),
+            previous: parent.join(crate::previous_bundle_name(&target, &token)),
+            build: Build {
+                version: release.manifest.version,
+                commit: release.manifest.commit,
+                schema: release.manifest.schema,
+                api: release.manifest.api,
+                platform: release.manifest.platform,
+            },
+            schema_before,
+            before: Some(before),
+            ui,
+            app_id,
+            error: None,
+            server: None,
+            candidate_ui: None,
+            recovery_ui: None,
+            systemd_managed: false,
+        };
+        j.save()?;
+        journal_written = true;
+        let log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(home.join("updates/updater.log"))?;
+        use std::os::unix::process::CommandExt;
+        canban_exec::raw_command(helper)
+            .arg("--home")
+            .arg(home)
+            .stdout(log.try_clone()?)
+            .stderr(log)
+            .stdin(Stdio::null())
+            .process_group(0)
+            .spawn()?;
+        Ok(())
+    })();
+    if let Some(dir) = &stage_job {
+        let _ = std::fs::remove_dir_all(dir);
     }
-    let helper = home
-        .join("updates/jobs")
-        .join(&token)
-        .join("canban-updater");
-    std::fs::create_dir_all(helper.parent().unwrap())?;
-    std::fs::copy(crate::bundle_updater(&target), &helper)?;
-    let before: Build = serde_json::from_value(
-        handoff::rpc(&home.join("app.sock"), "app.ping", json!({}))?["build"].clone(),
-    )?;
-    let schema_before = before.schema;
-    let j = Journal {
-        local: None,
-        token: token.clone(),
-        phase: "prepared".into(),
-        home: home.into(),
-        target: target.clone(),
-        staged: candidate,
-        previous: parent.join(crate::previous_bundle_name(&target, &token)),
-        build: Build {
-            version: release.manifest.version,
-            commit: release.manifest.commit,
-            schema: release.manifest.schema,
-            api: release.manifest.api,
-            platform: release.manifest.platform,
-        },
-        schema_before,
-        before: Some(before),
-        ui,
-        app_id,
-        error: None,
-        server: None,
-        candidate_ui: None,
-        recovery_ui: None,
-        systemd_managed: false,
-    };
-    j.save()?;
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(home.join("updates/updater.log"))?;
-    use std::os::unix::process::CommandExt;
-    canban_exec::raw_command(helper)
-        .arg("--home")
-        .arg(home)
-        .stdout(log.try_clone()?)
-        .stderr(log)
-        .stdin(Stdio::null())
-        .process_group(0)
-        .spawn()?;
+    if let Err(err) = prep {
+        let _ = std::fs::remove_dir_all(&candidate);
+        let _ = std::fs::remove_dir_all(&job_dir);
+        if journal_written
+            && let Ok(mut j) = handoff::journal(home)
+            && j.token == token
+        {
+            j.phase = "rolled_back".into();
+            j.error = Some(format!("{err:#}"));
+            let _ = j.save();
+        }
+        return Err(err);
+    }
     Ok(())
 }
 /// Atomically replace an installed desktop bundle (`Canban.app` or Linux `canban/` dir)
@@ -739,7 +1096,9 @@ pub fn run(home: &Path, recover: bool) -> Result<()> {
             j.save()?;
             state(&j, "error")?;
             prune_update_artifacts(&j);
-            if j.ui.as_ref().is_some_and(|ui| process(ui.pid).is_err()) {
+            if j.ui.as_ref().is_some_and(|ui| process(ui.pid).is_err())
+                && find_local_ui(&j.target, &j.home).is_none()
+            {
                 let _ = spawn_ui(&j);
             }
             return Ok(());
@@ -768,11 +1127,25 @@ pub fn run(home: &Path, recover: bool) -> Result<()> {
     }
     Ok(())
 }
+fn resolve_live_ui(j: &mut Journal) -> Result<Option<Process>> {
+    match &j.ui {
+        Some(ui) if process(ui.pid).is_ok_and(|p| p.identity == ui.identity) => {
+            Ok(Some(ui.clone()))
+        }
+        Some(_) => {
+            let replacement = find_local_ui(&j.target, &j.home);
+            j.ui = replacement.clone();
+            j.save()?;
+            Ok(replacement)
+        }
+        None => Ok(None),
+    }
+}
 fn install(j: &mut Journal) -> Result<()> {
     state(j, "installing")?;
     j.phase = "stopping".into();
     j.save()?;
-    if let Some(ui) = &j.ui {
+    if resolve_live_ui(j)?.is_some() {
         let until = Instant::now() + Duration::from_secs(15);
         while !j
             .home
@@ -780,21 +1153,18 @@ fn install(j: &mut Journal) -> Result<()> {
             .join(format!("ui-saved-{}", j.token))
             .exists()
         {
-            ensure!(
-                process(ui.pid).is_ok_and(|v| v.identity == ui.identity),
-                "Old UI exited before saving its session"
-            );
+            if resolve_live_ui(j)?.is_none() {
+                break;
+            }
             ensure!(
                 Instant::now() < until,
                 "Old UI did not preserve its session"
             );
             std::thread::sleep(Duration::from_millis(100));
         }
-        ensure!(
-            process(ui.pid).is_ok_and(|p| p.identity == ui.identity),
-            "Source UI closed during download; retry from the current window"
-        );
-        stop_process(ui)?;
+        if let Some(ui) = resolve_live_ui(j)? {
+            stop_process(&ui)?;
+        }
     }
     if !j.systemd_managed && systemd_manages_home(&j.home) {
         j.systemd_managed = true;
@@ -1370,5 +1740,233 @@ mod recovery_tests {
         });
         let parsed: Journal = serde_json::from_value(legacy).unwrap();
         assert!(!parsed.systemd_managed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_local_ui_and_resolve_live_ui_rebind_across_ui_restart_and_filter_by_home() {
+        use std::{io::Read as _, os::unix::fs::PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let home = root.join("home-a");
+        let other_home = root.join("home-b");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&other_home).unwrap();
+
+        let bundle = root.join("Canban.app");
+        let macos = bundle.join("Contents/MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+        let build = Build::current();
+        let cli_script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"build-info\" ]; then printf '%s\\n' '{}'; exit 0; fi\nexit 1\n",
+            serde_json::to_string(&build).unwrap()
+        );
+        std::fs::write(macos.join("canban"), cli_script).unwrap();
+        std::fs::write(macos.join("canban-updater"), "#!/bin/sh\nexit 0\n").unwrap();
+        // Use python3 so environment variables are visible via `ps -E` on macOS as well as `/proc` on Linux.
+        std::fs::write(
+            macos.join("canban-ui"),
+            "#!/usr/bin/python3\nimport sys, time\nsys.stdout.write('ready\\n')\nsys.stdout.flush()\ntime.sleep(30)\n",
+        )
+        .unwrap();
+        for name in ["canban", "canban-ui", "canban-updater"] {
+            std::fs::set_permissions(macos.join(name), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+
+        let spawn_ui = |target_home: &Path| {
+            let mut child = canban_exec::raw_command(macos.join("canban-ui"))
+                .env("CANBAN_HOME", target_home)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            if let Some(mut stdout) = child.stdout.take() {
+                let mut buf = [0u8; 6];
+                let _ = stdout.read_exact(&mut buf);
+            }
+            child
+        };
+
+        let mut other_ui = spawn_ui(&other_home);
+        assert!(
+            find_local_ui(&bundle, &home).is_none(),
+            "UI running for home-b must not match home-a"
+        );
+
+        let mut old_ui = spawn_ui(&home);
+        let old_proc = process(old_ui.id()).unwrap();
+        let found_old = find_local_ui(&bundle, &home).expect("expected old UI for home-a");
+        assert_eq!(found_old.pid, old_proc.pid);
+
+        let mut new_ui = spawn_ui(&home);
+        let new_pid = new_ui.id();
+        let _ = old_ui.kill();
+        let _ = old_ui.wait();
+
+        let mut journal = Journal {
+            local: None,
+            token: "tok-rebind".into(),
+            phase: "stopping".into(),
+            home: home.clone(),
+            target: bundle.clone(),
+            staged: root.join(".Canban-next-tok-rebind.app"),
+            previous: root.join(".Canban-previous-tok-rebind.app"),
+            build,
+            schema_before: canban_storage::migrations::CURRENT,
+            before: None,
+            ui: Some(old_proc),
+            app_id: "com.canban.test".into(),
+            error: None,
+            server: None,
+            candidate_ui: None,
+            recovery_ui: None,
+            systemd_managed: false,
+        };
+        journal.save().unwrap();
+
+        let rebound = resolve_live_ui(&mut journal)
+            .unwrap()
+            .expect("replacement UI should be rebound");
+        assert_eq!(rebound.pid, new_pid);
+        assert_eq!(
+            handoff::journal(&home).unwrap().ui.map(|p| p.pid),
+            Some(new_pid)
+        );
+
+        let _ = new_ui.kill();
+        let _ = new_ui.wait();
+        assert!(resolve_live_ui(&mut journal).unwrap().is_none());
+        assert!(handoff::journal(&home).unwrap().ui.is_none());
+
+        let _ = other_ui.kill();
+        let _ = other_ui.wait();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_locked_cleans_up_staging_candidate_and_job_on_post_stage_failure() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join("updates")).unwrap();
+
+        let bundle = root.join(if cfg!(target_os = "macos") {
+            "Canban.app"
+        } else {
+            "canban"
+        });
+        let bin_dir = if cfg!(target_os = "macos") {
+            bundle.join("Contents/MacOS")
+        } else {
+            bundle.join("bin")
+        };
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let build = Build::current();
+        if !cfg!(target_os = "macos") {
+            std::fs::write(
+                bundle.join("bundle.json"),
+                b"{\"app_id\":\"com.canban.desktop\"}\n",
+            )
+            .unwrap();
+        }
+        let cli_script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"build-info\" ]; then printf '%s\\n' '{}'; exit 0; fi\nexit 1\n",
+            serde_json::to_string(&build).unwrap()
+        );
+        std::fs::write(bin_dir.join("canban"), cli_script.as_bytes()).unwrap();
+        std::fs::write(bin_dir.join("canban-ui"), b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(bin_dir.join("canban-updater"), b"#!/bin/sh\nexit 0\n").unwrap();
+        for name in ["canban", "canban-ui", "canban-updater"] {
+            std::fs::set_permissions(bin_dir.join(name), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+
+        let archive = root.join("update.tar.zst");
+        feed::pack(&bundle, &archive).unwrap();
+        let archive_bytes = std::fs::read(&archive).unwrap();
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let served = archive_bytes.clone();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = server.accept() {
+                let mut req = [0u8; 1024];
+                let _ = std::io::Read::read(&mut stream, &mut req);
+                let hdr = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
+                    served.len()
+                );
+                let _ = stream.write_all(hdr.as_bytes());
+                let _ = stream.write_all(&served);
+            }
+        });
+
+        let avail = feed::Available {
+            manifest: feed::Manifest {
+                version: build.version.clone(),
+                commit: build.commit.clone(),
+                platform: build.platform.clone(),
+                api: build.api,
+                schema: build.schema,
+                rollback_floor: 8,
+                asset: format!("Canban-{}.tar.zst", build.platform),
+                size: archive_bytes.len() as u64,
+                sha256: feed::sha256_hex(&archive_bytes),
+            },
+            url: format!("http://{addr}/update.tar.zst"),
+            notes: String::new(),
+        };
+        save_state(
+            &home,
+            &State {
+                phase: "available".into(),
+                available: Some(avail),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let op_lock = lock(&home, "operation.lock").unwrap();
+        // `app.sock` does not exist, so `handoff::rpc(..., "app.ping")` fails after staging/copying.
+        let err = prepare_locked(
+            &home,
+            &bin_dir.join("canban"),
+            None,
+            "com.canban.test".into(),
+            op_lock,
+            None,
+        )
+        .unwrap_err();
+        let _ = handle.join();
+        assert!(!err.to_string().is_empty());
+        assert!(!handoff::active(&home));
+        assert_eq!(
+            std::fs::read_dir(home.join("updates/staging"))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert_eq!(
+            std::fs::read_dir(home.join("updates/jobs"))
+                .unwrap()
+                .count(),
+            0
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(root)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                let n = e.file_name();
+                let s = n.to_string_lossy();
+                s.starts_with(".Canban-next-") || s.starts_with(".canban-next-")
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "unexpected candidate leftovers: {leftovers:?}"
+        );
     }
 }

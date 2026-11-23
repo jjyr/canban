@@ -72,6 +72,100 @@ mod session_tests {
         );
         assert_eq!(restored.drafts["card:card"].comment, "unsent");
     }
+
+    #[test]
+    fn update_hints_error_truncation_and_retry_eligibility() {
+        assert_eq!(compact_error_reason("   \n  "), None);
+        assert_eq!(
+            compact_error_reason("  first   line\nsecond line  ").as_deref(),
+            Some("first line")
+        );
+        let long = "x".repeat(90);
+        let compact = compact_error_reason(&long).unwrap();
+        assert_eq!(compact.chars().count(), 72);
+        assert!(compact.ends_with('…'));
+
+        let available = json!({
+            "state": {
+                "phase": "available",
+                "available": {"manifest": {"version": "20261123-2"}}
+            }
+        });
+        assert_eq!(available_version(&available), Some("20261123-2"));
+        assert!(can_install_value(&available));
+        assert_eq!(
+            hint(&available),
+            "Update to 20261123-2 · Install and restart"
+        );
+
+        let downloading = json!({
+            "state": {
+                "phase": "downloading",
+                "progress": 37,
+                "available": {"manifest": {"version": "20261123-2"}}
+            }
+        });
+        assert!(!can_install_value(&downloading));
+        assert_eq!(hint(&downloading), "Downloading update 20261123-2 · 37%");
+
+        let installing = json!({
+            "state": {
+                "phase": "installing",
+                "available": {"manifest": {"version": "20261123-2"}}
+            }
+        });
+        assert!(!can_install_value(&installing));
+        assert_eq!(
+            hint(&installing),
+            "Installing update 20261123-2 and restarting…"
+        );
+
+        let error = json!({
+            "state": {
+                "phase": "error",
+                "error": "Update download timed out after 30s without data\nstack detail",
+                "available": {"manifest": {"version": "20261123-2"}}
+            }
+        });
+        assert!(can_install_value(&error));
+        assert_eq!(
+            hint(&error),
+            "Update to 20261123-2 failed · Click to retry\nUpdate download timed out after 30s without data"
+        );
+
+        let error_empty = json!({
+            "state": {
+                "phase": "error",
+                "error": "   \n ",
+                "available": {"manifest": {"version": "20261123-2"}}
+            }
+        });
+        assert_eq!(
+            hint(&error_empty),
+            "Update to 20261123-2 failed · Click to retry"
+        );
+
+        let recovery = json!({
+            "state": {
+                "phase": "manual_recovery",
+                "available": {"manifest": {"version": "20261123-2"}}
+            }
+        });
+        assert!(!can_install_value(&recovery));
+        assert_eq!(
+            hint(&recovery),
+            "Update requires manual recovery · Open Settings"
+        );
+
+        let disabled = json!({
+            "disabled": true,
+            "state": {
+                "phase": "available",
+                "available": {"manifest": {"version": "20261123-2"}}
+            }
+        });
+        assert!(!can_install_value(&disabled));
+    }
 }
 #[cfg(feature = "local-host")]
 pub fn restore(ui: Ui) {
@@ -224,6 +318,13 @@ pub(crate) fn refresh(ui: Ui) {
     });
 }
 pub fn check(ui: Ui) {
+    let cur = ui.update.get_untracked();
+    if is_busy_untracked(ui)
+        || cur["disabled"] == true
+        || cur["state"]["phase"] == "manual_recovery"
+    {
+        return;
+    }
     if !crate::backend::is_connected() {
         ui.update
             .update(|v| v["state"]["phase"] = json!("checking"));
@@ -231,18 +332,54 @@ pub fn check(ui: Ui) {
     }
     dispatch_complete(ui, "update.check", json!({}), move |_| refresh(ui));
 }
+pub(crate) fn available_version(v: &Value) -> Option<&str> {
+    v["state"]["available"]["manifest"]["version"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+pub(crate) fn can_install_value(v: &Value) -> bool {
+    v["disabled"] != true
+        && available_version(v).is_some()
+        && !matches!(
+            v["state"]["phase"].as_str(),
+            Some("downloading" | "installing" | "checking" | "manual_recovery")
+        )
+}
+fn is_busy_untracked(ui: Ui) -> bool {
+    ui.update_busy.get_untracked()
+        || matches!(
+            ui.update.get_untracked()["state"]["phase"].as_str(),
+            Some("downloading" | "installing" | "checking")
+        )
+}
+fn compact_error_reason(raw: &str) -> Option<String> {
+    let line = raw.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let collapsed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    const MAX_CHARS: usize = 72;
+    if collapsed.chars().count() <= MAX_CHARS {
+        Some(collapsed)
+    } else {
+        let prefix: String = collapsed.chars().take(MAX_CHARS - 1).collect();
+        Some(format!("{prefix}…"))
+    }
+}
 pub fn install(ui: Ui) {
-    if ui.update_busy.get_untracked() {
+    if is_busy_untracked(ui) || !can_install_value(&ui.update.get_untracked()) {
         return;
     }
-    ui.update_busy.set(true);
     if !crate::backend::is_connected() {
         ui.update.update(|v| {
             v["state"]["phase"] = json!("downloading");
             v["state"]["progress"] = json!(42);
+            v["state"]["error"] = Value::Null;
         });
         return;
     }
+    ui.update_busy.set(true);
     dispatch_complete(
         ui,
         "update.install",
@@ -263,19 +400,34 @@ fn busy(ui: Ui) -> bool {
         )
 }
 fn hint(v: &Value) -> String {
+    let ver = available_version(v);
     match v["state"]["phase"].as_str().unwrap_or("") {
-        "downloading" => format!(
-            "Downloading update · {}%",
-            v["state"]["progress"].as_u64().unwrap_or(0)
-        ),
-        "installing" => "Installing update and restarting…".into(),
+        "downloading" => {
+            let pct = v["state"]["progress"].as_u64().unwrap_or(0);
+            match ver {
+                Some(ver) => format!("Downloading update {ver} · {pct}%"),
+                None => format!("Downloading update · {pct}%"),
+            }
+        }
+        "installing" => match ver {
+            Some(ver) => format!("Installing update {ver} and restarting…"),
+            None => "Installing update and restarting…".into(),
+        },
         "manual_recovery" => "Update requires manual recovery · Open Settings".into(),
-        "error" => "Update failed · Click to retry".into(),
+        "error" => {
+            let header = match ver {
+                Some(ver) => format!("Update to {ver} failed · Click to retry"),
+                None => "Update failed · Click to retry".into(),
+            };
+            if let Some(reason) = v["state"]["error"].as_str().and_then(compact_error_reason) {
+                format!("{header}\n{reason}")
+            } else {
+                header
+            }
+        }
         _ => format!(
             "Update to {} · Install and restart",
-            v["state"]["available"]["manifest"]["version"]
-                .as_str()
-                .unwrap_or("new version")
+            ver.unwrap_or("new version")
         ),
     }
 }
@@ -298,20 +450,40 @@ pub fn rail(ui: Ui) -> impl IntoElement {
                         .items_center()
                         .justify_center()
                         .rounded(px(RADIUS))
-                        .bg(ACCENT_FILL)
+                        .border_1()
+                        .bg(move || match ui.update.get()["state"]["phase"].as_str() {
+                            Some("error") => ATTENTION_SURFACE,
+                            Some("manual_recovery") => DANGER_SURFACE,
+                            _ => ACCENT_FILL,
+                        })
+                        .border_color(move || match ui.update.get()["state"]["phase"].as_str() {
+                            Some("error") => ATTENTION,
+                            Some("manual_recovery") => DANGER,
+                            _ => CLEAR,
+                        })
                         .hover(|s| s.opacity(0.88))
                         .focus(|s| s.ring(px(2.)).ring_color(ACCENT))
                         .disabled(move || busy(ui))
+                        .disabled_style(|s| s.opacity(0.72))
                         .accessibility_label(move || Some(hint(&ui.update.get()).into()))
                         .child(dynamic(move || {
                             let v = ui.update.get();
-                            if v["state"]["phase"] == "downloading" {
-                                label(format!("{}%", v["state"]["progress"].as_u64().unwrap_or(0)))
-                                    .text_size(px(10.))
-                                    .text_color(ON_ACCENT)
-                                    .into_element()
-                            } else {
-                                icon_tinted(Icon::Update, ON_ACCENT).into_element()
+                            match v["state"]["phase"].as_str() {
+                                Some("downloading") => label(format!(
+                                    "{}%",
+                                    v["state"]["progress"].as_u64().unwrap_or(0)
+                                ))
+                                .text_size(px(10.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(ON_ACCENT)
+                                .into_element(),
+                                Some("error") => {
+                                    icon_tinted(Icon::Refresh, ATTENTION).into_element()
+                                }
+                                Some("manual_recovery") => {
+                                    icon_tinted(Icon::TriangleAlert, DANGER).into_element()
+                                }
+                                _ => icon_tinted(Icon::Update, ON_ACCENT).into_element(),
                             }
                         }))
                         .on_press(move |_: &()| {
@@ -326,31 +498,42 @@ pub fn rail(ui: Ui) -> impl IntoElement {
     )
 }
 pub fn settings(ui: Ui) -> impl IntoElement {
+    let is_failed = computed(move || ui.update.get()["state"]["phase"] == "error");
     settings_section("Updates", "Published desktop releases.")
         .trailing(dynamic(move || {
             let value = ui.update.get();
             if value["disabled"] == true {
                 return status("Dev instance", Tone::Neutral).into_element();
             }
-            if let Some(ver) = value["state"]["available"]["manifest"]["version"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-            {
-                return status(format!("Update · {ver}"), Tone::Info).into_element();
-            }
             match value["state"]["phase"].as_str() {
-                Some("current") => status("Up to date", Tone::Success).into_element(),
                 Some("manual_recovery") => {
-                    status("Recovery needed", Tone::Attention).into_element()
+                    status("Recovery needed", Tone::Danger).into_element()
                 }
-                Some("checking") => status("Checking…", Tone::Neutral).into_element(),
-                _ => badge(
-                    value["build"]["version"]
-                        .as_str()
-                        .unwrap_or("development")
-                        .to_owned(),
+                Some("error") => status("Update failed", Tone::Attention).into_element(),
+                Some("downloading") => status(
+                    format!(
+                        "Downloading · {}%",
+                        value["state"]["progress"].as_u64().unwrap_or(0)
+                    ),
+                    Tone::Info,
                 )
                 .into_element(),
+                Some("installing") => status("Installing…", Tone::Info).into_element(),
+                Some("checking") => status("Checking…", Tone::Neutral).into_element(),
+                Some("current") => status("Up to date", Tone::Success).into_element(),
+                _ => {
+                    if let Some(ver) = available_version(&value) {
+                        status(format!("Update · {ver}"), Tone::Info).into_element()
+                    } else {
+                        badge(
+                            value["build"]["version"]
+                                .as_str()
+                                .unwrap_or("development")
+                                .to_owned(),
+                        )
+                        .into_element()
+                    }
+                }
             }
         }))
         .child(when(
@@ -395,7 +578,11 @@ pub fn settings(ui: Ui) -> impl IntoElement {
                 ))
                 .child(
                     action("Check for updates", Variant::Secondary, move |_| check(ui))
-                        .disabled(move || busy(ui) || ui.update.get()["disabled"] == true),
+                        .disabled(move || {
+                            busy(ui)
+                                || ui.update.get()["disabled"] == true
+                                || ui.update.get()["state"]["phase"] == "manual_recovery"
+                        }),
                 ),
         )
         .child(when(
@@ -419,16 +606,32 @@ pub fn settings(ui: Ui) -> impl IntoElement {
                                 .unwrap_or("")
                         )
                     }))
-                    .child(
-                        action("Install and restart", Variant::Primary, move |_| {
-                            install(ui)
+                    .child(dynamic(move || {
+                        let btn = if is_failed.get() {
+                            action_with_icon(
+                                Icon::Refresh,
+                                "Retry update",
+                                Variant::Primary,
+                                move |_| install(ui),
+                            )
+                        } else {
+                            action("Install and restart", Variant::Primary, move |_| {
+                                install(ui)
+                            })
+                        };
+                        btn.disabled(move || {
+                            busy(ui) || ui.update.get()["state"]["phase"] == "manual_recovery"
                         })
-                        .disabled(move || busy(ui)),
-                    )
+                        .into_element()
+                    }))
             },
         ))
         .child(when(
-            move || ui.update.get()["state"]["error"].is_string(),
+            move || {
+                ui.update.get()["state"]["error"]
+                    .as_str()
+                    .is_some_and(|s| !s.trim().is_empty())
+            },
             move || {
                 notice(
                     move || {

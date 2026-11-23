@@ -88,25 +88,74 @@ fn validate_url(url: &str) -> Result<()> {
     );
     Ok(())
 }
+pub(crate) const DEFAULT_PER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn metadata_agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(20)))
         .timeout_send_request(Some(Duration::from_secs(20)))
         .timeout_recv_response(Some(Duration::from_secs(30)))
+        .timeout_per_read(Some(DEFAULT_PER_READ_TIMEOUT))
         .timeout_recv_body(Some(Duration::from_secs(60)))
         .max_redirects(5)
         .build()
         .into()
 }
-fn download_agent() -> ureq::Agent {
+fn download_agent_with_read_timeout(per_read: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(20)))
         .timeout_send_request(Some(Duration::from_secs(20)))
         .timeout_recv_response(Some(Duration::from_secs(30)))
+        .timeout_per_read(Some(per_read))
         .timeout_recv_body(Some(Duration::from_secs(20 * 60)))
         .max_redirects(5)
         .build()
         .into()
+}
+fn apply_asset_headers<B>(req: ureq::RequestBuilder<B>, url: &str) -> ureq::RequestBuilder<B> {
+    let req = req.header("User-Agent", "Canban updater");
+    if url.contains("/releases/assets/") {
+        req.header("Accept", "application/octet-stream")
+    } else {
+        req
+    }
+}
+fn map_download_call_error(err: ureq::Error, per_read: Duration) -> anyhow::Error {
+    match &err {
+        ureq::Error::Timeout(kind) if kind.to_string() == "per read" => anyhow::anyhow!(
+            "Update download timed out after {}s without data",
+            per_read.as_secs().max(1)
+        ),
+        ureq::Error::BodyStalled => anyhow::anyhow!(
+            "Update download timed out after {}s without data",
+            per_read.as_secs().max(1)
+        ),
+        ureq::Error::Timeout(kind) => anyhow::anyhow!("Update download timed out ({kind})"),
+        _ => anyhow::Error::from(err),
+    }
+}
+fn map_download_read_error(err: std::io::Error, per_read: Duration) -> anyhow::Error {
+    if let Some(ureq_err) = err.get_ref().and_then(|e| e.downcast_ref::<ureq::Error>()) {
+        return match ureq_err {
+            ureq::Error::Timeout(kind) if kind.to_string() == "per read" => anyhow::anyhow!(
+                "Update download timed out after {}s without data",
+                per_read.as_secs().max(1)
+            ),
+            ureq::Error::BodyStalled => anyhow::anyhow!(
+                "Update download timed out after {}s without data",
+                per_read.as_secs().max(1)
+            ),
+            ureq::Error::Timeout(kind) => anyhow::anyhow!("Update download timed out ({kind})"),
+            _ => anyhow::Error::from(err),
+        };
+    }
+    if err.kind() == std::io::ErrorKind::TimedOut {
+        return anyhow::anyhow!(
+            "Update download timed out after {}s without data",
+            per_read.as_secs().max(1)
+        );
+    }
+    anyhow::Error::from(err)
 }
 fn bytes(url: &str, limit: u64, client: Option<&canban_github::Client>) -> Result<Vec<u8>> {
     validate_url(url)?;
@@ -114,10 +163,7 @@ fn bytes(url: &str, limit: u64, client: Option<&canban_github::Client>) -> Resul
     {
         c.release_response(url)?
     } else {
-        metadata_agent()
-            .get(url)
-            .header("User-Agent", "Canban updater")
-            .call()?
+        apply_asset_headers(metadata_agent().get(url), url).call()?
     };
     let mut b = Vec::new();
     r.body_mut()
@@ -271,11 +317,7 @@ fn check_inner(home: &Path, client: Option<canban_github::Client>, automatic: bo
     ensure!(!handoff::active(home), "Upgrade is in progress");
     let mut state = load_state(home);
     if automatic && state.automatic_delay(now()) > 0 {
-        if state.phase == "checking" {
-            state.phase = "error".into();
-            state.error = Some("The previous update check was interrupted. Check again manually or wait for the next daily check.".into());
-            save_state(home, &state)?;
-        }
+        let _ = crate::recover_stale_state_with_op_lock(home)?;
         return Ok(());
     }
     state.last_check_started_at = now();
@@ -301,7 +343,7 @@ fn check_inner(home: &Path, client: Option<canban_github::Client>, automatic: bo
     }
     save_state(home, &state)
 }
-fn clear_stale_staging(home: &Path) {
+pub(crate) fn clear_stale_staging(home: &Path) {
     let staging = home.join("updates/staging");
     if let Ok(entries) = std::fs::read_dir(staging) {
         for entry in entries.flatten() {
@@ -320,6 +362,15 @@ pub fn stage(
     home: &Path,
     release: &Available,
     client: Option<&canban_github::Client>,
+) -> Result<PathBuf> {
+    stage_with_timeout(home, release, client, DEFAULT_PER_READ_TIMEOUT)
+}
+
+fn stage_with_timeout(
+    home: &Path,
+    release: &Available,
+    client: Option<&canban_github::Client>,
+    per_read: Duration,
 ) -> Result<PathBuf> {
     validate_url(&release.url)?;
     clear_stale_staging(home);
@@ -341,17 +392,21 @@ pub fn stage(
         {
             c.release_response(&release.url)?
         } else {
-            download_agent()
-                .get(&release.url)
-                .header("User-Agent", "Canban updater")
-                .call()?
+            apply_asset_headers(
+                download_agent_with_read_timeout(per_read).get(&release.url),
+                &release.url,
+            )
+            .call()
+            .map_err(|err| map_download_call_error(err, per_read))?
         };
         let mut reader = response.body_mut().as_reader();
         let mut total = 0u64;
         let mut digest = Sha256::new();
         let mut buffer = [0u8; 65536];
         loop {
-            let n = reader.read(&mut buffer)?;
+            let n = reader
+                .read(&mut buffer)
+                .map_err(|err| map_download_read_error(err, per_read))?;
             if n == 0 {
                 break;
             }
@@ -381,6 +436,7 @@ pub fn stage(
     if let Err(err) = &result {
         let _ = std::fs::remove_dir_all(&job);
         state.phase = "error".into();
+        state.progress = 0;
         state.error = Some(format!("{err:#}"));
         let _ = save_state(home, &state);
     }
@@ -674,6 +730,15 @@ pub fn stage_cli(
     release: &Available,
     client: Option<&canban_github::Client>,
 ) -> Result<PathBuf> {
+    stage_cli_with_timeout(home, release, client, DEFAULT_PER_READ_TIMEOUT)
+}
+
+fn stage_cli_with_timeout(
+    home: &Path,
+    release: &Available,
+    client: Option<&canban_github::Client>,
+    per_read: Duration,
+) -> Result<PathBuf> {
     validate_url(&release.url)?;
     clear_stale_staging(home);
     let job = home.join("updates/staging").join(canban_types::id());
@@ -686,17 +751,21 @@ pub fn stage_cli(
         {
             c.release_response(&release.url)?
         } else {
-            download_agent()
-                .get(&release.url)
-                .header("User-Agent", "Canban updater")
-                .call()?
+            apply_asset_headers(
+                download_agent_with_read_timeout(per_read).get(&release.url),
+                &release.url,
+            )
+            .call()
+            .map_err(|err| map_download_call_error(err, per_read))?
         };
         let mut reader = response.body_mut().as_reader();
         let mut total = 0u64;
         let mut digest = Sha256::new();
         let mut buffer = [0u8; 65536];
         loop {
-            let n = reader.read(&mut buffer)?;
+            let n = reader
+                .read(&mut buffer)
+                .map_err(|err| map_download_read_error(err, per_read))?;
             if n == 0 {
                 break;
             }
@@ -1232,6 +1301,164 @@ mod archive_tests {
             "staging directory must be empty after checksum mismatch in stage_cli"
         );
 
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn stage_enforces_per_read_stall_timeout_and_allows_retry_with_octet_stream_accept() {
+        use std::io::{BufRead, BufReader, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let source = dir.path().join(if cfg!(target_os = "macos") {
+            "Canban.app"
+        } else {
+            "canban"
+        });
+        let bin_dir = if cfg!(target_os = "macos") {
+            source.join("Contents/MacOS")
+        } else {
+            source.join("bin")
+        };
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let candidate = Build::current();
+        if !cfg!(target_os = "macos") {
+            std::fs::write(
+                source.join("bundle.json"),
+                b"{\"app_id\":\"com.canban.desktop\"}\n",
+            )
+            .unwrap();
+        }
+        let cli_script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"build-info\" ]; then printf '%s\\n' '{}'; exit 0; fi\nexit 1\n",
+            serde_json::to_string(&candidate).unwrap()
+        );
+        std::fs::write(bin_dir.join("canban"), cli_script.as_bytes()).unwrap();
+        std::fs::write(bin_dir.join("canban-ui"), b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(bin_dir.join("canban-updater"), b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for name in ["canban", "canban-ui", "canban-updater"] {
+                std::fs::set_permissions(
+                    bin_dir.join(name),
+                    std::fs::Permissions::from_mode(0o755),
+                )
+                .unwrap();
+            }
+        }
+        let archive = dir.path().join("valid.tar.zst");
+        pack(&source, &archive).unwrap();
+        let archive_bytes = std::fs::read(&archive).unwrap();
+        let sha = sha256_hex(&archive_bytes);
+        let size = archive_bytes.len() as u64;
+
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let (accept_tx, accept_rx) = std::sync::mpsc::channel::<String>();
+        let served = archive_bytes;
+        let handle = std::thread::spawn(move || {
+            let mut stalled_stream = None;
+            // First request: send partial response and stall until test finishes.
+            if let Ok((mut stream, _)) = server.accept() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut req = String::new();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    req.push_str(&line);
+                }
+                let _ = accept_tx.send(req);
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
+                    served.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&served[..16.min(served.len())]);
+                let _ = stream.flush();
+                stalled_stream = Some(stream);
+            }
+            // Second request (retry): serve complete valid archive.
+            if let Ok((mut stream, _)) = server.accept() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut req = String::new();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    req.push_str(&line);
+                }
+                let _ = accept_tx.send(req);
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
+                    served.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&served);
+                let _ = stream.flush();
+            }
+            let _ = done_rx.recv();
+            drop(stalled_stream);
+        });
+
+        let avail = Available {
+            manifest: Manifest {
+                version: candidate.version.clone(),
+                commit: candidate.commit.clone(),
+                platform: candidate.platform.clone(),
+                api: candidate.api,
+                schema: candidate.schema,
+                rollback_floor: 8,
+                asset: format!("Canban-{}.tar.zst", candidate.platform),
+                size,
+                sha256: sha,
+            },
+            url: format!("http://{addr}/repos/jjyr/canban/releases/assets/123"),
+            notes: String::new(),
+        };
+        save_state(
+            &home,
+            &State {
+                phase: "available".into(),
+                available: Some(avail.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let started = std::time::Instant::now();
+        let err = stage_with_timeout(&home, &avail, None, Duration::from_millis(200)).unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "per-read stall took too long: {:?}",
+            started.elapsed()
+        );
+        assert!(err.to_string().contains("timed out"), "{err:#}");
+        let req1 = accept_rx.recv().unwrap();
+        assert!(
+            req1.to_lowercase()
+                .contains("accept: application/octet-stream"),
+            "missing octet-stream Accept header: {req1}"
+        );
+
+        let after_fail = load_state(&home);
+        assert_eq!(after_fail.phase, "error");
+        assert_eq!(after_fail.progress, 0);
+        assert_eq!(after_fail.available, Some(avail.clone()));
+        assert_eq!(
+            std::fs::read_dir(home.join("updates/staging"))
+                .unwrap()
+                .count(),
+            0
+        );
+
+        // Retry against complete archive succeeds.
+        let staged = stage_with_timeout(&home, &avail, None, Duration::from_secs(5)).unwrap();
+        assert!(staged.exists());
+        let _ = done_tx.send(());
         let _ = handle.join();
     }
 }

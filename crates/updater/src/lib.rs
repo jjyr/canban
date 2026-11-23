@@ -123,6 +123,79 @@ pub fn lock(home: &Path, name: &str) -> Result<File> {
     f.try_lock().with_context(|| format!("{name} is busy"))?;
     Ok(f)
 }
+pub(crate) fn try_upgrade_lock_shared(home: &Path) -> Result<Option<File>> {
+    std::fs::create_dir_all(home.join("updates"))?;
+    let f = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(home.join("updates/upgrade.lock"))?;
+    match f.try_lock_shared() {
+        Ok(()) => Ok(Some(f)),
+        Err(_) => Ok(None),
+    }
+}
+fn is_stale_in_progress_phase(phase: &str) -> bool {
+    matches!(phase, "checking" | "downloading" | "installing")
+}
+/// Recover an interrupted `checking`, `downloading`, or `installing` state when the caller
+/// already holds `operation.lock` and no active upgrade handoff or worker owns the state.
+pub(crate) fn recover_stale_state_with_op_lock(home: &Path) -> Result<bool> {
+    if handoff::active(home) {
+        return Ok(false);
+    }
+    let Some(_upgrade_shared) = try_upgrade_lock_shared(home)? else {
+        return Ok(false);
+    };
+    if handoff::active(home) {
+        return Ok(false);
+    }
+    let mut state = load_state(home);
+    if !is_stale_in_progress_phase(&state.phase) {
+        return Ok(false);
+    }
+    feed::clear_stale_staging(home);
+    if let Some(avail) = &state.available
+        && let (Ok(current), Ok(offered)) = (
+            feed::Version::parse(&Build::current().version),
+            feed::Version::parse(&avail.manifest.version),
+        )
+        && current >= offered
+    {
+        state.phase = "current".into();
+        state.available = None;
+        state.progress = 0;
+        state.error = None;
+        save_state(home, &state)?;
+        return Ok(true);
+    }
+    let message = match state.phase.as_str() {
+        "checking" => {
+            "The previous update check was interrupted. Check again manually or wait for the next daily check."
+        }
+        "downloading" => "Previous update download was interrupted.",
+        "installing" => "Previous update preparation was interrupted.",
+        _ => return Ok(false),
+    };
+    state.phase = "error".into();
+    state.progress = 0;
+    state.error = Some(message.into());
+    save_state(home, &state)?;
+    Ok(true)
+}
+/// Recover stale in-progress update state when neither `operation.lock` nor an exclusive
+/// `upgrade.lock` / active install journal owns the transition.
+pub fn recover_stale_state(home: &Path) -> Result<bool> {
+    let state = load_state(home);
+    if !is_stale_in_progress_phase(&state.phase) || handoff::active(home) {
+        return Ok(false);
+    }
+    let Ok(_operation) = lock(home, "operation.lock") else {
+        return Ok(false);
+    };
+    recover_stale_state_with_op_lock(home)
+}
 pub fn service_lock(home: &Path) -> Result<File> {
     std::fs::create_dir_all(home)?;
     let f = OpenOptions::new()
@@ -252,5 +325,121 @@ mod version_and_check_tests {
             restarted.automatic_delay(now - 100),
             AUTOMATIC_CHECK_INTERVAL
         );
+    }
+
+    fn sample_available(version: &str) -> feed::Available {
+        feed::Available {
+            manifest: feed::Manifest {
+                version: version.into(),
+                commit: "0123456789abcdef0123456789abcdef01234567".into(),
+                platform: Build::current().platform,
+                api: DESKTOP_API,
+                schema: canban_storage::migrations::CURRENT,
+                rollback_floor: 8,
+                asset: format!("Canban-{}.tar.zst", Build::current().platform),
+                size: 1024,
+                sha256: "a".repeat(64),
+            },
+            url: "https://example.invalid/update.tar.zst".into(),
+            notes: String::new(),
+        }
+    }
+
+    #[test]
+    fn recover_stale_state_recovers_interrupted_phases_and_respects_locks() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+
+        for (phase, expected_msg) in [
+            ("downloading", "download was interrupted"),
+            ("checking", "check was interrupted"),
+            ("installing", "preparation was interrupted"),
+        ] {
+            let staging_leftover = home.join("updates/staging/leftover");
+            std::fs::create_dir_all(&staging_leftover).unwrap();
+            std::fs::write(staging_leftover.join("download.tar.zst"), b"partial").unwrap();
+
+            let state = State {
+                phase: phase.into(),
+                available: Some(sample_available("20990101-1")),
+                progress: 42,
+                error: None,
+                checked_at: 100,
+                last_check_started_at: 100,
+            };
+            save_state(home, &state).unwrap();
+
+            // Busy operation.lock skips recovery.
+            let op_lock = lock(home, "operation.lock").unwrap();
+            assert!(!recover_stale_state(home).unwrap());
+            assert_eq!(load_state(home).phase, phase);
+            assert!(staging_leftover.exists());
+            drop(op_lock);
+
+            // Exclusive upgrade.lock skips recovery.
+            let up_lock = lock(home, "upgrade.lock").unwrap();
+            assert!(!recover_stale_state(home).unwrap());
+            assert_eq!(load_state(home).phase, phase);
+            drop(up_lock);
+
+            // Free locks recover stale state, clean staging, preserve available, and reset progress.
+            assert!(recover_stale_state(home).unwrap());
+            let recovered = load_state(home);
+            assert_eq!(recovered.phase, "error");
+            assert_eq!(recovered.progress, 0);
+            assert_eq!(
+                recovered
+                    .available
+                    .as_ref()
+                    .map(|a| a.manifest.version.as_str()),
+                Some("20990101-1")
+            );
+            assert!(
+                recovered
+                    .error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains(expected_msg),
+                "unexpected error for {phase}: {:?}",
+                recovered.error
+            );
+            assert!(!staging_leftover.exists());
+            // Idempotent when already recovered.
+            assert!(!recover_stale_state(home).unwrap());
+        }
+
+        // Active install journal prevents stale recovery.
+        save_state(
+            home,
+            &State {
+                phase: "installing".into(),
+                available: Some(sample_available("20990101-1")),
+                progress: 100,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let journal = worker::Journal {
+            local: None,
+            token: "tok-active".into(),
+            phase: "stopping".into(),
+            home: home.into(),
+            target: home.join("Canban.app"),
+            staged: home.join(".Canban-next-tok-active.app"),
+            previous: home.join(".Canban-previous-tok-active.app"),
+            build: Build::current(),
+            schema_before: canban_storage::migrations::CURRENT,
+            before: None,
+            ui: None,
+            app_id: "com.canban.test".into(),
+            error: None,
+            server: None,
+            candidate_ui: None,
+            recovery_ui: None,
+            systemd_managed: false,
+        };
+        journal.save().unwrap();
+        assert!(!recover_stale_state(home).unwrap());
+        assert_eq!(load_state(home).phase, "installing");
     }
 }

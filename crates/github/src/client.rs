@@ -658,10 +658,20 @@ fn redact_release_download_error(err: ureq::Error) -> anyhow::Error {
     }
 }
 
+pub(crate) const RELEASE_PER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
 impl Client {
     /// Private release assets use the API octet-stream route. Never forward the
     /// GitHub credential when following its signed storage redirect.
     pub fn release_response(&self, url: &str) -> Result<ureq::http::Response<ureq::Body>> {
+        self.release_response_with_read_timeout(url, RELEASE_PER_READ_TIMEOUT)
+    }
+
+    fn release_response_with_read_timeout(
+        &self,
+        url: &str,
+        per_read: Duration,
+    ) -> Result<ureq::http::Response<ureq::Body>> {
         ensure!(
             url.starts_with(&format!("{}/repos/", self.api)) && url.contains("/releases/assets/"),
             "Invalid GitHub release asset URL"
@@ -690,6 +700,7 @@ impl Client {
                 .timeout_connect(Some(Duration::from_secs(20)))
                 .timeout_send_request(Some(Duration::from_secs(20)))
                 .timeout_recv_response(Some(Duration::from_secs(30)))
+                .timeout_per_read(Some(per_read))
                 .timeout_recv_body(Some(Duration::from_secs(20 * 60)))
                 .max_redirects(5)
                 .build()
@@ -810,6 +821,68 @@ mod release_tests {
             !msg.contains("storage-overloaded"),
             "leaked remote body: {msg}"
         );
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn redirected_release_download_enforces_per_read_stall_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let redirect = base.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let mut held_socket = None;
+            for i in 0..2 {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut input = BufReader::new(socket.try_clone().unwrap());
+                loop {
+                    let mut line = String::new();
+                    input.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                if i == 0 {
+                    let reply = format!(
+                        "HTTP/1.1 302 Found\r\nLocation: {redirect}/signed-stall\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    socket.write_all(reply.as_bytes()).unwrap();
+                } else {
+                    socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1024\r\nConnection: close\r\n\r\npartial")
+                        .unwrap();
+                    let _ = socket.flush();
+                    held_socket = Some(socket);
+                }
+            }
+            let _ = done_rx.recv();
+            drop(held_socket);
+        });
+        let mut client = Client::new(SecretString::from("gh-bearer-secret"));
+        client.api = base.clone();
+        let mut response = client
+            .release_response_with_read_timeout(
+                &format!("{base}/repos/test/app/releases/assets/99"),
+                Duration::from_millis(200),
+            )
+            .unwrap();
+        let mut buf = Vec::new();
+        let started = std::time::Instant::now();
+        let err = response
+            .body_mut()
+            .as_reader()
+            .read_to_end(&mut buf)
+            .unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "per-read timeout took too long: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            err.to_string().contains("timeout") || err.kind() == std::io::ErrorKind::TimedOut,
+            "unexpected stall error: {err}"
+        );
+        let _ = done_tx.send(());
         thread.join().unwrap();
     }
 }
