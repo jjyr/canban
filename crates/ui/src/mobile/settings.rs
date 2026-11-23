@@ -185,11 +185,11 @@ pub(crate) fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
                     .map(|(host, sec)| {
                         let (conn_label, conn_tone) = host_connection_status(&host);
                         let (badge_bg, badge_fg) = tone_colors(conn_tone);
-                        let sec_icon = match sec {
+                        let (sec_icon, sec_color) = match sec {
                             TransportSecurity::Local
                             | TransportSecurity::Tailscale
-                            | TransportSecurity::Ssh => "🔒",
-                            TransportSecurity::UnverifiedTcp => "⚠",
+                            | TransportSecurity::Ssh => (Icon::Check, SUCCESS),
+                            TransportSecurity::UnverifiedTcp => (Icon::TriangleAlert, ATTENTION),
                         };
                         let hid = host.id.clone();
                         let subtitle = if let Some((err, _)) = host_error_detail(&host) {
@@ -241,7 +241,11 @@ pub(crate) fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
                                                             .text_color(TEXT)
                                                             .truncate(),
                                                     )
-                                                    .child(text(sec_icon).text_size(px(13.))),
+                                                    .child(
+                                                        icon_tinted(sec_icon, sec_color)
+                                                            .w(px(14.))
+                                                            .h(px(14.)),
+                                                    ),
                                             )
                                             .child(
                                                 text(subtitle)

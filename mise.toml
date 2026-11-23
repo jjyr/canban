@@ -55,6 +55,21 @@ depends = ["build-ios-sim"]
 env = { IPHONEOS_DEPLOYMENT_TARGET = "15.0" }
 run = "python3 scripts/ios.py run-sim --no-build"
 
+[tasks.check-android]
+description = "Cross-compile canban-terminal and canban-android for Android"
+depends = ["terminal-deps"]
+run = "python3 scripts/android.py check"
+
+[tasks.build-android]
+description = "Build and package .local/android/Canban.apk"
+depends = ["terminal-deps"]
+run = "python3 scripts/android.py build-apk"
+
+[tasks.android-emu]
+description = "Build, install, and launch Canban on the Android Emulator"
+depends = ["build-android"]
+run = "python3 scripts/android.py run-emu --no-build"
+
 [tasks.test]
 depends = ["terminal-deps"]
 env = { CANBAN_UPDATES_DISABLED = "1", CANBAN_GH_BIN = "/usr/bin/false" }

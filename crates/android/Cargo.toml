@@ -1,0 +1,20 @@
+[package]
+name = "canban-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Canban Android mobile app shell hosted on nsh-platform-android."
+homepage.workspace = true
+repository.workspace = true
+
+[lib]
+name = "canban_android"
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+canban-client.workspace = true
+canban-ui = { path = "../ui", default-features = false }
+nsh-base.workspace = true
+nsh-core.workspace = true
+nsh-platform-android.workspace = true

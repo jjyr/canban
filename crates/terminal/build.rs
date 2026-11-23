@@ -17,6 +17,9 @@ fn zig_target(target: &str) -> &'static str {
         "aarch64-apple-ios-sim" => "aarch64-ios-simulator",
         "x86_64-pc-windows-msvc" => "x86_64-windows-msvc",
         "aarch64-pc-windows-msvc" => "aarch64-windows-msvc",
+        "aarch64-linux-android" => "aarch64-linux-android",
+        "x86_64-linux-android" => "x86_64-linux-android",
+        "armv7-linux-androideabi" => "arm-linux-androideabi",
         other => panic!("ghostty-sys: no Zig target for {other}"),
     }
 }

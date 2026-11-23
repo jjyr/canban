@@ -39,6 +39,7 @@ nsh-base = { git = "https://github.com/longbridge/nsh", rev = "071c6e2fc1526ce70
 nsh-platform-macos = { git = "https://github.com/longbridge/nsh", rev = "071c6e2fc1526ce70f6ccc8cb6b9936f168f1d7d", default-features = false }
 nsh-platform-linux = { git = "https://github.com/longbridge/nsh", rev = "071c6e2fc1526ce70f6ccc8cb6b9936f168f1d7d", default-features = false, features = ["shader", "editor", "highlight", "term"] }
 nsh-platform-ios = { git = "https://github.com/longbridge/nsh", rev = "071c6e2fc1526ce70f6ccc8cb6b9936f168f1d7d", default-features = false, features = ["editor", "highlight", "term", "svg"] }
+nsh-platform-android = { git = "https://github.com/longbridge/nsh", rev = "071c6e2fc1526ce70f6ccc8cb6b9936f168f1d7d", default-features = false, features = ["editor", "highlight", "term", "svg"] }
 canban-profiler = { path = "crates/profiler" }
 canban-exec = { path = "crates/exec" }
 canban-themes = { path = "crates/themes" }

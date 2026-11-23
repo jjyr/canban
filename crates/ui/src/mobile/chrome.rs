@@ -555,15 +555,15 @@ pub(crate) fn mobile_tab_bar(
         let items = move || {
             let count = inbox_badge();
             let badge_val = (count > 0).then(|| count.to_string());
-            let mut needs = TabBarItem::new("Needs you");
+            let mut needs = TabBarItem::new("Needs you").icon("tab_inbox");
             if let Some(b) = badge_val {
                 needs = needs.badge(b);
             }
             vec![
                 needs,
-                TabBarItem::new("Board"),
-                TabBarItem::new("Terminals"),
-                TabBarItem::new("Settings"),
+                TabBarItem::new("Board").icon("tab_board"),
+                TabBarItem::new("Terminals").icon("tab_terminals"),
+                TabBarItem::new("Settings").icon("tab_settings"),
             ]
         };
         return view().child(when(
