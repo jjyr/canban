@@ -1,6 +1,6 @@
 [tools]
 hk = "2.4.0"
-rust = "beta-2026-10-14"
+rust = { version = "beta-2026-10-14", components = ["rustfmt", "clippy"] }
 zig = "0.17.1"
 "aqua:nextest-rs/nextest/cargo-nextest" = "0.9.152"
 
