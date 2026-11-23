@@ -2243,6 +2243,12 @@ pub fn Gallery() -> impl IntoElement {
         ui.open_terminal("gallery-project-root-shell".into());
         return canban_ui::frame::screen(ui).into_element();
     }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("terminal-many-tabs") {
+        canban_ui::frame::configure_window_chrome();
+        ui.snapshot.set(fixtures::terminal_many_tabs());
+        ui.open_terminal("gallery-overflow-shell-12".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("terminal-folds") {
         canban_ui::frame::configure_window_chrome();
         ui.snapshot.set(fixtures::terminal_workspace());
@@ -3089,6 +3095,13 @@ pub fn Gallery() -> impl IntoElement {
                         "overview-card-2",
                         &canban_types::Config::default().profiles[0].id,
                     ));
+                }))
+                .child(action("Many Terminal Tabs", Variant::Secondary, move |_| {
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::terminal_many_tabs());
+                    ui.navigate("terminals");
+                    ui.terminal_sidebar.set(true);
+                    ui.open_terminal("gallery-overflow-shell-12".into());
                 }))
                 .child(action("Close Running Agent?", Variant::Quiet, move |_| {
                     scene.set("workspace".into());

@@ -389,6 +389,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                         .flex_1()
                         .min_w(px(0.))
                         .h_full()
+                        .overflow_hidden()
                         .flex_row()
                         .items_center()
                         .gap_1()
@@ -398,6 +399,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                                 .horizontal()
                                 .scrollbar(false)
                                 .element_ref(&strip)
+                                .flex_shrink(1.)
                                 .min_w(px(0.))
                                 .h_full()
                                 .child(dynamic(move || {
@@ -459,7 +461,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                             let terminal = e.saved.id.clone();
                             context_bar = context_bar.child(
                                 view()
-                                    .flex_1()
+                                    .flex_shrink(1.)
                                     .min_w(px(0.))
                                     .overflow_hidden()
                                     .tooltip(
@@ -510,8 +512,9 @@ pub fn header(ui: Ui) -> impl IntoElement {
                         } else if let Some(project) = e.project_id.clone() {
                             context_bar = context_bar.child(
                                 canban_ui_kit::press_target()
-                                    .flex_1()
+                                    .flex_shrink(1.)
                                     .min_w(px(0.))
+                                    .overflow_hidden()
                                     .h(px(30.))
                                     .justify_center()
                                     .px_2()
@@ -529,7 +532,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                             let title = super::worktrees::display_directory_path(&cwd, &e.host_id);
                             context_bar = context_bar.child(
                                 view()
-                                    .flex_1()
+                                    .flex_shrink(1.)
                                     .min_w(px(0.))
                                     .h(px(30.))
                                     .justify_center()
@@ -574,6 +577,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                             .h(px(30.))
                             .max_w(move || px(if ui.narrow.get() { 160. } else { 250. }))
                             .min_w(px(0.))
+                            .overflow_hidden()
                             .px_2()
                             .rounded(px(5.))
                             .flex_row()
@@ -590,6 +594,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                                     branch.as_deref().unwrap_or("No Git checkout"),
                                     limit,
                                 ))
+                                .flex_shrink(1.)
                                 .min_w(px(0.))
                                 .truncate(),
                             );

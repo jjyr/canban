@@ -1865,6 +1865,57 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
     s
 }
 
+/// Terminals workspace with many tabs in the active project-root scope to verify header tab scrolling.
+pub fn terminal_many_tabs() -> canban_types::Snapshot {
+    let mut s = terminal_workspace();
+    let proj_id = s.projects[0].id.clone();
+    let proj_dir = s.projects[0].directory.clone();
+    let next_num = s.terminals.iter().map(|t| t.number).max().unwrap_or(0) + 1;
+    for idx in 1..=12u64 {
+        let id = format!("gallery-overflow-shell-{idx}");
+        let pty = format!("overflow-shell-{idx}");
+        s.terminals.push(canban_types::TerminalEntry {
+            id: id.clone(),
+            conversation_id: None,
+            number: next_num + idx,
+            name: Some(format!("Shell {idx:02} · build-check")),
+            origin_project_id: Some(proj_id.clone()),
+            origin_card_id: None,
+            agent_engine: None,
+            runtime: Some(canban_types::TerminalRuntime {
+                core_id: Some("gallery".into()),
+                terminal: Some(pty.clone()),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+                observed_agent: None,
+                waiting: None,
+            }),
+            agent: None,
+            created_at: idx,
+        });
+        s.terminal_contexts.push(canban_types::TerminalContext {
+            directory_root: None,
+            terminal_id: id,
+            core_id: "gallery".into(),
+            terminal: pty,
+            cwd: Some(proj_dir.clone()),
+            project_id: Some(proj_id.clone()),
+            card_id: None,
+            worktree_id: None,
+            branch: Some("main".into()),
+            dirty: true,
+            additions: 18,
+            deletions: 4,
+            ahead: 1,
+            behind: 0,
+        });
+    }
+    s
+}
+
 /// Board density: quiet, queued, executing and human-gated Cards share one renderer.
 pub fn board_cards() -> canban_types::Snapshot {
     use canban_types::*;

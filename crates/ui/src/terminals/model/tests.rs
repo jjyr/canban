@@ -4447,6 +4447,507 @@ fn compact_terminal_tabs_never_push_notifications_or_hosts_out_of_header_bounds(
 }
 
 #[test]
+fn many_terminal_tabs_scroll_without_overlapping_project_branch_or_actions() {
+    use nsh_core::{
+        ApproxTextEngine, Bounds, Core, EventKind, EventPayload, MountItem, NodeId, Points,
+        element::JsEvent,
+        geometry::{Size, size},
+        prelude::*,
+    };
+    use std::collections::{HashMap, HashSet};
+
+    fn make_shell(id: &str, num: u64, proj: &str, card: Option<&str>) -> TerminalEntry {
+        TerminalEntry {
+            id: id.into(),
+            conversation_id: None,
+            number: num,
+            name: Some(format!("Shell {num} · long-tab-name")),
+            origin_project_id: Some(proj.into()),
+            origin_card_id: card.map(str::to_owned),
+            agent_engine: None,
+            runtime: Some(TerminalRuntime {
+                core_id: Some("core".into()),
+                terminal: Some(format!("pty-{id}")),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+                observed_agent: None,
+                waiting: None,
+            }),
+            agent: None,
+            created_at: num,
+        }
+    }
+
+    fn build_header_probe(ui: crate::presenter::Ui, card_scope: bool, shell_count: usize) -> View {
+        canban_ui_kit::tokens::install_theme();
+        let mut s = fixture();
+        s.projects[0].name = "Canban workspace with a long Project name".into();
+        s.projects[0].directory = "/repo/p1".into();
+        s.projects[0].target_branch = Some("main".into());
+        s.cards[0].number = 124;
+        s.cards[0].stage = "develop".into();
+        s.cards[0].title = "Ensure overflowing terminal tabs never cover Card or Branch".into();
+        s.cards[0].worktree = Some("/repo/p1-wt/c1".into());
+        s.cards[0].branch = Some("canban-0afd/124-very-long-branch-name".into());
+        s.cards[0].attention = Some("Needs review".into());
+        s.host_summaries.insert(
+            "gpu-box".into(),
+            HostSummary {
+                id: "gpu-box".into(),
+                name: "gpu-box".into(),
+                is_local: false,
+                transport_label: "SSH".into(),
+                endpoint_label: "gpu-box".into(),
+                ssh_target: Some("gpu-box".into()),
+                server_id: None,
+                connection: HostConnectionState::Connected {
+                    rtt_ms: 4,
+                    api_version: canban_updater::DESKTOP_API,
+                    version: "test".into(),
+                    platform: "linux-x86_64".into(),
+                },
+                active_agents: 2,
+                max_agents: 4,
+                project_count: 1,
+                reconnect_count: 0,
+                last_synced_at: None,
+                pending_mutations: 0,
+                sync_conflicts: 0,
+            },
+        );
+
+        let selected_id = if card_scope {
+            for idx in 1..=shell_count {
+                let id = format!("c1-shell-{idx}");
+                s.terminals
+                    .push(make_shell(&id, idx as u64 + 10, "p1", Some("c1")));
+                s.terminal_contexts.push(TerminalContext {
+                    terminal_id: id.clone(),
+                    core_id: "core".into(),
+                    terminal: format!("pty-{id}"),
+                    cwd: Some("/repo/p1-wt/c1".into()),
+                    project_id: Some("p1".into()),
+                    card_id: Some("c1".into()),
+                    branch: Some("canban-0afd/124-very-long-branch-name".into()),
+                    dirty: true,
+                    additions: 120,
+                    deletions: 45,
+                    ..Default::default()
+                });
+            }
+            format!("c1-shell-{shell_count}")
+        } else {
+            for idx in 1..=shell_count {
+                let id = format!("p1-shell-{idx}");
+                s.terminals
+                    .push(make_shell(&id, idx as u64 + 10, "p1", None));
+                s.terminal_contexts.push(TerminalContext {
+                    terminal_id: id.clone(),
+                    core_id: "core".into(),
+                    terminal: format!("pty-{id}"),
+                    cwd: Some("/repo/p1".into()),
+                    project_id: Some("p1".into()),
+                    branch: Some("main".into()),
+                    dirty: true,
+                    additions: 24,
+                    deletions: 8,
+                    ..Default::default()
+                });
+            }
+            format!("p1-shell-{shell_count}")
+        };
+
+        observe_fixture_locations(&mut s);
+        ui.snapshot.set(s);
+        ui.snapshot_ready.set(true);
+        ui.project.set("p1".into());
+        ui.page.set("terminals".into());
+        ui.terminal_sidebar.set(true);
+        ui.open_terminal(selected_id);
+
+        view()
+            .w_full()
+            .h(px(42.))
+            .child(
+                canban_ui_kit::press_target()
+                    .w(px(0.))
+                    .h(px(0.))
+                    .accessibility_label(Some("Hide Sidebar".into()))
+                    .on_press(move |_: &()| ui.terminal_sidebar.set(false)),
+            )
+            .child(crate::terminals::tabs::header(ui))
+    }
+
+    #[component]
+    fn ProjectManyProbe() -> impl IntoElement {
+        let ui = crate::presenter::Ui::new();
+        build_header_probe(ui, false, 14)
+    }
+
+    #[component]
+    fn CardManyProbe() -> impl IntoElement {
+        let ui = crate::presenter::Ui::new();
+        build_header_probe(ui, true, 13)
+    }
+
+    #[component]
+    fn FewTabsProbe() -> impl IntoElement {
+        let ui = crate::presenter::Ui::new();
+        build_header_probe(ui, false, 2)
+    }
+
+    struct FrameTree {
+        alive: HashSet<NodeId>,
+        parents: HashMap<NodeId, NodeId>,
+        frames: HashMap<NodeId, Bounds<Points>>,
+        scroll_contents: HashMap<NodeId, Size<Points>>,
+        horizontal_scrolls: HashSet<NodeId>,
+        labels: HashMap<String, NodeId>,
+        tab_nodes: HashSet<NodeId>,
+    }
+
+    impl FrameTree {
+        fn new() -> Self {
+            Self {
+                alive: HashSet::new(),
+                parents: HashMap::new(),
+                frames: HashMap::new(),
+                scroll_contents: HashMap::new(),
+                horizontal_scrolls: HashSet::new(),
+                labels: HashMap::new(),
+                tab_nodes: HashSet::new(),
+            }
+        }
+        fn apply(&mut self, batch: &nsh_core::MountBatch) {
+            for item in &batch.items {
+                match item {
+                    MountItem::Create { id, .. } => {
+                        self.alive.insert(*id);
+                    }
+                    MountItem::Insert { parent, child, .. } => {
+                        self.parents.insert(*child, *parent);
+                    }
+                    MountItem::Remove { id } => {
+                        self.parents.remove(id);
+                    }
+                    MountItem::Delete { id } => {
+                        self.alive.remove(id);
+                        self.parents.remove(id);
+                        self.frames.remove(id);
+                        self.scroll_contents.remove(id);
+                        self.horizontal_scrolls.remove(id);
+                        self.tab_nodes.remove(id);
+                    }
+                    MountItem::Frame { id, frame } => {
+                        self.frames.insert(*id, *frame);
+                    }
+                    MountItem::ScrollConfig { id, horizontal, .. } => {
+                        if *horizontal {
+                            self.horizontal_scrolls.insert(*id);
+                        } else {
+                            self.horizontal_scrolls.remove(id);
+                        }
+                    }
+                    MountItem::ScrollContent { id, size } => {
+                        self.scroll_contents.insert(*id, *size);
+                    }
+                    MountItem::ViewProps { id, props } => {
+                        if let Some(label) = &props.accessibility.label {
+                            self.labels.insert(label.to_string(), *id);
+                        }
+                        if props.accessibility.role == AccessibilityRole::Tab {
+                            self.tab_nodes.insert(*id);
+                        } else {
+                            self.tab_nodes.remove(id);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        fn is_mounted(&self, mut id: NodeId) -> bool {
+            if !self.alive.contains(&id) {
+                return false;
+            }
+            let mut guard = 0;
+            while id != nsh_core::ROOT_ID {
+                let Some(&parent) = self.parents.get(&id) else {
+                    return false;
+                };
+                id = parent;
+                guard += 1;
+                if guard > 256 {
+                    return false;
+                }
+            }
+            true
+        }
+        fn is_ancestor(&self, ancestor: NodeId, mut id: NodeId) -> bool {
+            let mut guard = 0;
+            while id != nsh_core::ROOT_ID {
+                if id == ancestor {
+                    return true;
+                }
+                let Some(&parent) = self.parents.get(&id) else {
+                    return false;
+                };
+                id = parent;
+                guard += 1;
+                if guard > 256 {
+                    return false;
+                }
+            }
+            false
+        }
+        fn page_bounds(&self, mut id: NodeId) -> Option<(f32, f32)> {
+            let frame = *self.frames.get(&id)?;
+            let mut x = 0.0f32;
+            let mut guard = 0;
+            while id != nsh_core::ROOT_ID {
+                let f = self.frames.get(&id)?;
+                x += f.origin.x.0;
+                id = *self.parents.get(&id)?;
+                guard += 1;
+                if guard > 256 {
+                    return None;
+                }
+            }
+            Some((x, x + frame.size.width.0))
+        }
+        fn find_label_prefix(&self, prefix: &str) -> NodeId {
+            *self
+                .labels
+                .iter()
+                .find(|(lbl, id)| lbl.starts_with(prefix) && self.is_mounted(**id))
+                .unwrap_or_else(|| panic!("mounted label starting with `{prefix}` not found"))
+                .1
+        }
+        fn find_tab_scroll(&self, label: &str) -> (Bounds<Points>, (f32, f32), Size<Points>) {
+            let mounted_tabs: Vec<NodeId> = self
+                .tab_nodes
+                .iter()
+                .copied()
+                .filter(|tab| self.is_mounted(*tab))
+                .collect();
+            let (&scroll_id, &content) = self
+                .scroll_contents
+                .iter()
+                .find(|(id, _)| {
+                    self.is_mounted(**id)
+                        && self.horizontal_scrolls.contains(id)
+                        && (mounted_tabs.is_empty()
+                            || mounted_tabs.iter().any(|tab| self.is_ancestor(**id, *tab)))
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{label}: mounted tab strip scroll container with ScrollContent not found (scroll_contents={:?}, horizontal_scrolls={:?}, mounted_tabs={mounted_tabs:?})",
+                        self.scroll_contents,
+                        self.horizontal_scrolls
+                    )
+                });
+            let frame = *self.frames.get(&scroll_id).expect("tab scroll frame");
+            let bounds = self.page_bounds(scroll_id).expect("tab scroll page bounds");
+            (frame, bounds, content)
+        }
+    }
+
+    fn mount_and_pump<C: nsh_core::element::Component>(
+        header_width: f32,
+        sidebar_open: bool,
+    ) -> FrameTree
+    where
+        C::Props: Default,
+    {
+        let mut core = Core::new(ApproxTextEngine, size(px(header_width), px(42.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<C>());
+        let mut tree = FrameTree::new();
+
+        let pump = |core: &mut Core<ApproxTextEngine>, tree: &mut FrameTree| {
+            for _ in 0..8 {
+                let had_batch = if let Some(batch) = core.commit() {
+                    tree.apply(&batch);
+                    true
+                } else {
+                    false
+                };
+                let mut events = Vec::new();
+                core.take_events(&mut events);
+                let mut dispatched = false;
+                for ev in events {
+                    match ev {
+                        JsEvent::Event(id, kind, payload) => {
+                            core.component_event(id, kind, &payload);
+                            dispatched = true;
+                        }
+                        JsEvent::LayoutListener {
+                            host,
+                            id,
+                            listener,
+                            frame,
+                        } => {
+                            core.component_layout(host, id, &listener, frame);
+                            dispatched = true;
+                        }
+                        _ => {}
+                    }
+                }
+                if !had_batch && !dispatched {
+                    break;
+                }
+            }
+        };
+
+        pump(&mut core, &mut tree);
+        if !sidebar_open {
+            let btn = *tree.labels.get("Hide Sidebar").unwrap();
+            assert!(core.component_event(btn, EventKind::Press, &EventPayload::None));
+            pump(&mut core, &mut tree);
+        }
+        tree
+    }
+
+    fn assert_many_tabs<C: nsh_core::element::Component>(
+        scope_label: &str,
+        context_prefix: &str,
+        header_width: f32,
+        sidebar_open: bool,
+    ) where
+        C::Props: Default,
+    {
+        let tree = mount_and_pump::<C>(header_width, sidebar_open);
+        let (scroll_frame, (scroll_left, scroll_right), scroll_content) = tree.find_tab_scroll(
+            &format!("{scope_label} {header_width}pt sidebar={sidebar_open}"),
+        );
+        assert!(
+            scroll_content.width.0 > scroll_frame.size.width.0 + 50.0,
+            "{scope_label} at {header_width}pt (sidebar={sidebar_open}): expected horizontal scroll overflow, got content={} vs frame={}",
+            scroll_content.width.0,
+            scroll_frame.size.width.0
+        );
+
+        let (plus_left, plus_right) = tree
+            .page_bounds(tree.find_label_prefix("New terminal in current worktree"))
+            .unwrap();
+        let (picker_left, picker_right) = tree
+            .page_bounds(tree.find_label_prefix("Choose terminal worktree or machine"))
+            .unwrap();
+        let (agent_left, agent_right) = tree
+            .page_bounds(tree.find_label_prefix("Open Agent"))
+            .unwrap();
+
+        assert!(
+            scroll_right <= plus_left + 0.5
+                && plus_right <= picker_left + 0.5
+                && picker_right <= agent_left + 0.5,
+            "{scope_label} at {header_width}pt (sidebar={sidebar_open}): strip/actions order/overlap scroll=({scroll_left},{scroll_right}), plus=({plus_left},{plus_right}), picker=({picker_left},{picker_right}), agent=({agent_left},{agent_right})"
+        );
+
+        let (ctx_item_left, ctx_item_right) = tree
+            .page_bounds(tree.find_label_prefix(context_prefix))
+            .unwrap();
+        let (branch_left, branch_right) = tree
+            .page_bounds(tree.find_label_prefix("View terminal changes in Git"))
+            .unwrap();
+        let (more_left, more_right) = tree
+            .page_bounds(tree.find_label_prefix("Terminal actions"))
+            .unwrap();
+        let context_left = ctx_item_left.min(branch_left);
+        let context_right = more_right;
+
+        assert!(
+            scroll_right <= context_left + 0.5,
+            "{scope_label} at {header_width}pt (sidebar={sidebar_open}): tab strip overlapped context bar (scroll_right={scroll_right} > context_left={context_left})"
+        );
+        if header_width >= 640.0 {
+            assert!(
+                agent_right <= context_left + 0.5,
+                "{scope_label} at {header_width}pt (sidebar={sidebar_open}): action cluster overlapped context bar (agent_right={agent_right} > context_left={context_left})"
+            );
+            assert!(
+                ctx_item_right - ctx_item_left > 20.0,
+                "{scope_label} at {header_width}pt: `{context_prefix}` collapsed: ({ctx_item_left}, {ctx_item_right})"
+            );
+            assert!(
+                branch_right - branch_left > 30.0,
+                "{scope_label} at {header_width}pt: branch pill collapsed: ({branch_left}, {branch_right})"
+            );
+            assert!(
+                more_right - more_left >= 24.0,
+                "{scope_label} at {header_width}pt: more button collapsed: ({more_left}, {more_right})"
+            );
+        }
+
+        let (hosts_left, hosts_right) = tree
+            .page_bounds(tree.find_label_prefix("Connected Hosts"))
+            .unwrap();
+        let (notif_left, notif_right) = tree
+            .page_bounds(tree.find_label_prefix("Activity & Notifications"))
+            .unwrap();
+        assert!(
+            context_right <= hosts_left + 0.5
+                && hosts_right <= notif_left + 0.5
+                && notif_right <= header_width + 0.5
+                && hosts_right - hosts_left > 20.0
+                && notif_right - notif_left > 20.0,
+            "{scope_label} at {header_width}pt (sidebar={sidebar_open}): context/hosts/notif bounds invalid: context_right={context_right}, hosts=({hosts_left},{hosts_right}), notif=({notif_left},{notif_right})"
+        );
+    }
+
+    for (w, sidebar_open) in [
+        (1200.0, true),
+        (884.0, true),
+        (640.0, true),
+        (884.0, false),
+        (420.0, true),
+    ] {
+        assert_many_tabs::<ProjectManyProbe>(
+            "ProjectRoot",
+            "Open current Project",
+            w,
+            sidebar_open,
+        );
+        assert_many_tabs::<CardManyProbe>("CardWorktree", "Open current Card", w, sidebar_open);
+    }
+
+    // Verify few-tabs layout still pins `+` right next to the last tab (not stretched across header).
+    let few_tree = mount_and_pump::<FewTabsProbe>(1200.0, true);
+    let (scroll_frame, (_, scroll_right), scroll_content) =
+        few_tree.find_tab_scroll("FewTabs 1200pt");
+    let (plus_left, _) = few_tree
+        .page_bounds(few_tree.find_label_prefix("New terminal in current worktree"))
+        .unwrap();
+    let (_, agent_right) = few_tree
+        .page_bounds(few_tree.find_label_prefix("Open Agent"))
+        .unwrap();
+    let (ctx_left, _) = few_tree
+        .page_bounds(few_tree.find_label_prefix("Open current Project"))
+        .unwrap();
+    let (branch_left, _) = few_tree
+        .page_bounds(few_tree.find_label_prefix("View terminal changes in Git"))
+        .unwrap();
+    let context_left = ctx_left.min(branch_left);
+    assert!(
+        (scroll_frame.size.width.0 - scroll_content.width.0).abs() <= 0.5
+            && scroll_frame.size.width.0 < 500.0,
+        "few-tabs scroll view must hug its tabs rather than expanding: width={}, content={}",
+        scroll_frame.size.width.0,
+        scroll_content.width.0
+    );
+    assert!(
+        plus_left - scroll_right <= 8.0,
+        "plus button must stay immediately right of the last tab: plus_left={plus_left}, scroll_right={scroll_right}"
+    );
+    assert!(
+        agent_right < context_left - 50.0,
+        "drag spacer must remain between actions and context bar: agent_right={agent_right}, context_left={context_left}"
+    );
+}
+
+#[test]
 fn managed_classification_policy_tooltips_and_reclaim_states_are_distinct() {
     use nsh_core::{ApproxTextEngine, Core, geometry::size, prelude::*};
 
