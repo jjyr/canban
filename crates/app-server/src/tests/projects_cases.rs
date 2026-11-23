@@ -151,6 +151,116 @@ fn appserver_rejects_a_second_owner_and_supports_explicit_shutdown() {
 }
 
 #[test]
+fn app_shutdown_flushes_rpc_reply_before_wait_stopped_tears_down_runtime() {
+    // 1. Direct in-process call wakes wait_stopped() immediately.
+    let (_dir, app, _, _) = setup();
+    let wait_app = Arc::clone(&app);
+    let waiter = std::thread::spawn(move || wait_app.wait_stopped());
+    assert_eq!(
+        app.call("app.shutdown", json!({})).unwrap(),
+        json!({"stopping": true})
+    );
+    assert!(app.stopped());
+    waiter.join().unwrap();
+
+    // 2. Socket RPC mimics `canban serve`: wait_stopped() immediately drops `Running` on return.
+    for iter in 0..20 {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let app = AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
+        let endpoint = app.endpoint();
+        let running = app.start().unwrap();
+        let wait_app = Arc::clone(&app);
+        let server_thread = std::thread::spawn(move || {
+            wait_app.wait_stopped();
+            drop(running);
+        });
+
+        if iter == 0 {
+            let err = rpc(
+                &endpoint,
+                "app.shutdown",
+                json!({"expected_pid": std::process::id() + 1}),
+            )
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("refusing shutdown"),
+                "unexpected error on expected_pid mismatch: {err:#}"
+            );
+            assert!(!app.stopped());
+        }
+
+        let params = if iter % 2 == 0 {
+            json!({"expected_pid": std::process::id()})
+        } else {
+            json!({})
+        };
+        let reply = if iter % 2 == 0 {
+            canban_updater::handoff::rpc(&endpoint, "app.shutdown", params)
+        } else {
+            rpc(&endpoint, "app.shutdown", params)
+        }
+        .unwrap_or_else(|e| panic!("iteration {iter} app.shutdown RPC failed: {e:#}"));
+        assert_eq!(reply, json!({"stopping": true}), "iteration {iter}");
+        assert!(app.stopped(), "iteration {iter} should mark app stopped");
+        server_thread.join().unwrap();
+    }
+}
+
+#[test]
+fn app_shutdown_flushes_rpc_reply_over_tcp_and_yamux_before_teardown() {
+    let listen = ServerListenConfig {
+        tailscale: false,
+        port: 0,
+        listen: Some("127.0.0.1:0".into()),
+        allow_insecure_bind: false,
+    };
+
+    // Direct TCP RPC
+    for iter in 0..5 {
+        let dir = tempfile::tempdir().unwrap();
+        let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+        let running = app.start_with_listen(Some(listen.clone())).unwrap();
+        let addr = app.bound_tcp_addrs().into_iter().next().unwrap();
+        let (_, token) = app.issue_device_token("tcp-shutdown-test").unwrap();
+        let wait_app = Arc::clone(&app);
+        let server_thread = std::thread::spawn(move || {
+            wait_app.wait_stopped();
+            drop(running);
+        });
+
+        let reply = client::rpc_tcp(&addr, Some(&token), "app.shutdown", json!({}))
+            .unwrap_or_else(|e| panic!("direct TCP iteration {iter} failed: {e:#}"));
+        assert_eq!(reply, json!({"stopping": true}));
+        assert!(app.stopped());
+        server_thread.join().unwrap();
+    }
+
+    // yamux/1 multiplexed AppClient RPC
+    for iter in 0..5 {
+        let dir = tempfile::tempdir().unwrap();
+        let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+        let running = app.start_with_listen(Some(listen.clone())).unwrap();
+        let addr = app.bound_tcp_addrs().into_iter().next().unwrap();
+        let (_, token) = app.issue_device_token("yamux-shutdown-test").unwrap();
+        let wait_app = Arc::clone(&app);
+        let server_thread = std::thread::spawn(move || {
+            wait_app.wait_stopped();
+            drop(running);
+        });
+
+        let mux_client = client::AppClient::connect_tcp(addr, token).unwrap();
+        let reply = mux_client
+            .call("app.shutdown", json!({}))
+            .unwrap_or_else(|e| panic!("yamux iteration {iter} failed: {e:#}"));
+        assert_eq!(reply, json!({"stopping": true}));
+        assert!(app.stopped());
+        drop(mux_client);
+        server_thread.join().unwrap();
+    }
+}
+
+#[test]
 fn completion_keeps_terminal_without_an_exit_intent_or_clock_comparison() {
     let (_dir, app, _, c) = setup();
     app.call(

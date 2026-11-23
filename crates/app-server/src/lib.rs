@@ -920,6 +920,12 @@ impl AppServer {
             }
         }
     }
+    /// Marks the server as logically stopping (`stopped() == true`) without waking
+    /// `wait_stopped()` or cancelling transport tasks, so an in-flight `app.shutdown` RPC
+    /// can flush its reply before runtime teardown begins.
+    pub(crate) fn begin_stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
     pub(crate) fn trigger_stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
         let _ = self.stop_tx.send(true);
@@ -938,7 +944,7 @@ impl AppServer {
     }
     pub fn wait_stopped(&self) {
         let mut guard = self.stop_cond.0.lock().unwrap();
-        while !*guard && !self.stopped() {
+        while !*guard {
             guard = self.stop_cond.1.wait(guard).unwrap();
         }
     }

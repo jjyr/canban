@@ -78,7 +78,11 @@ impl AppServer {
     }
 
     pub fn call(&self, method: &str, p: Value) -> Result<Value> {
-        self.call_with_transport_token(method, p, None)
+        let (value, pending_stop) = self.call_with_transport_token(method, p, None, false)?;
+        if pending_stop {
+            self.trigger_stop();
+        }
+        Ok(value)
     }
 
     pub(crate) fn call_with_transport_token(
@@ -86,13 +90,15 @@ impl AppServer {
         method: &str,
         p: Value,
         transport_token: Option<&str>,
-    ) -> Result<Value> {
+        defer_stop: bool,
+    ) -> Result<(Value, bool)> {
         representation::validate(method, &p)?;
         let mut business = p.clone();
         business.as_object_mut().unwrap().remove("view");
         business.as_object_mut().unwrap().remove("fields");
-        let result = self.call_business(method, business, transport_token)?;
-        Ok(representation::render(method, &p, result))
+        let result = self.call_business(method, business, transport_token, defer_stop)?;
+        let pending_stop = defer_stop && method == "app.shutdown";
+        Ok((representation::render(method, &p, result), pending_stop))
     }
 
     fn call_business(
@@ -100,6 +106,7 @@ impl AppServer {
         method: &str,
         p: Value,
         transport_token: Option<&str>,
+        defer_stop: bool,
     ) -> Result<Value> {
         if canban_updater::handoff::active(&self.home)
             && !matches!(
@@ -191,7 +198,11 @@ impl AppServer {
                     );
                 }
                 let _ = self.finish_agent_work();
-                self.trigger_stop();
+                if defer_stop {
+                    self.begin_stop();
+                } else {
+                    self.trigger_stop();
+                }
                 Ok(json!({"stopping":true}))
             }
             "app.state" => self.state_response(&p),

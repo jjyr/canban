@@ -211,6 +211,22 @@ impl AppServer {
     }
 }
 
+struct DeferredStopGuard(Option<Arc<AppServer>>);
+
+impl DeferredStopGuard {
+    fn trigger_now(&mut self) {
+        if let Some(server) = self.0.take() {
+            server.trigger_stop();
+        }
+    }
+}
+
+impl Drop for DeferredStopGuard {
+    fn drop(&mut self) {
+        self.trigger_now();
+    }
+}
+
 async fn serve_stream(
     server: Arc<AppServer>,
     accepted: canban_transport::AcceptedStream,
@@ -291,20 +307,42 @@ async fn serve_stream(
         let params = input["params"].clone();
         let tok = auth_token.clone();
         let call_res = tokio::task::spawn_blocking(move || {
-            srv.call_with_transport_token(&method, params, tok.as_deref().map(String::as_str))
+            srv.call_with_transport_token(&method, params, tok.as_deref().map(String::as_str), true)
         })
         .await?;
-        let reply = match call_res {
-            Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
-            Err(e) => {
-                json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":format!("{e:#}")}})
-            }
+        let (reply, mut deferred_stop) = match call_res {
+            Ok((result, pending_stop)) => (
+                json!({"jsonrpc":"2.0","id":id,"result":result}),
+                DeferredStopGuard(pending_stop.then(|| server.clone())),
+            ),
+            Err(e) => (
+                json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":format!("{e:#}")}}),
+                DeferredStopGuard(None),
+            ),
         };
-        tokio::time::timeout(
+        let write_res = tokio::time::timeout(
             Duration::from_secs(90),
             write_json_line_async(&mut writer, &reply),
         )
-        .await??;
+        .await;
+        if deferred_stop.0.is_some() {
+            if matches!(write_res, Ok(Ok(()))) {
+                let _ = tokio::time::timeout(Duration::from_secs(2), writer.shutdown()).await;
+                let _ = tokio::time::timeout(Duration::from_millis(250), async {
+                    let mut drain = [0u8; 64];
+                    while let Ok(n) = reader.read(&mut drain).await {
+                        if n == 0 {
+                            break;
+                        }
+                    }
+                })
+                .await;
+            }
+            deferred_stop.trigger_now();
+            write_res??;
+            return Ok(());
+        }
+        write_res??;
         if server.stopped() {
             return Ok(());
         }
