@@ -967,29 +967,15 @@ fn controls() -> impl IntoElement {
                 )
                 .child(canban_ui::settings::acknowledgements_section(ui))
                 .child(
-                    panel().child(label("Native libghostty terminal")).child({
-                        #[cfg(target_os = "macos")]
-                        {
-                            native("canban/terminal")
-                                .prop("theme", canban_ui::utilities::terminal_theme)
-                                .prop("font", move || canban_ui::utilities::terminal_font(ui))
-                                .prop("content", json!(fixtures::TERMINAL))
-                                .prop("read_only", json!(true))
-                                .w_full()
-                                .h(px(320.0))
-                        }
-                        #[cfg(not(target_os = "macos"))]
-                        {
-                            canban_terminal::linux::preview_terminal(
-                                fixtures::TERMINAL,
-                                canban_ui::utilities::terminal_theme,
-                                move || canban_ui::utilities::terminal_font(ui),
-                                canban_terminal::linux::FocusRequest::default,
-                            )
-                            .w_full()
-                            .h(px(320.0))
-                        }
-                    }),
+                    panel().child(label("Native libghostty terminal")).child(
+                        canban_terminal::TerminalView::preview(
+                            fixtures::TERMINAL,
+                            canban_ui::utilities::terminal_theme,
+                            move || canban_ui::utilities::terminal_font(ui),
+                            canban_terminal::FocusRequest::default,
+                        )
+                        .height(px(320.0)),
+                    ),
                 ),
         ),
     )

@@ -120,17 +120,17 @@ fn main() {
     let target = std::env::var("TARGET").unwrap();
     if target_os == "macos" {
         cc::Build::new()
-            .file("src/apple_render.m")
-            .file("src/macos_view.m")
+            .file("src/apple/apple_render.m")
+            .file("src/apple/macos_view.m")
             .flag("-fobjc-arc")
             .flag("-Wno-incompatible-pointer-types")
             .compile("canban-terminal-native");
         for fw in ["AppKit", "CoreText", "CoreGraphics", "Foundation"] {
             println!("cargo:rustc-link-lib=framework={fw}");
         }
-        println!("cargo:rerun-if-changed=src/apple_render.h");
-        println!("cargo:rerun-if-changed=src/apple_render.m");
-        println!("cargo:rerun-if-changed=src/macos_view.m");
+        println!("cargo:rerun-if-changed=src/apple/apple_render.h");
+        println!("cargo:rerun-if-changed=src/apple/apple_render.m");
+        println!("cargo:rerun-if-changed=src/apple/macos_view.m");
     }
     println!("cargo:rerun-if-changed=src/ffi.h");
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());

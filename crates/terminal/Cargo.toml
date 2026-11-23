@@ -24,7 +24,9 @@ nsh-core.workspace = true
 nsh-base.workspace = true
 canban-exec = { workspace = true, optional = true }
 canban-herdr = { workspace = true, optional = true }
+canban-transport.workspace = true
 canban-types.workspace = true
+tokio.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 nsh-platform-macos.workspace = true

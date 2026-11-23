@@ -1,9 +1,10 @@
 use crate::{
     ffi::*,
-    model::{KeyInput, Model, MouseInput, RenderImageData, RenderSnapshot, WheelOutput},
+    input,
+    model::{KeyInput, Model, MouseInput, RenderImageData, RenderSnapshot},
     session::{
         self, Input, LiveSession, SessionInit, State, WakeHub, detach_session_listener,
-        display_facts_for_model, get_or_spawn_session,
+        get_or_spawn_session,
     },
 };
 use canban_types::Config;
@@ -283,24 +284,6 @@ impl Host {
         session::accepts_pty_input(state, self.read_only)
     }
 
-    fn send_bytes(&self, bytes: Vec<u8>) {
-        if bytes.is_empty() {
-            return;
-        }
-        if let Some(tx) = &self.input {
-            let _ = tx.send(Input::Bytes(bytes));
-        }
-    }
-
-    fn send_auto_bytes(&self, bytes: Vec<u8>) {
-        if bytes.is_empty() {
-            return;
-        }
-        if let Some(tx) = &self.input {
-            let _ = tx.send(Input::AutoBytes(bytes));
-        }
-    }
-
     fn effective_status(&self, state: &State) -> String {
         session::effective_status(
             state,
@@ -390,27 +373,12 @@ impl Host {
         if !self.view_ptr.is_null() {
             attach_nsview_wake(&session.wake, self.view_ptr);
         }
-        let focus_seq = {
-            let mut s = session.state.lock().unwrap();
-            if s.focused != prev_focused {
-                s.focused = prev_focused;
-                let seq = if !self.read_only && (s.connected || s.status.starts_with("Connecting"))
-                {
-                    s.model.focus_sequence(prev_focused)
-                } else {
-                    Vec::new()
-                };
-                Some((prev_focused, seq))
-            } else {
-                None
-            }
-        };
-        if let Some((focused, seq)) = focus_seq {
-            let _ = session.input.send(Input::Focus(focused));
-            if !seq.is_empty() {
-                let _ = session.input.send(Input::Bytes(seq));
-            }
-        }
+        input::apply_focus(
+            &session.state,
+            Some(&session.input),
+            self.read_only,
+            prev_focused,
+        );
         self.state = session.state.clone();
         self.size_cv = session.size_cv.clone();
         self.wake = session.wake.clone();
@@ -557,11 +525,7 @@ extern "C" fn cb_snapshot(
     let host = unsafe { &mut *(host_ptr as *mut Host) };
     host.wake.ack();
 
-    let mut state = host.state.lock().unwrap();
     if geom.cols >= 2 && geom.rows >= 1 {
-        let cols = geom.cols.clamp(2, 500);
-        let rows = geom.rows.clamp(1, 200);
-        session::record_viewport_size(cols, rows);
         let cw_milli = if geom.cell_width_milli > 0 {
             geom.cell_width_milli
         } else {
@@ -572,43 +536,25 @@ extern "C" fn cb_snapshot(
         } else {
             geom.cell_height.max(1) * 1000
         };
-        session::record_cell_metrics_milli(cw_milli, ch_milli);
-        let became_ready = !state.size_ready;
-        let prev_cell = state.model.cell_size();
-        state.size_ready = true;
-        let grid_changed = state.model.resize_with_metrics(
-            cols,
-            rows,
-            geom.cell_width.max(1),
-            geom.cell_height.max(1),
-            geom.pad_left,
-            geom.pad_right,
-            geom.pad_top,
-            geom.pad_bottom,
+        input::apply_resize_with_cell_milli(
+            &host.state,
+            &host.size_cv,
+            host.input.as_ref(),
+            geom.cols,
+            geom.rows,
+            geom.cell_width,
+            geom.cell_height,
+            (cw_milli, ch_milli),
+            (geom.pad_left, geom.pad_right, geom.pad_top, geom.pad_bottom),
         );
-        if let Some(tx) = &host.input {
-            if grid_changed {
-                let _ = tx.send(Input::Resize(cols, rows));
-            }
-            if state.connected && state.model.cell_size() != prev_cell {
-                let _ = tx.send(Input::Facts(display_facts_for_model(
-                    &state.model,
-                    state.theme.as_ref(),
-                )));
-            }
-        }
-        if became_ready {
-            host.size_cv.notify_all();
-        }
     }
+    let mut state = host.state.lock().unwrap();
     let _ = state.model.expire_render_hold_if_due();
     let _ = state.model.advance_animation_if_due();
     let replies = state.model.replies();
     if state.is_attach_settling() {
         drop(state);
-        if !replies.is_empty() {
-            host.send_auto_bytes(replies);
-        }
+        input::send_auto_bytes(host.input.as_ref(), replies);
         return std::ptr::null();
     }
     let status = host.effective_status(&state);
@@ -616,9 +562,7 @@ extern "C" fn cb_snapshot(
     let rev = state.model.revision;
     if !force_full && rev == host.seen && !status_changed {
         drop(state);
-        if !replies.is_empty() {
-            host.send_auto_bytes(replies);
-        }
+        input::send_auto_bytes(host.input.as_ref(), replies);
         return std::ptr::null();
     }
     host.seen = rev;
@@ -631,25 +575,13 @@ extern "C" fn cb_snapshot(
         snap.dirty_state = 1;
     }
     drop(state);
-    if !replies.is_empty() {
-        host.send_auto_bytes(replies);
-    }
+    input::send_auto_bytes(host.input.as_ref(), replies);
     host.snapshot_box = snap;
     &host.snapshot_box as *const RenderSnapshot
 }
 
 extern "C" fn cb_key(host_ptr: *mut c_void, ev: CbKeyEvent) -> bool {
     let host = unsafe { &mut *(host_ptr as *mut Host) };
-    let mut state = host.state.lock().unwrap();
-    if !host.accepts_pty_input(&state) {
-        return false;
-    }
-    state.clear_attach_settle();
-    let action = match ev.action {
-        0 => GHOSTTY_KEY_ACTION_RELEASE,
-        2 => GHOSTTY_KEY_ACTION_REPEAT,
-        _ => GHOSTTY_KEY_ACTION_PRESS,
-    };
     let utf8 = if ev.utf8_ptr.is_null() || ev.utf8_len == 0 {
         ""
     } else {
@@ -661,21 +593,20 @@ extern "C" fn cb_key(host_ptr: *mut c_void, ev: CbKeyEvent) -> bool {
     } else {
         macos_key(ev.keycode)
     };
-    let encoded = state.model.encode_key(KeyInput {
-        action,
-        key,
-        mods: ev.mods,
-        consumed_mods: ev.consumed_mods,
-        composing: ev.composing != 0,
-        utf8,
-        unshifted_codepoint: ev.unshifted_cp,
-    });
-    drop(state);
-    if encoded.is_empty() {
-        return false;
-    }
-    host.send_bytes(encoded);
-    true
+    input::send_key(
+        &host.state,
+        host.input.as_ref(),
+        host.read_only,
+        KeyInput {
+            action: input::decode_key_action(ev.action),
+            key,
+            mods: ev.mods,
+            consumed_mods: ev.consumed_mods,
+            composing: ev.composing != 0,
+            utf8,
+            unshifted_codepoint: ev.unshifted_cp,
+        },
+    )
 }
 
 extern "C" fn cb_text(host_ptr: *mut c_void, ptr: *const u8, len: usize) {
@@ -686,15 +617,7 @@ extern "C" fn cb_text(host_ptr: *mut c_void, ptr: *const u8, len: usize) {
     let Ok(text) = std::str::from_utf8(unsafe { std::slice::from_raw_parts(ptr, len) }) else {
         return;
     };
-    let bytes = {
-        let mut state = host.state.lock().unwrap();
-        if !host.accepts_pty_input(&state) {
-            return;
-        }
-        state.clear_attach_settle();
-        state.model.commit_text(text)
-    };
-    host.send_bytes(bytes);
+    input::commit_text(&host.state, host.input.as_ref(), host.read_only, text);
 }
 
 extern "C" fn cb_paste(host_ptr: *mut c_void, ptr: *const u8, len: usize) {
@@ -705,15 +628,7 @@ extern "C" fn cb_paste(host_ptr: *mut c_void, ptr: *const u8, len: usize) {
     let Ok(text) = std::str::from_utf8(unsafe { std::slice::from_raw_parts(ptr, len) }) else {
         return;
     };
-    let bytes = {
-        let mut state = host.state.lock().unwrap();
-        if !host.accepts_pty_input(&state) {
-            return;
-        }
-        state.clear_attach_settle();
-        state.model.paste(text)
-    };
-    host.send_bytes(bytes);
+    input::paste_text(&host.state, host.input.as_ref(), host.read_only, text);
 }
 
 extern "C" fn cb_paste_paths(
@@ -738,23 +653,7 @@ extern "C" fn cb_paste_paths(
             paths.push(s);
         }
     }
-    let formatted = crate::shell_escape_paths(paths);
-    if formatted.is_empty() {
-        return false;
-    }
-    let bytes = {
-        let mut state = host.state.lock().unwrap();
-        if !host.accepts_pty_input(&state) {
-            return false;
-        }
-        state.clear_attach_settle();
-        state.model.paste(&formatted)
-    };
-    if bytes.is_empty() {
-        return false;
-    }
-    host.send_bytes(bytes);
-    true
+    input::paste_paths(&host.state, host.input.as_ref(), host.read_only, paths)
 }
 
 extern "C" fn cb_can_accept_input(host_ptr: *mut c_void) -> bool {
@@ -771,32 +670,19 @@ extern "C" fn cb_mouse(host_ptr: *mut c_void, ev: CbMouseEvent) -> bool {
         return false;
     }
     let host = unsafe { &mut *(host_ptr as *mut Host) };
-    let mut state = host.state.lock().unwrap();
-    if !host.accepts_pty_input(&state) || !state.model.mouse_tracking() {
-        return false;
-    }
-    let action = match ev.action {
-        1 => GHOSTTY_MOUSE_ACTION_RELEASE,
-        2 => GHOSTTY_MOUSE_ACTION_MOTION,
-        _ => GHOSTTY_MOUSE_ACTION_PRESS,
-    };
-    let button = match ev.button {
-        1 => Some(GHOSTTY_MOUSE_BUTTON_LEFT),
-        2 => Some(GHOSTTY_MOUSE_BUTTON_RIGHT),
-        3 => Some(GHOSTTY_MOUSE_BUTTON_MIDDLE),
-        _ => None,
-    };
-    let bytes = state.model.encode_mouse(MouseInput {
-        action,
-        button,
-        mods: ev.mods,
-        x_px: ev.x_px,
-        y_px: ev.y_px,
-        any_button_pressed: ev.any_pressed != 0,
-    });
-    drop(state);
-    host.send_bytes(bytes);
-    true
+    input::send_mouse(
+        &host.state,
+        host.input.as_ref(),
+        host.read_only,
+        MouseInput {
+            action: input::decode_mouse_action(ev.action),
+            button: input::decode_mouse_button(ev.button),
+            mods: ev.mods,
+            x_px: ev.x_px,
+            y_px: ev.y_px,
+            any_button_pressed: ev.any_pressed != 0,
+        },
+    )
 }
 
 extern "C" fn cb_wheel(
@@ -809,58 +695,33 @@ extern "C" fn cb_wheel(
     alt_override: bool,
 ) {
     let host = unsafe { &mut *(host_ptr as *mut Host) };
-    let out = {
-        let mut state = host.state.lock().unwrap();
-        state.clear_attach_settle();
-        let can_send = host.accepts_pty_input(&state);
-        state.model.wheel(
-            delta_rows as isize,
-            delta_cols as isize,
-            x_px,
-            y_px,
-            mods,
-            alt_override || !can_send,
-        )
-    };
-    if let WheelOutput::Pty(bytes) = out {
-        host.send_bytes(bytes);
-    }
+    input::send_wheel(
+        &host.state,
+        host.input.as_ref(),
+        host.read_only,
+        delta_rows as isize,
+        delta_cols as isize,
+        x_px,
+        y_px,
+        mods,
+        alt_override,
+    );
 }
 
 extern "C" fn cb_select(host_ptr: *mut c_void, ev: CbSelectEvent) -> i8 {
     let host = unsafe { &mut *(host_ptr as *mut Host) };
     let mut state = host.state.lock().unwrap();
     state.clear_attach_settle();
-    match ev.kind {
-        0 => {
-            state.model.select_press(
-                ev.x_px,
-                ev.y_px,
-                ev.time_ns,
-                ev.repeat_interval_ns,
-                ev.shift_extend != 0,
-                ev.rectangle != 0,
-            );
-            0
-        }
-        1 => state.model.select_drag(ev.x_px, ev.y_px, ev.rectangle != 0),
-        2 => {
-            state.model.select_release(ev.x_px, ev.y_px);
-            0
-        }
-        3 => state
-            .model
-            .select_autoscroll_tick(ev.x_px, ev.y_px, ev.rectangle != 0),
-        4 => {
-            state.model.select_all();
-            0
-        }
-        5 => {
-            state.model.clear_selection();
-            0
-        }
-        _ => 0,
-    }
+    input::apply_select(
+        &mut state.model,
+        ev.kind,
+        ev.x_px,
+        ev.y_px,
+        ev.time_ns,
+        ev.repeat_interval_ns,
+        ev.shift_extend != 0,
+        ev.rectangle != 0,
+    )
 }
 
 extern "C" fn cb_copy_text(host_ptr: *mut c_void, out_len: *mut usize) -> *const u8 {
@@ -890,7 +751,7 @@ extern "C" fn cb_has_selection(host_ptr: *mut c_void) -> bool {
 
 extern "C" fn cb_link_at(host_ptr: *mut c_void, x_px: f64, y_px: f64) -> CbLinkSpan {
     let host = unsafe { &mut *(host_ptr as *mut Host) };
-    let found = host.state.lock().unwrap().model.link_at_px(x_px, y_px);
+    let found = input::link_at_px(&host.state, x_px, y_px);
     match found {
         Some(link) => {
             host.link_scratch = link.uri;
@@ -909,39 +770,12 @@ extern "C" fn cb_link_at(host_ptr: *mut c_void, x_px: f64, y_px: f64) -> CbLinkS
 
 extern "C" fn cb_focus(host_ptr: *mut c_void, focused: bool) {
     let host = unsafe { &mut *(host_ptr as *mut Host) };
-    let (changed, focus_seq) = {
-        let mut state = host.state.lock().unwrap();
-        let changed = state.focused != focused;
-        state.focused = focused;
-        let seq = if changed && host.accepts_pty_input(&state) {
-            state.model.focus_sequence(focused)
-        } else {
-            Vec::new()
-        };
-        (changed, seq)
-    };
-    if !changed {
-        return;
-    }
-    if let Some(tx) = &host.input {
-        let _ = tx.send(Input::Focus(focused));
-        if !focus_seq.is_empty() {
-            let _ = tx.send(Input::Bytes(focus_seq));
-        }
-    }
+    input::apply_focus(&host.state, host.input.as_ref(), host.read_only, focused);
 }
 
 extern "C" fn cb_clear_screen(host_ptr: *mut c_void) {
     let host = unsafe { &mut *(host_ptr as *mut Host) };
-    let can_send = {
-        let mut state = host.state.lock().unwrap();
-        state.model.clear_selection();
-        host.accepts_pty_input(&state)
-    };
-    if can_send {
-        // Send Ctrl+L (form feed) to clear active shell/TUI cleanly without corrupting prompt state.
-        host.send_bytes(b"\x0c".to_vec());
-    }
+    input::clear_screen(&host.state, host.input.as_ref(), host.read_only);
 }
 
 extern "C" fn cb_accessibility_text(host_ptr: *mut c_void, out_len: *mut usize) -> *const u8 {
@@ -1124,26 +958,7 @@ impl NativeComponent for Terminal {
             {
                 unsafe { cb_terminal_set_theme_bg(view_ptr, r as u8, g as u8, b as u8) };
             }
-            let mut changed = false;
-            let mut facts_to_send = None;
-            {
-                let mut state = self.host.state.lock().unwrap();
-                if state.theme.as_ref() != Some(theme) {
-                    state.model.theme(theme);
-                    state.theme = Some(theme.clone());
-                    changed = true;
-                    if state.connected {
-                        facts_to_send =
-                            Some(display_facts_for_model(&state.model, state.theme.as_ref()));
-                    }
-                }
-            }
-            if let Some(facts) = facts_to_send
-                && let Some(tx) = &self.host.input
-            {
-                let _ = tx.send(Input::Facts(facts));
-            }
-            if changed {
+            if input::apply_theme(&self.host.state, self.host.input.as_ref(), theme) {
                 self.host.seen = u64::MAX;
                 self.host.wake.notify();
             }

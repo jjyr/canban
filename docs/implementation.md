@@ -21,9 +21,9 @@ Status: native macOS (AppKit/Metal) and Linux (GTK4) desktop workbench with simu
 
 [Desktop utilities](desktop-utilities.md) covers the shared bottom bar, subscription Usage, Caffeine, persisted appearance, command catalog and cross-Project Card creation.
 
-## Terminal core iOS cross-compile (Phase 0, 2026-11-22)
+## Terminal cross-platform core & remote PTY transport (Phases 0–2, 2026-11-23)
 
-`crates/terminal` (`canban-terminal --no-default-features`) now cross-compiles `libghostty-vt` + bindgen + `nsh-core`/`nsh-base` for `aarch64-apple-ios-sim` (`platform 7`) and `aarch64-apple-ios` (`platform 2`) via `mise run check-ios` using [vt_smoke.rs](../crates/terminal/examples/vt_smoke.rs); Android NDK verification remains pending. See [Cross-platform Terminal architecture](terminal-portability.md).
+`crates/terminal` now separates macOS `NSView` (`src/apple/`) from portable `nsh_base::Terminal` (`src/portable.rs`), extracts shared input/selection/resize/theme logic into `src/input.rs`, exposes a unified `TerminalView` UI entry point (`src/view.rs`), and implements `RemotePtyTransport` (`src/remote.rs`) speaking Generation-1 Herdr binary framing (`herdr.connect` -> `hello` -> `terminal.attach`) directly over `canban-transport` (`yamux/1` or direct TCP) + Tokio. `canban-terminal --no-default-features` and `canban-ui --no-default-features` cross-compile cleanly with zero warnings on `aarch64-apple-ios-sim` (`platform 7`) and `aarch64-apple-ios` (`platform 2`), verified alongside live iOS 27.0 Simulator `vt_smoke` execution; Android NDK verification remains pending. See [Cross-platform Terminal architecture](terminal-portability.md).
 
 ## Offline editing and synchronization (2026-11-22)
 

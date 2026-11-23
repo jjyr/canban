@@ -167,188 +167,62 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                     )
                 })
         };
-        #[cfg(target_os = "macos")]
-        {
-            let native_view = if !crate::backend::is_connected() {
-                native("canban/terminal")
-                    .prop("theme", crate::utilities::terminal_theme)
-                    .prop("font", move || crate::utilities::terminal_font(ui))
-                    .prop(
-                        "ui_command_keys",
-                        json!(["o", "n", "/", "i", "j", "t", "w", "[", "]", "{", "}"]),
-                    )
-                    .prop("focus", move || {
-                        json!({
-                            "ticket": ui.terminal_focus.get(),
-                            "enabled": has_live_target.get()
-                                && !ui.quick_open.get()
-                                && ui.utility_popup.get().is_empty()
-                                && ui.terminal_rename.get().is_none()
-                                && ui.terminal_close_confirm.get().is_none()
-                                && ui.worktree_modal.get().is_none()
-                                && ui.worktree_promote.get().is_none()
-                                && ui.worktree_remove_confirm.get().is_none()
-                                && ui.project_delete_confirm.get().is_none()
-                        })
-                    })
-                    .prop(
-                        "content",
-                        json!(concat!(
-                            "\x1b[1;36mCanban native Terminal\x1b[0m · Gallery preview (no Core connection)\r\n",
-                            "Styles: \x1b[1mBold\x1b[0m · \x1b[3mItalic\x1b[0m · \x1b[4:3;58;2;255;105;97mCurly underline\x1b[0m · 世界 · ░▒▓█\r\n",
-                            "Links : https://canban.dev · \x1b]8;;https://ghostty.org\x07libghostty-vt\x1b]8;;\x07\r\n",
-                        )),
-                    )
-                    .prop("read_only", json!(true))
-                    .prop("input_status", move || {
-                        target.with(|t| {
-                            json!(
-                                t.as_ref()
-                                    .map(|(_, _, _, _, status, _)| status.as_str())
-                                    .unwrap_or("")
-                            )
-                        })
-                    })
-                    .prop("notice_status", move || {
-                        target.with(|t| {
-                            json!(
-                                t.as_ref()
-                                    .map(|(_, _, _, _, _, notice)| notice.as_str())
-                                    .unwrap_or("")
-                            )
-                        })
-                    })
-                    .w_full()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .style_when(move || !has_live_target.get(), |s| s.hidden())
-            } else {
-                native("canban/terminal")
-                    .prop("theme", crate::utilities::terminal_theme)
-                    .prop("font", move || crate::utilities::terminal_font(ui))
-                    .prop(
-                        "ui_command_keys",
-                        json!(["o", "n", "/", "i", "j", "t", "w", "[", "]", "{", "}"]),
-                    )
-                    .prop("focus", move || {
-                        json!({
-                            "ticket": ui.terminal_focus.get(),
-                            "enabled": has_live_target.get()
-                                && !ui.quick_open.get()
-                                && ui.utility_popup.get().is_empty()
-                                && ui.terminal_rename.get().is_none()
-                                && ui.terminal_close_confirm.get().is_none()
-                                && ui.worktree_modal.get().is_none()
-                                && ui.worktree_promote.get().is_none()
-                                && ui.worktree_remove_confirm.get().is_none()
-                                && ui.project_delete_confirm.get().is_none()
-                        })
-                    })
-                    .prop("binding", move || {
-                        binding_key.with(|t| match t {
-                            Some((entry_id, core_id, terminal)) => {
-                                let host_id = ui
-                                    .snapshot
-                                    .with_untracked(|s| s.terminal_host(entry_id).to_owned());
-                                json!({
-                                    "config": crate::config_for_host(&host_id),
-                                    "terminal": terminal,
-                                    "core_id": core_id,
-                                })
-                            }
-                            None => serde_json::Value::Null,
-                        })
-                    })
-                    .prop("read_only", move || {
-                        target.with(|t| json!(t.as_ref().is_none_or(|(_, _, _, ro, _, _)| *ro)))
-                    })
-                    .prop("input_status", move || {
-                        target.with(|t| {
-                            json!(
-                                t.as_ref()
-                                    .map(|(_, _, _, _, status, _)| status.as_str())
-                                    .unwrap_or("")
-                            )
-                        })
-                    })
-                    .prop("notice_status", move || {
-                        target.with(|t| {
-                            json!(
-                                t.as_ref()
-                                    .map(|(_, _, _, _, _, notice)| notice.as_str())
-                                    .unwrap_or("")
-                            )
-                        })
-                    })
-                    .w_full()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .style_when(move || !has_live_target.get(), |s| s.hidden())
-            };
-            view()
-                .relative()
-                .flex_1()
-                .min_h(px(0.))
-                .bg(crate::utilities::terminal_bg_color)
-                .child(native_view)
-                .child(when(move || !has_live_target.get(), placeholder))
-                .into_element()
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let focus_req = move || canban_terminal::linux::FocusRequest {
-                ticket: ui.terminal_focus.get(),
-                enabled: !ui.quick_open.get()
-                    && ui.utility_popup.get().is_empty()
-                    && !ui.native_modal.get()
-                    && ui.terminal_rename.get().is_none()
-                    && ui.terminal_close_confirm.get().is_none()
-                    && ui.worktree_modal.get().is_none()
-                    && ui.worktree_promote.get().is_none()
-                    && ui.worktree_remove_confirm.get().is_none()
-                    && ui.project_delete_confirm.get().is_none(),
-            };
-            if !crate::backend::is_connected() {
-                return canban_terminal::linux::preview_terminal_with_status(
-                    concat!(
-                        "\x1b[1;36mCanban native Terminal\x1b[0m · Gallery preview (no Core connection)\r\n",
-                        "Styles: \x1b[1mBold\x1b[0m · \x1b[3mItalic\x1b[0m · \x1b[4:3;58;2;255;105;97mCurly underline\x1b[0m · 世界 · ░▒▓█\r\n",
-                        "Links : https://canban.dev · \x1b]8;;https://ghostty.org\x07libghostty-vt\x1b]8;;\x07\r\n",
-                    ),
-                    crate::utilities::terminal_theme,
-                    move || crate::utilities::terminal_font(ui),
-                    focus_req,
-                    move || {
-                        target.with(|t| {
-                            t.as_ref()
-                                .map(|(_, _, _, _, status, _)| status.clone())
-                                .unwrap_or_default()
-                        })
-                    },
-                    move || {
-                        target.with(|t| {
-                            t.as_ref()
-                                .map(|(_, _, _, _, _, notice)| notice.clone())
-                                .unwrap_or_default()
-                        })
-                    },
-                )
-                .w_full()
-                .flex_1()
-                .min_h(px(0.))
-                .into_element();
-            }
-            canban_terminal::linux::live_terminal(
+        let focus_req = move || canban_terminal::FocusRequest {
+            ticket: ui.terminal_focus.get(),
+            enabled: has_live_target.get()
+                && !ui.quick_open.get()
+                && ui.utility_popup.get().is_empty()
+                && !ui.native_modal.get()
+                && ui.terminal_rename.get().is_none()
+                && ui.terminal_close_confirm.get().is_none()
+                && ui.worktree_modal.get().is_none()
+                && ui.worktree_promote.get().is_none()
+                && ui.worktree_remove_confirm.get().is_none()
+                && ui.project_delete_confirm.get().is_none(),
+        };
+        let status_fn = move || {
+            target.with(|t| {
+                t.as_ref()
+                    .map(|(_, _, _, _, status, _)| status.clone())
+                    .unwrap_or_default()
+            })
+        };
+        let notice_fn = move || {
+            target.with(|t| {
+                t.as_ref()
+                    .map(|(_, _, _, _, _, notice)| notice.clone())
+                    .unwrap_or_default()
+            })
+        };
+        let terminal_el = if !crate::backend::is_connected() {
+            canban_terminal::TerminalView::preview(
+                concat!(
+                    "\x1b[1;36mCanban native Terminal\x1b[0m · Gallery preview (no Core connection)\r\n",
+                    "Styles: \x1b[1mBold\x1b[0m · \x1b[3mItalic\x1b[0m · \x1b[4:3;58;2;255;105;97mCurly underline\x1b[0m · 世界 · ░▒▓█\r\n",
+                    "Links : https://canban.dev · \x1b]8;;https://ghostty.org\x07libghostty-vt\x1b]8;;\x07\r\n",
+                ),
+                crate::utilities::terminal_theme,
+                move || crate::utilities::terminal_font(ui),
+                focus_req,
+            )
+            .ui_command_keys(["o", "n", "/", "i", "j", "t", "w", "[", "]", "{", "}"])
+            .read_only(|| true)
+            .input_status(status_fn)
+            .notice_status(notice_fn)
+            .hidden(move || !has_live_target.get())
+        } else {
+            canban_terminal::TerminalView::live(
                 move || {
-                    target.with(|t| {
-                        t.as_ref().map(|(entry_id, core_id, terminal, _, _, _)| {
+                    binding_key.with(|t| {
+                        t.as_ref().map(|(entry_id, core_id, terminal)| {
                             let host_id = ui
                                 .snapshot
                                 .with_untracked(|s| s.terminal_host(entry_id).to_owned());
-                            canban_terminal::linux::LiveBinding {
+                            canban_terminal::LiveBinding {
                                 config: crate::config_for_host(&host_id),
                                 core_id: core_id.clone(),
                                 terminal: terminal.clone(),
+                                transport: crate::backend::terminal_transport(&host_id),
                             }
                         })
                     })
@@ -356,27 +230,21 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                 crate::utilities::terminal_theme,
                 move || crate::utilities::terminal_font(ui),
                 focus_req,
-                move || target.with(|t| t.as_ref().is_none_or(|(_, _, _, ro, _, _)| *ro)),
-                move || {
-                    target.with(|t| {
-                        t.as_ref()
-                            .map(|(_, _, _, _, status, _)| status.clone())
-                            .unwrap_or_default()
-                    })
-                },
-                move || {
-                    target.with(|t| {
-                        t.as_ref()
-                            .map(|(_, _, _, _, _, notice)| notice.clone())
-                            .unwrap_or_default()
-                    })
-                },
             )
-            .w_full()
+            .ui_command_keys(["o", "n", "/", "i", "j", "t", "w", "[", "]", "{", "}"])
+            .read_only(move || target.with(|t| t.as_ref().is_none_or(|(_, _, _, ro, _, _)| *ro)))
+            .input_status(status_fn)
+            .notice_status(notice_fn)
+            .hidden(move || !has_live_target.get())
+        };
+        view()
+            .relative()
             .flex_1()
             .min_h(px(0.))
+            .bg(crate::utilities::terminal_bg_color)
+            .child(terminal_el)
+            .child(when(move || !has_live_target.get(), placeholder))
             .into_element()
-        }
     })
 }
 

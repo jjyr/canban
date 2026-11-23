@@ -403,195 +403,75 @@ pub fn pane(ui: Ui) -> impl IntoElement {
         )
         .child(dynamic(move || {
             if has_live_target.get() {
-                #[cfg(target_os = "macos")]
-                {
-                    let focus_prop = move || {
-                        json!({
-                            "ticket": ui.terminal_focus.get(),
-                            "enabled": ui.card_terminal_focused.get()
-                                && !ui.quick_open.get()
-                                && ui.utility_popup.get().is_empty()
-                                && !ui.native_modal.get()
-                                && ui.terminal_rename.get().is_none()
-                                && ui.terminal_close_confirm.get().is_none()
-                                && ui.worktree_modal.get().is_none()
-                                && ui.worktree_promote.get().is_none()
-                                && ui.worktree_remove_confirm.get().is_none()
-                                && ui.project_delete_confirm.get().is_none()
-                        })
-                    };
-                    if !crate::backend::is_connected() {
-                        return native("canban/terminal")
-                            .prop("theme", crate::utilities::terminal_theme)
-                            .prop("font", move || crate::utilities::terminal_font(ui))
-                            .prop(
-                                "ui_command_keys",
-                                json!(["o", "n", "/", "i", "j", "t", "w", "[", "]", "{", "}"]),
-                            )
-                            .prop("focus", focus_prop)
-                            .prop(
-                                "content",
-                                json!(concat!(
-                                    "\x1b[1;36mCard Live Terminal\x1b[0m · Side-by-side discussion\r\n",
-                                    "\x1b[2mDiscuss requirements or answer Agent prompts directly beside the Card.\x1b[0m\r\n\r\n",
-                                    "\x1b[1;32m❯\x1b[0m Ready for input…\r\n",
-                                )),
-                            )
-                            .prop("read_only", json!(true))
-                            .prop("input_status", move || {
-                                target.with(|t| {
-                                    json!(
-                                        t.as_ref()
-                                            .map(|(_, _, _, _, status, _)| status.as_str())
-                                            .unwrap_or("")
-                                    )
-                                })
-                            })
-                            .prop("notice_status", move || {
-                                target.with(|t| {
-                                    json!(
-                                        t.as_ref()
-                                            .map(|(_, _, _, _, _, notice)| notice.as_str())
-                                            .unwrap_or("")
-                                    )
-                                })
-                            })
-                            .w_full()
-                            .flex_1()
-                            .min_h(px(0.))
-                            .into_element();
-                    }
-                    return native("canban/terminal")
-                        .prop("theme", crate::utilities::terminal_theme)
-                        .prop("font", move || crate::utilities::terminal_font(ui))
-                        .prop(
-                            "ui_command_keys",
-                            json!(["o", "n", "/", "i", "j", "t", "w", "[", "]", "{", "}"]),
-                        )
-                        .prop("focus", focus_prop)
-                        .prop("binding", move || {
-                            binding_key.with(|t| match t {
-                                Some((entry_id, core_id, terminal)) => {
-                                    let host_id = ui
-                                        .snapshot
-                                        .with_untracked(|s| s.terminal_host(entry_id).to_owned());
-                                    json!({
-                                        "config": crate::config_for_host(&host_id),
-                                        "terminal": terminal,
-                                        "core_id": core_id,
-                                    })
-                                }
-                                None => serde_json::Value::Null,
-                            })
-                        })
-                        .prop("read_only", move || {
-                            target.with(|t| json!(t.as_ref().is_none_or(|(_, _, _, ro, _, _)| *ro)))
-                        })
-                        .prop("input_status", move || {
-                            target.with(|t| {
-                                json!(t
-                                    .as_ref()
-                                    .map(|(_, _, _, _, status, _)| status.as_str())
-                                    .unwrap_or(""))
-                            })
-                        })
-                        .prop("notice_status", move || {
-                            target.with(|t| {
-                                json!(t
-                                    .as_ref()
-                                    .map(|(_, _, _, _, _, notice)| notice.as_str())
-                                    .unwrap_or(""))
-                            })
-                        })
-                        .w_full()
-                        .flex_1()
-                        .min_h(px(0.))
-                        .into_element();
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let focus_req = move || canban_terminal::linux::FocusRequest {
-                        ticket: ui.terminal_focus.get(),
-                        enabled: ui.card_terminal_focused.get()
-                            && !ui.quick_open.get()
-                            && ui.utility_popup.get().is_empty()
-                            && !ui.native_modal.get()
-                            && ui.terminal_rename.get().is_none()
-                            && ui.terminal_close_confirm.get().is_none()
-                            && ui.worktree_modal.get().is_none()
-                            && ui.worktree_promote.get().is_none()
-                            && ui.worktree_remove_confirm.get().is_none()
-                            && ui.project_delete_confirm.get().is_none(),
-                    };
-                    if !crate::backend::is_connected() {
-                        return canban_terminal::linux::preview_terminal_with_status(
-                            concat!(
-                                "\x1b[1;36mCard Live Terminal\x1b[0m · Side-by-side discussion\r\n",
-                                "\x1b[2mDiscuss requirements or answer Agent prompts directly beside the Card.\x1b[0m\r\n\r\n",
-                                "\x1b[1;32m❯\x1b[0m Ready for input…\r\n",
-                            ),
-                            crate::utilities::terminal_theme,
-                            move || crate::utilities::terminal_font(ui),
-                            focus_req,
-                            move || {
-                                target.with(|t| {
-                                    t.as_ref()
-                                        .map(|(_, _, _, _, status, _)| status.clone())
-                                        .unwrap_or_default()
-                                })
-                            },
-                            move || {
-                                target.with(|t| {
-                                    t.as_ref()
-                                        .map(|(_, _, _, _, _, notice)| notice.clone())
-                                        .unwrap_or_default()
-                                })
-                            },
-                        )
-                        .w_full()
-                        .flex_1()
-                        .min_h(px(0.))
-                        .into_element();
-                    }
-                    return canban_terminal::linux::live_terminal(
-                        move || {
-                            target.with(|t| {
-                                t.as_ref().map(|(entry_id, core_id, terminal, _, _, _)| {
-                                    let host_id = ui
-                                        .snapshot
-                                        .with_untracked(|s| s.terminal_host(entry_id).to_owned());
-                                    canban_terminal::linux::LiveBinding {
-                                        config: crate::config_for_host(&host_id),
-                                        core_id: core_id.clone(),
-                                        terminal: terminal.clone(),
-                                    }
-                                })
-                            })
-                        },
+                let focus_req = move || canban_terminal::FocusRequest {
+                    ticket: ui.terminal_focus.get(),
+                    enabled: ui.card_terminal_focused.get()
+                        && !ui.quick_open.get()
+                        && ui.utility_popup.get().is_empty()
+                        && !ui.native_modal.get()
+                        && ui.terminal_rename.get().is_none()
+                        && ui.terminal_close_confirm.get().is_none()
+                        && ui.worktree_modal.get().is_none()
+                        && ui.worktree_promote.get().is_none()
+                        && ui.worktree_remove_confirm.get().is_none()
+                        && ui.project_delete_confirm.get().is_none(),
+                };
+                let status_fn = move || {
+                    target.with(|t| {
+                        t.as_ref()
+                            .map(|(_, _, _, _, status, _)| status.clone())
+                            .unwrap_or_default()
+                    })
+                };
+                let notice_fn = move || {
+                    target.with(|t| {
+                        t.as_ref()
+                            .map(|(_, _, _, _, _, notice)| notice.clone())
+                            .unwrap_or_default()
+                    })
+                };
+                if !crate::backend::is_connected() {
+                    return canban_terminal::TerminalView::preview(
+                        concat!(
+                            "\x1b[1;36mCard Live Terminal\x1b[0m · Side-by-side discussion\r\n",
+                            "\x1b[2mDiscuss requirements or answer Agent prompts directly beside the Card.\x1b[0m\r\n\r\n",
+                            "\x1b[1;32m❯\x1b[0m Ready for input…\r\n",
+                        ),
                         crate::utilities::terminal_theme,
                         move || crate::utilities::terminal_font(ui),
                         focus_req,
-                        move || target.with(|t| t.as_ref().is_none_or(|(_, _, _, ro, _, _)| *ro)),
-                        move || {
-                            target.with(|t| {
-                                t.as_ref()
-                                    .map(|(_, _, _, _, status, _)| status.clone())
-                                    .unwrap_or_default()
-                            })
-                        },
-                        move || {
-                            target.with(|t| {
-                                t.as_ref()
-                                    .map(|(_, _, _, _, _, notice)| notice.clone())
-                                    .unwrap_or_default()
-                            })
-                        },
                     )
-                    .w_full()
-                    .flex_1()
-                    .min_h(px(0.))
+                    .ui_command_keys(["o", "n", "/", "i", "j", "t", "w", "[", "]", "{", "}"])
+                    .read_only(|| true)
+                    .input_status(status_fn)
+                    .notice_status(notice_fn)
                     .into_element();
                 }
+                return canban_terminal::TerminalView::live(
+                    move || {
+                        binding_key.with(|t| {
+                            t.as_ref().map(|(entry_id, core_id, terminal)| {
+                                let host_id = ui
+                                    .snapshot
+                                    .with_untracked(|s| s.terminal_host(entry_id).to_owned());
+                                canban_terminal::LiveBinding {
+                                    config: crate::config_for_host(&host_id),
+                                    core_id: core_id.clone(),
+                                    terminal: terminal.clone(),
+                                    transport: crate::backend::terminal_transport(&host_id),
+                                }
+                            })
+                        })
+                    },
+                    crate::utilities::terminal_theme,
+                    move || crate::utilities::terminal_font(ui),
+                    focus_req,
+                )
+                .ui_command_keys(["o", "n", "/", "i", "j", "t", "w", "[", "]", "{", "}"])
+                .read_only(move || target.with(|t| t.as_ref().is_none_or(|(_, _, _, ro, _, _)| *ro)))
+                .input_status(status_fn)
+                .notice_status(notice_fn)
+                .into_element();
             }
 
             let status_label = active_entry

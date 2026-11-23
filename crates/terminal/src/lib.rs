@@ -9,12 +9,22 @@
 pub mod ffi {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
-pub mod linux;
+#[cfg(target_os = "macos")]
+pub mod apple;
+pub mod input;
 pub mod model;
 #[cfg(target_os = "macos")]
-pub mod native;
+pub use apple::macos as native;
+pub mod portable;
+pub mod remote;
 pub mod session;
+pub mod view;
 pub mod view_state;
+
+pub use remote::RemotePtyTransport;
+pub use view::{
+    FocusRequest, FontSpec, LiveBinding, TerminalView, decode_file_uri, parse_font_value,
+};
 
 /// Installed font family catalog discovered from the host OS.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -136,7 +146,7 @@ pub fn try_installed_fonts() -> Option<InstalledFonts> {
     }
     #[cfg(target_os = "linux")]
     {
-        linux::try_installed_fonts()
+        portable::try_installed_fonts()
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
@@ -153,7 +163,7 @@ pub fn installed_fonts() -> InstalledFonts {
     }
     #[cfg(target_os = "linux")]
     {
-        linux::installed_fonts()
+        portable::installed_fonts()
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {

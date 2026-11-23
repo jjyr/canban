@@ -95,6 +95,14 @@ pub trait UiBackend: Send + Sync + 'static {
     /// Return the effective configuration for `host_id`.
     fn config_for_host(&self, host_id: &str) -> Config;
 
+    /// Optional explicit PTY transport override for `host_id` (used by pure-remote clients).
+    fn terminal_transport(
+        &self,
+        _host_id: &str,
+    ) -> Option<std::sync::Arc<dyn canban_terminal::session::PtyTransport>> {
+        None
+    }
+
     /// Resolve which host ID an RPC call will target.
     fn resolve_target_host(
         &self,
@@ -241,6 +249,12 @@ pub fn config_for_host(host_id: &str) -> Config {
         .get()
         .map(|b| b.config_for_host(host_id))
         .unwrap_or_default()
+}
+
+pub fn terminal_transport(
+    host_id: &str,
+) -> Option<std::sync::Arc<dyn canban_terminal::session::PtyTransport>> {
+    BACKEND.get().and_then(|b| b.terminal_transport(host_id))
 }
 
 pub fn resolve_target_host(

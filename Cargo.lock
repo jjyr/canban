@@ -695,6 +695,7 @@ dependencies = [
  "canban-exec",
  "canban-herdr",
  "canban-profiler",
+ "canban-transport",
  "canban-types",
  "cc",
  "nsh-base",
@@ -703,6 +704,7 @@ dependencies = [
  "png 0.17.16",
  "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

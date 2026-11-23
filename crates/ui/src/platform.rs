@@ -5,18 +5,23 @@
 use anyhow::{Context, Result, ensure};
 #[cfg(not(feature = "local-host"))]
 use anyhow::{Result, ensure};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::{marker::PhantomData, sync::Mutex};
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[derive(Clone)]
 struct WindowLaunch {
     title: String,
     size: (i32, i32),
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 static WINDOW_LAUNCH: Mutex<Option<WindowLaunch>> = Mutex::new(None);
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 struct WindowHost<C>(PhantomData<C>);
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 impl<C> nsh_core::element::Component for WindowHost<C>
 where
     C: nsh_core::element::Component,
@@ -80,6 +85,10 @@ pub fn init_host(ui_sets: Vec<nsh_core::element::Registry>) {
     {
         nsh_platform_linux::set_ui_sets(ui_sets);
     }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = ui_sets;
+    }
 }
 
 /// Runs a root NSH component in a standalone desktop window until closed.
@@ -90,10 +99,13 @@ where
     C::Props: Default,
 {
     let title = title.into();
-    *WINDOW_LAUNCH.lock().unwrap_or_else(|e| e.into_inner()) = Some(WindowLaunch {
-        title: title.clone(),
-        size,
-    });
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        *WINDOW_LAUNCH.lock().unwrap_or_else(|e| e.into_inner()) = Some(WindowLaunch {
+            title: title.clone(),
+            size,
+        });
+    }
     #[cfg(target_os = "macos")]
     {
         let code = nsh_platform_macos::run_app(

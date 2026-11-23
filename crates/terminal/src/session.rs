@@ -70,6 +70,25 @@ pub struct DisplayFacts {
     pub cell: Option<(u32, u32)>,
 }
 
+impl DisplayFacts {
+    fn hex(rgb: [u8; 3]) -> String {
+        format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2])
+    }
+
+    pub fn to_json(&self) -> Value {
+        serde_json::json!({
+            "fg": self.fg.map(Self::hex),
+            "bg": self.bg.map(Self::hex),
+            "cursor": self.cursor.map(Self::hex),
+            "cell": self.cell.map(|(w, h)| [w.max(1), h.max(1)]),
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.fg.is_none() && self.bg.is_none() && self.cursor.is_none() && self.cell.is_none()
+    }
+}
+
 /// Transport-agnostic events emitted by an attached PTY stream.
 #[derive(Debug)]
 pub enum PtyEvent {

@@ -1,6 +1,6 @@
 # Cross-platform Terminal architecture (macOS, Linux, iOS, Android)
 
-Status: Phase 0 (iOS) implemented 2026-11-22; Android pending; later phases proposed.
+Status: Phase 0, Phase 1, and Phase 2 implemented 2026-11-23; Android NDK cross-compile and Phase 3/4 pending.
 
 ## Goal
 
@@ -8,14 +8,17 @@ Share the `libghostty-vt` screen model, PTY session pool, view timing state, tra
 
 ## Current `crates/terminal` layout
 
-| Module / file | Lines | Responsibility | Cross-platform status |
-| --- | --- | --- | --- |
-| `src/model.rs` | 3,815 | `libghostty-vt` screen, cell, cursor, image, link, and input adapter | ✅ Shared across all targets |
-| `src/session.rs` | 1,027 | Transport-agnostic `PtyTransport` / `LiveSession` attachment pool (`HerdrLocalTransport`, `WakeHub`) | ✅ Shared (`herdr-local` Cargo feature isolates local Herdr) |
-| `src/view_state.rs` | 642 | Cursor blink, IME commit cursor hold, scrollbar fade, link hover spans, dirty-row plan | ✅ Shared across Apple and Linux |
-| `src/linux.rs` | 1,403 | `GhosttyEmulator` adapting `model`/`session` to `nsh_base::Terminal` | ✅ Platform-neutral in practice (depends only on `nsh_base::term`, `nsh_core`, core `terminal`) |
-| `src/apple_render.h` / `.m` | 331 + 1,825 | CoreGraphics + CoreText cell, underline, box-drawing, and image renderer | 🟡 Apple-shared (header explicitly forbids AppKit and UIKit) |
-| `src/native.rs` / `src/macos_view.m` | 1,978 + 2,868 | macOS `NSView` host, `NSTextInputClient` IME, mouse/key translation, selection, FFI callbacks | ❌ macOS-only (`nsh-platform-macos`); contains some portable selection/key/link helpers |
+| Module / file | Responsibility | Cross-platform status |
+| --- | --- | --- |
+| `src/model.rs` | `libghostty-vt` screen, cell, cursor, image, link, and input adapter | ✅ Shared across all targets |
+| `src/session.rs` | Transport-agnostic `PtyTransport` / `LiveSession` attachment pool (`HerdrLocalTransport`, `WakeHub`) | ✅ Shared (`herdr-local` Cargo feature isolates local Herdr) |
+| `src/input.rs` | Platform-neutral input, paste/path escape, theme, resize, selection, and link-matching helpers | ✅ Shared across Apple and portable viewers |
+| `src/remote.rs` | `RemotePtyTransport` speaking Generation-1 binary framing over `canban-transport` (`herdr.connect`) | ✅ Shared across all targets (no `canban-herdr` / `canban-exec`) |
+| `src/view_state.rs` | Cursor blink, IME commit cursor hold, scrollbar fade, link hover spans, dirty-row plan | ✅ Shared across Apple and portable viewers |
+| `src/portable.rs` | `GhosttyEmulator` adapting `model`/`session` to `nsh_base::Terminal` | ✅ Shared across Linux, iOS, Android |
+| `src/view.rs` | Unified `TerminalView` UI entry point (`native("canban/terminal")` on macOS, `portable` elsewhere) | ✅ Shared entry point for `canban-ui` & Gallery |
+| `src/apple/apple_render.h` / `.m` | CoreGraphics + CoreText cell, underline, box-drawing, and image renderer | 🟡 Apple-shared (header explicitly forbids AppKit and UIKit) |
+| `src/apple/macos.rs` / `src/apple/macos_view.m` | macOS `NSView` host, `NSTextInputClient` IME, mouse/key translation, FFI callbacks | ❌ macOS-only (`#[cfg(target_os = "macos")]`, `nsh-platform-macos`) |
 
 ## Approved architecture: "A + B, iOS first via B"
 
@@ -49,20 +52,20 @@ Share the `libghostty-vt` screen model, PTY session pool, view timing state, tra
   - Added pure-Rust smoke example [vt_smoke.rs](../crates/terminal/examples/vt_smoke.rs) (`Model` parses VT + Unicode without `herdr-local` or macOS UI dependencies) and the `mise run check-ios` task in [mise.toml](../mise.toml#L27-L35) (`IPHONEOS_DEPLOYMENT_TARGET = "14.0"`, building `canban-terminal --no-default-features --locked --example vt_smoke` for `aarch64-apple-ios-sim` and `aarch64-apple-ios`).
   - **Verification:** `cargo run -p canban-terminal --example vt_smoke` printed `vt_smoke ok: hello ios 世界` on host; `mise run check-ios` succeeded for both iOS targets; `otool -l` reported `LC_BUILD_VERSION platform 7` (`minos 14.0`, `sdk 27.0`) for `aarch64-apple-ios-sim` and `LC_BUILD_VERSION platform 2` (`minos 14.0`, `sdk 27.0`) for `aarch64-apple-ios`; `nm -gU` confirmed statically linked `_ghostty_*` symbols in both `libghostty-vt.a` archives and final Mach-O binaries.
   - **Simulator runtime verification (2026-11-23):** Booted `iPhone 18 Pro` (`iOS 27.0 / 24A434`, UDID `80199FEC-F004-46AE-A1FD-68DDA238D6B5`), ran `xcrun simctl spawn` on `target/aarch64-apple-ios-sim/debug/examples/vt_smoke` (exit 0 without ad-hoc re-signing), observed `vt_smoke ok: hello ios 世界`, and shut down the simulator.
-  - **Mobile dependency chain iOS probe (2026-11-23):** `cargo check --locked` with `IPHONEOS_DEPLOYMENT_TARGET=14.0` succeeded (`rc=0`) on both `aarch64-apple-ios-sim` and `aarch64-apple-ios` for `canban-sync`, `canban-transport`, and `canban-ui --no-default-features` (6 non-fatal unused/dead_code warnings in `canban-ui` under non-macOS targets, including `crates/ui/src/terminals/viewer.rs` and `crates/ui/src/platform.rs`, to be cleaned up during Phase 1).
+  - **Mobile dependency chain iOS probe (2026-11-23):** `cargo check --locked` with `IPHONEOS_DEPLOYMENT_TARGET=14.0` succeeded (`rc=0`) on both `aarch64-apple-ios-sim` and `aarch64-apple-ios` for `canban-sync`, `canban-transport`, and `canban-ui --no-default-features` (later cleaned to 0 warnings in Phase 1).
 - **Android (deferred):** `aarch64-linux-android` cross-compilation (plus NDK sysroot/API-level/libc++ linkage verification) was deferred because no Android NDK is installed on this host (`ANDROID_NDK_HOME` is unset and `~/Library/Android/sdk/ndk` does not exist).
 
-### Phase 1 — Module reorganization and unified UI entry
+### Phase 1 — Module reorganization and unified UI entry (implemented 2026-11-23)
 
-- Rename `src/linux.rs` -> `src/portable.rs`.
-- Move `src/native.rs` and `src/macos_view.m` under `apple/macos` (`#[cfg(target_os = "macos")]`).
-- Extract platform-neutral selection, link-matching, and key/mouse encoding helpers from `native.rs` / `macos_view.m` into the shared Rust core.
-- Replace the `#[cfg(not(target_os = "macos"))]` platform branches in [crates/ui/src/card/terminal.rs](../crates/ui/src/card/terminal.rs#L438-L480) and [crates/ui/src/terminals/viewer.rs](../crates/ui/src/terminals/viewer.rs#L240-L280) with one unified entry point (e.g., `canban_terminal::view(...)`). Desktop runtime behavior remains unchanged.
+- Renamed `src/linux.rs` -> `src/portable.rs` and moved macOS-specific files under `src/apple/` (`apple/macos.rs`, `apple/macos_view.m`, `apple/apple_render.h`, `apple/apple_render.m`), keeping `pub use apple::macos as native;` gated by `#[cfg(target_os = "macos")]`.
+- Extracted platform-neutral input, paste/path escape, theme, resize, selection, and link-matching helpers from macOS FFI callbacks and `portable.rs` into [src/input.rs](../crates/terminal/src/input.rs).
+- Added [src/view.rs](../crates/terminal/src/view.rs) (`TerminalView`, `LiveBinding`, `FocusRequest`, `FontSpec`), extending `LiveBinding` with `transport: Option<Arc<dyn PtyTransport>>` and replacing the `#[cfg(target_os = "macos")]` branches in [crates/ui/src/card/terminal.rs](../crates/ui/src/card/terminal.rs), [crates/ui/src/terminals/viewer.rs](../crates/ui/src/terminals/viewer.rs), and [examples/gallery/main.rs](../examples/gallery/main.rs), plus gating desktop-only `WindowLaunch`/`WindowHost` in [crates/ui/src/platform.rs](../crates/ui/src/platform.rs).
+- Desktop runtime behavior remains unchanged (`native("canban/terminal")` preserved on macOS), and `canban-ui --no-default-features` compiles with zero warnings on both iOS targets.
 
-### Phase 2 — Remote `PtyTransport` (`herdr.connect` over `canban-transport`)
+### Phase 2 — Remote `PtyTransport` (`herdr.connect` over `canban-transport`, implemented 2026-11-23)
 
-- Implement a `PtyTransport` reusing [crates/transport](../crates/transport/Cargo.toml) (`ClientTransport` over `yamux/1` multiplexing, per-device bearer tokens, and Tokio async streams) for remote `canband` `herdr.connect` PTY sessions, shared by both desktop multi-host viewers and mobile clients instead of maintaining a separate custom TCP relay.
-- Mobile targets compile with `default-features = false` (omitting `herdr-local` so `canban-herdr` and `canban-exec` are not linked).
+- Implemented `RemotePtyTransport` in [src/remote.rs](../crates/terminal/src/remote.rs) on `canban-transport` (`ClientTransport::open_async_stream`, `yamux/1` multiplexing, and direct TCP per-device bearer auth) + Tokio async reader/writer tasks speaking Generation-1 Herdr binary framing (`herdr.connect` -> `hello` -> `terminal.attach` -> 9-byte frames for `Data`/`Resize`/`Closed`, input, `automatic_input`, `consumed`, `focus`, `facts`, and clean `Detach` on drop).
+- Mobile targets compile with `--no-default-features` (omitting `herdr-local` so `canban-herdr` and `canban-exec` are not linked), with `UiBackend::terminal_transport` providing the transport injection hook for pure-remote clients.
 
 ### Phase 3 — Mobile interaction components
 

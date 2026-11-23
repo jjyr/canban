@@ -1,14 +1,13 @@
-//! Linux & cross-platform `nsh_base::Terminal` integration backed by `libghostty-vt`
-//! and the shared Herdr `LiveSession` pool.
+//! Portable `nsh_base::Terminal` integration (Linux desktop, iOS, Android) backed by
+//! `libghostty-vt` and the shared Herdr `LiveSession` pool.
+pub use crate::view::{FocusRequest, FontSpec, LiveBinding, decode_file_uri, parse_font_value};
 use crate::{
-    InstalledFonts,
+    InstalledFonts, input,
     model::{Model, WheelOutput},
     session::{
-        self, Input, LiveSession, SessionInit, State, detach_session_listener,
-        display_facts_for_model, get_or_spawn_session,
+        self, Input, LiveSession, SessionInit, State, detach_session_listener, get_or_spawn_session,
     },
 };
-use canban_types::Config;
 use nsh_base::{
     Terminal, TerminalApi, TerminalCursor, TerminalEmulator, TerminalEmulatorEvent,
     TerminalEmulatorFactory, TerminalLine, TerminalModes, TerminalSize, terminal,
@@ -25,99 +24,6 @@ use std::{
     sync::{Arc, Condvar, Mutex, OnceLock, mpsc},
     task::{Context, Poll, Waker},
 };
-
-/// Live Herdr PTY target for a mounted Linux terminal.
-#[derive(Clone, Debug, PartialEq)]
-pub struct LiveBinding {
-    pub config: Config,
-    pub core_id: String,
-    pub terminal: String,
-}
-
-/// Focus request mirroring macOS `{"ticket": u64, "enabled": bool}`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct FocusRequest {
-    pub ticket: u64,
-    pub enabled: bool,
-}
-
-/// Parsed terminal font configuration (`family` + clamped point `size` + `line_height`).
-#[derive(Clone, Debug, PartialEq)]
-pub struct FontSpec {
-    pub family: Option<SharedString>,
-    pub size: f32,
-    pub line_height: f32,
-}
-
-impl Default for FontSpec {
-    fn default() -> Self {
-        Self {
-            family: None,
-            size: 13.0,
-            line_height: 18.0,
-        }
-    }
-}
-
-pub fn parse_font_value(value: &Value) -> FontSpec {
-    let family = value["family"]
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| SharedString::from(s.to_owned()));
-    let size = value["size"].as_f64().unwrap_or(13.0).clamp(9.0, 32.0) as f32;
-    let line_height = (size * 1.385).round().max(size + 3.0);
-    FontSpec {
-        family,
-        size,
-        line_height,
-    }
-}
-
-/// Decodes a `file://` URI (or bare absolute path) into a local UTF-8 filesystem path.
-pub fn decode_file_uri(uri: &str) -> Option<String> {
-    let trimmed = uri.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let raw_path = if let Some(rest) = trimmed.strip_prefix("file://localhost/") {
-        format!("/{rest}")
-    } else if let Some(rest) = trimmed.strip_prefix("file:///") {
-        format!("/{rest}")
-    } else if let Some(rest) = trimmed.strip_prefix("file:/") {
-        format!("/{rest}")
-    } else if trimmed.starts_with('/') {
-        trimmed.to_owned()
-    } else {
-        return None;
-    };
-
-    let bytes = raw_path.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
-        {
-            out.push((hi << 4) | lo);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).ok().filter(|s| !s.is_empty())
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
-}
 
 /// Standalone `nsh_base::TerminalEmulator` backed by `libghostty-vt` (`crate::model::Model`).
 pub struct GhosttyEmulator {
@@ -478,6 +384,7 @@ impl ControllerSlot {
             config,
             core_id,
             terminal,
+            transport,
         }) = next
         else {
             self.state = Arc::new(Mutex::new(State::new(prev_cols.max(2), prev_rows.max(1))));
@@ -496,7 +403,7 @@ impl ControllerSlot {
             size_ready: prev_ready,
             focused: prev_focused,
             theme,
-            transport: None,
+            transport,
         });
 
         let wake_target = self.wake.clone();
@@ -504,26 +411,12 @@ impl ControllerSlot {
             .wake
             .attach(self.listener_id, Arc::new(move || wake_target.trigger()));
 
-        let focus_seq = {
-            let mut s = session.state.lock().unwrap();
-            if s.focused != prev_focused {
-                s.focused = prev_focused;
-                let seq = if !self.read_only && session::accepts_pty_input(&s, self.read_only) {
-                    s.model.focus_sequence(prev_focused)
-                } else {
-                    Vec::new()
-                };
-                Some((prev_focused, seq))
-            } else {
-                None
-            }
-        };
-        if let Some((focused, seq)) = focus_seq {
-            let _ = session.input.send(Input::Focus(focused));
-            if !seq.is_empty() {
-                let _ = session.input.send(Input::Bytes(seq));
-            }
-        }
+        input::apply_focus(
+            &session.state,
+            Some(&session.input),
+            self.read_only,
+            prev_focused,
+        );
 
         self.state = session.state.clone();
         self.size_cv = session.size_cv.clone();
@@ -535,25 +428,7 @@ impl ControllerSlot {
 
     fn apply_theme(&mut self, next: &Value) -> bool {
         self.theme = Some(next.clone());
-        let mut changed = false;
-        let mut facts_to_send = None;
-        {
-            let mut s = self.state.lock().unwrap();
-            if s.theme.as_ref() != Some(next) {
-                s.model.theme(next);
-                s.theme = Some(next.clone());
-                let _ = s.model.replies();
-                changed = true;
-                if s.connected {
-                    facts_to_send = Some(display_facts_for_model(&s.model, s.theme.as_ref()));
-                }
-            }
-        }
-        if let Some(facts) = facts_to_send
-            && let Some(tx) = &self.input
-        {
-            let _ = tx.send(Input::Facts(facts));
-        }
+        let changed = input::apply_theme(&self.state, self.input.as_ref(), next);
         if changed {
             self.seen_rev = u64::MAX;
         }
@@ -561,26 +436,7 @@ impl ControllerSlot {
     }
 
     fn apply_focus(&self, focused: bool) {
-        let (changed, focus_seq) = {
-            let mut s = self.state.lock().unwrap();
-            let changed = s.focused != focused;
-            s.focused = focused;
-            let seq = if changed && session::accepts_pty_input(&s, self.read_only) {
-                s.model.focus_sequence(focused)
-            } else {
-                Vec::new()
-            };
-            (changed, seq)
-        };
-        if !changed {
-            return;
-        }
-        if let Some(tx) = &self.input {
-            let _ = tx.send(Input::Focus(focused));
-            if !focus_seq.is_empty() {
-                let _ = tx.send(Input::Bytes(focus_seq));
-            }
-        }
+        input::apply_focus(&self.state, self.input.as_ref(), self.read_only, focused);
     }
 
     fn effective_status(&self) -> String {
@@ -595,36 +451,15 @@ impl ControllerSlot {
     }
 
     fn paste_text_to_pty(&self, text: &str) {
-        if text.is_empty() || self.read_only {
-            return;
-        }
-        let encoded = {
-            let mut s = self.state.lock().unwrap();
-            if !session::accepts_pty_input(&s, self.read_only) {
-                return;
-            }
-            s.clear_attach_settle();
-            s.model.paste(text)
-        };
-        self.send_bytes(encoded);
+        input::paste_text(&self.state, self.input.as_ref(), self.read_only, text);
     }
 
     fn send_bytes(&self, bytes: Vec<u8>) {
-        if bytes.is_empty() {
-            return;
-        }
-        if let Some(tx) = &self.input {
-            let _ = tx.send(Input::Bytes(bytes));
-        }
+        input::send_bytes(self.input.as_ref(), bytes);
     }
 
     fn send_auto_bytes(&self, bytes: Vec<u8>) {
-        if bytes.is_empty() {
-            return;
-        }
-        if let Some(tx) = &self.input {
-            let _ = tx.send(Input::AutoBytes(bytes));
-        }
+        input::send_auto_bytes(self.input.as_ref(), bytes);
     }
 }
 
@@ -669,46 +504,22 @@ impl TerminalEmulator for SharedSessionEmulator {
     }
 
     fn resize(&mut self, size: TerminalSize) {
-        let cols = size.cols.clamp(2, 500);
-        let rows = size.rows.clamp(1, 200);
         let mut slot = self.slot.borrow_mut();
         slot.view_size = TerminalSize::new(size.cols.max(1), size.rows.max(1));
         if size.cols < 2 || size.rows < 1 {
             return;
         }
-        session::record_viewport_size(cols, rows);
         let (cw, ch) = slot.cell_px;
-        session::record_cell_metrics_milli(cw.max(1) * 1000, ch.max(1) * 1000);
-        let (grid_changed, facts, became_ready, replies) = {
-            let mut s = slot.state.lock().unwrap();
-            let became_ready = !s.size_ready;
-            let prev_cell = s.model.cell_size();
-            s.size_ready = true;
-            let grid_changed =
-                s.model
-                    .resize_with_metrics(cols, rows, cw.max(1), ch.max(1), 6, 6, 6, 6);
-            let facts = if s.connected && s.model.cell_size() != prev_cell {
-                Some(display_facts_for_model(&s.model, s.theme.as_ref()))
-            } else {
-                None
-            };
-            let replies = s.model.replies();
-            (grid_changed, facts, became_ready, replies)
-        };
-        if became_ready {
-            slot.size_cv.notify_all();
-        }
-        if grid_changed && let Some(tx) = &slot.input {
-            let _ = tx.send(Input::Resize(cols, rows));
-        }
-        if let Some(facts) = facts
-            && let Some(tx) = &slot.input
-        {
-            let _ = tx.send(Input::Facts(facts));
-        }
-        if !replies.is_empty() {
-            slot.send_auto_bytes(replies);
-        }
+        input::apply_resize(
+            &slot.state,
+            &slot.size_cv,
+            slot.input.as_ref(),
+            size.cols,
+            size.rows,
+            cw,
+            ch,
+            (6, 6, 6, 6),
+        );
     }
 
     fn line_count(&self) -> usize {
@@ -1393,21 +1204,13 @@ Adwaita Mono\t100\tFalse
 
     #[test]
     fn shared_session_slot_rebinds_and_evicts_across_pooled_sessions() {
-        let cfg = Config {
+        let cfg = canban_types::Config {
             hc: "/usr/bin/false".into(),
             hc_session: "linux-slot-lru".into(),
             ..Default::default()
         };
-        let bind_a = LiveBinding {
-            config: cfg.clone(),
-            core_id: "core-lx".into(),
-            terminal: "tty-lx-a".into(),
-        };
-        let bind_b = LiveBinding {
-            config: cfg,
-            core_id: "core-lx".into(),
-            terminal: "tty-lx-b".into(),
-        };
+        let bind_a = LiveBinding::new(cfg.clone(), "core-lx", "tty-lx-a");
+        let bind_b = LiveBinding::new(cfg, "core-lx", "tty-lx-b");
 
         let mut slot = ControllerSlot::new(false);
         assert!(slot.rebind(Some(bind_a.clone())));
