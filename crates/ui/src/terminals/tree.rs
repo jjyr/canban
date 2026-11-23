@@ -17,11 +17,11 @@ pub(crate) fn scope_fold_key(location_key: &str) -> String {
 
 fn tree_icon_button(
     kind: Icon,
-    title: impl Into<String>,
+    title: impl IntoReactive<SharedString>,
     disabled: impl Fn() -> bool + 'static,
     press: impl Fn(&()) + 'static,
 ) -> View {
-    let title = title.into();
+    let title = title.into_reactive();
     let hint = title.clone();
     view()
         .flex_shrink_0()
@@ -39,7 +39,7 @@ fn tree_icon_button(
                 .bg(CLEAR)
                 .hover(|s| s.bg(CARD_HOVER))
                 .focus(|s| s.border_1().border_color(ACCENT))
-                .accessibility_label(move || Some(title.clone().into()))
+                .accessibility_label(move || Some(title.get()))
                 .child(icon(kind).w(px(13.)).h(px(13.)))
                 .on_press(press),
         )
@@ -80,44 +80,40 @@ fn git_status_chips(git: &super::worktrees::ScopeGitSummary) -> View {
     row
 }
 
-fn scope_header(
-    ui: Ui,
-    s: &canban_types::Snapshot,
-    scope: WorktreeScope,
-    render_key: String,
-    children: &[Entry],
-) -> impl IntoElement + use<> {
-    let git = scope_git_summary(s, &scope, children);
-    let display = scope.display_name(s, children, Some(ui));
-    let resolution_label = scope_resolution_label(s, &scope);
-    let scope_for_active = children.first().map(super::worktrees::location_key);
-    let recent_key = scope.recent_key();
-    let recent_target = ui.terminal_recent.with(|m| m.get(&recent_key).cloned());
-    let target_terminal = recent_target
-        .filter(|rid| children.iter().any(|e| e.saved.id == *rid))
-        .or_else(|| children.first().map(|e| e.saved.id.clone()));
-    let launch_params = children.first().and_then(|e| e.location.as_ref().map(|l| json!({
-        "host_id": e.host_id, "cwd": l.directory_root.as_ref().or(l.cwd.as_ref()), "project_id": l.project_id
-    })));
-    let is_active_scope = computed(move || {
-        let sel = ui.terminal_selection.get();
-        if sel.is_empty() || ui.closing_terminals.with(|c| c.contains(&sel)) {
-            return false;
-        }
-        ui.terminal_entries.with(|rows| {
-            rows.iter()
-                .find(|e| e.saved.id == sel)
-                .is_some_and(|e| Some(super::worktrees::location_key(e)) == scope_for_active)
-        })
-    });
-    let fold_key = scope_fold_key(&render_key);
-    let is_folded = computed({
-        let fold_key = fold_key.clone();
-        move || ui.terminal_folds.with(|folds| folds.contains(&fold_key))
-    });
-    let summary = super::labels::group_status_summary(children.iter());
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ScopeMoreAction {
+    ManagedWorktree { id: String, branch: String },
+    CardWorktree { id: String, number: u64 },
+}
 
-    let (lead_icon, card_badge, mut tooltip_text) = match &scope {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ScopeHeaderModel {
+    scope: WorktreeScope,
+    display_label: String,
+    resolution_label: Option<String>,
+    git: super::worktrees::ScopeGitSummary,
+    lead_icon: Icon,
+    card_badge: Option<String>,
+    tooltip_text: String,
+    folded: bool,
+    summary: Option<super::labels::GroupStatusSummary>,
+    more_action: Option<ScopeMoreAction>,
+    is_external: bool,
+}
+
+fn build_scope_header_model(
+    ui: Ui,
+    s: &Snapshot,
+    scope: &WorktreeScope,
+    folded: bool,
+    children: &[Entry],
+) -> ScopeHeaderModel {
+    let git = scope_git_summary(s, scope, children);
+    let display_label = scope.display_name(s, children, Some(ui));
+    let resolution_label = scope_resolution_label(s, scope);
+    let summary = folded.then(|| super::labels::group_status_summary(children.iter()));
+
+    let (lead_icon, card_badge, mut tooltip_text) = match scope {
         WorktreeScope::ProjectRoot(pid) => {
             let dir = s
                 .projects
@@ -125,7 +121,7 @@ fn scope_header(
                 .find(|p| &p.id == pid)
                 .map(|p| p.directory.clone())
                 .unwrap_or_default();
-            let mut tip = format!("Project root · {display}");
+            let mut tip = format!("Project root · {display_label}");
             let ind = git.tooltip_indicators();
             if !ind.is_empty() {
                 tip.push_str(&format!(" ({})", ind.join(" · ")));
@@ -139,8 +135,8 @@ fn scope_header(
             let card = s.cards.iter().find(|c| &c.id == cid);
             let badge = card.map(|c| format!("#{}", c.number));
             let mut tip = match card {
-                Some(c) => format!("#{} {}\nBranch: {display}", c.number, c.title),
-                None => format!("Card worktree · {display}"),
+                Some(c) => format!("#{} {}\nBranch: {display_label}", c.number, c.title),
+                None => format!("Card worktree · {display_label}"),
             };
             let ind = git.tooltip_indicators();
             if !ind.is_empty() {
@@ -163,7 +159,7 @@ fn scope_header(
                         w.base_branch.as_str()
                     }
                 ),
-                None => format!("Managed worktree `{display}`"),
+                None => format!("Managed worktree `{display_label}`"),
             };
             let ind = git.tooltip_indicators();
             if !ind.is_empty() {
@@ -199,233 +195,358 @@ fn scope_header(
         tooltip_text.push_str(&format!("\n{label}"));
     }
 
-    let managed_wt = match &scope {
-        WorktreeScope::ManagedWorktree(wid) => s.worktrees.iter().find(|w| &w.id == wid).cloned(),
+    let more_action = match scope {
+        WorktreeScope::ManagedWorktree(wid) => {
+            s.worktrees
+                .iter()
+                .find(|w| &w.id == wid)
+                .map(|w| ScopeMoreAction::ManagedWorktree {
+                    id: w.id.clone(),
+                    branch: w.branch.clone(),
+                })
+        }
+        WorktreeScope::CardWorktree(cid) => {
+            s.cards
+                .iter()
+                .find(|c| &c.id == cid)
+                .map(|c| ScopeMoreAction::CardWorktree {
+                    id: c.id.clone(),
+                    number: c.number,
+                })
+        }
         _ => None,
     };
-    let scope_card = match &scope {
-        WorktreeScope::CardWorktree(cid) => s.cards.iter().find(|c| &c.id == cid).cloned(),
-        _ => None,
-    };
+    let is_external = matches!(
+        scope,
+        WorktreeScope::Directory { project: None, .. } | WorktreeScope::Unassigned(_)
+    );
+
+    ScopeHeaderModel {
+        scope: scope.clone(),
+        display_label,
+        resolution_label,
+        git,
+        lead_icon,
+        card_badge,
+        tooltip_text,
+        folded,
+        summary,
+        more_action,
+        is_external,
+    }
+}
+
+fn scope_header(
+    ui: Ui,
+    render_key: String,
+    model: Memo<Option<ScopeHeaderModel>>,
+) -> impl IntoElement + use<> {
+    let scope_for_active = render_key.clone();
+    let is_active_scope = computed(move || {
+        let sel = ui.terminal_selection.get();
+        if sel.is_empty() || ui.closing_terminals.with(|c| c.contains(&sel)) {
+            return false;
+        }
+        ui.terminal_entries.with(|rows| {
+            rows.iter()
+                .find(|e| e.saved.id == sel)
+                .is_some_and(|e| super::worktrees::location_key(e) == scope_for_active)
+        })
+    });
+    let fold_key = scope_fold_key(&render_key);
+    let is_folded = computed(move || model.with(|m| m.as_ref().is_some_and(|h| h.folded)));
+    let display_label = computed(move || {
+        model.with(|m| {
+            m.as_ref()
+                .map(|h| h.display_label.clone())
+                .unwrap_or_default()
+        })
+    });
+    let resolution_label =
+        computed(move || model.with(|m| m.as_ref().and_then(|h| h.resolution_label.clone())));
+    let git =
+        computed(move || model.with(|m| m.as_ref().map(|h| h.git.clone()).unwrap_or_default()));
+    let lead_icon =
+        computed(move || model.with(|m| m.as_ref().map(|h| h.lead_icon).unwrap_or(Icon::Folder)));
+    let card_badge =
+        computed(move || model.with(|m| m.as_ref().and_then(|h| h.card_badge.clone())));
+    let tooltip_text = computed(move || {
+        model.with(|m| {
+            m.as_ref()
+                .map(|h| h.tooltip_text.clone())
+                .unwrap_or_default()
+        })
+    });
+    let summary = computed(move || model.with(|m| m.as_ref().and_then(|h| h.summary)));
+    let more_action =
+        computed(move || model.with(|m| m.as_ref().and_then(|h| h.more_action.clone())));
+    let is_external = computed(move || model.with(|m| m.as_ref().is_some_and(|h| h.is_external)));
+    let stacked_git = computed(move || {
+        let has_git = git.with(|g| g.dirty || g.ahead > 0 || g.behind > 0);
+        resolution_label.with(|r| r.is_some()) && has_git && ui.terminal_width.get() < 340.
+    });
     let hovered = signal(false);
 
-    dynamic(move || {
-        let active = is_active_scope.get();
-        let folded = is_folded.get();
-        let target = target_terminal.clone();
-        let params = launch_params.clone();
-        let scope_plus = scope.clone();
-        let display_label = display.clone();
-        let badge = card_badge.clone();
-        let tip = tooltip_text.clone();
-        let git_now = git.clone();
-        let wt_ctx = managed_wt.clone();
-        let wt_more = managed_wt.clone();
-        let card_ctx = scope_card.clone();
-        let card_more = scope_card.clone();
-        let more_anchor = element_ref();
-        let fold_toggle = fold_key.clone();
-        let chev_label = display_label.clone();
-
-        let has_git = git_now.dirty || git_now.ahead > 0 || git_now.behind > 0;
-        let stacked_git = resolution_label.is_some() && has_git && ui.terminal_width.get() < 340.;
-        let mut title_row = view()
-            .w_full()
-            .min_w(px(0.))
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .child(
-                icon_tinted(lead_icon, if active { ACCENT } else { MUTED })
-                    .w(px(12.))
-                    .h(px(12.))
-                    .flex_shrink_0(),
-            )
-            .child(
-                label(display_label.clone())
-                    .flex_1()
-                    .min_w(px(0.))
-                    .text_size(px(11.5))
-                    .text_color(MUTED)
-                    .font_weight(if active {
-                        FontWeight::SEMIBOLD
-                    } else {
-                        FontWeight::MEDIUM
-                    })
-                    .truncate(),
-            );
-        if let Some(b) = badge {
-            title_row = title_row.child(muted(b).text_size(px(10.5)).flex_shrink_0());
-        }
-        if resolution_label.is_some() {
-            title_row = title_row.child(
+    let title_row = view()
+        .w_full()
+        .min_w(px(0.))
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .child(dynamic(move || {
+            let active = is_active_scope.get();
+            icon_tinted(lead_icon.get(), if active { ACCENT } else { MUTED })
+                .w(px(12.))
+                .h(px(12.))
+                .flex_shrink_0()
+        }))
+        .child(dynamic(move || {
+            let active = is_active_scope.get();
+            label(move || SharedString::from(display_label.get()))
+                .flex_1()
+                .min_w(px(0.))
+                .text_size(px(11.5))
+                .text_color(MUTED)
+                .font_weight(if active {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::MEDIUM
+                })
+                .truncate()
+        }))
+        .child(dynamic(move || {
+            card_badge
+                .get()
+                .map(|b| muted(b).text_size(px(10.5)).flex_shrink_0())
+        }))
+        .child(when(
+            move || resolution_label.with(|r| r.is_some()),
+            || {
                 status("Resolved", Tone::Highlight)
                     .px_1()
                     .py(px(1.))
-                    .flex_shrink_0(),
-            );
-        }
-        if has_git && !stacked_git {
-            title_row = title_row.child(git_status_chips(&git_now));
-        }
-        if folded && let Some(badge_el) = super::labels::group_summary_badge(summary) {
-            title_row = title_row.child(badge_el);
-        }
+                    .flex_shrink_0()
+            },
+        ))
+        .child(dynamic(move || {
+            if stacked_git.get() {
+                return None;
+            }
+            git.with(|g| (g.dirty || g.ahead > 0 || g.behind > 0).then(|| git_status_chips(g)))
+        }))
+        .child(dynamic(move || {
+            summary.get().and_then(super::labels::group_summary_badge)
+        }));
 
-        let chevron_btn = canban_ui_kit::press_target()
-            .w(px(16.))
-            .h(px(26.))
-            .flex_shrink_0()
-            .items_center()
-            .justify_center()
-            .rounded(px(4.))
-            .bg(CLEAR)
-            .hover(|st| st.bg(INSET))
-            .focus(|st| st.border_1().border_color(ACCENT))
-            .accessibility_label(move || {
-                Some(
-                    if folded {
-                        format!("Expand worktree {chev_label}")
-                    } else {
-                        format!("Collapse worktree {chev_label}")
-                    }
-                    .into(),
-                )
-            })
-            .child(
-                icon_tinted(
-                    if folded {
-                        Icon::Forward
-                    } else {
-                        Icon::ChevronDown
-                    },
-                    MUTED,
-                )
-                .w(px(10.))
-                .h(px(10.)),
+    let fold_toggle = fold_key;
+    let chevron_btn = canban_ui_kit::press_target()
+        .w(px(16.))
+        .h(px(26.))
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.))
+        .bg(CLEAR)
+        .hover(|st| st.bg(INSET))
+        .focus(|st| st.border_1().border_color(ACCENT))
+        .accessibility_label(move || {
+            let name = display_label.get();
+            Some(
+                if is_folded.get() {
+                    format!("Expand worktree {name}")
+                } else {
+                    format!("Collapse worktree {name}")
+                }
+                .into(),
             )
-            .on_press(move |_: &()| {
-                ui.terminal_folds.update(|folds| {
-                    if !folds.remove(&fold_toggle) {
-                        folds.insert(fold_toggle.clone());
-                    }
-                });
-            });
-
-        let mut btn_row = canban_ui_kit::press_target()
-            .w_full()
-            .min_w(px(0.))
-            .min_h(px(26.))
-            .px_1()
-            .rounded(px(5.))
-            .bg(CLEAR)
-            .focus(|st| st.border_1().border_color(ACCENT))
-            .flex_col()
-            .justify_center()
-            .py(px(if stacked_git { 2. } else { 0. }))
-            .child(title_row);
-        if stacked_git {
-            btn_row = btn_row.child(view().pl(px(16.)).child(git_status_chips(&git_now)));
-        }
-        btn_row = btn_row
-            .accessibility_label({
-                let lbl = match &resolution_label {
-                    Some(resolved) => format!("{display_label} · {resolved}"),
-                    None => display_label.clone(),
-                };
-                let summary_desc = folded.then(|| super::labels::group_summary_a11y(summary));
-                move || {
-                    Some(
-                        match &summary_desc {
-                            Some(s) => format!("Worktree {lbl} · Collapsed · {s}"),
-                            None => format!("Worktree {lbl}"),
-                        }
-                        .into(),
-                    )
-                }
-            })
-            .on_press(move |_: &()| {
-                if let Some(id) = &target {
-                    ui.select_terminal_in_scope(id.clone());
+        })
+        .child(dynamic(move || {
+            icon_tinted(
+                if is_folded.get() {
+                    Icon::Forward
+                } else {
+                    Icon::ChevronDown
+                },
+                MUTED,
+            )
+            .w(px(10.))
+            .h(px(10.))
+        }))
+        .on_press(move |_: &()| {
+            ui.terminal_folds.update(|folds| {
+                if !folds.remove(&fold_toggle) {
+                    folds.insert(fold_toggle.clone());
                 }
             });
+        });
 
-        let is_external = matches!(
-            scope,
-            WorktreeScope::Directory { project: None, .. } | WorktreeScope::Unassigned(_)
-        );
-        let mut outer = view().relative().mt(px(2.));
-        if is_external {
-            outer = outer.ml(px(4.));
-        } else {
-            outer = outer.ml(px(12.));
-        }
-        outer = outer
-            .flex_row()
-            .items_center()
-            .min_w(px(0.))
-            .rounded(px(5.))
-            .bg(CLEAR)
-            .hover(|st| st.bg(INSET))
-            .on_mouse_enter(move |_: &MouseEvent| hovered.set(true))
-            .on_mouse_leave(move |_: &MouseEvent| hovered.set(false))
-            .on_context_menu(move |ev: &nsh_core::ContextMenuEvent| {
-                if let Some(wt) = wt_ctx.clone() {
-                    ui.spawn(super::worktrees::menu(ui, wt, Some(ev.page_position)));
-                } else if let Some(card) = card_ctx.clone() {
-                    ui.spawn(super::worktrees::card_scope_menu(
-                        ui,
-                        card,
-                        Some(ev.page_position),
-                    ));
-                }
-            })
-            .child(chevron_btn)
-            .child(
+    let press_key = render_key.clone();
+    let btn_row = canban_ui_kit::press_target()
+        .w_full()
+        .min_w(px(0.))
+        .min_h(px(26.))
+        .px_1()
+        .rounded(px(5.))
+        .bg(CLEAR)
+        .focus(|st| st.border_1().border_color(ACCENT))
+        .flex_col()
+        .justify_center()
+        .py(move || px(if stacked_git.get() { 2. } else { 0. }))
+        .child(title_row)
+        .child(when(
+            move || stacked_git.get(),
+            move || {
                 view()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .tooltip(hint_tooltip(tip).placement(Placement::Right))
-                    .child(btn_row),
+                    .pl(px(16.))
+                    .child(dynamic(move || git.with(git_status_chips)))
+            },
+        ))
+        .accessibility_label(move || {
+            let lbl = match resolution_label.get() {
+                Some(resolved) => format!("{} · {resolved}", display_label.get()),
+                None => display_label.get(),
+            };
+            Some(
+                match summary.get() {
+                    Some(sum) => format!(
+                        "Worktree {lbl} · Collapsed · {}",
+                        super::labels::group_summary_a11y(sum)
+                    ),
+                    None => format!("Worktree {lbl}"),
+                }
+                .into(),
             )
-            .child(when(
-                move || hovered.get(),
-                move || {
-                    let plus_params = params.clone();
-                    let plus_scope = scope_plus.clone();
-                    let plus_label = format!("New terminal in {display_label}");
-                    let mut overlay = view()
-                        .absolute()
-                        .right(px(2.))
-                        .top_0()
-                        .bottom_0()
-                        .flex_row()
-                        .items_center()
-                        .gap_0p5()
-                        .pl_1()
-                        .rounded(px(5.))
-                        .bg(INSET)
-                        .child(tree_icon_button(
-                            Icon::Plus,
-                            plus_label,
-                            move || ui.pending.get(),
-                            move |_| {
-                                if let Some(p) = &plus_params {
-                                    super::launch_custom(ui, p.clone());
-                                } else {
-                                    create_in_scope(ui, &plus_scope);
-                                }
-                            },
+        })
+        .on_press(move |_: &()| {
+            let target = model.with_untracked(|m| {
+                let recent_key = m.as_ref().map(|h| h.scope.recent_key());
+                let recent_target =
+                    recent_key.and_then(|rk| ui.terminal_recent.with(|map| map.get(&rk).cloned()));
+                ui.closing_terminals.with_untracked(|closing| {
+                    ui.terminal_entries.with_untracked(|rows| {
+                        let mut children = rows.iter().filter(|e| {
+                            e.listed()
+                                && !closing.contains(&e.saved.id)
+                                && super::worktrees::location_key(e) == press_key
+                        });
+                        recent_target
+                            .filter(|rid| children.clone().any(|e| e.saved.id == *rid))
+                            .or_else(|| children.next().map(|e| e.saved.id.clone()))
+                    })
+                })
+            });
+            if let Some(id) = target {
+                ui.select_terminal_in_scope(id);
+            }
+        });
+
+    let plus_key = render_key;
+    view()
+        .relative()
+        .mt(px(2.))
+        .ml(move || px(if is_external.get() { 4. } else { 12. }))
+        .flex_row()
+        .items_center()
+        .min_w(px(0.))
+        .rounded(px(5.))
+        .bg(CLEAR)
+        .hover(|st| st.bg(INSET))
+        .on_mouse_enter(move |_: &MouseEvent| hovered.set(true))
+        .on_mouse_leave(move |_: &MouseEvent| hovered.set(false))
+        .on_context_menu(move |ev: &nsh_core::ContextMenuEvent| {
+            let action = model.with_untracked(|m| m.as_ref().and_then(|h| h.more_action.clone()));
+            match action {
+                Some(ScopeMoreAction::ManagedWorktree { id, .. }) => {
+                    if let Some(wt) = ui.snapshot.with_untracked(|s| {
+                        s.worktrees.iter().find(|w| w.id == id).cloned()
+                    }) {
+                        ui.spawn(super::worktrees::menu(ui, wt, Some(ev.page_position)));
+                    }
+                }
+                Some(ScopeMoreAction::CardWorktree { id, .. }) => {
+                    if let Some(card) = ui
+                        .snapshot
+                        .with_untracked(|s| s.cards.iter().find(|c| c.id == id).cloned())
+                    {
+                        ui.spawn(super::worktrees::card_scope_menu(
+                            ui,
+                            card,
+                            Some(ev.page_position),
                         ));
-                    if let Some(wt) = wt_more.clone() {
-                        let branch = wt.branch.clone();
-                        overlay = overlay.child(
+                    }
+                }
+                None => {}
+            }
+        })
+        .child(chevron_btn)
+        .child(
+            view()
+                .flex_1()
+                .min_w(px(0.))
+                .tooltip(hint_tooltip(move || SharedString::from(tooltip_text.get())).placement(Placement::Right))
+                .child(btn_row),
+        )
+        .child(when(
+            move || hovered.get(),
+            move || {
+                let more_anchor = element_ref();
+                let plus_key = plus_key.clone();
+                view()
+                    .absolute()
+                    .right(px(2.))
+                    .top_0()
+                    .bottom_0()
+                    .flex_row()
+                    .items_center()
+                    .gap_0p5()
+                    .pl_1()
+                    .rounded(px(5.))
+                    .bg(INSET)
+                    .child(tree_icon_button(
+                        Icon::Plus,
+                        move || SharedString::from(format!("New terminal in {}", display_label.get())),
+                        move || ui.pending.get(),
+                        move |_| {
+                            let plus_params = ui.closing_terminals.with_untracked(|closing| {
+                                ui.terminal_entries.with_untracked(|rows| {
+                                    rows.iter()
+                                        .find(|e| {
+                                            e.listed()
+                                                && !closing.contains(&e.saved.id)
+                                                && super::worktrees::location_key(e) == plus_key
+                                        })
+                                        .and_then(|e| {
+                                            e.location.as_ref().map(|l| {
+                                                json!({
+                                                    "host_id": e.host_id,
+                                                    "cwd": l.directory_root.as_ref().or(l.cwd.as_ref()),
+                                                    "project_id": l.project_id
+                                                })
+                                            })
+                                        })
+                                })
+                            });
+                            if let Some(p) = plus_params {
+                                super::launch_custom(ui, p);
+                            } else if let Some(scope) =
+                                model.with_untracked(|m| m.as_ref().map(|h| h.scope.clone()))
+                            {
+                                create_in_scope(ui, &scope);
+                            }
+                        },
+                    ))
+                    .child(dynamic(move || match more_action.get() {
+                        Some(ScopeMoreAction::ManagedWorktree { id, branch }) => Some(
                             tree_icon_button(
                                 Icon::More,
                                 format!("Worktree actions for {branch}"),
                                 || false,
                                 move |_| {
-                                    let item = wt.clone();
+                                    let Some(item) = ui.snapshot.with_untracked(|s| {
+                                        s.worktrees.iter().find(|w| w.id == id).cloned()
+                                    }) else {
+                                        return;
+                                    };
                                     ui.spawn(async move {
                                         let pos = more_anchor.measure().await.map(|b| {
                                             point(b.page.x, b.page.y + b.frame.size.height)
@@ -435,16 +556,18 @@ fn scope_header(
                                 },
                             )
                             .element_ref(&more_anchor),
-                        );
-                    } else if let Some(card) = card_more.clone() {
-                        let num = card.number;
-                        overlay = overlay.child(
+                        ),
+                        Some(ScopeMoreAction::CardWorktree { id, number }) => Some(
                             tree_icon_button(
                                 Icon::More,
-                                format!("Card worktree actions for #{num}"),
+                                format!("Card worktree actions for #{number}"),
                                 || false,
                                 move |_| {
-                                    let item = card.clone();
+                                    let Some(item) = ui.snapshot.with_untracked(|s| {
+                                        s.cards.iter().find(|c| c.id == id).cloned()
+                                    }) else {
+                                        return;
+                                    };
                                     ui.spawn(async move {
                                         let pos = more_anchor.measure().await.map(|b| {
                                             point(b.page.x, b.page.y + b.frame.size.height)
@@ -454,147 +577,191 @@ fn scope_header(
                                 },
                             )
                             .element_ref(&more_anchor),
-                        );
-                    }
-                    overlay
-                },
-            ));
-
-        outer
-    })
+                        ),
+                        None => None,
+                    }))
+            },
+        ))
 }
-fn row(
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TerminalRowModel {
+    row_title: String,
+    lead_icon: Icon,
+    managed: bool,
+    host_badge: Option<String>,
+    status: Option<super::labels::SidebarStatus>,
+    hint: String,
+    close_label: String,
+    is_external: bool,
+}
+
+fn build_terminal_row_model(
     ui: Ui,
-    e: Entry,
-    in_own_card_worktree: bool,
-    host_in_scope_header: bool,
-) -> impl IntoElement {
-    let id = e.saved.id.clone();
+    s: &Snapshot,
+    e: &Entry,
+    idle_minutes: u64,
+    terminal_width: f32,
+) -> TerminalRowModel {
+    let scope = entry_scope(s, e);
+    let is_external = scope.project_id(s).is_none();
+    let in_own_card_wt = e
+        .card
+        .as_ref()
+        .is_some_and(|c| scope == WorktreeScope::CardWorktree(c.id.clone()));
+    let host_in_scope = matches!(scope, WorktreeScope::Unassigned(_));
+    let host_label = if e.host_id == "local" {
+        "Local".into()
+    } else {
+        crate::hosts::host_name(ui, &e.host_id)
+    };
+    let wide_row = terminal_width >= 230.;
+    TerminalRowModel {
+        row_title: super::labels::sidebar_row_title(e, in_own_card_wt),
+        lead_icon: super::labels::sidebar_meta_icon(e),
+        managed: e.is_managed(),
+        host_badge: (wide_row && !host_in_scope)
+            .then(|| super::labels::sidebar_host_badge(e, &host_label))
+            .flatten(),
+        status: super::labels::sidebar_status_model(e, wide_row),
+        hint: super::labels::sidebar_hint(e, &host_label, idle_minutes),
+        close_label: format!("Close terminal {}", e.title()),
+        is_external,
+    }
+}
+
+fn row(ui: Ui, id: String, model: Memo<Option<TerminalRowModel>>) -> impl IntoElement {
     let id_sel = id.clone();
     let is_selected = computed(move || ui.terminal_selection.get() == id_sel);
     let hovered = signal(false);
-    dynamic(move || {
-        let selected = is_selected.get();
-        let id = id.clone();
-        let close_id = id.clone();
-        let context_id = id.clone();
-        let host_label = if e.host_id == "local" {
-            "Local".into()
-        } else {
-            crate::hosts::host_name(ui, &e.host_id)
-        };
-        let hint = super::labels::sidebar_hint(&e, &host_label, ui.idle_minutes.get());
-        let row_title = super::labels::sidebar_row_title(&e, in_own_card_worktree);
-        let lead_icon = super::labels::sidebar_meta_icon(&e);
-        let managed = e.is_managed();
-        let wide_row = ui.terminal_width.get() >= 230.;
-        let host_badge = (wide_row && !host_in_scope_header)
-            .then(|| super::labels::sidebar_host_badge(&e, &host_label))
-            .flatten();
-        let status_el = super::labels::sidebar_status_compact(&e, wide_row);
-        let close_label = format!("Close terminal {}", e.title());
+    let lead_icon =
+        computed(move || model.with(|m| m.as_ref().map(|r| r.lead_icon).unwrap_or(Icon::Terminal)));
+    let row_title = computed(move || {
+        model.with(|m| m.as_ref().map(|r| r.row_title.clone()).unwrap_or_default())
+    });
+    let is_managed = computed(move || model.with(|m| m.as_ref().is_some_and(|r| r.managed)));
+    let host_badge =
+        computed(move || model.with(|m| m.as_ref().and_then(|r| r.host_badge.clone())));
+    let status = computed(move || model.with(|m| m.as_ref().and_then(|r| r.status)));
+    let hint =
+        computed(move || model.with(|m| m.as_ref().map(|r| r.hint.clone()).unwrap_or_default()));
+    let close_label = computed(move || {
+        model.with(|m| {
+            m.as_ref()
+                .map(|r| r.close_label.clone())
+                .unwrap_or_default()
+        })
+    });
 
-        let mut line = view()
-            .w_full()
-            .min_w(px(0.))
-            .flex_row()
-            .items_center()
-            .gap_1p5()
-            .child(icon(lead_icon).w(px(14.)).h(px(14.)).flex_shrink_0())
-            .child(
-                label(row_title)
-                    .text_size(px(13.))
-                    .text_color(TEXT)
-                    .font_weight(if selected {
-                        FontWeight::SEMIBOLD
-                    } else {
-                        FontWeight::MEDIUM
+    let line = view()
+        .w_full()
+        .min_w(px(0.))
+        .flex_row()
+        .items_center()
+        .gap_1p5()
+        .child(dynamic(move || {
+            icon(lead_icon.get()).w(px(14.)).h(px(14.)).flex_shrink_0()
+        }))
+        .child(dynamic(move || {
+            let selected = is_selected.get();
+            label(move || SharedString::from(row_title.get()))
+                .text_size(px(13.))
+                .text_color(TEXT)
+                .font_weight(if selected {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::MEDIUM
+                })
+                .flex_shrink(1.)
+                .min_w(px(0.))
+                .truncate()
+        }))
+        .child(when(move || is_managed.get(), super::labels::managed_badge))
+        .child(view().flex_1().min_w(px(0.)))
+        .child(when(
+            move || !hovered.get(),
+            move || {
+                dynamic(move || {
+                    host_badge.get().map(|host| {
+                        muted(format!("· {host}"))
+                            .text_size(px(10.5))
+                            .max_w(px(72.))
+                            .truncate()
+                            .flex_shrink_0()
                     })
-                    .flex_shrink(1.)
-                    .min_w(px(0.))
-                    .truncate(),
-            );
-        if managed {
-            line = line.child(super::labels::managed_badge());
-        }
-        line = line.child(view().flex_1().min_w(px(0.)));
-        if !hovered.get() {
-            if let Some(host) = host_badge {
-                line = line.child(
-                    muted(format!("· {host}"))
-                        .text_size(px(10.5))
-                        .max_w(px(72.))
-                        .truncate()
-                        .flex_shrink_0(),
-                );
-            }
-            if let Some(st) = status_el {
-                line = line.child(st);
-            }
-        }
+                })
+            },
+        ))
+        .child(when(
+            move || !hovered.get(),
+            move || dynamic(move || status.get().map(super::labels::render_sidebar_status)),
+        ));
 
-        view()
-            .relative()
-            .flex_row()
-            .items_center()
-            .min_w(px(0.))
-            .h(px(32.))
-            .my(px(1.))
-            .rounded(px(6.))
-            .bg(if selected { SELECTED } else { CLEAR })
-            .hover(move |s| s.bg(if selected { SELECTED } else { INSET }))
-            .on_mouse_enter(move |_: &MouseEvent| hovered.set(true))
-            .on_mouse_leave(move |_: &MouseEvent| hovered.set(false))
-            .on_context_menu(move |event: &nsh_core::ContextMenuEvent| {
-                ui.spawn(super::tabs::menu(
-                    ui,
-                    context_id.clone(),
-                    Some(event.page_position),
-                ));
-            })
-            .tooltip(hint_tooltip(hint.clone()).placement(Placement::Right))
-            .child(when(
-                move || selected,
-                || {
-                    view()
-                        .absolute()
-                        .left(px(0.))
-                        .top(px(7.))
-                        .bottom(px(7.))
-                        .w(px(2.5))
-                        .rounded(px(2.))
-                        .bg(ACCENT)
-                },
-            ))
-            .child(
-                canban_ui_kit::press_target()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .h(px(32.))
-                    .px_2()
-                    .flex_row()
-                    .items_center()
-                    .rounded(px(6.))
-                    .bg(CLEAR)
-                    .focus(|s| s.border_1().border_color(ACCENT))
-                    .selected(move || selected)
-                    .accessibility_label(move || Some(hint.clone().into()))
-                    .child(line)
-                    .on_press(move |_: &()| ui.open_terminal(id.clone())),
-            )
-            .child(when(
-                move || hovered.get(),
-                move || {
-                    let close_target = close_id.clone();
-                    view().pr_1().child(tree_icon_button(
-                        Icon::Close,
-                        close_label.clone(),
-                        move || ui.pending.get(),
-                        move |_| super::close_entry(ui, &close_target),
-                    ))
-                },
-            ))
-    })
+    let open_id = id.clone();
+    let close_id = id.clone();
+    let context_id = id;
+    view()
+        .relative()
+        .flex_row()
+        .items_center()
+        .min_w(px(0.))
+        .h(px(32.))
+        .my(px(1.))
+        .rounded(px(6.))
+        .bg(move || if is_selected.get() { SELECTED } else { CLEAR })
+        .hover(move |s| s.bg(move || if is_selected.get() { SELECTED } else { INSET }))
+        .on_mouse_enter(move |_: &MouseEvent| hovered.set(true))
+        .on_mouse_leave(move |_: &MouseEvent| hovered.set(false))
+        .on_context_menu(move |event: &nsh_core::ContextMenuEvent| {
+            ui.spawn(super::tabs::menu(
+                ui,
+                context_id.clone(),
+                Some(event.page_position),
+            ));
+        })
+        .tooltip(hint_tooltip(move || SharedString::from(hint.get())).placement(Placement::Right))
+        .child(when(
+            move || is_selected.get(),
+            || {
+                view()
+                    .absolute()
+                    .left(px(0.))
+                    .top(px(7.))
+                    .bottom(px(7.))
+                    .w(px(2.5))
+                    .rounded(px(2.))
+                    .bg(ACCENT)
+                    .pointer_events(PointerEvents::None)
+            },
+        ))
+        .child(
+            canban_ui_kit::press_target()
+                .flex_1()
+                .min_w(px(0.))
+                .h(px(32.))
+                .px_2()
+                .flex_row()
+                .items_center()
+                .rounded(px(6.))
+                .bg(CLEAR)
+                .focus(|s| s.border_1().border_color(ACCENT))
+                .selected(move || is_selected.get())
+                .accessibility_label(move || Some(SharedString::from(hint.get())))
+                .child(line)
+                .on_press(move |_: &()| ui.open_terminal(open_id.clone())),
+        )
+        .child(when(
+            move || hovered.get(),
+            move || {
+                let close_target = close_id.clone();
+                view().pr_1().child(tree_icon_button(
+                    Icon::Close,
+                    move || SharedString::from(close_label.get()),
+                    move || ui.pending.get(),
+                    move |_| super::close_entry(ui, &close_target),
+                ))
+            },
+        ))
 }
 /// Flat keys allow a Terminal row to move between parents without remounting.
 #[derive(Clone, Debug, PartialEq)]
@@ -821,70 +988,68 @@ fn project_heading(ui: Ui, id: String, is_first: Memo<bool>) -> impl IntoElement
             })
         }
     });
+    let is_folded = computed(move || info.with(|(f, ..)| *f));
+    let proj_name = computed(move || info.with(|(_, n, _)| n.clone()));
+    let summary = computed(move || info.with(|(_, _, s)| *s));
 
-    dynamic(move || {
-        let (folded, proj_name, summary) = info.get();
-        let first = is_first.get();
-        let pid_wt = id.clone();
-        let pid_new = id.clone();
-        let pid_ctx_new = id.clone();
-        let pid_ctx_wt = id.clone();
-        let fold_toggle = fold_key.clone();
-        let fold_ctx = fold_key.clone();
-        let ctx_name = proj_name.clone();
-        let a11y_name = proj_name.clone();
-        let mut header_btn = canban_ui_kit::press_target()
-            .flex_1()
-            .min_w(px(0.))
-            .h(px(26.))
-            .px_1()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .rounded(px(5.))
-            .bg(CLEAR)
-            .hover(|s| s.bg(INSET))
-            .focus(|s| s.border_1().border_color(ACCENT))
-            .accessibility_label(move || {
-                Some(
-                    match summary {
-                        Some(sum) => format!(
-                            "Project {a11y_name} · Collapsed · {}",
-                            super::labels::group_summary_a11y(sum)
-                        ),
-                        None => format!("Project {a11y_name}"),
-                    }
-                    .into(),
-                )
-            })
-            .child(
-                icon_tinted(
-                    if folded {
-                        Icon::Forward
-                    } else {
-                        Icon::ChevronDown
-                    },
-                    MUTED,
-                )
-                .w(px(10.))
-                .h(px(10.))
-                .flex_shrink_0(),
+    let pid_wt = id.clone();
+    let pid_new = id.clone();
+    let pid_ctx_new = id.clone();
+    let pid_ctx_wt = id;
+    let fold_toggle = fold_key.clone();
+    let fold_ctx = fold_key;
+
+    let header_btn = canban_ui_kit::press_target()
+        .flex_1()
+        .min_w(px(0.))
+        .h(px(26.))
+        .px_1()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .rounded(px(5.))
+        .bg(CLEAR)
+        .hover(|s| s.bg(INSET))
+        .focus(|s| s.border_1().border_color(ACCENT))
+        .accessibility_label(move || {
+            let name = proj_name.get();
+            Some(
+                match summary.get() {
+                    Some(sum) => format!(
+                        "Project {name} · Collapsed · {}",
+                        super::labels::group_summary_a11y(sum)
+                    ),
+                    None => format!("Project {name}"),
+                }
+                .into(),
             )
-            .child(
-                label(proj_name.to_uppercase())
-                    .flex_1()
-                    .min_w(px(0.))
-                    .text_size(px(11.))
-                    .text_color(MUTED)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .truncate(),
-            );
-        if let Some(sum) = summary
-            && let Some(badge) = super::labels::group_summary_badge(sum)
-        {
-            header_btn = header_btn.child(badge);
-        }
-        header_btn = header_btn.on_press(move |_: &()| {
+        })
+        .child(dynamic(move || {
+            icon_tinted(
+                if is_folded.get() {
+                    Icon::Forward
+                } else {
+                    Icon::ChevronDown
+                },
+                MUTED,
+            )
+            .w(px(10.))
+            .h(px(10.))
+            .flex_shrink_0()
+        }))
+        .child(
+            label(move || SharedString::from(proj_name.get().to_uppercase()))
+                .flex_1()
+                .min_w(px(0.))
+                .text_size(px(11.))
+                .text_color(MUTED)
+                .font_weight(FontWeight::SEMIBOLD)
+                .truncate(),
+        )
+        .child(dynamic(move || {
+            summary.get().and_then(super::labels::group_summary_badge)
+        }))
+        .on_press(move |_: &()| {
             ui.terminal_folds.update(|folds| {
                 if !folds.remove(&fold_toggle) {
                     folds.insert(fold_toggle.clone());
@@ -892,88 +1057,90 @@ fn project_heading(ui: Ui, id: String, is_first: Memo<bool>) -> impl IntoElement
             });
         });
 
-        let row = view()
-            .relative()
-            .flex_row()
-            .items_center()
-            .h(px(28.))
-            .min_w(px(0.))
-            .on_mouse_enter(move |_: &MouseEvent| hovered.set(true))
-            .on_mouse_leave(move |_: &MouseEvent| hovered.set(false))
-            .on_context_menu(move |ev: &nsh_core::ContextMenuEvent| {
-                use nsh_core::element::desktop::{MenuItem, popup_menu_at};
-                let pid_new = pid_ctx_new.clone();
-                let pid_wt = pid_ctx_wt.clone();
-                let fold_key = fold_ctx.clone();
-                let name = ctx_name.clone();
-                let at = ev.page_position;
-                ui.spawn(async move {
-                    let toggle_label = if folded {
-                        format!("Expand {name}")
-                    } else {
-                        format!("Collapse {name}")
-                    };
-                    let items = vec![
-                        MenuItem::new(format!("New Terminal in {name}"))
-                            .on_select(move || create(ui, pid_new.clone(), None)),
-                        MenuItem::new("New Managed Branch Worktree…")
-                            .on_select(move || ui.worktree_modal.set(Some(pid_wt.clone()))),
-                        MenuItem::separator(),
-                        MenuItem::new(toggle_label).on_select(move || {
-                            ui.terminal_folds.update(|folds| {
-                                if !folds.remove(&fold_key) {
-                                    folds.insert(fold_key.clone());
-                                }
-                            });
-                        }),
-                    ];
-                    popup_menu_at(items, at).await;
-                });
-            })
-            .child(header_btn)
-            .child(when(
-                move || hovered.get(),
-                move || {
-                    let pid_wt = pid_wt.clone();
-                    let pid_new = pid_new.clone();
-                    view()
-                        .absolute()
-                        .right(px(4.))
-                        .top(px(2.))
-                        .bottom(px(2.))
-                        .flex_row()
-                        .items_center()
-                        .gap_0p5()
-                        .pl_1()
-                        .rounded(px(5.))
-                        .bg(INSET)
-                        .child(tree_icon_button(
-                            Icon::Branch,
-                            "New branch worktree",
-                            move || ui.pending.get(),
-                            move |_| ui.worktree_modal.set(Some(pid_wt.clone())),
-                        ))
-                        .child(tree_icon_button(
-                            Icon::Plus,
-                            "New terminal",
-                            move || ui.pending.get(),
-                            move |_| create(ui, pid_new.clone(), None),
-                        ))
-                },
-            ));
+    let row = view()
+        .relative()
+        .flex_row()
+        .items_center()
+        .h(px(28.))
+        .min_w(px(0.))
+        .on_mouse_enter(move |_: &MouseEvent| hovered.set(true))
+        .on_mouse_leave(move |_: &MouseEvent| hovered.set(false))
+        .on_context_menu(move |ev: &nsh_core::ContextMenuEvent| {
+            use nsh_core::element::desktop::{MenuItem, popup_menu_at};
+            let (folded, name, _) = info.get_untracked();
+            let pid_new = pid_ctx_new.clone();
+            let pid_wt = pid_ctx_wt.clone();
+            let fold_key = fold_ctx.clone();
+            let at = ev.page_position;
+            ui.spawn(async move {
+                let toggle_label = if folded {
+                    format!("Expand {name}")
+                } else {
+                    format!("Collapse {name}")
+                };
+                let items = vec![
+                    MenuItem::new(format!("New Terminal in {name}"))
+                        .on_select(move || create(ui, pid_new.clone(), None)),
+                    MenuItem::new("New Managed Branch Worktree…")
+                        .on_select(move || ui.worktree_modal.set(Some(pid_wt.clone()))),
+                    MenuItem::separator(),
+                    MenuItem::new(toggle_label).on_select(move || {
+                        ui.terminal_folds.update(|folds| {
+                            if !folds.remove(&fold_key) {
+                                folds.insert(fold_key.clone());
+                            }
+                        });
+                    }),
+                ];
+                popup_menu_at(items, at).await;
+            });
+        })
+        .child(header_btn)
+        .child(when(
+            move || hovered.get(),
+            move || {
+                let pid_wt = pid_wt.clone();
+                let pid_new = pid_new.clone();
+                view()
+                    .absolute()
+                    .right(px(4.))
+                    .top(px(2.))
+                    .bottom(px(2.))
+                    .flex_row()
+                    .items_center()
+                    .gap_0p5()
+                    .pl_1()
+                    .rounded(px(5.))
+                    .bg(INSET)
+                    .child(tree_icon_button(
+                        Icon::Branch,
+                        "New branch worktree",
+                        move || ui.pending.get(),
+                        move |_| ui.worktree_modal.set(Some(pid_wt.clone())),
+                    ))
+                    .child(tree_icon_button(
+                        Icon::Plus,
+                        "New terminal",
+                        move || ui.pending.get(),
+                        move |_| create(ui, pid_new.clone(), None),
+                    ))
+            },
+        ));
 
-        let mut container = view().flex_col().min_w(px(0.));
-        if !first {
-            container = container.child(
+    view()
+        .flex_col()
+        .min_w(px(0.))
+        .child(when(
+            move || !is_first.get(),
+            || {
                 view()
                     .h(px(10.))
                     .px_1()
                     .justify_center()
-                    .child(view().h(px(1.)).bg(BORDER)),
-            );
-        }
-        container.child(row)
-    })
+                    .child(view().h(px(1.)).bg(BORDER))
+            },
+        ))
+        .child(row)
 }
 
 fn node_content(
@@ -986,149 +1153,75 @@ fn node_content(
         TreeNode::Project(id) => project_heading(ui, id, is_first).into_element(),
         TreeNode::OtherHeader => other_heading().into_element(),
         TreeNode::Terminal(id) => {
-            let id_ext = id.clone();
-            let id_own = id.clone();
-            let id_host = id.clone();
-            let entry = computed(move || {
+            let id_model = id.clone();
+            let live_model = computed(move || {
                 ui.closing_terminals.with(|closing| {
                     ui.terminal_entries.with(|rows| {
-                        indices
-                            .with(|map| map.get(&id).and_then(|i| rows.get(*i)))
-                            .filter(|e| e.listed() && !closing.contains(&e.saved.id))
-                            .cloned()
+                        let e = indices
+                            .with(|map| map.get(&id_model).and_then(|i| rows.get(*i)))
+                            .filter(|e| e.listed() && !closing.contains(&e.saved.id))?;
+                        let idle_minutes = ui.idle_minutes.get();
+                        let terminal_width = ui.terminal_width.get();
+                        Some(ui.snapshot.with(|s| {
+                            build_terminal_row_model(ui, s, e, idle_minutes, terminal_width)
+                        }))
                     })
                 })
             });
-            let last = stored(entry.get_untracked());
-            let is_external = computed(move || {
-                ui.snapshot.with(|s| {
-                    ui.terminal_entries.with(|rows| {
-                        indices
-                            .with(|map| map.get(&id_ext).and_then(|i| rows.get(*i)))
-                            .is_some_and(|e| entry_scope(s, e).project_id(s).is_none())
-                    })
-                })
+            let last = stored(live_model.get_untracked());
+            let model = computed(move || {
+                if let Some(next) = live_model.get() {
+                    last.replace(Some(next));
+                }
+                last.get()
             });
-            let in_own_card_wt = computed(move || {
-                ui.snapshot.with(|s| {
-                    ui.terminal_entries.with(|rows| {
-                        indices
-                            .with(|map| map.get(&id_own).and_then(|i| rows.get(*i)))
-                            .is_some_and(|e| {
-                                e.card.as_ref().is_some_and(|c| {
-                                    entry_scope(s, e) == WorktreeScope::CardWorktree(c.id.clone())
-                                })
-                            })
-                    })
-                })
-            });
-            let host_in_scope = computed(move || {
-                ui.snapshot.with(|s| {
-                    ui.terminal_entries.with(|rows| {
-                        indices
-                            .with(|map| map.get(&id_host).and_then(|i| rows.get(*i)))
-                            .is_some_and(|e| {
-                                matches!(entry_scope(s, e), WorktreeScope::Unassigned(_))
-                            })
-                    })
-                })
-            });
-            let last_ext = stored(is_external.get_untracked());
-            let last_own = stored(in_own_card_wt.get_untracked());
-            let last_host_in_scope = stored(host_in_scope.get_untracked());
+            let is_external =
+                computed(move || model.with(|m| m.as_ref().is_some_and(|r| r.is_external)));
             view()
-                .ml(move || {
-                    if entry.get().is_some() {
-                        last_ext.replace(is_external.get());
-                    }
-                    px(if last_ext.get() { 12. } else { 20. })
-                })
+                .ml(move || px(if is_external.get() { 12. } else { 20. }))
                 .pl_2()
                 .border_l_1()
                 .border_color(BORDER)
-                .child(dynamic(move || {
-                    if let Some(e) = entry.get() {
-                        last.replace(Some(e));
-                        last_own.replace(in_own_card_wt.get());
-                        last_host_in_scope.replace(host_in_scope.get());
-                    }
-                    last.get().map(|e| {
-                        row(ui, e, last_own.get(), last_host_in_scope.get()).into_element()
-                    })
-                }))
+                .child(row(ui, id, model))
                 .into_element()
         }
         TreeNode::Scope(key, _) => {
             let render_key = key.clone();
             let fold_key = scope_fold_key(&key);
             // Expanded headers skip Agent status ticks; collapsed headers track GroupStatusSummary.
-            let info = computed(move || {
+            let live_model = computed(move || {
                 let TreeNode::Scope(_, scope) = node.get() else {
                     unreachable!()
                 };
                 let folded = ui.terminal_folds.with(|folds| folds.contains(&fold_key));
                 ui.snapshot.with(|s| {
-                    ui.terminal_entries.with(|rows| {
-                        let closing = ui.closing_terminals.get();
-                        let children: Vec<_> = rows
-                            .iter()
-                            .filter(|e| {
-                                e.listed()
-                                    && !closing.contains(&e.saved.id)
-                                    && super::worktrees::location_key(e) == key
-                            })
-                            .cloned()
-                            .collect();
-                        let summary =
-                            folded.then(|| super::labels::group_status_summary(children.iter()));
-                        (
-                            folded,
-                            summary,
-                            scope.clone(),
-                            scope.display_name(s, &children, Some(ui)),
-                            scope_git_summary(s, &scope, &children),
-                            scope_resolution_label(s, &scope),
-                            children
+                    ui.closing_terminals.with(|closing| {
+                        ui.terminal_entries.with(|rows| {
+                            let children: Vec<_> = rows
                                 .iter()
-                                .map(|e| e.saved.id.clone())
-                                .collect::<Vec<_>>(),
-                            match &scope {
-                                WorktreeScope::CardWorktree(id) => s
-                                    .cards
-                                    .iter()
-                                    .find(|c| &c.id == id)
-                                    .map(|c| (c.number, c.title.clone())),
-                                _ => None,
-                            },
-                        )
+                                .filter(|e| {
+                                    e.listed()
+                                        && !closing.contains(&e.saved.id)
+                                        && super::worktrees::location_key(e) == key
+                                })
+                                .cloned()
+                                .collect();
+                            if children.is_empty() {
+                                return None;
+                            }
+                            Some(build_scope_header_model(ui, s, &scope, folded, &children))
+                        })
                     })
                 })
             });
-            let last_children = stored(Vec::<Entry>::new());
-            dynamic(move || {
-                let (_, _, scope, ..) = info.get();
-                let s = ui.snapshot.get_untracked();
-                let rows = ui.terminal_entries.get_untracked();
-                let closing = ui.closing_terminals.get_untracked();
-                let children: Vec<_> = rows
-                    .into_iter()
-                    .filter(|e| {
-                        e.listed()
-                            && !closing.contains(&e.saved.id)
-                            && super::worktrees::location_key(e) == render_key
-                    })
-                    .collect();
-                if !children.is_empty() {
-                    last_children.replace(children.clone());
+            let last = stored(live_model.get_untracked());
+            let model = computed(move || {
+                if let Some(next) = live_model.get() {
+                    last.replace(Some(next));
                 }
-                let display_children = if children.is_empty() {
-                    last_children.get()
-                } else {
-                    children
-                };
-                scope_header(ui, &s, scope, render_key.clone(), &display_children)
-            })
-            .into_element()
+                last.get()
+            });
+            scope_header(ui, render_key, model).into_element()
         }
         TreeNode::Empty => action("New terminal", Variant::Quiet, move |_| new_tab(ui))
             .disabled(move || ui.pending.get())

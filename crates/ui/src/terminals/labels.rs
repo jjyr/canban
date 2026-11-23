@@ -85,16 +85,9 @@ pub fn sidebar_host_badge(e: &Entry, machine: &str) -> Option<String> {
 /// Right-aligned compact Herdr status indicator for a Terminal sidebar row.
 /// Plain idle Shells return `None` to stay quiet. When `show_word` is `false`
 /// (narrow sidebars `< 230px`), only the semantic status mark is rendered.
+#[cfg(test)]
 pub fn sidebar_status_compact(e: &Entry, show_word: bool) -> Option<AnyElement> {
-    let label_el = sidebar_status_label_raw(e)?;
-    let mut group = view().flex_row().items_center().gap_1().flex_shrink_0();
-    if let Some(mark_el) = status_mark(e) {
-        group = group.child(mark_el);
-    }
-    if show_word {
-        group = group.child(label_el);
-    }
-    Some(group.into_element())
+    sidebar_status_model(e, show_word).map(render_sidebar_status)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -276,95 +269,100 @@ pub fn sidebar_hint(e: &Entry, machine: &str, idle_minutes: u64) -> String {
     lines.join("\n")
 }
 
-/// Compact leading Herdr status mark for Terminal sidebar rows and top/Card tab strips.
-pub fn status_mark(e: &Entry) -> Option<AnyElement> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StatusMarkKind {
+    Clock,
+    LiveWorking,
+    MutedDot,
+    BlockedShield,
+    BlockedHelp,
+    AttentionInfo,
+    DoneCheck,
+    ErrorTriangle,
+}
+
+pub(crate) fn status_mark_kind(e: &Entry) -> Option<StatusMarkKind> {
     use canban_types::HerdrStatus;
     if e.is_auto_reclaiming() || e.is_reclaiming_soon() {
-        return Some(
-            icon_tinted(Icon::Clock, MUTED)
-                .w(px(12.))
-                .h(px(12.))
-                .flex_shrink_0()
-                .into_element(),
-        );
+        return Some(StatusMarkKind::Clock);
     }
     match e.herdr_status() {
         HerdrStatus::PlainShell | HerdrStatus::Ended => None,
-        HerdrStatus::Working => Some(live_dot(ACCENT).into_element()),
-        HerdrStatus::Starting | HerdrStatus::Queued | HerdrStatus::Closing => Some(
-            view()
-                .w(px(6.))
-                .h(px(6.))
-                .rounded_full()
-                .bg(MUTED)
-                .flex_shrink_0()
-                .pointer_events(PointerEvents::None)
-                .into_element(),
-        ),
-        HerdrStatus::Blocked => {
-            let blocked_icon = match e.runtime_wait().map(|w| w.kind.as_str()) {
-                Some("permission" | "approval" | "command" | "tool" | "bash" | "file") => {
-                    Icon::ShieldAlert
-                }
-                _ => Icon::CircleHelp,
-            };
-            Some(
-                icon_tinted(blocked_icon, ATTENTION)
-                    .w(px(13.))
-                    .h(px(13.))
-                    .flex_shrink_0()
-                    .into_element(),
-            )
+        HerdrStatus::Working => Some(StatusMarkKind::LiveWorking),
+        HerdrStatus::Starting | HerdrStatus::Queued | HerdrStatus::Closing => {
+            Some(StatusMarkKind::MutedDot)
         }
+        HerdrStatus::Blocked => match e.runtime_wait().map(|w| w.kind.as_str()) {
+            Some("permission" | "approval" | "command" | "tool" | "bash" | "file") => {
+                Some(StatusMarkKind::BlockedShield)
+            }
+            _ => Some(StatusMarkKind::BlockedHelp),
+        },
         HerdrStatus::Done => {
             if e.needs_attention() {
-                Some(
-                    icon_tinted(Icon::Info, ATTENTION)
-                        .w(px(13.))
-                        .h(px(13.))
-                        .flex_shrink_0()
-                        .into_element(),
-                )
+                Some(StatusMarkKind::AttentionInfo)
             } else {
-                Some(
-                    icon_tinted(Icon::Check, SUCCESS)
-                        .w(px(13.))
-                        .h(px(13.))
-                        .flex_shrink_0()
-                        .into_element(),
-                )
+                Some(StatusMarkKind::DoneCheck)
             }
         }
         HerdrStatus::Idle => {
             if e.needs_attention() {
-                Some(
-                    icon_tinted(Icon::Info, ATTENTION)
-                        .w(px(13.))
-                        .h(px(13.))
-                        .flex_shrink_0()
-                        .into_element(),
-                )
+                Some(StatusMarkKind::AttentionInfo)
             } else {
-                Some(
-                    view()
-                        .w(px(6.))
-                        .h(px(6.))
-                        .rounded_full()
-                        .bg(MUTED)
-                        .flex_shrink_0()
-                        .pointer_events(PointerEvents::None)
-                        .into_element(),
-                )
+                Some(StatusMarkKind::MutedDot)
             }
         }
-        HerdrStatus::Error | HerdrStatus::Disconnected => Some(
-            icon_tinted(Icon::TriangleAlert, DANGER)
-                .w(px(13.))
-                .h(px(13.))
-                .flex_shrink_0()
-                .into_element(),
-        ),
+        HerdrStatus::Error | HerdrStatus::Disconnected => Some(StatusMarkKind::ErrorTriangle),
     }
+}
+
+pub(crate) fn render_status_mark(kind: StatusMarkKind) -> AnyElement {
+    match kind {
+        StatusMarkKind::Clock => icon_tinted(Icon::Clock, MUTED)
+            .w(px(12.))
+            .h(px(12.))
+            .flex_shrink_0()
+            .into_element(),
+        StatusMarkKind::LiveWorking => live_dot(ACCENT).into_element(),
+        StatusMarkKind::MutedDot => view()
+            .w(px(6.))
+            .h(px(6.))
+            .rounded_full()
+            .bg(MUTED)
+            .flex_shrink_0()
+            .pointer_events(PointerEvents::None)
+            .into_element(),
+        StatusMarkKind::BlockedShield => icon_tinted(Icon::ShieldAlert, ATTENTION)
+            .w(px(13.))
+            .h(px(13.))
+            .flex_shrink_0()
+            .into_element(),
+        StatusMarkKind::BlockedHelp => icon_tinted(Icon::CircleHelp, ATTENTION)
+            .w(px(13.))
+            .h(px(13.))
+            .flex_shrink_0()
+            .into_element(),
+        StatusMarkKind::AttentionInfo => icon_tinted(Icon::Info, ATTENTION)
+            .w(px(13.))
+            .h(px(13.))
+            .flex_shrink_0()
+            .into_element(),
+        StatusMarkKind::DoneCheck => icon_tinted(Icon::Check, SUCCESS)
+            .w(px(13.))
+            .h(px(13.))
+            .flex_shrink_0()
+            .into_element(),
+        StatusMarkKind::ErrorTriangle => icon_tinted(Icon::TriangleAlert, DANGER)
+            .w(px(13.))
+            .h(px(13.))
+            .flex_shrink_0()
+            .into_element(),
+    }
+}
+
+/// Compact leading Herdr status mark for Terminal sidebar rows and top/Card tab strips.
+pub fn status_mark(e: &Entry) -> Option<AnyElement> {
+    status_mark_kind(e).map(render_status_mark)
 }
 
 pub(crate) fn sidebar_status_spec(e: &Entry) -> Option<(&'static str, ThemeColor)> {
@@ -403,16 +401,38 @@ pub(crate) fn sidebar_status_spec(e: &Entry) -> Option<(&'static str, ThemeColor
     Some((word, color))
 }
 
-fn sidebar_status_label_raw(e: &Entry) -> Option<AnyElement> {
-    let (word, color) = sidebar_status_spec(e)?;
-    Some(
-        text(word)
-            .text_size(px(11.))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(color)
-            .flex_shrink_0()
-            .into_element(),
-    )
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SidebarStatus {
+    pub mark: Option<StatusMarkKind>,
+    pub word: &'static str,
+    pub color: ThemeColor,
+    pub show_word: bool,
+}
+
+pub(crate) fn sidebar_status_model(e: &Entry, show_word: bool) -> Option<SidebarStatus> {
+    sidebar_status_spec(e).map(|(word, color)| SidebarStatus {
+        mark: status_mark_kind(e),
+        word,
+        color,
+        show_word,
+    })
+}
+
+pub(crate) fn render_sidebar_status(status: SidebarStatus) -> AnyElement {
+    let mut group = view().flex_row().items_center().gap_1().flex_shrink_0();
+    if let Some(mark) = status.mark {
+        group = group.child(render_status_mark(mark));
+    }
+    if status.show_word {
+        group = group.child(
+            text(status.word)
+                .text_size(px(11.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(status.color)
+                .flex_shrink_0(),
+        );
+    }
+    group.into_element()
 }
 fn text_width(text: &str) -> f32 {
     text.chars()

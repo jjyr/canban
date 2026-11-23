@@ -3155,11 +3155,19 @@ fn two_level_folding_hides_children_preserves_summary_badges_and_supports_option
                         self.alive.remove(id);
                         self.parents.remove(id);
                         self.texts.remove(id);
+                        self.labels.retain(|_, v| v != id);
                     }
                     MountItem::Text { id, text, .. } => {
                         self.texts.insert(*id, text.text.to_string());
                     }
+                    MountItem::AccessibilityLabel { id, label } => {
+                        self.labels.retain(|_, v| v != id);
+                        if let Some(label) = label {
+                            self.labels.insert(label.to_string(), *id);
+                        }
+                    }
                     MountItem::ViewProps { id, props } => {
+                        self.labels.retain(|_, v| v != id);
                         if let Some(label) = &props.accessibility.label {
                             self.labels.insert(label.to_string(), *id);
                         }
@@ -3934,16 +3942,24 @@ fn retained_directory_rows_survive_cd_and_unrelated_status_updates() {
             if let Some(batch) = core.commit() {
                 for item in batch.items {
                     match item {
+                        MountItem::AccessibilityLabel { id, label } => {
+                            m.labels.retain(|_, v| *v != id);
+                            if let Some(label) = label {
+                                m.labels.insert(label.to_string(), id);
+                            }
+                        }
                         MountItem::ViewProps { id, props } => {
                             if let Some(key) = props.test_id {
                                 m.keys.insert(key.to_string(), id);
                             }
+                            m.labels.retain(|_, v| *v != id);
                             if let Some(label) = props.accessibility.label {
                                 m.labels.insert(label.to_string(), id);
                             }
                         }
                         MountItem::Delete { id } => {
                             m.deleted.insert(id);
+                            m.labels.retain(|_, v| *v != id);
                         }
                         _ => {}
                     }
@@ -5353,16 +5369,24 @@ fn reclaiming_terminal_never_jumps_to_other_directories_on_transient_context_los
             if let Some(batch) = core.commit() {
                 for item in batch.items {
                     match item {
+                        MountItem::AccessibilityLabel { id, label } => {
+                            m.labels.retain(|_, v| *v != id);
+                            if let Some(label) = label {
+                                m.labels.insert(label.to_string(), id);
+                            }
+                        }
                         MountItem::ViewProps { id, props } => {
                             if let Some(key) = props.test_id {
                                 m.keys.insert(key.to_string(), id);
                             }
+                            m.labels.retain(|_, v| *v != id);
                             if let Some(label) = props.accessibility.label {
                                 m.labels.insert(label.to_string(), id);
                             }
                         }
                         MountItem::Delete { id } => {
                             m.deleted.insert(id);
+                            m.labels.retain(|_, v| *v != id);
                         }
                         _ => {}
                     }
@@ -5510,4 +5534,522 @@ fn estimate_terminal_size_for_layout_accounts_for_sidebars_and_card_splits() {
     .unwrap();
     assert!(card_split.0 < wide_open.0);
     assert!(card_split.1 < wide_open.1);
+}
+
+#[derive(Default)]
+struct SidebarMountedTree {
+    alive: std::collections::HashSet<nsh_core::NodeId>,
+    parents: std::collections::HashMap<nsh_core::NodeId, nsh_core::NodeId>,
+    children: std::collections::HashMap<nsh_core::NodeId, Vec<nsh_core::NodeId>>,
+    test_ids: std::collections::HashMap<String, nsh_core::NodeId>,
+    events: std::collections::HashMap<nsh_core::NodeId, nsh_core::EventMask>,
+    roles: std::collections::HashMap<nsh_core::NodeId, nsh_core::AccessibilityRole>,
+    labels: std::collections::HashMap<nsh_core::NodeId, String>,
+    selected: std::collections::HashMap<nsh_core::NodeId, bool>,
+    texts: std::collections::HashMap<nsh_core::NodeId, String>,
+    deleted: std::collections::HashSet<nsh_core::NodeId>,
+}
+
+impl SidebarMountedTree {
+    fn apply(&mut self, batch: &nsh_core::MountBatch) {
+        use nsh_core::MountItem;
+        for item in &batch.items {
+            match item {
+                MountItem::Create { id, .. } => {
+                    self.alive.insert(*id);
+                }
+                MountItem::Insert { parent, child, .. } => {
+                    if let Some(old_parent) = self.parents.insert(*child, *parent)
+                        && let Some(list) = self.children.get_mut(&old_parent)
+                    {
+                        list.retain(|x| x != child);
+                    }
+                    let list = self.children.entry(*parent).or_default();
+                    if !list.contains(child) {
+                        list.push(*child);
+                    }
+                }
+                MountItem::Remove { id } => {
+                    if let Some(parent) = self.parents.remove(id)
+                        && let Some(list) = self.children.get_mut(&parent)
+                    {
+                        list.retain(|x| x != id);
+                    }
+                }
+                MountItem::Delete { id } => {
+                    self.deleted.insert(*id);
+                    self.alive.remove(id);
+                    if let Some(parent) = self.parents.remove(id)
+                        && let Some(list) = self.children.get_mut(&parent)
+                    {
+                        list.retain(|x| x != id);
+                    }
+                    self.children.remove(id);
+                    self.events.remove(id);
+                    self.roles.remove(id);
+                    self.labels.remove(id);
+                    self.selected.remove(id);
+                    self.texts.remove(id);
+                    self.test_ids.retain(|_, v| v != id);
+                }
+                MountItem::Events { id, events } => {
+                    self.events.insert(*id, *events);
+                }
+                MountItem::Text { id, text, .. } => {
+                    self.texts.insert(*id, text.text.to_string());
+                }
+                MountItem::AccessibilityLabel { id, label } => {
+                    if let Some(label) = label {
+                        self.labels.insert(*id, label.to_string());
+                    } else {
+                        self.labels.remove(id);
+                    }
+                }
+                MountItem::ViewProps { id, props } => {
+                    if let Some(key) = &props.test_id {
+                        self.test_ids.insert(key.to_string(), *id);
+                    }
+                    self.roles.insert(*id, props.accessibility.role);
+                    if let Some(label) = &props.accessibility.label {
+                        self.labels.insert(*id, label.to_string());
+                    } else {
+                        self.labels.remove(id);
+                    }
+                    self.selected
+                        .insert(*id, props.accessibility.state.selected);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn is_mounted(&self, mut id: nsh_core::NodeId) -> bool {
+        if !self.alive.contains(&id) {
+            return false;
+        }
+        let mut guard = 0;
+        while id != nsh_core::ROOT_ID {
+            let Some(&parent) = self.parents.get(&id) else {
+                return false;
+            };
+            id = parent;
+            guard += 1;
+            if guard > 256 {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn bfs_descendants(&self, root: nsh_core::NodeId) -> Vec<nsh_core::NodeId> {
+        let mut out = Vec::new();
+        let mut queue = std::collections::VecDeque::from([root]);
+        while let Some(id) = queue.pop_front() {
+            if id != root && self.is_mounted(id) {
+                out.push(id);
+            }
+            if let Some(kids) = self.children.get(&id) {
+                queue.extend(kids.iter().copied());
+            }
+        }
+        out
+    }
+
+    fn find_hover_row(&self, ancestor: nsh_core::NodeId) -> nsh_core::NodeId {
+        self.bfs_descendants(ancestor)
+            .into_iter()
+            .find(|id| {
+                self.roles.get(id) != Some(&nsh_core::AccessibilityRole::Button)
+                    && self.events.get(id).is_some_and(|m| {
+                        m.contains(nsh_core::EventKind::MouseEnter)
+                            && m.contains(nsh_core::EventKind::MouseLeave)
+                    })
+            })
+            .unwrap_or_else(|| panic!("mounted hover container under node {ancestor:?} not found"))
+    }
+
+    fn find_descendant_button(
+        &self,
+        ancestor: nsh_core::NodeId,
+        pred: impl Fn(&str) -> bool,
+    ) -> Option<nsh_core::NodeId> {
+        self.bfs_descendants(ancestor).into_iter().find(|id| {
+            self.roles.get(id) == Some(&nsh_core::AccessibilityRole::Button)
+                && self.labels.get(id).is_some_and(|lbl| pred(lbl))
+        })
+    }
+
+    fn find_button(&self, label: &str) -> nsh_core::NodeId {
+        *self
+            .labels
+            .iter()
+            .find(|(id, lbl)| lbl.as_str() == label && self.is_mounted(**id))
+            .unwrap_or_else(|| panic!("mounted button `{label}` not found"))
+            .0
+    }
+
+    fn mounted_texts(&self) -> Vec<String> {
+        self.texts
+            .iter()
+            .filter(|(id, _)| self.is_mounted(**id))
+            .map(|(_, txt)| txt.clone())
+            .collect()
+    }
+}
+
+fn pump_sidebar(
+    core: &mut nsh_core::Core<nsh_core::ApproxTextEngine>,
+    tree: &mut SidebarMountedTree,
+) {
+    use nsh_core::element::JsEvent;
+    for _ in 0..8 {
+        let had_batch = if let Some(batch) = core.commit() {
+            tree.apply(&batch);
+            true
+        } else {
+            false
+        };
+        let mut events = Vec::new();
+        core.take_events(&mut events);
+        let mut dispatched = false;
+        for ev in events {
+            match ev {
+                JsEvent::Event(id, kind, payload) => {
+                    core.component_event(id, kind, &payload);
+                    dispatched = true;
+                }
+                JsEvent::LayoutListener {
+                    host,
+                    id,
+                    listener,
+                    frame,
+                } => {
+                    core.component_layout(host, id, &listener, frame);
+                    dispatched = true;
+                }
+                _ => {}
+            }
+        }
+        if !had_batch && !dispatched {
+            break;
+        }
+    }
+}
+
+#[test]
+fn mounted_sidebar_managed_terminal_row_survives_hover_and_observed_at_refreshes_and_remains_clickable()
+ {
+    use nsh_core::{ApproxTextEngine, Core, EventKind, EventPayload, geometry::size, prelude::*};
+
+    thread_local! {
+        static MANAGED_ID: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+        static SELECTED_ID: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    }
+
+    #[component]
+    fn ManagedRowHoverProbe() -> impl IntoElement {
+        canban_ui_kit::tokens::install_theme();
+        let ui = crate::presenter::Ui::new();
+        let mut s = fixture();
+        s.projects.truncate(1);
+        s.cards.truncate(1);
+        s.terminals.truncate(1);
+        s.projects[0].directory = "/repo/p1".into();
+        s.cards[0].worktree = Some("/fixture/worktrees/c1".into());
+        let managed_id = s.terminals[0].id.clone();
+        MANAGED_ID.with(|cell| *cell.borrow_mut() = managed_id.clone());
+        {
+            let a = s.terminals[0].agent.as_mut().unwrap();
+            a.state = "running".into();
+            a.connection_state = "connected".into();
+            a.observed = Some(json!({"state":"live","status":{"state":"working"}}));
+            a.lifecycle.observed_at = Some(now());
+        }
+        s.terminals.push(TerminalEntry {
+            id: "manual-shell".into(),
+            conversation_id: None,
+            number: 2,
+            name: Some("Manual shell".into()),
+            origin_project_id: Some("p1".into()),
+            origin_card_id: None,
+            agent_engine: None,
+            runtime: Some(TerminalRuntime {
+                core_id: Some("core".into()),
+                terminal: Some("pty-manual".into()),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+                observed_agent: None,
+                waiting: None,
+            }),
+            agent: None,
+            created_at: 2,
+        });
+        s.terminal_contexts.push(TerminalContext {
+            terminal_id: "manual-shell".into(),
+            core_id: "core".into(),
+            terminal: "pty-manual".into(),
+            cwd: Some("/repo/p1".into()),
+            directory_root: Some("/repo/p1".into()),
+            project_id: Some("p1".into()),
+            ..Default::default()
+        });
+        observe_fixture_locations(&mut s);
+
+        ui.accept_snapshot(s);
+        ui.terminal_width.set(260.);
+        ui.open_terminal("manual-shell".into());
+        effect(move || {
+            let sel = ui.terminal_selection.get();
+            SELECTED_ID.with(|cell| *cell.borrow_mut() = sel);
+        });
+
+        view()
+            .w(px(300.))
+            .h(px(640.))
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("Tick observed_at".into()))
+                    .on_press(move |_: &()| {
+                        let mut next = ui.snapshot.get_untracked();
+                        let a = next.terminals[0].agent.as_mut().unwrap();
+                        let prev = a.lifecycle.observed_at.unwrap_or(0);
+                        a.lifecycle.observed_at = Some(prev.max(now()) + 1_000);
+                        ui.accept_snapshot(next);
+                    }),
+            )
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("Mark done".into()))
+                    .on_press(move |_: &()| {
+                        let mut next = ui.snapshot.get_untracked();
+                        let a = next.terminals[0].agent.as_mut().unwrap();
+                        a.state = "completed".into();
+                        a.observed = Some(json!({"state":"live","status":{"state":"done"}}));
+                        let prev = a.lifecycle.observed_at.unwrap_or(0);
+                        a.lifecycle.observed_at = Some(prev.max(now()) + 1_000);
+                        ui.accept_snapshot(next);
+                    }),
+            )
+            .child(crate::terminals::sidebar_for_test(ui))
+    }
+
+    let mut core = Core::new(ApproxTextEngine, size(px(300.), px(640.)));
+    core.set_components(nsh_base::registry());
+    core.mount_root(&nsh_core::element::Root::of::<ManagedRowHoverProbe>());
+    let mut tree = SidebarMountedTree::default();
+    pump_sidebar(&mut core, &mut tree);
+
+    let managed_id = MANAGED_ID.with(|cell| cell.borrow().clone());
+    let managed_root = tree.test_ids[&format!("terminal:{managed_id}")];
+    let row_node_id = tree.find_hover_row(managed_root);
+    let press_node_id = tree
+        .find_descendant_button(managed_root, |lbl| !lbl.starts_with("Close terminal "))
+        .expect("managed terminal row press_target");
+
+    // 1. Before hover: status word "Working" is mounted and hover close button is absent.
+    assert!(
+        tree.mounted_texts().iter().any(|t| t == "Working"),
+        "expected initial Working status on managed terminal row; got {:?}",
+        tree.mounted_texts()
+    );
+    assert!(
+        tree.find_descendant_button(managed_root, |lbl| lbl.starts_with("Close terminal "))
+            .is_none()
+    );
+    assert_eq!(tree.selected.get(&press_node_id), Some(&false));
+
+    // 2. Hover the managed row: row & press_target keep exact NodeIds, Working hides, [×] mounts.
+    let mouse = EventPayload::Mouse(nsh_core::MouseEvent::default());
+    assert!(core.component_event(row_node_id, EventKind::MouseEnter, &mouse));
+    pump_sidebar(&mut core, &mut tree);
+
+    assert!(!tree.deleted.contains(&row_node_id));
+    assert!(!tree.deleted.contains(&press_node_id));
+    assert!(tree.is_mounted(row_node_id));
+    assert!(tree.is_mounted(press_node_id));
+    assert!(
+        !tree.mounted_texts().iter().any(|t| t == "Working"),
+        "Working status should hide while hovered"
+    );
+    let close_btn_id = tree
+        .find_descendant_button(managed_root, |lbl| lbl.starts_with("Close terminal "))
+        .expect("close button mounted on hover");
+
+    // 3. Three consecutive observed_at refreshes while hovered: zero deletes, zero flicker.
+    let tick_btn = tree.find_button("Tick observed_at");
+    for step in 0..3 {
+        assert!(core.component_event(tick_btn, EventKind::Press, &EventPayload::None));
+        pump_sidebar(&mut core, &mut tree);
+        assert!(
+            !tree.deleted.contains(&row_node_id) && tree.is_mounted(row_node_id),
+            "hover row recreated on observed_at tick #{step}"
+        );
+        assert!(
+            !tree.deleted.contains(&press_node_id) && tree.is_mounted(press_node_id),
+            "press_target recreated on observed_at tick #{step}"
+        );
+        assert!(
+            !tree.deleted.contains(&close_btn_id) && tree.is_mounted(close_btn_id),
+            "close button reset on observed_at tick #{step}"
+        );
+        assert!(
+            !tree.mounted_texts().iter().any(|t| t == "Working"),
+            "Working status flickered back on observed_at tick #{step}"
+        );
+    }
+
+    // 4. Status transition ("working" -> "done") while hovered keeps hover & NodeIds intact.
+    let done_btn = tree.find_button("Mark done");
+    assert!(core.component_event(done_btn, EventKind::Press, &EventPayload::None));
+    pump_sidebar(&mut core, &mut tree);
+    assert!(!tree.deleted.contains(&row_node_id) && tree.is_mounted(row_node_id));
+    assert!(!tree.deleted.contains(&press_node_id) && tree.is_mounted(press_node_id));
+    assert!(!tree.deleted.contains(&close_btn_id) && tree.is_mounted(close_btn_id));
+    assert!(!tree.mounted_texts().iter().any(|t| t == "Done"));
+    assert!(tree.labels[&press_node_id].contains("Status: Done"));
+
+    // 5. Clicking original press_target NodeId selects the managed terminal without teardown.
+    assert!(core.component_event(press_node_id, EventKind::Press, &EventPayload::None));
+    pump_sidebar(&mut core, &mut tree);
+    assert_eq!(SELECTED_ID.with(|cell| cell.borrow().clone()), managed_id);
+    assert_eq!(tree.selected.get(&press_node_id), Some(&true));
+    assert!(!tree.deleted.contains(&row_node_id));
+    assert!(!tree.deleted.contains(&press_node_id));
+    assert!(!tree.deleted.contains(&close_btn_id));
+
+    // 6. MouseLeave unmounts close button and reveals updated "Done" status.
+    assert!(core.component_event(row_node_id, EventKind::MouseLeave, &mouse));
+    pump_sidebar(&mut core, &mut tree);
+    assert!(!tree.is_mounted(close_btn_id));
+    assert!(
+        tree.mounted_texts().iter().any(|t| t == "Done"),
+        "expected Done status after MouseLeave; got {:?}",
+        tree.mounted_texts()
+    );
+}
+
+#[test]
+fn mounted_sidebar_scope_and_project_headers_keep_hover_and_press_targets_stable_on_refresh() {
+    use nsh_core::{ApproxTextEngine, Core, EventKind, EventPayload, geometry::size, prelude::*};
+
+    #[component]
+    fn HeaderHoverProbe() -> impl IntoElement {
+        canban_ui_kit::tokens::install_theme();
+        let ui = crate::presenter::Ui::new();
+        let mut s = fixture();
+        s.projects.truncate(1);
+        s.cards.truncate(1);
+        s.terminals.truncate(1);
+        s.projects[0].directory = "/repo/p1".into();
+        s.cards[0].worktree = Some("/repo/p1-worktrees/c1".into());
+        s.cards[0].branch = Some("canban/1".into());
+        let tid = s.terminals[0].id.clone();
+        s.terminal_contexts.push(TerminalContext {
+            terminal_id: tid,
+            core_id: "core".into(),
+            terminal: "t-c1".into(),
+            cwd: Some("/repo/p1-worktrees/c1".into()),
+            directory_root: Some("/repo/p1-worktrees/c1".into()),
+            project_id: Some("p1".into()),
+            card_id: Some("c1".into()),
+            branch: Some("canban/1".into()),
+            dirty: true,
+            additions: 1,
+            deletions: 0,
+            ..Default::default()
+        });
+        ui.accept_snapshot(s);
+        ui.terminal_width.set(260.);
+
+        view()
+            .w(px(300.))
+            .h(px(640.))
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("Refresh git stats".into()))
+                    .on_press(move |_: &()| {
+                        let mut next = ui.snapshot.get_untracked();
+                        next.terminal_contexts[0].additions = 12;
+                        next.terminal_contexts[0].deletions = 3;
+                        ui.accept_snapshot(next);
+                    }),
+            )
+            .child(crate::terminals::sidebar_for_test(ui))
+    }
+
+    let mut core = Core::new(ApproxTextEngine, size(px(300.), px(640.)));
+    core.set_components(nsh_base::registry());
+    core.mount_root(&nsh_core::element::Root::of::<HeaderHoverProbe>());
+    let mut tree = SidebarMountedTree::default();
+    pump_sidebar(&mut core, &mut tree);
+
+    let scope_root = tree.test_ids["location:local:/repo/p1-worktrees/c1"];
+    let scope_hover_id = tree.find_hover_row(scope_root);
+    let chevron_btn_id = tree
+        .find_descendant_button(scope_root, |lbl| {
+            lbl.starts_with("Collapse worktree ") || lbl.starts_with("Expand worktree ")
+        })
+        .expect("scope chevron button");
+    let scope_press_id = tree
+        .find_descendant_button(scope_root, |lbl| lbl.starts_with("Worktree "))
+        .expect("scope row press_target");
+
+    let mouse = EventPayload::Mouse(nsh_core::MouseEvent::default());
+    assert!(core.component_event(scope_hover_id, EventKind::MouseEnter, &mouse));
+    pump_sidebar(&mut core, &mut tree);
+
+    assert!(!tree.deleted.contains(&scope_hover_id));
+    assert!(!tree.deleted.contains(&chevron_btn_id));
+    assert!(!tree.deleted.contains(&scope_press_id));
+    let scope_plus_id = tree
+        .find_descendant_button(scope_root, |lbl| lbl.starts_with("New terminal in "))
+        .expect("scope hover + button");
+
+    let git_btn = tree.find_button("Refresh git stats");
+    assert!(core.component_event(git_btn, EventKind::Press, &EventPayload::None));
+    pump_sidebar(&mut core, &mut tree);
+
+    assert!(!tree.deleted.contains(&scope_hover_id) && tree.is_mounted(scope_hover_id));
+    assert!(!tree.deleted.contains(&chevron_btn_id) && tree.is_mounted(chevron_btn_id));
+    assert!(!tree.deleted.contains(&scope_press_id) && tree.is_mounted(scope_press_id));
+    assert!(!tree.deleted.contains(&scope_plus_id) && tree.is_mounted(scope_plus_id));
+    let texts = tree.mounted_texts();
+    assert!(texts.iter().any(|t| t == "+12") && texts.iter().any(|t| t == "−3"));
+
+    // Hover project header, then fold and unfold it without tearing down row or hover overlay.
+    let project_root = tree.test_ids["project:p1"];
+    let project_hover_id = tree.find_hover_row(project_root);
+    let project_press_id = tree
+        .find_descendant_button(project_root, |lbl| lbl.starts_with("Project "))
+        .expect("project header press_target");
+
+    assert!(core.component_event(project_hover_id, EventKind::MouseEnter, &mouse));
+    pump_sidebar(&mut core, &mut tree);
+    assert!(!tree.deleted.contains(&project_hover_id));
+    assert!(!tree.deleted.contains(&project_press_id));
+    let branch_btn_id = tree
+        .find_descendant_button(project_root, |lbl| lbl == "New branch worktree")
+        .expect("project hover branch button");
+    let new_term_btn_id = tree
+        .find_descendant_button(project_root, |lbl| lbl == "New terminal")
+        .expect("project hover plus button");
+
+    assert!(core.component_event(project_press_id, EventKind::Press, &EventPayload::None));
+    pump_sidebar(&mut core, &mut tree);
+    assert!(!tree.deleted.contains(&project_hover_id) && tree.is_mounted(project_hover_id));
+    assert!(!tree.deleted.contains(&project_press_id) && tree.is_mounted(project_press_id));
+    assert!(!tree.deleted.contains(&branch_btn_id) && tree.is_mounted(branch_btn_id));
+    assert!(!tree.deleted.contains(&new_term_btn_id) && tree.is_mounted(new_term_btn_id));
+    assert!(tree.labels[&project_press_id].contains("Collapsed"));
+
+    assert!(core.component_event(project_press_id, EventKind::Press, &EventPayload::None));
+    pump_sidebar(&mut core, &mut tree);
+    assert!(!tree.deleted.contains(&project_hover_id) && tree.is_mounted(project_hover_id));
+    assert!(!tree.deleted.contains(&project_press_id) && tree.is_mounted(project_press_id));
+    assert!(!tree.deleted.contains(&branch_btn_id) && tree.is_mounted(branch_btn_id));
+    assert!(!tree.deleted.contains(&new_term_btn_id) && tree.is_mounted(new_term_btn_id));
+    assert!(!tree.labels[&project_press_id].contains("Collapsed"));
 }
