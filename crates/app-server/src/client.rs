@@ -353,6 +353,20 @@ impl AppClient {
         }))
     }
 
+    fn daemon_command(home: &Path, cli: &Path) -> std::process::Command {
+        let mut cmd = canban_exec::raw_command(cli);
+        cmd.arg("--home").arg(home).arg("serve");
+        canban_exec::strip_herdr_terminal_scope_env(&mut cmd);
+        cmd.env_remove("CANBAN_ENDPOINT")
+            .env_remove("CANBAN_CARD")
+            .env_remove("CARD_ID")
+            .env_remove("CANBAN_PROJECT")
+            .env_remove("CANBAN_PROFILE_ID")
+            .env_remove("CANBAN_SESSION_ID")
+            .env_remove("CANBAN_RUN_DIR");
+        cmd
+    }
+
     fn spawn_daemon(home: &Path, cli: &Path) -> Result<()> {
         std::fs::create_dir_all(home)?;
         let log = std::fs::OpenOptions::new()
@@ -361,11 +375,7 @@ impl AppClient {
             .open(home.join("server.log"))?;
         use std::os::unix::process::CommandExt;
         // Separate process group, lifetime owned by the service, not its UI.
-        canban_exec::raw_command(cli)
-            .arg("--home")
-            .arg(home)
-            .arg("serve")
-            .env_remove("CANBAN_ENDPOINT")
+        Self::daemon_command(home, cli)
             .stdin(std::process::Stdio::null())
             .stdout(log.try_clone()?)
             .stderr(log)
@@ -892,5 +902,34 @@ mod tests {
         assert!(canban_updater::backend_order(&json!({"api_version":API_VERSION-1}), &app).is_lt());
         assert!(canban_updater::backend_order(&json!({"api_version":API_VERSION}), &app).is_eq());
         assert!(canban_updater::backend_order(&json!({"api_version":API_VERSION+1}), &app).is_gt());
+    }
+    #[test]
+    fn spawn_daemon_command_strips_herdr_terminal_scope_and_context_env() {
+        let cmd = AppClient::daemon_command(Path::new("/tmp/canban-home"), Path::new("canban"));
+        let envs: std::collections::BTreeMap<String, Option<String>> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|val| val.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        for key in [
+            "HC_SCOPE",
+            "HC_TERMINAL_ID",
+            "HC_TERMINAL_SOCKET",
+            "CANBAN_ENDPOINT",
+            "CANBAN_CARD",
+            "CARD_ID",
+            "CANBAN_PROJECT",
+            "CANBAN_PROFILE_ID",
+            "CANBAN_SESSION_ID",
+            "CANBAN_RUN_DIR",
+        ] {
+            assert_eq!(envs.get(key), Some(&None), "{key} must be removed");
+        }
+        assert!(!envs.contains_key("HC_SESSION"));
+        assert!(!envs.contains_key("HC_SOCKET"));
     }
 }

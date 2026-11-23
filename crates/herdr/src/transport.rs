@@ -76,9 +76,8 @@ impl Drop for Transport {
 }
 pub fn command(config: &Config) -> Command {
     let mut cmd = canban_exec::command_with_env(&config.hc, &config.hc_env);
-    cmd.arg("connect")
-        .env("HC_SESSION", &config.hc_session)
-        .env_remove("HC_TERMINAL_ID");
+    cmd.arg("connect").env("HC_SESSION", &config.hc_session);
+    canban_exec::strip_herdr_terminal_scope_env(&mut cmd);
     super::apply_default_terminal_env_to_command(&mut cmd, &config.hc_env);
     cmd
 }

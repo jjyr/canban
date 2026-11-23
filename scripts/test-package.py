@@ -396,7 +396,19 @@ if "--home" in args and "serve" in args:
                 req = json.loads(raw)
                 method = req.get("method")
                 if method == "app.ping":
-                    resp = {{"jsonrpc": "2.0", "id": req.get("id", 1), "result": {{"pid": os.getpid()}}}}
+                    observed_env = {{
+                        k: os.environ.get(k)
+                        for k in (
+                            "HC_SCOPE",
+                            "HC_TERMINAL_ID",
+                            "HC_TERMINAL_SOCKET",
+                            "HC_SESSION",
+                            "HC_SOCKET",
+                            "CANBAN_ENDPOINT",
+                            "CARD_ID",
+                        )
+                    }}
+                    resp = {{"jsonrpc": "2.0", "id": req.get("id", 1), "result": {{"pid": os.getpid(), "env": observed_env}}}}
                     conn.sendall((json.dumps(resp) + "\\n").encode("utf-8"))
                 elif method == "app.shutdown":
                     expected = (req.get("params") or {{}}).get("expected_pid")
@@ -421,13 +433,16 @@ if "--home" in args and "serve" in args:
         home = Path(short_home_dir.name)
         sock_path = home / "app.sock"
 
-        def ping_pid():
+        def ping_result():
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
                 conn.settimeout(2.0)
                 conn.connect(str(sock_path))
                 conn.sendall(b'{"jsonrpc":"2.0","id":1,"method":"app.ping","params":{}}\n')
                 raw = conn.recv(65536).split(b"\n", 1)[0].decode("utf-8")
-                return json.loads(raw)["result"]["pid"]
+                return json.loads(raw)["result"]
+
+        def ping_pid():
+            return ping_result()["pid"]
 
         def shutdown_if_running():
             if not sock_path.exists():
@@ -477,6 +492,16 @@ if "--home" in args and "serve" in args:
         old_pid = ping_pid()
         self.assertEqual(old_pid, old_proc.pid)
 
+        restart_env = self.linux_env()
+        restart_env.update({
+            "HC_SCOPE": "scope-from-caller",
+            "HC_TERMINAL_ID": "t99",
+            "HC_TERMINAL_SOCKET": "/tmp/t99.sock",
+            "HC_SESSION": "keep-session",
+            "HC_SOCKET": "/tmp/keep-hc.sock",
+            "CANBAN_ENDPOINT": "/tmp/old.sock",
+            "CARD_ID": "card-123",
+        })
         restarted = subprocess.run(
             [
                 sys.executable,
@@ -486,15 +511,26 @@ if "--home" in args and "serve" in args:
                 "--home",
                 str(home),
             ],
-            env=self.linux_env(),
+            env=restart_env,
             check=True,
             capture_output=True,
             text=True,
         )
         old_proc.wait(timeout=5)
-        new_pid = ping_pid()
+        new_ping = ping_result()
+        new_pid = new_ping["pid"]
         self.assertNotEqual(new_pid, old_pid)
         self.assertIn(f"pid {old_pid} -> {new_pid}", restarted.stderr)
+        for stripped_key in (
+            "HC_SCOPE",
+            "HC_TERMINAL_ID",
+            "HC_TERMINAL_SOCKET",
+            "CANBAN_ENDPOINT",
+            "CARD_ID",
+        ):
+            self.assertIsNone(new_ping["env"][stripped_key], f"{stripped_key} must be stripped")
+        self.assertEqual(new_ping["env"]["HC_SESSION"], "keep-session")
+        self.assertEqual(new_ping["env"]["HC_SOCKET"], "/tmp/keep-hc.sock")
 
         # 3. --no-restart must leave the running daemon untouched.
         subprocess.run(

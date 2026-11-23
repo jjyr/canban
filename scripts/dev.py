@@ -197,8 +197,9 @@ def stop(instance):
 
 
 def environment(instance):
-    # Preserve intentional update fixtures/configuration, but never inherited Agent or endpoint bindings.
-    env = {k: v for k, v in os.environ.items() if not k.startswith('CANBAN_')}
+    # Preserve intentional update fixtures/configuration, but never inherited Agent, Herdr terminal scope, or endpoint bindings.
+    strip_keys = {"HC_SCOPE", "HC_TERMINAL_ID", "HC_TERMINAL_SOCKET", "CARD_ID"}
+    env = {k: v for k, v in os.environ.items() if not k.startswith('CANBAN_') and k not in strip_keys}
     env.update({k: v for k, v in os.environ.items() if k.startswith('CANBAN_UPDATE_')})
     env.update(CANBAN_HOME=instance['home'], CANBAN_APP_ID=instance['app_id'], CANBAN_UPDATES_DISABLED='1')
     return env

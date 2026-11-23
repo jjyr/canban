@@ -135,6 +135,13 @@ impl AppServer {
             })
         })?;
         let Some((core, terminal)) = target else {
+            if saved["state"] == "closing" {
+                return self.reconcile_replayed_closing_receipt(
+                    terminal_id,
+                    p["request_key"].as_str(),
+                    saved,
+                );
+            }
             return Ok(saved);
         };
         let client = canban_herdr::Client {
@@ -189,6 +196,86 @@ impl AppServer {
         self.emit("terminals", None);
         Ok(value)
     }
+
+    /// Reconcile a replayed in-progress `terminal.close` receipt when the original runtime
+    /// already finished (e.g. an interrupted close killed the daemon mid-flight) without
+    /// ever sending a new `terminal.kill`.
+    fn reconcile_replayed_closing_receipt(
+        &self,
+        terminal_id: &str,
+        request_key: Option<&str>,
+        saved: Value,
+    ) -> Result<Value> {
+        let Ok(item) = self
+            .store
+            .lock()
+            .unwrap()
+            .db()
+            .get::<TerminalEntry>(terminal_id)
+        else {
+            return Ok(saved);
+        };
+        let (confirmed_closed, mark_runtime_finished) = if let Some(run) = &item.agent {
+            if run.finished() {
+                (true, false)
+            } else if run.close_state == "closing"
+                && let (Some(core), Some(addr)) = (&run.core_id, &run.terminal)
+                && self.verified_core_id().ok().as_deref() == Some(core.as_str())
+            {
+                let finished = canban_herdr::Client {
+                    config: self.config(),
+                }
+                .get(addr)
+                .is_ok_and(|obs| obs["state"] == "finished");
+                (finished, false)
+            } else {
+                (false, false)
+            }
+        } else if let Some(rt) = &item.runtime {
+            if rt.state == "finished" {
+                (true, false)
+            } else if rt.state == "closing"
+                && let (Some(core), Some(addr)) = (&rt.core_id, &rt.terminal)
+                && self.verified_core_id().ok().as_deref() == Some(core.as_str())
+            {
+                let finished = canban_herdr::Client {
+                    config: self.config(),
+                }
+                .get(addr)
+                .is_ok_and(|obs| obs["state"] == "finished");
+                (finished, finished)
+            } else {
+                (false, false)
+            }
+        } else {
+            (false, false)
+        };
+        if !confirmed_closed {
+            return Ok(saved);
+        }
+        let closed = json!({"state": "closed", "terminal_id": terminal_id});
+        self.store.lock().unwrap().write_topic("terminals", |db| {
+            if let Some(key) = request_key {
+                db.conn.execute(
+                    "UPDATE operations SET result=?2 WHERE id=?1",
+                    params![key, serde_json::to_string(&closed)?],
+                )?;
+            }
+            if mark_runtime_finished {
+                let mut current: TerminalEntry = db.get(terminal_id)?;
+                if let Some(r) = &mut current.runtime
+                    && r.state == "closing"
+                {
+                    r.state = "finished".into();
+                    db.save(&current)?;
+                }
+            }
+            Ok(())
+        })?;
+        self.emit("terminals", None);
+        Ok(closed)
+    }
+
     /// Resolve the owning Core + PTY binding for either a Card-role Agent or an independent terminal.
     pub(super) fn terminal_binding(
         _s: &Snapshot,

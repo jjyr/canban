@@ -1122,11 +1122,11 @@ restart_old_if_needed() {
     if [ "$OS_KIND" = "darwin" ] && [ -d "$DEST" ]; then
       /usr/bin/open "$DEST" >/dev/null 2>&1 || true
     elif [ "$OS_KIND" = "linux" ] && [ -x "$DEST/bin/canban-ui" ]; then
-      "$DEST/bin/canban-ui" >/dev/null 2>&1 </dev/null &
+      env -u HC_SCOPE -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET "$DEST/bin/canban-ui" >/dev/null 2>&1 </dev/null &
     fi
   elif [ "$SYSTEMD_MANAGED" -eq 0 ] && [ "$SERVER_WAS_RUNNING" -eq 1 ] && [ -x "$INSTALLED_CLI" ]; then
     mkdir -p "$HOME_DIR"
-    env -u CANBAN_ENDPOINT "$INSTALLED_CLI" --home "$HOME_DIR" serve >> "$HOME_DIR/server.log" 2>&1 </dev/null &
+    env -u CANBAN_ENDPOINT -u HC_SCOPE -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET "$INSTALLED_CLI" --home "$HOME_DIR" serve >> "$HOME_DIR/server.log" 2>&1 </dev/null &
   fi
 }
 
@@ -1410,19 +1410,19 @@ if [ "$NO_RESTART" -eq 0 ]; then
     wait_for_server_ping
     if [ "$UI_WAS_RUNNING" -eq 1 ] && [ "$OS_KIND" = "linux" ] && [ -x "$DEST_TARGET/bin/canban-ui" ]; then
       log "Reopening Canban..."
-      "$DEST_TARGET/bin/canban-ui" >/dev/null 2>&1 </dev/null &
+      env -u HC_SCOPE -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET "$DEST_TARGET/bin/canban-ui" >/dev/null 2>&1 </dev/null &
     fi
   elif [ "$UI_WAS_RUNNING" -eq 1 ]; then
     log "Reopening Canban..."
     if [ "$OS_KIND" = "darwin" ]; then
       /usr/bin/open "$DEST_TARGET"
     else
-      "$DEST_TARGET/bin/canban-ui" >/dev/null 2>&1 </dev/null &
+      env -u HC_SCOPE -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET "$DEST_TARGET/bin/canban-ui" >/dev/null 2>&1 </dev/null &
     fi
   elif [ "$SERVER_WAS_RUNNING" -eq 1 ]; then
     log "Restarting Canban AppServer..."
     mkdir -p "$HOME_DIR"
-    env -u CANBAN_ENDPOINT "$FINAL_CLI" --home "$HOME_DIR" serve >> "$HOME_DIR/server.log" 2>&1 </dev/null &
+    env -u CANBAN_ENDPOINT -u HC_SCOPE -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET "$FINAL_CLI" --home "$HOME_DIR" serve >> "$HOME_DIR/server.log" 2>&1 </dev/null &
     wait_for_server_ping
   fi
 fi

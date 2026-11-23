@@ -14,6 +14,20 @@ import tempfile
 import time
 
 
+DAEMON_STRIP_ENV_KEYS = frozenset({
+    "HC_SCOPE",
+    "HC_TERMINAL_ID",
+    "HC_TERMINAL_SOCKET",
+    "CANBAN_ENDPOINT",
+    "CANBAN_CARD",
+    "CARD_ID",
+    "CANBAN_PROJECT",
+    "CANBAN_PROFILE_ID",
+    "CANBAN_SESSION_ID",
+    "CANBAN_RUN_DIR",
+})
+
+
 def format_desktop_exec(executable: Path) -> str:
     raw = str(executable)
     if any(ch in raw for ch in (' ', '\t', '"', "'", '\\', '`', '$', '>', '<', '~', '|', '&', ';', '*', '?', '#', '(', ')')):
@@ -178,9 +192,11 @@ def restart_running_daemon(installed_cli: Path, home: Path, platform_kind: str) 
 
     log_path = home / "server.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    daemon_env = {k: v for k, v in os.environ.items() if k not in DAEMON_STRIP_ENV_KEYS}
     with open(log_path, "ab") as log_file:
         subprocess.Popen(
             [str(installed_cli), "--home", str(home), "serve"],
+            env=daemon_env,
             stdin=subprocess.DEVNULL,
             stdout=log_file,
             stderr=log_file,

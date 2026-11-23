@@ -1438,3 +1438,173 @@ fn worktree_create_and_promote_support_fork_upstream_default_branch_and_dirty_ma
         Some("develop")
     );
 }
+
+#[test]
+fn replayed_stale_closing_receipt_reconciles_to_closed_when_original_terminal_finished() {
+    let (dir, app, p, _) = setup();
+    core(&app, dir.path());
+    let terminal = app
+        .call("terminal.create", json!({"project_id": p.id}))
+        .unwrap();
+    let tid = terminal["id"].as_str().unwrap().to_owned();
+
+    // 1. Simulate daemon interruption mid-close: DB runtime is `"closing"`, `operations` holds
+    //    the intermediate `"closing"` receipt, and Herdr already finished `t1`.
+    let request_key = "interrupted-close-live-to-finished";
+    let params = json!({"terminal_id": tid, "request_key": request_key});
+    let fingerprint =
+        canban_context::digest(&serde_json::to_vec(&json!(["terminal.close", params])).unwrap());
+    let stale_receipt = json!({
+        "state": "closing",
+        "terminal_id": tid,
+        "message": "Terminal close is still in progress; inspect before retrying",
+    });
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut item: TerminalEntry = db.get(&tid)?;
+            item.runtime.as_mut().unwrap().state = "closing".into();
+            db.save(&item)?;
+            db.conn.execute(
+                "INSERT INTO operations(id,fingerprint,result) VALUES(?1,?2,?3)",
+                rusqlite::params![
+                    request_key,
+                    fingerprint,
+                    serde_json::to_string(&stale_receipt)?
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    std::fs::write(dir.path().join("finished"), "").unwrap();
+
+    let res = app.call("terminal.close", params).unwrap();
+    assert_eq!(res, json!({"state": "closed", "terminal_id": tid}));
+    assert!(!dir.path().join("controls").exists());
+
+    let db_item: TerminalEntry = app.store.lock().unwrap().db().get(&tid).unwrap();
+    assert_eq!(db_item.runtime.unwrap().state, "finished");
+    let stored_receipt: String = app
+        .store
+        .lock()
+        .unwrap()
+        .db()
+        .conn
+        .query_row(
+            "SELECT result FROM operations WHERE id=?1",
+            [request_key],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let stored_json: Value = serde_json::from_str(&stored_receipt).unwrap();
+    assert_eq!(stored_json, json!({"state": "closed", "terminal_id": tid}));
+
+    // 2. Also verify when DB already has `runtime.state == "finished"` while `operations`
+    //    still holds a stale `"closing"` receipt: replay reconciles `operations` to `"closed"`.
+    let finished_key = "interrupted-close-already-finished";
+    let finished_params = json!({"terminal_id": tid, "request_key": finished_key});
+    let finished_fp = canban_context::digest(
+        &serde_json::to_vec(&json!(["terminal.close", finished_params])).unwrap(),
+    );
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            db.conn.execute(
+                "INSERT INTO operations(id,fingerprint,result) VALUES(?1,?2,?3)",
+                rusqlite::params![
+                    finished_key,
+                    finished_fp,
+                    serde_json::to_string(&stale_receipt)?
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let res2 = app.call("terminal.close", finished_params).unwrap();
+    assert_eq!(res2, json!({"state": "closed", "terminal_id": tid}));
+    assert!(!dir.path().join("controls").exists());
+    let stored_receipt2: String = app
+        .store
+        .lock()
+        .unwrap()
+        .db()
+        .conn
+        .query_row(
+            "SELECT result FROM operations WHERE id=?1",
+            [finished_key],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let stored_json2: Value = serde_json::from_str(&stored_receipt2).unwrap();
+    assert_eq!(stored_json2, json!({"state": "closed", "terminal_id": tid}));
+}
+
+#[test]
+fn replayed_stale_closing_receipt_preserves_closing_when_live_or_rebound() {
+    let (dir, app, p, _) = setup();
+    core(&app, dir.path());
+    let terminal = app
+        .call("terminal.create", json!({"project_id": p.id}))
+        .unwrap();
+    let tid = terminal["id"].as_str().unwrap().to_owned();
+
+    let request_key = "interrupted-close-still-live";
+    let params = json!({"terminal_id": tid, "request_key": request_key});
+    let fingerprint =
+        canban_context::digest(&serde_json::to_vec(&json!(["terminal.close", params])).unwrap());
+    let stale_receipt = json!({
+        "state": "closing",
+        "terminal_id": tid,
+        "message": "Terminal close is still in progress; inspect before retrying",
+    });
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut item: TerminalEntry = db.get(&tid)?;
+            item.runtime.as_mut().unwrap().state = "closing".into();
+            db.save(&item)?;
+            db.conn.execute(
+                "INSERT INTO operations(id,fingerprint,result) VALUES(?1,?2,?3)",
+                rusqlite::params![
+                    request_key,
+                    fingerprint,
+                    serde_json::to_string(&stale_receipt)?
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    // 1. While Herdr still reports `t1` as live, replay preserves `"closing"` and sends no kill.
+    let res_live = app.call("terminal.close", params.clone()).unwrap();
+    assert_eq!(res_live, stale_receipt);
+    assert!(!dir.path().join("controls").exists());
+
+    // 2. If the entry was rebound (`runtime.state == "running"`, `terminal == "t-new"`), even
+    //    after `t1` finishes, replay must still preserve `"closing"` and never touch `t-new`.
+    std::fs::write(dir.path().join("finished"), "").unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut item: TerminalEntry = db.get(&tid)?;
+            let rt = item.runtime.as_mut().unwrap();
+            rt.terminal = Some("t-new".into());
+            rt.state = "running".into();
+            db.save(&item)
+        })
+        .unwrap();
+
+    let res_rebound = app.call("terminal.close", params).unwrap();
+    assert_eq!(res_rebound, stale_receipt);
+    assert!(!dir.path().join("controls").exists());
+    let db_item: TerminalEntry = app.store.lock().unwrap().db().get(&tid).unwrap();
+    assert_eq!(db_item.runtime.as_ref().unwrap().state, "running");
+    assert_eq!(
+        db_item.runtime.as_ref().unwrap().terminal.as_deref(),
+        Some("t-new")
+    );
+}

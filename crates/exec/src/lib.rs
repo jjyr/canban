@@ -82,6 +82,19 @@ pub fn command<S: AsRef<OsStr>>(program: S) -> Command {
     command_with_env(program, &BTreeMap::new())
 }
 
+/// Per-terminal Herdr scope environment variables that bind child processes to a hosted PTY's
+/// kill scope and must be stripped when spawning long-lived daemons, UI, or control clients.
+pub const HERDR_TERMINAL_SCOPE_ENV_KEYS: [&str; 3] =
+    ["HC_SCOPE", "HC_TERMINAL_ID", "HC_TERMINAL_SOCKET"];
+
+/// Remove Herdr per-terminal scope variables from `cmd` while preserving `HC_SESSION` and `HC_SOCKET`.
+pub fn strip_herdr_terminal_scope_env(cmd: &mut Command) -> &mut Command {
+    for key in HERDR_TERMINAL_SCOPE_ENV_KEYS {
+        cmd.env_remove(key);
+    }
+    cmd
+}
+
 /// Build a `Command` without probing or modifying `PATH`.
 /// Use only for bundled Canban binaries, explicit absolute system paths, or isolated test mocks.
 pub fn raw_command<S: AsRef<OsStr>>(program: S) -> Command {
@@ -92,6 +105,35 @@ pub fn raw_command<S: AsRef<OsStr>>(program: S) -> Command {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn strip_herdr_terminal_scope_env_removes_only_terminal_scope_keys() {
+        let mut cmd = raw_command("true");
+        cmd.env("HC_SESSION", "keep-session")
+            .env("HC_SOCKET", "/tmp/keep-hc.sock")
+            .env("HC_SCOPE", "drop-scope")
+            .env("HC_TERMINAL_ID", "drop-tid")
+            .env("HC_TERMINAL_SOCKET", "/tmp/drop-tsock");
+        strip_herdr_terminal_scope_env(&mut cmd);
+
+        let envs: BTreeMap<String, Option<String>> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|val| val.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert_eq!(envs.get("HC_SESSION"), Some(&Some("keep-session".into())));
+        assert_eq!(
+            envs.get("HC_SOCKET"),
+            Some(&Some("/tmp/keep-hc.sock".into()))
+        );
+        for key in HERDR_TERMINAL_SCOPE_ENV_KEYS {
+            assert_eq!(envs.get(key), Some(&None), "{key} must be removed");
+        }
+    }
 
     #[test]
     fn command_with_env_resolves_bare_program_and_injects_path() {

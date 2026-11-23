@@ -209,6 +209,14 @@ impl AppServer {
                     }
                     let mut cmd = canban_exec::raw_command(&cli_for_restart);
                     cmd.arg("--home").arg(&stop_flag_home).arg("serve");
+                    canban_exec::strip_herdr_terminal_scope_env(&mut cmd);
+                    cmd.env_remove("CANBAN_ENDPOINT")
+                        .env_remove("CANBAN_CARD")
+                        .env_remove("CARD_ID")
+                        .env_remove("CANBAN_PROJECT")
+                        .env_remove("CANBAN_PROFILE_ID")
+                        .env_remove("CANBAN_SESSION_ID")
+                        .env_remove("CANBAN_RUN_DIR");
                     if listen_cfg.tailscale {
                         cmd.arg("--tailscale");
                     }

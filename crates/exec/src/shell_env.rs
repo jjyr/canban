@@ -36,7 +36,9 @@ const DENIED_EXACT_KEYS: &[&str] = &[
     "LD_LIBRARY_PATH",
     "LD_AUDIT",
     "HC_SESSION",
+    "HC_SCOPE",
     "HC_TERMINAL_ID",
+    "HC_TERMINAL_SOCKET",
 ];
 
 /// Environment variable prefixes that must never be inherited from the host user shell snapshot.
@@ -868,7 +870,9 @@ mod tests {
             "GIT_WORK_TREE",
             "HERDR_SOCKET",
             "HC_SESSION",
+            "HC_SCOPE",
             "HC_TERMINAL_ID",
+            "HC_TERMINAL_SOCKET",
             "PWD",
             "OLDPWD",
             "SHLVL",
