@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import time
@@ -10,6 +11,26 @@ from typing import Any, Callable
 
 
 FINISHED_AGENT_STATES = frozenset({'finished', 'failed', 'cancelled', 'idle_closed', 'archived'})
+
+
+def isolated_herdr_env(
+    base: Path | str,
+    *,
+    session: str = 'acceptance',
+    base_env: dict[str, str] | None = None,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Build a Herdr-isolated process env (stripping inherited HC_*/HERDR_*) and its core vars."""
+    root = Path(base)
+    core = {
+        'HC_SESSION': session,
+        'HC_SOCKET': str(root / 'hc.sock'),
+        'XDG_STATE_HOME': str(root / 'hc-state'),
+        'XDG_CONFIG_HOME': str(root / 'hc-config'),
+    }
+    source = os.environ if base_env is None else base_env
+    env = {k: v for k, v in source.items() if not k.startswith(('HC_', 'HERDR_'))}
+    env.update(core)
+    return env, core
 
 
 def call(
