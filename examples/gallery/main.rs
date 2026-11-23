@@ -1925,7 +1925,11 @@ pub fn Gallery() -> impl IntoElement {
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("project-activity") {
         canban_ui::frame::configure_window_chrome();
         ui.snapshot.set(fixtures::project_activity());
-        ui.page.set("board".into());
+        if let Ok(project) = std::env::var("CANBAN_GALLERY_PROJECT") {
+            ui.select_project(project);
+        } else {
+            ui.page.set("board".into());
+        }
         return canban_ui::frame::screen(ui).into_element();
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("board-large") {

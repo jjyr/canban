@@ -387,12 +387,8 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
     when(
         move || ui.quick_open.get(),
         move || {
-            let projects = computed(move || {
-                crate::board::activity::model::projects(
-                    &ui.snapshot.get(),
-                    &ui.recent_destinations.get(),
-                )
-            });
+            let projects =
+                computed(move || crate::board::activity::model::projects(&ui.snapshot.get()));
             let all = computed(move || {
                 let snapshot = ui.snapshot.get();
                 let local_tags = ui.local_tags.get();

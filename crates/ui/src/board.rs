@@ -23,65 +23,70 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
         let _ = ui.project.get();
         ui.current_project()
     });
-    view()
-        .flex_1()
-        .min_w(px(0.))
-        .h_full()
-        .flex_row()
-        .items_center()
-        .gap_1p5()
-        .pl_2()
-        .window_drag(true)
-        .child(
+    let project_controls = when(
+        move || project.get().is_some(),
+        move || {
             view()
                 .flex_row()
                 .items_center()
                 .gap_0p5()
-                .min_w(px(80.))
-                .max_w(px(280.))
+                .flex_shrink_0()
                 .window_drag(false)
-                .child(project_picker(ui))
-                .child(when(
-                    move || project.get().is_some(),
+                .child(chrome_indicator_button(
+                    Icon::GitHub,
                     move || {
-                        chrome_indicator_button(
-                            Icon::GitHub,
-                            move || {
-                                if let Some(p) = project.get() {
-                                    if let Some(g) = &p.github {
-                                        if g.paused {
-                                            format!("GitHub · {} (paused)", g.repository)
-                                        } else {
-                                            format!("GitHub · Connected to {}", g.repository)
-                                        }
-                                    } else if let Some(d) = &p.detected_github {
-                                        format!("GitHub · Detected {} (not linked)", d.repository)
-                                    } else {
-                                        "GitHub repository & synchronization".into()
-                                    }
+                        if let Some(p) = project.get() {
+                            if let Some(g) = &p.github {
+                                if g.paused {
+                                    format!("GitHub · {} (paused)", g.repository)
                                 } else {
-                                    "GitHub repository & synchronization".into()
+                                    format!("GitHub · Connected to {}", g.repository)
                                 }
-                            },
-                            move || {
-                                project
-                                    .get()
-                                    .and_then(|p| p.github)
-                                    .is_some_and(|g| !g.paused)
-                            },
-                            move |_| ui.navigate("github-repository"),
-                        )
+                            } else if let Some(d) = &p.detected_github {
+                                format!("GitHub · Detected {} (not linked)", d.repository)
+                            } else {
+                                "GitHub repository & synchronization".into()
+                            }
+                        } else {
+                            "GitHub repository & synchronization".into()
+                        }
+                    },
+                    move || {
+                        project
+                            .get()
+                            .and_then(|p| p.github)
+                            .is_some_and(|g| !g.paused)
+                    },
+                    move |_| ui.navigate("github-repository"),
+                ))
+                .child(when(
+                    move || project.get().is_some_and(|p| p.github.is_some()),
+                    move || {
+                        let gh_project = computed(move || {
+                            project.get().filter(|p| p.github.is_some()).map(|p| p.id)
+                        });
+                        dynamic(move || {
+                            if let Some(pid) = gh_project.get() {
+                                crate::github::sync_button(ui, pid).into_element()
+                            } else {
+                                view().into_element()
+                            }
+                        })
                     },
                 ))
-                .child(dynamic(move || {
-                    if let Some(p) = project.get().filter(|p| p.github.is_some()) {
-                        crate::github::sync_button(ui, p.id).into_element()
-                    } else {
-                        view().into_element()
-                    }
-                })),
-        )
-        .child(activity::strip(ui))
+        },
+    );
+    view()
+        .flex_1()
+        .min_w(px(0.))
+        .h_full()
+        .overflow_hidden()
+        .flex_row()
+        .items_center()
+        .gap_1p5()
+        .pl_1()
+        .window_drag(true)
+        .child(activity::strip(ui, project_controls))
         .child(
             view()
                 .flex_row()
@@ -404,90 +409,15 @@ fn stage_tabs(
     })
 }
 
-/// Board owns Project selection/creation; the rail only navigates surfaces.
-fn project_picker(ui: Ui) -> impl IntoElement {
-    use canban_ui_kit::tokens::*;
-    let updates = computed(move || {
-        let project = ui.project.get();
-        let items = ui.reminders.get();
-        let cards = items
-            .iter()
-            .filter(|i| i.project_id == project)
-            .map(|i| &i.card_id)
-            .collect::<std::collections::BTreeSet<_>>()
-            .len();
-        (
-            cards,
-            items.iter().any(|i| i.project_id == project && i.pending),
-        )
-    });
-    view().min_w(px(72.)).max_w(px(240.)).child(
-        canban_ui_kit::press_target()
-            .h(px(28.))
-            .min_w(px(72.))
-            .max_w(px(240.))
-            .flex_row()
-            .items_center()
-            .gap_1p5()
-            .px_2()
-            .rounded(px(RADIUS))
-            .border_1()
-            .border_color(CLEAR)
-            .hover(|s| s.bg(INSET))
-            .focus(|s| s.border_color(ACCENT))
-            .accessibility_label(move || {
-                let _ = ui.project.get();
-                Some(
-                    format!(
-                        "Switch Project · {}",
-                        ui.current_project()
-                            .map(|p| p.name)
-                            .unwrap_or_else(|| "Choose Project".into())
-                    )
-                    .into(),
-                )
-            })
-            .child(
-                label(move || {
-                    let pid = ui.project.get();
-                    let base = ui
-                        .current_project()
-                        .map(|p| p.name)
-                        .unwrap_or_else(|| "Choose Project".into());
-                    ui.snapshot.with(|s| {
-                        let hid = s.project_host(&pid);
-                        if hid != "local" && s.has_remote_hosts() {
-                            format!("{base} · {}", s.host_display_name(hid))
-                        } else {
-                            base
-                        }
-                    })
-                })
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_size(px(13.5))
-                .truncate()
-                .min_w(px(0.)),
-            )
-            .child(canban_ui_kit::reminder_count(
-                move || updates.get().0,
-                move || updates.get().1,
-            ))
-            .child(
-                icon(Icon::ChevronDown)
-                    .w(px(13.))
-                    .h(px(13.))
-                    .flex_shrink_0(),
-            )
-            .on_press(move |_: &()| ui.show_search(true)),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use canban_types::{Project, ProjectAgentOverride, Snapshot, Workflow};
-    use nsh_core::{ApproxTextEngine, Core, MountItem, geometry::size};
-    use std::collections::BTreeMap;
+    use nsh_core::{
+        AccessibilityRole, ApproxTextEngine, Core, EventKind, EventPayload, MountBatch, MountItem,
+        NodeId, element::JsEvent, geometry::size,
+    };
+    use std::collections::{BTreeMap, HashMap};
 
     #[test]
     fn board_chrome_bar_renders_plain_agents_label_without_override_count() {
@@ -825,5 +755,397 @@ mod tests {
                 "Card #{n} title `{expected_title}` must appear once (no blanking or duplicate mount), got {occurrences}; mounted_after={mounted_after:?}"
             );
         }
+    }
+
+    struct ChromeTree {
+        kinds: HashMap<NodeId, nsh_core::ViewKind>,
+        parents: HashMap<NodeId, NodeId>,
+        texts: HashMap<NodeId, (String, FontWeight)>,
+        tabs: HashMap<NodeId, (String, bool)>,
+        labels: HashMap<String, NodeId>,
+    }
+
+    impl ChromeTree {
+        fn new() -> Self {
+            Self {
+                kinds: HashMap::new(),
+                parents: HashMap::new(),
+                texts: HashMap::new(),
+                tabs: HashMap::new(),
+                labels: HashMap::new(),
+            }
+        }
+
+        fn apply(&mut self, batch: &MountBatch) {
+            for item in &batch.items {
+                match item {
+                    MountItem::Create { id, kind } => {
+                        self.kinds.insert(*id, *kind);
+                    }
+                    MountItem::Insert { parent, child, .. } => {
+                        self.parents.insert(*child, *parent);
+                    }
+                    MountItem::Remove { id } => {
+                        self.parents.remove(id);
+                    }
+                    MountItem::Delete { id } => {
+                        self.kinds.remove(id);
+                        self.parents.remove(id);
+                        self.texts.remove(id);
+                        self.tabs.remove(id);
+                    }
+                    MountItem::Text { id, text, .. } => {
+                        let weight = text
+                            .spans
+                            .first()
+                            .map(|s| FontWeight(s.style.font_weight))
+                            .unwrap_or(FontWeight::NORMAL);
+                        self.texts.insert(*id, (text.text.to_string(), weight));
+                    }
+                    MountItem::ViewProps { id, props } => {
+                        if let Some(label) = &props.accessibility.label {
+                            self.labels.insert(label.to_string(), *id);
+                        }
+                        if props.accessibility.role == AccessibilityRole::Tab {
+                            let lbl = props
+                                .accessibility
+                                .label
+                                .as_ref()
+                                .map(|s| s.to_string())
+                                .unwrap_or_default();
+                            self.tabs
+                                .insert(*id, (lbl, props.accessibility.state.selected));
+                        } else {
+                            self.tabs.remove(id);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        fn is_mounted(&self, mut id: NodeId) -> bool {
+            if !self.kinds.contains_key(&id) {
+                return false;
+            }
+            let mut guard = 0;
+            while id != nsh_core::ROOT_ID {
+                let Some(&parent) = self.parents.get(&id) else {
+                    return false;
+                };
+                id = parent;
+                guard += 1;
+                if guard > 256 {
+                    return false;
+                }
+            }
+            true
+        }
+
+        fn mounted_text(&self, needle: &str) -> Option<(NodeId, FontWeight)> {
+            self.texts
+                .iter()
+                .find(|(id, (t, _))| t == needle && self.is_mounted(**id))
+                .map(|(id, (_, w))| (*id, *w))
+        }
+    }
+
+    fn pump_chrome(core: &mut Core<ApproxTextEngine>, tree: &mut ChromeTree) {
+        for _ in 0..8 {
+            let had_batch = if let Some(batch) = core.commit() {
+                tree.apply(&batch);
+                true
+            } else {
+                false
+            };
+            let mut events = Vec::new();
+            core.take_events(&mut events);
+            let mut dispatched = false;
+            for ev in events {
+                match ev {
+                    JsEvent::Event(id, kind, payload) => {
+                        core.component_event(id, kind, &payload);
+                        dispatched = true;
+                    }
+                    JsEvent::LayoutListener {
+                        host,
+                        id,
+                        listener,
+                        frame,
+                    } => {
+                        core.component_layout(host, id, &listener, frame);
+                        dispatched = true;
+                    }
+                    _ => {}
+                }
+            }
+            if !had_batch && !dispatched {
+                break;
+            }
+        }
+    }
+
+    fn many_projects_snapshot() -> Snapshot {
+        let mut snapshot = Snapshot::default();
+        for i in 1..=12u64 {
+            let mut project = Project {
+                id: format!("p{i}"),
+                name: format!("Project-{i:02}"),
+                directory: format!("/tmp/project-{i:02}"),
+                github: None,
+                detected_github: None,
+                github_disconnected: false,
+                delivery_mode: Default::default(),
+                agent_overrides: BTreeMap::new(),
+                tags: Vec::new(),
+                workflow: Workflow::default(),
+                target_branch: Some("main".into()),
+                created_at: i,
+            };
+            if i == 1 {
+                project.github = Some(canban_types::GitHubSource {
+                    repository: "jjyr/canban".into(),
+                    repository_id: 1,
+                    generation: "g".into(),
+                    intake: canban_types::GitHubIntake::Off,
+                    pr_intake: canban_types::GitHubPrIntake::Off,
+                    authors: Vec::new(),
+                    labels: Vec::new(),
+                    include_drafts: false,
+                    paused: false,
+                    synced_at: None,
+                    error: None,
+                });
+            }
+            snapshot.projects.push(project);
+        }
+        snapshot
+    }
+
+    #[test]
+    fn board_chrome_bar_renders_scrollable_project_tabs_and_persistent_search_trigger() {
+        #[component]
+        fn WideChromeProbe() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            ui.snapshot.set(many_projects_snapshot());
+            ui.project.set("p1".into());
+            ui.page.set("board".into());
+            ui.narrow.set(false);
+            view()
+                .w(px(1440.))
+                .h(px(42.))
+                .child(view().h(px(0.)).child(label(move || {
+                    format!(
+                        "probe:project={}:qo={}:pp={}",
+                        ui.project.get(),
+                        ui.quick_open.get(),
+                        ui.project_picker.get()
+                    )
+                })))
+                .child(chrome_bar(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1440.), px(42.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<WideChromeProbe>());
+        let mut tree = ChromeTree::new();
+        pump_chrome(&mut core, &mut tree);
+
+        // One horizontal Scroll hosts all 12 project tabs without +N truncation.
+        let scroll_ids: Vec<_> = tree
+            .kinds
+            .iter()
+            .filter(|(id, kind)| **kind == nsh_core::ViewKind::Scroll && tree.is_mounted(**id))
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(scroll_ids.len(), 1, "expected 1 horizontal project scroll");
+        let scroll_m = core.measure(scroll_ids[0]).expect("scroll measure");
+        assert!(scroll_m.frame.size.width.0 > 100.);
+
+        for i in 1..=12 {
+            let name = format!("Project-{i:02}");
+            let (_, weight) = tree
+                .mounted_text(&name)
+                .unwrap_or_else(|| panic!("expected tab text {name}"));
+            assert_eq!(
+                weight,
+                if i == 1 {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::MEDIUM
+                },
+                "unexpected font weight for {name}"
+            );
+        }
+        assert!(
+            !tree
+                .texts
+                .iter()
+                .filter(|(id, _)| tree.is_mounted(**id))
+                .any(|(_, (t, _))| {
+                    t.starts_with("Projects ·")
+                        || (t.starts_with('+') && t[1..].chars().all(|c| c.is_ascii_digit()))
+                }),
+            "scrollable strip must not render old +N / Projects · N truncation labels"
+        );
+
+        let mounted_tabs = |tree: &ChromeTree, core: &Core<ApproxTextEngine>| {
+            let mut items = tree
+                .tabs
+                .iter()
+                .filter(|(id, _)| tree.is_mounted(**id))
+                .filter_map(|(id, (lbl, sel))| {
+                    let m = core.measure(*id)?;
+                    Some((m.page.x.0, *id, lbl.clone(), *sel))
+                })
+                .collect::<Vec<_>>();
+            items.sort_by(|a, b| a.0.total_cmp(&b.0));
+            items
+        };
+
+        let before = mounted_tabs(&tree, &core);
+        assert_eq!(before.len(), 12);
+        assert!(before[0].3, "Project-01 tab should start selected");
+        assert!(
+            before[1..].iter().all(|t| !t.3),
+            "only Project-01 should be selected initially"
+        );
+        let order_before: Vec<_> = (1..=12).map(|i| format!("Project-{i:02}")).collect();
+        for (idx, expected) in order_before.iter().enumerate() {
+            assert!(
+                before[idx].2.contains(expected),
+                "tab {idx} was {:?}, expected {expected}",
+                before[idx].2
+            );
+        }
+
+        // Clicking Project-05 switches active selection in place without reordering tabs.
+        let p5_tab = before[4].1;
+        assert!(core.component_event(p5_tab, EventKind::Press, &EventPayload::None));
+        pump_chrome(&mut core, &mut tree);
+        assert!(
+            tree.mounted_text("probe:project=p5:qo=false:pp=false")
+                .is_some()
+        );
+        let after = mounted_tabs(&tree, &core);
+        assert_eq!(after.len(), 12);
+        for (idx, expected) in order_before.iter().enumerate() {
+            assert!(
+                after[idx].2.contains(expected),
+                "tab {idx} reordered after click: {:?}",
+                after[idx].2
+            );
+            assert_eq!(after[idx].3, idx == 4, "selection state mismatch at {idx}");
+        }
+        assert_eq!(
+            tree.mounted_text("Project-05").unwrap().1,
+            FontWeight::SEMIBOLD
+        );
+        assert_eq!(
+            tree.mounted_text("Project-01").unwrap().1,
+            FontWeight::MEDIUM
+        );
+
+        // Persistent Switch Project button stays visible within bounds and opens project picker.
+        let switch_id = *tree
+            .labels
+            .get("Switch Project")
+            .expect("persistent Switch Project button");
+        let switch_m = core.measure(switch_id).expect("switch measure");
+        let add_card_m = core
+            .measure(tree.mounted_text("+ Add Card").unwrap().0)
+            .expect("add card measure");
+        assert!(switch_m.frame.size.width.0 > 0.);
+        assert!(switch_m.page.x.0 >= scroll_m.page.x.0 + scroll_m.frame.size.width.0 - 0.5);
+        assert!(add_card_m.page.x.0 + add_card_m.frame.size.width.0 <= 1440. + 0.5);
+
+        assert!(core.component_event(switch_id, EventKind::Press, &EventPayload::None));
+        pump_chrome(&mut core, &mut tree);
+        assert!(
+            tree.mounted_text("probe:project=p5:qo=true:pp=true")
+                .is_some()
+        );
+
+        // Narrow 720pt chrome keeps scroll bounded and Switch Project / GitHub / + Add Card in bounds.
+        #[component]
+        fn NarrowChromeProbe() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            ui.snapshot.set(many_projects_snapshot());
+            ui.project.set("p1".into());
+            ui.page.set("board".into());
+            ui.narrow.set(true);
+            view().w(px(720.)).h(px(42.)).child(chrome_bar(ui))
+        }
+
+        let mut narrow_core = Core::new(ApproxTextEngine, size(px(720.), px(42.)));
+        narrow_core.set_components(nsh_base::registry());
+        narrow_core.mount_root(&nsh_core::element::Root::of::<NarrowChromeProbe>());
+        let mut narrow_tree = ChromeTree::new();
+        pump_chrome(&mut narrow_core, &mut narrow_tree);
+
+        let n_scroll = *narrow_tree
+            .kinds
+            .iter()
+            .find(|(id, kind)| **kind == nsh_core::ViewKind::Scroll && narrow_tree.is_mounted(**id))
+            .unwrap()
+            .0;
+        let n_scroll_m = narrow_core.measure(n_scroll).unwrap();
+        let n_switch_m = narrow_core
+            .measure(narrow_tree.labels["Switch Project"])
+            .unwrap();
+        let n_add_m = narrow_core
+            .measure(narrow_tree.mounted_text("+ Add Card").unwrap().0)
+            .unwrap();
+        assert!(n_scroll_m.frame.size.width.0 > 0.);
+        assert!(n_switch_m.frame.size.width.0 > 0.);
+        assert!(n_switch_m.page.x.0 >= n_scroll_m.page.x.0 + n_scroll_m.frame.size.width.0 - 0.5);
+        assert!(n_add_m.page.x.0 + n_add_m.frame.size.width.0 <= 720. + 0.5);
+    }
+
+    #[test]
+    fn board_chrome_bar_empty_projects_renders_choose_project_trigger() {
+        #[component]
+        fn EmptyChromeProbe() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            ui.snapshot.set(Snapshot::default());
+            ui.project.set(String::new());
+            ui.page.set("board".into());
+            view()
+                .w(px(900.))
+                .h(px(42.))
+                .child(view().h(px(0.)).child(label(move || {
+                    format!(
+                        "empty:qo={}:pp={}",
+                        ui.quick_open.get(),
+                        ui.project_picker.get()
+                    )
+                })))
+                .child(chrome_bar(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(900.), px(42.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<EmptyChromeProbe>());
+        let mut tree = ChromeTree::new();
+        pump_chrome(&mut core, &mut tree);
+
+        assert!(tree.mounted_text("Choose Project").is_some());
+        assert!(
+            !tree
+                .kinds
+                .iter()
+                .any(|(id, k)| *k == nsh_core::ViewKind::Scroll && tree.is_mounted(*id)),
+            "empty workspace must not mount project tab scroll"
+        );
+        let choose_id = *tree
+            .labels
+            .get("Switch Project · Choose Project")
+            .expect("Choose Project trigger");
+        assert!(core.component_event(choose_id, EventKind::Press, &EventPayload::None));
+        pump_chrome(&mut core, &mut tree);
+        assert!(tree.mounted_text("empty:qo=true:pp=true").is_some());
     }
 }
