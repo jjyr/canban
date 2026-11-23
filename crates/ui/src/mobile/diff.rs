@@ -1,6 +1,12 @@
-//! Mobile `Diff` segment inside pushed Card screen: file selector pills, unified hunk diff,
-//! offline notice, and `Return for rework` / `Deliver…` footer bar.
-use super::{MobileSheet, MobileState, chrome::trigger_haptic};
+//! Mobile `Diff` segment inside pushed Card screen: file selector pills, unified hunk diff
+//! with `Wrap / Scroll` toggle, offline notice, and sticky `Return for rework` / `Deliver…` bar.
+use super::{
+    MobileSheet, MobileState,
+    chrome::{
+        MOBILE_CODE, MOBILE_RADIUS, is_mobile_os, mobile_button, mobile_footnote, mobile_subhead,
+        trigger_haptic,
+    },
+};
 use crate::{
     presenter::*,
     review::model::{DiffLine, parse_unified_hunks},
@@ -54,7 +60,7 @@ fn parse_files(data: &Value) -> Vec<DiffFileItem> {
         .unwrap_or_default()
 }
 
-fn render_diff_line(line: DiffLine) -> AnyElement {
+fn render_diff_line(line: DiffLine, wrap: bool) -> AnyElement {
     let (prefix, color_fg, bg_row) = match line.kind {
         '+' => ("+", SUCCESS, SUCCESS_SURFACE),
         '-' => ("-", DANGER, DANGER_SURFACE),
@@ -66,28 +72,35 @@ fn render_diff_line(line: DiffLine) -> AnyElement {
         .or(line.old_line)
         .map(|n| format!("{n:>4}"))
         .unwrap_or_else(|| "    ".to_owned());
+
+    let code = text(format!("{prefix}{}", line.text))
+        .text_size(px(MOBILE_CODE))
+        .line_height(px(19.))
+        .font_family(MONO_FONT)
+        .text_color(color_fg);
+
     view()
         .w_full()
         .flex_row()
         .items_start()
-        .gap_1p5()
-        .px_2()
+        .gap_2()
+        .px_2p5()
         .py_0p5()
         .bg(bg_row)
         .child(
             text(ln)
-                .text_size(px(11.))
+                .text_size(px(11.5))
+                .line_height(px(19.))
                 .font_family(MONO_FONT)
                 .text_color(MUTED)
+                .tabular_nums()
                 .flex_shrink_0(),
         )
-        .child(
-            text(format!("{prefix}{}", line.text))
-                .text_size(px(11.5))
-                .font_family(MONO_FONT)
-                .text_color(color_fg)
-                .flex_shrink_0(),
-        )
+        .child(if wrap {
+            code.flex_1().min_w(px(0.)).into_element()
+        } else {
+            code.flex_shrink_0().into_element()
+        })
         .into_element()
 }
 
@@ -96,6 +109,7 @@ pub(crate) fn segment_view(ui: Ui, state: MobileState, card_id: String) -> impl 
     let loading = signal(false);
     let error = signal(String::new());
     let selected_file = signal(String::new());
+    let wrap_lines = signal(false);
 
     let query = computed({
         let cid = card_id.clone();
@@ -222,17 +236,17 @@ pub(crate) fn segment_view(ui: Ui, state: MobileState, card_id: String) -> impl 
             scroll()
                 .flex_1()
                 .min_h(px(0.))
-                .child(view().w_full().p_3().gap_3().child(dynamic(move || {
+                .child(view().w_full().p_4().gap_3().pb(px(32.)).child(dynamic(move || {
                     let m = model.get();
                     if m.empty_workspace {
-                        return panel()
-                            .p_4()
-                            .gap_1()
-                            .child(label("No workspace changes yet"))
-                            .child(muted(
-                                "This Card does not have an active worktree, branch, or PR attached yet.",
-                            ))
-                            .into_element();
+                        return super::chrome::empty_state(
+                            Icon::Compare,
+                            Tone::Neutral,
+                            "No workspace changes",
+                            "This Card does not have an active worktree, branch, or PR attached yet.",
+                            None,
+                        )
+                        .into_element();
                     }
                     if m.offline && m.files.is_empty() {
                         return notice(
@@ -242,16 +256,21 @@ pub(crate) fn segment_view(ui: Ui, state: MobileState, card_id: String) -> impl 
                         .into_element();
                     }
                     if m.loading && m.files.is_empty() {
-                        return loading_panel("Loading Card diff…", "Comparing branches").into_element();
+                        return loading_panel("Loading Card diff…", "Comparing branches")
+                            .into_element();
                     }
                     if !m.error.is_empty() && m.files.is_empty() {
                         return notice(m.error, Tone::Danger).into_element();
                     }
                     if m.files.is_empty() {
-                        return panel()
-                            .p_4()
-                            .child(muted("Working tree clean — no diff against target branch."))
-                            .into_element();
+                        return super::chrome::empty_state(
+                            Icon::Check,
+                            Tone::Success,
+                            "Working tree clean",
+                            "No diff against target branch.",
+                            None,
+                        )
+                        .into_element();
                     }
 
                     let chosen = selected_file.get();
@@ -261,84 +280,130 @@ pub(crate) fn segment_view(ui: Ui, state: MobileState, card_id: String) -> impl 
                         .find(|f| f.filename == chosen)
                         .or_else(|| m.files.first())
                         .cloned();
+                    let wrap = wrap_lines.get();
 
-                    let mut out = view().w_full().gap_2p5().child(
+                    let wrap_btn = press_target()
+                        .h(px(32.))
+                        .px_3()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(if wrap { ACCENT } else { BORDER })
+                        .bg(if wrap { SELECTED } else { SURFACE })
+                        .items_center()
+                        .justify_center()
+                        .active(|s| s.opacity(0.7))
+                        .child(
+                            text(if wrap { "Wrap: On" } else { "Wrap: Off" })
+                                .text_size(px(12.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(if wrap { ACCENT } else { TEXT }),
+                        )
+                        .on_press(move |_: &()| {
+                            trigger_haptic(Haptic::Selection);
+                            wrap_lines.update(|w| *w = !*w);
+                        });
+
+                    let mut out = view().w_full().gap_3().child(
                         view()
                             .w_full()
                             .flex_row()
                             .items_center()
                             .justify_between()
-                            .child(
-                                label(format!(
-                                    "{} file{}",
-                                    m.files.len(),
-                                    if m.files.len() == 1 { "" } else { "s" }
-                                ))
-                                .font_weight(FontWeight::SEMIBOLD),
-                            )
+                            .gap_2()
                             .child(
                                 view()
                                     .flex_row()
                                     .items_center()
-                                    .gap_2()
-                                    .children(m.truncated.then(|| muted("Partial")))
-                                    .child(label(format!("+{}", m.total_add)).text_color(SUCCESS))
-                                    .child(label(format!("−{}", m.total_del)).text_color(DANGER)),
-                            ),
+                                    .gap_2p5()
+                                    .child(
+                                        text(format!(
+                                            "{} file{}",
+                                            m.files.len(),
+                                            if m.files.len() == 1 { "" } else { "s" }
+                                        ))
+                                        .text_size(px(15.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(TEXT)
+                                        .tabular_nums(),
+                                    )
+                                    .child(
+                                        text(format!("+{}", m.total_add))
+                                            .text_size(px(14.))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(SUCCESS)
+                                            .tabular_nums(),
+                                    )
+                                    .child(
+                                        text(format!("−{}", m.total_del))
+                                            .text_size(px(14.))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(DANGER)
+                                            .tabular_nums(),
+                                    )
+                                    .children(m.truncated.then(|| mobile_footnote("Partial"))),
+                            )
+                            .child(wrap_btn),
                     );
 
                     out = out.child(
                         scroll().horizontal().scrollbar(false).w_full().child(
-                            view().flex_row().items_center().gap_1p5().children(
-                                m.files.iter().map(|f| {
+                            view().flex_row().items_center().gap_2().children(m.files.iter().map(
+                                |f| {
                                     let fname = f.filename.clone();
                                     let fname_press = fname.clone();
-                                    let short = fname
-                                        .rsplit('/')
-                                        .next()
-                                        .unwrap_or(&fname)
-                                        .to_owned();
+                                    let short =
+                                        fname.rsplit('/').next().unwrap_or(&fname).to_owned();
                                     let is_sel = active_file
                                         .as_ref()
                                         .is_some_and(|a| a.filename == fname);
                                     press_target()
-                                        .h(px(30.))
-                                        .px_2p5()
-                                        .rounded(px(6.))
+                                        .h(px(36.))
+                                        .px_3()
+                                        .rounded(px(10.))
                                         .border_1()
-                                        .border_color(if is_sel { ACCENT } else { BORDER })
-                                        .bg(if is_sel { SELECTED } else { INSET })
+                                        .border_color(if is_sel { CLEAR } else { BORDER })
+                                        .bg(if is_sel { ACCENT_FILL } else { SURFACE })
                                         .flex_row()
                                         .items_center()
                                         .gap_1p5()
                                         .cursor_pointer()
+                                        .active(|s| s.opacity(0.75))
                                         .child(
                                             text(short)
-                                                .text_size(px(12.))
+                                                .text_size(px(13.5))
                                                 .font_weight(FontWeight::MEDIUM)
-                                                .text_color(if is_sel { ACCENT } else { TEXT }),
+                                                .text_color(if is_sel { ON_ACCENT } else { TEXT }),
                                         )
                                         .child(
                                             text(format!("+{} −{}", f.additions, f.deletions))
-                                                .text_size(px(11.))
-                                                .text_color(MUTED),
+                                                .text_size(px(12.))
+                                                .text_color(if is_sel { ON_ACCENT } else { MUTED })
+                                                .opacity(if is_sel { 0.85 } else { 1.0 })
+                                                .tabular_nums(),
                                         )
                                         .on_press(move |_: &()| {
+                                            trigger_haptic(Haptic::Selection);
                                             selected_file.set(fname_press.clone());
                                         })
-                                }),
-                            ),
+                                },
+                            )),
                         ),
                     );
 
                     if let Some(file) = active_file {
                         let hunks = parse_unified_hunks(&file.patch);
-                        let mut diff_card = panel()
+                        let mut diff_card = view()
+                            .w_full()
+                            .rounded(px(MOBILE_RADIUS))
+                            .border_1()
+                            .border_color(BORDER)
+                            .bg(SURFACE)
                             .overflow_hidden()
                             .child(
                                 view()
-                                    .px_3()
-                                    .py_2()
+                                    .w_full()
+                                    .px_3p5()
+                                    .py_2p5()
                                     .border_b_1()
                                     .border_color(BORDER)
                                     .bg(INSET)
@@ -347,19 +412,21 @@ pub(crate) fn segment_view(ui: Ui, state: MobileState, card_id: String) -> impl 
                                     .justify_between()
                                     .gap_2()
                                     .child(
-                                        label(file.filename.clone())
+                                        text(file.filename.clone())
                                             .font_family(MONO_FONT)
-                                            .text_size(px(12.))
+                                            .text_size(px(12.5))
+                                            .text_color(TEXT)
                                             .truncate()
+                                            .flex_1()
                                             .min_w(px(0.)),
                                     )
                                     .child(badge(file.status)),
                             );
                         if hunks.is_empty() {
                             diff_card = diff_card.child(
-                                view()
-                                    .p_3()
-                                    .child(muted("Binary or summary-only diff (no patch lines).")),
+                                view().p_4().child(mobile_subhead(
+                                    "Binary or summary-only diff (no patch lines).",
+                                )),
                             );
                         } else {
                             let mut hunks_col = view().w_full();
@@ -367,23 +434,26 @@ pub(crate) fn segment_view(ui: Ui, state: MobileState, card_id: String) -> impl 
                                 hunks_col = hunks_col.child(
                                     view()
                                         .w_full()
-                                        .px_2()
-                                        .py_1()
+                                        .px_2p5()
+                                        .py_1p5()
                                         .bg(SELECTED)
                                         .child(
                                             text(hunk.header)
-                                                .text_size(px(11.))
+                                                .text_size(px(11.5))
                                                 .font_family(MONO_FONT)
                                                 .text_color(ACCENT),
                                         ),
                                 );
                                 for line in hunk.lines {
-                                    hunks_col = hunks_col.child(render_diff_line(line));
+                                    hunks_col = hunks_col.child(render_diff_line(line, wrap));
                                 }
                             }
-                            diff_card = diff_card.child(
-                                scroll().horizontal().w_full().child(hunks_col),
-                            );
+                            if wrap {
+                                diff_card = diff_card.child(hunks_col);
+                            } else {
+                                diff_card = diff_card
+                                    .child(scroll().horizontal().w_full().child(hunks_col));
+                            }
                         }
                         out = out.child(diff_card);
                     }
@@ -394,7 +464,7 @@ pub(crate) fn segment_view(ui: Ui, state: MobileState, card_id: String) -> impl 
         .child(dynamic(move || {
             let m = model.get();
             if !m.can_deliver && !m.can_rework {
-                return view();
+                return view().hidden();
             }
             let deliver_card_id = deliver_cid.clone();
             let rework_card_id = rework_cid.clone();
@@ -404,26 +474,31 @@ pub(crate) fn segment_view(ui: Ui, state: MobileState, card_id: String) -> impl 
             view()
                 .w_full()
                 .flex_shrink_0()
-                .px_3()
-                .py_2p5()
+                .px_4()
+                .pt_2p5()
+                .pb(move || {
+                    if is_mobile_os() {
+                        px(safe_area().bottom.0.max(12.))
+                    } else {
+                        px(12.)
+                    }
+                })
                 .border_t_1()
                 .border_color(BORDER)
                 .bg(SURFACE)
                 .flex_row()
                 .items_center()
-                .justify_between()
-                .gap_2()
+                .gap_2p5()
                 .children(m.can_rework.then(|| {
-                    action("Return for rework", Variant::Secondary, move |_| {
-                        trigger_haptic(Haptic::Selection);
+                    mobile_button("Return for Rework", Variant::Secondary, move |_| {
                         if run_opt_rework.is_some() {
                             state.open_sheet(MobileSheet::Rework(rework_card_id.clone()));
                         }
                     })
+                    .flex_1()
                 }))
                 .children(m.can_deliver.then(|| {
-                    action("Deliver…", Variant::Primary, move |_| {
-                        trigger_haptic(Haptic::Selection);
+                    mobile_button("Deliver…", Variant::Primary, move |_| {
                         if !crate::backend::is_connected() {
                             ui.notify("Gallery preview · Deliver Card");
                             return;
@@ -434,13 +509,13 @@ pub(crate) fn segment_view(ui: Ui, state: MobileState, card_id: String) -> impl 
                                 "workflow.deliver",
                                 json!({"card_id": deliver_card_id, "revision": rev}),
                             );
-                        } else if let Some(card) = ui
-                            .snapshot
-                            .with_untracked(|s| s.cards.iter().find(|c| c.id == deliver_card_id).cloned())
-                        {
+                        } else if let Some(card) = ui.snapshot.with_untracked(|s| {
+                            s.cards.iter().find(|c| c.id == deliver_card_id).cloned()
+                        }) {
                             crate::card::quick_merge_start(ui, card);
                         }
                     })
+                    .flex_1()
                 }))
         }))
 }

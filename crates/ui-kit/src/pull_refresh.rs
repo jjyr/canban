@@ -139,7 +139,7 @@ pub fn pull_refresh_scroll(
     refreshing: impl Fn() -> bool + Copy + 'static,
     on_refresh: impl Fn() + Copy + 'static,
 ) -> View {
-    if cfg!(target_os = "ios") {
+    if cfg!(any(target_os = "ios", target_os = "android")) {
         return view()
             .relative()
             .flex_1()

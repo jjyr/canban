@@ -1,11 +1,16 @@
 //! `Needs you` mobile inbox tab: actionable approvals/attentions, unread updates, and running agents.
 use super::{
-    CardSegment, MobileState,
-    chrome::{offline_sync_banner, trigger_haptic},
+    CardSegment, MobileSheet, MobileState,
+    chrome::{
+        MOBILE_CARD_RADIUS, disclosure_chevron, empty_state, grouped_card, grouped_card_with_inset,
+        icon_badge, is_mobile_os, mobile_footnote, mobile_inline_button, mobile_subhead,
+        mobile_title, offline_sync_banner, section_header, tab_scroll_bottom_pad, trigger_haptic,
+    },
 };
 use crate::presenter::*;
 use canban_types::HerdrStatus;
 use canban_ui_kit::{pull_refresh_scroll, tokens::*, *};
+use nsh_base::{MenuButtonItem, context_menu};
 use nsh_core::{Haptic, prelude::*};
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -277,246 +282,427 @@ fn approve_action(ui: Ui, item: &ActionItem) {
     }
 }
 
+fn render_action_card(ui: Ui, state: MobileState, item: ActionItem) -> AnyElement {
+    let approve_item = item.clone();
+    let rework_cid = item.card_id.clone();
+    let open_cid = item.card_id.clone();
+    let diff_cid = item.card_id.clone();
+    let term_for_menu = item.terminal_id.clone();
+    let term_for_btn = item.terminal_id.clone();
+    let rework_menu_cid = item.card_id.clone();
+    let is_deliver = item
+        .workflow_run
+        .as_ref()
+        .is_some_and(|(_, _, deliver)| *deliver);
+    let has_workflow_run = item.workflow_run.is_some();
+    let primary_lbl = if is_deliver {
+        "Deliver"
+    } else if has_workflow_run {
+        "Approve"
+    } else {
+        "Advance"
+    };
+    let reasons = item.reasons.join(" · ");
+
+    let tap_body = press_target()
+        .w_full()
+        .items_start()
+        .gap_1p5()
+        .cursor_pointer()
+        .active(|s| s.opacity(0.75))
+        .child(
+            view()
+                .w_full()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    mobile_footnote(format!("{} · #{}", item.project_name, item.card_number))
+                        .tabular_nums()
+                        .truncate()
+                        .flex_1()
+                        .min_w(px(0.)),
+                )
+                .child(status("Needs review", Tone::Attention)),
+        )
+        .child(mobile_title(item.card_title))
+        .children((!reasons.is_empty()).then(|| mobile_subhead(reasons)))
+        .on_press(move |_: &()| {
+            trigger_haptic(Haptic::Selection);
+            state.push_card(open_cid.clone(), CardSegment::Conversation);
+        });
+
+    let mut action_row = view()
+        .w_full()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .pt_1()
+        .child(
+            mobile_inline_button("Rework", Variant::Secondary, move |_| {
+                state.open_sheet(MobileSheet::Rework(rework_cid.clone()));
+            })
+            .flex_1(),
+        )
+        .child(
+            mobile_inline_button(primary_lbl, Variant::Primary, move |_| {
+                approve_action(ui, &approve_item);
+            })
+            .flex_1(),
+        );
+
+    if let Some(tid) = term_for_btn {
+        action_row = action_row.child(
+            press_target()
+                .w(px(42.))
+                .h(px(42.))
+                .rounded(px(11.))
+                .bg(INSET)
+                .border_1()
+                .border_color(BORDER)
+                .items_center()
+                .justify_center()
+                .active(|s| s.opacity(0.75))
+                .accessibility_label(Some(SharedString::from("Open terminal")))
+                .child(icon_tinted(Icon::Terminal, ACCENT).w(px(18.)).h(px(18.)))
+                .on_press(move |_: &()| {
+                    trigger_haptic(Haptic::Selection);
+                    state.push_terminal(tid.clone());
+                }),
+        );
+    }
+
+    let card = view()
+        .w_full()
+        .p_4()
+        .gap_3()
+        .rounded(px(MOBILE_CARD_RADIUS))
+        .border_1()
+        .border_color(BORDER)
+        .bg(SURFACE)
+        .child(tap_body)
+        .child(action_row);
+
+    if !is_mobile_os() {
+        return card.into_element();
+    }
+
+    let mut menu_items = vec![MenuButtonItem::new("open", "Open Conversation").icon("bubble.left")];
+    if term_for_menu.is_some() {
+        menu_items.push(MenuButtonItem::new("terminal", "Open Terminal").icon("terminal"));
+    }
+    menu_items.push(MenuButtonItem::new("diff", "View Diff").icon("doc.text.magnifyingglass"));
+    menu_items
+        .push(MenuButtonItem::new("rework", "Return for Rework").icon("arrow.uturn.backward"));
+
+    let open_cid_menu = item.card_id;
+    context_menu()
+        .w_full()
+        .items(menu_items)
+        .trigger(card)
+        .on_select(move |choice: &SharedString| {
+            trigger_haptic(Haptic::Selection);
+            match choice.as_ref() {
+                "open" => state.push_card(open_cid_menu.clone(), CardSegment::Conversation),
+                "diff" => state.push_card(diff_cid.clone(), CardSegment::Diff),
+                "terminal" => {
+                    if let Some(tid) = &term_for_menu {
+                        state.push_terminal(tid.clone());
+                    }
+                }
+                "rework" => state.open_sheet(MobileSheet::Rework(rework_menu_cid.clone())),
+                _ => {}
+            }
+        })
+        .into_element()
+}
+
 pub(crate) fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
     let scroll_ref = element_ref();
     let model = computed(move || build_inbox_model(ui));
 
     let body = pull_refresh_scroll(
-        scroll().child(view().w_full().p_4().gap_4().child(dynamic(move || {
-            let m = model.get();
-            if m.action_items.is_empty()
-                && m.terminal_alerts.is_empty()
-                && m.updates.is_empty()
-                && m.running.is_empty()
-            {
-                return panel()
-                    .p_5()
-                    .gap_2()
-                    .items_center()
-                    .child(heading("All caught up"))
-                    .child(muted(
-                        "No approvals, alerts, or running agents need you right now.",
-                    ))
-                    .into_element();
-            }
+        scroll().w_full().bg(BACKGROUND).child(
+            view()
+                .w_full()
+                .px_4()
+                .pt_2()
+                .pb(px(tab_scroll_bottom_pad()))
+                .gap_5()
+                .child(offline_sync_banner(ui, state, None))
+                .child(dynamic(move || {
+                    let m = model.get();
+                    if m.action_items.is_empty()
+                        && m.terminal_alerts.is_empty()
+                        && m.updates.is_empty()
+                        && m.running.is_empty()
+                    {
+                        return empty_state(
+                            Icon::Check,
+                            Tone::Success,
+                            "All caught up",
+                            "No approvals, alerts, or running agents need you right now.",
+                            None,
+                        )
+                        .into_element();
+                    }
 
-            let mut col = view().w_full().gap_4();
+                    let mut col = view().w_full().gap_6();
 
-            if !m.action_items.is_empty() || !m.terminal_alerts.is_empty() {
-                let mut sec = view().w_full().gap_2().child(
-                    label("NEEDS ATTENTION")
-                        .text_size(px(11.5))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(MUTED),
-                );
-                for item in m.action_items {
-                    let approve_item = item.clone();
-                    let rework_cid = item.card_id.clone();
-                    let reply_cid = item.card_id.clone();
-                    let open_cid = item.card_id.clone();
-                    let open_term = item.terminal_id.clone();
-                    let has_workflow_run = item.workflow_run.is_some();
-                    let reasons = item.reasons.join(" · ");
-
-                    let card_box = panel().p_3().gap_2().child(
-                        press_target()
+                    if !m.action_items.is_empty() || !m.terminal_alerts.is_empty() {
+                        let mut sec = view()
                             .w_full()
-                            .items_start()
-                            .gap_1()
-                            .cursor_pointer()
-                            .child(
+                            .gap_2p5()
+                            .child(section_header("NEEDS ATTENTION", None));
+                        for item in m.action_items {
+                            sec = sec.child(render_action_card(ui, state, item));
+                        }
+                        for alert in m.terminal_alerts {
+                            let tid = alert.id.clone();
+                            let tid_btn = alert.id.clone();
+                            sec = sec.child(
                                 view()
                                     .w_full()
+                                    .p_4()
+                                    .gap_3()
+                                    .rounded(px(MOBILE_CARD_RADIUS))
+                                    .border_1()
+                                    .border_color(BORDER)
+                                    .bg(SURFACE)
+                                    .child(
+                                        press_target()
+                                            .w_full()
+                                            .gap_1()
+                                            .active(|s| s.opacity(0.75))
+                                            .child(
+                                                view()
+                                                    .w_full()
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .gap_2()
+                                                    .child(
+                                                        mobile_title(alert.title)
+                                                            .flex_1()
+                                                            .min_w(px(0.)),
+                                                    )
+                                                    .child(status("Input needed", Tone::Attention)),
+                                            )
+                                            .children(
+                                                (!alert.detail.is_empty())
+                                                    .then(|| mobile_subhead(alert.detail)),
+                                            )
+                                            .on_press(move |_: &()| {
+                                                trigger_haptic(Haptic::Selection);
+                                                state.push_terminal(tid.clone());
+                                            }),
+                                    )
+                                    .child(mobile_inline_button(
+                                        "Open Terminal",
+                                        Variant::Secondary,
+                                        move |_| state.push_terminal(tid_btn.clone()),
+                                    )),
+                            );
+                        }
+                        col = col.child(sec);
+                    }
+
+                    if !m.updates.is_empty() {
+                        let mark_all = press_target()
+                            .min_h(px(32.))
+                            .px_1()
+                            .items_center()
+                            .justify_center()
+                            .active(|s| s.opacity(0.65))
+                            .child(
+                                text("Mark all read")
+                                    .text_size(px(13.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(ACCENT),
+                            )
+                            .on_press(move |_: &()| {
+                                trigger_haptic(Haptic::Selection);
+                                crate::overview::mark_all_read(ui, None);
+                            })
+                            .into_element();
+
+                        let rows: Vec<AnyElement> = m
+                            .updates
+                            .into_iter()
+                            .map(|u| {
+                                let cid = u.card_id.clone();
+                                let read_cid = u.card_id.clone();
+                                let seq = u.last_seq;
+                                press_target()
+                                    .w_full()
+                                    .min_h(px(58.))
+                                    .px_4()
+                                    .py_2p5()
                                     .flex_row()
                                     .items_center()
                                     .justify_between()
-                                    .gap_2()
-                                    .child(muted(item.project_name))
-                                    .child(status("Needs review", Tone::Attention)),
-                            )
-                            .child(
-                                label(format!("#{} {}", item.card_number, item.card_title))
-                                    .font_weight(FontWeight::SEMIBOLD),
-                            )
-                            .children((!reasons.is_empty()).then(|| muted(reasons)))
-                            .on_press(move |_: &()| {
-                                trigger_haptic(Haptic::Selection);
-                                state.push_card(open_cid.clone(), CardSegment::Conversation);
-                            }),
-                    );
+                                    .gap_3()
+                                    .active(|s| s.opacity(0.75))
+                                    .child(
+                                        view()
+                                            .flex_1()
+                                            .min_w(px(0.))
+                                            .gap_0p5()
+                                            .child(
+                                                text(format!("#{} {}", u.card_number, u.card_title))
+                                                    .text_size(px(16.))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(TEXT)
+                                                    .truncate(),
+                                            )
+                                            .child(mobile_footnote(u.project_name).truncate()),
+                                    )
+                                    .child(
+                                        view()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_2()
+                                            .flex_shrink_0()
+                                            .child(
+                                                view()
+                                                    .min_w(px(24.))
+                                                    .h(px(24.))
+                                                    .px_2()
+                                                    .rounded_full()
+                                                    .bg(SELECTED)
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .child(
+                                                        text(u.unread_count.to_string())
+                                                            .text_size(px(12.5))
+                                                            .font_weight(FontWeight::SEMIBOLD)
+                                                            .text_color(ACCENT)
+                                                            .tabular_nums(),
+                                                    ),
+                                            )
+                                            .child(disclosure_chevron()),
+                                    )
+                                    .on_press(move |_: &()| {
+                                        trigger_haptic(Haptic::Selection);
+                                        crate::overview::mark_card_read(ui, read_cid.clone(), seq);
+                                        state.push_card(cid.clone(), CardSegment::Conversation);
+                                    })
+                                    .into_element()
+                            })
+                            .collect();
 
-                    let mut actions = view().flex_row().flex_wrap().items_center().gap_2().pt_1();
-                    actions = actions.child(compact_action(
-                        if has_workflow_run {
-                            "Approve"
-                        } else {
-                            "Advance"
-                        },
-                        Variant::Primary,
-                        move |_| approve_action(ui, &approve_item),
-                    ));
-                    actions =
-                        actions.child(compact_action("Reject", Variant::Secondary, move |_| {
-                            trigger_haptic(Haptic::Selection);
-                            state.open_sheet(super::MobileSheet::Rework(rework_cid.clone()));
-                        }));
-                    actions = actions.child(compact_action("Reply", Variant::Quiet, move |_| {
-                        state.push_card(reply_cid.clone(), CardSegment::Conversation);
-                    }));
-                    if let Some(tid) = open_term {
-                        actions =
-                            actions.child(compact_action("Terminal", Variant::Quiet, move |_| {
-                                state.push_terminal(tid.clone())
-                            }));
+                        col = col.child(
+                            view()
+                                .w_full()
+                                .child(section_header("UPDATES", Some(mark_all)))
+                                .child(grouped_card(rows)),
+                        );
                     }
-                    sec = sec.child(card_box.child(actions));
-                }
-                for alert in m.terminal_alerts {
-                    let tid = alert.id.clone();
-                    sec = sec.child(
-                        panel().p_3().gap_2().child(
-                            press_target()
-                                .w_full()
-                                .items_start()
-                                .gap_1()
-                                .cursor_pointer()
-                                .child(
-                                    view()
-                                        .w_full()
-                                        .flex_row()
-                                        .items_center()
-                                        .justify_between()
-                                        .child(label(alert.title).font_weight(FontWeight::SEMIBOLD))
-                                        .child(status("Input needed", Tone::Attention)),
-                                )
-                                .children((!alert.detail.is_empty()).then(|| muted(alert.detail)))
-                                .on_press(move |_: &()| state.push_terminal(tid.clone())),
-                        ),
-                    );
-                }
-                col = col.child(sec);
-            }
 
-            if !m.updates.is_empty() {
-                let mut sec = view().w_full().gap_2().child(
-                    view()
-                        .w_full()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            label("UPDATES")
-                                .text_size(px(11.5))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(MUTED),
-                        )
-                        .child(compact_action("Mark all read", Variant::Quiet, move |_| {
-                            crate::overview::mark_all_read(ui, None);
-                        })),
-                );
-                for u in m.updates {
-                    let cid = u.card_id.clone();
-                    let read_cid = u.card_id.clone();
-                    let seq = u.last_seq;
-                    sec = sec.child(
-                        panel().p_3().child(
-                            press_target()
-                                .w_full()
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .gap_2()
-                                .cursor_pointer()
-                                .child(
-                                    view()
-                                        .flex_1()
-                                        .min_w(px(0.))
-                                        .gap_0p5()
-                                        .child(
-                                            label(format!("#{} {}", u.card_number, u.card_title))
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .truncate(),
-                                        )
-                                        .child(muted(u.project_name)),
-                                )
-                                .child(badge(format!("{} new", u.unread_count)))
-                                .on_press(move |_: &()| {
-                                    crate::overview::mark_card_read(ui, read_cid.clone(), seq);
-                                    state.push_card(cid.clone(), CardSegment::Conversation);
-                                }),
-                        ),
-                    );
-                }
-                col = col.child(sec);
-            }
-
-            if !m.running.is_empty() {
-                let mut sec = view().w_full().gap_2().child(
-                    label("RUNNING")
-                        .text_size(px(11.5))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(MUTED),
-                );
-                for run in m.running {
-                    let tid = run.terminal_id.clone();
-                    let started_at = run.started_at;
-                    sec = sec.child(
-                        panel().p_3().child(
-                            press_target()
-                                .w_full()
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .gap_2()
-                                .cursor_pointer()
-                                .child(
-                                    view()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap_2()
-                                        .flex_1()
-                                        .min_w(px(0.))
-                                        .child(if run.is_blocked {
-                                            view()
-                                                .w(px(8.))
-                                                .h(px(8.))
-                                                .rounded_full()
-                                                .bg(ATTENTION)
+                    if !m.running.is_empty() {
+                        let rows: Vec<AnyElement> = m
+                            .running
+                            .into_iter()
+                            .map(|run| {
+                                let tid = run.terminal_id.clone();
+                                let started_at = run.started_at;
+                                let (ic, fg, bg) = if run.is_blocked {
+                                    (Icon::TriangleAlert, ATTENTION, ATTENTION_SURFACE)
+                                } else {
+                                    (Icon::Agent, ACCENT, SELECTED)
+                                };
+                                press_target()
+                                    .w_full()
+                                    .min_h(px(60.))
+                                    .px_4()
+                                    .py_2p5()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_3()
+                                    .active(|s| s.opacity(0.75))
+                                    .child(
+                                        view()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_3()
+                                            .flex_1()
+                                            .min_w(px(0.))
+                                            .child(icon_badge(ic, fg, bg))
+                                            .child(
+                                                view()
+                                                    .flex_1()
+                                                    .min_w(px(0.))
+                                                    .gap_0p5()
+                                                    .child(
+                                                        text(run.title)
+                                                            .text_size(px(16.))
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .text_color(TEXT)
+                                                            .truncate(),
+                                                    )
+                                                    .child(mobile_footnote(run.subtitle).truncate()),
+                                            ),
+                                    )
+                                    .child(
+                                        view()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_2()
+                                            .flex_shrink_0()
+                                            .child(if let Some(ts) = started_at {
+                                                view()
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .gap_1p5()
+                                                    .child(live_dot(if run.is_blocked {
+                                                        ATTENTION
+                                                    } else {
+                                                        ACCENT
+                                                    }))
+                                                    .child(
+                                                        text(move || {
+                                                            crate::components::activity::compact_duration(
+                                                                ui.runtime_clock
+                                                                    .get()
+                                                                    .saturating_sub(ts),
+                                                            )
+                                                        })
+                                                        .text_size(px(13.))
+                                                        .text_color(MUTED)
+                                                        .tabular_nums(),
+                                                    )
+                                                    .into_element()
+                                            } else {
+                                                live_dot(if run.is_blocked {
+                                                    ATTENTION
+                                                } else {
+                                                    ACCENT
+                                                })
                                                 .into_element()
-                                        } else {
-                                            live_dot(ACCENT).into_element()
-                                        })
-                                        .child(
-                                            view()
-                                                .flex_1()
-                                                .min_w(px(0.))
-                                                .gap_0p5()
-                                                .child(
-                                                    label(run.title)
-                                                        .font_weight(FontWeight::MEDIUM)
-                                                        .truncate(),
-                                                )
-                                                .child(muted(run.subtitle).truncate()),
-                                        ),
-                                )
-                                .child(muted(move || {
-                                    if let Some(ts) = started_at {
-                                        crate::components::activity::compact_duration(
-                                            ui.runtime_clock.get().saturating_sub(ts),
-                                        )
-                                    } else {
-                                        "Open →".to_owned()
-                                    }
-                                }))
-                                .on_press(move |_: &()| state.push_terminal(tid.clone())),
-                        ),
-                    );
-                }
-                col = col.child(sec);
-            }
+                                            })
+                                            .child(disclosure_chevron()),
+                                    )
+                                    .on_press(move |_: &()| {
+                                        trigger_haptic(Haptic::Selection);
+                                        state.push_terminal(tid.clone());
+                                    })
+                                    .into_element()
+                            })
+                            .collect();
 
-            col.into_element()
-        }))),
+                        col = col.child(
+                            view()
+                                .w_full()
+                                .child(section_header("RUNNING", None))
+                                .child(grouped_card_with_inset(rows, 60.0)),
+                        );
+                    }
+
+                    col.into_element()
+                })),
+        ),
         scroll_ref,
         move || ui.refreshing.get(),
         move || {
@@ -530,16 +716,5 @@ pub(crate) fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
         .flex_col()
         .min_h(px(0.))
         .bg(BACKGROUND)
-        .child(
-            view()
-                .w_full()
-                .px_4()
-                .py_3()
-                .border_b_1()
-                .border_color(BORDER)
-                .bg(SURFACE)
-                .child(heading("Needs you")),
-        )
-        .child(offline_sync_banner(ui, state, None))
         .child(body)
 }

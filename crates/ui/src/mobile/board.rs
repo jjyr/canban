@@ -1,18 +1,22 @@
-//! Mobile `Board` tab: project picker pill, stage strip, vertical card list,
-//! long-press `Move to…` sheet, and offline-capable Card creation.
+//! Mobile `Board` tab: pinned stage pills, horizontally swipeable stage pager (`Carousel`),
+//! mobile-native single-layer cards with long-press native context menu, and searchable Project picker.
 use super::{
     CardSegment, MobileSheet, MobileState,
-    chrome::{offline_sync_banner, security_badge, trigger_haptic},
+    chrome::{
+        MOBILE_CAPTION, MOBILE_FOOTNOTE, MOBILE_RADIUS, disclosure_chevron, empty_state,
+        grouped_card, is_mobile_os, mobile_button, mobile_field, mobile_footnote,
+        mobile_inline_button, mobile_subhead, mobile_title, offline_sync_banner_inset,
+        section_header, security_badge, tab_scroll_bottom_pad, trigger_haptic,
+    },
     host_security, mobile_hosts,
 };
-use crate::{
-    components::card_tile::{CardTileModel, card_tile_from_model},
-    presenter::*,
-};
-use canban_types::{Card, Project, Stage};
+use crate::{components::card_tile::CardTileModel, presenter::*};
+use canban_types::{Card, HostSummary, Project, Stage};
 use canban_ui_kit::{pull_refresh_scroll, tokens::*, *};
+use nsh_base::{MenuButtonItem, carousel, carousel_content, carousel_item, context_menu};
 use nsh_core::{Haptic, HapticImpact, prelude::*};
 use serde_json::json;
+use std::collections::BTreeMap;
 
 #[derive(Clone, PartialEq)]
 struct BoardHeaderModel {
@@ -20,6 +24,12 @@ struct BoardHeaderModel {
     project_name: String,
     host_id: String,
     stages: Vec<(String, String, usize)>, // (id, name, count)
+}
+
+#[derive(Clone, PartialEq)]
+struct StageStructure {
+    project_id: String,
+    stages: Vec<(String, String)>, // (id, name)
 }
 
 fn build_board_header(ui: Ui) -> BoardHeaderModel {
@@ -61,9 +71,355 @@ fn build_board_header(ui: Ui) -> BoardHeaderModel {
     })
 }
 
+fn card_excerpt(body: &str) -> &str {
+    body.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .unwrap_or("")
+}
+
+fn mobile_card_row(
+    ui: Ui,
+    state: MobileState,
+    model: CardTileModel,
+    stages: Vec<(String, String)>,
+) -> AnyElement {
+    let CardTileModel {
+        card,
+        has_terminal,
+        terminal_tint,
+        github_cached,
+        tags,
+        active_tags,
+        status_specs,
+        running,
+        ephemeral_agents,
+        replies,
+        review_draft,
+        review_running,
+        pr_view,
+        sync_mark: _,
+    } = model;
+
+    let card_id = card.id.clone();
+    let open_id = card_id.clone();
+    let resolved = card.resolved();
+    let num_str = if card.number == 0 {
+        "Local".to_owned()
+    } else {
+        format!("#{}", card.number)
+    };
+
+    let mut top_chips: Vec<AnyElement> = Vec::new();
+    for (lbl, tone, live) in status_specs.into_iter().take(2) {
+        if live {
+            top_chips.push(live_status(lbl, tone).into_element());
+        } else {
+            top_chips.push(status(lbl, tone).into_element());
+        }
+    }
+    if let Some(badge) = running.first() {
+        let tone = if badge.herdr_status == canban_types::HerdrStatus::Blocked {
+            Tone::Attention
+        } else {
+            Tone::Info
+        };
+        top_chips.push(live_status(format!("@{}", badge.profile_id), tone).into_element());
+    } else if let Some(badge) = ephemeral_agents.first() {
+        let tone = if badge.herdr_status == canban_types::HerdrStatus::Blocked {
+            Tone::Attention
+        } else {
+            Tone::Info
+        };
+        top_chips.push(live_status(badge.provider_name.clone(), tone).into_element());
+    }
+    if review_running {
+        top_chips.push(live_status("Reviewing", Tone::Info).into_element());
+    } else if review_draft.is_some() {
+        top_chips.push(status("Review ready", Tone::Info).into_element());
+    }
+
+    let top_row = view()
+        .w_full()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .child(
+            view()
+                .flex_1()
+                .min_w(px(0.))
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap_1p5()
+                .child(
+                    text(num_str)
+                        .text_size(px(MOBILE_FOOTNOTE))
+                        .font_family(MONO_FONT)
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(MUTED)
+                        .tabular_nums(),
+                )
+                .children(top_chips),
+        )
+        .child(disclosure_chevron());
+
+    let title_view =
+        mobile_title(card.title.clone()).text_color(if resolved { MUTED } else { TEXT });
+
+    let excerpt = card_excerpt(&card.body).to_owned();
+    let github_meta = card.github_issue().map(|source| {
+        let mut row = view()
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .child(icon_tinted(Icon::GitHub, MUTED).w(px(13.)).h(px(13.)))
+            .child(
+                mobile_footnote(format!(
+                    "{} #{}",
+                    if card.is_github_pr() { "PR" } else { "Issue" },
+                    source.number
+                ))
+                .tabular_nums(),
+            );
+        if let Some((gh_state, _)) = &github_cached {
+            row = row.child(mobile_footnote(format!("· {gh_state}")));
+        }
+        row
+    });
+
+    let branch = card.branch.clone().filter(|b| !b.is_empty());
+    let has_pr = pr_view.is_some();
+    let has_footer = !tags.is_empty() || branch.is_some() || replies > 0 || has_terminal || has_pr;
+
+    let mut card_surface = press_target()
+        .w_full()
+        .p_4()
+        .gap_2()
+        .rounded(px(MOBILE_RADIUS))
+        .border_1()
+        .border_color(BORDER)
+        .bg(if resolved { INSET } else { SURFACE })
+        .cursor_pointer()
+        .active(|s| s.opacity(0.75))
+        .child(top_row)
+        .child(title_view)
+        .children(github_meta)
+        .children((!excerpt.is_empty()).then(|| mobile_subhead(excerpt).number_of_lines(2)))
+        .on_press(move |_: &()| {
+            trigger_haptic(Haptic::Selection);
+            state.push_card(open_id.clone(), CardSegment::Conversation);
+        });
+
+    if resolved {
+        card_surface = card_surface.border_dashed().opacity(0.78);
+    }
+
+    if has_footer {
+        let mut meta_left = view()
+            .flex_1()
+            .min_w(px(0.))
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_2();
+
+        for tag in tags.iter().take(3) {
+            let is_active = active_tags.iter().any(|t| t.eq_ignore_ascii_case(tag));
+            meta_left = meta_left.child(
+                view()
+                    .h(px(24.))
+                    .px_2()
+                    .rounded(px(6.))
+                    .bg(if is_active { SELECTED } else { INSET })
+                    .border_1()
+                    .border_color(if is_active { ACCENT } else { BORDER })
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        text(format!("#{tag}"))
+                            .text_size(px(MOBILE_CAPTION))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(if is_active { ACCENT } else { MUTED }),
+                    ),
+            );
+        }
+        if tags.len() > 3 {
+            meta_left = meta_left.child(mobile_footnote(format!("+{}", tags.len() - 3)));
+        }
+
+        if let Some(pr) = &pr_view
+            && let Some(pr_pill) = crate::components::pr_status::pill(ui, pr, true)
+        {
+            meta_left = meta_left.child(pr_pill);
+        }
+
+        if let Some(br) = branch {
+            meta_left = meta_left.child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .min_w(px(0.))
+                    .child(icon_tinted(Icon::Branch, MUTED).w(px(13.)).h(px(13.)))
+                    .child(
+                        mobile_footnote(crate::components::git_workspace::compact(&br, 22))
+                            .font_family(MONO_FONT)
+                            .truncate(),
+                    ),
+            );
+        }
+
+        if replies > 0 {
+            meta_left = meta_left.child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        icon_tinted(Icon::MessageSquare, MUTED)
+                            .w(px(13.))
+                            .h(px(13.)),
+                    )
+                    .child(mobile_footnote(replies.to_string()).tabular_nums()),
+            );
+        }
+
+        let mut footer = view()
+            .w_full()
+            .pt_0p5()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(meta_left);
+
+        if has_terminal {
+            let term_cid = card.id.clone();
+            footer = footer.child(
+                press_target()
+                    .h(px(28.))
+                    .px_2p5()
+                    .rounded(px(8.))
+                    .bg(INSET)
+                    .border_1()
+                    .border_color(BORDER)
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .active(|s| s.opacity(0.65))
+                    .accessibility_label(Some(SharedString::from("Open card terminal")))
+                    .child(
+                        icon_tinted(Icon::Terminal, terminal_tint)
+                            .w(px(14.))
+                            .h(px(14.)),
+                    )
+                    .child(
+                        text("Shell")
+                            .text_size(px(MOBILE_CAPTION))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(terminal_tint),
+                    )
+                    .on_press(move |_: &()| {
+                        trigger_haptic(Haptic::Selection);
+                        state.push_card(term_cid.clone(), CardSegment::Terminal);
+                    }),
+            );
+        }
+
+        card_surface = card_surface.child(footer);
+    }
+
+    if !is_mobile_os() {
+        let move_id = card_id;
+        return view()
+            .w_full()
+            .child(card_surface)
+            .on_long_press(move || {
+                trigger_haptic(Haptic::Impact(HapticImpact::Medium));
+                state.open_sheet(MobileSheet::MoveCard(move_id.clone()));
+            })
+            .into_element();
+    }
+
+    let stage_items: Vec<MenuButtonItem> = stages
+        .into_iter()
+        .map(|(sid, sname)| {
+            MenuButtonItem::new(format!("stage:{sid}"), sname).checked(sid == card.stage)
+        })
+        .collect();
+
+    let mut menu_items = vec![
+        MenuButtonItem::new("open", "Open Card").icon("doc.text"),
+        MenuButtonItem::new("terminal", "Open Terminal").icon("terminal"),
+        MenuButtonItem::new("diff", "View Diff").icon("arrow.left.arrow.right.square"),
+    ];
+    if !stage_items.is_empty() {
+        menu_items
+            .push(MenuButtonItem::submenu("Move to…", stage_items).icon("arrow.right.circle"));
+    }
+    menu_items.push(MenuButtonItem::section(
+        "",
+        [MenuButtonItem::new(
+            "resolve",
+            if resolved {
+                "Reopen Card"
+            } else {
+                "Resolve Card"
+            },
+        )
+        .icon(if resolved {
+            "arrow.uturn.left.circle"
+        } else {
+            "checkmark.circle"
+        })],
+    ));
+
+    let cid_menu = card.id.clone();
+    let card_for_resolve = card;
+    context_menu()
+        .w_full()
+        .items(menu_items)
+        .trigger(card_surface)
+        .on_select(move |choice: &SharedString| {
+            trigger_haptic(Haptic::Selection);
+            let raw = choice.as_ref();
+            if let Some(target_stage) = raw.strip_prefix("stage:") {
+                move_card(ui, &cid_menu, target_stage);
+                state.board_stage.set(target_stage.to_owned());
+                return;
+            }
+            match raw {
+                "open" => state.push_card(cid_menu.clone(), CardSegment::Conversation),
+                "terminal" => state.push_card(cid_menu.clone(), CardSegment::Terminal),
+                "diff" => state.push_card(cid_menu.clone(), CardSegment::Diff),
+                "resolve" => {
+                    if card_for_resolve.resolved() {
+                        crate::card::resolve_reopen(ui, card_for_resolve.clone());
+                    } else {
+                        crate::card::resolve_start(ui, card_for_resolve.clone());
+                    }
+                }
+                _ => {}
+            }
+        })
+        .into_element()
+}
+
 pub(crate) fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
-    let scroll_ref = element_ref();
     let header_model = computed(move || build_board_header(ui));
+    let stage_structure = computed(move || {
+        let hm = header_model.get();
+        StageStructure {
+            project_id: hm.project_id,
+            stages: hm
+                .stages
+                .into_iter()
+                .map(|(id, name, _)| (id, name))
+                .collect(),
+        }
+    });
 
     let active_stage = computed(move || {
         let hm = header_model.get();
@@ -79,97 +435,60 @@ pub(crate) fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
             .unwrap_or_else(|| "backlog".to_owned())
     });
 
-    let card_models = computed(move || {
+    let active_stage_idx = computed(move || {
         let hm = header_model.get();
-        let stage = active_stage.get();
-        if hm.project_id.is_empty() {
-            return Vec::new();
-        }
-        let cards: Vec<Card> = ui.snapshot.with(|s| {
-            s.cards
-                .iter()
-                .filter(|c| c.project_id == hm.project_id && c.active() && c.stage == stage)
-                .cloned()
-                .collect()
-        });
-        cards
-            .into_iter()
-            .map(|c| CardTileModel::build(ui, c))
-            .collect::<Vec<_>>()
+        let cur = active_stage.get();
+        hm.stages
+            .iter()
+            .position(|(id, _, _)| id == &cur)
+            .unwrap_or(0)
     });
 
-    let top_bar = dynamic(move || {
+    let stage_cards_map = computed(move || {
         let hm = header_model.get();
-        let pid_create = hm.project_id.clone();
-        let has_proj = !hm.project_id.is_empty();
-        view()
-            .w_full()
-            .px_3()
-            .py_2p5()
-            .border_b_1()
-            .border_color(BORDER)
-            .bg(SURFACE)
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .child(
-                press_target()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .h(px(34.))
-                    .px_3()
-                    .rounded(px(RADIUS))
-                    .border_1()
-                    .border_color(BORDER)
-                    .bg(INSET)
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .cursor_pointer()
-                    .accessibility_label(Some(SharedString::from("Switch project")))
-                    .child(
-                        label(hm.project_name)
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .truncate()
-                            .min_w(px(0.)),
-                    )
-                    .child(icon(Icon::ChevronDown).w(px(14.)).h(px(14.)))
-                    .on_press(move |_: &()| {
-                        trigger_haptic(Haptic::Selection);
-                        state.open_sheet(MobileSheet::ProjectPicker);
-                    }),
-            )
-            .child(
-                compact_action("+ Card", Variant::Primary, move |_| {
-                    if has_proj {
-                        trigger_haptic(Haptic::Selection);
-                        state.open_sheet(MobileSheet::CreateCard(pid_create.clone()));
-                    }
-                })
-                .disabled(move || !has_proj),
-            )
+        let mut by_stage: BTreeMap<String, Vec<CardTileModel>> = BTreeMap::new();
+        if hm.project_id.is_empty() {
+            return by_stage;
+        }
+        let cards: Vec<Card> = ui.snapshot.with(|s| {
+            let mut list: Vec<Card> = s
+                .cards
+                .iter()
+                .filter(|c| c.project_id == hm.project_id && c.active())
+                .cloned()
+                .collect();
+            list.sort_by(Card::board_cmp);
+            list
+        });
+        for card in cards {
+            let model = CardTileModel::build(ui, card);
+            by_stage
+                .entry(model.card.stage.clone())
+                .or_default()
+                .push(model);
+        }
+        by_stage
     });
+
+    let pager_width = signal(390.0_f32);
 
     let stage_strip = dynamic(move || {
         let hm = header_model.get();
         let cur = active_stage.get();
         if hm.stages.is_empty() {
-            return view();
+            return view().hidden();
         }
         view()
             .w_full()
-            .h(px(46.))
             .flex_shrink_0()
             .border_b_1()
             .border_color(BORDER)
-            .bg(SURFACE)
+            .bg(BACKGROUND)
             .child(
-                scroll().horizontal().scrollbar(false).size_full().child(
+                scroll().horizontal().scrollbar(false).w_full().child(
                     view()
-                        .h_full()
-                        .px_3()
+                        .px_4()
+                        .py_2p5()
                         .flex_row()
                         .items_center()
                         .gap_2()
@@ -177,25 +496,34 @@ pub(crate) fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
                             let selected = id == cur;
                             let next_id = id.clone();
                             press_target()
-                                .h(px(30.))
-                                .px_3()
+                                .h(px(34.))
+                                .px_3p5()
                                 .rounded_full()
                                 .border_1()
-                                .border_color(if selected { ACCENT } else { BORDER })
-                                .bg(if selected { SELECTED } else { INSET })
+                                .border_color(if selected { CLEAR } else { BORDER })
+                                .bg(if selected { ACCENT_FILL } else { SURFACE })
                                 .flex_row()
                                 .items_center()
                                 .gap_1p5()
                                 .cursor_pointer()
+                                .active(|s| s.opacity(0.75))
                                 .child(
-                                    text(format!("{name} {count}"))
-                                        .text_size(px(12.5))
+                                    text(name)
+                                        .text_size(px(14.))
                                         .font_weight(if selected {
                                             FontWeight::SEMIBOLD
                                         } else {
                                             FontWeight::MEDIUM
                                         })
-                                        .text_color(if selected { ACCENT } else { TEXT }),
+                                        .text_color(if selected { ON_ACCENT } else { TEXT }),
+                                )
+                                .child(
+                                    text(count.to_string())
+                                        .text_size(px(13.))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(if selected { ON_ACCENT } else { MUTED })
+                                        .opacity(if selected { 0.85 } else { 1.0 })
+                                        .tabular_nums(),
                                 )
                                 .on_press(move |_: &()| {
                                     trigger_haptic(Haptic::Selection);
@@ -206,73 +534,126 @@ pub(crate) fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
             )
     });
 
-    let list_body = pull_refresh_scroll(
-        scroll().child(view().w_full().p_3().gap_2p5().child(dynamic(move || {
-            let models = card_models.get();
-            if models.is_empty() {
-                return panel()
-                    .p_5()
-                    .gap_2()
-                    .items_center()
-                    .child(heading("No Cards in this stage"))
-                    .child(muted("Tap + Card to create one, or switch stages above."))
-                    .into_element();
-            }
-            view()
-                .w_full()
-                .gap_2p5()
-                .children(models.into_iter().map(|model| {
-                    let card_id = model.card.id.clone();
-                    let open_id = card_id.clone();
-                    let move_id = card_id.clone();
-                    view()
-                        .w_full()
-                        .rounded(px(RADIUS))
-                        .border_1()
-                        .border_color(BORDER)
-                        .bg(SURFACE)
-                        .cursor_pointer()
-                        .on_press(move |_: &PressEvent| {
-                            trigger_haptic(Haptic::Selection);
-                            state.push_card(open_id.clone(), CardSegment::Conversation);
-                        })
-                        .on_long_press(move |_: &PressEvent| {
-                            trigger_haptic(Haptic::Impact(HapticImpact::Medium));
-                            state.open_sheet(MobileSheet::MoveCard(move_id.clone()));
-                        })
-                        .child(card_tile_from_model(ui, model))
-                }))
-                .into_element()
-        }))),
-        scroll_ref,
-        move || ui.refreshing.get(),
-        move || refresh(ui),
-    );
-
     let scoped_banner = dynamic(move || {
         let hid = header_model.get().host_id;
         let scope = (!hid.is_empty()).then_some(hid);
-        offline_sync_banner(ui, state, scope)
+        offline_sync_banner_inset(ui, state, scope)
     });
+
+    let pager = view()
+        .flex_1()
+        .w_full()
+        .min_h(px(0.))
+        .on_layout(move |bounds: &Bounds<Points>| {
+            if bounds.size.width.0 > 50.0 {
+                pager_width.set(bounds.size.width.0);
+            }
+        })
+        .child(dynamic(move || {
+            let structure = stage_structure.get();
+            if structure.project_id.is_empty() || structure.stages.is_empty() {
+                return view()
+                    .size_full()
+                    .p_4()
+                    .child(empty_state(
+                        Icon::Board,
+                        Tone::Neutral,
+                        "No Project selected",
+                        "Pair a remote machine in Settings or switch projects from the top bar.",
+                        Some(
+                            mobile_button("Switch Project", Variant::Secondary, move |_| {
+                                state.open_sheet(MobileSheet::ProjectPicker);
+                            })
+                            .into_element(),
+                        ),
+                    ))
+                    .into_element();
+            }
+
+            let stages_for_change = structure.stages.clone();
+            let slides = structure.stages.clone().into_iter().map(|(stage_id, stage_name)| {
+                let scroll_ref = element_ref();
+                let pid_create = structure.project_id.clone();
+                let sid_lookup = stage_id.clone();
+                let all_stages = structure.stages.clone();
+                let stage_list = pull_refresh_scroll(
+                    scroll().size_full().child(
+                        view()
+                            .w_full()
+                            .px_4()
+                            .pt_3()
+                            .pb(px(tab_scroll_bottom_pad()))
+                            .gap_3()
+                            .child(dynamic(move || {
+                                let models = stage_cards_map
+                                    .with(|m| m.get(&sid_lookup).cloned().unwrap_or_default());
+                                if models.is_empty() {
+                                    let pid_btn = pid_create.clone();
+                                    return empty_state(
+                                        Icon::Board,
+                                        Tone::Neutral,
+                                        format!("No Cards in {stage_name}"),
+                                        "Tap + above to create a Card, or swipe horizontally to view other stages.",
+                                        Some(
+                                            mobile_inline_button(
+                                                "+ New Card",
+                                                Variant::Secondary,
+                                                move |_| {
+                                                    state.open_sheet(MobileSheet::CreateCard(
+                                                        pid_btn.clone(),
+                                                    ));
+                                                },
+                                            )
+                                            .into_element(),
+                                        ),
+                                    )
+                                    .into_element();
+                                }
+                                view()
+                                    .w_full()
+                                    .gap_3()
+                                    .children(models.into_iter().map(|m| {
+                                        mobile_card_row(ui, state, m, all_stages.clone())
+                                    }))
+                                    .into_element()
+                            })),
+                    ),
+                    scroll_ref,
+                    move || ui.refreshing.get(),
+                    move || refresh(ui),
+                );
+
+                carousel_item()
+                    .accessibility_label(Some(SharedString::from(format!("{stage_id} stage"))))
+                    .w(move || px(pager_width.get()))
+                    .h_full()
+                    .flex_shrink_0()
+                    .child(stage_list)
+            });
+
+            carousel()
+                .size_full()
+                .index(move || Some(active_stage_idx.get() as u32))
+                .on_change(move |idx: &u32| {
+                    if let Some((next_id, _)) = stages_for_change.get(*idx as usize)
+                        && state.board_stage.get_untracked() != *next_id
+                    {
+                        trigger_haptic(Haptic::Selection);
+                        state.board_stage.set(next_id.clone());
+                    }
+                })
+                .child(carousel_content().size_full().flex_row().children(slides))
+                .into_element()
+        }));
 
     view()
         .size_full()
         .flex_col()
         .min_h(px(0.))
         .bg(BACKGROUND)
-        .child(
-            view()
-                .w_full()
-                .px_4()
-                .pt_3()
-                .pb_1()
-                .bg(SURFACE)
-                .child(heading("Board")),
-        )
-        .child(top_bar)
         .child(stage_strip)
         .child(scoped_banner)
-        .child(list_body)
+        .child(pager)
 }
 
 pub(crate) fn move_card_sheet_body(
@@ -296,75 +677,92 @@ pub(crate) fn move_card_sheet_body(
 
     dynamic(move || {
         let Some((card, stages)) = info.get() else {
-            return muted("Card no longer available").into_element();
+            return mobile_subhead("Card no longer available").into_element();
         };
-        let mut col = view()
-            .w_full()
-            .gap_3()
-            .child(
-                label(format!("#{} {}", card.number, card.title)).font_weight(FontWeight::SEMIBOLD),
-            )
-            .child(
-                label("MOVE TO STAGE")
-                    .text_size(px(11.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(MUTED),
-            );
 
-        for stage in stages {
-            let is_current = stage.id == card.stage;
-            let cid = card.id.clone();
-            let stage_id = stage.id.clone();
-            col = col.child(
+        let stage_rows: Vec<AnyElement> = stages
+            .into_iter()
+            .map(|stage| {
+                let is_current = stage.id == card.stage;
+                let cid = card.id.clone();
+                let stage_id = stage.id.clone();
                 press_target()
                     .w_full()
-                    .px_3()
+                    .min_h(px(52.))
+                    .px_4()
                     .py_2p5()
-                    .rounded(px(RADIUS))
-                    .border_1()
-                    .border_color(if is_current { ACCENT } else { BORDER })
-                    .bg(if is_current { SELECTED } else { INSET })
                     .flex_row()
                     .items_center()
                     .justify_between()
+                    .gap_2()
                     .cursor_pointer()
-                    .child(label(stage.name))
-                    .children(is_current.then(|| status("Current", Tone::Info)))
+                    .active(|s| s.opacity(0.75))
+                    .child(
+                        text(stage.name)
+                            .text_size(px(16.))
+                            .font_weight(if is_current {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::NORMAL
+                            })
+                            .text_color(if is_current { ACCENT } else { TEXT }),
+                    )
+                    .children(
+                        is_current.then(|| icon_tinted(Icon::Check, ACCENT).w(px(18.)).h(px(18.))),
+                    )
                     .on_press(move |_: &()| {
                         trigger_haptic(Haptic::Selection);
                         move_card(ui, &cid, &stage_id);
                         state.board_stage.set(stage_id.clone());
                         state.close_sheet();
-                    }),
-            );
-        }
+                    })
+                    .into_element()
+            })
+            .collect();
 
         let term_cid = card.id.clone();
-        col = col.child(
+        let resolved = card.resolved();
+        let mut col = view()
+            .w_full()
+            .gap_4()
+            .child(mobile_title(format!("#{} {}", card.number, card.title)));
+        if !stage_rows.is_empty() {
+            col = col.child(
+                view()
+                    .w_full()
+                    .child(section_header("MOVE TO STAGE", None))
+                    .child(grouped_card(stage_rows)),
+            );
+        }
+        col.child(
             view()
-                .pt_2()
+                .w_full()
                 .flex_row()
-                .flex_wrap()
-                .gap_2()
-                .child(action("Open Terminal", Variant::Secondary, move |_| {
-                    state.close_sheet();
-                    state.push_card(term_cid.clone(), CardSegment::Terminal);
-                }))
-                .child(action(
-                    if card.resolved() { "Reopen" } else { "Resolve" },
-                    Variant::Quiet,
-                    move |_| {
-                        if card.resolved() {
-                            crate::card::resolve_reopen(ui, card.clone());
-                        } else {
-                            crate::card::resolve_start(ui, card.clone());
-                        }
+                .gap_2p5()
+                .child(
+                    mobile_inline_button("Open Terminal", Variant::Secondary, move |_| {
                         state.close_sheet();
-                    },
-                )),
-        );
-
-        col.into_element()
+                        state.push_card(term_cid.clone(), CardSegment::Terminal);
+                    })
+                    .flex_1(),
+                )
+                .child(
+                    mobile_inline_button(
+                        if resolved { "Reopen" } else { "Resolve" },
+                        Variant::Secondary,
+                        move |_| {
+                            if resolved {
+                                crate::card::resolve_reopen(ui, card.clone());
+                            } else {
+                                crate::card::resolve_start(ui, card.clone());
+                            }
+                            state.close_sheet();
+                        },
+                    )
+                    .flex_1(),
+                ),
+        )
+        .into_element()
     })
 }
 
@@ -393,44 +791,95 @@ pub(crate) fn create_card_sheet_body(
 
     view()
         .w_full()
-        .gap_3()
-        .child(label("Title"))
-        .child(field(title, "What needs doing?"))
-        .child(label("Description"))
+        .gap_4()
         .child(
-            nsh_base::input()
-                .value(move || body.get())
-                .on_change(move |v: &str| body.set(v.to_owned()))
-                .multiline(true)
-                .placeholder("Context, acceptance criteria, or links…")
-                .min_h(px(96.))
-                .px_3()
-                .py_2()
-                .rounded(px(RADIUS))
-                .bg(INSET)
-                .border_1()
-                .border_color(BORDER)
-                .text_size(px(13.))
-                .text_color(TEXT),
+            view()
+                .w_full()
+                .gap_1p5()
+                .child(section_header("TITLE", None))
+                .child(mobile_field(title, "What needs doing?")),
+        )
+        .child(
+            view()
+                .w_full()
+                .gap_1p5()
+                .child(section_header("DESCRIPTION", None))
+                .child(
+                    nsh_base::input()
+                        .value(move || body.get())
+                        .on_change(move |v: &str| body.set(v.to_owned()))
+                        .multiline(true)
+                        .placeholder("Context, acceptance criteria, or links…")
+                        .min_h(px(110.))
+                        .px_3p5()
+                        .py_2p5()
+                        .rounded(px(12.))
+                        .bg(INSET)
+                        .border_1()
+                        .border_color(BORDER)
+                        .text_size(px(16.))
+                        .text_color(TEXT)
+                        .focus(|s| s.border_color(ACCENT)),
+                ),
         )
         .children((!stages.is_empty()).then(|| {
-            view().w_full().gap_1p5().child(label("Stage")).child(
-                view()
-                    .flex_row()
-                    .flex_wrap()
-                    .gap_1p5()
-                    .children(stages.into_iter().map(move |st| {
-                        let sid = st.id.clone();
-                        let sid_press = sid.clone();
-                        let active = move || stage.get() == sid;
-                        compact_segment(st.name, None, active, move |_| {
-                            stage.set(sid_press.clone())
-                        })
-                    })),
-            )
+            view()
+                .w_full()
+                .gap_1p5()
+                .child(section_header("STAGE", None))
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap_2()
+                        .children(stages.into_iter().map(move |st| {
+                            let sid = st.id.clone();
+                            let sid_border = sid.clone();
+                            let sid_bg = sid.clone();
+                            let sid_press = sid;
+                            press_target()
+                                .h(px(38.))
+                                .px_3p5()
+                                .rounded_full()
+                                .border_1()
+                                .border_color(move || {
+                                    if stage.get() == sid_border {
+                                        ACCENT
+                                    } else {
+                                        BORDER
+                                    }
+                                })
+                                .bg(move || {
+                                    if stage.get() == sid_bg {
+                                        SELECTED
+                                    } else {
+                                        INSET
+                                    }
+                                })
+                                .items_center()
+                                .justify_center()
+                                .active(|s| s.opacity(0.75))
+                                .child(
+                                    text(st.name)
+                                        .text_size(px(14.5))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(move || {
+                                            if stage.get() == sid_press {
+                                                ACCENT
+                                            } else {
+                                                TEXT
+                                            }
+                                        }),
+                                )
+                                .on_press(move |_: &()| {
+                                    trigger_haptic(Haptic::Selection);
+                                    stage.set(st.id.clone());
+                                })
+                        })),
+                )
         }))
         .child(
-            action(
+            mobile_button(
                 move || {
                     if busy.get() {
                         "Creating…"
@@ -446,7 +895,6 @@ pub(crate) fn create_card_sheet_body(
                     }
                     let b = body.get_untracked();
                     let st = stage.get_untracked();
-                    trigger_haptic(Haptic::Selection);
                     if !crate::backend::is_connected() {
                         let new_id = format!("card-{}", canban_types::id());
                         let new_card: Card = serde_json::from_value(json!({
@@ -490,109 +938,157 @@ pub(crate) fn create_card_sheet_body(
 }
 
 pub(crate) fn project_picker_sheet_body(ui: Ui, state: MobileState) -> impl IntoElement {
+    let query = signal(String::new());
+
     let grouped = computed(move || {
         let hosts = mobile_hosts(ui);
         let active_pid = ui.project.get();
+        let needle = query.get().trim().to_lowercase();
         ui.snapshot.with(|s| {
-            let mut groups: Vec<(Option<canban_types::HostSummary>, Vec<Project>)> = Vec::new();
+            let count_active = |pid: &str| {
+                s.cards
+                    .iter()
+                    .filter(|c| c.project_id == pid && c.active())
+                    .count()
+            };
+            let matches = |host_name: &str, p: &Project| {
+                needle.is_empty()
+                    || p.name.to_lowercase().contains(&needle)
+                    || p.directory.to_lowercase().contains(&needle)
+                    || host_name.to_lowercase().contains(&needle)
+            };
+
+            type ProjectPickerGroup = (Option<HostSummary>, Vec<(Project, usize)>);
+            let mut groups: Vec<ProjectPickerGroup> = Vec::new();
             for host in &hosts {
-                let projects: Vec<Project> = s
+                let projects: Vec<(Project, usize)> = s
                     .projects
                     .iter()
-                    .filter(|p| s.project_host(&p.id) == host.id)
-                    .cloned()
+                    .filter(|p| s.project_host(&p.id) == host.id && matches(&host.name, p))
+                    .map(|p| (p.clone(), count_active(&p.id)))
                     .collect();
                 if !projects.is_empty() {
                     groups.push((Some(host.clone()), projects));
                 }
             }
-            let unowned: Vec<Project> = s
+            let unowned: Vec<(Project, usize)> = s
                 .projects
                 .iter()
                 .filter(|p| {
                     let h = s.project_host(&p.id);
-                    !hosts.iter().any(|known| known.id == h)
+                    !hosts.iter().any(|known| known.id == h) && matches("", p)
                 })
-                .cloned()
+                .map(|p| (p.clone(), count_active(&p.id)))
                 .collect();
             if !unowned.is_empty() {
                 groups.push((None, unowned));
             }
-            (active_pid, groups)
+            (active_pid, s.projects.len(), groups)
         })
     });
 
-    dynamic(move || {
-        let (active_pid, groups) = grouped.get();
-        if groups.is_empty() {
-            return panel()
-                .p_4()
-                .gap_2()
-                .child(label("No Projects yet"))
-                .child(muted("Connect a machine or create a Project on desktop."))
+    view()
+        .w_full()
+        .gap_4()
+        .child(mobile_field(query, "Search projects or machines…"))
+        .child(dynamic(move || {
+            let (active_pid, total_projects, groups) = grouped.get();
+            if total_projects == 0 {
+                return empty_state(
+                    Icon::Projects,
+                    Tone::Neutral,
+                    "No Projects yet",
+                    "Connect a machine or create a Project on desktop first.",
+                    None,
+                )
                 .into_element();
-        }
-        let mut col = view().w_full().gap_4();
-        for (host_opt, projects) in groups {
-            let mut sec = view().w_full().gap_2();
-            if let Some(host) = host_opt {
-                let sec_type = host_security(ui, &host);
-                let (conn_text, conn_tone) = super::chrome::host_connection_status(&host);
-                sec = sec.child(
-                    view()
-                        .w_full()
-                        .flex_row()
-                        .flex_wrap()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .child(label(host.name).font_weight(FontWeight::SEMIBOLD))
-                        .child(
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .gap_1p5()
-                                .child(security_badge(sec_type))
-                                .child(status(conn_text, conn_tone)),
-                        ),
-                );
             }
-            for project in projects {
-                let is_sel = project.id == active_pid;
-                let pid = project.id.clone();
-                sec = sec.child(
-                    press_target()
-                        .w_full()
-                        .px_3()
-                        .py_2p5()
-                        .rounded(px(RADIUS))
-                        .border_1()
-                        .border_color(if is_sel { ACCENT } else { BORDER })
-                        .bg(if is_sel { SELECTED } else { INSET })
+            if groups.is_empty() {
+                return empty_state(
+                    Icon::Search,
+                    Tone::Neutral,
+                    "No matching Projects",
+                    "Try a different project name, directory, or host.",
+                    None,
+                )
+                .into_element();
+            }
+            let mut col = view().w_full().gap_5();
+            for (host_opt, projects) in groups {
+                let header_el = if let Some(host) = host_opt {
+                    let sec_type = host_security(ui, &host);
+                    let (conn_text, conn_tone) = super::chrome::host_connection_status(&host);
+                    let badges = view()
                         .flex_row()
                         .items_center()
-                        .justify_between()
-                        .cursor_pointer()
-                        .child(
-                            view()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .child(label(project.name).font_weight(FontWeight::MEDIUM))
-                                .child(muted(project.directory).truncate()),
-                        )
-                        .children(
-                            is_sel.then(|| icon_tinted(Icon::Check, ACCENT).w(px(16.)).h(px(16.))),
-                        )
-                        .on_press(move |_: &()| {
-                            trigger_haptic(Haptic::Selection);
-                            ui.project.set(pid.clone());
-                            state.board_stage.set(String::new());
-                            state.close_sheet();
-                        }),
-                );
+                        .gap_1p5()
+                        .child(security_badge(sec_type))
+                        .child(status(conn_text, conn_tone))
+                        .into_element();
+                    section_header(host.name.to_uppercase(), Some(badges))
+                } else {
+                    section_header("PROJECTS", None)
+                };
+
+                let rows: Vec<AnyElement> = projects
+                    .into_iter()
+                    .map(|(project, card_count)| {
+                        let is_sel = project.id == active_pid;
+                        let pid = project.id.clone();
+                        press_target()
+                            .w_full()
+                            .min_h(px(58.))
+                            .px_4()
+                            .py_2p5()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .cursor_pointer()
+                            .active(|s| s.opacity(0.75))
+                            .child(
+                                view()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .gap_0p5()
+                                    .child(
+                                        text(project.name)
+                                            .text_size(px(16.5))
+                                            .font_weight(if is_sel {
+                                                FontWeight::SEMIBOLD
+                                            } else {
+                                                FontWeight::MEDIUM
+                                            })
+                                            .text_color(if is_sel { ACCENT } else { TEXT })
+                                            .truncate(),
+                                    )
+                                    .child(
+                                        mobile_footnote(project.directory)
+                                            .font_family(MONO_FONT)
+                                            .truncate(),
+                                    ),
+                            )
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .flex_shrink_0()
+                                    .child(mobile_footnote(format!("{card_count}")).tabular_nums())
+                                    .children(is_sel.then(|| {
+                                        icon_tinted(Icon::Check, ACCENT).w(px(18.)).h(px(18.))
+                                    })),
+                            )
+                            .on_press(move |_: &()| {
+                                super::switch_project(ui, state, pid.clone());
+                                state.close_sheet();
+                            })
+                            .into_element()
+                    })
+                    .collect();
+
+                col = col.child(view().w_full().child(header_el).child(grouped_card(rows)));
             }
-            col = col.child(sec);
-        }
-        col.into_element()
-    })
+            col.into_element()
+        }))
 }

@@ -1,8 +1,13 @@
-//! Pushed mobile Card workspace: `Conversation | Terminal | Diff`, collapsible context,
-//! timeline, keyboard-lifted composer, Card terminal switcher, and `Return for rework` sheet.
+//! Pushed mobile Card workspace: `Conversation | Terminal | Diff`, auto-expanded context,
+//! timeline, iMessage-style keyboard-lifted capsule composer, Card terminal switcher, and Rework sheet.
 use super::{
     CardSegment, MobileSheet, MobileState,
-    chrome::{is_ios, mobile_segmented_control, offline_sync_banner, trigger_haptic},
+    chrome::{
+        MOBILE_BODY, MOBILE_CARD_RADIUS, MOBILE_RADIUS, empty_state, is_android, is_ios,
+        is_mobile_os, mobile_body, mobile_button, mobile_footnote, mobile_inline_button,
+        mobile_segmented_control, mobile_subhead, mobile_title, offline_sync_banner,
+        trigger_haptic,
+    },
     diff,
 };
 use crate::{
@@ -12,11 +17,10 @@ use crate::{
 use canban_terminal::TerminalView;
 use canban_types::{Card, Event};
 use canban_ui_kit::{tokens::*, *};
-use nsh_base::nav_page;
+use nsh_base::{MenuButtonItem, menu_button, nav_page};
 use nsh_core::{
     Haptic,
     element::{desktop::MenuItem, header::HeaderItem},
-    platform::Os,
     prelude::*,
 };
 use serde_json::json;
@@ -36,6 +40,7 @@ struct CardHeaderModel {
     sync_mark: Option<canban_types::SyncMark>,
     human_reason: Option<String>,
     approval_run: Option<(String, u32, bool)>, // (run_id, visit, is_deliver)
+    stages: Vec<(String, String)>,
 }
 
 fn build_card_model(ui: Ui, card_id: &str) -> Option<CardHeaderModel> {
@@ -67,6 +72,18 @@ fn build_card_model(ui: Ui, card_id: &str) -> Option<CardHeaderModel> {
                 });
                 (r.id.clone(), r.visit, is_deliver)
             });
+        let stages = s
+            .projects
+            .iter()
+            .find(|p| p.id == card.project_id)
+            .map(|p| {
+                p.workflow
+                    .stages
+                    .iter()
+                    .map(|st| (st.id.clone(), st.name.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
         Some(CardHeaderModel {
             id: card.id.clone(),
             number: card.number,
@@ -81,6 +98,7 @@ fn build_card_model(ui: Ui, card_id: &str) -> Option<CardHeaderModel> {
             sync_mark,
             human_reason,
             approval_run,
+            stages,
         })
     })
 }
@@ -117,7 +135,7 @@ fn conversation_view(
     card_id: String,
     model: Memo<Option<CardHeaderModel>>,
 ) -> impl IntoElement {
-    let details_open = signal(false);
+    let user_toggled_details = signal(Option::<bool>::None);
     let draft = signal(String::new());
     let sending = signal(false);
 
@@ -129,10 +147,17 @@ fn conversation_view(
         }
     });
 
+    let details_open = computed(move || {
+        user_toggled_details.get().unwrap_or_else(|| {
+            !events_memo.with(|entries| entries.iter().any(|(_, narrative)| *narrative))
+                && model.get().is_some_and(|m| !m.body.trim().is_empty())
+        })
+    });
+
     let send_cid = card_id.clone();
     let send_comment = move || {
-        let text = draft.get_untracked().trim().to_owned();
-        if text.is_empty() || sending.get_untracked() {
+        let text_val = draft.get_untracked().trim().to_owned();
+        if text_val.is_empty() || sending.get_untracked() {
             return;
         }
         trigger_haptic(Haptic::Selection);
@@ -148,7 +173,7 @@ fn conversation_view(
                 sequence: 999,
                 kind: "comment.created".into(),
                 actor: "user".into(),
-                message: text,
+                message: text_val,
                 data: json!({}),
                 created_at: canban_types::now(),
             };
@@ -163,7 +188,7 @@ fn conversation_view(
         dispatch_complete(
             ui,
             "comment.add",
-            json!({"card_id": cid, "body": text}),
+            json!({"card_id": cid, "body": text_val}),
             move |res| {
                 sending.try_set(false);
                 if res.is_ok() {
@@ -182,60 +207,74 @@ fn conversation_view(
             scroll()
                 .flex_1()
                 .min_h(px(0.))
-                .child(view().w_full().p_3().gap_3().child(dynamic(move || {
+                .child(view().w_full().p_4().gap_4().child(dynamic(move || {
                     let Some(m) = model.get() else {
-                        return muted("Card not found").into_element();
+                        return mobile_subhead("Card not found").into_element();
                     };
-                    let mut col = view().w_full().gap_3();
+                    let mut col = view().w_full().gap_4();
 
                     if let Some(reason) = m.human_reason {
                         let cid_rework = m.id.clone();
                         let cid_deliver = m.id.clone();
                         let run = m.approval_run.clone();
                         let rev = m.revision;
-                        let gate = panel()
-                            .p_3()
-                            .gap_2()
+                        let mut gate = view()
+                            .w_full()
+                            .p_4()
+                            .gap_3()
+                            .rounded(px(MOBILE_CARD_RADIUS))
+                            .border_1()
                             .border_color(ATTENTION)
+                            .bg(ATTENTION_SURFACE)
                             .child(
-                                label("Needs review")
-                                    .text_color(ATTENTION)
-                                    .font_weight(FontWeight::SEMIBOLD),
+                                text("Needs review")
+                                    .text_size(px(MOBILE_BODY))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(ATTENTION),
                             )
-                            .child(muted(reason));
-                        let mut bar = view().flex_row().flex_wrap().gap_2();
-                        if let Some((run_id, visit, is_deliver)) = run {
-                            bar = bar.child(compact_action(
-                                if is_deliver { "Deliver" } else { "Approve" },
-                                Variant::Primary,
+                            .child(mobile_body(reason));
+                        let mut bar = view().w_full().flex_row().gap_2();
+                        bar = bar.child(
+                            mobile_inline_button(
+                                "Return for rework",
+                                Variant::Secondary,
                                 move |_| {
-                                    if !crate::backend::is_connected() {
-                                        ui.notify("Gallery preview · Approved");
-                                        return;
-                                    }
-                                    if is_deliver {
-                                        deliver_card(ui, &cid_deliver, rev, true);
-                                    } else {
-                                        dispatch(
-                                            ui,
-                                            "workflow.decide",
-                                            json!({
-                                                "run_id": run_id,
-                                                "visit": visit,
-                                                "revision": rev,
-                                                "decision": "approve",
-                                            }),
-                                        );
-                                    }
+                                    state.open_sheet(MobileSheet::Rework(cid_rework.clone()));
                                 },
-                            ));
+                            )
+                            .flex_1(),
+                        );
+                        if let Some((run_id, visit, is_deliver)) = run {
+                            bar = bar.child(
+                                mobile_inline_button(
+                                    if is_deliver { "Deliver" } else { "Approve" },
+                                    Variant::Primary,
+                                    move |_| {
+                                        if !crate::backend::is_connected() {
+                                            ui.notify("Gallery preview · Approved");
+                                            return;
+                                        }
+                                        if is_deliver {
+                                            deliver_card(ui, &cid_deliver, rev, true);
+                                        } else {
+                                            dispatch(
+                                                ui,
+                                                "workflow.decide",
+                                                json!({
+                                                    "run_id": run_id,
+                                                    "visit": visit,
+                                                    "revision": rev,
+                                                    "decision": "approve",
+                                                }),
+                                            );
+                                        }
+                                    },
+                                )
+                                .flex_1(),
+                            );
                         }
-                        bar = bar.child(compact_action(
-                            "Return for rework",
-                            Variant::Secondary,
-                            move |_| state.open_sheet(MobileSheet::Rework(cid_rework.clone())),
-                        ));
-                        col = col.child(gate.child(bar));
+                        gate = gate.child(bar);
+                        col = col.child(gate);
                     }
 
                     let sync_chip = m.sync_mark.map(|mark| {
@@ -243,57 +282,90 @@ fn conversation_view(
                         status(lbl, tone)
                     });
                     let context_body = m.body.clone();
+                    let has_body = !context_body.trim().is_empty();
                     let branch_label = m.branch.clone();
-                    let mut ctx = panel().p_3().gap_2().child(
-                        press_target()
-                            .w_full()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .cursor_pointer()
-                            .child(
-                                view()
-                                    .flex_1()
-                                    .min_w(px(0.))
-                                    .flex_row()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap_1p5()
-                                    .child(badge(m.stage))
-                                    .children(sync_chip)
-                                    .children(
-                                        branch_label
-                                            .map(|b| muted(b).font_family(MONO_FONT).truncate()),
-                                    ),
-                            )
-                            .child(
-                                label(move || {
-                                    if details_open.get() {
-                                        "Hide"
-                                    } else {
-                                        "Details"
+                    let stage_label = m
+                        .stages
+                        .iter()
+                        .find(|(sid, _)| sid == &m.stage)
+                        .map(|(_, sname)| sname.clone())
+                        .unwrap_or_else(|| m.stage.clone());
+
+                    let mut ctx = view()
+                        .w_full()
+                        .rounded(px(MOBILE_RADIUS))
+                        .border_1()
+                        .border_color(BORDER)
+                        .bg(SURFACE)
+                        .overflow_hidden()
+                        .child(
+                            press_target()
+                                .w_full()
+                                .min_h(px(48.))
+                                .px_4()
+                                .py_2p5()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .cursor_pointer()
+                                .active(|s| s.opacity(0.75))
+                                .child(
+                                    view()
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .flex_row()
+                                        .flex_wrap()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(status(stage_label, Tone::Info))
+                                        .children(sync_chip)
+                                        .children(branch_label.map(|b| {
+                                            mobile_footnote(b).font_family(MONO_FONT).truncate()
+                                        })),
+                                )
+                                .children(has_body.then(|| {
+                                    view().flex_row().items_center().gap_1().child(
+                                        text(move || {
+                                            if details_open.get() {
+                                                "Hide"
+                                            } else {
+                                                "Details"
+                                            }
+                                        })
+                                        .text_size(px(14.))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(ACCENT),
+                                    )
+                                }))
+                                .on_press(move |_: &()| {
+                                    if has_body {
+                                        let next = !details_open.get_untracked();
+                                        user_toggled_details.set(Some(next));
                                     }
-                                })
-                                .text_color(ACCENT),
-                            )
-                            .on_press(move |_: &()| details_open.update(|v| *v = !*v)),
-                    );
-                    if !context_body.is_empty() {
+                                }),
+                        );
+                    if has_body {
                         ctx = ctx.child(when(
                             move || details_open.get(),
-                            move || read_text(context_body.clone()),
+                            move || {
+                                view()
+                                    .w_full()
+                                    .border_t_1()
+                                    .border_color(BORDER)
+                                    .px_4()
+                                    .py_3p5()
+                                    .child(read_text(context_body.clone()))
+                            },
                         ));
                     }
                     col = col.child(ctx);
 
                     let rows = events_memo.get();
                     if rows.is_empty() {
-                        col = col.child(
-                            panel()
-                                .p_4()
-                                .child(muted("No conversation or milestones yet.")),
-                        );
+                        col = col.child(view().w_full().py_6().items_center().child(
+                            mobile_footnote("No replies yet — write below to start.").text_center(),
+                        ));
                     } else {
                         for (ev, _) in rows {
                             col = col.child(timeline_item(ui, ev));
@@ -310,28 +382,75 @@ fn conversation_view(
                 .border_t_1()
                 .border_color(BORDER)
                 .bg(SURFACE)
-                .px_3()
-                .pt_2()
+                .px_3p5()
+                .pt_2p5()
                 .pb(move || {
-                    if is_ios() {
+                    if is_mobile_os() {
                         px(keyboard_height().0.max(safe_area().bottom.0).max(10.))
                     } else {
                         px(10.)
                     }
                 })
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(field(draft, "Write a reply…").flex_1().min_w(px(0.)))
-                .child({
-                    let send_cb = send_comment.clone();
-                    action(
-                        move || if sending.get() { "…" } else { "Send" },
-                        Variant::Primary,
-                        move |_| send_cb(),
-                    )
-                    .disabled(move || sending.get() || draft.with(|d| d.trim().is_empty()))
-                }),
+                .child(
+                    view()
+                        .w_full()
+                        .rounded(px(22.))
+                        .bg(INSET)
+                        .border_1()
+                        .border_color(BORDER)
+                        .pl_3p5()
+                        .pr_1p5()
+                        .py_1p5()
+                        .flex_row()
+                        .items_end()
+                        .gap_2()
+                        .child(
+                            nsh_base::input()
+                                .value(move || draft.get())
+                                .on_change(move |v: &str| draft.set(v.to_owned()))
+                                .multiline(true)
+                                .placeholder("Reply or @agent…")
+                                .flex_1()
+                                .min_w(px(0.))
+                                .min_h(px(34.))
+                                .max_h(px(110.))
+                                .py_1p5()
+                                .text_size(px(MOBILE_BODY))
+                                .line_height(px(21.))
+                                .text_color(TEXT),
+                        )
+                        .child({
+                            let send_cb = send_comment.clone();
+                            let can_send =
+                                move || !sending.get() && !draft.with(|d| d.trim().is_empty());
+                            press_target()
+                                .w(px(34.))
+                                .h(px(34.))
+                                .rounded_full()
+                                .items_center()
+                                .justify_center()
+                                .flex_shrink_0()
+                                .bg(move || {
+                                    if can_send() {
+                                        ACCENT_FILL.resolve()
+                                    } else {
+                                        BORDER.resolve()
+                                    }
+                                })
+                                .active(|s| s.opacity(0.7))
+                                .disabled(move || !can_send())
+                                .accessibility_label(Some(SharedString::from("Send reply")))
+                                .child(
+                                    icon_tinted(Icon::ArrowUp, ON_ACCENT)
+                                        .w(px(17.))
+                                        .h(px(17.))
+                                        .opacity(
+                                            move || if can_send() { 1.0_f32 } else { 0.45_f32 },
+                                        ),
+                                )
+                                .on_press(move |_: &()| send_cb())
+                        }),
+                ),
         )
 }
 
@@ -360,79 +479,128 @@ fn card_terminal_view(
         rows.first().cloned()
     });
 
+    let cid_bar = card_id.clone();
     view()
         .flex_1()
         .flex_col()
         .min_h(px(0.))
-        .child(
-            view()
-                .w_full()
-                .flex_shrink_0()
-                .px_3()
-                .py_2()
-                .border_b_1()
-                .border_color(BORDER)
-                .bg(SURFACE)
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(
-                    scroll()
-                        .horizontal()
-                        .scrollbar(false)
-                        .flex_1()
-                        .min_w(px(0.))
-                        .child(dynamic(move || {
-                            let rows = entries_memo.get();
-                            let active_id = active_entry
-                                .get()
-                                .map(|e| e.saved.id)
-                                .unwrap_or_default();
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .gap_1p5()
-                                .children(rows.into_iter().map(|entry| {
-                                    let eid = entry.saved.id.clone();
-                                    let eid_press = eid.clone();
-                                    let is_sel = eid == active_id;
-                                    compact_segment(entry.title(), None, move || is_sel, move |_| {
-                                        selected_tid.set(eid_press.clone());
-                                        focus_ticket.update(|t| *t += 1);
-                                    })
-                                }))
-                        })),
-                )
-                .child(compact_action("+ Shell", Variant::Secondary, {
-                    let cid = card_id.clone();
-                    move |_| {
-                        if let Some(m) = model.get_untracked() {
-                            crate::terminals::create_in_card(ui, m.project_id, cid.clone(), false);
-                        }
-                    }
-                })),
-        )
+        .child(when(
+            move || !entries_memo.with(Vec::is_empty),
+            move || {
+                let cid_new_bar = cid_bar.clone();
+                view()
+                    .w_full()
+                    .flex_shrink_0()
+                    .h(px(50.))
+                    .px_4()
+                    .border_b_1()
+                    .border_color(BORDER)
+                    .bg(SURFACE)
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        scroll()
+                            .horizontal()
+                            .scrollbar(false)
+                            .flex_1()
+                            .min_w(px(0.))
+                            .child(dynamic(move || {
+                                let rows = entries_memo.get();
+                                let active_id = active_entry
+                                    .get()
+                                    .map(|e| e.saved.id)
+                                    .unwrap_or_default();
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .children(rows.into_iter().map(|entry| {
+                                        let eid = entry.saved.id.clone();
+                                        let eid_press = eid.clone();
+                                        let is_sel = eid == active_id;
+                                        press_target()
+                                            .h(px(34.))
+                                            .px_3()
+                                            .rounded_full()
+                                            .border_1()
+                                            .border_color(if is_sel { CLEAR } else { BORDER })
+                                            .bg(if is_sel { ACCENT_FILL } else { INSET })
+                                            .items_center()
+                                            .justify_center()
+                                            .child(
+                                                text(entry.title())
+                                                    .text_size(px(13.5))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(if is_sel { ON_ACCENT } else { TEXT }),
+                                            )
+                                            .on_press(move |_: &()| {
+                                                trigger_haptic(Haptic::Selection);
+                                                selected_tid.set(eid_press.clone());
+                                                focus_ticket.update(|t| *t += 1);
+                                            })
+                                    }))
+                            })),
+                    )
+                    .child(
+                        press_target()
+                            .h(px(34.))
+                            .px_3()
+                            .rounded_full()
+                            .bg(INSET)
+                            .border_1()
+                            .border_color(BORDER)
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .active(|s| s.opacity(0.65))
+                            .child(icon_tinted(Icon::Plus, ACCENT).w(px(14.)).h(px(14.)))
+                            .child(
+                                text("Shell")
+                                    .text_size(px(13.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(ACCENT),
+                            )
+                            .on_press(move |_: &()| {
+                                trigger_haptic(Haptic::Selection);
+                                if let Some(m) = model.get_untracked() {
+                                    crate::terminals::create_in_card(
+                                        ui,
+                                        m.project_id,
+                                        cid_new_bar.clone(),
+                                        false,
+                                    );
+                                }
+                            }),
+                    )
+            },
+        ))
         .child(dynamic(move || {
             let Some(entry) = active_entry.get() else {
                 let cid_new = card_id.clone();
                 return view()
                     .flex_1()
-                    .items_center()
                     .justify_center()
-                    .p_5()
-                    .gap_3()
-                    .child(muted("No active terminal for this Card."))
-                    .child(action("Start Shell", Variant::Primary, move |_| {
-                        if let Some(m) = model.get_untracked() {
-                            crate::terminals::create_in_card(
-                                ui,
-                                m.project_id,
-                                cid_new.clone(),
-                                false,
-                            );
-                        }
-                    }))
+                    .child(empty_state(
+                        Icon::Terminal,
+                        Tone::Neutral,
+                        "No active terminal",
+                        "Launch an interactive shell inside this Card's workspace.",
+                        Some(
+                            mobile_button("Start Shell", Variant::Primary, move |_| {
+                                if let Some(m) = model.get_untracked() {
+                                    crate::terminals::create_in_card(
+                                        ui,
+                                        m.project_id,
+                                        cid_new.clone(),
+                                        false,
+                                    );
+                                }
+                            })
+                            .into_element(),
+                        ),
+                    ))
                     .into_element();
             };
 
@@ -532,37 +700,122 @@ pub(crate) fn pushed_page(
             let Some(m) = model.get_untracked() else {
                 return Vec::new();
             };
-            let cid_move = cid_m.clone();
             let cid_rework = cid_m.clone();
             let cid_deliv = cid_m.clone();
             let rev = m.revision;
             let has_run = m.approval_run.is_some();
-            let mut items = vec![
-                MenuItem::new("Move to…").on_select(move || {
-                    state.open_sheet(MobileSheet::MoveCard(cid_move.clone()));
-                }),
-                MenuItem::new("Return for rework").on_select(move || {
-                    state.open_sheet(MobileSheet::Rework(cid_rework.clone()));
-                }),
-                MenuItem::new("Deliver…").on_select(move || {
-                    deliver_card(ui, &cid_deliv, rev, has_run);
-                }),
-            ];
+
+            let stage_items: Vec<MenuItem> = m
+                .stages
+                .iter()
+                .map(|(sid, sname)| {
+                    let cid_move = cid_m.clone();
+                    let sid_target = sid.clone();
+                    MenuItem::new(sname.clone())
+                        .checked(sid == &m.stage)
+                        .on_select(move || {
+                            trigger_haptic(Haptic::Selection);
+                            move_card(ui, &cid_move, &sid_target);
+                            state.board_stage.set(sid_target.clone());
+                        })
+                })
+                .collect();
+
+            let mut items = Vec::new();
+            if !stage_items.is_empty() {
+                items.push(MenuItem::submenu("Move to…", stage_items).symbol("arrow.right.circle"));
+            }
+            items.push(
+                MenuItem::new("Return for rework")
+                    .symbol("arrow.uturn.backward")
+                    .on_select(move || {
+                        state.open_sheet(MobileSheet::Rework(cid_rework.clone()));
+                    }),
+            );
+            items.push(
+                MenuItem::new("Deliver…")
+                    .symbol("paperplane")
+                    .on_select(move || {
+                        deliver_card(ui, &cid_deliv, rev, has_run);
+                    }),
+            );
             if let Some(br) = m.branch {
-                items.push(MenuItem::new("Copy branch").on_select(move || {
-                    copy_text(ui, br.clone());
-                }));
+                items.push(MenuItem::separator());
+                items.push(MenuItem::new("Copy branch").symbol("doc.on.doc").on_select(
+                    move || {
+                        copy_text(ui, br.clone());
+                    },
+                ));
             }
             items
         }
     };
 
-    let move_cid_desktop = cid_actions.clone();
-    let rework_cid_desktop = cid_actions.clone();
+    let android_menu = {
+        let cid_a = cid_actions.clone();
+        move || {
+            let Some(m) = model.get() else {
+                return view().into_element();
+            };
+            let mut items = Vec::new();
+            if !m.stages.is_empty() {
+                let stage_items = m.stages.iter().map(|(sid, sname)| {
+                    MenuButtonItem::new(format!("stage:{sid}"), sname.clone())
+                        .checked(sid == &m.stage)
+                });
+                items.push(MenuButtonItem::submenu("Move to…", stage_items));
+            }
+            items.push(MenuButtonItem::new("rework", "Return for rework"));
+            items.push(MenuButtonItem::new("deliver", "Deliver…"));
+            if m.branch.is_some() {
+                items.push(MenuButtonItem::new("copy-branch", "Copy branch"));
+            }
+
+            let cid_sel = cid_a.clone();
+            let rev = m.revision;
+            let has_run = m.approval_run.is_some();
+            let branch = m.branch.clone();
+            menu_button()
+                .title("Card actions")
+                .accessibility_label(Some(SharedString::from("Card actions")))
+                .items(items)
+                .on_select(move |choice: &SharedString| {
+                    trigger_haptic(Haptic::Selection);
+                    let raw = choice.as_ref();
+                    if let Some(sid) = raw.strip_prefix("stage:") {
+                        move_card(ui, &cid_sel, sid);
+                        state.board_stage.set(sid.to_owned());
+                    } else {
+                        match raw {
+                            "rework" => state.open_sheet(MobileSheet::Rework(cid_sel.clone())),
+                            "deliver" => deliver_card(ui, &cid_sel, rev, has_run),
+                            "copy-branch" => {
+                                if let Some(br) = &branch {
+                                    copy_text(ui, br.clone());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                })
+                .child(
+                    view()
+                        .w(px(44.))
+                        .h(px(44.))
+                        .items_center()
+                        .justify_center()
+                        .child(icon_tinted(Icon::More, ACCENT).w(px(21.)).h(px(21.))),
+                )
+                .into_element()
+        }
+    };
+
+    let move_cid_gallery = cid_actions.clone();
+    let rework_cid_gallery = cid_actions.clone();
     let desktop_header = view()
         .w_full()
+        .h(px(52.))
         .px_3()
-        .py_2p5()
         .border_b_1()
         .border_color(BORDER)
         .bg(SURFACE)
@@ -570,27 +823,61 @@ pub(crate) fn pushed_page(
         .items_center()
         .justify_between()
         .gap_2()
-        .child(compact_action("← Back", Variant::Quiet, move |_| {
-            state.pop()
-        }))
         .child(
-            label(title_fn)
-                .font_weight(FontWeight::SEMIBOLD)
-                .truncate()
-                .flex_1()
-                .min_w(px(0.)),
+            press_target()
+                .min_h(px(40.))
+                .px_2()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .active(|s| s.opacity(0.65))
+                .child(icon_tinted(Icon::Back, ACCENT).w(px(18.)).h(px(18.)))
+                .child(
+                    text("Back")
+                        .text_size(px(15.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(ACCENT),
+                )
+                .on_press(move |_: &()| state.pop()),
         )
+        .child(mobile_title(title_fn).truncate().flex_1().min_w(px(0.)))
         .child(
             view()
                 .flex_row()
                 .items_center()
-                .gap_1()
-                .child(compact_action("Move", Variant::Secondary, move |_| {
-                    state.open_sheet(MobileSheet::MoveCard(move_cid_desktop.clone()));
-                }))
-                .child(compact_action("•••", Variant::Quiet, move |_| {
-                    state.open_sheet(MobileSheet::Rework(rework_cid_desktop.clone()));
-                })),
+                .gap_1p5()
+                .child(
+                    press_target()
+                        .min_h(px(36.))
+                        .px_3()
+                        .rounded(px(9.))
+                        .bg(INSET)
+                        .border_1()
+                        .border_color(BORDER)
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            text("Move")
+                                .text_size(px(13.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(TEXT),
+                        )
+                        .on_press(move |_: &()| {
+                            state.open_sheet(MobileSheet::MoveCard(move_cid_gallery.clone()));
+                        }),
+                )
+                .child(
+                    press_target()
+                        .w(px(36.))
+                        .h(px(36.))
+                        .rounded(px(9.))
+                        .items_center()
+                        .justify_center()
+                        .child(icon_tinted(Icon::More, MUTED).w(px(18.)).h(px(18.)))
+                        .on_press(move |_: &()| {
+                            state.open_sheet(MobileSheet::Rework(rework_cid_gallery.clone()));
+                        }),
+                ),
         );
 
     let host_scope = computed(move || model.get().map(|m| m.host_id).filter(|h| !h.is_empty()));
@@ -598,22 +885,29 @@ pub(crate) fn pushed_page(
     let mut page = nav_page()
         .key(format!("mobile-card:{card_id}"))
         .title(title_fn)
+        .header_large_title(false)
+        .header_shadow_visible(false)
+        .header_style_with(|s| s.text_color(TEXT).tint_color(ACCENT))
         .hides_bottom_bar_when_pushed(true)
         .header_visible(move || !state.terminal_fullscreen.get())
         .on_dismiss(move |_: &()| {
             state.terminal_fullscreen.set(false);
             state.pop();
-        })
-        .header(desktop_header);
+        });
 
-    if try_os() == Some(Os::Ios) {
+    if is_ios() {
         page = page.header_right_items(move || {
             vec![
                 HeaderItem::symbol("ellipsis.circle")
+                    .key("card-more")
                     .label("Card actions")
                     .menu(more_menu()),
             ]
         });
+    } else if is_android() {
+        page = page.header_right(dynamic(android_menu));
+    } else {
+        page = page.header(desktop_header);
     }
 
     page.child(
@@ -626,11 +920,9 @@ pub(crate) fn pushed_page(
                 view()
                     .w_full()
                     .flex_shrink_0()
-                    .px_3()
+                    .px_4()
                     .py_2()
-                    .border_b_1()
-                    .border_color(BORDER)
-                    .bg(SURFACE)
+                    .bg(BACKGROUND)
                     .child(mobile_segmented_control(
                         &["Conversation", "Terminal", "Diff"],
                         move || segment_sig.get().index(),
@@ -679,39 +971,46 @@ pub(crate) fn rework_sheet_body(ui: Ui, state: MobileState, card_id: String) -> 
 
     dynamic(move || {
         let Some((num, title, rev, run_opt)) = target.get() else {
-            return muted("Card unavailable").into_element();
+            return mobile_subhead("Card unavailable").into_element();
         };
         let cid_submit = card_id.clone();
         view()
             .w_full()
-            .gap_3()
-            .child(label(format!("#{num} {title}")).font_weight(FontWeight::SEMIBOLD))
-            .child(muted("Add feedback for the Agent or next iteration."))
+            .gap_4()
+            .child(
+                view()
+                    .w_full()
+                    .gap_1()
+                    .child(mobile_title(format!("#{num} {title}")))
+                    .child(mobile_subhead(
+                        "Add feedback for the Agent or next iteration.",
+                    )),
+            )
             .child(
                 nsh_base::input()
                     .value(move || feedback.get())
                     .on_change(move |v: &str| feedback.set(v.to_owned()))
                     .multiline(true)
                     .placeholder("What needs to change…")
-                    .min_h(px(100.))
-                    .px_3()
-                    .py_2()
-                    .rounded(px(RADIUS))
+                    .min_h(px(120.))
+                    .px_3p5()
+                    .py_2p5()
+                    .rounded(px(12.))
                     .bg(INSET)
                     .border_1()
                     .border_color(BORDER)
-                    .text_size(px(13.))
-                    .text_color(TEXT),
+                    .text_size(px(MOBILE_BODY))
+                    .text_color(TEXT)
+                    .focus(|s| s.border_color(ACCENT)),
             )
             .child(
-                action(
-                    move || if busy.get() { "Submitting…" } else { "Return for rework" },
+                mobile_button(
+                    move || if busy.get() { "Submitting…" } else { "Return for Rework" },
                     Variant::Primary,
                     move |_| {
                         if busy.get_untracked() {
                             return;
                         }
-                        trigger_haptic(Haptic::Selection);
                         let note = feedback.get_untracked();
                         if !crate::backend::is_connected() {
                             ui.notify("Gallery preview · Returned for rework");

@@ -134,10 +134,10 @@ pub const CAPTION_SIZE: f32 = 12.0;
 /// Avoids macOS `.AppleSystemUIFontMonospaced` synthetic CJK-Latin inter-script
 /// spacing so per-grapheme caret X measurement matches CoreText line rendering,
 /// and provides a crisp Linux Pango/Fontconfig monospaced + CJK fallback cascade.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub const MONO_FONT: &str = "SF Mono, Menlo, PingFang SC";
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 pub const MONO_FONT: &str = "JetBrains Mono, DejaVu Sans Mono, Liberation Mono, Noto Sans Mono, Noto Sans CJK SC, monospace";
 
 #[cfg(test)]
@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn mono_font_uses_named_latin_and_cjk_families_without_system_ui_monospace() {
         let families: Vec<_> = nsh_core::font_families(MONO_FONT).collect();
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         assert_eq!(
             families,
             vec![
@@ -156,7 +156,7 @@ mod tests {
                 nsh_core::FamilyName::Named("PingFang SC"),
             ]
         );
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         assert_eq!(
             families,
             vec![

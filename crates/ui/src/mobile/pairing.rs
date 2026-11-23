@@ -1,7 +1,11 @@
-//! Single-address QR / URI pairing screen & confirmation sheet with transport security badges.
+//! Mobile-first QR / URI pairing screen & confirmation sheet with transport security badges.
 use super::{
     MobileState,
-    chrome::{is_ios, security_badge, trigger_haptic},
+    chrome::{
+        MOBILE_CAPTION, MOBILE_HEADLINE, MOBILE_HERO_TITLE, MOBILE_RADIUS, grouped_card,
+        is_mobile_os, mobile_button, mobile_field, mobile_footnote, mobile_inline_button,
+        mobile_subhead, section_header, security_badge, trigger_haptic,
+    },
 };
 use crate::presenter::*;
 use canban_client::{AddrProbeResult, PairingInvite, TransportSecurity, parse_pairing_invite};
@@ -54,7 +58,6 @@ fn connect_invite(ui: Ui, state: MobileState, invite: PairingInvite, name_overri
     trigger_haptic(Haptic::Selection);
 
     let Some(client) = crate::backend::remote_client() else {
-        // Deterministic Gallery preview fallback without live client.
         state.pairing_busy.set(false);
         let label = if name_override.trim().is_empty() {
             invite.host_name.as_deref().unwrap_or(&invite.addr)
@@ -109,10 +112,11 @@ fn connect_invite(ui: Ui, state: MobileState, invite: PairingInvite, name_overri
     });
 }
 
-/// Interactive single-address pairing form & confirmation card shared between
+/// Interactive single-address pairing flow & confirmation card shared between
 /// the first-run onboarding screen and `MobileSheet::Pairing`.
 pub(crate) fn pairing_panel(ui: Ui, state: MobileState) -> impl IntoElement {
     let custom_name = signal(String::new());
+    let show_manual = signal(false);
     let parsed_invite = computed(move || {
         let raw = state.pairing_uri_input.get();
         parse_pairing_invite(&raw)
@@ -129,7 +133,6 @@ pub(crate) fn pairing_panel(ui: Ui, state: MobileState) -> impl IntoElement {
         }
         if last_probed_addr.get() != next_addr {
             last_probed_addr.replace(next_addr.clone());
-            // Preserve pre-populated Gallery fixture result if already targeting this addr.
             let already_for_addr = matches!(
                 state.pairing_probe.get_untracked(),
                 ProbeState::Result(ref r) if r.addr == next_addr
@@ -140,74 +143,88 @@ pub(crate) fn pairing_panel(ui: Ui, state: MobileState) -> impl IntoElement {
         }
     });
 
+    let paste_btn = move |primary: bool| {
+        mobile_button(
+            "Paste Pairing Link",
+            if primary {
+                Variant::Primary
+            } else {
+                Variant::Secondary
+            },
+            move |_| {
+                ui.spawn(async move {
+                    let clip = clipboard_string().await;
+                    let trimmed = clip.trim().to_owned();
+                    if trimmed.is_empty() {
+                        state.pairing_error.try_set(
+                            "Clipboard is empty. Copy a `canban://` link from Settings -> Remote Access on your desktop.".into(),
+                        );
+                    } else {
+                        state.pairing_uri_input.try_set(trimmed);
+                        state.pairing_error.try_set(String::new());
+                    }
+                });
+            },
+        )
+    };
+
     view()
         .w_full()
-        .gap_3()
-        .child(
-            view()
-                .w_full()
-                .gap_1()
-                .child(heading("Connect to Canban host"))
-                .child(muted(
-                    "Scan a pairing QR code with your iPhone Camera (opens `canban://` directly), or paste the pairing URI below.",
-                )),
-        )
-        .child(
-            view()
-                .w_full()
-                .gap_1p5()
-                .child(label("Pairing URI"))
-                .child(
-                    view()
-                        .w_full()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            field(
-                                state.pairing_uri_input,
-                                "canban://host:7680?name=...#code",
-                            )
-                            .flex_1()
-                            .min_w(px(0.)),
-                        )
-                        .child(compact_action("Paste URI", Variant::Secondary, move |_| {
-                            trigger_haptic(Haptic::Selection);
-                            ui.spawn(async move {
-                                let clip = clipboard_string().await;
-                                let trimmed = clip.trim().to_owned();
-                                if trimmed.is_empty() {
-                                    state.pairing_error.try_set(
-                                        "Clipboard is empty. Copy a `canban://` link from Settings -> Remote Access on your desktop.".into(),
-                                    );
-                                } else {
-                                    state.pairing_uri_input.try_set(trimmed);
-                                    state.pairing_error.try_set(String::new());
-                                }
-                            });
-                        })),
-                ),
-        )
+        .gap_4()
         .child(dynamic(move || {
-            let Some(invite) = parsed_invite.get() else {
+            let invite_opt = parsed_invite.get();
+            if invite_opt.is_none() {
                 let raw_empty = state.pairing_uri_input.with(|s| s.trim().is_empty());
-                if raw_empty {
-                    return panel()
-                        .p_3()
-                        .gap_1()
-                        .child(label("Waiting for pairing URI"))
-                        .child(muted(
-                            "On your Mac or Linux host, open Settings -> Remote Access / Pair Mobile to show a QR code or copy a `canban://` link.",
-                        ))
-                        .into_element();
-                }
-                return notice(
-                    "Invalid pairing URI. Expected `canban://<addr>?name=...#<secret>`.",
-                    Tone::Attention,
-                )
-                .into_element();
-            };
+                return view()
+                    .w_full()
+                    .gap_3()
+                    .child(paste_btn(true))
+                    .child(
+                        press_target()
+                            .w_full()
+                            .min_h(px(40.))
+                            .items_center()
+                            .justify_center()
+                            .active(|s| s.opacity(0.65))
+                            .child(
+                                text(move || {
+                                    if show_manual.get() {
+                                        "Hide manual entry"
+                                    } else {
+                                        "Enter URI manually"
+                                    }
+                                })
+                                .text_size(px(14.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(ACCENT),
+                            )
+                            .on_press(move |_: &()| {
+                                trigger_haptic(Haptic::Selection);
+                                show_manual.update(|v| *v = !*v);
+                            }),
+                    )
+                    .child(when(
+                        move || show_manual.get() || !raw_empty,
+                        move || {
+                            view()
+                                .w_full()
+                                .gap_2()
+                                .child(mobile_field(
+                                    state.pairing_uri_input,
+                                    "canban://host:7680?name=...#code",
+                                ))
+                                .children((!raw_empty).then(|| {
+                                    notice(
+                                        "Invalid pairing URI. Expected `canban://<addr>?name=...#<secret>`.",
+                                        Tone::Attention,
+                                    )
+                                }))
+                        },
+                    ))
+                    .into_element();
+            }
 
+            let invite = invite_opt.unwrap();
             let display_name = invite
                 .host_name
                 .clone()
@@ -217,33 +234,57 @@ pub(crate) fn pairing_panel(ui: Ui, state: MobileState) -> impl IntoElement {
             let connect_inv = invite.clone();
             let is_tailscale = invite.security == TransportSecurity::Tailscale;
 
-            let probe_row = match probe {
-                ProbeState::Idle => view().child(muted("Ready to verify connection…")),
+            let probe_row: AnyElement = match probe {
+                ProbeState::Idle => view()
+                    .w_full()
+                    .px_4()
+                    .py_3()
+                    .child(mobile_footnote("Ready to verify connection…"))
+                    .into_element(),
                 ProbeState::Probing(ref addr) => view()
+                    .w_full()
+                    .px_4()
+                    .py_3()
                     .flex_row()
                     .items_center()
-                    .gap_2()
-                    .child(loading_spinner(14., ACCENT))
-                    .child(muted(format!("Checking reachability of {addr}…"))),
+                    .gap_2p5()
+                    .child(loading_spinner(15., ACCENT))
+                    .child(mobile_subhead(format!("Checking {addr}…")))
+                    .into_element(),
                 ProbeState::Result(ref res) if res.reachable => view()
+                    .w_full()
+                    .px_4()
+                    .py_2p5()
                     .flex_row()
-                    .flex_wrap()
                     .items_center()
                     .justify_between()
                     .gap_2()
                     .child(status(
-                        format!(
-                            "Reachable · {}ms",
-                            res.rtt_ms.unwrap_or(0)
-                        ),
+                        format!("Reachable · {}ms", res.rtt_ms.unwrap_or(0)),
                         Tone::Success,
                     ))
-                    .child(compact_action("Recheck", Variant::Quiet, move |_| {
-                        start_probe(ui, state, probe_addr_retry.clone());
-                    })),
+                    .child(
+                        press_target()
+                            .min_h(px(36.))
+                            .px_2p5()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                text("Recheck")
+                                    .text_size(px(13.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(ACCENT),
+                            )
+                            .on_press(move |_: &()| {
+                                trigger_haptic(Haptic::Selection);
+                                start_probe(ui, state, probe_addr_retry.clone());
+                            }),
+                    )
+                    .into_element(),
                 ProbeState::Result(ref res) => view()
                     .w_full()
-                    .gap_2()
+                    .p_3p5()
+                    .gap_2p5()
                     .child(notice(
                         format!(
                             "Cannot reach {} ({})",
@@ -254,26 +295,36 @@ pub(crate) fn pairing_panel(ui: Ui, state: MobileState) -> impl IntoElement {
                     ))
                     .child(
                         view()
+                            .w_full()
                             .flex_row()
-                            .flex_wrap()
-                            .items_center()
                             .gap_2()
-                            .child(compact_action("Retry", Variant::Secondary, move |_| {
-                                start_probe(ui, state, probe_addr_retry.clone());
-                            }))
-                            .children(is_tailscale.then(|| {
-                                compact_action("Open Tailscale", Variant::Secondary, move |_| {
-                                    ui.spawn(async {
-                                        let _ = open_url("tailscale://").await;
-                                    });
+                            .child(
+                                mobile_inline_button("Retry", Variant::Secondary, move |_| {
+                                    start_probe(ui, state, probe_addr_retry.clone());
                                 })
+                                .flex_1(),
+                            )
+                            .children(is_tailscale.then(|| {
+                                mobile_inline_button(
+                                    "Open Tailscale",
+                                    Variant::Secondary,
+                                    move |_| {
+                                        ui.spawn(async {
+                                            let _ = open_url("tailscale://").await;
+                                        });
+                                    },
+                                )
+                                .flex_1()
                             })),
-                    ),
+                    )
+                    .into_element(),
             };
 
-            panel()
-                .p_3()
-                .gap_3()
+            let summary_row = view()
+                .w_full()
+                .px_4()
+                .py_3p5()
+                .gap_1p5()
                 .child(
                     view()
                         .w_full()
@@ -282,35 +333,84 @@ pub(crate) fn pairing_panel(ui: Ui, state: MobileState) -> impl IntoElement {
                         .items_center()
                         .justify_between()
                         .gap_2()
-                        .child(label(display_name).font_weight(FontWeight::SEMIBOLD))
+                        .child(
+                            text(display_name.clone())
+                                .text_size(px(MOBILE_HEADLINE))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(TEXT),
+                        )
                         .child(security_badge(invite.security)),
                 )
-                .child(muted(invite.addr.clone()).font_family(MONO_FONT))
-                .child(muted(invite.security.hint()))
+                .child(
+                    text(invite.addr.clone())
+                        .text_size(px(13.5))
+                        .font_family(MONO_FONT)
+                        .text_color(MUTED),
+                )
+                .child(mobile_footnote(invite.security.hint()))
+                .into_element();
+
+            let label_row = view()
+                .w_full()
+                .px_4()
+                .py_3()
+                .gap_1p5()
+                .child(
+                    text("LABEL (OPTIONAL)")
+                        .text_size(px(MOBILE_CAPTION))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(MUTED),
+                )
+                .child(mobile_field(
+                    custom_name,
+                    invite.host_name.as_deref().unwrap_or("My Mac / Linux"),
+                ))
+                .into_element();
+
+            view()
+                .w_full()
+                .gap_4()
                 .child(
                     view()
                         .w_full()
-                        .gap_1()
-                        .child(muted("Label (optional)"))
-                        .child(field(
-                            custom_name,
-                            invite.host_name.as_deref().unwrap_or("My Mac / Linux"),
-                        )),
+                        .child(section_header("CONFIRM MACHINE", None))
+                        .child(grouped_card(vec![summary_row, probe_row, label_row])),
                 )
-                .child(probe_row)
                 .child(
-                    action(
+                    mobile_button(
                         move || {
                             if state.pairing_busy.get() {
-                                "Connecting…"
+                                "Connecting…".to_owned()
                             } else {
-                                "Connect"
+                                format!("Connect to {display_name}")
                             }
                         },
                         Variant::Primary,
-                        move |_| connect_invite(ui, state, connect_inv.clone(), custom_name.get_untracked()),
+                        move |_| {
+                            connect_invite(
+                                ui,
+                                state,
+                                connect_inv.clone(),
+                                custom_name.get_untracked(),
+                            );
+                        },
                     )
                     .disabled(move || state.pairing_busy.get()),
+                )
+                .child(
+                    view()
+                        .w_full()
+                        .flex_row()
+                        .gap_2()
+                        .child(paste_btn(false).flex_1())
+                        .child(
+                            mobile_button("Clear", Variant::Quiet, move |_| {
+                                state.pairing_uri_input.set(String::new());
+                                state.pairing_probe.set(ProbeState::Idle);
+                                state.pairing_error.set(String::new());
+                            })
+                            .flex_1(),
+                        ),
                 )
                 .into_element()
         }))
@@ -322,28 +422,66 @@ pub(crate) fn pairing_panel(ui: Ui, state: MobileState) -> impl IntoElement {
 
 /// Fullscreen first-run onboarding screen shown when 0 hosts are paired.
 pub(crate) fn onboarding_screen(ui: Ui, state: MobileState) -> impl IntoElement {
-    view()
-        .size_full()
-        .flex_col()
-        .min_h(px(0.))
-        .bg(BACKGROUND)
-        .children((!is_ios()).then(|| {
-            view()
-                .w_full()
-                .px_4()
-                .py_3()
-                .border_b_1()
-                .border_color(BORDER)
-                .bg(SURFACE)
-                .child(heading("Canban"))
-        }))
-        .child(
-            scroll().flex_1().min_h(px(0.)).child(
+    scroll().size_full().bg(BACKGROUND).child(
+        view()
+            .w_full()
+            .px_5()
+            .pt(move || {
+                px(if is_mobile_os() {
+                    safe_area().top.0 + 36.0
+                } else {
+                    36.0
+                })
+            })
+            .pb(move || {
+                px(if is_mobile_os() {
+                    safe_area().bottom.0 + 36.0
+                } else {
+                    36.0
+                })
+            })
+            .gap_6()
+            .child(
                 view()
                     .w_full()
-                    .p_4()
-                    .gap_4()
-                    .child(pairing_panel(ui, state)),
+                    .items_center()
+                    .gap_3()
+                    .pt_2()
+                    .child(
+                        view()
+                            .w(px(64.))
+                            .h(px(64.))
+                            .rounded(px(18.))
+                            .bg(SELECTED)
+                            .border_1()
+                            .border_color(ACCENT)
+                            .items_center()
+                            .justify_center()
+                            .child(icon_tinted(Icon::Board, ACCENT).w(px(30.)).h(px(30.))),
+                    )
+                    .child(
+                        text("Connect to Canban")
+                            .text_size(px(MOBILE_HERO_TITLE))
+                            .font_weight(FontWeight::BOLD)
+                            .letter_spacing(px(-0.4))
+                            .text_color(TEXT)
+                            .text_center(),
+                    )
+                    .child(
+                        view().w_full().max_w(px(320.)).items_center().child(
+                            mobile_subhead(
+                                "Scan the QR code in desktop Settings -> Remote Access with your phone Camera, or paste a pairing link below.",
+                            )
+                            .line_height(px(21.))
+                            .text_center(),
+                        ),
+                    ),
+            )
+            .child(pairing_panel(ui, state))
+            .children(
+                state.pairing_error.with_untracked(|_| false).then(|| {
+                    view().rounded(px(MOBILE_RADIUS))
+                }),
             ),
-        )
+    )
 }

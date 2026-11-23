@@ -1083,7 +1083,10 @@ fn mount_terminal_surface(
             .flex_col()
             .min_h(px(0.0))
             .pb(move || {
-                if try_os() == Some(nsh_core::platform::Os::Ios) {
+                if matches!(
+                    try_os(),
+                    Some(nsh_core::platform::Os::Ios | nsh_core::platform::Os::Android)
+                ) {
                     px(keyboard_height().0.max(safe_area().bottom.0))
                 } else {
                     px(0.0)

@@ -105,12 +105,12 @@ fn bar_color(hex: u32, alpha: f32) -> AdaptiveColor {
 }
 
 fn maybe_haptic() {
-    if try_os() == Some(Os::Ios) {
+    if matches!(try_os(), Some(Os::Ios | Os::Android)) {
         haptic(Haptic::Selection);
     }
 }
 
-/// Renders a docked 44pt accessory strip for mobile terminals (`Esc`, `Tab`, sticky `Ctrl`,
+/// Renders a docked accessory strip for mobile terminals (`Esc`, `Tab`, sticky `Ctrl`,
 /// arrows, `^C`, `Paste`, and optional `⤢` fullscreen/landscape toggle).
 #[allow(clippy::too_many_arguments)]
 pub fn accessory_bar(
@@ -125,20 +125,21 @@ pub fn accessory_bar(
         view()
             .focusable(false)
             .cursor_pointer()
-            .h(px(32.))
-            .min_w(px(36.))
-            .px(px(10.))
-            .rounded(px(6.))
+            .h(px(36.))
+            .min_w(px(38.))
+            .px(px(11.))
+            .rounded(px(8.))
             .items_center()
             .justify_center()
             .border_1()
-            .border_color(bar_color(0xffffff, 0.14))
-            .bg(bar_color(0x2a2d36, 0.92))
+            .border_color(bar_color(0xffffff, 0.16))
+            .bg(bar_color(0x2c2f38, 0.94))
+            .active(|s| s.opacity(0.65))
             .opacity(move || if read_only() { 0.4_f32 } else { 1.0_f32 })
             .label(a11y)
             .child(
                 text(label_text)
-                    .text_size(px(13.))
+                    .text_size(px(13.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(bar_color(0xf0f2f7, 1.0)),
             )
@@ -154,10 +155,10 @@ pub fn accessory_bar(
     let ctrl_btn = view()
         .focusable(false)
         .cursor_pointer()
-        .h(px(32.))
-        .min_w(px(44.))
-        .px(px(10.))
-        .rounded(px(6.))
+        .h(px(36.))
+        .min_w(px(46.))
+        .px(px(11.))
+        .rounded(px(8.))
         .items_center()
         .justify_center()
         .border_1()
@@ -165,21 +166,22 @@ pub fn accessory_bar(
             if ctrl_sticky.get() {
                 bar_color(0x4c9eff, 0.95)
             } else {
-                bar_color(0xffffff, 0.14)
+                bar_color(0xffffff, 0.16)
             }
         })
         .bg(move || {
             if ctrl_sticky.get() {
                 bar_color(0x2d68c4, 0.95)
             } else {
-                bar_color(0x2a2d36, 0.92)
+                bar_color(0x2c2f38, 0.94)
             }
         })
+        .active(|s| s.opacity(0.65))
         .opacity(move || if read_only() { 0.4_f32 } else { 1.0_f32 })
         .label("Control modifier")
         .child(
             text("Ctrl")
-                .text_size(px(13.))
+                .text_size(px(13.5))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(bar_color(0xf5f7fa, 1.0)),
         )
@@ -194,19 +196,20 @@ pub fn accessory_bar(
     let paste_btn = view()
         .focusable(false)
         .cursor_pointer()
-        .h(px(32.))
-        .px(px(10.))
-        .rounded(px(6.))
+        .h(px(36.))
+        .px(px(11.))
+        .rounded(px(8.))
         .items_center()
         .justify_center()
         .border_1()
-        .border_color(bar_color(0xffffff, 0.14))
-        .bg(bar_color(0x2a2d36, 0.92))
+        .border_color(bar_color(0xffffff, 0.16))
+        .bg(bar_color(0x2c2f38, 0.94))
+        .active(|s| s.opacity(0.65))
         .opacity(move || if read_only() { 0.4_f32 } else { 1.0_f32 })
         .label("Paste from clipboard")
         .child(
             text("Paste")
-                .text_size(px(12.))
+                .text_size(px(13.0))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(bar_color(0xf0f2f7, 1.0)),
         )
@@ -221,8 +224,8 @@ pub fn accessory_bar(
     let mut row = view()
         .flex_row()
         .items_center()
-        .gap(px(6.))
-        .px(px(8.))
+        .gap(px(7.))
+        .px(px(10.))
         .h_full()
         .child(key_btn("Esc", "Escape", AccessoryKey::Esc))
         .child(key_btn("Tab", "Tab", AccessoryKey::Tab))
@@ -239,19 +242,20 @@ pub fn accessory_bar(
             view()
                 .focusable(false)
                 .cursor_pointer()
-                .h(px(32.))
-                .min_w(px(34.))
-                .px(px(8.))
-                .rounded(px(6.))
+                .h(px(36.))
+                .min_w(px(36.))
+                .px(px(9.))
+                .rounded(px(8.))
                 .items_center()
                 .justify_center()
                 .border_1()
-                .border_color(bar_color(0xffffff, 0.14))
-                .bg(bar_color(0x2a2d36, 0.92))
+                .border_color(bar_color(0xffffff, 0.16))
+                .bg(bar_color(0x2c2f38, 0.94))
+                .active(|s| s.opacity(0.65))
                 .label("Toggle fullscreen")
                 .child(
                     text("⤢")
-                        .text_size(px(14.))
+                        .text_size(px(14.5))
                         .text_color(bar_color(0xf0f2f7, 1.0)),
                 )
                 .on_press(move |_: &PressEvent| {
@@ -263,7 +267,7 @@ pub fn accessory_bar(
 
     view()
         .w_full()
-        .h(px(44.))
+        .h(px(48.))
         .flex_shrink_0()
         .border_t_1()
         .border_color(bar_color(0xffffff, 0.10))
