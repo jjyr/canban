@@ -48,7 +48,8 @@ Share the `libghostty-vt` screen model, PTY session pool, view timing state, tra
   - Generalized `macos_sdk` into `apple_sdk` (selecting `iphoneos` or `iphonesimulator` via `xcrun --sdk`, tracking `SDKROOT` env changes), updating `cache_key`, and passed `--target=arm64-apple-ios[-simulator]` + `-isysroot{sdk}` to bindgen on iOS. No extra `cargo:rustc-link-lib` entries were needed on iOS beyond Apple system frameworks (`CoreFoundation`, `libiconv.2`, `libSystem.B`).
   - Added pure-Rust smoke example [vt_smoke.rs](../crates/terminal/examples/vt_smoke.rs) (`Model` parses VT + Unicode without `herdr-local` or macOS UI dependencies) and the `mise run check-ios` task in [mise.toml](../mise.toml#L27-L35) (`IPHONEOS_DEPLOYMENT_TARGET = "14.0"`, building `canban-terminal --no-default-features --locked --example vt_smoke` for `aarch64-apple-ios-sim` and `aarch64-apple-ios`).
   - **Verification:** `cargo run -p canban-terminal --example vt_smoke` printed `vt_smoke ok: hello ios 世界` on host; `mise run check-ios` succeeded for both iOS targets; `otool -l` reported `LC_BUILD_VERSION platform 7` (`minos 14.0`, `sdk 27.0`) for `aarch64-apple-ios-sim` and `LC_BUILD_VERSION platform 2` (`minos 14.0`, `sdk 27.0`) for `aarch64-apple-ios`; `nm -gU` confirmed statically linked `_ghostty_*` symbols in both `libghostty-vt.a` archives and final Mach-O binaries.
-  - **Simulator runtime limit:** `xcrun simctl list runtimes -v` and `xcrun simctl list devices` report no installed iOS Simulator runtime or device on this host, so `xcrun simctl spawn` execution could not run here.
+  - **Simulator runtime verification (2026-11-23):** Booted `iPhone 18 Pro` (`iOS 27.0 / 24A434`, UDID `80199FEC-F004-46AE-A1FD-68DDA238D6B5`), ran `xcrun simctl spawn` on `target/aarch64-apple-ios-sim/debug/examples/vt_smoke` (exit 0 without ad-hoc re-signing), observed `vt_smoke ok: hello ios 世界`, and shut down the simulator.
+  - **Mobile dependency chain iOS probe (2026-11-23):** `cargo check --locked` with `IPHONEOS_DEPLOYMENT_TARGET=14.0` succeeded (`rc=0`) on both `aarch64-apple-ios-sim` and `aarch64-apple-ios` for `canban-sync`, `canban-transport`, and `canban-ui --no-default-features` (6 non-fatal unused/dead_code warnings in `canban-ui` under non-macOS targets, including `crates/ui/src/terminals/viewer.rs` and `crates/ui/src/platform.rs`, to be cleaned up during Phase 1).
 - **Android (deferred):** `aarch64-linux-android` cross-compilation (plus NDK sysroot/API-level/libc++ linkage verification) was deferred because no Android NDK is installed on this host (`ANDROID_NDK_HOME` is unset and `~/Library/Android/sdk/ndk` does not exist).
 
 ### Phase 1 — Module reorganization and unified UI entry
@@ -58,9 +59,9 @@ Share the `libghostty-vt` screen model, PTY session pool, view timing state, tra
 - Extract platform-neutral selection, link-matching, and key/mouse encoding helpers from `native.rs` / `macos_view.m` into the shared Rust core.
 - Replace the `#[cfg(not(target_os = "macos"))]` platform branches in [crates/ui/src/card/terminal.rs](../crates/ui/src/card/terminal.rs#L438-L480) and [crates/ui/src/terminals/viewer.rs](../crates/ui/src/terminals/viewer.rs#L240-L280) with one unified entry point (e.g., `canban_terminal::view(...)`). Desktop runtime behavior remains unchanged.
 
-### Phase 2 — Remote `PtyTransport` (`herdr.connect` over TCP)
+### Phase 2 — Remote `PtyTransport` (`herdr.connect` over `canban-transport`)
 
-- Implement a `PtyTransport` for authenticated remote `canband` TCP `herdr.connect` PTY streams (using `server.token` / per-device bearer token), shared by both desktop multi-host viewers and mobile clients.
+- Implement a `PtyTransport` reusing [crates/transport](../crates/transport/Cargo.toml) (`ClientTransport` over `yamux/1` multiplexing, per-device bearer tokens, and Tokio async streams) for remote `canband` `herdr.connect` PTY sessions, shared by both desktop multi-host viewers and mobile clients instead of maintaining a separate custom TCP relay.
 - Mobile targets compile with `default-features = false` (omitting `herdr-local` so `canban-herdr` and `canban-exec` are not linked).
 
 ### Phase 3 — Mobile interaction components
