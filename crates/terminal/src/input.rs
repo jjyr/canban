@@ -105,10 +105,17 @@ pub fn apply_resize_with_cell_milli(
     let cols = cols.clamp(2, 500);
     let rows = rows.clamp(1, 200);
     session::record_viewport_size(cols, rows);
-    session::record_cell_metrics_milli(
-        cell_milli.0.max(cell_width.max(1) * 1000),
-        cell_milli.1.max(cell_height.max(1) * 1000),
-    );
+    let cw_milli = if cell_milli.0 > 0 {
+        cell_milli.0
+    } else {
+        cell_width.max(1) * 1000
+    };
+    let ch_milli = if cell_milli.1 > 0 {
+        cell_milli.1
+    } else {
+        cell_height.max(1) * 1000
+    };
+    session::record_cell_metrics_milli(cw_milli, ch_milli);
     let (grid_changed, facts, became_ready, replies) = {
         let mut s = state.lock().unwrap();
         let became_ready = !s.size_ready;

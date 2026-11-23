@@ -36,6 +36,18 @@ fn shared_remote_runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
+fn encode_frame_into(buf: &mut Vec<u8>, channel: u32, kind: u8, payload: &[u8]) -> Result<()> {
+    ensure!(
+        payload.len() <= MAX_HERDR_FRAME_BYTES,
+        "Herdr frame too large"
+    );
+    buf.extend_from_slice(&channel.to_le_bytes());
+    buf.push(kind);
+    buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    buf.extend_from_slice(payload);
+    Ok(())
+}
+
 async fn write_frame_async<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     channel: u32,
@@ -80,6 +92,7 @@ async fn connect_and_attach(
     BufReader<ReadHalf<TransportStream>>,
     WriteHalf<TransportStream>,
     u32,
+    bool,
     bool,
 )> {
     let (stream, auth_token) = transport.open_async_stream().await?;
@@ -139,6 +152,9 @@ async fn connect_and_attach(
     let hello_auto = hello_reply["result"]["features"]
         .as_array()
         .is_some_and(|v| v.iter().any(|x| x == "automatic_input"));
+    let supports_get = hello_reply["result"]["methods"]
+        .as_array()
+        .is_some_and(|v| v.iter().any(|x| x == "terminal.get"));
 
     let mut attach_params = json!({
         "terminal": params.terminal,
@@ -149,19 +165,59 @@ async fn connect_and_attach(
     if !params.display.is_empty() {
         attach_params["display"] = params.display.to_json();
     }
-    let attach_req = json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "terminal.attach",
-        "params": attach_params,
-    });
-    write_frame_async(&mut write_half, 0, 0, &serde_json::to_vec(&attach_req)?).await?;
+    let attach_id: u64 = if supports_get {
+        let get_req = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "terminal.get",
+            "params": { "terminal": params.terminal },
+        });
+        let attach_req = json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "terminal.attach",
+            "params": attach_params,
+        });
+        let mut batch = Vec::new();
+        encode_frame_into(&mut batch, 0, 0, &serde_json::to_vec(&get_req)?)?;
+        encode_frame_into(&mut batch, 0, 0, &serde_json::to_vec(&attach_req)?)?;
+        write_half.write_all(&batch).await?;
+        write_half.flush().await?;
+        3
+    } else {
+        let attach_req = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "terminal.attach",
+            "params": attach_params,
+        });
+        write_frame_async(&mut write_half, 0, 0, &serde_json::to_vec(&attach_req)?).await?;
+        2
+    };
 
+    let mut prior_size: Option<(u16, u16)> = None;
     let attach_result = loop {
         let (channel, kind, data) = read_frame_async(&mut reader).await?;
         if channel == 0 && kind == 0 {
             let value: Value = serde_json::from_slice(&data)?;
-            if value["id"] == 2 {
+            if supports_get && value["id"] == 2 {
+                if value.get("error").is_none()
+                    && let (Some(c), Some(r)) = (
+                        value["result"]["cols"]
+                            .as_u64()
+                            .and_then(|v| u16::try_from(v).ok()),
+                        value["result"]["rows"]
+                            .as_u64()
+                            .and_then(|v| u16::try_from(v).ok()),
+                    )
+                    && c > 0
+                    && r > 0
+                {
+                    prior_size = Some((c, r));
+                }
+                continue;
+            }
+            if value["id"] == attach_id {
                 ensure!(value.get("error").is_none(), "Herdr attach: {value}");
                 break value["result"].clone();
             }
@@ -173,7 +229,14 @@ async fn connect_and_attach(
             .context("Herdr attach channel missing")?,
     )?;
     let automatic_input = hello_auto && attach_result["automatic_input"] == true;
-    Ok((reader, write_half, channel, automatic_input))
+    let resized_on_attach = prior_size.is_some_and(|(c, r)| c != params.cols || r != params.rows);
+    Ok((
+        reader,
+        write_half,
+        channel,
+        automatic_input,
+        resized_on_attach,
+    ))
 }
 
 enum WriteCommand {
@@ -241,6 +304,7 @@ struct RemoteAttachment {
     event_rx: mpsc::Receiver<PtyEvent>,
     runtime: tokio::runtime::Handle,
     reader_abort: AbortHandle,
+    resized_on_attach: bool,
 }
 
 impl PtyAttachment for RemoteAttachment {
@@ -271,6 +335,10 @@ impl PtyAttachment for RemoteAttachment {
 
     fn consumed(&mut self, len: usize) -> Result<()> {
         self.writer.consumed(len)
+    }
+
+    fn resized_on_attach(&self) -> bool {
+        self.resized_on_attach
     }
 
     fn detach(self: Box<Self>) {
@@ -323,7 +391,7 @@ impl PtyTransport for RemotePtyTransport {
                 .await
                 .map_err(|_| anyhow!("Timed out attaching to remote PTY {}", params.terminal))?
         };
-        let (mut reader, mut write_half, channel, automatic_input) =
+        let (mut reader, mut write_half, channel, automatic_input, resized_on_attach) =
             if tokio::runtime::Handle::try_current().is_ok() {
                 let (tx, rx) = std::sync::mpsc::sync_channel(1);
                 runtime.spawn(async move {
@@ -400,6 +468,7 @@ impl PtyTransport for RemotePtyTransport {
             event_rx,
             runtime,
             reader_abort: reader_handle.abort_handle(),
+            resized_on_attach,
         }))
     }
 }
@@ -439,6 +508,14 @@ mod tests {
     }
 
     fn start_mock_daemon(expected_core: &str, reject_mismatch: bool) -> MockDaemon {
+        start_mock_daemon_with_get(expected_core, reject_mismatch, None)
+    }
+
+    fn start_mock_daemon_with_get(
+        expected_core: &str,
+        reject_mismatch: bool,
+        prior_size: Option<(u16, u16)>,
+    ) -> MockDaemon {
         let rt = shared_remote_runtime().handle().clone();
         let home = tempfile::tempdir().unwrap();
         let store = Arc::new(DeviceTokenStore::open(home.path()));
@@ -481,6 +558,7 @@ mod tests {
                         accepted,
                         expected_core,
                         reject_mismatch,
+                        prior_size,
                         ftx,
                         tokens_seen,
                     )
@@ -504,6 +582,7 @@ mod tests {
         accepted: AcceptedStream,
         expected_core: String,
         reject_mismatch: bool,
+        prior_size: Option<(u16, u16)>,
         frames_tx: mpsc::UnboundedSender<RecordedFrame>,
         auth_tokens_seen: Arc<Mutex<Vec<Option<String>>>>,
     ) -> Result<()> {
@@ -550,26 +629,48 @@ mod tests {
             .context("EOF before hello")?;
         let hello: Value = serde_json::from_str(&hello_line)?;
         ensure!(hello["method"] == "hello");
+        let methods = if prior_size.is_some() {
+            json!(["hello", "terminal.get", "terminal.attach"])
+        } else {
+            json!(["hello", "terminal.attach"])
+        };
         write_json_line_async(
             &mut writer,
-            &json!({"jsonrpc":"2.0","id":hello["id"],"result":{"generation":1,"framed":true,"features":["automatic_input"]}}),
+            &json!({"jsonrpc":"2.0","id":hello["id"],"result":{"generation":1,"framed":true,"features":["automatic_input"],"methods":methods}}),
         )
         .await?;
 
-        let (ch0, kind0, attach_bytes) = read_frame_async(&mut reader).await?;
-        ensure!(ch0 == 0 && kind0 == 0);
-        let attach_req: Value = serde_json::from_slice(&attach_bytes)?;
-        ensure!(attach_req["method"] == "terminal.attach");
         let channel: u32 = 7;
-        let attach_reply = json!({
-            "jsonrpc": "2.0",
-            "id": attach_req["id"],
-            "result": {
-                "channel": channel,
-                "automatic_input": true,
+        loop {
+            let (ch0, kind0, req_bytes) = read_frame_async(&mut reader).await?;
+            ensure!(ch0 == 0 && kind0 == 0);
+            let req: Value = serde_json::from_slice(&req_bytes)?;
+            if req["method"] == "terminal.get" {
+                let (c, r) = prior_size.context("unexpected terminal.get")?;
+                let get_reply = json!({
+                    "jsonrpc": "2.0",
+                    "id": req["id"],
+                    "result": {
+                        "address": req["params"]["terminal"],
+                        "cols": c,
+                        "rows": r,
+                    }
+                });
+                write_frame_async(&mut writer, 0, 0, &serde_json::to_vec(&get_reply)?).await?;
+                continue;
             }
-        });
-        write_frame_async(&mut writer, 0, 0, &serde_json::to_vec(&attach_reply)?).await?;
+            ensure!(req["method"] == "terminal.attach");
+            let attach_reply = json!({
+                "jsonrpc": "2.0",
+                "id": req["id"],
+                "result": {
+                    "channel": channel,
+                    "automatic_input": true,
+                }
+            });
+            write_frame_async(&mut writer, 0, 0, &serde_json::to_vec(&attach_reply)?).await?;
+            break;
+        }
 
         // Emit initial Resize + Data banner so attach clients immediately see both events.
         let mut rsz = Vec::with_capacity(4);
@@ -901,5 +1002,61 @@ mod tests {
                 .contains("banner:tty-session")
         );
         evict_session("core-conc", "tty-session");
+    }
+
+    #[test]
+    fn remote_pty_transport_pipelines_terminal_get_and_tracks_resized_on_attach() {
+        let params_90x30 = PtyAttachParams {
+            core_id: "core-get".into(),
+            terminal: "tty-get".into(),
+            cols: 90,
+            rows: 30,
+            display: DisplayFacts::default(),
+        };
+
+        // 1. Mismatched prior size (200x120 -> 90x30) sets resized_on_attach() = true.
+        let daemon_mismatch = start_mock_daemon_with_get("core-get", true, Some((200, 120)));
+        let client_mismatch = Arc::new(
+            ClientTransport::connect_tcp(
+                daemon_mismatch.addr.clone(),
+                daemon_mismatch.token.clone(),
+                "ios-get".into(),
+            )
+            .unwrap(),
+        );
+        let remote_mismatch = RemotePtyTransport::with_transport(client_mismatch).unwrap();
+        let att_mismatch = remote_mismatch.attach(&params_90x30).unwrap();
+        assert!(att_mismatch.resized_on_attach());
+        drop(att_mismatch);
+
+        // 2. Matching prior size (90x30 -> 90x30) sets resized_on_attach() = false.
+        let daemon_same = start_mock_daemon_with_get("core-get", true, Some((90, 30)));
+        let client_same = Arc::new(
+            ClientTransport::connect_tcp(
+                daemon_same.addr.clone(),
+                daemon_same.token.clone(),
+                "ios-get".into(),
+            )
+            .unwrap(),
+        );
+        let remote_same = RemotePtyTransport::with_transport(client_same).unwrap();
+        let att_same = remote_same.attach(&params_90x30).unwrap();
+        assert!(!att_same.resized_on_attach());
+        drop(att_same);
+
+        // 3. Legacy server without terminal.get advertised falls back with resized_on_attach() = false.
+        let daemon_legacy = start_mock_daemon_with_get("core-get", true, None);
+        let client_legacy = Arc::new(
+            ClientTransport::connect_tcp(
+                daemon_legacy.addr.clone(),
+                daemon_legacy.token.clone(),
+                "ios-get".into(),
+            )
+            .unwrap(),
+        );
+        let remote_legacy = RemotePtyTransport::with_transport(client_legacy).unwrap();
+        let att_legacy = remote_legacy.attach(&params_90x30).unwrap();
+        assert!(!att_legacy.resized_on_attach());
+        drop(att_legacy);
     }
 }

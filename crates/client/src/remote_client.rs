@@ -18,8 +18,8 @@ use canban_terminal::{RemotePtyTransport, session::PtyTransport};
 use canban_transport::ClientTransport;
 use canban_types::{
     AppEvent, Config, GlobalEnvSyncSummary, HostConnectionState, HostSummary, HostTransport,
-    SavedHost, Snapshot, SyncAction, SyncItemState, SyncItemView, is_device_token, is_pairing_code,
-    normalize_daemon_addr, now,
+    RuntimeState, SavedHost, Snapshot, SyncAction, SyncItemState, SyncItemView, TerminalEntry,
+    is_device_token, is_pairing_code, normalize_daemon_addr, now,
 };
 use serde_json::{Value, json};
 use std::{
@@ -32,23 +32,40 @@ use tokio::sync::{Notify, broadcast, mpsc, watch};
 
 const DEFAULT_READ_CACHE_BUDGET: u64 = 20 * 1024 * 1024;
 const PUSH_DEBOUNCE: Duration = Duration::from_millis(30);
+const PUSH_MAX_DEBOUNCE: Duration = Duration::from_millis(100);
 const MAX_BACKOFF: Duration = Duration::from_secs(10);
-const SUBSCRIBE_TOPICS: &[&str] = &[
-    "application",
-    "github",
-    "review",
-    "configuration",
-    "desktop",
-    "schedules",
-    "terminals",
-    "worktrees",
-    "execution",
-    "host",
-    "resync",
-    "usage",
-    "utilities",
-    "update",
-];
+const SUBSCRIBE_TOPICS: &[&str] = &["snapshot", "update", "utilities", "usage", "herdr"];
+
+fn count_active_agents_in(terminals: &[TerminalEntry]) -> usize {
+    terminals
+        .iter()
+        .filter(|t| {
+            t.agent
+                .as_ref()
+                .is_some_and(|a| matches!(a.state.as_str(), "starting" | "running" | "working"))
+        })
+        .count()
+}
+
+fn count_active_agents(s: &Snapshot) -> usize {
+    count_active_agents_in(&s.terminals)
+}
+
+fn is_runtime_topic(topic: &str) -> bool {
+    matches!(topic, "terminals" | "reclaim")
+}
+
+fn merge_push_topic(current: &'static str, incoming: &'static str) -> &'static str {
+    if current == "resync" || incoming == "resync" {
+        "resync"
+    } else if current == "github" || incoming == "github" {
+        "github"
+    } else if !is_runtime_topic(current) && is_runtime_topic(incoming) {
+        current
+    } else {
+        incoming
+    }
+}
 
 /// Configuration for [`RemoteClient`].
 #[derive(Clone, Debug)]
@@ -137,13 +154,7 @@ impl RemoteHostSlot {
 
     fn summary(&self) -> HostSummary {
         let outbox = self.outbox.lock().unwrap();
-        let active_agents = self
-            .cached
-            .snapshot
-            .terminals
-            .iter()
-            .filter(|t| t.has_active_agent())
-            .count();
+        let active_agents = count_active_agents(&self.cached.snapshot);
         HostSummary {
             id: self.saved.id.clone(),
             name: self.saved.name.clone(),
@@ -356,6 +367,7 @@ fn apply_state_to_slot(
     state_val: &Value,
     rtt_ms: Option<u64>,
     probe_val: Option<&Value>,
+    preferred_topic: Option<&'static str>,
 ) -> Option<&'static str> {
     let changed = state_val["changed"] == true || state_val.get("snapshot").is_some();
     let prev_marker = slot.last_marker.clone();
@@ -421,10 +433,18 @@ fn apply_state_to_slot(
         slot.last_marker = next_marker.clone();
     }
 
-    if !was_connected {
+    if !was_connected || preferred_topic == Some("resync") {
         Some("resync")
     } else if changed {
-        Some(change_topic(true, &prev_marker, &slot.last_marker))
+        Some(
+            if prev_marker["github_revision"] != slot.last_marker["github_revision"] {
+                "github"
+            } else if let Some(topic) = preferred_topic {
+                topic
+            } else {
+                change_topic(true, &prev_marker, &slot.last_marker)
+            },
+        )
     } else {
         None
     }
@@ -557,15 +577,18 @@ impl RemoteClient {
         let Some(this) = self.upgrade_self() else {
             return;
         };
-        let (epoch, notify) = {
+        let (epoch, old_notify, notify) = {
             let mut guard = self.hosts.write().unwrap();
             let Some(slot) = guard.get_mut(host_id) else {
                 return;
             };
             slot.supervisor_epoch = slot.supervisor_epoch.wrapping_add(1);
-            (slot.supervisor_epoch, Arc::clone(&slot.supervisor_notify))
+            let next_notify = Arc::new(Notify::new());
+            let prev_notify =
+                std::mem::replace(&mut slot.supervisor_notify, Arc::clone(&next_notify));
+            (slot.supervisor_epoch, prev_notify, next_notify)
         };
-        notify.notify_one();
+        old_notify.notify_waiters();
         let hid = host_id.to_owned();
         let shutdown_rx = self.shutdown_tx.subscribe();
         self.runtime_handle.spawn(async move {
@@ -766,6 +789,7 @@ impl RemoteClient {
                     &state_val,
                     Some(rtt_ms),
                     Some(&probe_val),
+                    None,
                 );
                 let summary = slot.summary();
                 let notify = was_enabled.then(|| Arc::clone(&slot.supervisor_notify));
@@ -800,6 +824,7 @@ impl RemoteClient {
                     &state_val,
                     Some(rtt_ms),
                     Some(&probe_val),
+                    None,
                 );
                 let summary = slot.summary();
                 guard.insert(hid.clone(), slot);
@@ -1036,6 +1061,37 @@ impl RemoteClient {
         Ok(merged)
     }
 
+    /// Merges the lightweight runtime state (`terminals`, `terminal_contexts`, `reclaim_status`,
+    /// `merging_cards`) across enabled and offline-cached hosts with optimistic outbox projections.
+    pub fn merged_runtime_state(&self) -> Result<RuntimeState> {
+        let guard = self.hosts.read().unwrap();
+        let mut combined = RuntimeState::default();
+        for slot in guard.values() {
+            if !slot.saved.enabled && slot.cached.saved_at == 0 {
+                continue;
+            }
+            let outbox = slot.outbox.lock().unwrap();
+            let mut host_snap = slot.cached.snapshot.clone();
+            if !outbox.ops.is_empty() {
+                canban_sync::apply(&mut host_snap, &slot.saved.id, &outbox.ops);
+            }
+            let active_agents = count_active_agents(&host_snap);
+            let has_durable = !host_snap.projects.is_empty() || !host_snap.cards.is_empty();
+            let rt = RuntimeState {
+                terminals: host_snap.terminals,
+                terminal_contexts: host_snap.terminal_contexts,
+                reclaim_status: host_snap.reclaim_status,
+                merging_cards: host_snap.merging_cards,
+                terminal_hosts: BTreeMap::new(),
+                host_active_agents: BTreeMap::from([(slot.saved.id.clone(), active_agents)]),
+            };
+            if slot.saved.enabled || has_durable || !rt.terminals.is_empty() {
+                combined.merge_remote(rt, &slot.saved.id);
+            }
+        }
+        Ok(combined)
+    }
+
     /// Resolves which saved host owns the target entity or project for an RPC call.
     pub fn resolve_target_host(
         &self,
@@ -1139,7 +1195,7 @@ impl RemoteClient {
                     return Ok(val);
                 }
                 Err(err) if is_connection_error(&err) => {
-                    self.mark_slot_disconnected(&host_id, Some(client_gen), err.to_string());
+                    self.mark_slot_disconnected(&host_id, Some(client_gen), err.to_string(), true);
                     return self.offline_fallback(&host_id, method, raw_params_for_cache, err);
                 }
                 Err(err) => return Err(err),
@@ -1161,7 +1217,7 @@ impl RemoteClient {
                 Ok(v) => return Ok(v),
                 Err(err) if !is_connection_error(&err) => return Err(err),
                 Err(err) => {
-                    self.mark_slot_disconnected(host_id, Some(client_gen), err.to_string());
+                    self.mark_slot_disconnected(host_id, Some(client_gen), err.to_string(), true);
                 }
             }
         }
@@ -1320,7 +1376,13 @@ impl RemoteClient {
         }
     }
 
-    fn mark_slot_disconnected(&self, host_id: &str, expected_gen: Option<u64>, err_msg: String) {
+    fn mark_slot_disconnected(
+        &self,
+        host_id: &str,
+        expected_gen: Option<u64>,
+        err_msg: String,
+        wake_supervisor: bool,
+    ) {
         let changed = {
             let mut guard = self.hosts.write().unwrap();
             let Some(slot) = guard.get_mut(host_id) else {
@@ -1346,7 +1408,9 @@ impl RemoteClient {
             };
             let was_conn = slot.client.is_some();
             slot.clear_connection(next_state);
-            slot.supervisor_notify.notify_one();
+            if wake_supervisor && was_conn {
+                slot.supervisor_notify.notify_one();
+            }
             was_conn
         };
         if changed {
@@ -1659,7 +1723,7 @@ impl RemoteClient {
         let after = if saved_at == 0 {
             Value::Null
         } else {
-            last_marker
+            last_marker["revision"].clone()
         };
         let state_res = transport
             .call_async("app.state", &json!({"after": after}))
@@ -1720,6 +1784,7 @@ impl RemoteClient {
                 &state_val,
                 Some(rtt_ms),
                 Some(&probe_val),
+                None,
             );
             let conn_gen = slot.conn_gen;
             if persist_needed {
@@ -1742,6 +1807,7 @@ impl RemoteClient {
         &self,
         host_id: &str,
         client: &Arc<ClientTransport>,
+        preferred_topic: Option<&'static str>,
         card_id: Option<String>,
     ) -> Result<()> {
         let (after, saved_at) = {
@@ -1751,7 +1817,11 @@ impl RemoteClient {
                 .with_context(|| format!("Unknown host '{host_id}'"))?;
             (slot.last_marker.clone(), slot.cached.saved_at)
         };
-        let req_after = if saved_at == 0 { Value::Null } else { after };
+        let req_after = if saved_at == 0 {
+            Value::Null
+        } else {
+            after["revision"].clone()
+        };
         let start = Instant::now();
         let state_val = client
             .call_async("app.state", &json!({"after": req_after}))
@@ -1763,11 +1833,72 @@ impl RemoteClient {
             let Some(slot) = guard.get_mut(host_id) else {
                 return Ok(());
             };
-            apply_state_to_slot(slot, &self.config.data_dir, &state_val, Some(rtt_ms), None)
+            apply_state_to_slot(
+                slot,
+                &self.config.data_dir,
+                &state_val,
+                Some(rtt_ms),
+                None,
+                preferred_topic,
+            )
         };
         if let Some(topic) = emitted_topic {
             self.emit_host(host_id, AppEvent::Changed { topic, card_id });
         }
+        Ok(())
+    }
+
+    async fn refresh_host_runtime_async(
+        &self,
+        host_id: &str,
+        client: &Arc<ClientTransport>,
+        topic: &'static str,
+        card_id: Option<String>,
+        latest_marker: &Value,
+    ) -> Result<()> {
+        let start = Instant::now();
+        let mut val = match client.call_async("runtime.state", &json!({})).await {
+            Ok(v) => v,
+            Err(err) if !is_connection_error(&err) => {
+                return self
+                    .refresh_host_now_async(host_id, client, Some(topic), card_id)
+                    .await;
+            }
+            Err(err) => return Err(err),
+        };
+        let rtt_ms = start.elapsed().as_millis() as u64;
+        let Ok(mut rt) = serde_json::from_value::<RuntimeState>(val["runtime"].take()) else {
+            return self
+                .refresh_host_now_async(host_id, client, Some(topic), card_id)
+                .await;
+        };
+        rt.terminal_hosts.clear();
+        rt.host_active_agents.clear();
+        rt.register_host(host_id);
+        let active_agents = count_active_agents_in(&rt.terminals);
+        rt.host_active_agents
+            .insert(host_id.to_owned(), active_agents);
+
+        {
+            let mut guard = self.hosts.write().unwrap();
+            let Some(slot) = guard.get_mut(host_id) else {
+                return Ok(());
+            };
+            slot.cached.snapshot.apply_runtime_state(rt);
+            slot.cached.snapshot.register_host_entities(host_id);
+            slot.last_synced_at = Some(now());
+            if let HostConnectionState::Connected {
+                rtt_ms: ref mut prev_rtt,
+                ..
+            } = slot.connection
+            {
+                *prev_rtt = rtt_ms;
+            }
+            if !latest_marker["revision"].is_null() {
+                slot.last_marker = latest_marker.clone();
+            }
+        }
+        self.emit_host(host_id, AppEvent::Changed { topic, card_id });
         Ok(())
     }
 
@@ -1904,6 +2035,7 @@ impl RemoteClient {
                         host_id,
                         Some(client_gen),
                         "Connection lost during outbox replay".to_owned(),
+                        true,
                     );
                     break;
                 }
@@ -1912,7 +2044,9 @@ impl RemoteClient {
 
         if report.applied > 0 || report.conflicts > 0 || report.failed > 0 {
             if let Some(client) = active_client {
-                let _ = self.refresh_host_now_async(host_id, &client, None).await;
+                let _ = self
+                    .refresh_host_now_async(host_id, &client, Some("application"), None)
+                    .await;
             }
             self.emit_host(
                 host_id,
@@ -1938,9 +2072,14 @@ impl RemoteClient {
         };
         match existing {
             Some((c, client_gen)) => {
-                if let Err(err) = self.refresh_host_now_async(host_id, &c, None).await {
+                if let Err(err) = self.refresh_host_now_async(host_id, &c, None, None).await {
                     if is_connection_error(&err) {
-                        self.mark_slot_disconnected(host_id, Some(client_gen), err.to_string());
+                        self.mark_slot_disconnected(
+                            host_id,
+                            Some(client_gen),
+                            err.to_string(),
+                            true,
+                        );
                         self.connect_slot_async(host_id).await?.0
                     } else {
                         return Err(err);
@@ -1954,6 +2093,14 @@ impl RemoteClient {
         self.drain_outbox_async(host_id).await?;
         Ok(())
     }
+}
+
+struct PendingRefresh {
+    topic: &'static str,
+    card_id: Option<String>,
+    latest_marker: Value,
+    deadline: tokio::time::Instant,
+    max_deadline: tokio::time::Instant,
 }
 
 async fn host_supervisor_task(
@@ -2042,12 +2189,17 @@ async fn host_supervisor_task(
 
         let _ = rc.drain_outbox_async(&host_id).await;
 
-        let sub_res =
-            open_async_subscribe(&transport, &last_marker, SUBSCRIBE_TOPICS, Some(15_000)).await;
+        let sub_res = open_async_subscribe(
+            &transport,
+            &last_marker["revision"],
+            SUBSCRIBE_TOPICS,
+            Some(15_000),
+        )
+        .await;
         let (mut stream, handshake) = match sub_res {
             Ok(res) => res,
             Err(err) => {
-                rc.mark_slot_disconnected(&host_id, Some(conn_gen), err.to_string());
+                rc.mark_slot_disconnected(&host_id, Some(conn_gen), err.to_string(), false);
                 if is_auth_error(&err) {
                     tokio::select! {
                         _ = notify.notified() => { backoff = Duration::from_millis(250); }
@@ -2067,14 +2219,13 @@ async fn host_supervisor_task(
         };
 
         if handshake.changed {
-            let _ = rc.refresh_host_now_async(&host_id, &transport, None).await;
+            let _ = rc
+                .refresh_host_now_async(&host_id, &transport, None, None)
+                .await;
             let _ = rc.drain_outbox_async(&host_id).await;
         }
 
-        let mut pending_card_id: Option<String> = None;
-        let debounce = tokio::time::sleep(Duration::from_secs(86_400));
-        tokio::pin!(debounce);
-        let mut debounce_active = false;
+        let mut pending: Option<PendingRefresh> = None;
 
         loop {
             {
@@ -2095,16 +2246,57 @@ async fn host_supervisor_task(
                     return;
                 }
                 _ = notify.notified() => {
-                    let _ = rc.refresh_host_now_async(&host_id, &transport, None).await;
+                    let _ = rc.refresh_host_now_async(&host_id, &transport, None, None).await;
                     let _ = rc.drain_outbox_async(&host_id).await;
                 }
-                _ = &mut debounce, if debounce_active => {
-                    debounce_active = false;
-                    let cid = pending_card_id.take();
-                    if let Err(err) = rc.refresh_host_now_async(&host_id, &transport, cid).await
+                _ = async {
+                    match pending.as_ref() {
+                        Some(p) => tokio::time::sleep_until(p.deadline).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    let Some(p) = pending.take() else {
+                        continue;
+                    };
+                    let (still_active, already_fetched, can_use_runtime) = {
+                        let guard = rc.hosts.read().unwrap();
+                        let Some(slot) = guard.get(&host_id) else {
+                            break;
+                        };
+                        let active = slot.saved.enabled
+                            && slot.supervisor_epoch == epoch
+                            && slot.conn_gen == conn_gen
+                            && slot.client.is_some();
+                        let rev = &p.latest_marker["revision"];
+                        let up_to_date = p.topic != "resync"
+                            && !rev.is_null()
+                            && slot.last_marker["revision"] == *rev;
+                        let can_runtime = is_runtime_topic(p.topic) && slot.cached.saved_at > 0;
+                        (active, up_to_date, can_runtime)
+                    };
+                    if !still_active {
+                        break;
+                    }
+                    if already_fetched {
+                        continue;
+                    }
+                    let refresh_res = if can_use_runtime {
+                        rc.refresh_host_runtime_async(
+                            &host_id,
+                            &transport,
+                            p.topic,
+                            p.card_id,
+                            &p.latest_marker,
+                        )
+                        .await
+                    } else {
+                        rc.refresh_host_now_async(&host_id, &transport, Some(p.topic), p.card_id)
+                            .await
+                    };
+                    if let Err(err) = refresh_res
                         && is_connection_error(&err)
                     {
-                        rc.mark_slot_disconnected(&host_id, Some(conn_gen), err.to_string());
+                        rc.mark_slot_disconnected(&host_id, Some(conn_gen), err.to_string(), false);
                         break;
                     }
                 }
@@ -2117,17 +2309,38 @@ async fn host_supervisor_task(
                             }
                         }
                         Ok(Some(PushFrame::StateChanged { topic, card_id, marker })) => {
+                            let rev = &marker["revision"];
                             let same_marker = {
                                 let guard = rc.hosts.read().unwrap();
-                                guard.get(&host_id).is_some_and(|s| s.last_marker == marker)
+                                guard.get(&host_id).is_some_and(|s| {
+                                    topic != "resync"
+                                        && !rev.is_null()
+                                        && s.last_marker["revision"] == *rev
+                                })
                             };
-                            if topic == "resync" || !same_marker {
-                                if card_id.is_some() {
-                                    pending_card_id = card_id;
+                            if same_marker {
+                                continue;
+                            }
+                            let now_i = tokio::time::Instant::now();
+                            match &mut pending {
+                                Some(p) => {
+                                    p.topic = merge_push_topic(p.topic, topic);
+                                    if p.card_id != card_id {
+                                        p.card_id = None;
+                                    }
+                                    if !rev.is_null() {
+                                        p.latest_marker = marker;
+                                    }
+                                    p.deadline = (now_i + PUSH_DEBOUNCE).min(p.max_deadline);
                                 }
-                                if !debounce_active {
-                                    debounce.as_mut().reset(tokio::time::Instant::now() + PUSH_DEBOUNCE);
-                                    debounce_active = true;
+                                None => {
+                                    pending = Some(PendingRefresh {
+                                        topic,
+                                        card_id,
+                                        latest_marker: marker,
+                                        deadline: now_i + PUSH_DEBOUNCE,
+                                        max_deadline: now_i + PUSH_MAX_DEBOUNCE,
+                                    });
                                 }
                             }
                         }
@@ -2144,11 +2357,16 @@ async fn host_supervisor_task(
                             rc.emit(ClientEvent::HerdrInstall { host_id: host_id.clone(), state });
                         }
                         Ok(None) => {
-                            rc.mark_slot_disconnected(&host_id, Some(conn_gen), "Server closed push subscription".into());
+                            rc.mark_slot_disconnected(
+                                &host_id,
+                                Some(conn_gen),
+                                "Server closed push subscription".into(),
+                                false,
+                            );
                             break;
                         }
                         Err(err) => {
-                            rc.mark_slot_disconnected(&host_id, Some(conn_gen), err.to_string());
+                            rc.mark_slot_disconnected(&host_id, Some(conn_gen), err.to_string(), false);
                             break;
                         }
                     }
@@ -2561,5 +2779,356 @@ mod tests {
         )
         .unwrap();
         assert_eq!(server_created.title, "Offline Created Card");
+    }
+
+    #[test]
+    fn merge_push_topic_preserves_durable_github_and_resync_precedence() {
+        assert_eq!(merge_push_topic("terminals", "reclaim"), "reclaim");
+        assert_eq!(merge_push_topic("reclaim", "terminals"), "terminals");
+        assert_eq!(merge_push_topic("application", "terminals"), "application");
+        assert_eq!(merge_push_topic("application", "reclaim"), "application");
+        assert_eq!(merge_push_topic("terminals", "application"), "application");
+        assert_eq!(merge_push_topic("github", "application"), "github");
+        assert_eq!(merge_push_topic("terminals", "github"), "github");
+        assert_eq!(merge_push_topic("github", "resync"), "resync");
+        assert_eq!(merge_push_topic("resync", "terminals"), "resync");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runtime_only_push_uses_runtime_state_and_updates_merged_runtime_state() {
+        use canban_transport::{
+            AcceptedStream, DeviceTokenStore, MAX_FRAME_BYTES, PairingCodeStore, RevocationBus,
+            ServerTransportConfig, read_bounded_line, spawn_tcp_listener, write_json_line_async,
+        };
+        use canban_types::{TerminalReclaimStatus, Workflow};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let dir = tempfile::tempdir().unwrap();
+        let server_home = dir.path().join("mock-server-home");
+        let client_dir = dir.path().join("client-data");
+        std::fs::create_dir_all(&server_home).unwrap();
+
+        let store = Arc::new(DeviceTokenStore::open(&server_home));
+        let (_dev, token) = store.issue_device("ios-runtime-test").unwrap();
+        let pairing_codes = Arc::new(PairingCodeStore::open(&server_home));
+        let revocations = RevocationBus::new();
+        let active_tcp = Arc::new(AtomicUsize::new(0));
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let (push_tx, _) = broadcast::channel::<(String, Value)>(16);
+
+        let app_state_calls = Arc::new(AtomicUsize::new(0));
+        let runtime_state_calls = Arc::new(AtomicUsize::new(0));
+        let subscribed_notify = Arc::new(Notify::new());
+
+        let durable_project: Project = serde_json::from_value(json!({
+            "id": "p-rt",
+            "name": "Durable Project",
+            "directory": "/srv/durable",
+            "workflow": Workflow::default(),
+            "created_at": 1000,
+        }))
+        .unwrap();
+        let durable_card: Card = serde_json::from_value(json!({
+            "id": "c-rt",
+            "project_id": "p-rt",
+            "number": 1,
+            "title": "Durable Card",
+            "body": "Must survive runtime refresh",
+            "stage": "todo",
+            "revision": 2,
+            "attention": null,
+            "archived_at": null,
+            "archive": null,
+            "archive_error": null,
+            "worktree": null,
+            "created_at": 1000,
+        }))
+        .unwrap();
+        let mut initial_snap_typed = Snapshot::default();
+        initial_snap_typed.projects.push(durable_project);
+        initial_snap_typed.cards.push(durable_card);
+        let initial_snap = serde_json::to_value(&initial_snap_typed).unwrap();
+
+        let latest_runtime: Arc<Mutex<RuntimeState>> =
+            Arc::new(Mutex::new(RuntimeState::default()));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let cfg = Arc::new(ServerTransportConfig {
+            home: server_home,
+            server_id: "srv-runtime-mock".into(),
+            api_version: 85,
+            device_store: store,
+            pairing_codes,
+            revocations,
+            active_tcp_connections: active_tcp,
+        });
+
+        let handle = tokio::runtime::Handle::current();
+        let ptx = push_tx.clone();
+        let app_calls = app_state_calls.clone();
+        let rt_calls = runtime_state_calls.clone();
+        let sub_notify = subscribed_notify.clone();
+        let snap_ref = Arc::new(initial_snap);
+        let rt_ref = latest_runtime.clone();
+        spawn_tcp_listener(
+            &handle,
+            listener,
+            cfg,
+            stop_rx,
+            move |accepted: AcceptedStream| {
+                let mut prx = ptx.subscribe();
+                let app_calls = app_calls.clone();
+                let rt_calls = rt_calls.clone();
+                let sub_notify = sub_notify.clone();
+                let snap_ref = snap_ref.clone();
+                let rt_ref = rt_ref.clone();
+                async move {
+                    let (read_half, mut writer) = tokio::io::split(accepted.stream);
+                    let mut reader = BufReader::new(read_half);
+                    let mut first_req = accepted.initial_request;
+                    loop {
+                        let req: Value = match first_req.take() {
+                            Some(v) => v,
+                            None => {
+                                let Ok(Some(line)) =
+                                    read_bounded_line(&mut reader, MAX_FRAME_BYTES).await
+                                else {
+                                    break;
+                                };
+                                serde_json::from_str(&line).unwrap()
+                            }
+                        };
+                        let id = req["id"].clone();
+                        match req["method"].as_str() {
+                            Some("host.probe") => {
+                                let _ = write_json_line_async(
+                                    &mut writer,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "server_id": "srv-runtime-mock",
+                                            "api_version": 85,
+                                            "version": "test",
+                                            "platform": "macos",
+                                        }
+                                    }),
+                                )
+                                .await;
+                            }
+                            Some("app.state") => {
+                                app_calls.fetch_add(1, Ordering::SeqCst);
+                                let _ = write_json_line_async(
+                                    &mut writer,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "changed": true,
+                                            "revision": ["srv-runtime-mock", "i1", 1, 1, 0],
+                                            "github_revision": 0,
+                                            "server_id": "srv-runtime-mock",
+                                            "snapshot": *snap_ref,
+                                            "config": Config::default(),
+                                            "home": "/tmp/srv",
+                                        }
+                                    }),
+                                )
+                                .await;
+                            }
+                            Some("runtime.state") => {
+                                rt_calls.fetch_add(1, Ordering::SeqCst);
+                                let rt = rt_ref.lock().unwrap().clone();
+                                let _ = write_json_line_async(
+                                    &mut writer,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "server_id": "srv-runtime-mock",
+                                            "runtime": rt,
+                                        }
+                                    }),
+                                )
+                                .await;
+                            }
+                            Some("app.subscribe") => {
+                                let topics: Vec<String> = req["params"]["topics"]
+                                    .as_array()
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(|v| v.as_str().map(str::to_owned))
+                                    .collect();
+                                assert!(
+                                    topics.iter().any(|t| t == "snapshot"),
+                                    "remote subscriber must request 'snapshot' stream, got {topics:?}"
+                                );
+                                let _ = write_json_line_async(
+                                    &mut writer,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "subscribed": true,
+                                            "server_id": "srv-runtime-mock",
+                                            "api_version": 85,
+                                            "revision": ["srv-runtime-mock", "i1", 1, 1, 0],
+                                            "changed": false,
+                                            "github_revision": 0,
+                                            "heartbeat_ms": 5000,
+                                        }
+                                    }),
+                                )
+                                .await;
+                                sub_notify.notify_waiters();
+                                let mut buf = String::new();
+                                loop {
+                                    tokio::select! {
+                                        Ok((topic, rev)) = prx.recv() => {
+                                            let frame = json!({
+                                                "jsonrpc": "2.0",
+                                                "method": "event",
+                                                "params": {
+                                                    "seq": 2,
+                                                    "topic": topic,
+                                                    "card_id": null,
+                                                    "revision": rev,
+                                                    "github_revision": 0,
+                                                }
+                                            });
+                                            if write_json_line_async(&mut writer, &frame).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                        r = reader.read_line(&mut buf) => {
+                                            if matches!(r, Ok(0) | Err(_)) {
+                                                break;
+                                            }
+                                            buf.clear();
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            },
+        );
+
+        let creds = Arc::new(MemoryCredentialStore::new());
+        let client = RemoteClient::with_runtime(
+            RemoteClientConfig::new(client_dir),
+            creds,
+            tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+        let mut events = client.subscribe();
+
+        let sum = client
+            .add_host_async(SavedHost {
+                id: "host-rt".into(),
+                name: "Runtime Box".into(),
+                transport: HostTransport::Tcp { addr, token },
+                ssh_target: None,
+                server_id: Some("srv-runtime-mock".into()),
+                enabled: true,
+                added_at: now(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(sum.id, "host-rt");
+
+        // Wait until live app.subscribe stream is active, then drain initial resync events.
+        tokio::time::timeout(Duration::from_secs(3), subscribed_notify.notified())
+            .await
+            .expect("supervisor subscribed");
+        while events.try_recv().is_ok() {}
+        let baseline_app_calls = app_state_calls.load(Ordering::SeqCst);
+
+        // Push a pure runtime "terminals" change (working agent + reclaim status).
+        *latest_runtime.lock().unwrap() = RuntimeState {
+            terminals: vec![
+                serde_json::from_value::<TerminalEntry>(json!({
+                    "id": "t-rt-1",
+                    "conversation_id": null,
+                    "number": 1,
+                    "name": "Agent 1",
+                    "origin_project_id": "p-rt",
+                    "origin_card_id": "c-rt",
+                    "agent_engine": null,
+                    "runtime": null,
+                    "agent": {
+                        "project_id": "p-rt",
+                        "card_id": "c-rt",
+                        "number": 1,
+                        "provider": "claude",
+                        "state": "working",
+                        "instruction": "Do work",
+                        "cwd": "/srv/durable",
+                        "terminal": "t-rt-1",
+                        "started_at": 1750000000123_u64,
+                    },
+                    "created_at": 1001,
+                }))
+                .unwrap(),
+            ],
+            reclaim_status: vec![TerminalReclaimStatus {
+                terminal_id: "t-rt-1".into(),
+                paused: true,
+                reclaiming_soon: false,
+                auto_reclaiming: false,
+                interactive_followup: false,
+                deadline_at: None,
+            }],
+            terminal_hosts: BTreeMap::from([("t-rt-1".into(), "local".into())]),
+            host_active_agents: BTreeMap::from([("local".into(), 1)]),
+            ..Default::default()
+        };
+        let _ = push_tx.send((
+            "terminals".into(),
+            json!(["srv-runtime-mock", "i1", 2, 2, 0]),
+        ));
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(!remaining.is_zero(), "timed out waiting for terminals push");
+            if let Ok(Some(ClientEvent::Host {
+                host_id,
+                event: AppEvent::Changed { topic, .. },
+            })) = tokio::time::timeout(remaining, events.recv()).await
+            {
+                assert_eq!(host_id, "host-rt");
+                if topic == "terminals" {
+                    break;
+                }
+            }
+        }
+
+        // Pure runtime refresh must NOT have called app.state again!
+        assert_eq!(app_state_calls.load(Ordering::SeqCst), baseline_app_calls);
+        assert!(runtime_state_calls.load(Ordering::SeqCst) >= 1);
+
+        let rt = client.merged_runtime_state().unwrap();
+        assert_eq!(rt.terminals.len(), 1);
+        assert_eq!(rt.terminals[0].id, "t-rt-1");
+        assert_eq!(
+            rt.terminal_hosts.get("t-rt-1").map(String::as_str),
+            Some("host-rt")
+        );
+        assert_eq!(rt.host_active_agents.get("host-rt").copied(), Some(1));
+        assert_eq!(rt.reclaim_status.len(), 1);
+
+        // Durable project and card must remain intact in merged_snapshot().
+        let snap = client.merged_snapshot().unwrap();
+        assert_eq!(snap.projects.len(), 1);
+        assert_eq!(snap.cards.len(), 1);
+        assert_eq!(snap.cards[0].id, "c-rt");
+
+        let _ = stop_tx.send(true);
     }
 }

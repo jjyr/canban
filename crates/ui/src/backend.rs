@@ -733,6 +733,10 @@ impl UiBackend for RemoteBackend {
         self.client.merged_snapshot()
     }
 
+    fn merged_runtime_state(&self) -> Result<Option<RuntimeState>> {
+        Ok(Some(self.client.merged_runtime_state()?))
+    }
+
     fn host_summaries(&self) -> Vec<HostSummary> {
         self.client.host_summaries()
     }
@@ -997,6 +1001,11 @@ mod tests {
 
         let merged = backend.merged_snapshot().unwrap();
         assert_eq!(merged.cards.len(), 1);
+        let rt = backend
+            .merged_runtime_state()
+            .unwrap()
+            .expect("RemoteBackend supports merged_runtime_state");
+        assert!(rt.terminals.is_empty());
         assert_eq!(
             backend.resolve_target_host("card.update", &json!({"card_id": "c1"}), None),
             host_id
