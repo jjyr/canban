@@ -23,7 +23,7 @@ Status: native macOS (AppKit/Metal) and Linux (GTK4) desktop workbench with simu
 
 ## Shared pure-remote client & `UiBackend::RemoteBackend` (2026-11-23)
 
-`crates/client` (`canban-client`) implements a pure-remote client without `canban-app-server`, SQLite, or SSH subprocesses, combining native Tokio `app.subscribe` push streams and `call_async`/`connect_tcp_async` over `canban-transport`, multi-address QR v2 pairing (`canban://pair?v=2&...#<secret>`) + v1 fallback + concurrent reachability probing, pluggable `CredentialStore` (`FileCredentialStore` / `MemoryCredentialStore`), TCP `enc:v1:` secret sealing, cached `RemotePtyTransport`, and `canban-sync` offline outbox/read-cache/3-way conflict resolution. `canban-ui` exposes `RemoteBackend` unconditionally (even with `--no-default-features`).
+`crates/client` (`canban-client`) implements a pure-remote client without `canban-app-server`, SQLite, or SSH subprocesses, combining native Tokio `app.subscribe` push streams and `call_async`/`connect_tcp_async` over `canban-transport`, single-address QR pairing (`canban://<addr>[?sid=...&name=...]#<secret>`) with zero implicit fallback addresses, `TransportSecurity` (`Local`, `Tailscale`, `Ssh`, `UnverifiedTcp`), pluggable `CredentialStore` (`FileCredentialStore` / `MemoryCredentialStore`), TCP `enc:v1:` secret sealing, cached `RemotePtyTransport`, and `canban-sync` offline outbox/read-cache/3-way conflict resolution. `canban-ui` exposes `RemoteBackend` unconditionally (even with `--no-default-features`).
 
 ## Terminal cross-platform core & remote PTY transport (Phases 0–2, 2026-11-23)
 

@@ -12,7 +12,7 @@ Full mobile client connected to remote `canband` daemons over Tailscale or direc
 - **Terminals** tab for browsing `Card Agents`, `Shells`, and `Worktrees`, opening live sessions, and launching new Shells or Managed Branch Worktrees.
 - **Git Diff and delivery** with file list, unified per-file diff, `Return for rework`, and `Deliver…` (Queue Merge allowed on mobile).
 - **Offline Board and Card viewing/editing** across all stages and drafts; see [Offline editing and synchronization](offline-sync.md).
-- **QR pairing with multi-address probing**, preferring Tailscale MagicDNS and Tailscale IPv4 with manual override.
+- **QR pairing using the single address chosen on desktop**, with explicit `TransportSecurity` badges (`🔒` for Tailscale / SSH, `⚠` for other TCP) and zero implicit cross-network fallback.
 
 ## Visual style and platform adaptation
 
@@ -62,29 +62,25 @@ The navigation-bar title acts as a switcher menu for selecting the active Host a
 Desktop Settings -> Hosts                 Phone (first launch)
 ┌──────────────────────────────┐          ┌────────────────────┐
 │ Pair a phone                 │          │       Canban       │
-│  ┌────────┐  home-mac        │          │                    │
-│  │ ▓▓ ▓ ▓ │  home-mac.ts.net │  ──QR──▶ │  Scan QR code in   │
-│  │ ▓ ▓▓ ▓ │  100.64.1.2:7680 │  system  │  desktop Settings  │
-│  └────────┘  expires 04:59   │  camera  │  -> Hosts          │
-│ Paired devices               │  opens   │                    │
-│  iPhone 17 · 2m ago [Revoke] │  link    │ [Open Camera]      │
-└──────────────────────────────┘          │ [Paste URI]        │
-                                          └────────────────────┘
+│  Address: [home-mac.ts.net ▾]│          │                    │
+│  ┌────────┐  home-mac        │  ──QR──▶ │  Scan QR code in   │
+│  │ ▓▓ ▓ ▓ │  🔒 Tailscale    │  system  │  desktop Settings  │
+│  │ ▓ ▓▓ ▓ │  expires 04:59   │  camera  │  -> Hosts          │
+│  └────────┘                  │  opens   │                    │
+│ Paired devices               │  link    │ [Open Camera]      │
+│  iPhone 17 · 2m ago [Revoke] │          │ [Paste URI]        │
+└──────────────────────────────┘          └────────────────────┘
                                                     │
                                                     ▼
                                           ┌────────────────────────────────────┐
                                           │ Connect home-mac?                  │
                                           │ macOS · v20261120                  │
                                           │                                    │
-                                          │ ● 🔒 home-mac.ts.net               │
-                                          │      Tailscale · 12ms              │
-                                          │ ○ 🔒 100.64.1.2:7680               │
-                                          │      Tailscale · 14ms              │
-                                          │ ○ ⚠  192.168.1.20:7680             │
-                                          │      Not Tailscale · 9ms           │
+                                          │ 🔒 home-mac.ts.net:7680            │
+                                          │    Tailscale · 12ms                │
                                           │                                    │
-                                          │ 🔒 Tailscale = encrypted           │
-                                          │ ⚠  depends on your network         │
+                                          │ 🔒 Tailscale / SSH = encrypted     │
+                                          │ ⚠  Other TCP = depends on network  │
                                           │                                    │
                                           │ [Cancel]                 [Connect] │
                                           └────────────────────────────────────┘
@@ -221,33 +217,23 @@ Single-column unified diff by default; horizontal scroll for long lines with a l
 
 See [Offline editing and synchronization](offline-sync.md#ui-states-and-conflict-resolution) for the Sync screen and field-level conflict wireframes shared across desktop and mobile.
 
-## Multi-address pairing
+## Single-address pairing
 
-### Pairing URI v2
+### Single-address pairing URI
 
-Current code formats and parses v1 `canban://<addr>#<token>` (`format_pairing_uri` / `parse_pairing_uri` in [crates/types/src/hosts.rs](../crates/types/src/hosts.rs#L304-L329), CLI `canban pair` in [crates/cli/src/main.rs](../crates/cli/src/main.rs), and [crates/ui/src/hosts.rs](../crates/ui/src/hosts.rs)).
-
-Mobile and desktop pairing extend this with **URI v2** while continuing to accept v1 URIs:
+Desktop, CLI (`canban pair`), and mobile share a unified single-address pairing URI while also accepting bare `canban://<addr>#<secret>` strings:
 
 ```text
-canban://pair?v=2&sid=<server_id>&name=<hostname>&a=<host:port>&a=<host:port>...#<secret>
+canban://<host:port>[?sid=<server_id>&name=<hostname>]#<secret>
 ```
 
-- **Candidate generation:** `canban pair` and the desktop `Pair a phone` QR generator include **only addresses that `canband` is actually listening on** (never advertising unconfigured LAN interfaces when bound only to Tailscale), ordered by priority:
-  1. Tailscale MagicDNS FQDN (`<node>.<tailnet>.ts.net:<port>`)
-  2. Tailscale IPv4 (`100.x.y.z:<port>`)
-  3. Explicitly configured `--listen` / LAN addresses (`host:port`)
-- **Concurrent probing and auto-selection:** The client sends unauthenticated `host.probe` (see [Multi-host daemons](multi-host.md#21-daemon-network-listener-security-and-pairing-canban-serve)) concurrently to all `a=` candidates with a short timeout (~2 seconds):
-  - Rejects any endpoint whose returned `server_id` does not match `sid`.
-  - Automatically selects the highest-priority reachable candidate according to the order above.
-  - Displays every candidate on the confirmation screen with reachability and measured RTT so the user can manually override the selected address before tapping `Connect`.
-- **Persistence and reconnect:** All reachable candidates are saved as an ordered address list on the host entry. Later reconnects try the last-working address first, then probe remaining saved candidates if unreachable.
-- **Address security icons:** Each candidate on the pairing confirmation screen—and each saved address in `Settings -> Hosts`—shows a transport security icon based on address classification:
-  - **Tailscale addresses** (`*.ts.net` MagicDNS names, or IPs in `100.64.0.0/10` / `fd7a:115c:a1e0::/48`, matching `is_tailscale_ip` in `crates/app-server/src/network.rs`) display a lock/shield icon (`🔒`) with hint `"Tailscale — encrypted by WireGuard"`.
-  - **All other addresses** (LAN IPs, custom hostnames) display a caution icon (`⚠`) with hint `"Not Tailscale — may be unencrypted unless your own VPN protects it"`.
-  - Hints are purely informational and **never block selection or connection**; the user decides because Canban cannot inspect whether a non-Tailscale route runs inside the user's own VPN.
-- **Unreachable tailnet guidance:** If no candidate responds, show `"Tailscale is not connected on this phone"` with a shortcut button to open the Tailscale app alongside a `Retry` action.
-- **Desktop parity:** The same multi-candidate probe applies to desktop `Connect a Machine`.
+- **Explicit desktop selection (zero silent cross-network fallback):** On desktop (`Settings -> Hosts -> Pair a phone`) or CLI (`canban pair`), the user selects the single endpoint address they intend to expose (typically Tailscale MagicDNS `*.ts.net` or Tailscale IPv4 `100.x.y.z`, or an explicit LAN/custom VPN address).
+- **Single-address confirmation & probe:** The client parses the single address, optionally checks reachability/RTT with an unauthenticated TCP connect (`probe_addr`), displays the transport security badge before confirmation, and saves **only that chosen address**—never storing hidden fallback addresses or silently failing over between Tailscale and LAN routes. Switching addresses later is an explicit edit in `Settings -> Hosts`.
+- **Transport security icons:** Pairing confirmation cards and `Settings -> Hosts` rows display explicit link security badges (`TransportSecurity` in `canban-client`):
+  - **Local socket / Tailscale / SSH** (`Local`, `*.ts.net` / `100.64.0.0/10` / `fd7a:115c:a1e0::/48`, or `HostTransport::Ssh` encrypted tunnels): display a lock icon (`🔒`) with hint `"Tailscale — encrypted by WireGuard"` or `"SSH — encrypted tunnel"`.
+  - **All other TCP addresses** (LAN IPs, custom hostnames): display a caution icon (`⚠`) with hint `"Not Tailscale — may be unencrypted unless your own VPN protects it"`.
+  - Hints are purely informational and **never block selection or connection**; the user decides because Canban cannot inspect whether a non-Tailscale TCP route runs inside the user's own VPN.
+- **Unreachable tailnet guidance:** If a Tailscale endpoint does not respond, show `"Tailscale is not connected on this phone"` with a shortcut button to open the Tailscale app alongside a `Retry` action.
 - **Camera capture:** Because NSH has no camera or barcode scanner component, desktop renders the pairing URI as a QR code and the phone uses the OS camera to open the registered `canban://` deep link; an in-app `Paste URI` button serves as fallback.
 
 ### Transport security
@@ -255,13 +241,14 @@ canban://pair?v=2&sid=<server_id>&name=<hostname>&a=<host:port>&a=<host:port>...
 Link confidentiality is provided by the user's chosen network path (Tailscale WireGuard, a user-managed VPN, or the SSH tunnel fallback) rather than Canban-managed transport encryption:
 
 - `canband`'s TCP listener carries no application-layer encryption: JSON-RPC requests, Terminal byte streams, and the bearer token travel in plaintext over that TCP socket, so users should only expose `--listen` addresses that sit on an encrypted or private network.
+- Desktop already supports encrypted SSH tunnels via `HostTransport::Ssh`; mobile presently connects over TCP (Tailscale or another VPN) because iOS sandboxing forbids spawning `ssh` subprocesses, and any future pure-Rust SSH tunnel transport on mobile will share the same `🔒` `TransportSecurity::Ssh` classification.
 - Application-layer TLS (e.g., TLS 1.3 with QR-pinned certificates) and mandatory Tailscale-only enforcement were evaluated and declined on 2026-11-22 so users remain free to route traffic through their own VPN setups.
 
 ### Pairing credentials
 
-- **One-time pairing code -> per-device revocable token:** The QR / v2 pairing URI carries a short-lived (e.g., 5-minute) single-use pairing code rather than the shared `server.token`. On first connection, the client exchanges that pairing code for a **per-device revocable bearer token** persisted on `canband` (and stored in OS Keychain/Keystore on the client).
+- **One-time pairing code -> per-device revocable token:** The QR / pairing URI carries a short-lived (e.g., 5-minute) single-use pairing code rather than the shared `server.token`. On first connection, the client exchanges that pairing code for a **per-device revocable bearer token** persisted on `canband` (and stored in OS Keychain/Keystore on the client).
 - **Paired devices management:** Desktop `Settings -> Hosts` provides a `Paired devices` list showing device name, last seen time, and `[Revoke]` to invalidate an individual device's token without rotating tokens for other devices.
-- **Backward compatibility:** Legacy v1 `canban://<host>:<port>#<token>` URIs carrying a shared token remain accepted by the parser.
+- **Backward compatibility:** Bare single-address URIs without query parameters (`canban://<host>:<port>#<token>` or `<host>:<port>#<token>`) remain accepted by the parser.
 
 ## Planned Gallery scenes
 
@@ -273,6 +260,6 @@ Per [UI architecture](ui-architecture.md), add phone-viewport (`390×844` and `4
 4. `mobile-terminal`: portable `Terminal` view with accessory key bar (`Esc`, `Tab`, `Ctrl`, arrows, `^C`, `⤢`) and offline read-only snapshot state.
 5. `mobile-terminals-tab`: grouped `Card Agents` / `Shells` / `Worktrees` inventory and `+` creation `Sheet`.
 6. `mobile-diff`: file list and single-column unified diff with line-wrap toggle and `Return for rework` / `Deliver…` actions.
-7. `mobile-pairing`: QR confirmation sheet listing MagicDNS, Tailscale IPv4, and LAN/other candidates with lock (`🔒`) and caution (`⚠`) security icons, hint texts, RTT, and unreachable states.
+7. `mobile-pairing`: QR confirmation sheet showing the single chosen address, RTT reachability, lock (`🔒` Tailscale / SSH) vs caution (`⚠` other TCP) security icons, hint texts, and unreachable state.
 8. `mobile-sync-conflicts`: Sync queue summary (synced/pending/conflicts) and field-level merge conflict screen.
 9. `mobile-offline-states`: offline banner variants (`Offline · Cached`, `N pending`, `N conflicts`).

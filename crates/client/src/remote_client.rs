@@ -1,12 +1,11 @@
 //! Pure-remote multi-host client (`RemoteClient`) driven by Tokio async push streams,
 //! `canban-sync` outbox/read-cache replay, AEAD TCP secret sealing, and remote PTY transport.
 use crate::{
-    pairing::{PairingInvite, address_priority, probe_candidates, select_preferred_candidate},
+    pairing::{PairingInvite, TransportSecurity},
     push::{PushFrame, change_topic, open_async_subscribe, state_marker},
     store::{
-        CachedHostData, CredentialStore, load_cache, load_fallback_addrs, load_hosts, outbox_path,
-        reads_dir, remove_host_files, save_cache, save_fallback_addrs, save_hosts,
-        seal_params_for_tcp,
+        CachedHostData, CredentialStore, load_cache, load_hosts, outbox_path, reads_dir,
+        remove_host_files, save_cache, save_hosts, seal_params_for_tcp,
     },
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -32,7 +31,6 @@ use std::{
 use tokio::sync::{Notify, broadcast, mpsc, watch};
 
 const DEFAULT_READ_CACHE_BUDGET: u64 = 20 * 1024 * 1024;
-const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const PUSH_DEBOUNCE: Duration = Duration::from_millis(30);
 const MAX_BACKOFF: Duration = Duration::from_secs(10);
 const SUBSCRIBE_TOPICS: &[&str] = &[
@@ -82,7 +80,6 @@ pub enum ClientEvent {
 
 struct RemoteHostSlot {
     saved: SavedHost,
-    fallback_addrs: Vec<String>,
     client: Option<Arc<ClientTransport>>,
     terminal: Option<Arc<RemotePtyTransport>>,
     connection: HostConnectionState,
@@ -101,12 +98,7 @@ struct RemoteHostSlot {
 }
 
 impl RemoteHostSlot {
-    fn from_saved(
-        saved: SavedHost,
-        fallback_addrs: Vec<String>,
-        data_dir: &Path,
-        read_cache_budget: u64,
-    ) -> Self {
+    fn from_saved(saved: SavedHost, data_dir: &Path, read_cache_budget: u64) -> Self {
         let cached = load_cache(data_dir, &saved.id).unwrap_or(CachedHostData {
             saved_at: 0,
             snapshot: Snapshot::default(),
@@ -125,7 +117,6 @@ impl RemoteHostSlot {
         let reads = ReadCache::open(reads_dir(data_dir, &saved.id), read_cache_budget);
         Self {
             saved,
-            fallback_addrs,
             client: None,
             terminal: None,
             connection: initial_conn,
@@ -197,29 +188,6 @@ impl RemoteHostSlot {
         self.terminal = None;
         self.connection = next_state;
         self.conn_gen = self.conn_gen.wrapping_add(1);
-    }
-
-    fn ordered_candidate_addrs(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        if let HostTransport::Tcp { addr, .. } = &self.saved.transport {
-            let norm = normalize_daemon_addr(addr.as_str());
-            if !norm.is_empty() {
-                out.push(norm);
-            }
-        }
-        let mut extras: Vec<String> = self
-            .fallback_addrs
-            .iter()
-            .map(|a| normalize_daemon_addr(a))
-            .filter(|a| !a.is_empty() && !out.contains(a))
-            .collect();
-        extras.sort_by_key(|a| address_priority(a));
-        for a in extras {
-            if !out.contains(&a) {
-                out.push(a);
-            }
-        }
-        out
     }
 }
 
@@ -524,21 +492,14 @@ impl RemoteClient {
         owned_runtime: Option<tokio::runtime::Runtime>,
     ) -> Result<Arc<Self>> {
         let saved = load_hosts(&config.data_dir, creds.as_ref());
-        let fallback_map = load_fallback_addrs(&config.data_dir);
         let mut slots = BTreeMap::new();
         for host in saved {
             if !matches!(host.transport, HostTransport::Tcp { .. }) {
                 continue;
             }
-            let fallbacks = fallback_map.get(&host.id).cloned().unwrap_or_default();
             slots.insert(
                 host.id.clone(),
-                RemoteHostSlot::from_saved(
-                    host,
-                    fallbacks,
-                    &config.data_dir,
-                    config.read_cache_budget_bytes,
-                ),
+                RemoteHostSlot::from_saved(host, &config.data_dir, config.read_cache_budget_bytes),
             );
         }
 
@@ -589,12 +550,6 @@ impl RemoteClient {
     fn persist_locked(&self, hosts: &BTreeMap<String, RemoteHostSlot>) -> Result<()> {
         let saved: Vec<SavedHost> = hosts.values().map(|s| s.saved.clone()).collect();
         save_hosts(&self.config.data_dir, &saved, self.creds.as_ref())?;
-        let fallbacks: BTreeMap<String, Vec<String>> = hosts
-            .values()
-            .filter(|s| !s.fallback_addrs.is_empty())
-            .map(|s| (s.saved.id.clone(), s.fallback_addrs.clone()))
-            .collect();
-        save_fallback_addrs(&self.config.data_dir, &fallbacks)?;
         Ok(())
     }
 
@@ -704,88 +659,37 @@ impl RemoteClient {
         while set.join_next().await.is_some() {}
     }
 
-    /// Pairs with a host described by a QR/deep-link [`PairingInvite`], preferring Tailscale paths.
+    /// Pairs with the exact single address encoded in a QR/deep-link [`PairingInvite`].
     pub async fn pair_with_invite(
         &self,
         invite: &PairingInvite,
-        preferred_addr: Option<&str>,
         display_name: Option<&str>,
     ) -> Result<HostSummary> {
-        self.pair_internal(None, invite, preferred_addr, display_name)
-            .await
+        self.pair_internal(None, invite, display_name).await
     }
 
     async fn pair_internal(
         &self,
         preferred_id: Option<String>,
         invite: &PairingInvite,
-        preferred_addr: Option<&str>,
         display_name: Option<&str>,
     ) -> Result<HostSummary> {
+        let addr = normalize_daemon_addr(&invite.addr);
         ensure!(
-            !invite.addresses.is_empty() || preferred_addr.is_some(),
-            "Pairing invite does not contain any addresses"
+            !addr.is_empty(),
+            "Pairing invite does not contain an address"
         );
-        let ordered_candidates: Vec<String> = if let Some(addr) = preferred_addr {
-            let norm = normalize_daemon_addr(addr);
-            ensure!(!norm.is_empty(), "Preferred pairing address is empty");
-            let mut list = vec![norm];
-            for candidate in &invite.addresses {
-                let c_norm = normalize_daemon_addr(candidate);
-                if !c_norm.is_empty() && !list.contains(&c_norm) {
-                    list.push(c_norm);
-                }
-            }
-            list
-        } else if invite.addresses.len() > 1 {
-            let probe = probe_candidates(&invite.addresses, PROBE_TIMEOUT).await;
-            let mut list = Vec::new();
-            if let Some(best) = select_preferred_candidate(&probe) {
-                list.push(best.addr.clone());
-            }
-            for item in probe {
-                if !list.contains(&item.addr) {
-                    list.push(item.addr);
-                }
-            }
-            list
-        } else {
-            invite
-                .addresses
-                .iter()
-                .map(|a| normalize_daemon_addr(a))
-                .filter(|a| !a.is_empty())
-                .collect()
-        };
 
-        let mut last_err = None;
-        let mut connected: Option<(String, Arc<ClientTransport>, u64)> = None;
-        for addr in &ordered_candidates {
-            let start = Instant::now();
-            match ClientTransport::connect_tcp_async(
+        let start = Instant::now();
+        let transport = Arc::new(
+            ClientTransport::connect_tcp_async(
                 addr.clone(),
                 invite.secret.clone(),
                 self.config.device_name.clone(),
             )
-            .await
-            {
-                Ok(client) => {
-                    let rtt_ms = start.elapsed().as_millis() as u64;
-                    connected = Some((addr.clone(), Arc::new(client), rtt_ms));
-                    break;
-                }
-                Err(err) => {
-                    let auth = is_auth_error(&err);
-                    last_err = Some(err);
-                    if auth {
-                        break;
-                    }
-                }
-            }
-        }
-        let (selected_addr, transport, rtt_ms) = connected.ok_or_else(|| {
-            last_err.unwrap_or_else(|| anyhow!("Failed to connect to any candidate address"))
-        })?;
+            .await?,
+        );
+        let rtt_ms = start.elapsed().as_millis() as u64;
 
         let token = transport
             .upgraded_token()
@@ -812,12 +716,7 @@ impl RemoteClient {
             .filter(|s| !s.trim().is_empty())
             .map(str::to_owned);
 
-        let fallback_addrs: Vec<String> = ordered_candidates
-            .into_iter()
-            .filter(|a| a != &selected_addr)
-            .collect();
-
-        let fallback_name = display_name
+        let host_name = display_name
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .or_else(|| invite.host_name.as_deref().filter(|s| !s.trim().is_empty()))
@@ -852,14 +751,10 @@ impl RemoteClient {
                 let was_enabled = slot.saved.enabled;
                 slot.clear_connection(HostConnectionState::Connecting);
                 slot.saved.enabled = true;
-                slot.saved.transport = HostTransport::Tcp {
-                    addr: selected_addr,
-                    token,
-                };
+                slot.saved.transport = HostTransport::Tcp { addr, token };
                 if let Some(name) = display_name.map(str::trim).filter(|s| !s.is_empty()) {
                     slot.saved.name = name.to_owned();
                 }
-                slot.fallback_addrs = fallback_addrs;
                 slot.terminal = Some(Arc::new(RemotePtyTransport::new(
                     Arc::clone(&transport),
                     self.runtime_handle.clone(),
@@ -882,11 +777,8 @@ impl RemoteClient {
                     .unwrap_or_else(canban_types::id);
                 let saved = SavedHost {
                     id: hid.clone(),
-                    name: fallback_name,
-                    transport: HostTransport::Tcp {
-                        addr: selected_addr,
-                        token,
-                    },
+                    name: host_name,
+                    transport: HostTransport::Tcp { addr, token },
                     ssh_target: None,
                     server_id,
                     enabled: true,
@@ -894,7 +786,6 @@ impl RemoteClient {
                 };
                 let mut slot = RemoteHostSlot::from_saved(
                     saved,
-                    fallback_addrs,
                     &self.config.data_dir,
                     self.config.read_cache_budget_bytes,
                 );
@@ -957,16 +848,14 @@ impl RemoteClient {
 
         if host.enabled {
             let invite = PairingInvite {
-                version: 1,
+                addr: addr.clone(),
+                security: TransportSecurity::classify_tcp_addr(addr),
                 server_id: host.server_id.clone(),
                 host_name: (!host.name.trim().is_empty()).then(|| host.name.clone()),
-                addresses: vec![addr.clone()],
                 secret: token.clone(),
             };
             let display = (!host.name.trim().is_empty()).then_some(host.name.as_str());
-            return self
-                .pair_internal(Some(host.id), &invite, Some(addr), display)
-                .await;
+            return self.pair_internal(Some(host.id), &invite, display).await;
         }
 
         let hid = host.id.clone();
@@ -974,7 +863,6 @@ impl RemoteClient {
             let mut guard = self.hosts.write().unwrap();
             let slot = RemoteHostSlot::from_saved(
                 host,
-                Vec::new(),
                 &self.config.data_dir,
                 self.config.read_cache_budget_bytes,
             );
@@ -1708,17 +1596,17 @@ impl RemoteClient {
     }
 
     async fn connect_slot_async(&self, host_id: &str) -> Result<(Arc<ClientTransport>, u64)> {
-        let (candidates, token, server_id, cached_at, saved_at, last_marker) = {
+        let (addr, token, server_id, cached_at, saved_at, last_marker) = {
             let guard = self.hosts.read().unwrap();
             let slot = guard
                 .get(host_id)
                 .with_context(|| format!("Unknown host '{host_id}'"))?;
             ensure!(slot.saved.enabled, "Host '{host_id}' is disabled");
-            let (_, token) = slot
+            let (raw_addr, token) = slot
                 .tcp_addr_and_token()
                 .with_context(|| format!("Host '{host_id}' is not TCP"))?;
             (
-                slot.ordered_candidate_addrs(),
+                normalize_daemon_addr(raw_addr.as_str()),
                 token,
                 slot.saved.server_id.clone(),
                 slot.cached_at(),
@@ -1726,86 +1614,46 @@ impl RemoteClient {
                 slot.last_marker.clone(),
             )
         };
-        ensure!(!candidates.is_empty(), "No TCP address configured for host");
+        ensure!(!addr.is_empty(), "No TCP address configured for host");
         ensure!(
             !token.trim().is_empty(),
             "No device token found for host '{host_id}'"
         );
 
-        let ordered = if candidates.len() > 1 {
-            let probe = probe_candidates(&candidates, Duration::from_secs(1)).await;
-            let mut sorted: Vec<String> = probe
-                .iter()
-                .filter(|r| r.reachable)
-                .map(|r| r.addr.clone())
-                .collect();
-            for c in candidates {
-                if !sorted.contains(&c) {
-                    sorted.push(c);
-                }
-            }
-            sorted
-        } else {
-            candidates
-        };
-
-        let mut last_err = None;
-        let mut connected: Option<(String, Arc<ClientTransport>, u64)> = None;
-        for addr in &ordered {
-            let start = Instant::now();
-            match ClientTransport::connect_tcp_async(
-                addr.clone(),
-                token.clone(),
-                self.config.device_name.clone(),
-            )
-            .await
+        let start = Instant::now();
+        let (transport, rtt_ms) =
+            match ClientTransport::connect_tcp_async(addr, token, self.config.device_name.clone())
+                .await
             {
-                Ok(client) => {
-                    let rtt_ms = start.elapsed().as_millis() as u64;
-                    connected = Some((addr.clone(), Arc::new(client), rtt_ms));
-                    break;
-                }
+                Ok(client) => (Arc::new(client), start.elapsed().as_millis() as u64),
                 Err(err) => {
+                    let err_str = err.to_string();
                     let auth = is_auth_error(&err);
-                    last_err = Some(err);
-                    if auth {
-                        break;
+                    {
+                        let mut guard = self.hosts.write().unwrap();
+                        if let Some(slot) = guard.get_mut(host_id) {
+                            slot.reconnect_count = slot.reconnect_count.saturating_add(1);
+                            let next_state = if auth {
+                                HostConnectionState::AuthFailed { error: err_str }
+                            } else {
+                                HostConnectionState::Offline {
+                                    error: err_str,
+                                    cached_at,
+                                }
+                            };
+                            slot.clear_connection(next_state);
+                        }
                     }
+                    self.emit_host(
+                        host_id,
+                        AppEvent::Changed {
+                            topic: "resync",
+                            card_id: None,
+                        },
+                    );
+                    return Err(err);
                 }
-            }
-        }
-
-        let (selected_addr, transport, rtt_ms) = match connected {
-            Some(c) => c,
-            None => {
-                let err = last_err.unwrap_or_else(|| anyhow!("Failed to connect"));
-                let err_str = err.to_string();
-                let auth = is_auth_error(&err);
-                {
-                    let mut guard = self.hosts.write().unwrap();
-                    if let Some(slot) = guard.get_mut(host_id) {
-                        slot.reconnect_count = slot.reconnect_count.saturating_add(1);
-                        let next_state = if auth {
-                            HostConnectionState::AuthFailed { error: err_str }
-                        } else {
-                            HostConnectionState::Offline {
-                                error: err_str,
-                                cached_at,
-                            }
-                        };
-                        slot.clear_connection(next_state);
-                    }
-                }
-                self.emit_host(
-                    host_id,
-                    AppEvent::Changed {
-                        topic: "resync",
-                        card_id: None,
-                    },
-                );
-                return Err(err);
-            }
-        };
+            };
 
         let probe_res = transport.call_async("host.probe", &json!({})).await;
         let after = if saved_at == 0 {
@@ -1854,21 +1702,12 @@ impl RemoteClient {
                 .with_context(|| format!("Host '{host_id}' was removed"))?;
             slot.clear_connection(HostConnectionState::Connecting);
             let mut persist_needed = false;
-            if let HostTransport::Tcp { addr, token: cur } = &mut slot.saved.transport {
-                if *addr != selected_addr {
-                    let prev = addr.clone();
-                    *addr = selected_addr;
-                    if !prev.is_empty() && !slot.fallback_addrs.contains(&prev) {
-                        slot.fallback_addrs.push(prev);
-                    }
-                    persist_needed = true;
-                }
-                if let Some(new_tok) = upgraded
-                    && *cur != new_tok
-                {
-                    *cur = new_tok;
-                    persist_needed = true;
-                }
+            if let HostTransport::Tcp { token: cur, .. } = &mut slot.saved.transport
+                && let Some(new_tok) = upgraded
+                && *cur != new_tok
+            {
+                *cur = new_tok;
+                persist_needed = true;
             }
             slot.terminal = Some(Arc::new(RemotePtyTransport::new(
                 Arc::clone(&transport),
@@ -2322,9 +2161,7 @@ async fn host_supervisor_task(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        pairing::format_pairing_uri_v2, parse_pairing_invite, store::MemoryCredentialStore,
-    };
+    use crate::{pairing::format_pairing_uri, parse_pairing_invite, store::MemoryCredentialStore};
     use canban_app_server::AppServer;
     use canban_types::{Card, Project, ServerListenConfig, SyncMark};
 
@@ -2372,17 +2209,10 @@ mod tests {
         let probe = server.call("host.probe", json!({})).unwrap();
         let server_id = probe["server_id"].as_str().unwrap().to_owned();
 
-        let closed_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let dead_addr = closed_listener.local_addr().unwrap().to_string();
-        drop(closed_listener);
-
-        let uri = format_pairing_uri_v2(
-            Some(&server_id),
-            Some("Studio Mac"),
-            &[dead_addr, server_addr],
-            &code,
-        );
-        let invite = parse_pairing_invite(&uri).expect("valid v2 invite");
+        let uri = format_pairing_uri(&server_addr, &code, Some(&server_id), Some("Studio Mac"));
+        let invite = parse_pairing_invite(&uri).expect("valid single-address invite");
+        assert_eq!(invite.addr, server_addr);
+        assert_eq!(invite.security, TransportSecurity::UnverifiedTcp);
 
         let creds = Arc::new(MemoryCredentialStore::new());
         let client = RemoteClient::with_runtime(
@@ -2393,7 +2223,7 @@ mod tests {
         .unwrap();
 
         let summary = client
-            .pair_with_invite(&invite, None, Some("Paired Mac"))
+            .pair_with_invite(&invite, Some("Paired Mac"))
             .await
             .expect("pairing succeeds");
         assert!(summary.is_connected());
@@ -2411,7 +2241,7 @@ mod tests {
         let raw_hosts = std::fs::read_to_string(client_dir.join("hosts.json")).unwrap();
         assert!(!raw_hosts.contains(&saved_tok));
         assert!(!raw_hosts.contains(&code));
-        assert!(!load_fallback_addrs(&client_dir).is_empty());
+        assert!(!client_dir.join("host_addrs.json").exists());
 
         let pty_before = client
             .terminal_transport(&summary.id)

@@ -1,16 +1,18 @@
-//! Pairing URI v1/v2 parsing/formatting, address security classification,
-//! and concurrent TCP candidate probing.
-use canban_types::{normalize_daemon_addr, parse_pairing_uri};
+//! Single-address pairing URI parsing/formatting, transport security classification
+//! (including Tailscale & SSH), and single-address TCP reachability probing.
+use canban_types::{HostTransport, normalize_daemon_addr};
 use std::{
     net::IpAddr,
     time::{Duration, Instant},
 };
 
-/// Network security classification displayed during QR pairing and host inspection.
+/// Transport confidentiality classification displayed during pairing and host inspection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AddressSecurity {
+pub enum TransportSecurity {
+    Local,
     Tailscale,
-    Other,
+    Ssh,
+    UnverifiedTcp,
 }
 
 /// Returns `true` for Tailscale CGNAT (`100.64.0.0/10`) and ULA (`fd7a:115c:a1e0::/48`) IPs.
@@ -48,9 +50,9 @@ fn extract_host_part(addr: &str) -> &str {
     trimmed
 }
 
-impl AddressSecurity {
-    /// Classifies a candidate address or `host:port` into Tailscale vs non-Tailscale.
-    pub fn classify(addr: &str) -> Self {
+impl TransportSecurity {
+    /// Classifies a TCP `host:port` endpoint into Tailscale vs unverified direct TCP.
+    pub fn classify_tcp_addr(addr: &str) -> Self {
         let host = extract_host_part(addr);
         if host.eq_ignore_ascii_case("ts.net") || host.to_ascii_lowercase().ends_with(".ts.net") {
             return Self::Tailscale;
@@ -60,29 +62,53 @@ impl AddressSecurity {
         {
             return Self::Tailscale;
         }
-        Self::Other
+        Self::UnverifiedTcp
+    }
+
+    /// Classifies a saved [`HostTransport`] for UI security icons and hints.
+    pub fn classify_transport(transport: &HostTransport) -> Self {
+        match transport {
+            HostTransport::Local => Self::Local,
+            HostTransport::Ssh { .. } => Self::Ssh,
+            HostTransport::Tcp { addr, .. } => Self::classify_tcp_addr(addr),
+        }
+    }
+
+    /// Returns `true` when the underlying link provides transport encryption (`Local`, `Tailscale`, or `Ssh`).
+    pub fn is_encrypted(self) -> bool {
+        matches!(self, Self::Local | Self::Tailscale | Self::Ssh)
+    }
+
+    /// Concise transport label for pairing confirmation and host rows.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Local => "Local socket",
+            Self::Tailscale => "Tailscale",
+            Self::Ssh => "SSH",
+            Self::UnverifiedTcp => "Not Tailscale",
+        }
+    }
+
+    /// User-facing transport security hint matching mobile pairing and host UI guidelines.
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Local => "Local Unix socket",
+            Self::Tailscale => "Tailscale — encrypted by WireGuard",
+            Self::Ssh => "SSH — encrypted tunnel",
+            Self::UnverifiedTcp => {
+                "Not Tailscale — may be unencrypted unless your own VPN protects it"
+            }
+        }
     }
 }
 
-/// Lower value means higher preference (`0` = Tailscale MagicDNS, `1` = Tailscale IP, `2` = other).
-pub fn address_priority(addr: &str) -> u8 {
-    let host = extract_host_part(addr);
-    if host.to_ascii_lowercase().ends_with(".ts.net") {
-        0
-    } else if host.parse::<IpAddr>().is_ok_and(is_tailscale_ip) {
-        1
-    } else {
-        2
-    }
-}
-
-/// Parsed pairing invitation (URI v2 multi-candidate or legacy v1).
+/// Parsed single-address pairing invitation (`canban://<addr>[?sid=...&name=...]#<secret>`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PairingInvite {
-    pub version: u8,
+    pub addr: String,
+    pub security: TransportSecurity,
     pub server_id: Option<String>,
     pub host_name: Option<String>,
-    pub addresses: Vec<String>,
     pub secret: String,
 }
 
@@ -130,68 +156,61 @@ fn percent_decode(input: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-fn normalize_and_sort_addrs(raw: Vec<String>) -> Vec<String> {
-    let mut deduped = Vec::new();
-    for item in raw {
-        let norm = normalize_daemon_addr(&item);
-        if !norm.is_empty() && !deduped.contains(&norm) {
-            deduped.push(norm);
-        }
-    }
-    deduped.sort_by_key(|a| address_priority(a));
-    deduped
-}
-
-/// Formats a v2 pairing URI (`canban://pair?v=2&sid=...&name=...&a=...#<secret>`).
-pub fn format_pairing_uri_v2(
+/// Formats a single-address pairing URI (`canban://<addr>[?sid=...&name=...]#<secret>`).
+pub fn format_pairing_uri(
+    addr: &str,
+    secret: &str,
     server_id: Option<&str>,
     host_name: Option<&str>,
-    addresses: &[String],
-    secret: &str,
 ) -> String {
-    let mut query = vec!["v=2".to_owned()];
+    let norm_addr = normalize_daemon_addr(addr);
+    let mut query = Vec::new();
     if let Some(sid) = server_id.map(str::trim).filter(|s| !s.is_empty()) {
         query.push(format!("sid={}", percent_encode(sid)));
     }
     if let Some(name) = host_name.map(str::trim).filter(|s| !s.is_empty()) {
         query.push(format!("name={}", percent_encode(name)));
     }
-    let ordered = normalize_and_sort_addrs(addresses.to_vec());
-    for addr in ordered {
-        query.push(format!("a={}", percent_encode(&addr)));
+    if query.is_empty() {
+        format!("canban://{norm_addr}#{}", secret.trim())
+    } else {
+        format!("canban://{norm_addr}?{}#{}", query.join("&"), secret.trim())
     }
-    format!("canban://pair?{}#{}", query.join("&"), secret.trim())
 }
 
-/// Parses either a v2 (`canban://pair?v=2&...#<secret>`) or legacy v1 (`canban://<addr>#<token>`) URI.
+/// Parses a single-address pairing URI (`canban://<addr>[?sid=...&name=...]#<secret>`,
+/// `tcp://<addr>#<secret>`, or `<addr>#<secret>`). Rejects legacy multi-candidate `?v=2&a=...` URIs.
 pub fn parse_pairing_invite(raw: &str) -> Option<PairingInvite> {
     let trimmed = raw.trim();
-    if let Some((before_frag, frag)) = trimmed.split_once('#')
-        && let Some(after_scheme) = before_frag
-            .strip_prefix("canban://")
-            .or_else(|| before_frag.strip_prefix("tcp://"))
-        && let Some((host_or_route, query)) = after_scheme.split_once('?')
-        && host_or_route.trim_end_matches('/') == "pair"
-    {
-        let secret = frag.trim();
-        if secret.len() < 16 {
-            return None;
-        }
-        let mut version = 2u8;
-        let mut server_id = None;
-        let mut host_name = None;
-        let mut addrs = Vec::new();
+    let (before_frag, frag) = trimmed.split_once('#')?;
+    let secret = frag.trim();
+    if secret.len() < 16 {
+        return None;
+    }
+
+    let without_scheme = before_frag
+        .strip_prefix("canban://")
+        .or_else(|| before_frag.strip_prefix("tcp://"))
+        .unwrap_or(before_frag);
+
+    let (raw_host, raw_query) = match without_scheme.split_once('?') {
+        Some((h, q)) => (h.trim().trim_end_matches('/'), Some(q)),
+        None => (without_scheme.trim().trim_end_matches('/'), None),
+    };
+    if raw_host.is_empty() || raw_host.eq_ignore_ascii_case("pair") {
+        return None;
+    }
+
+    let mut server_id = None;
+    let mut host_name = None;
+    if let Some(query) = raw_query {
         for pair in query.split('&') {
-            let Some((k, v)) = pair.split_once('=') else {
+            if pair.is_empty() {
                 continue;
-            };
+            }
+            let (k, v) = pair.split_once('=')?;
             let decoded = percent_decode(v)?;
             match k {
-                "v" => {
-                    if let Ok(parsed) = decoded.trim().parse::<u8>() {
-                        version = parsed;
-                    }
-                }
                 "sid" => {
                     let s = decoded.trim();
                     if !s.is_empty() {
@@ -204,116 +223,77 @@ pub fn parse_pairing_invite(raw: &str) -> Option<PairingInvite> {
                         host_name = Some(s.to_owned());
                     }
                 }
-                "a" => {
-                    let s = decoded.trim();
-                    if !s.is_empty() {
-                        addrs.push(s.to_owned());
-                    }
-                }
+                "v" | "a" => return None,
                 _ => {}
             }
         }
-        if version != 2 {
-            return None;
-        }
-        let addresses = normalize_and_sort_addrs(addrs);
-        if addresses.is_empty() {
-            return None;
-        }
-        return Some(PairingInvite {
-            version,
-            server_id,
-            host_name,
-            addresses,
-            secret: secret.to_owned(),
-        });
     }
 
-    let (addr, secret) = parse_pairing_uri(trimmed)?;
+    let addr = normalize_daemon_addr(raw_host);
+    if addr.is_empty() {
+        return None;
+    }
+    let security = TransportSecurity::classify_tcp_addr(&addr);
     Some(PairingInvite {
-        version: 1,
-        server_id: None,
-        host_name: None,
-        addresses: vec![addr],
-        secret,
+        addr,
+        security,
+        server_id,
+        host_name,
+        secret: secret.to_owned(),
     })
 }
 
-/// Reachability + RTT result for a single pairing candidate address.
+/// Reachability and RTT result for the single address in a pairing invitation.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CandidateProbeResult {
+pub struct AddrProbeResult {
     pub addr: String,
-    pub security: AddressSecurity,
+    pub security: TransportSecurity,
     pub reachable: bool,
     pub rtt_ms: Option<u64>,
     pub error: Option<String>,
 }
 
-/// Concurrently probes TCP reachability of all candidate addresses without consuming single-use
-/// pairing codes. Results are ordered with reachable Tailscale MagicDNS > Tailscale IP > other.
-pub async fn probe_candidates(
-    addresses: &[String],
-    timeout: Duration,
-) -> Vec<CandidateProbeResult> {
-    let ordered = normalize_and_sort_addrs(addresses.to_vec());
-    let mut set = tokio::task::JoinSet::new();
-    for addr in ordered {
-        set.spawn(async move {
-            let security = AddressSecurity::classify(&addr);
-            let start = Instant::now();
-            match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr.as_str())).await
-            {
-                Ok(Ok(stream)) => {
-                    let rtt_ms = start.elapsed().as_millis() as u64;
-                    drop(stream);
-                    CandidateProbeResult {
-                        addr,
-                        security,
-                        reachable: true,
-                        rtt_ms: Some(rtt_ms),
-                        error: None,
-                    }
-                }
-                Ok(Err(e)) => CandidateProbeResult {
-                    addr,
-                    security,
-                    reachable: false,
-                    rtt_ms: None,
-                    error: Some(e.to_string()),
-                },
-                Err(_) => CandidateProbeResult {
-                    addr,
-                    security,
-                    reachable: false,
-                    rtt_ms: None,
-                    error: Some("Timed out".into()),
-                },
+/// Probes TCP reachability of a single address without consuming single-use pairing codes.
+pub async fn probe_addr(addr: &str, timeout: Duration) -> AddrProbeResult {
+    let norm = normalize_daemon_addr(addr);
+    let security = TransportSecurity::classify_tcp_addr(&norm);
+    if norm.is_empty() {
+        return AddrProbeResult {
+            addr: norm,
+            security,
+            reachable: false,
+            rtt_ms: None,
+            error: Some("Empty address".into()),
+        };
+    }
+    let start = Instant::now();
+    match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(norm.as_str())).await {
+        Ok(Ok(stream)) => {
+            let rtt_ms = start.elapsed().as_millis() as u64;
+            drop(stream);
+            AddrProbeResult {
+                addr: norm,
+                security,
+                reachable: true,
+                rtt_ms: Some(rtt_ms),
+                error: None,
             }
-        });
-    }
-
-    let mut results = Vec::new();
-    while let Some(joined) = set.join_next().await {
-        if let Ok(item) = joined {
-            results.push(item);
         }
+        Ok(Err(e)) => AddrProbeResult {
+            addr: norm,
+            security,
+            reachable: false,
+            rtt_ms: None,
+            error: Some(e.to_string()),
+        },
+        Err(_) => AddrProbeResult {
+            addr: norm,
+            security,
+            reachable: false,
+            rtt_ms: None,
+            error: Some("Timed out".into()),
+        },
     }
-    results.sort_by_key(|r| {
-        (
-            !r.reachable,
-            address_priority(&r.addr),
-            r.rtt_ms.unwrap_or(u64::MAX),
-            r.addr.clone(),
-        )
-    });
-    results
-}
-
-/// Returns the highest-priority reachable candidate from `probe_candidates`.
-pub fn select_preferred_candidate(
-    results: &[CandidateProbeResult],
-) -> Option<&CandidateProbeResult> {
-    results.iter().find(|r| r.reachable)
 }
 
 #[cfg(test)]
@@ -321,75 +301,104 @@ mod tests {
     use super::*;
 
     #[test]
-    fn address_security_and_priority_classify_tailscale_vs_other() {
+    fn transport_security_classifies_local_tailscale_ssh_and_unverified_tcp() {
         assert_eq!(
-            AddressSecurity::classify("home-mac.tailnet-abc.ts.net:7680"),
-            AddressSecurity::Tailscale
+            TransportSecurity::classify_tcp_addr("home-mac.tailnet-abc.ts.net:7680"),
+            TransportSecurity::Tailscale
         );
-        assert_eq!(address_priority("home-mac.tailnet-abc.ts.net:7680"), 0);
+        assert_eq!(
+            TransportSecurity::classify_tcp_addr("100.84.12.5:7680"),
+            TransportSecurity::Tailscale
+        );
+        assert_eq!(
+            TransportSecurity::classify_tcp_addr("[fd7a:115c:a1e0::1]:7680"),
+            TransportSecurity::Tailscale
+        );
+        assert_eq!(
+            TransportSecurity::classify_tcp_addr("192.168.1.20:7680"),
+            TransportSecurity::UnverifiedTcp
+        );
+        assert_eq!(
+            TransportSecurity::classify_tcp_addr("100.128.0.1:7680"),
+            TransportSecurity::UnverifiedTcp
+        );
 
-        assert_eq!(
-            AddressSecurity::classify("100.84.12.5:7680"),
-            AddressSecurity::Tailscale
-        );
-        assert_eq!(address_priority("100.84.12.5:7680"), 1);
+        let local = TransportSecurity::classify_transport(&HostTransport::Local);
+        assert_eq!(local, TransportSecurity::Local);
+        assert!(local.is_encrypted());
+        assert_eq!(local.label(), "Local socket");
 
-        assert_eq!(
-            AddressSecurity::classify("[fd7a:115c:a1e0::1]:7680"),
-            AddressSecurity::Tailscale
-        );
-        assert_eq!(address_priority("[fd7a:115c:a1e0::1]:7680"), 1);
+        let ssh = TransportSecurity::classify_transport(&HostTransport::Ssh {
+            target: "jjy@home-mac".into(),
+            remote_home: None,
+        });
+        assert_eq!(ssh, TransportSecurity::Ssh);
+        assert!(ssh.is_encrypted());
+        assert_eq!(ssh.label(), "SSH");
+        assert!(ssh.hint().contains("encrypted tunnel"));
 
-        assert_eq!(
-            AddressSecurity::classify("192.168.1.20:7680"),
-            AddressSecurity::Other
-        );
-        assert_eq!(address_priority("192.168.1.20:7680"), 2);
-        assert_eq!(
-            AddressSecurity::classify("100.128.0.1:7680"),
-            AddressSecurity::Other
-        );
+        let ts = TransportSecurity::classify_transport(&HostTransport::Tcp {
+            addr: "home-mac.ts.net:7680".into(),
+            token: "dev_token".into(),
+        });
+        assert_eq!(ts, TransportSecurity::Tailscale);
+        assert!(ts.is_encrypted());
+        assert!(ts.hint().contains("WireGuard"));
+
+        let lan = TransportSecurity::classify_transport(&HostTransport::Tcp {
+            addr: "192.168.1.20:7680".into(),
+            token: "dev_token".into(),
+        });
+        assert_eq!(lan, TransportSecurity::UnverifiedTcp);
+        assert!(!lan.is_encrypted());
+        assert!(lan.hint().contains("Not Tailscale"));
     }
 
     #[test]
-    fn pairing_invite_v2_and_v1_round_trip_and_order_candidates() {
+    fn single_address_pairing_uri_round_trip() {
         let secret = "pair_0123456789abcdef0123456789abcdef";
-        let addrs = vec![
-            "192.168.1.20:7680".to_owned(),
-            "100.64.1.2:7680".to_owned(),
-            "home-mac.tailnet.ts.net".to_owned(),
-            "100.64.1.2:7680".to_owned(),
-        ];
-        let uri = format_pairing_uri_v2(Some("srv-1"), Some("Home Mac #1"), &addrs, secret);
-        assert!(uri.starts_with("canban://pair?v=2&sid=srv-1&name=Home%20Mac%20%231&"));
-        assert!(uri.ends_with(&format!("#{secret}")));
 
-        let parsed = parse_pairing_invite(&uri).expect("valid v2 URI");
-        assert_eq!(parsed.version, 2);
+        let with_meta = format_pairing_uri(
+            "home-mac.tailnet.ts.net",
+            secret,
+            Some("srv-1"),
+            Some("Home Mac #1"),
+        );
+        assert_eq!(
+            with_meta,
+            format!(
+                "canban://home-mac.tailnet.ts.net:7680?sid=srv-1&name=Home%20Mac%20%231#{secret}"
+            )
+        );
+        let parsed = parse_pairing_invite(&with_meta).expect("valid URI with metadata");
+        assert_eq!(parsed.addr, "home-mac.tailnet.ts.net:7680");
+        assert_eq!(parsed.security, TransportSecurity::Tailscale);
         assert_eq!(parsed.server_id.as_deref(), Some("srv-1"));
         assert_eq!(parsed.host_name.as_deref(), Some("Home Mac #1"));
         assert_eq!(parsed.secret, secret);
-        assert_eq!(
-            parsed.addresses,
-            vec![
-                "home-mac.tailnet.ts.net:7680",
-                "100.64.1.2:7680",
-                "192.168.1.20:7680",
-            ]
+
+        let plain = format_pairing_uri("192.168.1.20:7680", secret, None, None);
+        assert_eq!(plain, format!("canban://192.168.1.20:7680#{secret}"));
+        let parsed_plain = parse_pairing_invite(&plain).expect("valid plain URI");
+        assert_eq!(parsed_plain.addr, "192.168.1.20:7680");
+        assert_eq!(parsed_plain.security, TransportSecurity::UnverifiedTcp);
+        assert_eq!(parsed_plain.server_id, None);
+        assert_eq!(parsed_plain.host_name, None);
+
+        let tcp_raw = format!("tcp://100.84.12.5#{secret}");
+        let parsed_tcp = parse_pairing_invite(&tcp_raw).expect("tcp URI without port");
+        assert_eq!(parsed_tcp.addr, "100.84.12.5:7680");
+        assert_eq!(parsed_tcp.security, TransportSecurity::Tailscale);
+
+        assert!(parse_pairing_invite("canban://127.0.0.1:7680#short").is_none());
+        assert!(
+            parse_pairing_invite(&format!("canban://pair?v=2&a=100.64.1.2:7680#{secret}"))
+                .is_none()
         );
-
-        let v1_uri = format!("canban://100.84.12.5:7680#{secret}");
-        let v1 = parse_pairing_invite(&v1_uri).expect("valid v1 URI");
-        assert_eq!(v1.version, 1);
-        assert_eq!(v1.addresses, vec!["100.84.12.5:7680"]);
-        assert_eq!(v1.secret, secret);
-
-        assert!(parse_pairing_invite("canban://pair?v=2&a=127.0.0.1:7680#short").is_none());
-        assert!(parse_pairing_invite("canban://pair?v=2#0123456789abcdef0123").is_none());
     }
 
     #[tokio::test]
-    async fn probe_candidates_measures_reachability_and_prefers_priority_order() {
+    async fn probe_addr_reports_reachable_and_unreachable_states() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let open_addr = listener.local_addr().unwrap().to_string();
 
@@ -401,17 +410,13 @@ mod tests {
             let _ = listener.accept().await;
         });
 
-        let results = probe_candidates(
-            &[closed_addr.clone(), open_addr.clone()],
-            Duration::from_secs(2),
-        )
-        .await;
-        assert_eq!(results.len(), 2);
-        let preferred = select_preferred_candidate(&results).expect("open port reachable");
-        assert_eq!(preferred.addr, open_addr);
-        assert!(preferred.reachable);
-        assert!(preferred.rtt_ms.is_some());
-        assert!(!results[1].reachable);
-        assert_eq!(results[1].addr, closed_addr);
+        let open_res = probe_addr(&open_addr, Duration::from_secs(2)).await;
+        assert!(open_res.reachable);
+        assert!(open_res.rtt_ms.is_some());
+        assert_eq!(open_res.security, TransportSecurity::UnverifiedTcp);
+
+        let closed_res = probe_addr(&closed_addr, Duration::from_secs(2)).await;
+        assert!(!closed_res.reachable);
+        assert_eq!(closed_res.rtt_ms, None);
     }
 }

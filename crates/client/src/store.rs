@@ -1,5 +1,5 @@
-//! Persistence for credentials, saved hosts, fallback candidate addresses,
-//! offline host caches, and TCP transport secret sealing (`enc:v1:`).
+//! Persistence for credentials, saved hosts, offline host caches,
+//! and TCP transport secret sealing (`enc:v1:`).
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use canban_types::{Config, HostTransport, HostsFile, SavedHost, Snapshot};
@@ -142,18 +142,8 @@ pub struct CachedHostData {
     pub config: Config,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-struct HostAddrsFile {
-    #[serde(default)]
-    addrs: BTreeMap<String, Vec<String>>,
-}
-
 pub fn hosts_path(data_dir: &Path) -> PathBuf {
     data_dir.join("hosts.json")
-}
-
-pub fn host_addrs_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("host_addrs.json")
 }
 
 pub fn cache_path(data_dir: &Path, host_id: &str) -> PathBuf {
@@ -216,24 +206,6 @@ pub fn save_hosts(data_dir: &Path, hosts: &[SavedHost], creds: &dyn CredentialSt
     )?;
     set_private_mode(&path, 0o600);
     Ok(())
-}
-
-pub fn load_fallback_addrs(data_dir: &Path) -> BTreeMap<String, Vec<String>> {
-    std::fs::read(host_addrs_path(data_dir))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<HostAddrsFile>(&b).ok())
-        .map(|f| f.addrs)
-        .unwrap_or_default()
-}
-
-pub fn save_fallback_addrs(data_dir: &Path, addrs: &BTreeMap<String, Vec<String>>) -> Result<()> {
-    let path = host_addrs_path(data_dir);
-    canban_context::atomic(
-        &path,
-        &serde_json::to_vec_pretty(&HostAddrsFile {
-            addrs: addrs.clone(),
-        })?,
-    )
 }
 
 pub fn load_cache(data_dir: &Path, host_id: &str) -> Option<CachedHostData> {
