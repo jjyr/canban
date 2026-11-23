@@ -92,6 +92,8 @@ typedef struct {
   uint16_t rows;
   uint32_t cell_width;
   uint32_t cell_height;
+  uint32_t cell_width_milli;
+  uint32_t cell_height_milli;
   uint32_t pad_left;
   uint32_t pad_right;
   uint32_t pad_top;

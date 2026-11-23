@@ -1222,14 +1222,26 @@ fn viewer_presence_protects_card_and_terminal_without_db_writes_and_drives_recla
 
     // Active Card presence (even with terminal pane collapsed: terminal_id = None)
     // protects the Card's managed terminal with zero SQLite writes and no state_revision bump
-    // on steady heartbeats.
+    // on steady heartbeats. Optional `terminal_size` updates in-memory launch sizing with zero SQLite writes.
     let db_changes_before = app.store.lock().unwrap().db().conn.total_changes();
     let rev_before = app.state_revision.load(std::sync::atomic::Ordering::SeqCst);
     app.call(
         "viewer.presence",
-        json!({"client_id": "win-1", "card_id": c.id, "terminal_id": null}),
+        json!({
+            "client_id": "win-1",
+            "card_id": c.id,
+            "terminal_id": null,
+            "terminal_size": {"cols": 108, "rows": 38}
+        }),
     )
     .unwrap();
+    assert_eq!(
+        app.resolve_launch_terminal_size(None),
+        canban_herdr::TerminalSize {
+            cols: 108,
+            rows: 38
+        }
+    );
     let rev_after_first = app.state_revision.load(std::sync::atomic::Ordering::SeqCst);
     app.call(
         "viewer.presence",

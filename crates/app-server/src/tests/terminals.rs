@@ -1173,3 +1173,48 @@ for line in sys.stdin:
         "terminal.kill\n"
     );
 }
+
+#[test]
+fn terminal_run_uses_default_explicit_and_persisted_launch_sizes() {
+    let (dir, app, p, _) = setup();
+    core(&app, dir.path());
+
+    // 1. Unsized launch uses fallback 120x36 (never Herdr's 200x120 headless default).
+    app.call("terminal.create", json!({"project_id": p.id}))
+        .unwrap();
+    let launches: Vec<Value> = std::fs::read_to_string(dir.path().join("launches"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(launches[0]["size"], json!({"cols": 120, "rows": 36}));
+
+    // 2. Explicit size from UI is forwarded to terminal.run and remembered across restart.
+    app.call(
+        "terminal.create",
+        json!({"project_id": p.id, "size": {"cols": 134, "rows": 44}}),
+    )
+    .unwrap();
+    let launches: Vec<Value> = std::fs::read_to_string(dir.path().join("launches"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(launches[1]["size"], json!({"cols": 134, "rows": 44}));
+
+    let home = app.home.clone();
+    drop(app);
+    let reopened = AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
+    core(&reopened, dir.path());
+
+    // 3. Subsequent unsized launch after restart inherits persisted 134x44.
+    reopened
+        .call("terminal.create", json!({"project_id": p.id}))
+        .unwrap();
+    let launches: Vec<Value> = std::fs::read_to_string(dir.path().join("launches"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(launches[2]["size"], json!({"cols": 134, "rows": 44}));
+}

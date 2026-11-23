@@ -1139,6 +1139,7 @@ impl AppServer {
             argv,
             cwd: batch.worktree.clone(),
             labels,
+            size: None,
         });
         match launch_res.map(|o| o.receipt) {
             Ok(receipt) => {

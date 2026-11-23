@@ -1471,6 +1471,7 @@ impl AppServer {
                         ("canban.terminal".into(), item.id.clone()),
                         ("canban.project".into(), project.id.clone()),
                     ]),
+                    size: None,
                 })?
                 .receipt;
             let address = strp(&receipt, "address")?.to_owned();

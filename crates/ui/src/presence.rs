@@ -37,6 +37,11 @@ fn publish_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(Default::default)
 }
 
+fn preferred_terminal_size_slot() -> &'static Mutex<Option<(u16, u16)>> {
+    static SIZE: OnceLock<Mutex<Option<(u16, u16)>>> = OnceLock::new();
+    SIZE.get_or_init(Default::default)
+}
+
 /// Resolves which Card and/or Terminal the active window is currently viewing.
 /// Returns `None` when the window is inactive/blurred or on non-Card/non-Terminal pages.
 #[allow(clippy::too_many_arguments)]
@@ -89,12 +94,20 @@ fn send_presence(host_id: &str, card_id: Option<&str>, terminal_id: Option<&str>
     if !crate::backend::is_connected() {
         return;
     }
-    let payload = json!({
+    let mut payload = json!({
         "client_id": client_id(),
         "host_id": host_id,
         "card_id": card_id,
         "terminal_id": terminal_id,
     });
+    if (card_id.is_some() || terminal_id.is_some())
+        && let Some((cols, rows)) = preferred_terminal_size_slot()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .or_else(canban_terminal::last_viewport_size)
+    {
+        payload["terminal_size"] = json!({ "cols": cols, "rows": rows });
+    }
     let _ = crate::routed_call("viewer.presence", payload, None);
 }
 
@@ -133,6 +146,22 @@ pub fn init(ui: Ui) {
     if !crate::backend::is_connected() {
         return;
     }
+    effect(move || {
+        let _ = (
+            ui.window_size.get(),
+            ui.narrow.get(),
+            ui.terminal_sidebar.get(),
+            ui.terminal_width.get(),
+            ui.page.get(),
+        );
+        let _ = ui
+            .utility
+            .with(|v| v["preferences"]["terminal_font_size"].as_u64());
+        let next = crate::terminals::launch_terminal_size(ui, false);
+        *preferred_terminal_size_slot()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = next;
+    });
     let current_target = computed(move || {
         if !ui.snapshot_ready.get() {
             return None;

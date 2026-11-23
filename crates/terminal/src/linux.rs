@@ -603,6 +603,7 @@ impl ControllerSlot {
             if !session::accepts_pty_input(&s, self.read_only) {
                 return;
             }
+            s.clear_attach_settle();
             s.model.paste(text)
         };
         self.send_bytes(encoded);
@@ -675,7 +676,9 @@ impl TerminalEmulator for SharedSessionEmulator {
         if size.cols < 2 || size.rows < 1 {
             return;
         }
+        session::record_viewport_size(cols, rows);
         let (cw, ch) = slot.cell_px;
+        session::record_cell_metrics_milli(cw.max(1) * 1000, ch.max(1) * 1000);
         let (grid_changed, facts, became_ready, replies) = {
             let mut s = slot.state.lock().unwrap();
             let became_ready = !s.size_ready;
@@ -717,12 +720,18 @@ impl TerminalEmulator for SharedSessionEmulator {
     fn line(&self, index: usize) -> TerminalLine {
         let slot = self.slot.borrow();
         let s = slot.state.lock().unwrap();
+        if s.is_attach_settling() {
+            return TerminalLine::default();
+        }
         s.model.terminal_line(index)
     }
 
     fn cursor(&self) -> Option<TerminalCursor> {
         let slot = self.slot.borrow();
         let s = slot.state.lock().unwrap();
+        if s.is_attach_settling() {
+            return None;
+        }
         let mut cur = s.model.active_cursor()?;
         cur.col = cur.col.min(slot.view_size.cols.saturating_sub(1));
         cur.row = cur.row.min(slot.view_size.rows.saturating_sub(1));
@@ -1055,6 +1064,7 @@ fn mount_terminal_surface(
                     if !session::accepts_pty_input(&s, guard.read_only) {
                         false
                     } else {
+                        s.clear_attach_settle();
                         s.model.clear_selection();
                         s.model.scroll_to_bottom();
                         true
@@ -1101,6 +1111,7 @@ fn mount_terminal_surface(
                     if !session::accepts_pty_input(&s, guard.read_only) {
                         return;
                     }
+                    s.clear_attach_settle();
                     // Only intercept wheel when TUI mouse tracking or alternate scroll (1007) is active;
                     // primary scrollback is scrolled natively by `nsh_base::Terminal`'s virtual_list.
                     if !s.model.mouse_tracking()

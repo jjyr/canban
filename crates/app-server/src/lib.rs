@@ -65,6 +65,7 @@ pub struct AppServer {
     merging_cards: Mutex<std::collections::BTreeSet<String>>,
     terminal_gate: Mutex<()>,
     terminal_contexts: Mutex<Vec<TerminalContext>>,
+    last_terminal_size: Mutex<Option<canban_herdr::TerminalSize>>,
     presence: presence::PresenceTracker,
     inventory: Mutex<observation::Inventory>,
     refinements: refine::RefinementTracker,
@@ -695,6 +696,7 @@ impl AppServer {
         }
 
         let utilities = utilities::Utilities::new(&home);
+        let initial_terminal_size = utilities.default_terminal_size();
         {
             let usage_push_seq = push_seq.clone();
             let usage_push_tx = push_tx.clone();
@@ -758,6 +760,7 @@ impl AppServer {
             merging_cards: Mutex::new(Default::default()),
             terminal_gate: Mutex::new(()),
             terminal_contexts: Mutex::new(Vec::new()),
+            last_terminal_size: Mutex::new(initial_terminal_size),
             presence: Default::default(),
             inventory: Mutex::new(Default::default()),
             refinements: Default::default(),

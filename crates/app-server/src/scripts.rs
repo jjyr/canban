@@ -1144,13 +1144,14 @@ impl AppServer {
                 labels.insert("canban.card_id".into(), cid.clone());
             }
             let wrapped = wrapped_herdr_argv(&prep.raw_log_file, &prep.argv);
-            match client.launch_with_policy_and_unset(
+            match client.launch_with_policy_unset_and_size(
                 wrapped,
                 &prep.cwd.to_string_lossy(),
                 prep.env.clone(),
                 labels,
                 prep.env_policy,
                 &prep.unset_keys,
+                Some(self.resolve_launch_terminal_size(None)),
             ) {
                 Ok(launched) => {
                     let addr = launched["address"].as_str().unwrap_or("").to_owned();

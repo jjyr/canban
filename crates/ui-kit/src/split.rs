@@ -60,10 +60,14 @@ pub fn reveal_split(
     let total = signal(0f32);
     let open = computed(move || requested.get() && total.get() > 0.);
     let presence = super::motion::Presence::new(open);
-    let extent = signal(340f32);
-    effect(move || {
+    let last_extent = stored(340f32);
+    let extent = computed(move || {
         if open.get() {
-            extent.set(pane_extent(total.get(), width.get(), full.get()));
+            let next = pane_extent(total.get(), width.get(), full.get());
+            last_extent.replace(next);
+            next
+        } else {
+            last_extent.get()
         }
     });
     let wide = computed(move || open.get() && !full.get());
@@ -213,8 +217,8 @@ pub fn reveal_left_split(
     let total = signal(0f32);
     let group_ref = element_ref();
     let presence = super::motion::Presence::new(open);
-    let extent = signal(width.get_untracked().clamp(min_left, max_left));
-    effect(move || {
+    let last_extent = stored(width.get_untracked().clamp(min_left, max_left));
+    let extent = computed(move || {
         if open.get() {
             let t = total.get();
             let next = if full.get() {
@@ -226,7 +230,10 @@ pub fn reveal_left_split(
             } else {
                 width.get().clamp(min_left, max_left)
             };
-            extent.set(next);
+            last_extent.replace(next);
+            next
+        } else {
+            last_extent.get()
         }
     });
     let prev_open = stored(open.get_untracked());
@@ -277,24 +284,31 @@ pub fn reveal_left_split(
                 })
                 .child(
                     nsh_base::resizable_panel()
-                        .size(move || px(if open.get() { extent.get() } else { 0. }))
+                        .size(move || {
+                            if open.get() && !full.get() {
+                                Some(px(extent.get()))
+                            } else if open.get() && full.get() {
+                                None
+                            } else {
+                                Some(px(0.))
+                            }
+                        })
                         .min_size(move || px(if wide.get() { min_left } else { 0. }))
                         .max_size(move || {
-                            px(if wide.get() {
+                            if wide.get() {
                                 let t = total.get();
-                                if t > 0. {
+                                Some(px(if t > 0. {
                                     max_left.min((t - min_right).max(min_left))
                                 } else {
                                     max_left
-                                }
+                                }))
                             } else if open.get() {
-                                let t = total.get();
-                                if t > 0. { t } else { 10000. }
+                                None
                             } else {
-                                0.
-                            })
+                                Some(px(0.))
+                            }
                         })
-                        .fixed(move || !wide.get())
+                        .fixed(move || !open.get())
                         .child(
                             view()
                                 .element_ref(&presence.region)
@@ -323,23 +337,21 @@ pub fn reveal_left_split(
                 .child(
                     nsh_base::resizable_panel()
                         .size(move || {
-                            let t = total.get();
-                            if t > 0. {
-                                Some(px((t - if open.get() { extent.get() } else { 0. }).max(0.)))
+                            if open.get() && full.get() {
+                                Some(px(0.))
                             } else {
                                 None
                             }
                         })
                         .min_size(move || px(if wide.get() { min_right } else { 0. }))
                         .max_size(move || {
-                            px(if open.get() && full.get() {
-                                0.
+                            if open.get() && full.get() {
+                                Some(px(0.))
                             } else {
-                                let t = total.get();
-                                if t > 0. { t } else { 10000. }
-                            })
+                                None
+                            }
                         })
-                        .fixed(move || !wide.get())
+                        .fixed(move || open.get() && full.get())
                         .child(
                             view()
                                 .flex_1()
@@ -516,6 +528,208 @@ mod tests {
         assert_ne!(
             gruvbox_bg, initial_bg,
             "split handle indicator color updates when Canban theme changes"
+        );
+    }
+
+    #[test]
+    fn reveal_left_split_and_reveal_split_assign_final_widths_on_first_layout() {
+        #[component]
+        fn RevealLeftHost() -> impl IntoElement {
+            crate::tokens::install_theme();
+            let width = signal(260.0_f32);
+            let open_sig = signal(true);
+            let full_sig = signal(false);
+            let open = computed(move || open_sig.get());
+            let full = computed(move || full_sig.get());
+            view()
+                .w(px(1200.0))
+                .h(px(700.0))
+                .child(
+                    view()
+                        .test_id("toggle-open")
+                        .h(px(0.0))
+                        .on_press(move || open_sig.set(!open_sig.get_untracked())),
+                )
+                .child(
+                    view()
+                        .test_id("toggle-full")
+                        .h(px(0.0))
+                        .on_press(move || full_sig.set(!full_sig.get_untracked())),
+                )
+                .child(reveal_left_split(
+                    view()
+                        .test_id("split-left")
+                        .flex_1()
+                        .h_full()
+                        .into_element(),
+                    view()
+                        .test_id("split-right")
+                        .flex_1()
+                        .h_full()
+                        .into_element(),
+                    width,
+                    190.0,
+                    544.0,
+                    300.0,
+                    full,
+                    open,
+                    "Resize",
+                    |_| {},
+                ))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1200.0), px(700.0)));
+        core.mount_root(&nsh_core::element::Root::of::<RevealLeftHost>());
+
+        let mut frames: HashMap<NodeId, Bounds<Points>> = HashMap::new();
+        let mut test_ids: HashMap<String, NodeId> = HashMap::new();
+
+        fn apply_batch(
+            batch: &nsh_core::MountBatch,
+            frames: &mut HashMap<NodeId, Bounds<Points>>,
+            test_ids: &mut HashMap<String, NodeId>,
+        ) {
+            for item in &batch.items {
+                match item {
+                    MountItem::Frame { id, frame } => {
+                        frames.insert(*id, *frame);
+                    }
+                    MountItem::ViewProps { id, props } => {
+                        if let Some(tid) = &props.test_id {
+                            test_ids.insert(tid.to_string(), *id);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        fn drain_layout(
+            core: &mut Core<ApproxTextEngine>,
+            frames: &mut HashMap<NodeId, Bounds<Points>>,
+            test_ids: &mut HashMap<String, NodeId>,
+        ) {
+            for _ in 0..8 {
+                let had_batch = if let Some(batch) = core.commit() {
+                    apply_batch(&batch, frames, test_ids);
+                    true
+                } else {
+                    false
+                };
+                let mut events = Vec::new();
+                core.take_events(&mut events);
+                let mut dispatched = false;
+                for ev in events {
+                    match ev {
+                        nsh_core::element::JsEvent::Event(id, kind, payload) => {
+                            core.component_event(id, kind, &payload);
+                            dispatched = true;
+                        }
+                        nsh_core::element::JsEvent::LayoutListener {
+                            host,
+                            id,
+                            listener,
+                            frame,
+                        } => {
+                            core.component_layout(host, id, &listener, frame);
+                            dispatched = true;
+                        }
+                        _ => {}
+                    }
+                }
+                if !had_batch && !dispatched && !core.has_events() {
+                    break;
+                }
+            }
+        }
+
+        // 1. VERY FIRST commit (before any on_layout feedback!) must already allocate 1200 - 260 = 940pt.
+        let first_batch = core.commit().expect("initial commit batch");
+        apply_batch(&first_batch, &mut frames, &mut test_ids);
+        let right_id = test_ids["split-right"];
+        let left_id = test_ids["split-left"];
+        assert_eq!(frames[&left_id].size.width, px(260.0));
+        assert_eq!(frames[&right_id].size.width, px(940.0));
+
+        // Drain layout events and verify no second-frame width jump occurs.
+        drain_layout(&mut core, &mut frames, &mut test_ids);
+        assert_eq!(frames[&right_id].size.width, px(940.0));
+
+        // 2. Collapsing sidebar expands right pane to full 1200pt.
+        core.component_event(
+            test_ids["toggle-open"],
+            nsh_core::EventKind::Press,
+            &nsh_core::EventPayload::None,
+        );
+        drain_layout(&mut core, &mut frames, &mut test_ids);
+        assert_eq!(frames[&right_id].size.width, px(1200.0));
+
+        // 3. Reopening in narrow/full mode gives left pane 1200pt and collapses right pane to 0pt.
+        core.component_event(
+            test_ids["toggle-full"],
+            nsh_core::EventKind::Press,
+            &nsh_core::EventPayload::None,
+        );
+        core.component_event(
+            test_ids["toggle-open"],
+            nsh_core::EventKind::Press,
+            &nsh_core::EventPayload::None,
+        );
+        drain_layout(&mut core, &mut frames, &mut test_ids);
+        assert_eq!(frames[&left_id].size.width, px(1200.0));
+        assert_eq!(frames[&right_id].size.width, px(0.0));
+
+        // 4. reveal_split resolves extent synchronously on the exact commit `requested` flips true.
+        #[component]
+        fn RevealRightHost() -> impl IntoElement {
+            crate::tokens::install_theme();
+            let width = signal(560.0_f32);
+            let req = signal(false);
+            let full = computed(|| false);
+            let requested = computed(move || req.get());
+            view()
+                .w(px(1200.0))
+                .h(px(700.0))
+                .child(
+                    view()
+                        .test_id("open-right")
+                        .h(px(0.0))
+                        .on_press(move || req.set(true)),
+                )
+                .child(reveal_split(
+                    view().flex_1().into_element(),
+                    move || {
+                        view()
+                            .test_id("reveal-right")
+                            .flex_1()
+                            .h_full()
+                            .into_element()
+                    },
+                    width,
+                    full,
+                    requested,
+                    || {},
+                ))
+        }
+
+        let mut r_core = Core::new(ApproxTextEngine, size(px(1200.0), px(700.0)));
+        r_core.mount_root(&nsh_core::element::Root::of::<RevealRightHost>());
+        let mut r_frames: HashMap<NodeId, Bounds<Points>> = HashMap::new();
+        let mut r_ids: HashMap<String, NodeId> = HashMap::new();
+        drain_layout(&mut r_core, &mut r_frames, &mut r_ids);
+        r_core.component_event(
+            r_ids["open-right"],
+            nsh_core::EventKind::Press,
+            &nsh_core::EventPayload::None,
+        );
+        if let Some(batch) = r_core.commit() {
+            apply_batch(&batch, &mut r_frames, &mut r_ids);
+        }
+        let rr_id = r_ids["reveal-right"];
+        assert_eq!(
+            r_frames[&rr_id].size.width,
+            px(639.0),
+            "reveal_split must mount right pane at exact target extent (1200 - 560 = 640, minus 1pt border = 639), never 340"
         );
     }
 }

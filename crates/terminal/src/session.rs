@@ -7,14 +7,58 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Condvar, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
         mpsc,
     },
     time::{Duration, Instant},
 };
 
 pub const CONNECTING_GRACE: Duration = Duration::from_millis(180);
+pub const ATTACH_RESIZE_COALESCE: Duration = Duration::from_millis(75);
+pub const ATTACH_RESIZE_SYNC_CAP: Duration = Duration::from_millis(160);
+const ATTACH_POST_SNAPSHOT_BURST: Duration = Duration::from_millis(2);
 pub const MAX_POOLED_SESSIONS: usize = 8;
+
+static LAST_VIEWPORT_SIZE: AtomicU32 = AtomicU32::new(0);
+static LAST_CELL_METRICS_MILLI: AtomicU64 = AtomicU64::new(0);
+
+/// Records the most recent live terminal viewport grid dimensions `(cols, rows)`.
+pub fn record_viewport_size(cols: u16, rows: u16) {
+    if cols >= 2 && rows >= 1 {
+        let packed = (u32::from(cols) << 16) | u32::from(rows);
+        LAST_VIEWPORT_SIZE.store(packed, Ordering::Relaxed);
+    }
+}
+
+/// Returns the most recent live terminal viewport grid dimensions `(cols, rows)`.
+pub fn last_viewport_size() -> Option<(u16, u16)> {
+    let packed = LAST_VIEWPORT_SIZE.load(Ordering::Relaxed);
+    if packed == 0 {
+        return None;
+    }
+    let cols = (packed >> 16) as u16;
+    let rows = (packed & 0xFFFF) as u16;
+    (cols >= 2 && rows >= 1).then_some((cols, rows))
+}
+
+/// Records the most recent terminal cell dimensions in millipoints (`pt * 1000`).
+pub fn record_cell_metrics_milli(cell_w_milli: u32, cell_h_milli: u32) {
+    if cell_w_milli > 0 && cell_h_milli > 0 {
+        let packed = (u64::from(cell_w_milli) << 32) | u64::from(cell_h_milli);
+        LAST_CELL_METRICS_MILLI.store(packed, Ordering::Relaxed);
+    }
+}
+
+/// Returns the most recent terminal cell dimensions in millipoints (`pt * 1000`).
+pub fn last_cell_metrics_milli() -> Option<(u32, u32)> {
+    let packed = LAST_CELL_METRICS_MILLI.load(Ordering::Relaxed);
+    if packed == 0 {
+        return None;
+    }
+    let w = (packed >> 32) as u32;
+    let h = (packed & 0xFFFF_FFFF) as u32;
+    (w > 0 && h > 0).then_some((w, h))
+}
 
 /// Display geometry and color facts reported to the remote/local PTY backend.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -94,6 +138,10 @@ pub trait PtyAttachment: Send {
 
     fn facts(&mut self, display: &DisplayFacts) -> anyhow::Result<()> {
         self.writer().facts(display)
+    }
+
+    fn resized_on_attach(&self) -> bool {
+        false
     }
 
     fn detach(self: Box<Self>) {}
@@ -209,6 +257,10 @@ impl PtyAttachment for HerdrAttachment {
     fn facts(&mut self, display: &DisplayFacts) -> anyhow::Result<()> {
         self.0
             .facts(&HerdrLocalTransport::to_herdr_display(display))
+    }
+
+    fn resized_on_attach(&self) -> bool {
+        self.0.resized_on_attach
     }
 }
 
@@ -349,6 +401,7 @@ pub struct State {
     pub connected: bool,
     pub exited: bool,
     pub connecting_since: Option<Instant>,
+    pub attach_settle_until: Option<Instant>,
     pub size_ready: bool,
     pub focused: bool,
     pub theme: Option<Value>,
@@ -362,10 +415,20 @@ impl State {
             connected: false,
             exited: false,
             connecting_since: None,
+            attach_settle_until: None,
             size_ready: false,
             focused: false,
             theme: None,
         }
+    }
+
+    pub fn is_attach_settling(&self) -> bool {
+        self.attach_settle_until
+            .is_some_and(|deadline| Instant::now() < deadline)
+    }
+
+    pub fn clear_attach_settle(&mut self) -> bool {
+        self.attach_settle_until.take().is_some()
     }
 }
 
@@ -541,6 +604,7 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
         connected: false,
         exited: false,
         connecting_since: Some(Instant::now()),
+        attach_settle_until: None,
         size_ready,
         focused,
         theme,
@@ -639,7 +703,16 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                 for _ in rx.lock().unwrap().try_iter() {}
             }
             first_attach = false;
-            {
+            #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+            enum AttachSettlePhase {
+                Inactive,
+                AwaitingInitialSnapshot,
+                AwaitingRedraw {
+                    snapshot_at: Instant,
+                    saw_render_hold: bool,
+                },
+            }
+            let (effective_size, settle_sync_deadline, mut settle_phase) = {
                 let mut s = state.lock().unwrap();
                 let size = (s.model.cols, s.model.height);
                 if !was_first_attach {
@@ -667,9 +740,11 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                 } else {
                     Ok(())
                 };
+                let mut effective_size = attached_size;
                 // Layout may have resized the view or updated font/theme while attach was connecting.
                 if setup_res.is_ok() && s.size_ready && size != attached_size {
                     setup_res = transport.resize(attach.as_mut(), size.0, size.1);
+                    effective_size = size;
                 }
                 let latest_display = display_facts_for_model(&s.model, s.theme.as_ref());
                 if setup_res.is_ok() && latest_display != attached_display {
@@ -677,14 +752,28 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                 }
                 if let Err(e) = setup_res {
                     s.status = format!("Attach setup failed: {e} · reconnecting");
+                    s.attach_settle_until = None;
                     drop(s);
                     transport.detach(attach);
                     wake.notify();
                     continue;
                 }
+                let needs_settle = attach.resized_on_attach() || effective_size != attached_size;
+                let now_inst = Instant::now();
+                let settle_sync_deadline = now_inst + ATTACH_RESIZE_SYNC_CAP;
+                let settle_phase = if needs_settle {
+                    s.attach_settle_until = Some(now_inst + ATTACH_RESIZE_COALESCE);
+                    AttachSettlePhase::AwaitingInitialSnapshot
+                } else {
+                    s.attach_settle_until = None;
+                    AttachSettlePhase::Inactive
+                };
                 s.connected = true;
+                (effective_size, settle_sync_deadline, settle_phase)
+            };
+            if settle_phase == AttachSettlePhase::Inactive {
+                wake.notify();
             }
-            wake.notify();
 
             let input_stop = Arc::new(AtomicBool::new(false));
             let failed = Arc::new(AtomicBool::new(false));
@@ -696,12 +785,19 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                 let state = state.clone();
                 let wake = wake.clone();
                 std::thread::spawn(move || {
+                    let mut last_sent_size = effective_size;
                     while !stopped.load(Ordering::SeqCst) {
                         let message = rx.lock().unwrap().recv_timeout(Duration::from_millis(20));
                         let result = match message {
                             Ok(Input::Bytes(bytes)) => writer.write(&bytes),
                             Ok(Input::AutoBytes(bytes)) => writer.write_auto(&bytes),
-                            Ok(Input::Resize(c, r)) => writer.resize(c, r),
+                            Ok(Input::Resize(c, r)) => {
+                                if (c, r) == last_sent_size {
+                                    continue;
+                                }
+                                last_sent_size = (c, r);
+                                writer.resize(c, r)
+                            }
                             Ok(Input::Focus(on)) => writer.focus(on),
                             Ok(Input::Facts(facts)) => writer.facts(&facts),
                             Err(mpsc::RecvTimeoutError::Timeout) => continue,
@@ -717,20 +813,120 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                 })
             };
             let mut reconnect = false;
+            let mut pending_event: Option<anyhow::Result<Option<PtyEvent>>> = None;
             while !stop.load(Ordering::SeqCst) && !failed.load(Ordering::SeqCst) {
-                match attach.recv(Duration::from_millis(15)) {
-                    Ok(Some(PtyEvent::Data(data))) => {
+                let next_event = if let Some(ev) = pending_event.take() {
+                    ev
+                } else {
+                    let recv_timeout = if settle_phase != AttachSettlePhase::Inactive {
+                        let s = state.lock().unwrap();
+                        if s.attach_settle_until.is_none() {
+                            settle_phase = AttachSettlePhase::Inactive;
+                            Duration::from_millis(15)
+                        } else if let Some(deadline) = s.attach_settle_until {
+                            let target = if s.model.is_render_held() {
+                                deadline.max(settle_sync_deadline)
+                            } else {
+                                deadline
+                            };
+                            target
+                                .saturating_duration_since(Instant::now())
+                                .clamp(Duration::from_millis(1), Duration::from_millis(15))
+                        } else {
+                            Duration::from_millis(15)
+                        }
+                    } else {
+                        Duration::from_millis(15)
+                    };
+                    attach.recv(recv_timeout)
+                };
+                match next_event {
+                    Ok(Some(PtyEvent::Data(first_data))) => {
+                        let mut chunks = vec![first_data];
+                        while chunks.len() < 32 {
+                            match attach.recv(Duration::ZERO) {
+                                Ok(Some(PtyEvent::Data(more))) => chunks.push(more),
+                                Ok(None) => break,
+                                other => {
+                                    pending_event = Some(other);
+                                    break;
+                                }
+                            }
+                        }
+                        let total_len: usize = chunks.iter().map(Vec::len).sum();
                         let (replies, should_wake) = {
                             let mut s = state.lock().unwrap();
-                            s.model.write(&data);
-                            let should_wake =
-                                !s.model.is_render_held() || s.model.render_state_dirty();
+                            for chunk in &chunks {
+                                s.model.write(chunk);
+                            }
+                            let now = Instant::now();
+                            let should_wake = if s.attach_settle_until.is_none() {
+                                settle_phase = AttachSettlePhase::Inactive;
+                                !s.model.is_render_held() || s.model.render_state_dirty()
+                            } else {
+                                match settle_phase {
+                                    AttachSettlePhase::Inactive => {
+                                        s.attach_settle_until = None;
+                                        !s.model.is_render_held() || s.model.render_state_dirty()
+                                    }
+                                    AttachSettlePhase::AwaitingInitialSnapshot => {
+                                        let expired =
+                                            s.attach_settle_until.is_some_and(|d| now >= d)
+                                                && !s.model.is_render_held();
+                                        if expired {
+                                            s.attach_settle_until = None;
+                                            settle_phase = AttachSettlePhase::Inactive;
+                                            s.model.revision += 1;
+                                            true
+                                        } else {
+                                            settle_phase = AttachSettlePhase::AwaitingRedraw {
+                                                snapshot_at: now,
+                                                saw_render_hold: s.model.is_render_held(),
+                                            };
+                                            false
+                                        }
+                                    }
+                                    AttachSettlePhase::AwaitingRedraw {
+                                        snapshot_at,
+                                        saw_render_hold,
+                                    } => {
+                                        let held = s.model.is_render_held();
+                                        let now_saw_hold = saw_render_hold || held;
+                                        if held {
+                                            let capped = settle_sync_deadline
+                                                .max(now)
+                                                .min(settle_sync_deadline);
+                                            s.attach_settle_until = Some(capped);
+                                            settle_phase = AttachSettlePhase::AwaitingRedraw {
+                                                snapshot_at,
+                                                saw_render_hold: true,
+                                            };
+                                            false
+                                        } else if now_saw_hold
+                                            || now.duration_since(snapshot_at)
+                                                >= ATTACH_POST_SNAPSHOT_BURST
+                                            || s.attach_settle_until.is_some_and(|d| now >= d)
+                                        {
+                                            s.attach_settle_until = None;
+                                            settle_phase = AttachSettlePhase::Inactive;
+                                            s.model.revision += 1;
+                                            true
+                                        } else {
+                                            settle_phase = AttachSettlePhase::AwaitingRedraw {
+                                                snapshot_at,
+                                                saw_render_hold: now_saw_hold,
+                                            };
+                                            false
+                                        }
+                                    }
+                                }
+                            };
                             (s.model.replies(), should_wake)
                         };
                         if should_wake {
                             wake.notify();
                         }
-                        let result = attach.consumed(data.len()).and_then(|_| {
+                        let result = attach.consumed(total_len).and_then(|_| {
                             if replies.is_empty() {
                                 Ok(())
                             } else {
@@ -756,6 +952,7 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                             s.connected = false;
                             s.exited = true;
                             s.connecting_since = None;
+                            s.attach_settle_until = None;
                             s.status = format!(
                                 "Terminal exited · {}",
                                 reason["reason"].as_str().unwrap_or("closed")
@@ -769,14 +966,21 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                         return;
                     }
                     Ok(Some(PtyEvent::Lost(error))) => {
-                        state.lock().unwrap().status =
-                            format!("Disconnected · {error} · reconnecting");
+                        {
+                            let mut s = state.lock().unwrap();
+                            s.attach_settle_until = None;
+                            s.status = format!("Disconnected · {error} · reconnecting");
+                        }
                         wake.notify();
                         reconnect = true;
                         break;
                     }
                     Err(e) => {
-                        state.lock().unwrap().status = format!("Disconnected · {e}");
+                        {
+                            let mut s = state.lock().unwrap();
+                            s.attach_settle_until = None;
+                            s.status = format!("Disconnected · {e}");
+                        }
                         wake.notify();
                         reconnect = true;
                         break;
@@ -784,8 +988,32 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                     Ok(None) => {
                         let should_wake = {
                             let mut s = state.lock().unwrap();
-                            s.model.expire_render_hold_if_due()
-                                || s.model.advance_animation_if_due()
+                            let held_expired = s.model.expire_render_hold_if_due();
+                            let anim_due = s.model.advance_animation_if_due();
+                            let settle_released = if settle_phase != AttachSettlePhase::Inactive {
+                                let now = Instant::now();
+                                if let Some(deadline) = s.attach_settle_until {
+                                    if now >= deadline {
+                                        if s.model.is_render_held() && now < settle_sync_deadline {
+                                            s.attach_settle_until = Some(settle_sync_deadline);
+                                            false
+                                        } else {
+                                            s.attach_settle_until = None;
+                                            settle_phase = AttachSettlePhase::Inactive;
+                                            s.model.revision += 1;
+                                            true
+                                        }
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    settle_phase = AttachSettlePhase::Inactive;
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+                            held_expired || anim_due || settle_released
                         };
                         if should_wake {
                             wake.notify();
@@ -796,7 +1024,11 @@ pub fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
             input_stop.store(true, Ordering::SeqCst);
             let _ = input_worker.join();
             reconnect |= failed.load(Ordering::SeqCst);
-            state.lock().unwrap().connected = false;
+            {
+                let mut s = state.lock().unwrap();
+                s.connected = false;
+                s.attach_settle_until = None;
+            }
             wake.notify();
             transport.detach(attach);
             if !reconnect {
@@ -903,6 +1135,7 @@ mod tests {
         writer: Arc<MockWriter>,
         rx: mpsc::Receiver<PtyEvent>,
         detached: Arc<AtomicBool>,
+        resized_on_attach: bool,
     }
 
     impl PtyAttachment for MockAttachment {
@@ -918,6 +1151,10 @@ mod tests {
             }
         }
 
+        fn resized_on_attach(&self) -> bool {
+            self.resized_on_attach
+        }
+
         fn detach(self: Box<Self>) {
             self.detached.store(true, Ordering::SeqCst);
         }
@@ -928,6 +1165,7 @@ mod tests {
         resizes: Arc<Mutex<Vec<(u16, u16)>>>,
         detached: Arc<AtomicBool>,
         events_rx: Mutex<Option<mpsc::Receiver<PtyEvent>>>,
+        resized_on_attach: bool,
     }
 
     impl PtyTransport for MockTransport {
@@ -945,6 +1183,7 @@ mod tests {
                 }),
                 rx,
                 detached: self.detached.clone(),
+                resized_on_attach: self.resized_on_attach,
             }))
         }
     }
@@ -960,6 +1199,7 @@ mod tests {
             resizes: resizes.clone(),
             detached: detached.clone(),
             events_rx: Mutex::new(Some(ev_rx)),
+            resized_on_attach: false,
         });
 
         let session = get_or_spawn_session(SessionInit {
@@ -1076,5 +1316,285 @@ mod tests {
             ),
             "Disconnected"
         );
+    }
+
+    #[test]
+    fn same_size_attach_wakes_immediately_without_coalesce_delay() {
+        let (ev_tx, ev_rx) = mpsc::channel();
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let resizes = Arc::new(Mutex::new(Vec::new()));
+        let detached = Arc::new(AtomicBool::new(false));
+        let transport = Arc::new(MockTransport {
+            written,
+            resizes,
+            detached,
+            events_rx: Mutex::new(Some(ev_rx)),
+            resized_on_attach: false,
+        });
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let wakes_cb = wakes.clone();
+        let session = spawn_session(SessionInit {
+            config: Config::default(),
+            core: "c-same".into(),
+            terminal: "t-same".into(),
+            initial_cols: 100,
+            initial_rows: 30,
+            initial_cell: (8, 18),
+            size_ready: true,
+            focused: false,
+            theme: None,
+            transport: Some(transport),
+        });
+        session.wake.attach(
+            99,
+            Arc::new(move || {
+                wakes_cb.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+
+        for _ in 0..50 {
+            if session.state.lock().unwrap().connected {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(session.state.lock().unwrap().connected);
+        assert!(!session.state.lock().unwrap().is_attach_settling());
+
+        session.wake.ack();
+        ev_tx.send(PtyEvent::Data(b"ready\r\n".to_vec())).unwrap();
+        for _ in 0..50 {
+            if session
+                .state
+                .lock()
+                .unwrap()
+                .model
+                .viewport_text()
+                .contains("ready")
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(wakes.load(Ordering::SeqCst) >= 1);
+    }
+
+    #[test]
+    fn resized_attach_coalesces_initial_snapshot_and_sync_redraw_until_2026l() {
+        let (ev_tx, ev_rx) = mpsc::channel();
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let resizes = Arc::new(Mutex::new(Vec::new()));
+        let detached = Arc::new(AtomicBool::new(false));
+        let transport = Arc::new(MockTransport {
+            written,
+            resizes,
+            detached,
+            events_rx: Mutex::new(Some(ev_rx)),
+            resized_on_attach: true,
+        });
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let wakes_cb = wakes.clone();
+        let session = spawn_session(SessionInit {
+            config: Config::default(),
+            core: "c-sync".into(),
+            terminal: "t-sync".into(),
+            initial_cols: 100,
+            initial_rows: 30,
+            initial_cell: (8, 18),
+            size_ready: true,
+            focused: false,
+            theme: None,
+            transport: Some(transport),
+        });
+        session.wake.attach(
+            101,
+            Arc::new(move || {
+                wakes_cb.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+
+        for _ in 0..50 {
+            if session.state.lock().unwrap().connected {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(session.state.lock().unwrap().is_attach_settling());
+        assert_eq!(wakes.load(Ordering::SeqCst), 0);
+
+        // 1. Garbled initial reflow snapshot arrives; must remain settling and silent.
+        ev_tx
+            .send(PtyEvent::Data(b"GARBLED_INIT".to_vec()))
+            .unwrap();
+        for _ in 0..20 {
+            if session
+                .state
+                .lock()
+                .unwrap()
+                .model
+                .viewport_text()
+                .contains("GARBLED_INIT")
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(session.state.lock().unwrap().is_attach_settling());
+        assert_eq!(wakes.load(Ordering::SeqCst), 0);
+
+        // 2. Partial synchronized redraw (?2026h without ?2026l yet) must keep settling.
+        std::thread::sleep(Duration::from_millis(4));
+        ev_tx
+            .send(PtyEvent::Data(
+                b"\x1b[?2026h\x1b[2J\x1b[HCLEAN_PART".to_vec(),
+            ))
+            .unwrap();
+        for _ in 0..20 {
+            if session.state.lock().unwrap().model.is_render_held() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(session.state.lock().unwrap().is_attach_settling());
+        assert_eq!(wakes.load(Ordering::SeqCst), 0);
+
+        // 3. Synchronized redraw finishes (?2026l) -> wakes immediately with clean screen.
+        ev_tx
+            .send(PtyEvent::Data(b"_DONE\x1b[?2026l".to_vec()))
+            .unwrap();
+        for _ in 0..50 {
+            if !session.state.lock().unwrap().is_attach_settling() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(!session.state.lock().unwrap().is_attach_settling());
+        assert!(wakes.load(Ordering::SeqCst) >= 1);
+        assert!(
+            session
+                .state
+                .lock()
+                .unwrap()
+                .model
+                .viewport_text()
+                .contains("CLEAN_PART_DONE")
+        );
+    }
+
+    #[test]
+    fn resized_attach_without_winch_redraw_releases_after_coalesce_timeout() {
+        let (ev_tx, ev_rx) = mpsc::channel();
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let resizes = Arc::new(Mutex::new(Vec::new()));
+        let detached = Arc::new(AtomicBool::new(false));
+        let transport = Arc::new(MockTransport {
+            written,
+            resizes,
+            detached,
+            events_rx: Mutex::new(Some(ev_rx)),
+            resized_on_attach: true,
+        });
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let wakes_cb = wakes.clone();
+        let session = spawn_session(SessionInit {
+            config: Config::default(),
+            core: "c-plain".into(),
+            terminal: "t-plain".into(),
+            initial_cols: 100,
+            initial_rows: 30,
+            initial_cell: (8, 18),
+            size_ready: true,
+            focused: false,
+            theme: None,
+            transport: Some(transport),
+        });
+        session.wake.attach(
+            102,
+            Arc::new(move || {
+                wakes_cb.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+
+        for _ in 0..50 {
+            if session.state.lock().unwrap().connected {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        ev_tx
+            .send(PtyEvent::Data(b"PLAIN_SHELL>".to_vec()))
+            .unwrap();
+        for _ in 0..20 {
+            if session
+                .state
+                .lock()
+                .unwrap()
+                .model
+                .viewport_text()
+                .contains("PLAIN_SHELL>")
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(session.state.lock().unwrap().is_attach_settling());
+        assert_eq!(wakes.load(Ordering::SeqCst), 0);
+
+        for _ in 0..40 {
+            if !session.state.lock().unwrap().is_attach_settling() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!session.state.lock().unwrap().is_attach_settling());
+        assert!(wakes.load(Ordering::SeqCst) >= 1);
+    }
+
+    #[test]
+    fn duplicate_pre_attach_resize_is_suppressed_while_preserving_early_bytes() {
+        let (_ev_tx, ev_rx) = mpsc::channel();
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let resizes = Arc::new(Mutex::new(Vec::new()));
+        let detached = Arc::new(AtomicBool::new(false));
+        let transport = Arc::new(MockTransport {
+            written: written.clone(),
+            resizes: resizes.clone(),
+            detached,
+            events_rx: Mutex::new(Some(ev_rx)),
+            resized_on_attach: false,
+        });
+        let session = spawn_session(SessionInit {
+            config: Config::default(),
+            core: "c-dup".into(),
+            terminal: "t-dup".into(),
+            initial_cols: 100,
+            initial_rows: 30,
+            initial_cell: (8, 18),
+            size_ready: true,
+            focused: false,
+            theme: None,
+            transport: Some(transport),
+        });
+
+        for _ in 0..50 {
+            if session.state.lock().unwrap().connected {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // Duplicate resize matching attached_size (100, 30) is suppressed; new resize (110, 32) goes through.
+        session.input.send(Input::Bytes(b"hi".to_vec())).unwrap();
+        session.input.send(Input::Resize(100, 30)).unwrap();
+        session.input.send(Input::Resize(110, 32)).unwrap();
+
+        for _ in 0..50 {
+            if !written.lock().unwrap().is_empty() && !resizes.lock().unwrap().is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(written.lock().unwrap().as_slice(), &[b"hi".to_vec()]);
+        assert_eq!(resizes.lock().unwrap().as_slice(), &[(110, 32)]);
     }
 }

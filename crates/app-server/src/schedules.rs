@@ -1711,6 +1711,7 @@ impl AppServer {
                 argv,
                 cwd: directory.to_owned(),
                 labels,
+                size: None,
             })?
             .receipt;
         let terminal_address = strp(&receipt, "address")?.to_owned();

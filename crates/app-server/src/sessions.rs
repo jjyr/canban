@@ -319,6 +319,9 @@ impl AppServer {
     }
     pub(super) fn open_agent(&self, p: Value) -> Result<Value> {
         let config = self.config();
+        if let Some(sz) = Self::parse_terminal_size(&p["size"]) {
+            self.record_terminal_size(sz, true);
+        }
         self.mutate("agent.open", &p, |db| {
             let mut card = super::resolve_card(db, &p)?;
             ensure!(

@@ -5432,3 +5432,82 @@ fn reclaiming_terminal_never_jumps_to_other_directories_on_transient_context_los
         "finished terminal fading out must not mount Other Directories"
     );
 }
+
+#[test]
+fn estimate_terminal_size_for_layout_accounts_for_sidebars_and_card_splits() {
+    use crate::terminals::estimate_terminal_size_for_layout;
+
+    // Unmeasured window returns None.
+    assert_eq!(
+        estimate_terminal_size_for_layout((0.0, 0.0), false, true, 260.0, 520.0, 13, None, false),
+        None
+    );
+
+    // Wide Terminals with open 260pt sidebar and 8.0x18.0pt cells:
+    // pane_w = 1280 - 56 - 260 = 964pt; pane_h = 800 - 42 - 32 = 726pt.
+    let wide_open = estimate_terminal_size_for_layout(
+        (1280.0, 800.0),
+        false,
+        true,
+        260.0,
+        520.0,
+        13,
+        Some((8000, 18000)),
+        false,
+    )
+    .unwrap();
+    // Wide Terminals with collapsed sidebar adds ~32 columns.
+    let wide_collapsed = estimate_terminal_size_for_layout(
+        (1280.0, 800.0),
+        false,
+        false,
+        260.0,
+        520.0,
+        13,
+        Some((8000, 18000)),
+        false,
+    )
+    .unwrap();
+    assert!(wide_collapsed.0 > wide_open.0);
+    assert_eq!(wide_collapsed.1, wide_open.1);
+
+    // Narrow Terminals hides sidebar when viewing terminal, matching collapsed width.
+    let narrow_term = estimate_terminal_size_for_layout(
+        (860.0, 800.0),
+        true,
+        true,
+        260.0,
+        520.0,
+        13,
+        Some((8000, 18000)),
+        false,
+    )
+    .unwrap();
+    let narrow_collapsed = estimate_terminal_size_for_layout(
+        (860.0, 800.0),
+        true,
+        false,
+        260.0,
+        520.0,
+        13,
+        Some((8000, 18000)),
+        false,
+    )
+    .unwrap();
+    assert_eq!(narrow_term, narrow_collapsed);
+
+    // Card side-by-side split subtracts left Card width (520pt) and Card terminal tab bar (38pt).
+    let card_split = estimate_terminal_size_for_layout(
+        (1280.0, 800.0),
+        false,
+        true,
+        260.0,
+        520.0,
+        13,
+        Some((8000, 18000)),
+        true,
+    )
+    .unwrap();
+    assert!(card_split.0 < wide_open.0);
+    assert!(card_split.1 < wide_open.1);
+}

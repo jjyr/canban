@@ -1,7 +1,39 @@
 //! Independent terminals share Herdr transport, never Scheduler admission.
 use super::*;
 
+pub(super) const DEFAULT_LAUNCH_TERMINAL_COLS: u16 = 120;
+pub(super) const DEFAULT_LAUNCH_TERMINAL_ROWS: u16 = 36;
+
 impl AppServer {
+    pub(super) fn parse_terminal_size(value: &Value) -> Option<canban_herdr::TerminalSize> {
+        let cols = u16::try_from(value.get("cols")?.as_u64()?).ok()?;
+        let rows = u16::try_from(value.get("rows")?.as_u64()?).ok()?;
+        canban_herdr::TerminalSize::normalized(cols, rows)
+    }
+
+    pub(super) fn record_terminal_size(&self, size: canban_herdr::TerminalSize, persist: bool) {
+        *self.last_terminal_size.lock().unwrap() = Some(size);
+        if persist {
+            let _ = self.utilities.save_terminal_size(&self.home, size);
+        }
+    }
+
+    pub(super) fn resolve_launch_terminal_size(
+        &self,
+        explicit: Option<canban_herdr::TerminalSize>,
+    ) -> canban_herdr::TerminalSize {
+        if let Some(sz) = explicit {
+            return sz;
+        }
+        if let Some(sz) = *self.last_terminal_size.lock().unwrap() {
+            return sz;
+        }
+        canban_herdr::TerminalSize {
+            cols: DEFAULT_LAUNCH_TERMINAL_COLS,
+            rows: DEFAULT_LAUNCH_TERMINAL_ROWS,
+        }
+    }
+
     /// Close is a product lifecycle operation, independent of UI tab shortcuts.
     pub(super) fn close_terminal(&self, p: Value) -> Result<Value> {
         let _gate = self.terminal_gate.lock().unwrap();
@@ -410,6 +442,10 @@ impl AppServer {
     }
     pub(super) fn create_terminal(&self, p: Value) -> Result<Value> {
         let _gate = self.terminal_gate.lock().unwrap();
+        let explicit_size = Self::parse_terminal_size(&p["size"]);
+        if let Some(sz) = explicit_size {
+            self.record_terminal_size(sz, true);
+        }
         let inherited = p["inherit_terminal_id"]
             .as_str()
             .filter(|id| !id.is_empty())
@@ -722,13 +758,14 @@ impl AppServer {
                     env,
                     cwd: cwd.clone(),
                 })?;
-                client.launch_with_policy_and_unset(
+                client.launch_with_policy_unset_and_size(
                     spec.argv,
                     &spec.cwd,
                     spec.env,
                     labels,
                     canban_exec::shell_env::LocalEnvPolicy::MinimalPathOnly,
                     &std::collections::BTreeSet::new(),
+                    Some(self.resolve_launch_terminal_size(explicit_size)),
                 )?
             } else {
                 let trust = card.as_ref().map(Card::trust_level);
@@ -741,6 +778,7 @@ impl AppServer {
                     argv,
                     cwd: cwd.clone(),
                     labels,
+                    size: explicit_size,
                 })?
                 .receipt
             };

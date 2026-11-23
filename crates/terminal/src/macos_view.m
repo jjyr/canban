@@ -315,6 +315,8 @@ static bool cb_contains_non_ascii(NSString *s) {
   CbGeometry g;
   g.cell_width = (uint32_t)fmax(1.0, round(cw));
   g.cell_height = (uint32_t)fmax(1.0, round(ch));
+  g.cell_width_milli = (uint32_t)fmax(1000.0, round(cw * 1000.0));
+  g.cell_height_milli = (uint32_t)fmax(1000.0, round(ch * 1000.0));
   g.pad_left = (uint32_t)kPadX;
   g.pad_right = (uint32_t)kPadX;
   g.pad_top = (uint32_t)kPadY;

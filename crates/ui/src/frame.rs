@@ -315,7 +315,14 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         .flex_1()
         .min_h(px(0.))
         .bg(BACKGROUND)
-        .on_layout(move |b: &Bounds<Points>| ui.narrow.set(b.size.width.0 < 950.))
+        .on_layout(move |b: &Bounds<Points>| {
+            let next = (b.size.width.0, b.size.height.0);
+            let prev = ui.window_size.get_untracked();
+            if (next.0 - prev.0).abs() > 0.5 || (next.1 - prev.1).abs() > 0.5 {
+                ui.window_size.set(next);
+            }
+            ui.narrow.set(b.size.width.0 < 950.);
+        })
         .child(when(
             move || terminals_mounted.get(),
             move || {

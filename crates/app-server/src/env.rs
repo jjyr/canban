@@ -42,6 +42,7 @@ pub(crate) struct HerdrLaunchRequest<'a> {
     pub argv: Vec<String>,
     pub cwd: String,
     pub labels: BTreeMap<String, String>,
+    pub size: Option<canban_herdr::TerminalSize>,
 }
 
 pub(crate) struct HerdrLaunchOutcome {
@@ -528,13 +529,15 @@ impl AppServer {
             cfg.terminal_env_mode.is_inherit(),
             req.source_trust,
         );
-        let receipt = canban_herdr::Client { config: cfg }.launch_with_policy_and_unset(
+        let launch_size = self.resolve_launch_terminal_size(req.size);
+        let receipt = canban_herdr::Client { config: cfg }.launch_with_policy_unset_and_size(
             spec.argv,
             &spec.cwd,
             spec.env,
             req.labels,
             env_policy,
             &resolved.unset_keys,
+            Some(launch_size),
         )?;
         Ok(HerdrLaunchOutcome { receipt, resolved })
     }

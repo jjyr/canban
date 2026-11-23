@@ -18,6 +18,8 @@ pub struct Attachment {
     transport: super::transport::Transport,
     channel: u32,
     pub automatic_input: bool,
+    pub prior_size: Option<(u16, u16)>,
+    pub resized_on_attach: bool,
 }
 /// Viewer display colors and cell metrics reported to Herdr so display/cell-size
 /// queries (`CSI 14 t`, `CSI 16 t`, OSC 10/11/12) are answered accurately.
@@ -80,12 +82,21 @@ impl InputWriter {
         frame(&mut *self.writer.lock().unwrap(), self.channel, 5, &data)
     }
 }
-fn frame(writer: &mut (impl Write + ?Sized), channel: u32, kind: u8, data: &[u8]) -> Result<()> {
+fn encode_frame(
+    writer: &mut (impl Write + ?Sized),
+    channel: u32,
+    kind: u8,
+    data: &[u8],
+) -> Result<()> {
     ensure!(data.len() <= 16 * 1024 * 1024, "Herdr frame too large");
     writer.write_all(&channel.to_le_bytes())?;
     writer.write_all(&[kind])?;
     writer.write_all(&(data.len() as u32).to_le_bytes())?;
     writer.write_all(data)?;
+    Ok(())
+}
+fn frame(writer: &mut (impl Write + ?Sized), channel: u32, kind: u8, data: &[u8]) -> Result<()> {
+    encode_frame(writer, channel, kind, data)?;
     writer.flush()?;
     Ok(())
 }
@@ -137,19 +148,51 @@ impl Client {
             let line = read_bounded_json_line(&mut reader, MAX_JSON_FRAME_BYTES)?;
             let hello: Value = serde_json::from_str(&line)?;
             ensure!(hello.get("error").is_none(), "Herdr handshake: {hello}");
+            let supports_get = hello["result"]["methods"]
+                .as_array()
+                .is_some_and(|v| v.iter().any(|x| x == "terminal.get"));
             let mut attach_params =
                 json!({"terminal":terminal,"cols":cols,"rows":rows,"history":2000});
             if let Some(d) = display.filter(|d| !d.is_empty()) {
                 attach_params["display"] = d.to_json();
             }
-            let call =
-                json!({"jsonrpc":"2.0","id":2,"method":"terminal.attach","params":attach_params});
-            frame(&mut stdin, 0, 0, &serde_json::to_vec(&call)?)?;
+            let attach_id: u64 = if supports_get {
+                let get_call = json!({"jsonrpc":"2.0","id":2,"method":"terminal.get","params":{"terminal":terminal}});
+                let attach_call = json!({"jsonrpc":"2.0","id":3,"method":"terminal.attach","params":attach_params});
+                let mut batch = Vec::new();
+                encode_frame(&mut batch, 0, 0, &serde_json::to_vec(&get_call)?)?;
+                encode_frame(&mut batch, 0, 0, &serde_json::to_vec(&attach_call)?)?;
+                stdin.write_all(&batch)?;
+                stdin.flush()?;
+                3
+            } else {
+                let call = json!({"jsonrpc":"2.0","id":2,"method":"terminal.attach","params":attach_params});
+                frame(&mut stdin, 0, 0, &serde_json::to_vec(&call)?)?;
+                2
+            };
+            let mut prior_size: Option<(u16, u16)> = None;
             let result = loop {
                 let (channel, kind, data) = read_frame(&mut reader)?;
                 if channel == 0 && kind == 0 {
                     let value: Value = serde_json::from_slice(&data)?;
-                    if value["id"] == 2 {
+                    if supports_get && value["id"] == 2 {
+                        if value.get("error").is_none()
+                            && let (Some(c), Some(r)) = (
+                                value["result"]["cols"]
+                                    .as_u64()
+                                    .and_then(|v| u16::try_from(v).ok()),
+                                value["result"]["rows"]
+                                    .as_u64()
+                                    .and_then(|v| u16::try_from(v).ok()),
+                            )
+                            && c > 0
+                            && r > 0
+                        {
+                            prior_size = Some((c, r));
+                        }
+                        continue;
+                    }
+                    if value["id"] == attach_id {
                         ensure!(value.get("error").is_none(), "Herdr attach: {value}");
                         break value["result"].clone();
                     }
@@ -164,15 +207,17 @@ impl Client {
                 .as_array()
                 .is_some_and(|v| v.iter().any(|x| x == "automatic_input"))
                 && result["automatic_input"] == true;
-            Ok((stdin, reader, channel, auto))
+            let resized_on_attach = prior_size.is_some_and(|(c, r)| c != cols || r != rows);
+            Ok((stdin, reader, channel, auto, prior_size, resized_on_attach))
         })();
-        let (stdin, mut reader, channel, automatic_input) = match setup {
-            Ok(v) => v,
-            Err(e) => {
-                drop(transport);
-                return Err(e);
-            }
-        };
+        let (stdin, mut reader, channel, automatic_input, prior_size, resized_on_attach) =
+            match setup {
+                Ok(v) => v,
+                Err(e) => {
+                    drop(transport);
+                    return Err(e);
+                }
+            };
         let (tx, receiver) = mpsc::sync_channel(32);
         std::thread::spawn(move || {
             loop {
@@ -209,6 +254,8 @@ impl Client {
             transport,
             channel,
             automatic_input,
+            prior_size,
+            resized_on_attach,
         })
     }
 }
@@ -378,5 +425,108 @@ sys.exit(0)
             Some(std::io::ErrorKind::UnexpectedEof),
             "expected UnexpectedEof, got: {err:#}"
         );
+    }
+
+    #[test]
+    fn attach_pipelines_terminal_get_to_detect_prior_size_and_falls_back_when_unsupported() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let make_script = |name: &str, advertise_get: bool, prior_cols: u16, prior_rows: u16| {
+            let script = dir.path().join(name);
+            let methods = if advertise_get {
+                r#"["hello", "terminal.get", "terminal.attach"]"#
+            } else {
+                r#"["hello", "terminal.attach"]"#
+            };
+            std::fs::write(
+                &script,
+                format!(
+                    r#"#!/usr/bin/python3
+import sys, json, struct
+
+line = sys.stdin.readline()
+hello = json.loads(line)
+sys.stdout.write(json.dumps({{"jsonrpc": "2.0", "id": hello["id"], "result": {{"features": ["automatic_input"], "methods": {methods}}}}}) + "\n")
+sys.stdout.flush()
+
+def write_frame(ch, kind, data):
+    sys.stdout.buffer.write(struct.pack("<IBI", ch, kind, len(data)) + data)
+    sys.stdout.buffer.flush()
+
+def read_frame():
+    hdr = sys.stdin.buffer.read(9)
+    if len(hdr) < 9:
+        return None
+    ch, kind, ln = struct.unpack("<IBI", hdr)
+    return ch, kind, sys.stdin.buffer.read(ln)
+
+while True:
+    fr = read_frame()
+    if not fr:
+        break
+    ch, kind, body = fr
+    if ch == 0 and kind == 0:
+        req = json.loads(body.decode())
+        if req["method"] == "terminal.get":
+            res = {{"address": req["params"]["terminal"], "cols": {prior_cols}, "rows": {prior_rows}}}
+            write_frame(0, 0, json.dumps({{"jsonrpc": "2.0", "id": req["id"], "result": res}}).encode())
+        elif req["method"] == "terminal.attach":
+            res = {{"channel": 1, "automatic_input": True, "terminal": {{"cols": req["params"]["cols"], "rows": req["params"]["rows"]}}}}
+            write_frame(0, 0, json.dumps({{"jsonrpc": "2.0", "id": req["id"], "result": res}}).encode())
+            write_frame(1, 0, b"initial-frame")
+    elif ch == 1 and kind == 2:
+        break
+"#
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            script
+        };
+
+        // 1. Mismatched prior size (200x120 -> 100x30) sets resized_on_attach = true.
+        let s1 = make_script("hc-mismatch", true, 200, 120);
+        let c1 = Client {
+            config: Config {
+                hc: s1.to_string_lossy().into_owned(),
+                hc_session: "stream-get-mismatch".into(),
+                ..Default::default()
+            },
+        };
+        let att1 = c1.attach("t1", 100, 30).unwrap();
+        assert_eq!(att1.prior_size, Some((200, 120)));
+        assert!(att1.resized_on_attach);
+        assert!(
+            matches!(att1.recv(Duration::from_secs(1)).unwrap(), Some(Event::Data(d)) if d == b"initial-frame")
+        );
+        drop(att1);
+
+        // 2. Matching prior size (100x30 -> 100x30) sets resized_on_attach = false.
+        let s2 = make_script("hc-same", true, 100, 30);
+        let c2 = Client {
+            config: Config {
+                hc: s2.to_string_lossy().into_owned(),
+                hc_session: "stream-get-same".into(),
+                ..Default::default()
+            },
+        };
+        let att2 = c2.attach("t1", 100, 30).unwrap();
+        assert_eq!(att2.prior_size, Some((100, 30)));
+        assert!(!att2.resized_on_attach);
+        drop(att2);
+
+        // 3. Legacy server without terminal.get falls back cleanly without prior_size.
+        let s3 = make_script("hc-legacy", false, 200, 120);
+        let c3 = Client {
+            config: Config {
+                hc: s3.to_string_lossy().into_owned(),
+                hc_session: "stream-get-legacy".into(),
+                ..Default::default()
+            },
+        };
+        let att3 = c3.attach("t1", 100, 30).unwrap();
+        assert_eq!(att3.prior_size, None);
+        assert!(!att3.resized_on_attach);
     }
 }

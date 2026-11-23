@@ -102,6 +102,29 @@ pub fn apply_default_terminal_env_to_command(cmd: &mut Command, hc_env: &BTreeMa
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalSize {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+impl TerminalSize {
+    pub const MIN_COLS: u16 = 20;
+    pub const MAX_COLS: u16 = 500;
+    pub const MIN_ROWS: u16 = 5;
+    pub const MAX_ROWS: u16 = 200;
+
+    pub fn normalized(cols: u16, rows: u16) -> Option<Self> {
+        if cols < 2 || rows < 1 {
+            return None;
+        }
+        Some(Self {
+            cols: cols.clamp(Self::MIN_COLS, Self::MAX_COLS),
+            rows: rows.clamp(Self::MIN_ROWS, Self::MAX_ROWS),
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct Client {
     pub config: Config,
@@ -171,10 +194,23 @@ impl Client {
         &self,
         argv: Vec<String>,
         cwd: &str,
+        env: BTreeMap<String, String>,
+        labels: BTreeMap<String, String>,
+        env_policy: LocalEnvPolicy,
+        unset_keys: &BTreeSet<String>,
+    ) -> Result<Value> {
+        self.launch_with_policy_unset_and_size(argv, cwd, env, labels, env_policy, unset_keys, None)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_with_policy_unset_and_size(
+        &self,
+        argv: Vec<String>,
+        cwd: &str,
         mut env: BTreeMap<String, String>,
         labels: BTreeMap<String, String>,
         env_policy: LocalEnvPolicy,
         unset_keys: &BTreeSet<String>,
+        size: Option<TerminalSize>,
     ) -> Result<Value> {
         ensure!(!argv.is_empty(), "Agent profile has no launch command");
         merge_default_terminal_env(&mut env, &self.config.hc_env);
@@ -182,7 +218,10 @@ impl Client {
         for k in unset_keys {
             env.remove(k);
         }
-        let p = json!({"argv":argv,"cwd":cwd,"env":env,"labels":labels,"no_parent":true,"no_notify":true,"outlive_parent":true,"wait":false});
+        let mut p = json!({"argv":argv,"cwd":cwd,"env":env,"labels":labels,"no_parent":true,"no_notify":true,"outlive_parent":true,"wait":false});
+        if let Some(sz) = size {
+            p["size"] = json!({ "cols": sz.cols, "rows": sz.rows });
+        }
         self.call("terminal.run", p)
     }
     pub fn terminals(&self) -> Result<Value> {
@@ -344,5 +383,80 @@ mod tests {
             "PATH must remain deferred to merge_local_path_env so remote machines stay isolated"
         );
         assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
+    }
+
+    #[test]
+    fn launch_with_policy_unset_and_size_includes_size_only_when_specified() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("mock-hc-run-size");
+        let log_path = dir.path().join("calls.jsonl");
+        std::fs::write(
+            &script,
+            format!(
+                r#"#!/usr/bin/python3
+import sys, json
+log_path = {:?}
+for line in sys.stdin:
+    req = json.loads(line)
+    m = req["method"]
+    if m == "hello":
+        res = {{"generation": 1}}
+    elif m == "terminal.run":
+        with open(log_path, "a") as f:
+            f.write(json.dumps(req["params"]) + "\n")
+        res = {{"address": "t1"}}
+    else:
+        res = {{}}
+    print(json.dumps({{"jsonrpc": "2.0", "id": req["id"], "result": res}}), flush=True)
+"#,
+                log_path
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let client = Client {
+            config: Config {
+                hc: script.to_string_lossy().into_owned(),
+                hc_session: "unit-run-size".into(),
+                ..Default::default()
+            },
+        };
+        let cwd = dir.path().to_string_lossy().into_owned();
+        client
+            .launch_with_policy_unset_and_size(
+                vec!["/bin/sh".into()],
+                &cwd,
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LocalEnvPolicy::MinimalPathOnly,
+                &BTreeSet::new(),
+                Some(TerminalSize {
+                    cols: 112,
+                    rows: 36,
+                }),
+            )
+            .unwrap();
+        client
+            .launch_with_policy_and_unset(
+                vec!["/bin/sh".into()],
+                &cwd,
+                BTreeMap::new(),
+                BTreeMap::new(),
+                LocalEnvPolicy::MinimalPathOnly,
+                &BTreeSet::new(),
+            )
+            .unwrap();
+
+        let recorded = std::fs::read_to_string(&log_path).unwrap();
+        let lines: Vec<Value> = recorded
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["size"], json!({"cols": 112, "rows": 36}));
+        assert!(lines[1].get("size").is_none());
     }
 }

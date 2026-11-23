@@ -26,6 +26,8 @@ pub struct CbGeometry {
     pub rows: u16,
     pub cell_width: u32,
     pub cell_height: u32,
+    pub cell_width_milli: u32,
+    pub cell_height_milli: u32,
     pub pad_left: u32,
     pub pad_right: u32,
     pub pad_top: u32,
@@ -315,6 +317,31 @@ impl Host {
         }
     }
 
+    fn reset_unbound(
+        &mut self,
+        prev_cols: u16,
+        prev_rows: u16,
+        prev_focused: bool,
+        theme: Option<Value>,
+    ) -> bool {
+        let mut reset = State::new(prev_cols.max(2), prev_rows.max(1));
+        if let Some(ref t) = theme {
+            reset.model.theme(t);
+        }
+        reset.theme = theme;
+        reset.focused = prev_focused;
+        self.state = Arc::new(Mutex::new(reset));
+        self.size_cv = Arc::new(Condvar::new());
+        self.wake = Arc::new(WakeHub::new());
+        if !self.view_ptr.is_null() {
+            attach_nsview_wake(&self.wake, self.view_ptr);
+        }
+        self.input = None;
+        self.seen = u64::MAX;
+        self.seen_status.clear();
+        true
+    }
+
     fn bind(&mut self, value: &Value) -> bool {
         let key = value.to_string();
         if self.binding == key {
@@ -339,13 +366,13 @@ impl Host {
         self.content = None;
 
         let Ok(config) = serde_json::from_value::<Config>(value["config"].clone()) else {
-            return true;
+            return self.reset_unbound(prev_cols, prev_rows, prev_focused, theme);
         };
         let Some(terminal) = value["terminal"].as_str().map(str::to_owned) else {
-            return true;
+            return self.reset_unbound(prev_cols, prev_rows, prev_focused, theme);
         };
         let Some(core) = value["core_id"].as_str().map(str::to_owned) else {
-            return true;
+            return self.reset_unbound(prev_cols, prev_rows, prev_focused, theme);
         };
 
         let session = get_or_spawn_session(SessionInit {
@@ -534,6 +561,18 @@ extern "C" fn cb_snapshot(
     if geom.cols >= 2 && geom.rows >= 1 {
         let cols = geom.cols.clamp(2, 500);
         let rows = geom.rows.clamp(1, 200);
+        session::record_viewport_size(cols, rows);
+        let cw_milli = if geom.cell_width_milli > 0 {
+            geom.cell_width_milli
+        } else {
+            geom.cell_width.max(1) * 1000
+        };
+        let ch_milli = if geom.cell_height_milli > 0 {
+            geom.cell_height_milli
+        } else {
+            geom.cell_height.max(1) * 1000
+        };
+        session::record_cell_metrics_milli(cw_milli, ch_milli);
         let became_ready = !state.size_ready;
         let prev_cell = state.model.cell_size();
         state.size_ready = true;
@@ -565,6 +604,13 @@ extern "C" fn cb_snapshot(
     let _ = state.model.expire_render_hold_if_due();
     let _ = state.model.advance_animation_if_due();
     let replies = state.model.replies();
+    if state.is_attach_settling() {
+        drop(state);
+        if !replies.is_empty() {
+            host.send_auto_bytes(replies);
+        }
+        return std::ptr::null();
+    }
     let status = host.effective_status(&state);
     let status_changed = status != host.seen_status;
     let rev = state.model.revision;
@@ -598,6 +644,7 @@ extern "C" fn cb_key(host_ptr: *mut c_void, ev: CbKeyEvent) -> bool {
     if !host.accepts_pty_input(&state) {
         return false;
     }
+    state.clear_attach_settle();
     let action = match ev.action {
         0 => GHOSTTY_KEY_ACTION_RELEASE,
         2 => GHOSTTY_KEY_ACTION_REPEAT,
@@ -644,6 +691,7 @@ extern "C" fn cb_text(host_ptr: *mut c_void, ptr: *const u8, len: usize) {
         if !host.accepts_pty_input(&state) {
             return;
         }
+        state.clear_attach_settle();
         state.model.commit_text(text)
     };
     host.send_bytes(bytes);
@@ -662,6 +710,7 @@ extern "C" fn cb_paste(host_ptr: *mut c_void, ptr: *const u8, len: usize) {
         if !host.accepts_pty_input(&state) {
             return;
         }
+        state.clear_attach_settle();
         state.model.paste(text)
     };
     host.send_bytes(bytes);
@@ -698,6 +747,7 @@ extern "C" fn cb_paste_paths(
         if !host.accepts_pty_input(&state) {
             return false;
         }
+        state.clear_attach_settle();
         state.model.paste(&formatted)
     };
     if bytes.is_empty() {
@@ -761,6 +811,7 @@ extern "C" fn cb_wheel(
     let host = unsafe { &mut *(host_ptr as *mut Host) };
     let out = {
         let mut state = host.state.lock().unwrap();
+        state.clear_attach_settle();
         let can_send = host.accepts_pty_input(&state);
         state.model.wheel(
             delta_rows as isize,
@@ -779,6 +830,7 @@ extern "C" fn cb_wheel(
 extern "C" fn cb_select(host_ptr: *mut c_void, ev: CbSelectEvent) -> i8 {
     let host = unsafe { &mut *(host_ptr as *mut Host) };
     let mut state = host.state.lock().unwrap();
+    state.clear_attach_settle();
     match ev.kind {
         0 => {
             state.model.select_press(
@@ -1181,6 +1233,8 @@ mod tests {
             rows: 24,
             cell_width: 8,
             cell_height: 18,
+            cell_width_milli: 8000,
+            cell_height_milli: 18000,
             pad_left: 6,
             pad_right: 6,
             pad_top: 6,
@@ -1992,5 +2046,30 @@ mod tests {
             cb_terminal_detach(raw_view as *mut c_void);
             drop(Retained::from_raw(raw_view));
         }
+    }
+
+    #[test]
+    fn cb_snapshot_holds_paint_during_attach_settle_and_reveals_on_clear_or_input() {
+        let mut host = Box::new(Host::new());
+        {
+            let mut s = host.state.lock().unwrap();
+            s.connected = true;
+            s.attach_settle_until = Some(Instant::now() + Duration::from_secs(5));
+            s.model.write(b"GARBLED_DURING_SETTLE");
+        }
+        let (tx, _rx) = mpsc::channel();
+        host.input = Some(tx);
+        let ptr = &mut *host as *mut Host as *mut c_void;
+
+        // While attach settle is active, cb_snapshot returns null so drawRect keeps clean theme bg.
+        assert!(cb_snapshot(ptr, default_geom(), true).is_null());
+        assert_eq!(host.seen, u64::MAX);
+
+        // User input immediately clears settle and reveals the snapshot.
+        let ch = b"x";
+        cb_text(ptr, ch.as_ptr(), ch.len());
+        assert!(!host.state.lock().unwrap().is_attach_settling());
+        let snap = cb_snapshot(ptr, default_geom(), false);
+        assert!(!snap.is_null());
     }
 }

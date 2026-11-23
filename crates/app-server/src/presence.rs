@@ -355,6 +355,9 @@ impl AppServer {
     pub(super) fn viewer_presence(&self, p: Value) -> Result<Value> {
         let client_id = strp(&p, "client_id")?.trim().to_owned();
         ensure!(!client_id.is_empty(), "Missing client_id");
+        if let Some(sz) = Self::parse_terminal_size(&p["terminal_size"]) {
+            self.record_terminal_size(sz, false);
+        }
         let card_id = p.get("card_id").and_then(Value::as_str).map(str::to_owned);
         let terminal_id = p
             .get("terminal_id")

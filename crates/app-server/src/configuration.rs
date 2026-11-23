@@ -43,15 +43,33 @@ impl AppServer {
     }
     pub(super) fn configuration_call(&self, method: &str, p: Value) -> Result<Value> {
         match method {
-            "configuration.bind" => self.mutate(method,&p,|db| {
-                let mut session:ConfigurationSession=db.get(strp(&p,"configuration_id")?)?;
-                ensure!(p["generation"].as_u64()==Some(session.generation),"Obsolete configuration invocation");
-                let id=strp(&p,"session_id")?;
-                ensure!(!id.is_empty() && id.len()<512,"Invalid provider session ID");
-                ensure!(session.provider_session_id.as_deref().is_none_or(|s|s==id),"Provider history changed");
-                session.provider_session_id=Some(id.into());db.save(&session)?;Ok(json!({"bound":true}))
+            "configuration.bind" => self.mutate(method, &p, |db| {
+                let mut session: ConfigurationSession = db.get(strp(&p, "configuration_id")?)?;
+                ensure!(
+                    p["generation"].as_u64() == Some(session.generation),
+                    "Obsolete configuration invocation"
+                );
+                let id = strp(&p, "session_id")?;
+                ensure!(
+                    !id.is_empty() && id.len() < 512,
+                    "Invalid provider session ID"
+                );
+                ensure!(
+                    session
+                        .provider_session_id
+                        .as_deref()
+                        .is_none_or(|s| s == id),
+                    "Provider history changed"
+                );
+                session.provider_session_id = Some(id.into());
+                db.save(&session)?;
+                Ok(json!({"bound":true}))
             }),
-            "configuration.open" => self.mutate(method,&p,|db| {
+            "configuration.open" => {
+                if let Some(sz) = Self::parse_terminal_size(&p["size"]) {
+                    self.record_terminal_size(sz, true);
+                }
+                self.mutate(method,&p,|db| {
                 let scope_id = if p["scope"]
                     .as_str()
                     .is_some_and(|s| s.trim().eq_ignore_ascii_case("global"))
@@ -99,8 +117,9 @@ impl AppServer {
                 terminal.created_at=now();
                 terminal.runtime=None;db.save(&terminal)?;db.save(&session)?;
                 Ok(json!({"terminal_id":key,"reused":false,"state":"queued","terminal":terminal,"session":session}))
-            }),
-            _=>bail!("Unknown configuration operation {method}"),
+            })
+            }
+            _ => bail!("Unknown configuration operation {method}"),
         }
     }
     pub(super) fn pump_configuration(&self) -> Result<()> {
@@ -276,6 +295,7 @@ impl AppServer {
                             ("canban.configuration".into(), session.id.clone()),
                             ("canban.project".into(), session.project_id.clone()),
                         ]),
+                        size: None,
                     })?
                     .receipt;
                 let address = strp(&receipt, "address")?.to_owned();

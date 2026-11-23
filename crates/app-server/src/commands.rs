@@ -197,6 +197,9 @@ impl AppServer {
                         "AppServer identity changed; refusing shutdown"
                     );
                 }
+                if let Some(sz) = *self.last_terminal_size.lock().unwrap() {
+                    let _ = self.utilities.save_terminal_size(&self.home, sz);
+                }
                 let _ = self.finish_agent_work();
                 if defer_stop {
                     self.begin_stop();

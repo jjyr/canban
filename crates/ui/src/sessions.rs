@@ -24,16 +24,13 @@ pub fn open(ui: Ui, card: String, profile: String) {
     let origin = ui.location();
     let conversation = canban_types::Conversation::key(&card, &profile);
     let card_for_open = card.clone();
-    dispatch_then(
-        ui,
-        "agent.open",
-        json!({"card_id":card,"profile_id":profile}),
-        move |v| {
-            if ui.location() == origin && v["terminal_id"].as_str().is_some() {
-                ui.open_card_with_terminal(card_for_open, Some(conversation));
-            }
-        },
-    );
+    let mut params = json!({"card_id":card,"profile_id":profile});
+    crate::terminals::attach_launch_size(&mut params, ui, true);
+    dispatch_then(ui, "agent.open", params, move |v| {
+        if ui.location() == origin && v["terminal_id"].as_str().is_some() {
+            ui.open_card_with_terminal(card_for_open, Some(conversation));
+        }
+    });
 }
 
 pub fn default_review_profile(ui: Ui) -> String {

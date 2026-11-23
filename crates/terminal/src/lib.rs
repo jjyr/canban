@@ -28,6 +28,16 @@ pub fn evict_session(core_id: &str, terminal: &str) {
     session::evict_session(core_id, terminal);
 }
 
+/// Returns the most recently measured live terminal viewport `(cols, rows)`, if any.
+pub fn last_viewport_size() -> Option<(u16, u16)> {
+    session::last_viewport_size()
+}
+
+/// Returns the most recently measured terminal cell `(width_milli_pt, height_milli_pt)`, if any.
+pub fn last_cell_metrics_milli() -> Option<(u32, u32)> {
+    session::last_cell_metrics_milli()
+}
+
 /// Formats local filesystem paths as a POSIX shell-escaped paste payload with a trailing space.
 ///
 /// Safe ASCII paths (`[A-Za-z0-9_./:@+-]`) remain unquoted; paths containing spaces, quotes,

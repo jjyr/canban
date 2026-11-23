@@ -21,6 +21,8 @@ struct Preferences {
     terminal_font_family: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     terminal_font_size: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal_size: Option<[u16; 2]>,
 }
 #[derive(Default, Deserialize)]
 #[serde(default)]
@@ -33,6 +35,7 @@ struct SavedPreferences {
     notification_sound: Option<bool>,
     terminal_font_family: Option<String>,
     terminal_font_size: Option<u16>,
+    terminal_size: Option<[u16; 2]>,
 }
 fn enabled(value: &bool) -> bool {
     *value
@@ -46,6 +49,10 @@ fn normalize_font_size(value: Option<u16>) -> Option<u16> {
     value
         .filter(|&sz| (MIN_TERMINAL_FONT_SIZE..=MAX_TERMINAL_FONT_SIZE).contains(&sz))
         .filter(|&sz| sz != DEFAULT_TERMINAL_FONT_SIZE)
+}
+fn normalize_terminal_size(value: Option<[u16; 2]>) -> Option<[u16; 2]> {
+    let [cols, rows] = value?;
+    canban_herdr::TerminalSize::normalized(cols, rows).map(|sz| [sz.cols, sz.rows])
 }
 impl From<SavedPreferences> for Preferences {
     fn from(saved: SavedPreferences) -> Self {
@@ -72,6 +79,7 @@ impl From<SavedPreferences> for Preferences {
             notification_sound: saved.notification_sound.unwrap_or(true),
             terminal_font_family: normalize_font_family(saved.terminal_font_family),
             terminal_font_size: normalize_font_size(saved.terminal_font_size),
+            terminal_size: normalize_terminal_size(saved.terminal_size),
         }
     }
 }
@@ -84,6 +92,7 @@ impl Default for Preferences {
             notification_sound: true,
             terminal_font_family: None,
             terminal_font_size: None,
+            terminal_size: None,
         }
     }
 }
@@ -172,6 +181,31 @@ impl Utilities {
             *prefs = next;
         }
         Ok(changed)
+    }
+
+    pub(super) fn default_terminal_size(&self) -> Option<canban_herdr::TerminalSize> {
+        let [cols, rows] = self.preferences.lock().unwrap().terminal_size?;
+        canban_herdr::TerminalSize::normalized(cols, rows)
+    }
+
+    pub(super) fn save_terminal_size(
+        &self,
+        home: &Path,
+        size: canban_herdr::TerminalSize,
+    ) -> Result<bool> {
+        let normalized = [size.cols, size.rows];
+        let mut prefs = self.preferences.lock().unwrap();
+        if prefs.terminal_size == Some(normalized) {
+            return Ok(false);
+        }
+        let mut next = prefs.clone();
+        next.terminal_size = Some(normalized);
+        canban_context::atomic(
+            &home.join("config/desktop.json"),
+            &serde_json::to_vec_pretty(&next)?,
+        )?;
+        *prefs = next;
+        Ok(true)
     }
 
     pub(super) fn state(&self) -> Value {

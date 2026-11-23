@@ -67,16 +67,14 @@ pub fn resume(ui: Ui, id: &str) {
     let origin = ui.location();
     let card_for_open = row.card.id.clone();
     let att = row.agent().unwrap();
-    dispatch_then(
-        ui,
-        "agent.open",
-        json!({"card_id":row.card.id,"profile_id":att.profile.id,"expected_terminal_id":&row.id}),
-        move |value| {
-            if ui.location() == origin && value["terminal_id"].as_str().is_some() {
-                ui.open_card_with_terminal(card_for_open, Some(row.id.clone()));
-            }
-        },
-    );
+    let mut params =
+        json!({"card_id":row.card.id,"profile_id":att.profile.id,"expected_terminal_id":&row.id});
+    super::attach_launch_size(&mut params, ui, true);
+    dispatch_then(ui, "agent.open", params, move |value| {
+        if ui.location() == origin && value["terminal_id"].as_str().is_some() {
+            ui.open_card_with_terminal(card_for_open, Some(row.id.clone()));
+        }
+    });
 }
 /// Prefer an explicitly selected live Agent, otherwise only an unambiguous live target.
 pub fn direct(rows: &[Entry], recent: Option<&str>) -> Option<String> {

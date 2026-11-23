@@ -424,30 +424,27 @@ fn launch_agent_config(ui: Ui, fresh: bool) {
         ui.notify("Configure a default Agent profile in Settings first.");
         return;
     }
-    dispatch_complete(
-        ui,
-        "configuration.open",
-        json!({
-            "project_id": scope,
-            "profile_id": profile,
-            "prompt": prompt,
-            "fresh": fresh,
-            "auto_fresh": !fresh,
-        }),
-        move |res| match res {
-            Ok(v) => {
-                ui.schedules.agent_open.set(false);
-                if let Some(tid) = v["terminal_id"].as_str() {
-                    ui.open_terminal(tid.to_owned());
-                } else {
-                    ui.notify("Opened configuration Agent in Terminal");
-                }
+    let mut params = json!({
+        "project_id": scope,
+        "profile_id": profile,
+        "prompt": prompt,
+        "fresh": fresh,
+        "auto_fresh": !fresh,
+    });
+    crate::terminals::attach_launch_size(&mut params, ui, false);
+    dispatch_complete(ui, "configuration.open", params, move |res| match res {
+        Ok(v) => {
+            ui.schedules.agent_open.set(false);
+            if let Some(tid) = v["terminal_id"].as_str() {
+                ui.open_terminal(tid.to_owned());
+            } else {
+                ui.notify("Opened configuration Agent in Terminal");
             }
-            Err(e) => {
-                ui.notify(e);
-            }
-        },
-    );
+        }
+        Err(e) => {
+            ui.notify(e);
+        }
+    });
 }
 
 pub fn create_modal(ui: Ui) -> impl IntoElement {

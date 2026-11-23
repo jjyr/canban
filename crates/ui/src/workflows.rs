@@ -479,33 +479,30 @@ pub fn edit_agent(ui: Ui) {
         return;
     }
     state.error.set(String::new());
-    dispatch_complete(
-        ui,
-        "configuration.open",
-        json!({
-            "project_id": project,
-            "profile_id": profile,
-            "auto_fresh": true,
-        }),
-        move |result| {
-            if ui.location() != origin {
-                return;
-            }
-            match result {
-                Ok(value) => {
-                    if let Some(id) = value["terminal_id"].as_str() {
-                        state.agent.set(false);
-                        state.history_open.set(false);
-                        ui.open_terminal(id.into());
-                    }
-                }
-                Err(error) => {
-                    state.error.set(error);
-                    ui.operation_error.set(String::new());
+    let mut params = json!({
+        "project_id": project,
+        "profile_id": profile,
+        "auto_fresh": true,
+    });
+    crate::terminals::attach_launch_size(&mut params, ui, false);
+    dispatch_complete(ui, "configuration.open", params, move |result| {
+        if ui.location() != origin {
+            return;
+        }
+        match result {
+            Ok(value) => {
+                if let Some(id) = value["terminal_id"].as_str() {
+                    state.agent.set(false);
+                    state.history_open.set(false);
+                    ui.open_terminal(id.into());
                 }
             }
-        },
-    );
+            Err(error) => {
+                state.error.set(error);
+                ui.operation_error.set(String::new());
+            }
+        }
+    });
 }
 fn launch(ui: Ui, fresh: bool) {
     let origin = ui.location();
@@ -523,6 +520,7 @@ fn launch(ui: Ui, fresh: bool) {
     if !prompt.is_empty() {
         params["prompt"] = json!(prompt);
     }
+    crate::terminals::attach_launch_size(&mut params, ui, false);
     dispatch_complete(ui, "configuration.open", params, move |result| {
         if ui.location() != origin {
             return;

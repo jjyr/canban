@@ -20,6 +20,102 @@ pub(crate) fn sidebar_for_test(ui: Ui) -> impl IntoElement {
     tree::sidebar(ui)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn estimate_terminal_size_for_layout(
+    window_size: (f32, f32),
+    narrow: bool,
+    terminal_sidebar: bool,
+    terminal_width: f32,
+    card_terminal_width: f32,
+    font_size: u16,
+    cell_metrics_milli: Option<(u32, u32)>,
+    for_card_split: bool,
+) -> Option<(u16, u16)> {
+    if window_size.0 <= 100.0 || window_size.1 <= 100.0 {
+        return None;
+    }
+    const RAIL_W: f32 = 56.0;
+    const TOP_CHROME_H: f32 = 42.0;
+    const CARD_TAB_H: f32 = 38.0;
+    const UTILITY_BAR_H: f32 = 32.0;
+    #[cfg(target_os = "macos")]
+    const PAD_X: f32 = 8.0;
+    #[cfg(not(target_os = "macos"))]
+    const PAD_X: f32 = 6.0;
+    const PAD_Y: f32 = 6.0;
+
+    let avail_w = (window_size.0 - RAIL_W).max(0.0);
+    let (pane_w, pane_h) = if for_card_split {
+        let pane_w = if narrow {
+            avail_w
+        } else {
+            (avail_w - card_terminal_width).clamp(340.0, (avail_w - 540.0).max(340.0))
+        };
+        let pane_h = (window_size.1 - TOP_CHROME_H - CARD_TAB_H - UTILITY_BAR_H).max(0.0);
+        (pane_w, pane_h)
+    } else {
+        let sidebar_w = if !narrow && terminal_sidebar {
+            terminal_width.clamp(190.0, 544.0_f32.min((avail_w - 300.0).max(190.0)))
+        } else {
+            0.0
+        };
+        let pane_w = (avail_w - sidebar_w).max(0.0);
+        let pane_h = (window_size.1 - TOP_CHROME_H - UTILITY_BAR_H).max(0.0);
+        (pane_w, pane_h)
+    };
+
+    let (cw, ch) = match cell_metrics_milli {
+        Some((wm, hm)) if wm >= 4000 && hm >= 8000 => (wm as f32 / 1000.0, hm as f32 / 1000.0),
+        _ => {
+            let sz = f32::from(font_size.clamp(9, 32));
+            ((sz * 0.60).max(4.0), (sz * 1.38).ceil().max(8.0))
+        }
+    };
+    let inner_w = (pane_w - PAD_X * 2.0).max(cw * 2.0);
+    let inner_h = (pane_h - PAD_Y * 2.0).max(ch);
+    let cols = (inner_w / cw).floor().clamp(20.0, 500.0) as u16;
+    let rows = (inner_h / ch).floor().clamp(5.0, 200.0) as u16;
+    Some((cols, rows))
+}
+
+pub(crate) fn launch_terminal_size(ui: Ui, for_card_split: bool) -> Option<(u16, u16)> {
+    let page = ui.page.get_untracked();
+    let exact_match = if for_card_split {
+        page == "card" && ui.card_terminal_open.get_untracked()
+    } else {
+        matches!(page.as_str(), "terminals" | "terminal")
+            && !(ui.narrow.get_untracked() && ui.terminal_sidebar.get_untracked())
+    };
+    if exact_match && let Some(sz) = canban_terminal::last_viewport_size() {
+        return Some(sz);
+    }
+    let font_size = ui.utility.with_untracked(|v| {
+        v["preferences"]["terminal_font_size"]
+            .as_u64()
+            .map(|n| n as u16)
+            .unwrap_or(crate::utilities::DEFAULT_TERMINAL_FONT_SIZE)
+    });
+    estimate_terminal_size_for_layout(
+        ui.window_size.get_untracked(),
+        ui.narrow.get_untracked(),
+        ui.terminal_sidebar.get_untracked(),
+        ui.terminal_width.get_untracked(),
+        ui.card_terminal_width.get_untracked(),
+        font_size,
+        canban_terminal::last_cell_metrics_milli(),
+        for_card_split,
+    )
+    .or_else(canban_terminal::last_viewport_size)
+}
+
+pub(crate) fn attach_launch_size(params: &mut serde_json::Value, ui: Ui, for_card_split: bool) {
+    if params.get("size").is_none()
+        && let Some((cols, rows)) = launch_terminal_size(ui, for_card_split)
+    {
+        params["size"] = json!({ "cols": cols, "rows": rows });
+    }
+}
+
 /// Finished/archived entries retain Card history but never leave stale tabs in Terminals.
 pub fn watch(ui: Ui) {
     navigation::watch(ui);
@@ -587,6 +683,7 @@ pub fn create_in_card(ui: Ui, project_id: String, card_id: String, agent: bool) 
     if agent {
         params["agent"] = json!(true);
     }
+    attach_launch_size(&mut params, ui, in_card_workspace);
     let target_card = card_id;
     dispatch_then(ui, "terminal.create", params, move |v| {
         let Some(id) = v["id"].as_str().map(str::to_owned) else {
@@ -654,7 +751,7 @@ pub(crate) fn launch_custom(ui: Ui, params: serde_json::Value) {
     launch(ui, params);
 }
 
-fn launch(ui: Ui, params: serde_json::Value) {
+fn launch(ui: Ui, mut params: serde_json::Value) {
     let source = ui.location();
     let selection = ui.terminal_selection.get_untracked();
     if !crate::backend::is_connected() {
@@ -682,6 +779,7 @@ fn launch(ui: Ui, params: serde_json::Value) {
         ui.open_terminal(id);
         return;
     }
+    attach_launch_size(&mut params, ui, ui.page.get_untracked() == "card");
     dispatch_then(ui, "terminal.create", params, move |v| {
         if ui.location() == source
             && let Some(id) = v["id"].as_str()
@@ -736,10 +834,11 @@ pub fn open_global(ui: Ui) {
     ui.navigate("terminals");
     let selection = ui.terminal_selection.get_untracked();
     let intermediate = ui.location();
-    let params = match target_project {
+    let mut params = match target_project {
         Some(p) => json!({ "project_id": p }),
         None => json!({}),
     };
+    attach_launch_size(&mut params, ui, false);
     dispatch_then(ui, "terminal.create", params, move |v| {
         if ui.location() == intermediate
             && let Some(id) = v["id"].as_str()
@@ -848,22 +947,19 @@ pub fn reopen(ui: Ui, id: String) {
             .find(|c| c.id == id)
             .map(|c| (c.project_id.clone(), c.profile_id.clone()))
     }) {
-        dispatch_complete(
-            ui,
-            "configuration.open",
-            json!({
-                "project_id": project,
-                "profile_id": profile,
-                "auto_fresh": true,
-            }),
-            move |result| {
-                if let Ok(value) = result
-                    && let Some(tid) = value["terminal_id"].as_str()
-                {
-                    ui.open_terminal(tid.into());
-                }
-            },
-        );
+        let mut params = json!({
+            "project_id": project,
+            "profile_id": profile,
+            "auto_fresh": true,
+        });
+        attach_launch_size(&mut params, ui, false);
+        dispatch_complete(ui, "configuration.open", params, move |result| {
+            if let Ok(value) = result
+                && let Some(tid) = value["terminal_id"].as_str()
+            {
+                ui.open_terminal(tid.into());
+            }
+        });
         return;
     }
 

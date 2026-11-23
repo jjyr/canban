@@ -1703,13 +1703,14 @@ impl AppServer {
             client.config.terminal_env_mode.is_inherit(),
             Some(card.trust_level()),
         );
-        let terminal = client.launch_with_policy_and_unset(
+        let terminal = client.launch_with_policy_unset_and_size(
             spec.argv,
             &spec.cwd,
             spec.env,
             labels,
             env_policy,
             &unset_keys,
+            Some(self.resolve_launch_terminal_size(None)),
         )?;
         let terminal_address = strp(&terminal, "address")?.to_owned();
         run.core_id = Some(core_id.clone());
@@ -2041,13 +2042,14 @@ impl AppServer {
                 ("canban.workflow_run".into(), run.id.clone()),
                 ("canban.workflow_step".into(), step_id.clone()),
             ]);
-            match client.launch_with_policy_and_unset(
+            match client.launch_with_policy_unset_and_size(
                 spec.argv,
                 &spec.cwd,
                 spec.env,
                 labels,
                 env_policy,
                 &unset_keys,
+                Some(self.resolve_launch_terminal_size(None)),
             ) {
                 Ok(launched) => {
                     let addr = launched["address"].as_str().unwrap_or("").to_owned();
