@@ -1001,7 +1001,10 @@ impl AppServer {
                     .then(|| values.iter().find(|v| v["address"] == *terminal))
                     .flatten()
             });
-            if let (Some((core, terminal)), Some(value)) = (&binding, value)
+            let already_ended = item.agent.as_ref().is_some_and(AgentRun::finished)
+                || item.runtime.as_ref().is_some_and(|r| r.state == "finished");
+            if !already_ended
+                && let (Some((core, terminal)), Some(value)) = (&binding, value)
                 && value["state"] != "finished"
             {
                 #[cfg(test)]
@@ -1016,20 +1019,6 @@ impl AppServer {
                 {
                     contexts.push(context);
                 }
-            }
-            // Preserve only a confirmed location for the same binding while observation
-            // or asynchronous discovery is unavailable. Never invent the launch directory.
-            if !contexts.iter().any(|c| c.terminal_id == item.id)
-                && let Some((core, terminal)) = &binding
-                && !observed
-                    .as_ref()
-                    .is_ok_and(|(observed_core, _)| observed_core != core)
-                && value.is_none_or(|v| v["state"] != "finished")
-                && let Some(previous) = snapshot.terminal_contexts.iter().find(|c| {
-                    c.terminal_id == item.id && c.core_id == *core && c.terminal == *terminal
-                })
-            {
-                contexts.push(previous.clone());
             }
             let is_special_agent = item.is_special_session()
                 || snapshot
@@ -1124,12 +1113,30 @@ impl AppServer {
                     // A launch receipt may have arrived after this observation
                     // began. Never erase its binding with an older starting row.
                     if current.runtime == before.runtime {
-                        current.runtime = item.runtime;
+                        current.runtime = item.runtime.clone();
                         db.save(&current)?;
                     }
                     Ok(())
                 })?;
                 self.emit("terminals", None);
+            }
+            let entry_ended = item.agent.as_ref().is_some_and(AgentRun::finished)
+                || item.runtime.as_ref().is_some_and(|r| r.state == "finished");
+            // Preserve only a confirmed location for the same binding while the entry is
+            // still live in the product DB (including the brief window after Herdr reports
+            // `finished`/`removed` before Card Agent reconciliation completes) or while
+            // observation/discovery is unavailable. Never invent the launch directory.
+            if !entry_ended
+                && !contexts.iter().any(|c| c.terminal_id == item.id)
+                && let Some((core, terminal)) = &binding
+                && !observed
+                    .as_ref()
+                    .is_ok_and(|(observed_core, _)| observed_core != core)
+                && let Some(previous) = snapshot.terminal_contexts.iter().find(|c| {
+                    c.terminal_id == item.id && c.core_id == *core && c.terminal == *terminal
+                })
+            {
+                contexts.push(previous.clone());
             }
         }
         if observed.is_ok() {
@@ -1409,5 +1416,180 @@ mod tests {
             .unwrap();
         assert_eq!(rt.connection, "unavailable");
         assert_eq!(rt.observed_agent, None);
+    }
+
+    #[test]
+    fn observe_terminals_keeps_card_agent_context_until_agent_is_marked_finished() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+        app.observer_running.store(true, Ordering::SeqCst);
+
+        let proj_dir = dir.path().join("project");
+        let worktree_dir = dir.path().join("worktree");
+        std::fs::create_dir_all(&proj_dir).unwrap();
+        std::fs::create_dir_all(&worktree_dir).unwrap();
+        let project: Project = serde_json::from_value(json!({
+            "id": "p1",
+            "name": "Project",
+            "directory": proj_dir.to_string_lossy(),
+            "target_branch": "main",
+            "workflow": Workflow::default(),
+            "created_at": 1
+        }))
+        .unwrap();
+        let card: Card = serde_json::from_value(json!({
+            "id": "c1",
+            "project_id": "p1",
+            "number": 1,
+            "title": "Test card",
+            "body": "",
+            "stage": "develop",
+            "worktree": worktree_dir.to_string_lossy(),
+            "branch": "canban/1",
+            "revision": 1,
+            "created_at": 1
+        }))
+        .unwrap();
+        let profile = Config::default().profiles[0].clone();
+        let mut run = canban_scheduler::agent_run(
+            "p1",
+            "c1",
+            1,
+            "develop",
+            "interactive",
+            profile,
+            "work".into(),
+            None,
+        );
+        run.state = "completed".into();
+        run.core_id = Some("core-1".into());
+        run.terminal = Some("pty-agent".into());
+        run.connection_state = "connected".into();
+        run.observed = Some(json!({"state": "live", "status": {"state": "idle"}}));
+        let agent_id = Conversation::key("c1", &run.profile.id);
+        let agent_entry = TerminalEntry {
+            id: agent_id.clone(),
+            conversation_id: Some(agent_id.clone()),
+            number: 1,
+            name: None,
+            origin_project_id: Some("p1".into()),
+            origin_card_id: Some("c1".into()),
+            agent_engine: Some("codex".into()),
+            created_at: now().saturating_sub(10_000),
+            runtime: None,
+            agent: Some(run),
+        };
+        let shell_entry = TerminalEntry {
+            id: "shell-1".into(),
+            conversation_id: None,
+            number: 2,
+            name: Some("Shell".into()),
+            origin_project_id: Some("p1".into()),
+            origin_card_id: None,
+            agent_engine: None,
+            created_at: now().saturating_sub(10_000),
+            runtime: Some(TerminalRuntime {
+                core_id: Some("core-1".into()),
+                terminal: Some("pty-shell".into()),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+                observed_agent: None,
+                waiting: None,
+            }),
+            agent: None,
+        };
+        app.store
+            .lock()
+            .unwrap()
+            .write(|db| {
+                db.save(&project)?;
+                db.save(&card)?;
+                db.save(&agent_entry)?;
+                db.save(&shell_entry)
+            })
+            .unwrap();
+
+        let confirmed_agent_ctx = TerminalContext {
+            terminal_id: agent_id.clone(),
+            core_id: "core-1".into(),
+            terminal: "pty-agent".into(),
+            cwd: Some(worktree_dir.to_string_lossy().into_owned()),
+            directory_root: Some(worktree_dir.to_string_lossy().into_owned()),
+            project_id: Some("p1".into()),
+            card_id: Some("c1".into()),
+            ..Default::default()
+        };
+        let confirmed_shell_ctx = TerminalContext {
+            terminal_id: "shell-1".into(),
+            core_id: "core-1".into(),
+            terminal: "pty-shell".into(),
+            cwd: Some(proj_dir.to_string_lossy().into_owned()),
+            directory_root: Some(proj_dir.to_string_lossy().into_owned()),
+            project_id: Some("p1".into()),
+            ..Default::default()
+        };
+        *app.terminal_contexts.lock().unwrap() =
+            vec![confirmed_agent_ctx.clone(), confirmed_shell_ctx];
+
+        // 1. Herdr reports `finished` on both PTYs before tick() reconciles the Card Agent.
+        // The Card Agent is still unfinished in SQLite, so its confirmed context is preserved;
+        // the independent shell transitions to `runtime.state == "finished"` and clears its context.
+        {
+            let mut inv = app.inventory.lock().unwrap();
+            inv.core = "core-1".into();
+            inv.last_at = now();
+            inv.records.insert(
+                "pty-agent".into(),
+                json!({"address": "pty-agent", "state": "finished"}),
+            );
+            inv.records.insert(
+                "pty-shell".into(),
+                json!({"address": "pty-shell", "state": "finished"}),
+            );
+        }
+        app.observe_terminals().unwrap();
+        let s1 = app.snapshot().unwrap();
+        assert_eq!(s1.terminal_contexts, vec![confirmed_agent_ctx.clone()]);
+        assert_eq!(
+            s1.terminals
+                .iter()
+                .find(|t| t.id == "shell-1")
+                .unwrap()
+                .runtime
+                .as_ref()
+                .unwrap()
+                .state,
+            "finished"
+        );
+
+        // 2. Herdr removes the PTY record completely while the Card Agent is still unfinished.
+        {
+            let mut inv = app.inventory.lock().unwrap();
+            inv.last_at = now();
+            inv.records.remove("pty-agent");
+        }
+        app.observe_terminals().unwrap();
+        assert_eq!(
+            app.snapshot().unwrap().terminal_contexts,
+            vec![confirmed_agent_ctx]
+        );
+
+        // 3. Once SQLite marks the Card Agent finished, observe_terminals drops its context.
+        app.store
+            .lock()
+            .unwrap()
+            .write(|db| {
+                let mut saved: TerminalEntry = db.get(&agent_id)?;
+                let a = saved.agent.as_mut().unwrap();
+                a.observed = Some(json!({"state": "finished"}));
+                a.close_state = "closed".into();
+                db.save(&saved)
+            })
+            .unwrap();
+        app.observe_terminals().unwrap();
+        assert!(app.snapshot().unwrap().terminal_contexts.is_empty());
     }
 }

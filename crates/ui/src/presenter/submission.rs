@@ -67,6 +67,7 @@ pub(crate) struct CommittedWrites {
     schedule_states: BTreeMap<String, ScheduleState>,
     terminals: BTreeMap<String, (TerminalEntry, String)>,
     terminal_hints: BTreeMap<String, TerminalContext>,
+    last_terminal_contexts: BTreeMap<String, TerminalContext>,
     review_drafts: BTreeMap<String, (Option<ReviewDraft>, u64)>,
     worktrees: BTreeMap<String, (ManagedWorktree, String)>,
     removed_worktrees: BTreeSet<String>,
@@ -92,9 +93,73 @@ fn terminal_is_newer(receipt: &TerminalEntry, snap: &TerminalEntry) -> bool {
     }
 }
 
+fn live_terminal_binding(t: &TerminalEntry) -> Option<(&str, &str)> {
+    if let Some(a) = &t.agent {
+        if a.finished() || a.connection_state == "replaced" {
+            return None;
+        }
+        return Some((a.core_id.as_deref()?, a.terminal.as_deref()?));
+    }
+    let r = t.runtime.as_ref()?;
+    if r.state == "finished" || r.connection == "replaced" {
+        return None;
+    }
+    Some((r.core_id.as_deref()?, r.terminal.as_deref()?))
+}
+
 impl CommittedWrites {
     pub(super) fn record_terminal_hint(&mut self, hint: TerminalContext) {
         self.terminal_hints.insert(hint.terminal_id.clone(), hint);
+    }
+
+    fn record_observed_terminal_contexts(&mut self, snapshot: &Snapshot) {
+        for ctx in &snapshot.terminal_contexts {
+            if ctx.cwd.is_none() {
+                continue;
+            }
+            if snapshot.terminals.iter().any(|t| {
+                t.id == ctx.terminal_id
+                    && live_terminal_binding(t)
+                        == Some((ctx.core_id.as_str(), ctx.terminal.as_str()))
+            }) {
+                self.last_terminal_contexts
+                    .insert(ctx.terminal_id.clone(), ctx.clone());
+            }
+        }
+        self.last_terminal_contexts.retain(|id, ctx| {
+            ctx.project_id
+                .as_deref()
+                .is_none_or(|pid| snapshot.projects.iter().any(|p| p.id == pid))
+                && snapshot.terminals.iter().any(|t| {
+                    t.id == *id
+                        && live_terminal_binding(t)
+                            == Some((ctx.core_id.as_str(), ctx.terminal.as_str()))
+                })
+        });
+    }
+
+    fn apply_last_terminal_contexts(&self, snapshot: &mut Snapshot) {
+        for (tid, cached) in &self.last_terminal_contexts {
+            let still_live_same_binding = snapshot.terminals.iter().any(|t| {
+                t.id == *tid
+                    && live_terminal_binding(t)
+                        == Some((cached.core_id.as_str(), cached.terminal.as_str()))
+            });
+            if !still_live_same_binding {
+                continue;
+            }
+            if let Some(existing) = snapshot
+                .terminal_contexts
+                .iter_mut()
+                .find(|c| c.terminal_id == *tid)
+            {
+                if existing.cwd.is_none() {
+                    *existing = cached.clone();
+                }
+            } else {
+                snapshot.terminal_contexts.push(cached.clone());
+            }
+        }
     }
 
     pub(crate) fn record_card_reads(&mut self, reads: &[CardRead]) {
@@ -481,6 +546,7 @@ impl CommittedWrites {
     /// Drop a receipt only after the authoritative snapshot includes it. A
     /// newer Card revision or edited/deleted comment must always win.
     pub(super) fn reconcile(&mut self, snapshot: &mut Snapshot) {
+        self.record_observed_terminal_contexts(snapshot);
         self.terminal_hints.retain(|id, hint| {
             (hint_applies(snapshot, hint) || self.terminals.contains_key(id))
                 && !snapshot
@@ -552,6 +618,7 @@ impl CommittedWrites {
             }
         });
         self.overlay(snapshot);
+        self.apply_last_terminal_contexts(snapshot);
     }
 
     pub(super) fn overlay_card_events(&self, card_id: &str, events: &mut Vec<Event>) {
@@ -1255,5 +1322,183 @@ mod tests {
         let mut caught_up = Snapshot::default();
         writes.reconcile(&mut caught_up);
         assert!(writes.env_updates.is_empty());
+    }
+
+    #[test]
+    fn live_terminal_retains_last_observed_context_until_finished_or_rebound() {
+        let mut writes = CommittedWrites::default();
+        let mut agent_entry: TerminalEntry = serde_json::from_value(json!({
+            "id": "agent-1", "conversation_id": "agent-1", "number": 1, "created_at": 1,
+            "agent": {
+                "id": "run-1", "project_id": "p1", "card_id": "c1", "number": 1,
+                "stage": "develop", "trigger": "interactive",
+                "profile": canban_types::Config::default().profiles[0],
+                "instruction": "work", "cwd": "/worktree", "input_path": "in",
+                "state": "completed", "core_id": "core-1", "terminal": "pty-1",
+                "connection_state": "connected",
+                "observed": {"state": "live", "status": {"state": "idle"}},
+                "updated_at": 1
+            }
+        }))
+        .unwrap();
+        let mut shell_entry: TerminalEntry = serde_json::from_value(json!({
+            "id": "shell-1", "number": 2, "created_at": 2,
+            "runtime": {
+                "core_id": "core-1", "terminal": "pty-2",
+                "state": "running", "connection": "connected"
+            }
+        }))
+        .unwrap();
+        let project: Project = serde_json::from_value(json!({
+            "id": "p1", "name": "Proj", "directory": "/proj",
+            "workflow": canban_types::Workflow::default(), "created_at": 1
+        }))
+        .unwrap();
+        let agent_ctx = TerminalContext {
+            terminal_id: "agent-1".into(),
+            core_id: "core-1".into(),
+            terminal: "pty-1".into(),
+            cwd: Some("/worktree".into()),
+            directory_root: Some("/worktree".into()),
+            project_id: Some("p1".into()),
+            card_id: Some("c1".into()),
+            ..Default::default()
+        };
+        let shell_ctx = TerminalContext {
+            terminal_id: "shell-1".into(),
+            core_id: "core-1".into(),
+            terminal: "pty-2".into(),
+            cwd: Some("/proj".into()),
+            directory_root: Some("/proj".into()),
+            project_id: Some("p1".into()),
+            ..Default::default()
+        };
+
+        // 1. Observed snapshot populates last_terminal_contexts.
+        let mut s1 = Snapshot {
+            projects: vec![project.clone()],
+            terminals: vec![agent_entry.clone(), shell_entry.clone()],
+            terminal_contexts: vec![agent_ctx.clone(), shell_ctx.clone()],
+            ..Default::default()
+        };
+        writes.reconcile(&mut s1);
+        assert_eq!(s1.terminal_contexts.len(), 2);
+
+        // 2. Subsequent transient snapshot omits agent context and sends cwd: None for shell.
+        let mut transient = Snapshot {
+            projects: vec![project.clone()],
+            terminals: vec![agent_entry.clone(), shell_entry.clone()],
+            terminal_contexts: vec![TerminalContext {
+                cwd: None,
+                directory_root: None,
+                project_id: None,
+                ..shell_ctx.clone()
+            }],
+            ..Default::default()
+        };
+        writes.reconcile(&mut transient);
+        assert_eq!(
+            transient
+                .terminal_contexts
+                .iter()
+                .find(|c| c.terminal_id == "agent-1"),
+            Some(&agent_ctx)
+        );
+        assert_eq!(
+            transient
+                .terminal_contexts
+                .iter()
+                .find(|c| c.terminal_id == "shell-1"),
+            Some(&shell_ctx)
+        );
+
+        // 3. Genuine directory change updates the preserved context immediately.
+        let moved_agent_ctx = TerminalContext {
+            cwd: Some("/other".into()),
+            directory_root: Some("/other".into()),
+            project_id: None,
+            card_id: None,
+            ..agent_ctx.clone()
+        };
+        let mut moved = Snapshot {
+            projects: vec![project.clone()],
+            terminals: vec![agent_entry.clone(), shell_entry.clone()],
+            terminal_contexts: vec![moved_agent_ctx.clone(), shell_ctx.clone()],
+            ..Default::default()
+        };
+        writes.reconcile(&mut moved);
+        assert_eq!(
+            moved
+                .terminal_contexts
+                .iter()
+                .find(|c| c.terminal_id == "agent-1"),
+            Some(&moved_agent_ctx)
+        );
+
+        // 4. Finished / rebound / replaced / deleted project clears preserved context cleanly.
+        agent_entry.agent.as_mut().unwrap().observed = Some(json!({"state": "finished"}));
+        shell_entry.runtime.as_mut().unwrap().terminal = Some("pty-new".into());
+        let mut finished_or_rebound = Snapshot {
+            projects: vec![project],
+            terminals: vec![agent_entry, shell_entry.clone()],
+            terminal_contexts: Vec::new(),
+            ..Default::default()
+        };
+        writes.reconcile(&mut finished_or_rebound);
+        assert!(finished_or_rebound.terminal_contexts.is_empty());
+        assert!(writes.last_terminal_contexts.is_empty());
+
+        // Also verify replaced connection and deleted project drop retained contexts.
+        let mut live_shell = Snapshot {
+            projects: vec![
+                serde_json::from_value(json!({
+                    "id": "p1", "name": "Proj", "directory": "/proj",
+                    "workflow": canban_types::Workflow::default(), "created_at": 1
+                }))
+                .unwrap(),
+            ],
+            terminals: vec![TerminalEntry {
+                runtime: Some(canban_types::TerminalRuntime {
+                    core_id: Some("core-1".into()),
+                    terminal: Some("pty-2".into()),
+                    state: "running".into(),
+                    connection: "connected".into(),
+                    error: None,
+                    agent_status: None,
+                    agent_turn: None,
+                    observed_agent: None,
+                    waiting: None,
+                }),
+                ..shell_entry.clone()
+            }],
+            terminal_contexts: vec![shell_ctx],
+            ..Default::default()
+        };
+        writes.reconcile(&mut live_shell);
+        assert_eq!(writes.last_terminal_contexts.len(), 1);
+        live_shell.terminals[0].runtime.as_mut().unwrap().connection = "replaced".into();
+        live_shell.terminal_contexts.clear();
+        writes.reconcile(&mut live_shell);
+        assert!(live_shell.terminal_contexts.is_empty());
+        assert!(writes.last_terminal_contexts.is_empty());
+
+        // Deleted project also clears retained context even if terminal stayed running.
+        live_shell.terminals[0].runtime.as_mut().unwrap().connection = "connected".into();
+        live_shell.terminal_contexts = vec![TerminalContext {
+            terminal_id: "shell-1".into(),
+            core_id: "core-1".into(),
+            terminal: "pty-2".into(),
+            cwd: Some("/proj".into()),
+            directory_root: Some("/proj".into()),
+            project_id: Some("p1".into()),
+            ..Default::default()
+        }];
+        writes.reconcile(&mut live_shell);
+        assert_eq!(writes.last_terminal_contexts.len(), 1);
+        live_shell.projects.clear();
+        live_shell.terminal_contexts.clear();
+        writes.reconcile(&mut live_shell);
+        assert!(live_shell.terminal_contexts.is_empty());
+        assert!(writes.last_terminal_contexts.is_empty());
     }
 }

@@ -5127,6 +5127,18 @@ fn managed_classification_policy_tooltips_and_reclaim_states_are_distinct() {
     );
     assert!(crate::terminals::labels::has_status_mark(&e_soon));
     assert_eq!(
+        crate::terminals::labels::reclaim_badge_spec(&e_soon),
+        Some((
+            "Reclaiming soon",
+            canban_ui_kit::tokens::INSET,
+            canban_ui_kit::tokens::MUTED
+        ))
+    );
+    assert_eq!(
+        crate::terminals::labels::sidebar_status_spec(&e_soon),
+        Some(("Reclaiming soon", canban_ui_kit::tokens::MUTED))
+    );
+    assert_eq!(
         e_soon.binding().unwrap()["read_only"],
         json!(false),
         "Reclaiming soon must stay writable so user input cancels reclaim"
@@ -5144,6 +5156,18 @@ fn managed_classification_policy_tooltips_and_reclaim_states_are_distinct() {
     s.reclaim_status[0].auto_reclaiming = true;
     let e_reclaiming = find(&s, &agent_id);
     assert_eq!(e_reclaiming.display_status(), "Auto-reclaiming…");
+    assert_eq!(
+        crate::terminals::labels::reclaim_badge_spec(&e_reclaiming),
+        Some((
+            "Auto-reclaiming…",
+            canban_ui_kit::tokens::INSET,
+            canban_ui_kit::tokens::MUTED
+        ))
+    );
+    assert_eq!(
+        crate::terminals::labels::sidebar_status_spec(&e_reclaiming),
+        Some(("Auto-reclaiming…", canban_ui_kit::tokens::MUTED))
+    );
     let key = Conversation::key("c1", &dev_profile);
     let row = conversations(&s).into_iter().find(|r| r.id == key).unwrap();
     let b = binding(&row).unwrap();
@@ -5205,11 +5229,14 @@ fn managed_classification_policy_tooltips_and_reclaim_states_are_distinct() {
             .unwrap();
         let reclaiming_badge =
             crate::terminals::labels::tab_reclaim_badge(&reclaiming_entry).unwrap();
+        let soon_sidebar_status =
+            crate::terminals::labels::sidebar_status_compact(&soon_entry, true).unwrap();
 
         view()
             .flex_row()
             .child(crate::terminals::labels::tab(&soon_entry, false, true))
             .child(soon_badge)
+            .child(soon_sidebar_status)
             .child(crate::terminals::labels::managed_badge())
             .child(reclaiming_badge)
     }
@@ -5218,4 +5245,190 @@ fn managed_classification_policy_tooltips_and_reclaim_states_are_distinct() {
     core.set_components(nsh_base::registry());
     core.mount_root(&nsh_core::element::Root::of::<ReclaimBadgeProbe>());
     assert!(core.commit().is_some());
+}
+
+#[test]
+fn reclaiming_terminal_never_jumps_to_other_directories_on_transient_context_loss() {
+    use crate::terminals::worktrees::{WorktreeScope, entry_scope};
+    use nsh_core::{
+        ApproxTextEngine, Core, EventKind, EventPayload, MountItem, NodeId, element::JsEvent,
+        geometry::size, prelude::*,
+    };
+    use std::collections::{HashMap, HashSet};
+
+    thread_local! {
+        static RECLAIM_SCOPE_OK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    #[component]
+    fn ReclaimTreeProbe() -> impl IntoElement {
+        canban_ui_kit::tokens::install_theme();
+        let ui = crate::presenter::Ui::new();
+        let mut s = fixture();
+        s.terminals.truncate(1);
+        s.cards.truncate(1);
+        s.projects.truncate(1);
+        let run = s.terminals[0].agent.as_mut().unwrap();
+        run.state = "completed".into();
+        run.core_id = Some("core-1".into());
+        run.terminal = Some("pty-1".into());
+        let tid = s.terminals[0].id.clone();
+        s.terminal_contexts = vec![TerminalContext {
+            terminal_id: tid.clone(),
+            core_id: "core-1".into(),
+            terminal: "pty-1".into(),
+            cwd: Some("/fixture/worktrees/c1".into()),
+            directory_root: Some("/fixture/worktrees/c1".into()),
+            project_id: Some("p1".into()),
+            card_id: Some("c1".into()),
+            ..Default::default()
+        }];
+        ui.accept_snapshot(s);
+        let tid_close = tid;
+        view()
+            .w(px(300.))
+            .h(px(640.))
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("Begin reclaim".into()))
+                    .on_press(move |_: &()| {
+                        let mut closing_snap = ui.snapshot.get_untracked();
+                        closing_snap.terminals[0]
+                            .agent
+                            .as_mut()
+                            .unwrap()
+                            .close_state = "closing".into();
+                        closing_snap.terminals[0]
+                            .agent
+                            .as_mut()
+                            .unwrap()
+                            .lifecycle
+                            .close_reason = "idle".into();
+                        closing_snap.reclaim_status = vec![TerminalReclaimStatus {
+                            terminal_id: tid_close.clone(),
+                            paused: false,
+                            reclaiming_soon: false,
+                            auto_reclaiming: true,
+                            interactive_followup: false,
+                            deadline_at: None,
+                        }];
+                        closing_snap.terminal_contexts.clear();
+                        ui.accept_snapshot(closing_snap);
+                        let ok = ui.snapshot.with_untracked(|s| {
+                            let rows = super::super::entries(s);
+                            let e = rows.iter().find(|e| e.saved.id == tid_close).unwrap();
+                            entry_scope(s, e) == WorktreeScope::CardWorktree("c1".into())
+                        });
+                        RECLAIM_SCOPE_OK.with(|cell| cell.set(ok));
+                    }),
+            )
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("Finish reclaim".into()))
+                    .on_press(move |_: &()| {
+                        let mut finished_snap = ui.snapshot.get_untracked();
+                        finished_snap.terminals[0].agent.as_mut().unwrap().observed =
+                            Some(json!({"state": "finished"}));
+                        finished_snap.terminals[0]
+                            .agent
+                            .as_mut()
+                            .unwrap()
+                            .close_state = "closed".into();
+                        finished_snap.reclaim_status.clear();
+                        finished_snap.terminal_contexts.clear();
+                        ui.accept_snapshot(finished_snap);
+                    }),
+            )
+            .child(crate::terminals::sidebar_for_test(ui))
+    }
+
+    #[derive(Default)]
+    struct Mounted {
+        keys: HashMap<String, NodeId>,
+        labels: HashMap<String, NodeId>,
+        deleted: HashSet<NodeId>,
+    }
+    fn pump(core: &mut Core<ApproxTextEngine>, m: &mut Mounted) {
+        for _ in 0..8 {
+            if let Some(batch) = core.commit() {
+                for item in batch.items {
+                    match item {
+                        MountItem::ViewProps { id, props } => {
+                            if let Some(key) = props.test_id {
+                                m.keys.insert(key.to_string(), id);
+                            }
+                            if let Some(label) = props.accessibility.label {
+                                m.labels.insert(label.to_string(), id);
+                            }
+                        }
+                        MountItem::Delete { id } => {
+                            m.deleted.insert(id);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let mut events = Vec::new();
+            core.take_events(&mut events);
+            for ev in events {
+                match ev {
+                    JsEvent::Event(id, kind, payload) => {
+                        core.component_event(id, kind, &payload);
+                    }
+                    JsEvent::LayoutListener {
+                        host,
+                        id,
+                        listener,
+                        frame,
+                    } => core.component_layout(host, id, &listener, frame),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let mut core = Core::new(ApproxTextEngine, size(px(300.), px(640.)));
+    core.set_components(nsh_base::registry());
+    core.mount_root(&nsh_core::element::Root::of::<ReclaimTreeProbe>());
+    let mut m = Mounted::default();
+    pump(&mut core, &mut m);
+    let term_id = *m
+        .keys
+        .iter()
+        .find(|(k, _)| k.starts_with("terminal:"))
+        .map(|(_, id)| id)
+        .unwrap();
+    assert!(m.keys.contains_key("project:p1"));
+    assert!(!m.keys.contains_key("section:other"));
+
+    // Intermediate auto-reclaim snapshot drops terminal_contexts before marking finished.
+    assert!(core.component_event(
+        m.labels["Begin reclaim"],
+        EventKind::Press,
+        &EventPayload::None,
+    ));
+    pump(&mut core, &mut m);
+
+    assert!(
+        !m.keys.contains_key("section:other"),
+        "transient empty terminal_contexts during reclaim must not jump to Other Directories"
+    );
+    assert!(
+        !m.deleted.contains(&term_id),
+        "reclaiming terminal row must stay mounted in place without deleting/remounting"
+    );
+    assert!(RECLAIM_SCOPE_OK.with(|cell| cell.get()));
+
+    // Final snapshot marks the Card Agent finished and clears terminal_contexts.
+    assert!(core.component_event(
+        m.labels["Finish reclaim"],
+        EventKind::Press,
+        &EventPayload::None,
+    ));
+    pump(&mut core, &mut m);
+
+    assert!(
+        !m.keys.contains_key("section:other"),
+        "finished terminal fading out must not mount Other Directories"
+    );
 }

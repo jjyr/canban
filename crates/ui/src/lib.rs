@@ -119,7 +119,7 @@ pub(crate) fn workspace_root() -> impl IntoElement {
                 ui.project.set(id);
             }
             ui.runtime_clock.set(canban_types::now());
-            ui.snapshot.set(boot.snapshot);
+            ui.accept_snapshot(boot.snapshot);
             ui.snapshot_ready.set(true);
         });
     }

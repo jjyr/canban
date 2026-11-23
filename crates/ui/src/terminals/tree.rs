@@ -990,8 +990,13 @@ fn node_content(
             let id_own = id.clone();
             let id_host = id.clone();
             let entry = computed(move || {
-                ui.terminal_entries.with(|rows| {
-                    indices.with(|map| map.get(&id).and_then(|i| rows.get(*i)).cloned())
+                ui.closing_terminals.with(|closing| {
+                    ui.terminal_entries.with(|rows| {
+                        indices
+                            .with(|map| map.get(&id).and_then(|i| rows.get(*i)))
+                            .filter(|e| e.listed() && !closing.contains(&e.saved.id))
+                            .cloned()
+                    })
                 })
             });
             let last = stored(entry.get_untracked());
@@ -1099,6 +1104,7 @@ fn node_content(
                     })
                 })
             });
+            let last_children = stored(Vec::<Entry>::new());
             dynamic(move || {
                 let (_, _, scope, ..) = info.get();
                 let s = ui.snapshot.get_untracked();
@@ -1112,7 +1118,15 @@ fn node_content(
                             && super::worktrees::location_key(e) == render_key
                     })
                     .collect();
-                scope_header(ui, &s, scope, render_key.clone(), &children)
+                if !children.is_empty() {
+                    last_children.replace(children.clone());
+                }
+                let display_children = if children.is_empty() {
+                    last_children.get()
+                } else {
+                    children
+                };
+                scope_header(ui, &s, scope, render_key.clone(), &display_children)
             })
             .into_element()
         }

@@ -1004,6 +1004,10 @@ impl AppServer {
                         self.request_scripts();
                     }
                     if finished {
+                        self.terminal_contexts
+                            .lock()
+                            .unwrap()
+                            .retain(|c| c.terminal_id != entry.id);
                         let _ = self.try_auto_archive_resolved(&card_id);
                     }
                     self.emit("runtime", Some(card_id));

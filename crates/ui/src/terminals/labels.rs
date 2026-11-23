@@ -28,14 +28,18 @@ pub fn managed_badge() -> View {
 }
 
 /// Calm static pre-reclaim / active auto-reclaim indicator pill for Terminal tabs.
-pub fn tab_reclaim_badge(e: &Entry) -> Option<View> {
-    let (label_text, bg, fg) = if e.is_auto_reclaiming() {
-        ("Auto-reclaiming…", INSET, MUTED)
+pub(crate) fn reclaim_badge_spec(e: &Entry) -> Option<(&'static str, ThemeColor, ThemeColor)> {
+    if e.is_auto_reclaiming() {
+        Some(("Auto-reclaiming…", INSET, MUTED))
     } else if e.is_reclaiming_soon() {
-        ("Reclaiming soon", ATTENTION_SURFACE, ATTENTION)
+        Some(("Reclaiming soon", INSET, MUTED))
     } else {
-        return None;
-    };
+        None
+    }
+}
+
+pub fn tab_reclaim_badge(e: &Entry) -> Option<View> {
+    let (label_text, bg, fg) = reclaim_badge_spec(e)?;
     Some(
         view()
             .flex_row()
@@ -275,18 +279,9 @@ pub fn sidebar_hint(e: &Entry, machine: &str, idle_minutes: u64) -> String {
 /// Compact leading Herdr status mark for Terminal sidebar rows and top/Card tab strips.
 pub fn status_mark(e: &Entry) -> Option<AnyElement> {
     use canban_types::HerdrStatus;
-    if e.is_auto_reclaiming() {
+    if e.is_auto_reclaiming() || e.is_reclaiming_soon() {
         return Some(
             icon_tinted(Icon::Clock, MUTED)
-                .w(px(12.))
-                .h(px(12.))
-                .flex_shrink_0()
-                .into_element(),
-        );
-    }
-    if e.is_reclaiming_soon() {
-        return Some(
-            icon_tinted(Icon::Clock, ATTENTION)
                 .w(px(12.))
                 .h(px(12.))
                 .flex_shrink_0()
@@ -372,12 +367,12 @@ pub fn status_mark(e: &Entry) -> Option<AnyElement> {
     }
 }
 
-fn sidebar_status_label_raw(e: &Entry) -> Option<AnyElement> {
+pub(crate) fn sidebar_status_spec(e: &Entry) -> Option<(&'static str, ThemeColor)> {
     use canban_types::HerdrStatus;
     let (word, color) = if e.is_auto_reclaiming() {
         ("Auto-reclaiming…", MUTED)
     } else if e.is_reclaiming_soon() {
-        ("Reclaiming soon", ATTENTION)
+        ("Reclaiming soon", MUTED)
     } else {
         let st = e.herdr_status();
         match st {
@@ -405,6 +400,11 @@ fn sidebar_status_label_raw(e: &Entry) -> Option<AnyElement> {
             HerdrStatus::Disconnected => ("Offline", DANGER),
         }
     };
+    Some((word, color))
+}
+
+fn sidebar_status_label_raw(e: &Entry) -> Option<AnyElement> {
+    let (word, color) = sidebar_status_spec(e)?;
     Some(
         text(word)
             .text_size(px(11.))

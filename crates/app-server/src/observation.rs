@@ -395,6 +395,10 @@ impl AppServer {
             )?;
             db.save(&current_entry)
         })?;
+        self.terminal_contexts
+            .lock()
+            .unwrap()
+            .retain(|c| c.terminal_id != entry.id);
         self.request_deliveries();
         self.request_scripts();
         let _ = self.try_auto_archive_resolved(&card_id);
