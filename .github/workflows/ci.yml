@@ -40,7 +40,10 @@ jobs:
           mkdir -p "$HOME/.local/bin"
           curl --retry 3 --retry-all-errors -fsSL https://releases.herdr.dev/core/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Run lint
+        run: mise run lint
       - name: Run unit tests
+        if: ${{ !cancelled() }}
         run: mise run test
       - name: Run script and packaging tests
         if: ${{ !cancelled() }}

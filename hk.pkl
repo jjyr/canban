@@ -1,5 +1,20 @@
 amends "package://github.com/jdx/hk/releases/download/v2.4.0/hk@2.4.0#/Config.pkl"
 
+local rust_globs = List(
+  "crates/**",
+  "examples/**",
+  "prompts/**",
+  "skills/**",
+  "third_party/**",
+  "Cargo.toml",
+  "Cargo.lock",
+  "clippy.toml",
+  "LICENSE",
+  "THIRD_PARTY_NOTICES.md",
+  ".github/ISSUE_TEMPLATE/bug_report.md",
+  "scripts/terminal-deps.py",
+)
+
 hooks {
   ["pre-commit"] {
     fix = false
@@ -7,7 +22,18 @@ hooks {
     stash = "git"
     steps {
       ["check"] {
+        glob = rust_globs
         check = "mise run check"
+      }
+    }
+  }
+  ["pre-push"] {
+    fix = false
+    stage = false
+    steps {
+      ["lint"] {
+        glob = rust_globs
+        check = "mise run lint"
       }
     }
   }

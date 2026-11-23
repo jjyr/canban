@@ -16,11 +16,18 @@ description = "Check localized website metadata, links, FAQ, and safe release re
 run = "python3 scripts/test-website.py"
 
 [tasks.check]
-description = "Check Rust formatting, compilation, and Clippy without running tests or packaging"
+description = "Fast Rust formatting and compilation check without Clippy, tests, or packaging"
 depends = ["terminal-deps"]
 run = [
   "cargo fmt --all -- --check",
   "cargo check --workspace --all-targets --locked",
+]
+
+[tasks.lint]
+description = "Run Rust formatting and workspace Clippy checks with warnings denied"
+depends = ["terminal-deps"]
+run = [
+  "cargo fmt --all -- --check",
   "cargo clippy --workspace --all-targets --locked -- -D warnings",
 ]
 
