@@ -23,6 +23,7 @@ local-host = [
 
 [dependencies]
 canban-profiler.workspace = true
+canban-client.workspace = true
 canban-github = { workspace = true, default-features = false }
 canban-workflow-engine = { workspace = true, default-features = false }
 canban-updater = { workspace = true, optional = true }

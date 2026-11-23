@@ -58,6 +58,7 @@ canban-workspaces = { path = "crates/workspaces" }
 canban-transport = { path = "crates/transport" }
 canban-app-server = { path = "crates/app-server" }
 canban-sync = { path = "crates/sync" }
+canban-client = { path = "crates/client" }
 canban-ui-kit = { path = "crates/ui-kit" }
 canban-terminal = { path = "crates/terminal" }
 

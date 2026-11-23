@@ -21,6 +21,10 @@ Status: native macOS (AppKit/Metal) and Linux (GTK4) desktop workbench with simu
 
 [Desktop utilities](desktop-utilities.md) covers the shared bottom bar, subscription Usage, Caffeine, persisted appearance, command catalog and cross-Project Card creation.
 
+## Shared pure-remote client & `UiBackend::RemoteBackend` (2026-11-23)
+
+`crates/client` (`canban-client`) implements a pure-remote client without `canban-app-server`, SQLite, or SSH subprocesses, combining native Tokio `app.subscribe` push streams and `call_async`/`connect_tcp_async` over `canban-transport`, multi-address QR v2 pairing (`canban://pair?v=2&...#<secret>`) + v1 fallback + concurrent reachability probing, pluggable `CredentialStore` (`FileCredentialStore` / `MemoryCredentialStore`), TCP `enc:v1:` secret sealing, cached `RemotePtyTransport`, and `canban-sync` offline outbox/read-cache/3-way conflict resolution. `canban-ui` exposes `RemoteBackend` unconditionally (even with `--no-default-features`).
+
 ## Terminal cross-platform core & remote PTY transport (Phases 0–2, 2026-11-23)
 
 `crates/terminal` now separates macOS `NSView` (`src/apple/`) from portable `nsh_base::Terminal` (`src/portable.rs`), extracts shared input/selection/resize/theme logic into `src/input.rs`, exposes a unified `TerminalView` UI entry point (`src/view.rs`), and implements `RemotePtyTransport` (`src/remote.rs`) speaking Generation-1 Herdr binary framing (`herdr.connect` -> `hello` -> `terminal.attach`) directly over `canban-transport` (`yamux/1` or direct TCP) + Tokio. `canban-terminal --no-default-features` and `canban-ui --no-default-features` cross-compile cleanly with zero warnings on `aarch64-apple-ios-sim` (`platform 7`) and `aarch64-apple-ios` (`platform 2`), verified alongside live iOS 27.0 Simulator `vt_smoke` execution; Android NDK verification remains pending. See [Cross-platform Terminal architecture](terminal-portability.md).

@@ -699,6 +699,134 @@ impl UiBackend for LocalBackend {
     }
 }
 
+/// Pure-remote [`UiBackend`] backed by [`canban_client::RemoteClient`] (works without
+/// `local-host`, SQLite, `AppServer`, or SSH subprocesses).
+pub struct RemoteBackend {
+    client: Arc<canban_client::RemoteClient>,
+}
+
+impl RemoteBackend {
+    pub fn new(client: Arc<canban_client::RemoteClient>) -> Self {
+        Self { client }
+    }
+
+    pub fn client(&self) -> &Arc<canban_client::RemoteClient> {
+        &self.client
+    }
+}
+
+impl UiBackend for RemoteBackend {
+    fn call_routed(
+        &self,
+        method: &str,
+        params: Value,
+        active_project_id: Option<&str>,
+    ) -> Result<Value> {
+        self.client.call_routed(method, params, active_project_id)
+    }
+
+    fn call_all_hosts(&self, method: &str, params: Value) -> Vec<(String, Result<Value>)> {
+        self.client.call_all_hosts(method, params)
+    }
+
+    fn merged_snapshot(&self) -> Result<Snapshot> {
+        self.client.merged_snapshot()
+    }
+
+    fn host_summaries(&self) -> Vec<HostSummary> {
+        self.client.host_summaries()
+    }
+
+    fn config_for_host(&self, host_id: &str) -> Config {
+        self.client.config_for_host(host_id)
+    }
+
+    fn terminal_transport(
+        &self,
+        host_id: &str,
+    ) -> Option<std::sync::Arc<dyn canban_terminal::session::PtyTransport>> {
+        self.client.terminal_transport(host_id)
+    }
+
+    fn resolve_target_host(
+        &self,
+        method: &str,
+        params: &Value,
+        active_project_id: Option<&str>,
+    ) -> String {
+        self.client
+            .resolve_target_host(method, params, active_project_id)
+    }
+
+    fn server_notice(&self) -> Option<String> {
+        self.client.server_notice()
+    }
+
+    fn subscribe(&self) -> tokio::sync::mpsc::UnboundedReceiver<BackendEvent> {
+        self.client.subscribe_mapped(|ev| match ev {
+            canban_client::ClientEvent::Host { host_id, event } => {
+                BackendEvent::Host { host_id, event }
+            }
+            canban_client::ClientEvent::UpdateChanged { host_id, state } => {
+                BackendEvent::UpdateChanged { host_id, state }
+            }
+            canban_client::ClientEvent::UtilitiesChanged { host_id, state } => {
+                BackendEvent::UtilitiesChanged { host_id, state }
+            }
+            canban_client::ClientEvent::UsageChanged { host_id, state } => {
+                BackendEvent::UsageChanged { host_id, state }
+            }
+            canban_client::ClientEvent::HerdrInstall { host_id, state } => {
+                BackendEvent::HerdrInstall { host_id, state }
+            }
+        })
+    }
+
+    fn home_for(&self, host_id: &str) -> String {
+        self.client.home_for(host_id)
+    }
+
+    fn has_host_registry(&self) -> bool {
+        true
+    }
+
+    fn saved_hosts(&self) -> Vec<SavedHost> {
+        self.client.saved_hosts()
+    }
+
+    fn add_host(&self, host: SavedHost) -> Result<HostSummary> {
+        self.client.add_host(host)
+    }
+
+    fn remove_host(&self, host_id: &str) -> Result<()> {
+        self.client.remove_host(host_id)
+    }
+
+    fn rename_host(&self, host_id: &str, new_name: &str) -> Result<()> {
+        self.client.rename_host(host_id, new_name)
+    }
+
+    fn set_host_enabled(&self, host_id: &str, enabled: bool) -> Result<()> {
+        self.client.set_host_enabled(host_id, enabled)
+    }
+
+    fn reconnect_host(&self, host_id: Option<&str>) {
+        self.client.reconnect(host_id);
+    }
+
+    fn poll_remotes_once(&self) {
+        self.client.poll_remotes_once();
+    }
+
+    fn sync_items(&self) -> Vec<SyncItemView> {
+        self.client.sync_items()
+    }
+
+    fn sync_action(&self, host_id: &str, mutation_id: &str, action: SyncAction) -> Result<()> {
+        self.client.sync_action(host_id, mutation_id, action)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -788,5 +916,112 @@ mod tests {
         let side = rx.blocking_recv().unwrap();
         assert_eq!(side.host_id(), "remote-1");
         assert!(side.app_event().is_none());
+    }
+
+    #[test]
+    fn remote_backend_implements_ui_backend_without_local_host() {
+        let dir =
+            std::env::temp_dir().join(format!("canban-ui-remote-test-{}", canban_types::id()));
+        let host_id = "remote-cached-1";
+        let now_ms = canban_types::now();
+
+        let mut card_snap = Snapshot::default();
+        let project: canban_types::Project = serde_json::from_value(json!({
+            "id": "p1",
+            "name": "Cached Project",
+            "directory": "/srv/cached",
+            "workflow": canban_types::Workflow::default(),
+            "created_at": now_ms,
+        }))
+        .unwrap();
+        card_snap.projects.push(project);
+        let card: canban_types::Card = serde_json::from_value(json!({
+            "id": "c1",
+            "project_id": "p1",
+            "number": 1,
+            "title": "Cached Card",
+            "body": "Offline body",
+            "stage": "todo",
+            "revision": 3,
+            "attention": null,
+            "archived_at": null,
+            "archive": null,
+            "archive_error": null,
+            "worktree": null,
+            "created_at": now_ms,
+        }))
+        .unwrap();
+        card_snap.cards.push(card);
+        canban_client::store::save_cache(
+            &dir,
+            host_id,
+            &canban_client::store::CachedHostData {
+                saved_at: now_ms,
+                snapshot: card_snap,
+                config: Config::default(),
+            },
+        );
+        let creds = Arc::new(canban_client::MemoryCredentialStore::new());
+        canban_client::store::save_hosts(
+            &dir,
+            &[SavedHost {
+                id: host_id.into(),
+                name: "Offline Box".into(),
+                transport: canban_types::HostTransport::Tcp {
+                    addr: "127.0.0.1:1".into(),
+                    token: "dev_0123456789abcdef0123456789abcdef".into(),
+                },
+                ssh_target: None,
+                server_id: Some("srv-cached".into()),
+                enabled: false,
+                added_at: now_ms,
+            }],
+            creds.as_ref(),
+        )
+        .unwrap();
+
+        let client = canban_client::RemoteClient::new(
+            canban_client::RemoteClientConfig::new(dir.clone()),
+            creds,
+        )
+        .unwrap();
+        let backend: Arc<dyn UiBackend> = Arc::new(RemoteBackend::new(client));
+
+        assert!(backend.has_host_registry());
+        assert_eq!(backend.local_home(), None);
+
+        let sums = backend.host_summaries();
+        assert_eq!(sums.len(), 1);
+        assert_eq!(sums[0].id, host_id);
+        assert!(!sums[0].is_local);
+
+        let merged = backend.merged_snapshot().unwrap();
+        assert_eq!(merged.cards.len(), 1);
+        assert_eq!(
+            backend.resolve_target_host("card.update", &json!({"card_id": "c1"}), None),
+            host_id
+        );
+
+        let mut rx = backend.subscribe();
+        let created = backend
+            .call_routed(
+                "card.create",
+                json!({"project_id": "p1", "title": "Queued offline", "body": "Text"}),
+                Some("p1"),
+            )
+            .unwrap();
+        assert_eq!(created["offline_queued"], true);
+        let queued_ev = rx.blocking_recv().unwrap();
+        assert_eq!(queued_ev.host_id(), host_id);
+
+        let items = backend.sync_items();
+        assert_eq!(items.len(), 1);
+        backend
+            .sync_action(host_id, &items[0].mutation_id, SyncAction::Discard)
+            .unwrap();
+        assert!(backend.sync_items().is_empty());
+
+        drop(backend);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

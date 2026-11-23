@@ -1,6 +1,6 @@
 # Offline editing and synchronization (all platforms)
 
-Status: Implemented for desktop (2026-11-22); mobile pending.
+Status: Implemented for desktop (2026-11-22) and shared pure-remote `canban-client` / `RemoteBackend` (2026-11-23); mobile UI screens pending.
 
 ## Overview
 

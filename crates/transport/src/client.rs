@@ -484,6 +484,57 @@ impl ClientTransport {
         })
     }
 
+    /// Connects to a remote TCP endpoint asynchronously, upgrading to `yamux/1` multiplexing
+    /// when supported by the daemon and falling back to direct TCP RPC on older daemons.
+    pub async fn connect_tcp_async(
+        addr: String,
+        token: String,
+        device_name: String,
+    ) -> Result<Self> {
+        let normalized = canban_types::normalize_daemon_addr(&addr);
+        if let Some(res) = try_connect_mux(normalized.clone(), token.clone(), device_name).await? {
+            let effective_token = res.upgraded_token.clone().unwrap_or(token);
+            let key = canban_types::id();
+            mux_relay_registry()
+                .lock()
+                .unwrap()
+                .insert(key.clone(), res.mux.clone());
+            return Ok(Self {
+                endpoint: ClientEndpoint::Tcp {
+                    addr: normalized,
+                    token: effective_token,
+                },
+                mux: Some(res.mux),
+                mux_relay_key: Some(key),
+                upgraded_token: res.upgraded_token,
+                rpc_pool: Mutex::new(Vec::new()),
+            });
+        }
+        let stream = tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio::net::TcpStream::connect(normalized.as_str()),
+        )
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("Timed out connecting to {normalized}"),
+            )
+        })?
+        .with_context(|| format!("Canban is not reachable at {normalized}"))?;
+        drop(stream);
+        Ok(Self {
+            endpoint: ClientEndpoint::Tcp {
+                addr: normalized,
+                token,
+            },
+            mux: None,
+            mux_relay_key: None,
+            upgraded_token: None,
+            rpc_pool: Mutex::new(Vec::new()),
+        })
+    }
+
     /// Connects to a remote TCP endpoint, upgrading to `yamux/1` multiplexing when
     /// supported by the daemon and falling back to direct TCP RPC on older daemons.
     pub fn connect_tcp(addr: String, token: String, device_name: String) -> Result<Self> {
@@ -548,6 +599,56 @@ impl ClientTransport {
             mux.close();
         }
         self.clear_pool();
+    }
+
+    pub async fn call_async(&self, method: &str, params: &Value) -> Result<Value> {
+        if let Some(mux) = &self.mux {
+            return mux_rpc_call_async(mux.clone(), method.to_owned(), params.clone()).await;
+        }
+        let (stream, auth_token) = self.open_async_stream().await?;
+        let (read_half, mut writer) = tokio::io::split(stream);
+        let mut reader = tokio::io::BufReader::new(read_half);
+        let mut req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params,
+        });
+        if let Some(token) = auth_token {
+            req["auth"] = json!(token);
+        }
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            write_json_line_async(&mut writer, &req),
+        )
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("Timed out sending RPC request to {method}"),
+            )
+        })??;
+
+        let read_timeout = rpc_read_timeout(method);
+        let line_opt = tokio::time::timeout(
+            read_timeout,
+            read_bounded_line(&mut reader, MAX_FRAME_BYTES),
+        )
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("Timed out waiting for RPC reply to {method}"),
+            )
+        })??;
+        let Some(line) = line_opt else {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("Remote AppServer closed RPC stream for {method}"),
+            )
+            .into());
+        };
+        decode_rpc_reply(&line)
     }
 
     pub fn call(&self, method: &str, params: &Value) -> Result<Value> {
