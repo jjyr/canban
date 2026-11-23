@@ -3615,6 +3615,22 @@ pub fn Gallery() -> impl IntoElement {
                     ui.notify("Copied to clipboard");
                 }))
                 .child(action("Work location",Variant::Quiet,move |_|{scene.set("workspace".into());ui.navigate("project-location");}))
+                .child(action("Worktree modal", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());
+                    let mut preview_refs = fixtures::git_refs();
+                    preview_refs["default_branch"] = serde_json::json!("develop");
+                    preview_refs["sync_remote"] = serde_json::json!("upstream");
+                    preview_refs["has_sync_remote"] = serde_json::json!(true);
+                    preview_refs["branches"] = serde_json::json!([
+                        {"name": "develop", "kind": "local", "short_sha": "c207c08", "is_current": false, "is_default": true},
+                        {"name": "lsp-support", "kind": "local", "short_sha": "88aa112", "is_current": true, "is_default": false},
+                        {"name": "upstream/develop", "kind": "remote", "short_sha": "c207c08", "is_current": false, "is_default": false},
+                        {"name": "origin/develop", "kind": "remote", "short_sha": "9911ff0", "is_current": false, "is_default": false},
+                    ]);
+                    ui.review_state.refs_data.set(preview_refs);
+                    let pid = ui.project.get_untracked();
+                    ui.worktree_modal.set(Some(pid));
+                }))
                 .child(action("Controls", Variant::Quiet, move |_| {
                     scene.set("controls".into())
                 }))

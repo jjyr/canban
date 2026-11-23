@@ -45,9 +45,21 @@ impl AppServer {
         }
 
         let ops = self.ops();
+        let sync_remote = self.resolve_sync_remote(&ops, &project);
+        let github_default = self.cached_github_default_branch(&project);
         let (path_buf, resolved_base, base_commit) = {
             let _permit = self.check();
-            ops.create_branch_worktree(&self.home, &project, branch, base_branch, sync_base)?
+            ops.create_branch_worktree_with_options(
+                &self.home,
+                &project,
+                branch,
+                base_branch,
+                sync_base,
+                canban_workspaces::WorktreeBaseOptions {
+                    preferred_remote: Some(sync_remote.as_str()),
+                    github_default_branch: github_default.as_deref(),
+                },
+            )?
         };
         let path_str = path_buf.to_string_lossy().into_owned();
         let wt = ManagedWorktree {
@@ -116,6 +128,15 @@ impl AppServer {
         let title = strp(&p, "title")?.trim();
         ensure!(!title.is_empty(), "Card title is required");
         let body = p["body"].as_str().unwrap_or("");
+        let promoted_target = {
+            let wt_peek: Option<ManagedWorktree> = self.store.lock().unwrap().db().get(wt_id).ok();
+            wt_peek.and_then(|wt| {
+                let stripped = self
+                    .ops()
+                    .strip_remote_branch_prefix(Path::new(&wt.directory), &wt.base_branch);
+                (!stripped.is_empty()).then_some(stripped)
+            })
+        };
 
         let card_val = self.mutate("worktree.promote", &p, |db| {
             let wt: ManagedWorktree = db.get(wt_id)?;
@@ -135,7 +156,9 @@ impl AppServer {
                 path: wt.path.clone(),
                 branch: Some(wt.branch.clone()),
                 base_commit: wt.base_commit.clone(),
-                target_branch: Some(wt.base_branch.clone()),
+                target_branch: promoted_target
+                    .clone()
+                    .or_else(|| (!wt.base_branch.is_empty()).then(|| wt.base_branch.clone())),
             });
             db.save(&card)?;
             log(

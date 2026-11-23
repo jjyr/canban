@@ -7,7 +7,58 @@ use canban_types::{
 };
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
-use serde_json::json;
+use serde_json::{Value, json};
+
+const AUTO_TARGET_BRANCH_ID: &str = "__auto_target_branch__";
+
+pub(crate) fn build_target_branch_options(refs: &Value, current: &str) -> Vec<PickerOption> {
+    let current = current.trim();
+    let default_branch = refs["default_branch"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "HEAD");
+    let branches = refs["branches"].as_array().cloned().unwrap_or_default();
+    let mut options = Vec::new();
+    let mut auto_opt = PickerOption::new(AUTO_TARGET_BRANCH_ID, "Auto (repository default)")
+        .group("Default")
+        .icon(Icon::Branch)
+        .selected(current.is_empty())
+        .keywords(["auto", "default"]);
+    if let Some(def) = default_branch {
+        auto_opt = auto_opt.detail(def).keywords([def]);
+    }
+    options.push(auto_opt);
+
+    for br in &branches {
+        if br["kind"].as_str() != Some("local") {
+            continue;
+        }
+        let name = br["name"].as_str().unwrap_or("").trim();
+        if name.is_empty() {
+            continue;
+        }
+        let is_cur = br["is_current"].as_bool().unwrap_or(false);
+        let is_def = br["is_default"].as_bool().unwrap_or(false) || default_branch == Some(name);
+        let short = br["short_sha"].as_str().unwrap_or("").to_owned();
+        let detail = match (is_def, is_cur) {
+            (true, true) => "default · current".to_owned(),
+            (true, false) => "default".to_owned(),
+            (false, true) => "current".to_owned(),
+            (false, false) => short.clone(),
+        };
+        options.push(
+            PickerOption::new(name, name)
+                .group("Local Branches")
+                .detail(detail)
+                .icon(Icon::Branch)
+                .mono(true)
+                .selected(current == name)
+                .keywords([short]),
+        );
+    }
+
+    options
+}
 
 fn fixture_listing(host_id: &str, base_dir: &str) -> PathListing {
     let home = if host_id.is_empty() || host_id == "local" {
@@ -220,8 +271,13 @@ pub fn directory_picker_for_host(
 pub fn project_location(ui: Ui) -> impl IntoElement {
     let p = ui.current_project();
     let initial = p.as_ref().map(|p| p.directory.clone()).unwrap_or_default();
+    let initial_target = p
+        .as_ref()
+        .and_then(|p| p.target_branch.clone())
+        .unwrap_or_default();
     let host_id = signal(ui.active_project_host());
     let directory = signal(initial.clone());
+    let target_branch = signal(initial_target);
     let expected = initial;
     let id = p.as_ref().map(|p| p.id.clone()).unwrap_or_default();
     let delete_id = id.clone();
@@ -230,6 +286,130 @@ pub fn project_location(ui: Ui) -> impl IntoElement {
         .map(|p| p.name.clone())
         .unwrap_or_else(|| "this Project".into());
     let project_dir = p.as_ref().map(|p| p.directory.clone()).unwrap_or_default();
+    let refs_data = signal(Value::Null);
+    let refs_loading = signal(false);
+    let refs_ticket = signal(0u64);
+    let refs_id = id.clone();
+    let prev_refs_id = stored(String::new());
+    effect(move || {
+        let pid = refs_id.clone();
+        if prev_refs_id.replace(pid.clone()) == pid {
+            return;
+        }
+        if pid.is_empty() {
+            refs_data.set(Value::Null);
+            refs_loading.set(false);
+            return;
+        }
+        if !crate::backend::is_connected() {
+            refs_data.set(ui.review_state.refs_data.get_untracked());
+            refs_loading.set(false);
+            return;
+        }
+        let offline = untracked(|| {
+            ui.snapshot
+                .with(|s| s.is_host_offline(s.project_host(&pid)))
+        });
+        if offline {
+            refs_data.set(Value::Null);
+            refs_loading.set(false);
+            return;
+        }
+        let ticket = refs_ticket.get_untracked() + 1;
+        refs_ticket.set(ticket);
+        refs_loading.set(true);
+        ui.spawn(async move {
+            let result =
+                crate::review::cached_read(ui, "git.refs", json!({"project_id": pid}), pid).await;
+            if refs_ticket.try_get() != Some(ticket) {
+                return;
+            }
+            let _ = refs_loading.try_set(false);
+            if let Ok(value) = result {
+                let _ = refs_data.try_set(value.data.clone());
+            }
+        });
+    });
+
+    let target_trigger = canban_ui_kit::press_target()
+        .w_full()
+        .h(px(32.))
+        .px_2p5()
+        .rounded(px(RADIUS))
+        .border_1()
+        .border_color(BORDER)
+        .bg(INSET)
+        .hover(|s| s.bg(CARD_HOVER))
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .accessibility_label("Choose Target branch")
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .min_w(px(0.))
+                .child(icon(Icon::Branch).w(px(13.)).h(px(13.)))
+                .child(
+                    label(move || {
+                        let tb = target_branch.get();
+                        let tb = tb.trim();
+                        if !tb.is_empty() {
+                            return tb.to_owned();
+                        }
+                        refs_data.with(|refs| {
+                            refs["default_branch"]
+                                .as_str()
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty() && *s != "HEAD")
+                                .map(|def| format!("Auto ({def})"))
+                                .unwrap_or_else(|| "Auto (repository default)".into())
+                        })
+                    })
+                    .font_family(MONO_FONT)
+                    .text_size(px(12.))
+                    .truncate()
+                    .min_w(px(0.)),
+                ),
+        )
+        .child(dynamic(move || {
+            if refs_loading.get() {
+                loading_spinner(12., MUTED).into_element()
+            } else {
+                icon(Icon::ChevronDown).w(px(13.)).h(px(13.)).into_element()
+            }
+        }));
+    let target_picker = search_popover(
+        target_trigger,
+        move || {
+            let cur = target_branch.get();
+            refs_data.with(|refs| build_target_branch_options(refs, &cur))
+        },
+        move |chosen| {
+            if chosen == AUTO_TARGET_BRANCH_ID {
+                target_branch.set(String::new());
+            } else {
+                target_branch.set(chosen);
+            }
+        },
+    )
+    .loading(move || refs_loading.get())
+    .placeholder("Search local branches or type name…")
+    .empty_text("No local branches found")
+    .custom_option(|q| {
+        let trimmed = q.trim();
+        (!trimmed.is_empty()).then(|| {
+            PickerOption::new(trimmed.to_owned(), format!("Use branch \"{trimmed}\""))
+                .detail("custom")
+                .icon(Icon::Branch)
+                .mono(true)
+        })
+    })
+    .width(340.)
+    .list_height(260.);
+
     view()
         .flex_1()
         .min_h(px(0.))
@@ -251,6 +431,11 @@ pub fn project_location(ui: Ui) -> impl IntoElement {
                             "Filter and select subdirectories inline or type an absolute/`~/` path. New directories are created on save.",
                             directory_picker_for_host(ui, host_id, directory),
                         ))
+                        .child(settings_field(
+                            "Target branch",
+                            "Default merge target for Board Cards and reviews. Standalone worktrees default to the repository's default branch.",
+                            target_picker,
+                        ))
                         .child(
                             view()
                                 .flex_row()
@@ -260,17 +445,39 @@ pub fn project_location(ui: Ui) -> impl IntoElement {
                                     ui.navigate("board")
                                 }))
                                 .child(
-                                    action("Save work location", Variant::Primary, move |_| {
+                                    action("Save changes", Variant::Primary, move |_| {
                                         let id = id.clone();
+                                        let dir = directory.get_untracked().trim().to_owned();
+                                        let tb = target_branch.get_untracked().trim().to_owned();
+                                        let mut payload = json!({
+                                            "project_id": id,
+                                            "target_branch": tb,
+                                        });
+                                        let dir_changed = dir != expected;
+                                        if dir_changed {
+                                            payload["expected_directory"] = json!(expected);
+                                            payload["directory"] = json!(dir);
+                                        }
+                                        let inv_id = id.clone();
                                         dispatch_then(
                                             ui,
                                             "project.update",
-                                            json!({
-                                                "project_id": id,
-                                                "expected_directory": expected,
-                                                "directory": directory.get_untracked().trim(),
-                                            }),
-                                            move |_| ui.navigate("board"),
+                                            payload,
+                                            move |_| {
+                                                if dir_changed {
+                                                    let host = ui.snapshot.with_untracked(|s| {
+                                                        s.project_host(&inv_id).to_owned()
+                                                    });
+                                                    ui.review_state.read_cache.with(|c| {
+                                                        c.invalidate_method(
+                                                            &host,
+                                                            &inv_id,
+                                                            "git.refs",
+                                                        )
+                                                    });
+                                                }
+                                                ui.navigate("board");
+                                            },
                                         );
                                     })
                                     .disabled(move || {
@@ -1403,5 +1610,81 @@ mod tests {
         core.set_components(nsh_base::registry());
         core.mount_root(&nsh_core::element::Root::of::<AfterDeleteProbe>());
         core.commit().expect("after_delete probe mount");
+    }
+
+    #[test]
+    fn build_target_branch_options_lists_auto_and_local_branches_only() {
+        let refs = json!({
+            "default_branch": "develop",
+            "branches": [
+                {"name": "develop", "kind": "local", "short_sha": "111aaaa", "is_current": false, "is_default": true},
+                {"name": "lsp-support", "kind": "local", "short_sha": "222bbbb", "is_current": true, "is_default": false},
+                {"name": "upstream/develop", "kind": "remote", "short_sha": "111aaaa", "is_current": false, "is_default": false},
+            ]
+        });
+        let opts = build_target_branch_options(&refs, "lsp-support");
+        assert_eq!(opts[0].id, AUTO_TARGET_BRANCH_ID);
+        assert_eq!(opts[0].detail, "develop");
+        assert!(!opts[0].selected);
+        assert!(
+            opts.iter()
+                .any(|o| o.id == "develop" && o.detail == "default")
+        );
+        assert!(
+            opts.iter()
+                .any(|o| o.id == "lsp-support" && o.detail == "current" && o.selected)
+        );
+        assert!(!opts.iter().any(|o| o.id == "upstream/develop"));
+    }
+
+    #[test]
+    fn project_location_renders_target_branch_field() {
+        #[component]
+        fn ProjectLocationTargetBranchProbe() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            ui.snapshot.update(|s| {
+                s.projects.push(
+                    serde_json::from_value::<Project>(json!({
+                        "id": "proj-1",
+                        "name": "Fiber",
+                        "directory": "/Users/demo/Workspace/fiber",
+                        "target_branch": "lsp-support",
+                        "workflow": canban_types::Workflow::default(),
+                        "created_at": 1
+                    }))
+                    .unwrap(),
+                );
+            });
+            ui.project.set("proj-1".into());
+            project_location(ui)
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(900.), px(700.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<
+            ProjectLocationTargetBranchProbe,
+        >());
+        let batch = core.commit().expect("project_location mount");
+        let texts: Vec<String> = batch
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                MountItem::Text { text, .. } => Some(text.text.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t == "Target branch"),
+            "expected Target branch heading, got {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t == "lsp-support"),
+            "expected initial target branch value, got {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t == "Save changes"),
+            "expected Save changes button, got {texts:?}"
+        );
     }
 }

@@ -237,7 +237,14 @@ impl AppServer {
         let mut ctx = self.resolve_project_checkout(&p)?;
         let _permit = self.check();
         let ops = self.ops();
-        let mut resp = ops.git_refs_in(&ctx.project, Some(&ctx.cwd))?;
+        let sync_remote = self.resolve_sync_remote(&ops, &ctx.project);
+        let github_default = self.cached_github_default_branch(&ctx.project);
+        let mut resp = ops.git_refs_in_with_context(
+            &ctx.project,
+            Some(&ctx.cwd),
+            Some(sync_remote.as_str()),
+            github_default.as_deref(),
+        )?;
         for wt in ops.list_git_worktrees(Path::new(&ctx.project.directory)) {
             let label = wt
                 .branch

@@ -336,3 +336,115 @@ fn directory_list_returns_sorted_subdirs_home_and_nonexistent_gracefully() {
     let res_tilde = app.call("directory.list", json!({"path": "~"})).unwrap();
     assert_eq!(res_tilde["exists"], json!(true));
 }
+
+#[test]
+fn project_create_detects_default_branch_and_project_update_validates_target_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let app = AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
+    let git = |cwd: &Path, args: &[&str]| {
+        let out = canban_exec::raw_command("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    let remote_bare = dir.path().join("origin.git");
+    let seed = dir.path().join("seed");
+    let repo = dir.path().join("fiber");
+    std::fs::create_dir_all(&seed).unwrap();
+    git(
+        &seed,
+        &[
+            "init",
+            "--bare",
+            "-b",
+            "develop",
+            remote_bare.to_str().unwrap(),
+        ],
+    );
+    git(&seed, &["init", "-b", "develop"]);
+    for (k, v) in [
+        ("user.name", "Tester"),
+        ("user.email", "tester@example.invalid"),
+        ("core.hooksPath", "/dev/null"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&seed, &["config", k, v]);
+    }
+    std::fs::write(seed.join("README.md"), "# Fiber\n").unwrap();
+    git(&seed, &["add", "."]);
+    git(&seed, &["commit", "-m", "init"]);
+    git(
+        &seed,
+        &["remote", "add", "origin", remote_bare.to_str().unwrap()],
+    );
+    git(&seed, &["push", "origin", "develop"]);
+
+    git(
+        dir.path(),
+        &[
+            "clone",
+            "-b",
+            "develop",
+            remote_bare.to_str().unwrap(),
+            repo.to_str().unwrap(),
+        ],
+    );
+    git(&repo, &["remote", "set-head", "origin", "develop"]);
+    git(&repo, &["switch", "-c", "lsp-support"]);
+
+    let created: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Fiber", "directory": repo, "github_auto_link": false}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(created.target_branch.as_deref(), Some("develop"));
+
+    // Invalid target branch names are rejected before mutating.
+    assert!(
+        app.call(
+            "project.update",
+            json!({"project_id": created.id, "target_branch": "-bad"})
+        )
+        .is_err()
+    );
+    assert!(
+        app.call(
+            "project.update",
+            json!({"project_id": created.id, "target_branch": "a..b"})
+        )
+        .is_err()
+    );
+
+    // Valid target branch update & empty string clear work.
+    let updated: Project = serde_json::from_value(
+        app.call(
+            "project.update",
+            json!({"project_id": created.id, "target_branch": "release/v1"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(updated.target_branch.as_deref(), Some("release/v1"));
+
+    let cleared: Project = serde_json::from_value(
+        app.call(
+            "project.update",
+            json!({"project_id": created.id, "target_branch": ""}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cleared.target_branch, None);
+}

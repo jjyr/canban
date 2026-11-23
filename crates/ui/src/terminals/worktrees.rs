@@ -1,9 +1,195 @@
 //! Unified Worktree scopes, standalone Canban-managed Git branch worktrees,
 //! Git status summaries, Card promotion, and guarded deletion.
 use super::*;
-use canban_types::{ManagedWorktree, Snapshot};
+use canban_types::{ManagedWorktree, Project, Snapshot};
 use canban_ui_kit::compact_home;
 use nsh_core::element::desktop::{MenuItem, popup_menu, popup_menu_at};
+use serde_json::Value;
+
+const DEFAULT_BASE_ID: &str = "__default_base__";
+
+pub(crate) fn effective_default_base(project: Option<&Project>, refs: &Value) -> Option<String> {
+    project
+        .and_then(|p| p.workflow.workspace.base_branch.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            refs["default_branch"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && *s != "HEAD")
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            project
+                .and_then(|p| p.target_branch.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        })
+}
+
+pub(crate) fn effective_sync_remote(
+    project: Option<&Project>,
+    refs: &Value,
+    base_branch: &str,
+) -> String {
+    let base = base_branch.trim();
+    if !base.is_empty() {
+        let mut remotes: Vec<&str> = refs["branches"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|br| br["kind"].as_str() == Some("remote"))
+            .filter_map(|br| br["name"].as_str())
+            .filter_map(|name| name.split('/').next())
+            .filter(|r| !r.is_empty() && !r.starts_with('-'))
+            .collect();
+        if let Some(sr) = refs["sync_remote"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.starts_with('-'))
+        {
+            remotes.push(sr);
+        }
+        if let Some(rn) = refs["remote_name"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.starts_with('-'))
+        {
+            remotes.push(rn);
+        }
+        remotes.sort_by_key(|r| (std::cmp::Reverse(r.len()), *r));
+        remotes.dedup();
+        let has_local_exact =
+            refs["branches"].as_array().into_iter().flatten().any(|br| {
+                br["kind"].as_str() == Some("local") && br["name"].as_str() == Some(base)
+            });
+        if !has_local_exact {
+            for r in remotes {
+                if let Some(rest) = base.strip_prefix(&format!("{r}/"))
+                    && !rest.is_empty()
+                {
+                    return r.to_owned();
+                }
+            }
+        }
+    }
+    refs["sync_remote"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.starts_with('-'))
+        .or_else(|| {
+            refs["remote_name"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && !s.starts_with('-'))
+        })
+        .or_else(|| {
+            project
+                .map(|p| p.workflow.workspace.remote.trim())
+                .filter(|s| !s.is_empty() && !s.starts_with('-'))
+        })
+        .unwrap_or("origin")
+        .to_owned()
+}
+
+pub(crate) fn build_base_branch_options(
+    refs: &Value,
+    default_branch: Option<&str>,
+    sync_remote: &str,
+    selected: &str,
+) -> Vec<PickerOption> {
+    let selected = selected.trim();
+    let default_trimmed = default_branch.map(str::trim).filter(|s| !s.is_empty());
+    let branches = refs["branches"].as_array().cloned().unwrap_or_default();
+    let mut options = Vec::new();
+
+    if let Some(def) = default_trimmed {
+        let is_current = branches.iter().any(|br| {
+            br["kind"].as_str() == Some("local")
+                && br["name"].as_str() == Some(def)
+                && br["is_current"].as_bool().unwrap_or(false)
+        });
+        options.push(
+            PickerOption::new(def, def)
+                .group("Default")
+                .detail(if is_current {
+                    "default · current"
+                } else {
+                    "default"
+                })
+                .icon(Icon::Branch)
+                .mono(true)
+                .selected(selected.is_empty() || selected == def)
+                .keywords(["default", def]),
+        );
+    } else {
+        options.push(
+            PickerOption::new(DEFAULT_BASE_ID, "Repository default")
+                .group("Default")
+                .detail("auto")
+                .icon(Icon::Branch)
+                .selected(selected.is_empty())
+                .keywords(["default"]),
+        );
+    }
+
+    for br in &branches {
+        if br["kind"].as_str() != Some("local") {
+            continue;
+        }
+        let name = br["name"].as_str().unwrap_or("").trim();
+        if name.is_empty() || default_trimmed == Some(name) {
+            continue;
+        }
+        let is_cur = br["is_current"].as_bool().unwrap_or(false);
+        let short = br["short_sha"].as_str().unwrap_or("").to_owned();
+        let detail = if is_cur {
+            "current".to_owned()
+        } else {
+            short.clone()
+        };
+        options.push(
+            PickerOption::new(name, name)
+                .group("Local Branches")
+                .detail(detail)
+                .icon(Icon::Branch)
+                .mono(true)
+                .selected(selected == name)
+                .keywords([short]),
+        );
+    }
+
+    let default_remote_ref = default_trimmed.map(|def| format!("{sync_remote}/{def}"));
+    for br in &branches {
+        if br["kind"].as_str() != Some("remote") {
+            continue;
+        }
+        let name = br["name"].as_str().unwrap_or("").trim();
+        if name.is_empty() {
+            continue;
+        }
+        let short = br["short_sha"].as_str().unwrap_or("").to_owned();
+        let detail = if default_remote_ref.as_deref() == Some(name) {
+            "default remote".to_owned()
+        } else {
+            short.clone()
+        };
+        options.push(
+            PickerOption::new(name, name)
+                .group("Remote Branches")
+                .detail(detail)
+                .icon(Icon::Branch)
+                .mono(true)
+                .selected(selected == name)
+                .keywords([short]),
+        );
+    }
+
+    options
+}
 
 pub fn display_directory_path(path: &str, host: &str) -> String {
     if host.is_empty() || host == "local" {
@@ -675,6 +861,53 @@ fn create_modal(ui: Ui) -> impl IntoElement {
             let launch_mode = signal("shell".to_owned());
             let profile_id = signal(crate::sessions::default_profile(ui));
             let error = signal(String::new());
+            let refs_data = signal(Value::Null);
+            let refs_loading = signal(false);
+            let refs_ticket = signal(0u64);
+            let prev_project = stored(String::new());
+
+            effect(move || {
+                let pid = project_id.get();
+                let previous = prev_project.replace(pid.clone());
+                if !previous.is_empty() && previous != pid {
+                    base_branch.set(String::new());
+                }
+                if pid.is_empty() {
+                    refs_data.set(Value::Null);
+                    refs_loading.set(false);
+                    return;
+                }
+                if !crate::backend::is_connected() {
+                    refs_data.set(ui.review_state.refs_data.get_untracked());
+                    refs_loading.set(false);
+                    return;
+                }
+                let offline = untracked(|| {
+                    ui.snapshot
+                        .with(|s| s.is_host_offline(s.project_host(&pid)))
+                });
+                if offline {
+                    refs_data.set(Value::Null);
+                    refs_loading.set(false);
+                    return;
+                }
+                let ticket = refs_ticket.get_untracked() + 1;
+                refs_ticket.set(ticket);
+                refs_data.set(Value::Null);
+                refs_loading.set(true);
+                ui.spawn(async move {
+                    let result =
+                        crate::review::cached_read(ui, "git.refs", json!({"project_id": pid}), pid)
+                            .await;
+                    if refs_ticket.try_get() != Some(ticket) {
+                        return;
+                    }
+                    let _ = refs_loading.try_set(false);
+                    if let Ok(value) = result {
+                        let _ = refs_data.try_set(value.data.clone());
+                    }
+                });
+            });
 
             let close_modal = move || {
                 if ui.is_method_pending("worktree.create") {
@@ -705,11 +938,17 @@ fn create_modal(ui: Ui) -> impl IntoElement {
                 let prof = profile_id.get_untracked();
 
                 if !crate::backend::is_connected() {
+                    let proj = ui
+                        .snapshot
+                        .with_untracked(|s| s.projects.iter().find(|p| p.id == pid).cloned());
+                    let fallback_base = refs_data
+                        .with_untracked(|refs| effective_default_base(proj.as_ref(), refs))
+                        .unwrap_or_else(|| "main".into());
                     let wt = ManagedWorktree {
                         id: format!("wt-{}", canban_types::id()),
                         project_id: pid.clone(),
                         branch: br.clone(),
-                        base_branch: if base.is_empty() { "main".into() } else { base },
+                        base_branch: if base.is_empty() { fallback_base } else { base },
                         base_commit: Some("0123456789abcdef".into()),
                         path: format!("/preview/worktrees/{br}"),
                         directory: "/preview/source".into(),
@@ -875,16 +1114,162 @@ fn create_modal(ui: Ui) -> impl IntoElement {
                                     view()
                                         .gap_1p5()
                                         .child(label("Base branch (optional)"))
-                                        .child(
-                                            field(base_branch, "Defaults to repository target branch")
-                                                .label("Base branch"),
-                                        ),
+                                        .child({
+                                            let base_trigger = canban_ui_kit::press_target()
+                                                .w_full()
+                                                .h(px(32.))
+                                                .px_2p5()
+                                                .rounded(px(RADIUS))
+                                                .border_1()
+                                                .border_color(BORDER)
+                                                .bg(INSET)
+                                                .hover(|s| s.bg(CARD_HOVER))
+                                                .flex_row()
+                                                .items_center()
+                                                .justify_between()
+                                                .gap_2()
+                                                .accessibility_label("Choose or type base branch")
+                                                .child(
+                                                    view()
+                                                        .flex_row()
+                                                        .items_center()
+                                                        .gap_2()
+                                                        .min_w(px(0.))
+                                                        .child(
+                                                            icon(Icon::Branch)
+                                                                .w(px(13.))
+                                                                .h(px(13.)),
+                                                        )
+                                                        .child(
+                                                            label(move || {
+                                                                let chosen = base_branch.get();
+                                                                let chosen = chosen.trim();
+                                                                if !chosen.is_empty() {
+                                                                    return chosen.to_owned();
+                                                                }
+                                                                let pid = project_id.get();
+                                                                let proj = ui.snapshot.with(|s| {
+                                                                    s.projects
+                                                                        .iter()
+                                                                        .find(|p| p.id == pid)
+                                                                        .cloned()
+                                                                });
+                                                                let refs = refs_data.get();
+                                                                if let Some(def) =
+                                                                    effective_default_base(
+                                                                        proj.as_ref(),
+                                                                        &refs,
+                                                                    )
+                                                                {
+                                                                    format!("{def} (default)")
+                                                                } else if refs_loading.get() {
+                                                                    "Detecting default branch…"
+                                                                        .into()
+                                                                } else {
+                                                                    "Repository default branch"
+                                                                        .into()
+                                                                }
+                                                            })
+                                                            .font_family(MONO_FONT)
+                                                            .text_size(px(12.))
+                                                            .truncate()
+                                                            .min_w(px(0.)),
+                                                        ),
+                                                )
+                                                .child(dynamic(move || {
+                                                    if refs_loading.get() {
+                                                        loading_spinner(12., MUTED).into_element()
+                                                    } else {
+                                                        icon(Icon::ChevronDown)
+                                                            .w(px(13.))
+                                                            .h(px(13.))
+                                                            .into_element()
+                                                    }
+                                                }));
+                                            search_popover(
+                                                base_trigger,
+                                                move || {
+                                                    let pid = project_id.get();
+                                                    let proj = ui.snapshot.with(|s| {
+                                                        s.projects
+                                                            .iter()
+                                                            .find(|p| p.id == pid)
+                                                            .cloned()
+                                                    });
+                                                    let refs = refs_data.get();
+                                                    let cur = base_branch.get();
+                                                    let def = effective_default_base(
+                                                        proj.as_ref(),
+                                                        &refs,
+                                                    );
+                                                    let remote = effective_sync_remote(
+                                                        proj.as_ref(),
+                                                        &refs,
+                                                        &cur,
+                                                    );
+                                                    build_base_branch_options(
+                                                        &refs,
+                                                        def.as_deref(),
+                                                        &remote,
+                                                        &cur,
+                                                    )
+                                                },
+                                                move |chosen| {
+                                                    let pid = project_id.get_untracked();
+                                                    let proj = ui.snapshot.with_untracked(|s| {
+                                                        s.projects
+                                                            .iter()
+                                                            .find(|p| p.id == pid)
+                                                            .cloned()
+                                                    });
+                                                    let def = refs_data.with_untracked(|refs| {
+                                                        effective_default_base(proj.as_ref(), refs)
+                                                    });
+                                                    if chosen == DEFAULT_BASE_ID
+                                                        || def.as_deref() == Some(chosen.as_str())
+                                                    {
+                                                        base_branch.set(String::new());
+                                                    } else {
+                                                        base_branch.set(chosen);
+                                                    }
+                                                },
+                                            )
+                                            .loading(move || refs_loading.get())
+                                            .placeholder("Search branches or type ref…")
+                                            .empty_text("No matching branches")
+                                            .custom_option(|q| {
+                                                let trimmed = q.trim();
+                                                (!trimmed.is_empty()).then(|| {
+                                                    PickerOption::new(
+                                                        trimmed.to_owned(),
+                                                        format!("Use branch \"{trimmed}\""),
+                                                    )
+                                                    .detail("custom")
+                                                    .icon(Icon::Branch)
+                                                    .mono(true)
+                                                })
+                                            })
+                                            .width(392.)
+                                            .list_height(260.)
+                                        }),
                                 )
-                                .child(checkbox(
-                                    "Sync base branch from upstream before branching".into(),
-                                    sync_base,
-                                    move |v| sync_base.set(*v),
-                                ))
+                                .child(dynamic(move || {
+                                    let pid = project_id.get();
+                                    let proj = ui.snapshot.with(|s| {
+                                        s.projects.iter().find(|p| p.id == pid).cloned()
+                                    });
+                                    let refs = refs_data.get();
+                                    let base = base_branch.get();
+                                    let remote =
+                                        effective_sync_remote(proj.as_ref(), &refs, &base);
+                                    checkbox(
+                                        format!(
+                                            "Sync base branch from `{remote}` before branching"
+                                        ),
+                                        sync_base,
+                                        move |v| sync_base.set(*v),
+                                    )
+                                }))
                                 .child(
                                     view()
                                         .gap_1p5()
@@ -1192,4 +1577,129 @@ fn remove_confirm_modal(ui: Ui) -> impl IntoElement {
                 )
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use canban_types::Workflow;
+    use nsh_core::{ApproxTextEngine, Core, MountItem, geometry::size};
+    use serde_json::json;
+
+    fn sample_project(target_branch: Option<&str>, base_branch: Option<&str>) -> Project {
+        let mut workflow = Workflow::default();
+        workflow.workspace.base_branch = base_branch.map(str::to_owned);
+        Project {
+            github: None,
+            detected_github: None,
+            github_disconnected: false,
+            delivery_mode: Default::default(),
+            agent_overrides: Default::default(),
+            tags: Default::default(),
+            id: "proj-1".into(),
+            name: "Fiber".into(),
+            directory: "/tmp/fiber".into(),
+            workflow,
+            target_branch: target_branch.map(str::to_owned),
+            created_at: 1,
+        }
+    }
+
+    #[test]
+    fn effective_default_base_and_sync_remote_follow_repo_and_remote_prefixes() {
+        let proj = sample_project(Some("lsp-support"), None);
+        let refs = json!({
+            "default_branch": "develop",
+            "remote_name": "origin",
+            "sync_remote": "upstream",
+            "branches": [
+                {"name": "develop", "kind": "local", "short_sha": "aaa1111", "is_current": false, "is_default": true},
+                {"name": "lsp-support", "kind": "local", "short_sha": "bbb2222", "is_current": true, "is_default": false},
+                {"name": "upstream/develop", "kind": "remote", "short_sha": "aaa1111", "is_current": false, "is_default": false},
+                {"name": "origin/develop", "kind": "remote", "short_sha": "ccc3333", "is_current": false, "is_default": false},
+            ]
+        });
+
+        assert_eq!(
+            effective_default_base(Some(&proj), &refs).as_deref(),
+            Some("develop")
+        );
+        let overridden = sample_project(Some("lsp-support"), Some("release"));
+        assert_eq!(
+            effective_default_base(Some(&overridden), &refs).as_deref(),
+            Some("release")
+        );
+        assert_eq!(effective_sync_remote(Some(&proj), &refs, ""), "upstream");
+        assert_eq!(
+            effective_sync_remote(Some(&proj), &refs, "origin/develop"),
+            "origin"
+        );
+        assert_eq!(
+            effective_sync_remote(Some(&proj), &refs, "upstream/develop"),
+            "upstream"
+        );
+
+        let opts = build_base_branch_options(&refs, Some("develop"), "upstream", "");
+        assert_eq!(opts[0].id, "develop");
+        assert_eq!(opts[0].group.as_deref(), Some("Default"));
+        assert_eq!(opts[0].detail, "default");
+        assert!(opts[0].selected);
+        assert!(
+            opts.iter()
+                .any(|o| o.id == "lsp-support" && o.group.as_deref() == Some("Local Branches"))
+        );
+        assert!(opts.iter().any(|o| {
+            o.id == "upstream/develop"
+                && o.group.as_deref() == Some("Remote Branches")
+                && o.detail == "default remote"
+        }));
+    }
+
+    #[test]
+    fn create_modal_renders_detected_default_branch_and_resolved_sync_remote() {
+        #[component]
+        fn CreateWorktreeModalProbe() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let proj = sample_project(Some("lsp-support"), None);
+            ui.snapshot.update(|s| {
+                s.projects.push(proj);
+            });
+            ui.project.set("proj-1".into());
+            ui.review_state.refs_data.set(json!({
+                "default_branch": "develop",
+                "remote_name": "origin",
+                "sync_remote": "upstream",
+                "branches": [
+                    {"name": "develop", "kind": "local", "short_sha": "aaa1111", "is_current": false, "is_default": true},
+                    {"name": "upstream/develop", "kind": "remote", "short_sha": "aaa1111", "is_current": false, "is_default": false},
+                ]
+            }));
+            ui.worktree_modal.set(Some("proj-1".into()));
+            create_modal(ui)
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(900.), px(700.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<CreateWorktreeModalProbe>());
+        let batch = core.commit().expect("worktree modal mount");
+        let texts: Vec<String> = batch
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                MountItem::Text { text, .. } => Some(text.text.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t == "develop (default)"),
+            "expected detected default branch label, got {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t == "Sync base branch from `upstream` before branching"),
+            "expected resolved sync remote label, got {texts:?}"
+        );
+    }
 }

@@ -583,14 +583,37 @@ impl AppServer {
                 let auto_link = p["github_auto_link"].as_bool().unwrap_or(true);
                 let detected_github =
                     self.detect_project_github(&directory, &workflow.workspace.remote);
-                let github = if auto_link {
-                    detected_github
+                let (github, github_default_branch) = if auto_link {
+                    match detected_github
                         .as_ref()
-                        .and_then(|d| self.try_auto_link_github(&d.repository))
+                        .and_then(|d| self.try_auto_link_github_with_default(&d.repository))
+                    {
+                        Some((source, def)) => (Some(source), def),
+                        None => (None, None),
+                    }
                 } else {
-                    None
+                    (None, None)
                 };
                 let linked_github = github.is_some();
+                let ops = self.ops();
+                let sync_remote = self.resolve_sync_remote_for_repo(
+                    &ops,
+                    &directory,
+                    &workflow.workspace.remote,
+                    github.as_ref().map(|g| g.repository.as_str()),
+                );
+                let target_branch = p["target_branch"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .or(github_default_branch)
+                    .or_else(|| {
+                        ops.detect_default_branch(
+                            Path::new(&directory),
+                            &[sync_remote.as_str(), workflow.workspace.remote.as_str()],
+                        )
+                    });
                 let project = Project {
                     github,
                     detected_github,
@@ -602,10 +625,7 @@ impl AppServer {
                     name: name.into(),
                     directory: directory.clone(),
                     workflow,
-                    target_branch: p["target_branch"]
-                        .as_str()
-                        .map(str::to_owned)
-                        .or_else(|| self.ops().current_branch(&directory)),
+                    target_branch,
                     created_at: now(),
                 };
                 let result = self.mutate(method, &p, |db| {

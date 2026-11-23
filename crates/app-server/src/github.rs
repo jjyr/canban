@@ -69,23 +69,34 @@ impl AppServer {
         }
         fallback
     }
-    pub(super) fn try_auto_link_github(&self, repository: &str) -> Option<GitHubSource> {
+    pub(super) fn try_auto_link_github_with_default(
+        &self,
+        repository: &str,
+    ) -> Option<(GitHubSource, Option<String>)> {
         let repo = canban_github::repository(repository).ok()?;
         let client = self.github_client().ok()?;
         let info = client.repo(&repo).ok()?;
-        Some(GitHubSource {
-            pr_intake: GitHubPrIntake::Off,
-            authors: Vec::new(),
-            labels: Vec::new(),
-            include_drafts: false,
-            paused: false,
-            repository: info.full_name,
-            repository_id: info.id,
-            generation: id(),
-            intake: GitHubIntake::Off,
-            synced_at: None,
-            error: None,
-        })
+        let default_branch = Some(info.default_branch.trim().to_owned()).filter(|s| !s.is_empty());
+        Some((
+            GitHubSource {
+                pr_intake: GitHubPrIntake::Off,
+                authors: Vec::new(),
+                labels: Vec::new(),
+                include_drafts: false,
+                paused: false,
+                repository: info.full_name,
+                repository_id: info.id,
+                generation: id(),
+                intake: GitHubIntake::Off,
+                synced_at: None,
+                error: None,
+            },
+            default_branch,
+        ))
+    }
+    pub(super) fn try_auto_link_github(&self, repository: &str) -> Option<GitHubSource> {
+        self.try_auto_link_github_with_default(repository)
+            .map(|(source, _)| source)
     }
     /// Backfills `detected_github` and automatic repository bindings (`intake: Off`,
     /// `pr_intake: Off`) for unlinked Projects that have not been manually disconnected.

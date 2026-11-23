@@ -261,50 +261,40 @@ impl Ops {
         parse_worktree_list_porcelain_z(&raw)
     }
 
-    fn resolve_default_branch(&self, dir: &Path, project: &Project, current: &str) -> String {
+    fn resolve_default_branch(
+        &self,
+        dir: &Path,
+        project: &Project,
+        current: &str,
+        preferred_remotes: &[&str],
+        github_default_branch: Option<&str>,
+    ) -> String {
+        if let Some(detected) = self.detect_repo_default_branch(dir, preferred_remotes) {
+            return detected;
+        }
+        if let Some(gh) = github_default_branch
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return gh.to_owned();
+        }
         if let Some(t) = project
             .target_branch
             .as_deref()
-            .filter(|s| !s.trim().is_empty())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
         {
-            return t.trim().to_owned();
+            return t.to_owned();
         }
         if let Some(b) = project
             .workflow
             .workspace
             .base_branch
             .as_deref()
-            .filter(|s| !s.trim().is_empty())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
         {
-            return b.trim().to_owned();
-        }
-        if let Ok(out) = self.git(
-            dir,
-            &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
-        ) && out.status.success()
-        {
-            let sym = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-            if let Some(short) = sym.strip_prefix("refs/remotes/origin/")
-                && !short.is_empty()
-            {
-                return short.to_owned();
-            }
-        }
-        for candidate in ["main", "master", "trunk", "develop"] {
-            if self
-                .git(
-                    dir,
-                    &[
-                        "show-ref",
-                        "--verify",
-                        "--quiet",
-                        &format!("refs/heads/{candidate}"),
-                    ],
-                )
-                .is_ok_and(|o| o.status.success())
-            {
-                return candidate.to_owned();
-            }
+            return b.to_owned();
         }
         if !current.is_empty() {
             current.to_owned()
@@ -314,10 +304,20 @@ impl Ops {
     }
 
     pub fn git_refs(&self, project: &Project) -> Result<Value> {
-        self.git_refs_in(project, None)
+        self.git_refs_in_with_context(project, None, None, None)
     }
 
     pub fn git_refs_in(&self, project: &Project, cwd_override: Option<&str>) -> Result<Value> {
+        self.git_refs_in_with_context(project, cwd_override, None, None)
+    }
+
+    pub fn git_refs_in_with_context(
+        &self,
+        project: &Project,
+        cwd_override: Option<&str>,
+        preferred_remote: Option<&str>,
+        github_default_branch: Option<&str>,
+    ) -> Result<Value> {
         let dir_str = cwd_override
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -328,15 +328,21 @@ impl Ops {
             "Repository directory is not available: {}",
             dir.display()
         );
-        let remote_name = if project.workflow.workspace.remote.trim().is_empty() {
+        let remote_name = if project.workflow.workspace.remote.trim().is_empty()
+            || project.workflow.workspace.remote.trim().starts_with('-')
+        {
             "origin".to_owned()
         } else {
             project.workflow.workspace.remote.trim().to_owned()
         };
-        let has_remote = !remote_name.starts_with('-')
-            && self
-                .git(dir, &["remote", "get-url", &remote_name])
-                .is_ok_and(|o| o.status.success());
+        let has_remote = self.has_remote(dir, &remote_name);
+        let sync_remote = preferred_remote
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.starts_with('-'))
+            .unwrap_or(&remote_name)
+            .to_owned();
+        let has_sync_remote = self.has_remote(dir, &sync_remote);
+        let preferred_remotes = [sync_remote.as_str(), remote_name.as_str()];
 
         let has_head = self
             .git(dir, &["rev-parse", "--verify", "HEAD"])?
@@ -350,16 +356,36 @@ impl Ops {
                 .iter()
                 .filter(|f| f["unstaged"] == true || f["untracked"] == true)
                 .count();
+            let default_branch = self
+                .detect_repo_default_branch(dir, &preferred_remotes)
+                .or_else(|| {
+                    github_default_branch
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                })
+                .or_else(|| {
+                    project
+                        .target_branch
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                })
+                .or_else(|| (!current_branch.is_empty()).then(|| current_branch.clone()))
+                .unwrap_or_else(|| "main".into());
             return Ok(json!({
                 "cwd": dir_str,
                 "current_branch": current_branch,
-                "default_branch": project.target_branch.clone().unwrap_or_else(|| "main".into()),
+                "default_branch": default_branch,
                 "head_sha": "",
                 "upstream": "",
                 "ahead": 0,
                 "behind": 0,
                 "has_remote": has_remote,
                 "remote_name": remote_name,
+                "sync_remote": sync_remote,
+                "has_sync_remote": has_sync_remote,
                 "dirty": !status_files.is_empty(),
                 "dirty_count": status_files.len(),
                 "staged_count": staged_count,
@@ -373,7 +399,13 @@ impl Ops {
             }));
         }
 
-        let default_branch = self.resolve_default_branch(dir, project, &current_branch);
+        let default_branch = self.resolve_default_branch(
+            dir,
+            project,
+            &current_branch,
+            &preferred_remotes,
+            github_default_branch,
+        );
         let head_sha = self
             .checked(dir, &["rev-parse", "HEAD"])
             .unwrap_or_default();
@@ -470,7 +502,7 @@ impl Ops {
             &[
                 "for-each-ref",
                 "--sort=-committerdate",
-                "--count=40",
+                "--count=100",
                 "--format=%(refname:short)%09%(objectname)%09%(objectname:short)%09%(committerdate:relative)%09%(contents:subject)",
                 "refs/remotes",
             ],
@@ -560,6 +592,8 @@ impl Ops {
             "behind": behind,
             "has_remote": has_remote,
             "remote_name": remote_name,
+            "sync_remote": sync_remote,
+            "has_sync_remote": has_sync_remote,
             "dirty": dirty_count > 0,
             "dirty_count": dirty_count,
             "staged_count": staged_count,
@@ -1986,6 +2020,113 @@ mod tests {
                     branch: None,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn git_refs_in_with_context_prefers_detected_default_branch_and_reports_sync_remote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let upstream_bare = tmp.path().join("upstream.git");
+        let fork_bare = tmp.path().join("fork.git");
+        let seed = tmp.path().join("seed");
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&seed).unwrap();
+        git(
+            &seed,
+            &[
+                "init",
+                "--bare",
+                "-b",
+                "develop",
+                upstream_bare.to_str().unwrap(),
+            ],
+        );
+        git(
+            &seed,
+            &[
+                "init",
+                "--bare",
+                "-b",
+                "develop",
+                fork_bare.to_str().unwrap(),
+            ],
+        );
+        git(&seed, &["init", "-b", "develop"]);
+        for (k, v) in [
+            ("user.name", "Reviewer"),
+            ("user.email", "reviewer@example.invalid"),
+            ("core.hooksPath", "/dev/null"),
+            ("commit.gpgsign", "false"),
+        ] {
+            git(&seed, &["config", k, v]);
+        }
+        fs::write(seed.join("README.md"), "# Fiber\n").unwrap();
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-m", "init develop"]);
+        git(
+            &seed,
+            &["remote", "add", "upstream", upstream_bare.to_str().unwrap()],
+        );
+        git(&seed, &["push", "upstream", "develop"]);
+        git(
+            &seed,
+            &["remote", "add", "origin", fork_bare.to_str().unwrap()],
+        );
+        git(&seed, &["push", "origin", "develop"]);
+        git(
+            tmp.path(),
+            &[
+                "clone",
+                "-b",
+                "develop",
+                fork_bare.to_str().unwrap(),
+                repo.to_str().unwrap(),
+            ],
+        );
+        git(
+            &repo,
+            &["remote", "add", "upstream", upstream_bare.to_str().unwrap()],
+        );
+        git(&repo, &["fetch", "upstream"]);
+        git(&repo, &["remote", "set-head", "upstream", "develop"]);
+        git(&repo, &["switch", "-c", "lsp-support"]);
+
+        let project = Project {
+            github: None,
+            detected_github: None,
+            github_disconnected: false,
+            delivery_mode: Default::default(),
+            agent_overrides: Default::default(),
+            tags: Default::default(),
+            id: "proj-fiber".into(),
+            name: "Fiber".into(),
+            directory: repo.to_string_lossy().into_owned(),
+            workflow: Default::default(),
+            target_branch: Some("lsp-support".into()),
+            created_at: 0,
+        };
+
+        let refs = Ops::local()
+            .git_refs_in_with_context(&project, None, Some("upstream"), None)
+            .unwrap();
+        assert_eq!(refs["current_branch"], "lsp-support");
+        assert_eq!(refs["default_branch"], "develop");
+        assert_eq!(refs["remote_name"], "origin");
+        assert_eq!(refs["sync_remote"], "upstream");
+        assert_eq!(refs["has_sync_remote"], true);
+        assert!(
+            refs["branches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b["name"] == "develop" && b["is_default"] == true)
+        );
+        assert!(
+            refs["branches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b["name"] == "upstream/develop" && b["kind"] == "remote")
         );
     }
 }

@@ -58,6 +58,9 @@ impl AppServer {
             next_directory.is_some() || next_name.is_some() || next_target_branch.is_some(),
             "At least one of directory, name, or target_branch is required"
         );
+        if let Some(branch) = next_target_branch.as_deref().filter(|b| !b.is_empty()) {
+            self.ops().validate_branch_name(branch)?;
+        }
         let existing = {
             let store = self.store.lock().unwrap();
             let db = store.db();

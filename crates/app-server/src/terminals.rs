@@ -245,6 +245,61 @@ impl AppServer {
         None
     }
 
+    pub(super) fn resolve_sync_remote_for_repo(
+        &self,
+        ops: &canban_workspaces::Ops,
+        directory: &str,
+        configured_remote: &str,
+        github_repo: Option<&str>,
+    ) -> String {
+        let preferred = if configured_remote.trim().is_empty() || configured_remote.starts_with('-')
+        {
+            "origin"
+        } else {
+            configured_remote.trim()
+        };
+        if let Some(repo) = github_repo.and_then(|raw| canban_github::repository(raw).ok()) {
+            let remotes = ops.fetch_remote_urls(directory, preferred);
+            if let Some((remote, _)) = remotes.iter().find(|(_, url)| {
+                canban_github::remote_repository(url).is_ok_and(|r| r.eq_ignore_ascii_case(&repo))
+            }) {
+                return remote.clone();
+            }
+        }
+        let dir = Path::new(directory);
+        if !ops.has_remote(dir, preferred) && ops.has_remote(dir, "upstream") {
+            return "upstream".into();
+        }
+        preferred.to_owned()
+    }
+
+    pub(super) fn resolve_sync_remote(
+        &self,
+        ops: &canban_workspaces::Ops,
+        project: &Project,
+    ) -> String {
+        self.resolve_sync_remote_for_repo(
+            ops,
+            &project.directory,
+            &project.workflow.workspace.remote,
+            project.github.as_ref().map(|g| g.repository.as_str()),
+        )
+    }
+
+    pub(super) fn cached_github_default_branch(&self, project: &Project) -> Option<String> {
+        let repo_raw = project.github.as_ref()?.repository.as_str();
+        let repo = canban_github::repository(repo_raw).ok()?;
+        let info = self
+            .github_cached_client()
+            .ok()?
+            .cached::<Value>(&format!("/repos/{repo}"))?;
+        info["default_branch"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    }
+
     pub(super) fn prepare_pr_card_source(
         &self,
         card: &Card,

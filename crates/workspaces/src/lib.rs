@@ -4,6 +4,27 @@ use std::path::{Path, PathBuf};
 pub struct Ops {
     pub host: canban_herdr::host::Host,
 }
+
+#[derive(Clone, Debug, Default)]
+pub struct WorktreeBaseOptions<'a> {
+    pub preferred_remote: Option<&'a str>,
+    pub github_default_branch: Option<&'a str>,
+}
+
+enum WorktreeBaseSpec {
+    Branch(String),
+    Remote { remote: String, branch: String },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LocalSync {
+    Missing,
+    Aligned,
+    FastForwarded,
+    Skipped,
+}
+
+const COMMON_DEFAULT_BRANCHES: [&str; 4] = ["main", "master", "trunk", "develop"];
 impl Ops {
     pub fn local() -> Self {
         Self {
@@ -681,6 +702,258 @@ impl Ops {
         );
         Ok(None)
     }
+    /// Validate a Git branch name with `git check-ref-format --branch` (works outside a Git repo).
+    pub fn validate_branch_name(&self, branch: &str) -> Result<()> {
+        let branch = branch.trim();
+        ensure!(
+            !branch.is_empty() && !branch.starts_with('-'),
+            "Invalid branch name '{branch}'"
+        );
+        let out = self.host.run_env(
+            Path::new("/"),
+            &[("GIT_EDITOR", "true"), ("GIT_SEQUENCE_EDITOR", "true")],
+            &["git", "check-ref-format", "--branch", branch],
+            None,
+        )?;
+        ensure!(
+            out.status.success(),
+            "Invalid branch name '{}': {}",
+            branch,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        Ok(())
+    }
+    pub(crate) fn list_remotes(&self, dir: &Path) -> Vec<String> {
+        let Ok(out) = self.git_ro(dir, &["remote"]) else {
+            return Vec::new();
+        };
+        if !out.status.success() {
+            return Vec::new();
+        }
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.starts_with('-'))
+            .map(str::to_owned)
+            .collect()
+    }
+    pub fn has_remote(&self, dir: &Path, remote: &str) -> bool {
+        let remote = remote.trim();
+        if remote.is_empty() || remote.starts_with('-') {
+            return false;
+        }
+        self.git_ro(dir, &["remote", "get-url", remote])
+            .is_ok_and(|out| out.status.success())
+    }
+    pub(crate) fn ordered_preferred_remotes(&self, dir: &Path, preferred: &[&str]) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut push_unique = |name: &str| {
+            let trimmed = name.trim();
+            if !trimmed.is_empty()
+                && !trimmed.starts_with('-')
+                && !out.iter().any(|existing| existing == trimmed)
+            {
+                out.push(trimmed.to_owned());
+            }
+        };
+        for &r in preferred {
+            push_unique(r);
+        }
+        push_unique("upstream");
+        push_unique("origin");
+        for r in self.list_remotes(dir) {
+            push_unique(&r);
+        }
+        out
+    }
+    fn ref_exists(&self, dir: &Path, full_ref: &str) -> bool {
+        self.git_ro(dir, &["show-ref", "--verify", "--quiet", full_ref])
+            .is_ok_and(|out| out.status.success())
+    }
+    /// Detect the repository's default branch from remote HEADs or common branch names,
+    /// without falling back to whatever branch `HEAD` happens to have checked out.
+    pub fn detect_repo_default_branch(
+        &self,
+        dir: &Path,
+        preferred_remotes: &[&str],
+    ) -> Option<String> {
+        if !self.host.is_dir(dir) {
+            return None;
+        }
+        let candidates = self.ordered_preferred_remotes(dir, preferred_remotes);
+        for r in &candidates {
+            let head_ref = format!("refs/remotes/{r}/HEAD");
+            if let Ok(out) = self.git_ro(dir, &["symbolic-ref", "--quiet", &head_ref])
+                && out.status.success()
+            {
+                let sym = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+                if let Some(short) = sym.strip_prefix(&format!("refs/remotes/{r}/"))
+                    && !short.is_empty()
+                {
+                    return Some(short.to_owned());
+                }
+            }
+        }
+        for candidate in COMMON_DEFAULT_BRANCHES {
+            if self.ref_exists(dir, &format!("refs/heads/{candidate}")) {
+                return Some(candidate.to_owned());
+            }
+        }
+        for r in &candidates {
+            for candidate in COMMON_DEFAULT_BRANCHES {
+                if self.ref_exists(dir, &format!("refs/remotes/{r}/{candidate}")) {
+                    return Some(candidate.to_owned());
+                }
+            }
+        }
+        None
+    }
+    /// Detect the repository's default branch, falling back to the checked-out branch when needed.
+    pub fn detect_default_branch(&self, dir: &Path, preferred_remotes: &[&str]) -> Option<String> {
+        self.detect_repo_default_branch(dir, preferred_remotes)
+            .or_else(|| self.current_branch(dir.to_str()?))
+    }
+    /// Strip a configured `<remote>/` prefix when promoting or targeting a branch name,
+    /// preserving real local branches that contain `/`.
+    pub fn strip_remote_branch_prefix(&self, dir: &Path, ref_name: &str) -> String {
+        let trimmed = ref_name.trim();
+        if trimmed.is_empty() {
+            return String::new();
+        }
+        if self.ref_exists(dir, &format!("refs/heads/{trimmed}")) {
+            return trimmed.to_owned();
+        }
+        let mut remotes = self.list_remotes(dir);
+        remotes.sort_by_key(|r| std::cmp::Reverse(r.len()));
+        for r in remotes {
+            if let Some(suffix) = trimmed.strip_prefix(&format!("{r}/"))
+                && !suffix.is_empty()
+            {
+                return suffix.to_owned();
+            }
+        }
+        trimmed.to_owned()
+    }
+    fn resolve_worktree_base_spec(
+        &self,
+        source: &Path,
+        raw_base: &str,
+        all_remotes: &[String],
+    ) -> Result<WorktreeBaseSpec> {
+        ensure!(
+            !raw_base.starts_with('-'),
+            "Invalid base branch name '{raw_base}'"
+        );
+        let mut sorted_remotes = all_remotes.to_vec();
+        sorted_remotes.sort_by_key(|r| std::cmp::Reverse(r.len()));
+        if let Some(rest) = raw_base.strip_prefix("refs/remotes/") {
+            let (remote, branch) = sorted_remotes
+                .iter()
+                .find_map(|r| {
+                    rest.strip_prefix(&format!("{r}/"))
+                        .filter(|b| !b.is_empty())
+                        .map(|b| (r.as_str(), b))
+                })
+                .or_else(|| rest.split_once('/'))
+                .context(format!("Invalid remote base branch '{raw_base}'"))?;
+            ensure!(
+                !remote.is_empty() && !remote.starts_with('-'),
+                "Invalid remote name '{remote}'"
+            );
+            self.checked(source, &["check-ref-format", "--branch", branch])?;
+            return Ok(WorktreeBaseSpec::Remote {
+                remote: remote.to_owned(),
+                branch: branch.to_owned(),
+            });
+        }
+        if let Some(branch) = raw_base.strip_prefix("refs/heads/") {
+            self.checked(source, &["check-ref-format", "--branch", branch])?;
+            return Ok(WorktreeBaseSpec::Branch(branch.to_owned()));
+        }
+        self.checked(source, &["check-ref-format", "--branch", raw_base])?;
+        if self.ref_exists(source, &format!("refs/heads/{raw_base}")) {
+            return Ok(WorktreeBaseSpec::Branch(raw_base.to_owned()));
+        }
+        for remote in sorted_remotes {
+            if let Some(branch) = raw_base.strip_prefix(&format!("{remote}/"))
+                && !branch.is_empty()
+            {
+                return Ok(WorktreeBaseSpec::Remote {
+                    remote,
+                    branch: branch.to_owned(),
+                });
+            }
+        }
+        Ok(WorktreeBaseSpec::Branch(raw_base.to_owned()))
+    }
+    fn try_fast_forward_local_branch(
+        &self,
+        source: &Path,
+        local_ref: &str,
+        latest: &str,
+    ) -> LocalSync {
+        let Ok(old) = self.checked(
+            source,
+            &["rev-parse", "--verify", &format!("{local_ref}^{{commit}}")],
+        ) else {
+            return LocalSync::Missing;
+        };
+        if old == latest {
+            return LocalSync::Aligned;
+        }
+        if !self
+            .git(source, &["merge-base", "--is-ancestor", &old, latest])
+            .is_ok_and(|out| out.status.success())
+        {
+            return LocalSync::Skipped;
+        }
+        let Ok(worktrees) = self.checked(source, &["worktree", "list", "--porcelain"]) else {
+            return LocalSync::Skipped;
+        };
+        let target_line = format!("branch {local_ref}");
+        for record in worktrees.split("\n\n") {
+            if record.lines().any(|l| l == target_line) {
+                let Some(path) = record.lines().find_map(|l| l.strip_prefix("worktree ")) else {
+                    return LocalSync::Skipped;
+                };
+                let cwd = Path::new(path);
+                let Ok(status) = self.r_checked(
+                    cwd,
+                    &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+                ) else {
+                    return LocalSync::Skipped;
+                };
+                if !status.is_empty() {
+                    return LocalSync::Skipped;
+                }
+                let Ok(head) = self.checked(cwd, &["rev-parse", "HEAD"]) else {
+                    return LocalSync::Skipped;
+                };
+                if head != old {
+                    return LocalSync::Skipped;
+                }
+                return if self
+                    .git(
+                        cwd,
+                        &["merge", "--ff-only", "--no-overwrite-ignore", latest],
+                    )
+                    .is_ok_and(|out| out.status.success())
+                {
+                    LocalSync::FastForwarded
+                } else {
+                    LocalSync::Skipped
+                };
+            }
+        }
+        if self
+            .git(source, &["update-ref", local_ref, latest, &old])
+            .is_ok_and(|out| out.status.success())
+        {
+            LocalSync::FastForwarded
+        } else {
+            LocalSync::Skipped
+        }
+    }
     /// Create or attach a standalone Canban-managed branch worktree under `<home>/worktrees`.
     pub fn create_branch_worktree(
         &self,
@@ -690,44 +963,195 @@ impl Ops {
         base_branch: Option<&str>,
         sync_base: bool,
     ) -> Result<(PathBuf, String, String)> {
+        self.create_branch_worktree_with_options(
+            home,
+            project,
+            branch,
+            base_branch,
+            sync_base,
+            WorktreeBaseOptions::default(),
+        )
+    }
+    /// Create or attach a standalone Canban-managed branch worktree with explicit remote and
+    /// GitHub default-branch context.
+    pub fn create_branch_worktree_with_options(
+        &self,
+        home: &Path,
+        project: &Project,
+        branch: &str,
+        base_branch: Option<&str>,
+        sync_base: bool,
+        opts: WorktreeBaseOptions<'_>,
+    ) -> Result<(PathBuf, String, String)> {
         let source = Path::new(&project.directory);
         let branch = branch.trim();
         ensure!(!branch.is_empty(), "Branch name is required");
         self.checked(source, &["check-ref-format", "--branch", branch])?;
-        let base = base_branch
+        let configured_remote = {
+            let trimmed = project.workflow.workspace.remote.trim();
+            if trimmed.is_empty() || trimmed.starts_with('-') {
+                "origin"
+            } else {
+                trimmed
+            }
+        };
+        let primary_remote = opts
+            .preferred_remote
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.starts_with('-'))
+            .unwrap_or(configured_remote);
+        let preferred = [primary_remote, configured_remote];
+        let all_remotes = self.list_remotes(source);
+        let raw_base = base_branch
             .map(str::trim)
             .filter(|b| !b.is_empty())
             .map(str::to_owned)
-            .or_else(|| project.workflow.workspace.base_branch.clone())
-            .or_else(|| project.target_branch.clone())
+            .or_else(|| {
+                project
+                    .workflow
+                    .workspace
+                    .base_branch
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|b| !b.is_empty())
+                    .map(str::to_owned)
+            })
+            .or_else(|| self.detect_repo_default_branch(source, &preferred))
+            .or_else(|| {
+                opts.github_default_branch
+                    .map(str::trim)
+                    .filter(|b| !b.is_empty())
+                    .map(str::to_owned)
+            })
+            .or_else(|| {
+                project
+                    .target_branch
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|b| !b.is_empty())
+                    .map(str::to_owned)
+            })
             .or_else(|| self.current_branch(&project.directory))
             .context("Choose a base branch for the worktree")?;
-        self.checked(source, &["check-ref-format", "--branch", &base])?;
-        if sync_base {
-            let remote = if project.workflow.workspace.remote.trim().is_empty() {
-                "origin"
-            } else {
-                project.workflow.workspace.remote.as_str()
+        let spec = self.resolve_worktree_base_spec(source, &raw_base, &all_remotes)?;
+        let (base_commit, resolved_base) = if sync_base {
+            let (fetch_remote, remote_branch, explicit_remote) = match &spec {
+                WorktreeBaseSpec::Remote { remote, branch } => {
+                    (remote.as_str(), branch.as_str(), true)
+                }
+                WorktreeBaseSpec::Branch(branch) => (primary_remote, branch.as_str(), false),
             };
-            if self.has_push_remote(project) {
-                self.sync_base(source, &base, remote)?;
-            }
-        }
-        let start_ref = format!("refs/heads/{base}");
-        let base_commit = match self.checked(source, &["rev-parse", "--verify", &start_ref]) {
-            Ok(commit) => commit,
-            Err(err) => {
-                ensure!(
-                    self.git(source, &["rev-parse", "--verify", "HEAD"])?
-                        .status
-                        .success(),
-                    "Initialize a Git repository with at least one commit before creating a worktree"
+            ensure!(
+                self.has_remote(source, fetch_remote),
+                "Cannot sync base branch '{remote_branch}': Git remote '{fetch_remote}' is not configured"
+            );
+            let tracking = format!("refs/remotes/{fetch_remote}/{remote_branch}");
+            let out = self.git(
+                source,
+                &[
+                    "fetch",
+                    "--",
+                    fetch_remote,
+                    &format!("+refs/heads/{remote_branch}:{tracking}"),
+                ],
+            )?;
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+                let lower = stderr.to_ascii_lowercase();
+                if lower.contains("couldn't find remote ref") || lower.contains("not found") {
+                    anyhow::bail!(
+                        "Base branch '{remote_branch}' was not found on remote '{fetch_remote}'"
+                    );
+                }
+                anyhow::bail!(
+                    "Failed to fetch '{remote_branch}' from remote '{fetch_remote}': {stderr}"
                 );
-                return Err(err);
+            }
+            let latest = self.checked(
+                source,
+                &["rev-parse", "--verify", &format!("{tracking}^{{commit}}")],
+            )?;
+            let local_ref = format!("refs/heads/{remote_branch}");
+            let local_sync = self.try_fast_forward_local_branch(source, &local_ref, &latest);
+            let resolved_base = if !explicit_remote
+                && matches!(local_sync, LocalSync::Aligned | LocalSync::FastForwarded)
+            {
+                remote_branch.to_owned()
+            } else {
+                format!("{fetch_remote}/{remote_branch}")
+            };
+            (latest, resolved_base)
+        } else {
+            match spec {
+                WorktreeBaseSpec::Remote { remote, branch } => {
+                    let remote_ref = format!("refs/remotes/{remote}/{branch}");
+                    match self.checked(
+                        source,
+                        &["rev-parse", "--verify", &format!("{remote_ref}^{{commit}}")],
+                    ) {
+                        Ok(commit) => (commit, format!("{remote}/{branch}")),
+                        Err(_) => {
+                            ensure!(
+                                self.git(source, &["rev-parse", "--verify", "HEAD"])?
+                                    .status
+                                    .success(),
+                                "Initialize a Git repository with at least one commit before creating a worktree"
+                            );
+                            anyhow::bail!(
+                                "Base branch '{remote}/{branch}' not found locally; enable sync or fetch remote '{remote}' first"
+                            );
+                        }
+                    }
+                }
+                WorktreeBaseSpec::Branch(branch) => {
+                    let local_ref = format!("refs/heads/{branch}");
+                    if let Ok(commit) = self.checked(
+                        source,
+                        &["rev-parse", "--verify", &format!("{local_ref}^{{commit}}")],
+                    ) {
+                        (commit, branch)
+                    } else if let Some(found) = self
+                        .ordered_preferred_remotes(source, &preferred)
+                        .into_iter()
+                        .find_map(|r| {
+                            let remote_ref = format!("refs/remotes/{r}/{branch}");
+                            self.checked(
+                                source,
+                                &["rev-parse", "--verify", &format!("{remote_ref}^{{commit}}")],
+                            )
+                            .ok()
+                            .map(|commit| (commit, format!("{r}/{branch}")))
+                        })
+                    {
+                        found
+                    } else if let Ok(commit) = self.checked(
+                        source,
+                        &[
+                            "rev-parse",
+                            "--verify",
+                            &format!("refs/tags/{branch}^{{commit}}"),
+                        ],
+                    ) {
+                        (commit, branch)
+                    } else {
+                        ensure!(
+                            self.git(source, &["rev-parse", "--verify", "HEAD"])?
+                                .status
+                                .success(),
+                            "Initialize a Git repository with at least one commit before creating a worktree"
+                        );
+                        if self.has_remote(source, primary_remote) {
+                            anyhow::bail!(
+                                "Base branch '{branch}' not found locally or on remote '{primary_remote}'"
+                            );
+                        }
+                        anyhow::bail!("Base branch '{branch}' not found locally");
+                    }
+                }
             }
         };
-        let target = self.create_standalone(home, project, branch, &start_ref)?;
-        Ok((target, base, base_commit))
+        let target = self.create_standalone(home, project, branch, &base_commit)?;
+        Ok((target, resolved_base, base_commit))
     }
     /// Inspect clean/dirty status and current branch of a standalone worktree.
     pub fn worktree_status(&self, path: &Path) -> Result<(String, bool, Option<String>)> {
@@ -1513,6 +1937,661 @@ mod sync_tests {
         assert_eq!(
             ops.resolve_worktree_warning(&f.project, &f.card).as_deref(),
             Some("Branch source-p/42 has unmerged changes against main")
+        );
+    }
+
+    #[test]
+    fn detect_default_branch_prefers_remote_head_over_current_and_common_branches() {
+        let dir = tempfile::tempdir().unwrap();
+        let ops = Ops::local();
+        assert_eq!(ops.detect_default_branch(dir.path(), &[]), None);
+
+        // 1. upstream/HEAD -> develop wins over local `main` and current `lsp-support`.
+        let upstream_bare = dir.path().join("upstream.git");
+        let seed = dir.path().join("seed");
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(&seed).unwrap();
+        checked(
+            &seed,
+            &[
+                "init",
+                "--bare",
+                "-b",
+                "develop",
+                upstream_bare.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        checked(&seed, &["init", "-b", "develop"]).unwrap();
+        for (k, v) in [
+            ("user.name", "Test"),
+            ("user.email", "test@example.invalid"),
+            ("core.hooksPath", "/dev/null"),
+            ("commit.gpgsign", "false"),
+        ] {
+            checked(&seed, &["config", k, v]).unwrap();
+        }
+        fs::write(seed.join("f"), "1\n").unwrap();
+        checked(&seed, &["add", "."]).unwrap();
+        checked(&seed, &["commit", "-m", "init"]).unwrap();
+        checked(
+            &seed,
+            &["remote", "add", "upstream", upstream_bare.to_str().unwrap()],
+        )
+        .unwrap();
+        checked(&seed, &["push", "upstream", "develop"]).unwrap();
+
+        checked(
+            &seed,
+            &[
+                "clone",
+                "-b",
+                "develop",
+                upstream_bare.to_str().unwrap(),
+                repo.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        checked(
+            &repo,
+            &["remote", "add", "upstream", upstream_bare.to_str().unwrap()],
+        )
+        .unwrap();
+        checked(&repo, &["fetch", "upstream"]).unwrap();
+        checked(&repo, &["remote", "set-head", "upstream", "develop"]).unwrap();
+        checked(&repo, &["branch", "main"]).unwrap();
+        checked(&repo, &["switch", "-c", "lsp-support"]).unwrap();
+
+        assert_eq!(
+            ops.detect_repo_default_branch(&repo, &["upstream"])
+                .as_deref(),
+            Some("develop")
+        );
+        assert_eq!(
+            ops.detect_default_branch(&repo, &["upstream"]).as_deref(),
+            Some("develop")
+        );
+
+        // 2. Without remote HEAD, falls back to common default branch names over current branch.
+        let local_only = dir.path().join("local-only");
+        fs::create_dir_all(&local_only).unwrap();
+        checked(&local_only, &["init", "-b", "master"]).unwrap();
+        for (k, v) in [
+            ("user.name", "Test"),
+            ("user.email", "test@example.invalid"),
+            ("core.hooksPath", "/dev/null"),
+            ("commit.gpgsign", "false"),
+        ] {
+            checked(&local_only, &["config", k, v]).unwrap();
+        }
+        fs::write(local_only.join("f"), "1\n").unwrap();
+        checked(&local_only, &["add", "."]).unwrap();
+        checked(&local_only, &["commit", "-m", "init"]).unwrap();
+        checked(&local_only, &["switch", "-c", "feat/x"]).unwrap();
+        assert_eq!(
+            ops.detect_default_branch(&local_only, &[]).as_deref(),
+            Some("master")
+        );
+
+        // 3. Pure custom branch repository falls back to current_branch.
+        let custom = dir.path().join("custom");
+        fs::create_dir_all(&custom).unwrap();
+        checked(&custom, &["init", "-b", "release-v1"]).unwrap();
+        for (k, v) in [
+            ("user.name", "Test"),
+            ("user.email", "test@example.invalid"),
+            ("core.hooksPath", "/dev/null"),
+            ("commit.gpgsign", "false"),
+        ] {
+            checked(&custom, &["config", k, v]).unwrap();
+        }
+        fs::write(custom.join("f"), "1\n").unwrap();
+        checked(&custom, &["add", "."]).unwrap();
+        checked(&custom, &["commit", "-m", "init"]).unwrap();
+        assert_eq!(ops.detect_repo_default_branch(&custom, &[]), None);
+        assert_eq!(
+            ops.detect_default_branch(&custom, &[]).as_deref(),
+            Some("release-v1")
+        );
+    }
+
+    #[test]
+    fn create_branch_worktree_defaults_to_repo_default_branch_ignoring_stale_target_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let upstream_bare = dir.path().join("upstream.git");
+        let source = dir.path().join("source");
+        let seed = dir.path().join("seed");
+        fs::create_dir_all(&seed).unwrap();
+        checked(
+            &seed,
+            &[
+                "init",
+                "--bare",
+                "-b",
+                "develop",
+                upstream_bare.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        checked(&seed, &["init", "-b", "develop"]).unwrap();
+        for (k, v) in [
+            ("user.name", "Test"),
+            ("user.email", "test@example.invalid"),
+            ("core.hooksPath", "/dev/null"),
+            ("commit.gpgsign", "false"),
+        ] {
+            checked(&seed, &["config", k, v]).unwrap();
+        }
+        fs::write(seed.join("base.txt"), "develop\n").unwrap();
+        checked(&seed, &["add", "."]).unwrap();
+        checked(&seed, &["commit", "-m", "develop base"]).unwrap();
+        let develop_sha = checked(&seed, &["rev-parse", "HEAD"]).unwrap();
+        checked(
+            &seed,
+            &["remote", "add", "upstream", upstream_bare.to_str().unwrap()],
+        )
+        .unwrap();
+        checked(&seed, &["push", "upstream", "develop"]).unwrap();
+
+        checked(
+            &seed,
+            &[
+                "clone",
+                "-b",
+                "develop",
+                upstream_bare.to_str().unwrap(),
+                source.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        for (k, v) in [
+            ("user.name", "Test"),
+            ("user.email", "test@example.invalid"),
+            ("core.hooksPath", "/dev/null"),
+            ("commit.gpgsign", "false"),
+        ] {
+            checked(&source, &["config", k, v]).unwrap();
+        }
+        checked(
+            &source,
+            &["remote", "add", "upstream", upstream_bare.to_str().unwrap()],
+        )
+        .unwrap();
+        checked(&source, &["fetch", "upstream"]).unwrap();
+        checked(&source, &["remote", "set-head", "upstream", "develop"]).unwrap();
+        checked(&source, &["switch", "-c", "lsp-support"]).unwrap();
+        fs::write(source.join("lsp.txt"), "feature\n").unwrap();
+        checked(&source, &["add", "."]).unwrap();
+        checked(&source, &["commit", "-m", "lsp feature"]).unwrap();
+
+        let project = Project {
+            github: None,
+            detected_github: None,
+            github_disconnected: false,
+            delivery_mode: Default::default(),
+            agent_overrides: Default::default(),
+            tags: Default::default(),
+            id: "fiber-p".into(),
+            name: "Fiber".into(),
+            directory: source.to_string_lossy().into(),
+            workflow: Default::default(),
+            target_branch: Some("lsp-support".into()),
+            created_at: 0,
+        };
+
+        let (wt, resolved_base, base_commit) = Ops::local()
+            .create_branch_worktree_with_options(
+                &home,
+                &project,
+                "feat/from-default",
+                None,
+                false,
+                WorktreeBaseOptions {
+                    preferred_remote: Some("upstream"),
+                    github_default_branch: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(resolved_base, "develop");
+        assert_eq!(base_commit, develop_sha);
+        assert!(!wt.join("lsp.txt").exists());
+        assert_eq!(
+            fs::read_to_string(wt.join("base.txt")).unwrap(),
+            "develop\n"
+        );
+    }
+
+    #[test]
+    fn create_branch_worktree_resolves_remote_refs_and_remote_only_branches_without_auto_tracking()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let upstream_bare = dir.path().join("upstream.git");
+        let origin_bare = dir.path().join("origin.git");
+        let seed = dir.path().join("seed");
+        let source = dir.path().join("source");
+        fs::create_dir_all(&seed).unwrap();
+        checked(
+            &seed,
+            &[
+                "init",
+                "--bare",
+                "-b",
+                "develop",
+                upstream_bare.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        checked(
+            &seed,
+            &[
+                "init",
+                "--bare",
+                "-b",
+                "develop",
+                origin_bare.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        checked(&seed, &["init", "-b", "develop"]).unwrap();
+        for (k, v) in [
+            ("user.name", "Test"),
+            ("user.email", "test@example.invalid"),
+            ("core.hooksPath", "/dev/null"),
+            ("commit.gpgsign", "false"),
+        ] {
+            checked(&seed, &["config", k, v]).unwrap();
+        }
+        fs::write(seed.join("f.txt"), "base\n").unwrap();
+        checked(&seed, &["add", "."]).unwrap();
+        checked(&seed, &["commit", "-m", "develop"]).unwrap();
+        checked(
+            &seed,
+            &["remote", "add", "upstream", upstream_bare.to_str().unwrap()],
+        )
+        .unwrap();
+        checked(
+            &seed,
+            &["remote", "add", "origin", origin_bare.to_str().unwrap()],
+        )
+        .unwrap();
+        checked(&seed, &["push", "upstream", "develop"]).unwrap();
+        checked(&seed, &["push", "origin", "develop"]).unwrap();
+
+        checked(&seed, &["switch", "-c", "only-remote"]).unwrap();
+        fs::write(seed.join("remote.txt"), "remote only\n").unwrap();
+        checked(&seed, &["add", "."]).unwrap();
+        checked(&seed, &["commit", "-m", "remote only"]).unwrap();
+        let remote_only_sha = checked(&seed, &["rev-parse", "HEAD"]).unwrap();
+        checked(&seed, &["push", "upstream", "only-remote"]).unwrap();
+        checked(&seed, &["push", "origin", "only-remote"]).unwrap();
+
+        checked(
+            &seed,
+            &[
+                "clone",
+                "-b",
+                "develop",
+                origin_bare.to_str().unwrap(),
+                source.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        for (k, v) in [
+            ("user.name", "Test"),
+            ("user.email", "test@example.invalid"),
+            ("core.hooksPath", "/dev/null"),
+            ("commit.gpgsign", "false"),
+        ] {
+            checked(&source, &["config", k, v]).unwrap();
+        }
+        checked(
+            &source,
+            &["remote", "add", "upstream", upstream_bare.to_str().unwrap()],
+        )
+        .unwrap();
+        checked(&source, &["fetch", "upstream"]).unwrap();
+        checked(&source, &["fetch", "origin"]).unwrap();
+
+        let project = Project {
+            github: None,
+            detected_github: None,
+            github_disconnected: false,
+            delivery_mode: Default::default(),
+            agent_overrides: Default::default(),
+            tags: Default::default(),
+            id: "fiber-p".into(),
+            name: "Fiber".into(),
+            directory: source.to_string_lossy().into(),
+            workflow: Default::default(),
+            target_branch: None,
+            created_at: 0,
+        };
+        let ops = Ops::local();
+
+        // Explicit `<remote>/<branch>` works and does not set branch.<new>.remote.
+        let (wt1, base1, sha1) = ops
+            .create_branch_worktree_with_options(
+                &home,
+                &project,
+                "feat/explicit-upstream",
+                Some("upstream/develop"),
+                false,
+                WorktreeBaseOptions {
+                    preferred_remote: Some("upstream"),
+                    github_default_branch: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(base1, "upstream/develop");
+        assert!(!sha1.is_empty());
+        assert!(
+            git(
+                &wt1,
+                &["config", "--get", "branch.feat/explicit-upstream.remote"]
+            )
+            .unwrap()
+            .status
+            .code()
+                != Some(0)
+        );
+
+        // Remote-only branch resolved with `origin/only-remote` and bare `only-remote`.
+        let (_wt2, base2, sha2) = ops
+            .create_branch_worktree_with_options(
+                &home,
+                &project,
+                "feat/origin-only",
+                Some("origin/only-remote"),
+                false,
+                WorktreeBaseOptions {
+                    preferred_remote: Some("upstream"),
+                    github_default_branch: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(base2, "origin/only-remote");
+        assert_eq!(sha2, remote_only_sha);
+
+        let (_wt3, base3, sha3) = ops
+            .create_branch_worktree_with_options(
+                &home,
+                &project,
+                "feat/bare-remote-only",
+                Some("only-remote"),
+                false,
+                WorktreeBaseOptions {
+                    preferred_remote: Some("upstream"),
+                    github_default_branch: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(base3, "upstream/only-remote");
+        assert_eq!(sha3, remote_only_sha);
+
+        // Missing branch emits friendly error message.
+        let missing_err = ops
+            .create_branch_worktree_with_options(
+                &home,
+                &project,
+                "feat/bad-base",
+                Some("main"),
+                false,
+                WorktreeBaseOptions {
+                    preferred_remote: Some("upstream"),
+                    github_default_branch: None,
+                },
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            missing_err.contains("Base branch 'main' not found locally or on remote 'upstream'"),
+            "unexpected error: {missing_err}"
+        );
+    }
+
+    #[test]
+    fn create_branch_worktree_sync_base_handles_missing_local_dirty_main_diverged_local_and_clean_ff()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let upstream_bare = dir.path().join("upstream.git");
+        let fork_bare = dir.path().join("fork.git");
+        let writer = dir.path().join("writer");
+        let source = dir.path().join("source");
+        fs::create_dir_all(&writer).unwrap();
+        checked(
+            &writer,
+            &[
+                "init",
+                "--bare",
+                "-b",
+                "develop",
+                upstream_bare.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        checked(
+            &writer,
+            &[
+                "init",
+                "--bare",
+                "-b",
+                "develop",
+                fork_bare.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        checked(&writer, &["init", "-b", "develop"]).unwrap();
+        for (k, v) in [
+            ("user.name", "Test"),
+            ("user.email", "test@example.invalid"),
+            ("core.hooksPath", "/dev/null"),
+            ("commit.gpgsign", "false"),
+        ] {
+            checked(&writer, &["config", k, v]).unwrap();
+        }
+        fs::write(writer.join("seed.txt"), "v1\n").unwrap();
+        checked(&writer, &["add", "."]).unwrap();
+        checked(&writer, &["commit", "-m", "v1"]).unwrap();
+        checked(
+            &writer,
+            &["remote", "add", "upstream", upstream_bare.to_str().unwrap()],
+        )
+        .unwrap();
+        checked(
+            &writer,
+            &["remote", "add", "origin", fork_bare.to_str().unwrap()],
+        )
+        .unwrap();
+        checked(&writer, &["push", "upstream", "develop"]).unwrap();
+        checked(&writer, &["push", "origin", "develop"]).unwrap();
+
+        checked(
+            &writer,
+            &[
+                "clone",
+                "-b",
+                "develop",
+                fork_bare.to_str().unwrap(),
+                source.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        for (k, v) in [
+            ("user.name", "Test"),
+            ("user.email", "test@example.invalid"),
+            ("core.hooksPath", "/dev/null"),
+            ("commit.gpgsign", "false"),
+        ] {
+            checked(&source, &["config", k, v]).unwrap();
+        }
+        checked(
+            &source,
+            &["remote", "add", "upstream", upstream_bare.to_str().unwrap()],
+        )
+        .unwrap();
+        checked(&source, &["fetch", "upstream"]).unwrap();
+        checked(&source, &["remote", "set-head", "upstream", "develop"]).unwrap();
+
+        let project = Project {
+            github: None,
+            detected_github: None,
+            github_disconnected: false,
+            delivery_mode: Default::default(),
+            agent_overrides: Default::default(),
+            tags: Default::default(),
+            id: "fiber-p".into(),
+            name: "Fiber".into(),
+            directory: source.to_string_lossy().into(),
+            workflow: Default::default(),
+            target_branch: Some("lsp-support".into()),
+            created_at: 0,
+        };
+        let ops = Ops::local();
+
+        // Advance `upstream/develop` only (leave `origin/develop` behind to verify preferred_remote).
+        checked(&writer, &["switch", "-c", "remote-only-release"]).unwrap();
+        fs::write(writer.join("rel.txt"), "rel1\n").unwrap();
+        checked(&writer, &["add", "."]).unwrap();
+        checked(&writer, &["commit", "-m", "rel1"]).unwrap();
+        let rel_sha = checked(&writer, &["rev-parse", "HEAD"]).unwrap();
+        checked(&writer, &["push", "upstream", "remote-only-release"]).unwrap();
+
+        // 1. Missing local ref + sync_base=true succeeds from upstream without creating local branch.
+        let (wt_missing, base_missing, sha_missing) = ops
+            .create_branch_worktree_with_options(
+                &home,
+                &project,
+                "feat/missing-local",
+                Some("remote-only-release"),
+                true,
+                WorktreeBaseOptions {
+                    preferred_remote: Some("upstream"),
+                    github_default_branch: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(base_missing, "upstream/remote-only-release");
+        assert_eq!(sha_missing, rel_sha);
+        assert!(wt_missing.join("rel.txt").exists());
+
+        // 2. Clean local `develop` behind `upstream/develop` fast-forwards cleanly.
+        checked(&writer, &["switch", "develop"]).unwrap();
+        fs::write(writer.join("seed.txt"), "v2\n").unwrap();
+        checked(&writer, &["add", "."]).unwrap();
+        checked(&writer, &["commit", "-m", "v2"]).unwrap();
+        let v2_sha = checked(&writer, &["rev-parse", "HEAD"]).unwrap();
+        checked(&writer, &["push", "upstream", "develop"]).unwrap();
+
+        let (wt_ff, base_ff, sha_ff) = ops
+            .create_branch_worktree_with_options(
+                &home,
+                &project,
+                "feat/clean-ff",
+                None,
+                true,
+                WorktreeBaseOptions {
+                    preferred_remote: Some("upstream"),
+                    github_default_branch: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(base_ff, "develop");
+        assert_eq!(sha_ff, v2_sha);
+        assert_eq!(
+            checked(&source, &["rev-parse", "refs/heads/develop"]).unwrap(),
+            v2_sha
+        );
+        assert_eq!(fs::read_to_string(wt_ff.join("seed.txt")).unwrap(), "v2\n");
+
+        // 3. Main checkout on `develop` with dirty edits: leaves main dirty files untouched and branches from latest upstream/develop.
+        fs::write(writer.join("seed.txt"), "v3\n").unwrap();
+        checked(&writer, &["add", "."]).unwrap();
+        checked(&writer, &["commit", "-m", "v3"]).unwrap();
+        let v3_sha = checked(&writer, &["rev-parse", "HEAD"]).unwrap();
+        checked(&writer, &["push", "upstream", "develop"]).unwrap();
+        fs::write(source.join("dirty.txt"), "keep local edit\n").unwrap();
+
+        let (wt_dirty, base_dirty, sha_dirty) = ops
+            .create_branch_worktree_with_options(
+                &home,
+                &project,
+                "feat/dirty-main",
+                None,
+                true,
+                WorktreeBaseOptions {
+                    preferred_remote: Some("upstream"),
+                    github_default_branch: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(base_dirty, "upstream/develop");
+        assert_eq!(sha_dirty, v3_sha);
+        assert_eq!(
+            checked(&source, &["rev-parse", "refs/heads/develop"]).unwrap(),
+            v2_sha
+        );
+        assert_eq!(
+            fs::read_to_string(source.join("dirty.txt")).unwrap(),
+            "keep local edit\n"
+        );
+        assert_eq!(
+            fs::read_to_string(wt_dirty.join("seed.txt")).unwrap(),
+            "v3\n"
+        );
+        assert!(!wt_dirty.join("dirty.txt").exists());
+
+        // 4. Local `develop` diverged: leaves local `develop` intact and branches from latest upstream/develop.
+        checked(&source, &["add", "dirty.txt"]).unwrap();
+        checked(&source, &["commit", "-m", "local diverged"]).unwrap();
+        let diverged_sha = checked(&source, &["rev-parse", "HEAD"]).unwrap();
+        fs::write(writer.join("seed.txt"), "v4\n").unwrap();
+        checked(&writer, &["add", "."]).unwrap();
+        checked(&writer, &["commit", "-m", "v4"]).unwrap();
+        let v4_sha = checked(&writer, &["rev-parse", "HEAD"]).unwrap();
+        checked(&writer, &["push", "upstream", "develop"]).unwrap();
+
+        let (wt_div, base_div, sha_div) = ops
+            .create_branch_worktree_with_options(
+                &home,
+                &project,
+                "feat/diverged-local",
+                None,
+                true,
+                WorktreeBaseOptions {
+                    preferred_remote: Some("upstream"),
+                    github_default_branch: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(base_div, "upstream/develop");
+        assert_eq!(sha_div, v4_sha);
+        assert_eq!(
+            checked(&source, &["rev-parse", "refs/heads/develop"]).unwrap(),
+            diverged_sha
+        );
+        assert_eq!(fs::read_to_string(wt_div.join("seed.txt")).unwrap(), "v4\n");
+
+        // 5. Non-existent branch on remote gives friendly error naming branch and remote.
+        let err = ops
+            .create_branch_worktree_with_options(
+                &home,
+                &project,
+                "feat/missing-remote",
+                Some("main"),
+                true,
+                WorktreeBaseOptions {
+                    preferred_remote: Some("upstream"),
+                    github_default_branch: None,
+                },
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Base branch 'main' was not found on remote 'upstream'"),
+            "unexpected sync error: {err}"
         );
     }
 }

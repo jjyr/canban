@@ -213,6 +213,8 @@ pub fn git_refs() -> serde_json::Value {
         "behind": 1,
         "has_remote": true,
         "remote_name": "origin",
+        "sync_remote": "origin",
+        "has_sync_remote": true,
         "dirty": true,
         "dirty_count": 3,
         "staged_count": 1,

@@ -1218,3 +1218,223 @@ fn terminal_run_uses_default_explicit_and_persisted_launch_sizes() {
         .collect();
     assert_eq!(launches[2]["size"], json!({"cols": 134, "rows": 44}));
 }
+
+#[test]
+fn worktree_create_and_promote_support_fork_upstream_default_branch_and_dirty_main() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let app = AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
+    let git = |cwd: &Path, args: &[&str]| {
+        let out = canban_exec::raw_command("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+
+    // 1. Verify `resolve_sync_remote` matches the project's GitHub repo remote (`upstream`).
+    let gh_repo = dir.path().join("gh-fork");
+    std::fs::create_dir_all(&gh_repo).unwrap();
+    git(&gh_repo, &["init", "-b", "develop"]);
+    git(
+        &gh_repo,
+        &["remote", "add", "origin", "git@github.com:jjyr/fiber.git"],
+    );
+    git(
+        &gh_repo,
+        &[
+            "remote",
+            "add",
+            "upstream",
+            "git@github.com:nervosnetwork/fiber.git",
+        ],
+    );
+    let gh_proj: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "FiberGH", "directory": gh_repo, "github_auto_link": false}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut gh_proj_linked = gh_proj.clone();
+    gh_proj_linked.github = Some(GitHubSource {
+        pr_intake: GitHubPrIntake::Off,
+        authors: Vec::new(),
+        labels: Vec::new(),
+        include_drafts: false,
+        paused: false,
+        repository: "nervosnetwork/fiber".into(),
+        repository_id: 1,
+        generation: "g1".into(),
+        intake: GitHubIntake::Off,
+        synced_at: None,
+        error: None,
+    });
+    assert_eq!(
+        app.resolve_sync_remote(&app.ops(), &gh_proj_linked),
+        "upstream"
+    );
+
+    // 2. End-to-end bare upstream fork layout: stale `target_branch = lsp-support`,
+    // `upstream/HEAD -> develop`, dirty main checkout, `sync_base = true`, and `worktree.promote`.
+    let upstream_bare = dir.path().join("upstream.git");
+    let writer = dir.path().join("writer");
+    let src = dir.path().join("fiber-local");
+    std::fs::create_dir_all(&writer).unwrap();
+    git(
+        &writer,
+        &[
+            "init",
+            "--bare",
+            "-b",
+            "develop",
+            upstream_bare.to_str().unwrap(),
+        ],
+    );
+    git(&writer, &["init", "-b", "develop"]);
+    for (k, v) in [
+        ("user.name", "Tester"),
+        ("user.email", "tester@example.invalid"),
+        ("core.hooksPath", "/dev/null"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&writer, &["config", k, v]);
+    }
+    std::fs::write(writer.join("fiber.txt"), "v1\n").unwrap();
+    git(&writer, &["add", "."]);
+    git(&writer, &["commit", "-m", "v1"]);
+    git(
+        &writer,
+        &["remote", "add", "upstream", upstream_bare.to_str().unwrap()],
+    );
+    git(&writer, &["push", "upstream", "develop"]);
+
+    git(
+        dir.path(),
+        &[
+            "clone",
+            "-b",
+            "develop",
+            upstream_bare.to_str().unwrap(),
+            src.to_str().unwrap(),
+        ],
+    );
+    for (k, v) in [
+        ("user.name", "Tester"),
+        ("user.email", "tester@example.invalid"),
+        ("core.hooksPath", "/dev/null"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&src, &["config", k, v]);
+    }
+    // Remove `origin` and use `upstream` so `resolve_sync_remote` selects `upstream`.
+    git(&src, &["remote", "rename", "origin", "upstream"]);
+    git(&src, &["remote", "set-head", "upstream", "develop"]);
+    git(&src, &["branch", "lsp-support"]);
+
+    let proj: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({
+                "name": "Fiber",
+                "directory": src,
+                "target_branch": "lsp-support",
+                "github_auto_link": false,
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(proj.target_branch.as_deref(), Some("lsp-support"));
+
+    // `git.refs` still reports repo default branch `develop` and `sync_remote: "upstream"`.
+    let refs = app
+        .call("git.refs", json!({"project_id": proj.id}))
+        .unwrap();
+    assert_eq!(refs["default_branch"], "develop");
+    assert_eq!(refs["sync_remote"], "upstream");
+
+    // Advance upstream `develop` and dirty the main checkout on `develop`.
+    std::fs::write(writer.join("fiber.txt"), "v2\n").unwrap();
+    git(&writer, &["add", "."]);
+    git(&writer, &["commit", "-m", "v2"]);
+    let v2_sha = git(&writer, &["rev-parse", "HEAD"]);
+    git(&writer, &["push", "upstream", "develop"]);
+    std::fs::write(src.join("local-wip.txt"), "keep\n").unwrap();
+
+    // Creating a worktree with no base_branch and sync_base=true branches from latest `upstream/develop`.
+    let created = app
+        .call(
+            "worktree.create",
+            json!({
+                "project_id": proj.id,
+                "branch": "feat/upstream-sync",
+                "sync_base": true,
+                "launch": "none",
+                "request_key": "wt-fork-sync-1"
+            }),
+        )
+        .unwrap();
+    let wt: ManagedWorktree = serde_json::from_value(created["worktree"].clone()).unwrap();
+    assert_eq!(wt.base_branch, "upstream/develop");
+    assert_eq!(wt.base_commit.as_deref(), Some(v2_sha.as_str()));
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&wt.path).join("fiber.txt")).unwrap(),
+        "v2\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(src.join("local-wip.txt")).unwrap(),
+        "keep\n"
+    );
+
+    // Promoting strips the `upstream/` remote prefix so `workspace.target_branch` is `"develop"`.
+    let promoted: Card = serde_json::from_value(
+        app.call(
+            "worktree.promote",
+            json!({
+                "worktree_id": wt.id,
+                "title": "Upstream spike",
+                "request_key": "wt-fork-promote-1"
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        promoted
+            .workspace
+            .as_ref()
+            .and_then(|w| w.target_branch.as_deref()),
+        Some("develop")
+    );
+
+    // Replaying `worktree.promote` with the same `request_key` remains idempotent after row removal.
+    let replayed: Card = serde_json::from_value(
+        app.call(
+            "worktree.promote",
+            json!({
+                "worktree_id": wt.id,
+                "title": "Upstream spike",
+                "request_key": "wt-fork-promote-1"
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(replayed.id, promoted.id);
+    assert_eq!(
+        replayed
+            .workspace
+            .as_ref()
+            .and_then(|w| w.target_branch.as_deref()),
+        Some("develop")
+    );
+}
