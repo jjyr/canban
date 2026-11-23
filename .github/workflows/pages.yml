@@ -24,23 +24,20 @@ permissions:
   id-token: write
 
 jobs:
-  deploy:
+  build:
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     concurrency:
-      group: 'pages'
+      group: 'pages-build'
       cancel-in-progress: true
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           # Editing an old release must not restore the website from its old tag.
           ref: ${{ (github.event_name == 'release' || github.event_name == 'workflow_run') && github.event.repository.default_branch || github.sha }}
       - name: Setup Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
         with:
           enablement: true
       - name: Validate website generator
@@ -50,9 +47,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/website.py --refresh-releases
       - name: Upload static site artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: '.local/website'
+
+  deploy:
+    needs: build
+    concurrency:
+      group: 'pages'
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
