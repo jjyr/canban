@@ -17,13 +17,19 @@ jobs:
     timeout-minutes: 75
     env:
       CANBAN_UPDATES_DISABLED: '1'
+      CARGO_INCREMENTAL: '0'
       HOMEBREW_NO_AUTO_UPDATE: '1'
       HOMEBREW_NO_INSTALL_CLEANUP: '1'
       NEXTEST_PROFILE: ci
       CANBAN_ACCEPTANCE_RETRIES: '1'
     steps:
       - uses: actions/checkout@v6
+      - name: Compute mise tool cache key
+        run: python3 scripts/ci-cache.py mise-tools-hash --github-env
       - uses: jdx/mise-action@v5
+        with:
+          cache_key: '{{cache_key_prefix}}-{{platform}}-p{{cache_period}}-{{env.MISE_TOOLS_HASH}}'
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
       - uses: Swatinem/rust-cache@v2
         with:
           cache-directories: ~/Library/Caches/canban
@@ -88,10 +94,16 @@ jobs:
             arch: aarch64
     env:
       CANBAN_UPDATES_DISABLED: '1'
+      CARGO_INCREMENTAL: '0'
       CANBAN_ACCEPTANCE_RETRIES: '1'
     steps:
       - uses: actions/checkout@v6
+      - name: Compute mise tool cache key
+        run: python3 scripts/ci-cache.py mise-tools-hash --github-env
       - uses: jdx/mise-action@v5
+        with:
+          cache_key: '{{cache_key_prefix}}-{{platform}}-p{{cache_period}}-{{env.MISE_TOOLS_HASH}}'
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
       - uses: Swatinem/rust-cache@v2
         with:
           cache-directories: ~/.cache/canban
@@ -131,3 +143,18 @@ jobs:
           name: ci-linux-${{ matrix.arch }}-logs-${{ github.run_attempt }}
           path: target/acceptance-logs/
           if-no-files-found: ignore
+
+  cache-prune:
+    needs: [macos, linux]
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: Prune superseded GitHub Actions caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-cache.py prune --keep-per-bucket 1 --best-effort

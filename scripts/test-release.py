@@ -206,8 +206,19 @@ class Releases(unittest.TestCase):
         self.assertIn('scripts/android.py build-apk --release',content)
         self.assertIn('scripts/release.py package-android',content)
         self.assertIn('ANDROID_KEYSTORE_B64',content)
-        self.assertIn('needs: [macos, linux, android]',content)
+        self.assertIn('needs: [ci-gate, macos, linux, android]',content)
+        self.assertNotIn('needs: macos',content)
+        self.assertEqual(content.count('needs: ci-gate'),3)
         self.assertIn('scripts/release.py publish --require-all-platforms',content)
+        for wf in (content,ci_content):
+            self.assertIn("CARGO_INCREMENTAL: '0'",wf)
+            self.assertIn('scripts/ci-cache.py mise-tools-hash --github-env',wf)
+            self.assertIn('{{cache_key_prefix}}-{{platform}}-p{{cache_period}}-{{env.MISE_TOOLS_HASH}}',wf)
+            self.assertIn('scripts/ci-cache.py prune --keep-per-bucket 1 --best-effort',wf)
+        ci_header=ci_content.split('jobs:',1)[0]
+        self.assertIn('actions: read',ci_header)
+        self.assertNotIn('actions: write',ci_header)
+        self.assertIn('actions: write',ci_content.split('cache-prune:',1)[1])
         cargo_toml=(root/'Cargo.toml').read_text()
         self.assertIn('[profile.android-release]',cargo_toml)
         for setting in ('opt-level = "z"','lto = true','codegen-units = 1','panic = "abort"','strip = "symbols"'):
@@ -543,6 +554,63 @@ class Releases(unittest.TestCase):
             self.assertEqual(cfg.key_pass,'secret-store')
             self.assertEqual(cfg.keystore.read_bytes(),b'fake-p12-keystore')
             self.assertEqual(stat.S_IMODE(cfg.keystore.stat().st_mode),0o600)
+        legacy_apksigner=(
+            'Verifies\n'
+            'Number of signers: 1\n'
+            'Signer #1 certificate SHA-256 digest: '
+            '0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF\n'
+        )
+        self.assertEqual(android.parse_apksigner_cert_sha256(legacy_apksigner),'0123456789abcdef'*4)
+        v3_apksigner=(
+            'Verifies\n'
+            'Verified using v1 scheme (JAR signing): false\n'
+            'Verified using v2 scheme (APK Signature Scheme v2): true\n'
+            'Verified using v3 scheme (APK Signature Scheme v3): true\n'
+            'Number of signers: 1\n'
+            'V3.0 Signer: certificate DN: CN=Canban, O=Canban, C=US\n'
+            'V3.0 Signer: certificate SHA-256 digest: bcd2e1a0e40c884482e027299d5c6befb3ca6a25b72bff6c49cf2e975f5800d6\n'
+            'V3.0 Signer: public key SHA-256 digest: 73c1b5c5db09dc92fa0c9f07cf890bb3a26351122e26a997b006c6348fd7db26\n'
+        )
+        self.assertEqual(
+            android.parse_apksigner_cert_sha256(v3_apksigner),
+            'bcd2e1a0e40c884482e027299d5c6befb3ca6a25b72bff6c49cf2e975f5800d6',
+        )
+        with self.assertRaisesRegex(RuntimeError,'signer certificate SHA-256 digest'):
+            android.parse_apksigner_cert_sha256('V3.0 Signer: public key SHA-256 digest: '+'7'*64)
+    def test_ci_cache_tools_hash_and_bucket_pruning(self):
+        cache_spec=importlib.util.spec_from_file_location('ci_cache',pathlib.Path(__file__).with_name('ci-cache.py'))
+        ci_cache=importlib.util.module_from_spec(cache_spec);sys.modules['ci_cache']=ci_cache;cache_spec.loader.exec_module(ci_cache)
+        root=pathlib.Path(__file__).resolve().parents[1]
+        repo_hash=ci_cache.extract_mise_tools_hash(root/'mise.toml')
+        self.assertRegex(repo_hash,r'^[0-9a-f]{24}$')
+        with tempfile.TemporaryDirectory(prefix='cb-ci-cache-') as directory:
+            tmp=pathlib.Path(directory)
+            f1=tmp/'a.toml';f2=tmp/'b.toml';f3=tmp/'c.toml';empty=tmp/'empty.toml'
+            f1.write_text('[tools]\nhk = "2.4.0" # hook tool\nrust = { version = "1.90" }\n\n[tasks.check]\nrun = "echo one"\n')
+            f2.write_text('# header comment\n[tools]\nhk = "2.4.0"\nrust = { version = "1.90" }\n\n[tasks.check]\nrun = "echo changed"\n[tasks.new]\nrun = "echo added"\n')
+            f3.write_text('[tools]\nhk = "2.4.1"\nrust = { version = "1.90" }\n')
+            empty.write_text('[tasks.check]\nrun = "echo only-tasks"\n')
+            self.assertEqual(ci_cache.extract_mise_tools_hash(f1),ci_cache.extract_mise_tools_hash(f2))
+            self.assertNotEqual(ci_cache.extract_mise_tools_hash(f1),ci_cache.extract_mise_tools_hash(f3))
+            with self.assertRaisesRegex(RuntimeError,'No \\[tools\\]'):
+                ci_cache.extract_mise_tools_hash(empty)
+        self.assertEqual(ci_cache.cache_bucket('v0-rust-ci-macos-Darwin-arm64-e0dbb914-5e4950ae'),'v0-rust-ci-macos-Darwin-arm64')
+        self.assertEqual(ci_cache.cache_bucket('v0-rust-release-android-Linux-x64-1234abcd-deadbeef'),'v0-rust-release-android-Linux-x64')
+        self.assertEqual(ci_cache.cache_bucket('mise-v1-linux-x64-ubuntu24-p692-0123456789abcdef01234567'),'mise-v1-linux-x64-ubuntu24')
+        self.assertIsNone(ci_cache.cache_bucket('custom-unrelated-cache-key'))
+        entries=[
+            {'id':1,'key':'v0-rust-ci-macos-Darwin-arm64-e0dbb914-11111111','created_at':'2026-11-23T01:00:00Z','last_accessed_at':'2026-11-23T01:00:00Z','size_in_bytes':100},
+            {'id':2,'key':'v0-rust-ci-macos-Darwin-arm64-e0dbb914-22222222','created_at':'2026-11-24T01:00:00Z','last_accessed_at':'2026-11-24T01:00:00Z','size_in_bytes':200},
+            {'id':3,'key':'v0-rust-release-macos-Darwin-arm64-e0dbb914-11111111','created_at':'2026-11-20T01:00:00Z','last_accessed_at':'2026-11-20T01:00:00Z','size_in_bytes':300},
+            {'id':4,'key':'mise-v1-linux-x64-ubuntu24-p692-0123456789abcdef01234567','created_at':'2026-11-23T00:00:00Z','last_accessed_at':'2026-11-23T00:00:00Z','size_in_bytes':50},
+            {'id':5,'key':'mise-v1-linux-x64-ubuntu24-p693-0123456789abcdef01234567','created_at':'2026-11-24T00:00:00Z','last_accessed_at':'2026-11-24T00:00:00Z','size_in_bytes':55},
+            {'id':6,'key':'custom-unrelated-cache-key','created_at':'2026-11-01T00:00:00Z','last_accessed_at':'2026-11-01T00:00:00Z','size_in_bytes':999},
+        ]
+        pruned=ci_cache.select_caches_to_prune(entries,keep_per_bucket=1)
+        self.assertEqual([e['id'] for e in pruned],[4,1])
+        with patch.object(ci_cache,'list_caches',side_effect=urllib.error.HTTPError('https://api.github.com',500,'Server Error',{},None)):
+            res=ci_cache.prune_caches('fixture/app','tok',best_effort=True)
+        self.assertTrue(res.get('skipped'))
     def test_fastlane_android_metadata_meets_izzyondroid_constraints(self):
         import re, struct
         root=pathlib.Path(__file__).resolve().parents[1]

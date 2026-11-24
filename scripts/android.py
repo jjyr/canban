@@ -529,6 +529,19 @@ def _render_launcher_icons(res_stage: Path) -> None:
         )
 
 
+def parse_apksigner_cert_sha256(output: str) -> str:
+    for pattern in (
+        r"(?m)^\s*Signer #1 certificate SHA-256 digest:\s*([0-9a-fA-F]{64})\s*$",
+        r"(?m)^\s*(?:V\d+(?:\.\d+)?\s+)?Signer(?:\s+#1)?:\s*certificate SHA-256 digest:\s*([0-9a-fA-F]{64})\s*$",
+    ):
+        match = re.search(pattern, output)
+        if match is not None:
+            return match.group(1).lower()
+    raise RuntimeError(
+        f"Could not extract signer certificate SHA-256 digest from apksigner output:\n{output.strip()}"
+    )
+
+
 def _sign_and_verify_apk(
     sdk: AndroidSdk,
     apk_path: Path,
@@ -564,10 +577,7 @@ def _sign_and_verify_apk(
     output = (verify.stdout or "") + "\n" + (verify.stderr or "")
     if verify.returncode != 0:
         raise RuntimeError(f"apksigner verify failed:\n{output.strip()}")
-    match = re.search(r"Signer #1 certificate SHA-256 digest:\s*([0-9a-fA-F]{64})", output)
-    if match is None:
-        raise RuntimeError(f"Could not extract Signer #1 SHA-256 digest from apksigner output:\n{output.strip()}")
-    return match.group(1).lower()
+    return parse_apksigner_cert_sha256(output)
 
 
 def check_android() -> None:

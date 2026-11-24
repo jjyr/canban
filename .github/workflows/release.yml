@@ -11,6 +11,8 @@ jobs:
   ci-gate:
     runs-on: ubuntu-24.04
     timeout-minutes: 100
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
     env:
       CANBAN_RELEASE_COMMIT: ${{ github.sha }}
     steps:
@@ -21,27 +23,37 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/release.py ci-gate
+      - name: Reserve immutable release identity
+        id: identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release.py reserve
 
   macos:
     needs: ci-gate
     runs-on: macos-15
     timeout-minutes: 60
-    outputs:
-      version: ${{ steps.identity.outputs.version }}
     env:
       CANBAN_RELEASE_COMMIT: ${{ github.sha }}
+      CANBAN_RELEASE_VERSION: ${{ needs.ci-gate.outputs.version }}
       CANBAN_UPDATES_DISABLED: '1'
+      CARGO_INCREMENTAL: '0'
       HOMEBREW_NO_AUTO_UPDATE: '1'
       HOMEBREW_NO_INSTALL_CLEANUP: '1'
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
+      - name: Compute mise tool cache key
+        run: python3 scripts/ci-cache.py mise-tools-hash --github-env
       - uses: jdx/mise-action@v5
+        with:
+          cache_key: '{{cache_key_prefix}}-{{platform}}-p{{cache_period}}-{{env.MISE_TOOLS_HASH}}'
       - uses: Swatinem/rust-cache@v2
         with:
           cache-directories: ~/Library/Caches/canban
           shared-key: release-macos
+          cache-on-failure: true
       - name: Install build and integration test dependencies
         env:
           HC_VERSION: '0.1.21'
@@ -52,31 +64,21 @@ jobs:
           mkdir -p "$HOME/.local/bin"
           curl --retry 3 --retry-all-errors -fsSL https://releases.herdr.dev/core/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: Reserve immutable release identity
-        id: identity
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/release.py reserve
       - name: Build release bundle
-        env:
-          CANBAN_RELEASE_VERSION: ${{ steps.identity.outputs.version }}
         run: mise run build-release
       - name: Package verified artifact
-        env:
-          CANBAN_RELEASE_VERSION: ${{ steps.identity.outputs.version }}
         run: python3 scripts/release.py package
       - name: Validate packaged archive upgrade from latest published release
         env:
           GH_TOKEN: ${{ github.token }}
-          CANBAN_RELEASE_VERSION: ${{ steps.identity.outputs.version }}
         run: /usr/bin/python3 scripts/run-acceptance.py --retries 1 -- scripts/test-release-upgrade.py --dist dist
       - uses: actions/upload-artifact@v7
         with:
-          name: canban-macos-${{ steps.identity.outputs.version }}
+          name: canban-macos-${{ needs.ci-gate.outputs.version }}
           path: dist/
 
   linux:
-    needs: macos
+    needs: ci-gate
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
@@ -89,17 +91,23 @@ jobs:
             arch: aarch64
     env:
       CANBAN_RELEASE_COMMIT: ${{ github.sha }}
-      CANBAN_RELEASE_VERSION: ${{ needs.macos.outputs.version }}
+      CANBAN_RELEASE_VERSION: ${{ needs.ci-gate.outputs.version }}
       CANBAN_UPDATES_DISABLED: '1'
+      CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
+      - name: Compute mise tool cache key
+        run: python3 scripts/ci-cache.py mise-tools-hash --github-env
       - uses: jdx/mise-action@v5
+        with:
+          cache_key: '{{cache_key_prefix}}-{{platform}}-p{{cache_period}}-{{env.MISE_TOOLS_HASH}}'
       - uses: Swatinem/rust-cache@v2
         with:
           cache-directories: ~/.cache/canban
           shared-key: release-linux
+          cache-on-failure: true
       - name: Install Linux desktop build and test dependencies
         env:
           HC_VERSION: '0.1.21'
@@ -125,17 +133,18 @@ jobs:
           python3 scripts/release.py package-cli --directory dist/cli
       - uses: actions/upload-artifact@v7
         with:
-          name: canban-linux-${{ matrix.arch }}-${{ needs.macos.outputs.version }}
+          name: canban-linux-${{ matrix.arch }}-${{ needs.ci-gate.outputs.version }}
           path: dist/
 
   android:
-    needs: macos
+    needs: ci-gate
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       CANBAN_RELEASE_COMMIT: ${{ github.sha }}
-      CANBAN_RELEASE_VERSION: ${{ needs.macos.outputs.version }}
+      CANBAN_RELEASE_VERSION: ${{ needs.ci-gate.outputs.version }}
       CANBAN_UPDATES_DISABLED: '1'
+      CARGO_INCREMENTAL: '0'
     steps:
       - name: Verify Android release signing secrets
         env:
@@ -154,11 +163,16 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
+      - name: Compute mise tool cache key
+        run: python3 scripts/ci-cache.py mise-tools-hash --github-env
       - uses: jdx/mise-action@v5
+        with:
+          cache_key: '{{cache_key_prefix}}-{{platform}}-p{{cache_period}}-{{env.MISE_TOOLS_HASH}}'
       - uses: Swatinem/rust-cache@v2
         with:
           cache-directories: ~/.cache/canban
           shared-key: release-android
+          cache-on-failure: true
       - name: Install Android SDK/NDK and icon build dependencies
         run: |
           sudo apt-get update
@@ -190,23 +204,23 @@ jobs:
           rm -f dist/android-signing-sha256.txt
       - uses: actions/upload-artifact@v7
         with:
-          name: canban-android-${{ needs.macos.outputs.version }}
+          name: canban-android-${{ needs.ci-gate.outputs.version }}
           path: dist/
 
   publish:
-    needs: [macos, linux, android]
+    needs: [ci-gate, macos, linux, android]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       CANBAN_RELEASE_COMMIT: ${{ github.sha }}
-      CANBAN_RELEASE_VERSION: ${{ needs.macos.outputs.version }}
+      CANBAN_RELEASE_VERSION: ${{ needs.ci-gate.outputs.version }}
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
       - uses: actions/download-artifact@v8
         with:
-          pattern: canban-*-${{ needs.macos.outputs.version }}
+          pattern: canban-*-${{ needs.ci-gate.outputs.version }}
           path: dist/
           merge-multiple: true
       - name: Verify release scripts and multi-platform manifests
@@ -215,9 +229,26 @@ jobs:
           python3 scripts/release.py verify-dist --directory dist
       - uses: actions/upload-artifact@v7
         with:
-          name: canban-${{ needs.macos.outputs.version }}
+          name: canban-${{ needs.ci-gate.outputs.version }}
           path: dist/
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/release.py publish --require-all-platforms
+
+  cache-prune:
+    needs: [macos, linux, android]
+    if: always() && (needs.macos.result == 'success' || needs.linux.result == 'success' || needs.android.result == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+      - name: Prune superseded GitHub Actions caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-cache.py prune --keep-per-bucket 1 --best-effort
