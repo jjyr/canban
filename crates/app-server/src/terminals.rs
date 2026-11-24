@@ -34,6 +34,24 @@ impl AppServer {
         }
     }
 
+    fn find_orphan_terminal_binding(
+        &self,
+        terminal_id: &str,
+        expected_core: Option<&str>,
+    ) -> Option<(String, String)> {
+        let (observed_core, values) = self.runtime_inventory().ok()?;
+        if expected_core.is_some_and(|core| core != observed_core) {
+            return None;
+        }
+        let value = values.into_iter().find(|v| {
+            v["state"] != "finished"
+                && (v["labels"]["canban.terminal"].as_str() == Some(terminal_id)
+                    || v["labels"]["canban.configuration"].as_str() == Some(terminal_id))
+        })?;
+        let address = value["address"].as_str().filter(|s| !s.is_empty())?;
+        Some((observed_core, address.to_owned()))
+    }
+
     /// Close is a product lifecycle operation, independent of UI tab shortcuts.
     pub(super) fn close_terminal(&self, p: Value) -> Result<Value> {
         let _gate = self.terminal_gate.lock().unwrap();
@@ -42,6 +60,27 @@ impl AppServer {
             "Closing a terminal requires a user action"
         );
         let terminal_id = strp(&p, "terminal_id")?;
+        let orphan_target = {
+            let existing = self
+                .store
+                .lock()
+                .unwrap()
+                .db()
+                .get::<TerminalEntry>(terminal_id)
+                .ok();
+            let expected_core = existing.as_ref().and_then(|item| {
+                if let Some(run) = &item.agent {
+                    (!run.finished() && run.terminal.is_none() && run.state != "starting")
+                        .then(|| run.core_id.clone())
+                } else if let Some(rt) = &item.runtime {
+                    (rt.state != "finished" && rt.terminal.is_none()).then(|| rt.core_id.clone())
+                } else {
+                    None
+                }
+            });
+            expected_core
+                .and_then(|core| self.find_orphan_terminal_binding(terminal_id, core.as_deref()))
+        };
         let mut target = None;
         let mut closing_agent = false;
         let saved = self.mutate("terminal.close", &p, |db| {
@@ -58,22 +97,25 @@ impl AppServer {
                 self.cancel_scheduled_run_from_terminal_close(db, &mut sched, &mut item)?;
             }
             if let Ok(mut configuration) = db.get::<ConfigurationSession>(terminal_id)
-                && configuration.state == "queued"
+                && matches!(configuration.state.as_str(), "queued" | "unknown")
             {
+                let was_queued = configuration.state == "queued";
                 configuration.state = "cancelled".into();
                 db.save(&configuration)?;
-                item.runtime = Some(TerminalRuntime {
-                    core_id: None,
-                    terminal: None,
-                    state: "finished".into(),
-                    connection: "connected".into(),
-                    error: None,
-                    agent_status: None,
-                    agent_turn: None,
-                    observed_agent: None,
-                    waiting: None,
-                });
-                db.save(&item)?;
+                if was_queued {
+                    item.runtime = Some(TerminalRuntime {
+                        core_id: None,
+                        terminal: None,
+                        state: "finished".into(),
+                        connection: "connected".into(),
+                        error: None,
+                        agent_status: None,
+                        agent_turn: None,
+                        observed_agent: None,
+                        waiting: None,
+                    });
+                    db.save(&item)?;
+                }
             }
             if let Some(run) = &mut item.agent {
                 if !run.finished() && run.terminal.is_some() {
@@ -102,26 +144,60 @@ impl AppServer {
                         json!({"run_number":run_num}),
                     )?;
                     closing_agent = true;
-                } else {
+                } else if !run.finished() {
                     ensure!(
                         run.state != "starting",
                         "Terminal is still starting; wait before closing"
                     );
+                    let card_id = run.card_id.clone();
+                    let run_num = run.number;
+                    if let Some((core, terminal)) = orphan_target.clone() {
+                        run.core_id = Some(core.clone());
+                        run.terminal = Some(terminal.clone());
+                        target = Some((core, terminal));
+                        run.close_state = "closing".into();
+                        run.close_requested_at = Some(now());
+                        closing_agent = true;
+                    } else {
+                        run.state = "cancelled".into();
+                        run.close_state = "closed".into();
+                        run.close_requested_at = Some(now());
+                    }
+                    db.save(&item)?;
+                    if let Ok(card) = db.get::<Card>(&card_id) {
+                        log(
+                            db,
+                            &card,
+                            "execution.close_requested",
+                            "user",
+                            "Terminal closed by user",
+                            Some(item.id.clone()),
+                            json!({"run_number":run_num}),
+                        )?;
+                    }
                 }
             } else if let Some(runtime) = &mut item.runtime
                 && runtime.state != "finished"
             {
-                target = Some((
-                    runtime
+                if let Some(terminal) = runtime.terminal.clone() {
+                    let core = runtime
                         .core_id
                         .clone()
-                        .context("Original Core binding unavailable")?,
-                    runtime
-                        .terminal
-                        .clone()
-                        .context("Terminal binding unavailable; inspect before closing")?,
-                ));
-                runtime.state = "closing".into();
+                        .context("Original Core binding unavailable")?;
+                    target = Some((core, terminal));
+                    runtime.state = "closing".into();
+                } else if let Some((core, terminal)) = orphan_target.clone() {
+                    runtime.core_id = Some(core.clone());
+                    runtime.terminal = Some(terminal.clone());
+                    target = Some((core, terminal));
+                    runtime.state = "closing".into();
+                } else {
+                    runtime.state = "finished".into();
+                    runtime.agent_status = None;
+                    runtime.agent_turn = None;
+                    runtime.observed_agent = None;
+                    runtime.waiting = None;
+                }
                 db.save(&item)?;
             }
             Ok(if target.is_some() {
@@ -1422,7 +1498,10 @@ impl AppServer {
                     && !t.id.starts_with("scheduled:")
             })
             .any(|t| {
-                let live = t.runtime.as_ref().is_some_and(|r| r.state != "finished");
+                let live = t
+                    .runtime
+                    .as_ref()
+                    .is_some_and(|r| r.state != "finished" && r.terminal.is_some());
                 live && s
                     .terminal_contexts
                     .iter()

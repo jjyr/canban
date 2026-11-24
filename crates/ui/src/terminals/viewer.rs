@@ -157,6 +157,13 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                                         r.error.clone().unwrap_or_else(|| format!("{}…", r.state))
                                     })
                                 })
+                                .or_else(|| {
+                                    s.terminals.iter().find(|t| t.id == sel).and_then(|t| {
+                                        t.runtime.as_ref().and_then(|r| r.error.clone()).or_else(
+                                            || t.agent.as_ref().and_then(|a| a.error.clone()),
+                                        )
+                                    })
+                                })
                                 .unwrap_or_else(|| "Connecting…".into())
                         })
                     }))

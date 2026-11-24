@@ -1956,3 +1956,271 @@ fn inherit_terminal_uses_live_inventory_cwd_while_directory_context_is_updating(
     assert_ne!(second_launch["cwd"], wt_sub.to_string_lossy().as_ref());
     assert_ne!(second_launch["cwd"], p.directory);
 }
+
+#[test]
+fn close_allows_failed_unbound_terminals_with_or_without_core_binding() {
+    // Scenario A: verified_core_id() succeeds ("original"), but terminal.run fails
+    // (e.g. "No space left on device"), leaving core_id=Some("original"), terminal=None, state="unknown".
+    let (dir, app, p, c) = setup();
+    let script = dir.path().join("disk-full-hc");
+    std::fs::write(
+        &script,
+        r#"#!/usr/bin/python3
+import sys, json, os
+base = os.path.dirname(__file__)
+for line in sys.stdin:
+    req = json.loads(line)
+    m = req["method"]
+    if m == "hello":
+        resp = {"jsonrpc": "2.0", "id": req["id"], "result": {"generation": 1}}
+    elif m == "server.status":
+        resp = {"jsonrpc": "2.0", "id": req["id"], "result": {"core": {"id": "original"}}}
+    elif m == "terminal.run":
+        resp = {"jsonrpc": "2.0", "id": req["id"], "error": {"code": -32000, "message": "No space left on device"}}
+    elif m == "terminal.list":
+        resp = {"jsonrpc": "2.0", "id": req["id"], "result": {"terminals": []}}
+    elif m == "terminal.kill":
+        with open(base + "/controls", "a") as f:
+            f.write("terminal.kill\n")
+        resp = {"jsonrpc": "2.0", "id": req["id"], "result": {"sent": True}}
+    else:
+        resp = {"jsonrpc": "2.0", "id": req["id"], "result": {}}
+    print(json.dumps(resp), flush=True)
+"#,
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    app.config.write().unwrap().hc = script.to_string_lossy().into();
+
+    let created = app
+        .call("terminal.create", json!({"project_id": p.id}))
+        .unwrap();
+    let tid = created["id"].as_str().unwrap().to_owned();
+    assert_eq!(created["runtime"]["core_id"], "original");
+    assert!(created["runtime"]["terminal"].is_null());
+    assert_eq!(created["runtime"]["state"], "unknown");
+    assert!(
+        created["runtime"]["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("No space left on device"))
+    );
+
+    let mut card_with_wt = c.clone();
+    let wt = dir.path().join("card-wt");
+    std::fs::create_dir_all(&wt).unwrap();
+    card_with_wt.worktree = Some(wt.to_string_lossy().into_owned());
+    assert!(!app.terminal_retains_worktree(&card_with_wt).unwrap());
+
+    let close_params = json!({"terminal_id": tid, "request_key": "close-disk-full"});
+    let closed = app.call("terminal.close", close_params.clone()).unwrap();
+    assert_eq!(closed, json!({"state": "closed", "terminal_id": tid}));
+    assert!(!dir.path().join("controls").exists());
+    assert_eq!(app.call("terminal.close", close_params).unwrap(), closed);
+
+    let snap = app.snapshot().unwrap();
+    let entry = snap.terminals.iter().find(|t| t.id == tid).unwrap();
+    let rt = entry.runtime.as_ref().unwrap();
+    assert_eq!(rt.state, "finished");
+    assert!(
+        rt.error
+            .as_deref()
+            .is_some_and(|e| e.contains("No space left on device"))
+    );
+
+    // Scenario B: core_id == None && terminal == None (e.g. hc unavailable / restart mid-launch).
+    app.config.write().unwrap().hc = "/usr/bin/false".into();
+    let no_core = app
+        .call("terminal.create", json!({"project_id": p.id}))
+        .unwrap();
+    let no_core_id = no_core["id"].as_str().unwrap().to_owned();
+    assert!(no_core["runtime"]["core_id"].is_null());
+    assert!(no_core["runtime"]["terminal"].is_null());
+    assert_eq!(no_core["runtime"]["state"], "unknown");
+
+    let closed_no_core = app
+        .call(
+            "terminal.close",
+            json!({"terminal_id": no_core_id, "request_key": "close-no-core"}),
+        )
+        .unwrap();
+    assert_eq!(
+        closed_no_core,
+        json!({"state": "closed", "terminal_id": no_core_id})
+    );
+    let snap2 = app.snapshot().unwrap();
+    let entry2 = snap2.terminals.iter().find(|t| t.id == no_core_id).unwrap();
+    assert_eq!(entry2.runtime.as_ref().unwrap().state, "finished");
+
+    // Scenario C: item.agent with state == "unknown" and terminal == None.
+    app.call(
+        "agent.open",
+        json!({"card_id": c.id, "profile_id": "codex"}),
+    )
+    .unwrap();
+    let agent_id = Conversation::key(&c.id, "codex");
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut item: TerminalEntry = db.get(&agent_id)?;
+            let run = item.agent.as_mut().unwrap();
+            run.state = "unknown".into();
+            run.core_id = Some("original".into());
+            run.terminal = None;
+            db.save(&item)
+        })
+        .unwrap();
+    let closed_agent = app
+        .call(
+            "terminal.close",
+            json!({"terminal_id": agent_id, "request_key": "close-unknown-agent"}),
+        )
+        .unwrap();
+    assert_eq!(
+        closed_agent,
+        json!({"state": "closed", "terminal_id": agent_id})
+    );
+    let snap3 = app.snapshot().unwrap();
+    let agent_entry = snap3.terminals.iter().find(|t| t.id == agent_id).unwrap();
+    let run = agent_entry.agent.as_ref().unwrap();
+    assert_eq!(run.state, "cancelled");
+    assert_eq!(run.close_state, "closed");
+    assert!(run.finished());
+}
+
+#[test]
+fn close_unbound_terminal_kills_matching_orphan_pty_from_herdr_inventory() {
+    let (dir, app, p, _) = setup();
+    let script = dir.path().join("orphan-hc");
+    std::fs::write(
+        &script,
+        r#"#!/usr/bin/python3
+import sys, json, os
+base = os.path.dirname(__file__)
+for line in sys.stdin:
+    req = json.loads(line)
+    m = req["method"]
+    args = req.get("params", {})
+    if m == "hello":
+        res = {"generation": 1}
+    elif m == "server.status":
+        res = {"core": {"id": "original"}}
+    elif m in ("terminal.list", "terminal.get"):
+        tid = open(base + "/orphan_tid").read().strip()
+        t = {
+            "address": "t-orphan",
+            "cwd": base,
+            "labels": {"canban.terminal": tid},
+            "state": "finished" if os.path.exists(base + "/finished") else "live",
+        }
+        res = {"terminals": [t]} if m == "terminal.list" else t
+    elif m == "terminal.kill":
+        with open(base + "/controls", "a") as f:
+            f.write(f"terminal.kill:{args.get('terminal')}\n")
+        open(base + "/finished", "w").close()
+        res = {"sent": True}
+    else:
+        res = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": res}), flush=True)
+"#,
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    app.config.write().unwrap().hc = script.to_string_lossy().into();
+
+    let entry = TerminalEntry {
+        id: "shell-orphan".into(),
+        conversation_id: None,
+        number: 1,
+        name: Some("Terminal 1".into()),
+        origin_project_id: Some(p.id.clone()),
+        origin_card_id: None,
+        agent_engine: None,
+        created_at: now(),
+        runtime: Some(TerminalRuntime {
+            core_id: Some("original".into()),
+            terminal: None,
+            state: "unknown".into(),
+            connection: "unavailable".into(),
+            error: Some("Launch timed out".into()),
+            agent_status: None,
+            agent_turn: None,
+            observed_agent: None,
+            waiting: None,
+        }),
+        agent: None,
+    };
+    std::fs::write(dir.path().join("orphan_tid"), &entry.id).unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| db.save(&entry))
+        .unwrap();
+
+    let closed = app
+        .call(
+            "terminal.close",
+            json!({"terminal_id": entry.id, "request_key": "close-orphan"}),
+        )
+        .unwrap();
+    assert_eq!(closed, json!({"state": "closed", "terminal_id": entry.id}));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("controls")).unwrap(),
+        "terminal.kill:t-orphan\n"
+    );
+    let saved: TerminalEntry = app.store.lock().unwrap().db().get(&entry.id).unwrap();
+    let rt = saved.runtime.as_ref().unwrap();
+    assert_eq!(rt.state, "finished");
+    assert_eq!(rt.terminal.as_deref(), Some("t-orphan"));
+}
+
+#[test]
+fn close_unknown_configuration_session_cancels_and_finishes() {
+    let (_dir, app, p, _) = setup();
+    let opened = app
+        .call(
+            "configuration.open",
+            json!({"project_id": p.id, "profile_id": "codex"}),
+        )
+        .unwrap();
+    let tid = opened["terminal_id"].as_str().unwrap().to_owned();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut session: ConfigurationSession = db.get(&tid)?;
+            session.state = "unknown".into();
+            session.error = Some("No space left on device".into());
+            db.save(&session)?;
+            let mut item: TerminalEntry = db.get(&tid)?;
+            item.runtime = Some(TerminalRuntime {
+                core_id: None,
+                terminal: None,
+                state: "unknown".into(),
+                connection: "unavailable".into(),
+                error: Some("No space left on device".into()),
+                agent_status: None,
+                agent_turn: None,
+                observed_agent: None,
+                waiting: None,
+            });
+            db.save(&item)
+        })
+        .unwrap();
+
+    let closed = app
+        .call(
+            "terminal.close",
+            json!({"terminal_id": tid, "request_key": "close-unknown-cfg"}),
+        )
+        .unwrap();
+    assert_eq!(closed, json!({"state": "closed", "terminal_id": tid}));
+    let snap = app.snapshot().unwrap();
+    assert_eq!(snap.configuration_sessions[0].state, "cancelled");
+    let entry = snap.terminals.iter().find(|t| t.id == tid).unwrap();
+    let rt = entry.runtime.as_ref().unwrap();
+    assert_eq!(rt.state, "finished");
+    assert_eq!(rt.error.as_deref(), Some("No space left on device"));
+}
