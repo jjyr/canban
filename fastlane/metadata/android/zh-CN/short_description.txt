@@ -1,0 +1,1 @@
+Canban 移动端：远程管理 AI 编程 Agent 看板、Git Diff 与实时终端

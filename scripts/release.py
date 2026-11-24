@@ -1,11 +1,21 @@
 #!/usr/bin/env python3
 """GitHub release dispatch, reservation, and publication; never modifies main or an existing release."""
-import argparse, datetime, hashlib, json, os, pathlib, shutil, subprocess, sys, tarfile, time, urllib.error, urllib.parse, urllib.request
+import argparse, datetime, hashlib, json, os, pathlib, re, shutil, subprocess, sys, tarfile, time, urllib.error, urllib.parse, urllib.request
 from zoneinfo import ZoneInfo
 
 DESKTOP_PLATFORMS = ('macos-aarch64', 'linux-x86_64', 'linux-aarch64')
 CLI_PLATFORMS = ('linux-x86_64', 'linux-aarch64')
+ANDROID_PLATFORMS = ('android-arm64-v8a',)
+ANDROID_BUNDLE_ID = 'dev.canban.mobile'
 CI_WORKFLOW = 'ci.yml'
+
+def derive_android_version_code(version):
+    m=re.fullmatch(r'(\d{4})(\d{2})(\d{2})-(\d+)',str(version).strip())
+    if not m:raise RuntimeError(f'Cannot derive Android version_code from release version: {version!r}')
+    year,month,day,seq=(int(g) for g in m.groups())
+    if not 2020<=year<=2147 or not 1<=month<=12 or not 1<=day<=31 or not 1<=seq<=99:
+        raise RuntimeError(f'Android release version out of encodable range: {version!r}')
+    return (year-2000)*1_000_000+month*10_000+day*100+seq
 
 def pack_tar_gz(source, output):
     source=pathlib.Path(source)
@@ -80,6 +90,28 @@ def verify_dist_directory(directory, version, commit):
         data=archive_path.read_bytes()
         if len(data)!=manifest.get('size') or hashlib.sha256(data).hexdigest()!=str(manifest.get('sha256','')).lower():
             raise RuntimeError(f'CLI archive digest/size mismatch for {archive_path}')
+    for platform in ANDROID_PLATFORMS:
+        manifest_name=f'manifest-{platform}.json'
+        manifest_path=files.get(manifest_name)
+        if manifest_path is None:
+            raise RuntimeError(f'Missing Android release manifest: {manifest_name}')
+        manifest=json.loads(manifest_path.read_text())
+        if manifest.get('version')!=version or manifest.get('commit')!=commit or manifest.get('platform')!=platform or manifest.get('bundle_id')!=ANDROID_BUNDLE_ID:
+            raise RuntimeError(f'Android manifest identity mismatch in {manifest_path}')
+        if not isinstance(manifest.get('version_code'),int) or manifest['version_code']<1:
+            raise RuntimeError(f'Invalid Android version_code in {manifest_path}')
+        signing_sha=str(manifest.get('signing_sha256',''))
+        if not re.fullmatch(r'[0-9a-f]{64}',signing_sha):
+            raise RuntimeError(f'Invalid Android signing_sha256 in {manifest_path}')
+        apk_name=f'Canban-{platform}.apk'
+        if manifest.get('asset')!=apk_name:
+            raise RuntimeError(f'Android manifest asset name mismatch in {manifest_path}')
+        apk_path=files.get(apk_name)
+        if apk_path is None:
+            raise RuntimeError(f'Missing Android release APK: {apk_name}')
+        data=apk_path.read_bytes()
+        if len(data)!=manifest.get('size') or hashlib.sha256(data).hexdigest()!=str(manifest.get('sha256','')).lower():
+            raise RuntimeError(f'Android APK digest/size mismatch for {apk_path}')
 
 def resolve_gh_token():
     token=os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
@@ -296,12 +328,15 @@ def dispatch(repo,ref='main',workflow='release.yml',watch=False,poll_interval=2.
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command',choices=['dispatch','ci-gate','reserve','package','package-cli','verify-dist','publish'])
+    parser.add_argument('command',choices=['dispatch','ci-gate','reserve','package','package-cli','package-android','verify-dist','publish'])
     parser.add_argument('--directory',type=pathlib.Path,default=pathlib.Path('dist'))
+    parser.add_argument('--apk',type=pathlib.Path,default=pathlib.Path('.local/android/Canban-android-arm64-v8a.apk'),help='Signed release APK path (package-android only)')
+    parser.add_argument('--signing-sha256',default=None,help='Verified Signer #1 SHA-256 certificate hex digest (package-android only)')
+    parser.add_argument('--version-code',type=int,default=None,help='Android versionCode override (package-android only)')
     parser.add_argument('--ref',default='main',help='Branch or tag ref to release (dispatch only, default: main)')
     parser.add_argument('--repo',default=None,help='GitHub owner/repo override (default: GITHUB_REPOSITORY or jjyr/canban)')
     parser.add_argument('--watch',action='store_true',help='Watch the dispatched workflow run until completion (dispatch only)')
-    parser.add_argument('--require-all-platforms',action='store_true',help='Verify macOS + Linux (x86_64 & aarch64) desktop and CLI manifests/archives before publishing')
+    parser.add_argument('--require-all-platforms',action='store_true',help='Verify macOS + Linux (x86_64 & aarch64) desktop/CLI and Android APK manifests/artifacts before publishing')
     args=parser.parse_args()
     repo=args.repo or os.environ.get('GITHUB_REPOSITORY','jjyr/canban')
     if args.command=='dispatch':
@@ -344,6 +379,26 @@ def main():
         pack_cli_tar_gz(cli,gz_asset)
         manifest={**build,'asset':gz_name,'size':gz_asset.stat().st_size,'sha256':hashlib.sha256(gz_asset.read_bytes()).hexdigest()}
         (args.directory/('manifest-cli-'+build['platform']+'.json')).write_text(json.dumps(manifest,indent=2)+'\n');return
+    if args.command=='package-android':
+        if not version:raise RuntimeError('CANBAN_RELEASE_VERSION is required for package-android')
+        if args.apk.is_symlink() or not args.apk.is_file():
+            raise RuntimeError(f'Android APK is missing or unsafe: {args.apk}')
+        signing_sha=(args.signing_sha256 or os.environ.get('ANDROID_SIGNING_SHA256','')).strip().lower()
+        if not re.fullmatch(r'[0-9a-f]{64}',signing_sha):
+            raise RuntimeError('package-android requires a 64-char hex --signing-sha256 (or ANDROID_SIGNING_SHA256)')
+        version_code=args.version_code if args.version_code is not None else derive_android_version_code(version)
+        if version_code<1:raise RuntimeError(f'Invalid Android version_code: {version_code}')
+        platform='android-arm64-v8a';apk_name=f'Canban-{platform}.apk';dest_apk=args.directory/apk_name
+        if args.apk.resolve()!=dest_apk.resolve():
+            shutil.copy2(args.apk,dest_apk)
+        data=dest_apk.read_bytes()
+        manifest={
+            'version':version,'commit':commit,'platform':platform,'abi':'arm64-v8a',
+            'bundle_id':ANDROID_BUNDLE_ID,'version_code':version_code,
+            'asset':apk_name,'size':len(data),'sha256':hashlib.sha256(data).hexdigest(),
+            'signing_sha256':signing_sha,
+        }
+        (args.directory/f'manifest-{platform}.json').write_text(json.dumps(manifest,indent=2)+'\n');return
     release=find_release(repo,version)
     if release is None:raise RuntimeError('Reserved release is missing: '+version)
     if not release['draft']:
@@ -354,7 +409,8 @@ def main():
     # Draft retries may replace incomplete assets; published assets are immutable.
     for asset in release['assets']:api('DELETE',f'/repos/{repo}/releases/assets/{asset["id"]}')
     for name,path in sorted(dist_files.items()):
-        api('POST',f'/upload/repos/{repo}/releases/{release["id"]}/assets?name={name}',raw=path.read_bytes(),content_type='application/octet-stream')
+        ctype='application/vnd.android.package-archive' if name.endswith('.apk') else 'application/octet-stream'
+        api('POST',f'/upload/repos/{repo}/releases/{release["id"]}/assets?name={name}',raw=path.read_bytes(),content_type=ctype)
     notes=build_release_notes(repo,version,commit)
     api('PATCH',f'/repos/{repo}/releases/{release["id"]}',{'draft':False,'prerelease':False,'body':notes})
     print('Published '+version)

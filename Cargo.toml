@@ -75,3 +75,13 @@ debug = 0
 inherits = "release"
 debug = 2
 strip = "none"
+
+# Size-optimized Android release profile targeting < 30 MB arm64-v8a APKs (IzzyOnDroid/F-Droid)
+# while keeping uncompressed 16 KB-aligned libnsh.so packaging.
+[profile.android-release]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

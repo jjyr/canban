@@ -203,7 +203,17 @@ class Releases(unittest.TestCase):
         self.assertIn('librsvg2-bin',content)
         self.assertIn('scripts/release.py package-cli',content)
         self.assertIn('scripts/test-install.py --bundle .local/canban',content)
+        self.assertIn('scripts/android.py build-apk --release',content)
+        self.assertIn('scripts/release.py package-android',content)
+        self.assertIn('ANDROID_KEYSTORE_B64',content)
+        self.assertIn('needs: [macos, linux, android]',content)
         self.assertIn('scripts/release.py publish --require-all-platforms',content)
+        cargo_toml=(root/'Cargo.toml').read_text()
+        self.assertIn('[profile.android-release]',cargo_toml)
+        for setting in ('opt-level = "z"','lto = true','codegen-units = 1','panic = "abort"','strip = "symbols"'):
+            self.assertIn(setting,cargo_toml)
+        android_py=(root/'scripts/android.py').read_text()
+        self.assertIn('--profile", "android-release"',android_py)
         self.assertIn('push:',ci_content)
         self.assertIn('main',ci_content)
         self.assertIn('pull_request:',ci_content)
@@ -449,14 +459,114 @@ class Releases(unittest.TestCase):
                     'version':ver,'commit':commit,'platform':platform,'schema':20,'api':59,
                     'asset':cli_gz.name,'size':cli_gz.stat().st_size,'sha256':hashlib.sha256(cli_gz.read_bytes()).hexdigest(),
                 }))
+            apk=dist/'Canban-android-arm64-v8a.apk';apk.write_bytes(b'android-apk-fixture')
+            (dist/'manifest-android-arm64-v8a.json').write_text(json.dumps({
+                'version':ver,'commit':commit,'platform':'android-arm64-v8a','abi':'arm64-v8a',
+                'bundle_id':'dev.canban.mobile','version_code':26111602,
+                'asset':apk.name,'size':apk.stat().st_size,'sha256':hashlib.sha256(apk.read_bytes()).hexdigest(),
+                'signing_sha256':'a'*64,
+            }))
             release.verify_dist_directory(dist,ver,commit)
             # GitHub Release assets are case-insensitive (`Canban-linux-*.tar.gz` vs `canban-linux-*.tar.gz` -> HTTP 422)
             case_dup=cli_dir/'canban-linux-x86_64.tar.gz';case_dup.write_bytes(b'collision')
             with self.assertRaisesRegex(RuntimeError,'case-colliding release asset name'):
                 release.collect_dist_files(dist)
             case_dup.unlink()
-            # Corrupting Linux aarch64 desktop archive or removing CLI manifest fails verification before publish
+            # Corrupting Linux aarch64 desktop archive fails verification before publish
             (dist/'Canban-linux-aarch64.tar.gz').write_bytes(b'corrupted')
             with self.assertRaisesRegex(RuntimeError,'Desktop archive digest/size mismatch'):
                 release.verify_dist_directory(dist,ver,commit)
+            # Restoring Linux archive and corrupting Android APK or invalid signing digest fails verification
+            gz_arm=dist/'Canban-linux-aarch64.tar.gz';gz_arm.write_bytes(b'gz-linux-aarch64')
+            apk.write_bytes(b'tampered-apk')
+            with self.assertRaisesRegex(RuntimeError,'Android APK digest/size mismatch'):
+                release.verify_dist_directory(dist,ver,commit)
+            apk.write_bytes(b'android-apk-fixture')
+            android_manifest=json.loads((dist/'manifest-android-arm64-v8a.json').read_text())
+            android_manifest['signing_sha256']='not-hex'
+            (dist/'manifest-android-arm64-v8a.json').write_text(json.dumps(android_manifest))
+            with self.assertRaisesRegex(RuntimeError,'Invalid Android signing_sha256'):
+                release.verify_dist_directory(dist,ver,commit)
+    def test_package_android_creates_apk_and_manifest_with_version_code_and_signing_digest(self):
+        with tempfile.TemporaryDirectory(prefix='cb-release-android-pkg-') as directory:
+            root=pathlib.Path(directory)
+            src_apk=root/'Canban-android-arm64-v8a.apk'
+            src_apk.write_bytes(b'signed-release-apk')
+            dist=root/'dist'
+            signing_sha='0123456789abcdef'*4
+            with patch.dict(os.environ,{'CANBAN_RELEASE_COMMIT':'a'*40,'CANBAN_RELEASE_VERSION':'20261124-12'}),patch.object(sys,'argv',[
+                'release.py','package-android','--directory',str(dist),'--apk',str(src_apk),'--signing-sha256',signing_sha.upper()
+            ]):
+                release.main()
+            out_apk=dist/'Canban-android-arm64-v8a.apk'
+            manifest_path=dist/'manifest-android-arm64-v8a.json'
+            self.assertTrue(out_apk.is_file());self.assertTrue(manifest_path.is_file())
+            manifest=json.loads(manifest_path.read_text())
+            self.assertEqual(manifest['version'],'20261124-12')
+            self.assertEqual(manifest['commit'],'a'*40)
+            self.assertEqual(manifest['platform'],'android-arm64-v8a')
+            self.assertEqual(manifest['abi'],'arm64-v8a')
+            self.assertEqual(manifest['bundle_id'],'dev.canban.mobile')
+            self.assertEqual(manifest['version_code'],26112412)
+            self.assertEqual(manifest['asset'],'Canban-android-arm64-v8a.apk')
+            self.assertEqual(manifest['size'],out_apk.stat().st_size)
+            self.assertEqual(manifest['sha256'],hashlib.sha256(out_apk.read_bytes()).hexdigest())
+            self.assertEqual(manifest['signing_sha256'],signing_sha)
+    def test_android_script_version_code_signing_guard_and_manifest_icon(self):
+        import base64, stat
+        android_spec=importlib.util.spec_from_file_location('android_build',pathlib.Path(__file__).with_name('android.py'))
+        android=importlib.util.module_from_spec(android_spec);sys.modules['android_build']=android;android_spec.loader.exec_module(android)
+        self.assertEqual(android.derive_version_code('20261124-1'),'26112401')
+        self.assertEqual(android.derive_version_code('20261124-12'),'26112412')
+        self.assertEqual(android.derive_version_code('0.1.0',run_number='42'),'42')
+        self.assertEqual(android.derive_version_code('20261124-1',explicit_code='99999999'),'99999999')
+        with self.assertRaisesRegex(RuntimeError,'1..=99'):
+            android.derive_version_code('20261124-100')
+        manifest=android._manifest_xml()
+        self.assertIn('android:icon="@mipmap/ic_launcher"',manifest)
+        self.assertIn('android:roundIcon="@mipmap/ic_launcher_round"',manifest)
+        with tempfile.TemporaryDirectory(prefix='cb-android-sign-') as directory:
+            work=pathlib.Path(directory)
+            with self.assertRaisesRegex(RuntimeError,'ANDROID_KEYSTORE_B64'):
+                android.resolve_signing_config(release=True,debug_sign=False,work_dir=work,env={})
+            cfg=android.resolve_signing_config(
+                release=True,debug_sign=False,work_dir=work,
+                env={
+                    'ANDROID_KEYSTORE_B64':base64.b64encode(b'fake-p12-keystore').decode(),
+                    'ANDROID_KEY_ALIAS':'canban',
+                    'ANDROID_KEYSTORE_PASS':'secret-store',
+                },
+            )
+            self.assertFalse(cfg.is_debug)
+            self.assertEqual(cfg.alias,'canban')
+            self.assertEqual(cfg.ks_pass,'secret-store')
+            self.assertEqual(cfg.key_pass,'secret-store')
+            self.assertEqual(cfg.keystore.read_bytes(),b'fake-p12-keystore')
+            self.assertEqual(stat.S_IMODE(cfg.keystore.stat().st_mode),0o600)
+    def test_fastlane_android_metadata_meets_izzyondroid_constraints(self):
+        import re, struct
+        root=pathlib.Path(__file__).resolve().parents[1]
+        base=root/'fastlane/metadata/android'
+        for locale in ('en-US','zh-CN'):
+            loc_dir=base/locale
+            title=(loc_dir/'title.txt').read_text().strip()
+            short=(loc_dir/'short_description.txt').read_text().strip()
+            full=(loc_dir/'full_description.txt').read_text().strip()
+            self.assertTrue(1<=len(title)<=30,(locale,title))
+            self.assertTrue(1<=len(short)<=80,(locale,len(short)))
+            self.assertNotIn('\n',short)
+            self.assertTrue(1<=len(full)<=3500,(locale,len(full)))
+            self.assertIsNone(re.search(r'<[a-zA-Z/][^>]*>',full),locale)
+        icon_data=(base/'en-US/images/icon.png').read_bytes()
+        self.assertEqual(icon_data[:8],b'\x89PNG\r\n\x1a\n')
+        w,h=struct.unpack('>II',icon_data[16:24])
+        self.assertEqual((w,h),(512,512))
+        shots=sorted((base/'en-US/images/phoneScreenshots').glob('*.png'))
+        self.assertGreaterEqual(len(shots),3)
+        for shot in shots:
+            data=shot.read_bytes()
+            self.assertEqual(data[:8],b'\x89PNG\r\n\x1a\n',shot.name)
+            sw,sh=struct.unpack('>II',data[16:24])
+            self.assertGreaterEqual(min(sw,sh),320,shot.name)
+            self.assertLessEqual(max(sw,sh)/min(sw,sh),2.0,shot.name)
 if __name__=='__main__':unittest.main()

@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/jjyr/canban/releases"><img src="https://img.shields.io/github/v/release/jjyr/canban?label=release" alt="Latest release" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/jjyr/canban" alt="Apache-2.0 License" /></a>
-  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue" alt="macOS and Linux" />
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Android-blue" alt="macOS, Linux, and Android" />
   <img src="https://img.shields.io/badge/built%20with-Rust-orange" alt="Built with Rust" />
 </p>
 
@@ -112,6 +112,15 @@ curl -fsSL https://canban.dev/install.sh | bash
 ```
 
 Works out of the box with `git` and your existing Agent CLIs (`claude`, `codex`, `agy`, `cursor-agent`, etc.). On first launch, Canban automatically guides one-click setup for the persistent PTY daemon (`hc`) if not already installed.
+
+### Android Companion (`arm64-v8a`)
+
+<p>
+  <a href="https://github.com/jjyr/canban/releases/latest"><img src="https://img.shields.io/badge/Android-Download%20APK-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Download Android APK" /></a>
+  <a href="https://apps.obtainium.imranr.dev/redirect?r=obtainium://app/%7B%22id%22%3A%22dev.canban.mobile%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2Fjjyr%2Fcanban%22%2C%22author%22%3A%22jjyr%22%2C%22name%22%3A%22Canban%22%7D"><img src="https://img.shields.io/badge/Get_it_on-Obtainium-3A7AFE?style=for-the-badge&logo=android&logoColor=white" alt="Get it on Obtainium" /></a>
+</p>
+
+Connects to your macOS or headless Linux `canband` host over Tailscale (zero-QR WhoIs auto-auth) or single-use `canban://` QR pairing for live Needs-you triage, Kanban boards, Git diffs, and persistent `libghostty-vt` terminals.
 
 <details>
 <summary><strong>Linux runtime dependencies &amp; building from source</strong></summary>

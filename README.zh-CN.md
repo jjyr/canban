@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/jjyr/canban/releases"><img src="https://img.shields.io/github/v/release/jjyr/canban?label=release" alt="最新版本" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/jjyr/canban" alt="Apache-2.0 协议" /></a>
-  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue" alt="支持 macOS 与 Linux" />
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Android-blue" alt="支持 macOS、Linux 与 Android" />
   <img src="https://img.shields.io/badge/built%20with-Rust-orange" alt="使用 Rust 构建" />
 </p>
 
@@ -112,6 +112,15 @@ curl -fsSL https://canban.dev/install.sh | bash
 ```
 
 开箱即用，直接复用你现有的 `git` 与各类 Agent CLI（`claude`、`codex`、`agy`、`cursor-agent` 等）。首次启动时，若未安装持久化终端守护进程（`hc`），Canban 会自动引导一键完成配置。
+
+### Android 客户端（`arm64-v8a`）
+
+<p>
+  <a href="https://github.com/jjyr/canban/releases/latest"><img src="https://img.shields.io/badge/Android-Download%20APK-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="下载 Android APK" /></a>
+  <a href="https://apps.obtainium.imranr.dev/redirect?r=obtainium://app/%7B%22id%22%3A%22dev.canban.mobile%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2Fjjyr%2Fcanban%22%2C%22author%22%3A%22jjyr%22%2C%22name%22%3A%22Canban%22%7D"><img src="https://img.shields.io/badge/Get_it_on-Obtainium-3A7AFE?style=for-the-badge&logo=android&logoColor=white" alt="Get it on Obtainium" /></a>
+</p>
+
+支持通过 Tailscale（WhoIs 同账号免扫码直连）或一次性 `canban://` 二维码连接本地 macOS 或远程 Linux `canband` 主机，随时在手机端处理 Needs you 审批、看板、Git Diff 与原生 `libghostty-vt` 实时终端。
 
 <details>
 <summary><strong>Linux 运行库要求与从源码构建</strong></summary>

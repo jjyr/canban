@@ -1,0 +1,11 @@
+Canban is the open-source (Apache-2.0) mobile companion for your self-hosted Canban desktop and headless Linux canband coding workbenches.
+
+Key capabilities:
+- Zero-QR Tailscale & on-demand Tailnet discovery: Sign into your own personal Tailscale hosts directly with host.ts.net or 100.x.y.z (WhoIs auto-auth) and discover sibling hosts in Settings -> Discover on Tailnet, or pair cross-account / custom-VPN hosts via one-time canban:// QR/URI invites with per-device revocable tokens over yamux/1.
+- Needs-you Inbox: Triage waiting approvals, agent follow-up questions, and completed runs across all projects and remote hosts from one tab.
+- Kanban Board & Card Workspace: Browse stages, create and edit Cards, move columns, inspect timelines, and mention @agent profiles.
+- Live Native Terminals: Interact directly with running agent CLIs and remote shells rendered by libghostty-vt, complete with a touch accessory bar (Esc, Tab, Ctrl, arrows, ^C, Paste, fullscreen landscape) and pinch-to-zoom.
+- Inline Git Diff & Delivery: Inspect commits and per-file unified diffs, return work for rework, or trigger Queue Merge delivery.
+- Offline Editing & 3-Way Sync: Create Cards, edit titles/descriptions, post comments, and move stages offline; queued edits sync automatically with 3-way conflict resolution when connectivity returns.
+
+Requires a running Canban desktop or headless canband server (macOS or Linux) to connect to. Zero ads, zero trackers, zero telemetry.

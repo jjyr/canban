@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import dataclasses
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import zipfile
+from collections.abc import Mapping
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +26,14 @@ BUNDLE_ID = "dev.canban.mobile"
 MIN_SDK = 26
 COMPILE_SDK = 35
 AVD_NAME = "canban_pixel"
+_MAX_VERSION_CODE = 2_147_483_647
+_LAUNCHER_ICON_DENSITIES = (
+    ("mdpi", 48, 108),
+    ("hdpi", 72, 162),
+    ("xhdpi", 96, 216),
+    ("xxhdpi", 144, 324),
+    ("xxxhdpi", 192, 432),
+)
 
 
 @dataclasses.dataclass
@@ -30,7 +42,7 @@ class AndroidSdk:
     ndk: Path
     build_tools: Path
     android_jar: Path
-    adb: Path
+    adb: Path | None
     emulator: Path
 
     @property
@@ -48,6 +60,15 @@ class AndroidSdk:
     def tool(self, name: str) -> Path:
         suffix = ".exe" if platform.system() == "Windows" else ""
         return self.build_tools / f"{name}{suffix}"
+
+
+@dataclasses.dataclass(frozen=True)
+class SigningConfig:
+    keystore: Path
+    alias: str
+    ks_pass: str
+    key_pass: str
+    is_debug: bool
 
 
 def _version_sort_key(path: Path) -> list[int]:
@@ -84,11 +105,14 @@ def find_sdk() -> AndroidSdk:
             "Android SDK not found (checked ANDROID_HOME, ANDROID_SDK_ROOT, ~/Library/Android/sdk)"
         )
 
-    ndk = (
-        Path(os.environ["ANDROID_NDK_HOME"])
-        if os.environ.get("ANDROID_NDK_HOME")
-        else _newest_subdir(sdk_root / "ndk")
-    )
+    ndk = next(
+        (
+            Path(os.environ[k])
+            for k in ("ANDROID_NDK_HOME", "ANDROID_NDK_LATEST_HOME", "ANDROID_NDK_ROOT")
+            if os.environ.get(k) and Path(os.environ[k]).is_dir()
+        ),
+        None,
+    ) or _newest_subdir(sdk_root / "ndk")
     if ndk is None or not ndk.is_dir():
         raise RuntimeError(f"No NDK found under {sdk_root / 'ndk'}")
 
@@ -100,12 +124,12 @@ def find_sdk() -> AndroidSdk:
     if not android_jar.is_file():
         raise RuntimeError(f"Missing platform jar: {android_jar}")
 
-    adb = sdk_root / "platform-tools" / "adb"
-    if not adb.is_file():
+    adb_candidate = sdk_root / "platform-tools" / "adb"
+    if adb_candidate.is_file():
+        adb: Path | None = adb_candidate
+    else:
         resolved_adb = shutil.which("adb")
-        if resolved_adb is None:
-            raise RuntimeError("adb not found in platform-tools or PATH")
-        adb = Path(resolved_adb)
+        adb = Path(resolved_adb) if resolved_adb else None
 
     emulator = sdk_root / "emulator" / "emulator"
     return AndroidSdk(
@@ -306,6 +330,8 @@ def _manifest_xml() -> str:
         </intent>
     </queries>
     <application android:label="Canban"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:usesCleartextTraffic="true"
         android:extractNativeLibs="false"
         android:enableOnBackInvokedCallback="true"
@@ -334,6 +360,214 @@ def _manifest_xml() -> str:
     </application>
 </manifest>
 """
+
+
+def derive_version_code(
+    version_name: str,
+    explicit_code: str | None = None,
+    run_number: str | None = None,
+) -> str:
+    """Derive a strictly monotonic 32-bit Android versionCode from YYYYMMDD-N or explicit input."""
+    if explicit_code is not None and explicit_code.strip():
+        try:
+            code = int(explicit_code.strip())
+        except ValueError as err:
+            raise RuntimeError(f"Invalid Android versionCode: {explicit_code!r}") from err
+        if not 1 <= code <= _MAX_VERSION_CODE:
+            raise RuntimeError(f"Android versionCode out of bounds (1..={_MAX_VERSION_CODE}): {code}")
+        return str(code)
+
+    m = re.fullmatch(r"(\d{4})(\d{2})(\d{2})-(\d+)", version_name.strip())
+    if m:
+        year, month, day, seq = (int(g) for g in m.groups())
+        if not 2020 <= year <= 2147:
+            raise RuntimeError(f"Release year out of range for Android versionCode: {version_name}")
+        if not 1 <= month <= 12 or not 1 <= day <= 31:
+            raise RuntimeError(f"Release date out of range for Android versionCode: {version_name}")
+        if not 1 <= seq <= 99:
+            raise RuntimeError(f"Daily release sequence must be 1..=99 for Android versionCode: {version_name}")
+        code = (year - 2000) * 1_000_000 + month * 10_000 + day * 100 + seq
+        if not 1 <= code <= _MAX_VERSION_CODE:
+            raise RuntimeError(f"Derived Android versionCode overflowed 32-bit int: {code}")
+        return str(code)
+
+    if run_number is not None and run_number.strip():
+        try:
+            code = int(run_number.strip())
+        except ValueError:
+            code = 0
+        if 1 <= code <= _MAX_VERSION_CODE:
+            return str(code)
+    return "1"
+
+
+def resolve_version_metadata(
+    *,
+    version_name: str | None = None,
+    version_code: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> tuple[str, str]:
+    environ = os.environ if env is None else env
+    resolved_name = (
+        version_name.strip()
+        if version_name and version_name.strip()
+        else environ.get("CANBAN_RELEASE_VERSION", "").strip() or "0.1.0"
+    )
+    explicit = (
+        version_code.strip()
+        if version_code and version_code.strip()
+        else environ.get("ANDROID_VERSION_CODE", "").strip() or None
+    )
+    resolved_code = derive_version_code(
+        resolved_name,
+        explicit_code=explicit,
+        run_number=environ.get("GITHUB_RUN_NUMBER"),
+    )
+    return resolved_name, resolved_code
+
+
+def resolve_signing_config(
+    *,
+    release: bool,
+    debug_sign: bool,
+    work_dir: Path,
+    keystore: Path | None = None,
+    ks_alias: str | None = None,
+    ks_pass: str | None = None,
+    key_pass: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> SigningConfig:
+    """Resolve release or debug APK signing config, failing closed on missing release credentials."""
+    if not release or debug_sign:
+        return SigningConfig(
+            keystore=_ensure_debug_keystore(),
+            alias="androiddebugkey",
+            ks_pass="android",
+            key_pass="android",
+            is_debug=True,
+        )
+
+    environ = os.environ if env is None else env
+    ks_path: Path | None = keystore
+    if ks_path is None:
+        env_path = environ.get("ANDROID_KEYSTORE_PATH", "").strip()
+        if env_path:
+            ks_path = Path(env_path)
+    if ks_path is None:
+        b64 = "".join(environ.get("ANDROID_KEYSTORE_B64", "").split())
+        if b64:
+            try:
+                raw = base64.b64decode(b64, validate=True)
+            except (binascii.Error, ValueError) as err:
+                raise RuntimeError("Invalid base64 payload in ANDROID_KEYSTORE_B64") from err
+            if not raw:
+                raise RuntimeError("ANDROID_KEYSTORE_B64 decoded to empty bytes")
+            ks_path = work_dir / "release.keystore"
+            ks_path.write_bytes(raw)
+            os.chmod(ks_path, 0o600)
+
+    alias = (ks_alias if ks_alias is not None else environ.get("ANDROID_KEY_ALIAS", "")).strip()
+    store_pass = ks_pass if ks_pass is not None else environ.get("ANDROID_KEYSTORE_PASS", "")
+    priv_pass = (
+        key_pass
+        if key_pass is not None
+        else (environ.get("ANDROID_KEY_PASS") or store_pass)
+    )
+
+    if ks_path is None or not ks_path.is_file() or not alias or not store_pass:
+        raise RuntimeError(
+            "Release APK signing requires ANDROID_KEYSTORE_B64 (or ANDROID_KEYSTORE_PATH / --keystore), "
+            "ANDROID_KEY_ALIAS (--ks-alias), and ANDROID_KEYSTORE_PASS (--ks-pass). "
+            "Pass --debug-sign only for local non-release testing."
+        )
+    return SigningConfig(
+        keystore=ks_path,
+        alias=alias,
+        ks_pass=store_pass,
+        key_pass=priv_pass,
+        is_debug=False,
+    )
+
+
+def _render_launcher_icons(res_stage: Path) -> None:
+    rasterizer = shutil.which("rsvg-convert")
+    if rasterizer is None:
+        hint = "brew install librsvg" if platform.system() == "Darwin" else "sudo apt install librsvg2-bin"
+        raise RuntimeError(f"Android launcher icon generation requires rsvg-convert; install with: {hint}")
+    svg_icon = ROOT / "crates" / "ui" / "assets" / "app-icon.svg"
+    if not svg_icon.is_file():
+        raise FileNotFoundError(f"App icon SVG missing: {svg_icon}")
+    for density, legacy_px, fg_px in _LAUNCHER_ICON_DENSITIES:
+        mipmap_dir = res_stage / f"mipmap-{density}"
+        mipmap_dir.mkdir(parents=True, exist_ok=True)
+        legacy_icon = mipmap_dir / "ic_launcher.png"
+        _run(
+            [
+                rasterizer,
+                "--width",
+                str(legacy_px),
+                "--height",
+                str(legacy_px),
+                "--output",
+                str(legacy_icon),
+                str(svg_icon),
+            ]
+        )
+        shutil.copy2(legacy_icon, mipmap_dir / "ic_launcher_round.png")
+        fg_icon = mipmap_dir / "ic_launcher_foreground.png"
+        _run(
+            [
+                rasterizer,
+                "--width",
+                str(fg_px),
+                "--height",
+                str(fg_px),
+                "--output",
+                str(fg_icon),
+                str(svg_icon),
+            ]
+        )
+
+
+def _sign_and_verify_apk(
+    sdk: AndroidSdk,
+    apk_path: Path,
+    signing: SigningConfig,
+    *,
+    release: bool,
+) -> str:
+    sign_env = os.environ.copy()
+    sign_env["_CANBAN_KS_PASS"] = signing.ks_pass
+    sign_env["_CANBAN_KEY_PASS"] = signing.key_pass
+    cmd = [
+        str(sdk.tool("apksigner")),
+        "sign",
+        "--ks",
+        str(signing.keystore),
+        "--ks-key-alias",
+        signing.alias,
+        "--ks-pass",
+        "env:_CANBAN_KS_PASS",
+        "--key-pass",
+        "env:_CANBAN_KEY_PASS",
+    ]
+    if release:
+        cmd.append("--debuggable-apk-permitted=false")
+    cmd.append(str(apk_path))
+    _run(cmd, env=sign_env)
+
+    verify = subprocess.run(
+        [str(sdk.tool("apksigner")), "verify", "--verbose", "--print-certs", str(apk_path)],
+        capture_output=True,
+        text=True,
+    )
+    output = (verify.stdout or "") + "\n" + (verify.stderr or "")
+    if verify.returncode != 0:
+        raise RuntimeError(f"apksigner verify failed:\n{output.strip()}")
+    match = re.search(r"Signer #1 certificate SHA-256 digest:\s*([0-9a-fA-F]{64})", output)
+    if match is None:
+        raise RuntimeError(f"Could not extract Signer #1 SHA-256 digest from apksigner output:\n{output.strip()}")
+    return match.group(1).lower()
 
 
 def check_android() -> None:
@@ -367,28 +601,56 @@ def check_android() -> None:
     )
 
 
-def build_apk(*, release: bool = False, out_apk: Path | None = None) -> Path:
+def build_apk(
+    *,
+    release: bool = False,
+    out_apk: Path | None = None,
+    version_name: str | None = None,
+    version_code: str | None = None,
+    keystore: Path | None = None,
+    ks_alias: str | None = None,
+    ks_pass: str | None = None,
+    key_pass: str | None = None,
+    debug_sign: bool = False,
+    cert_sha256_out: Path | None = None,
+) -> Path:
     sdk = find_sdk()
     env = ndk_cargo_env(sdk)
     ensure_android_target(env)
 
-    cmd = ["cargo", "build", "-p", "canban-android", "--target", ANDROID_TRIPLE]
-    if release:
-        cmd.append("--release")
-    _run(cmd, env=env)
-
-    profile = "release" if release else "debug"
-    raw_so = ROOT / "target" / ANDROID_TRIPLE / profile / "libcanban_android.so"
-    if not raw_so.is_file():
-        raise FileNotFoundError(f"Expected built cdylib at {raw_so}")
-    _check_elf_16kb_alignment(sdk, raw_so)
-
-    dex_path = _ensure_java_runtime(sdk, env)
+    resolved_ver_name, resolved_ver_code = resolve_version_metadata(
+        version_name=version_name,
+        version_code=version_code,
+    )
     apk_path = out_apk or (ROOT / ".local" / "android" / "Canban.apk")
     apk_path.parent.mkdir(parents=True, exist_ok=True)
-
     work = Path(tempfile.mkdtemp(prefix=".Canban.apk-", dir=apk_path.parent))
+
     try:
+        # Resolve release signing credentials before compiling Rust so missing secrets fail fast.
+        signing = resolve_signing_config(
+            release=release,
+            debug_sign=debug_sign,
+            work_dir=work,
+            keystore=keystore,
+            ks_alias=ks_alias,
+            ks_pass=ks_pass,
+            key_pass=key_pass,
+        )
+
+        cmd = ["cargo", "build", "-p", "canban-android", "--target", ANDROID_TRIPLE]
+        if release:
+            cmd.extend(["--profile", "android-release", "--locked"])
+        _run(cmd, env=env)
+
+        profile = "android-release" if release else "debug"
+        raw_so = ROOT / "target" / ANDROID_TRIPLE / profile / "libcanban_android.so"
+        if not raw_so.is_file():
+            raise FileNotFoundError(f"Expected built cdylib at {raw_so}")
+        _check_elf_16kb_alignment(sdk, raw_so)
+
+        dex_path = _ensure_java_runtime(sdk, env)
+
         so_to_pack = raw_so
         if release:
             stripped_so = work / "libnsh.so"
@@ -407,46 +669,53 @@ def build_apk(*, release: bool = False, out_apk: Path | None = None) -> Path:
         manifest = work / "AndroidManifest.xml"
         manifest.write_text(_manifest_xml(), encoding="utf-8")
 
-        flat_res: list[str] = []
+        res_stage = work / "res-stage"
         res_dir = ROOT / "crates" / "android" / "res"
         if res_dir.is_dir():
-            compiled_res = work / "compiled-res"
-            compiled_res.mkdir(parents=True, exist_ok=True)
-            for res_file in sorted(res_dir.rglob("*.xml")):
-                _run(
-                    [
-                        str(sdk.tool("aapt2")),
-                        "compile",
-                        str(res_file),
-                        "-o",
-                        str(compiled_res),
-                    ]
-                )
-            flat_res = [str(p) for p in sorted(compiled_res.glob("*.flat"))]
+            shutil.copytree(res_dir, res_stage, dirs_exist_ok=True)
+        else:
+            res_stage.mkdir(parents=True, exist_ok=True)
+        _render_launcher_icons(res_stage)
+
+        compiled_res = work / "compiled-res"
+        compiled_res.mkdir(parents=True, exist_ok=True)
+        for res_file in sorted(
+            p for p in res_stage.rglob("*") if p.is_file() and p.suffix.lower() in (".xml", ".png")
+        ):
+            _run(
+                [
+                    str(sdk.tool("aapt2")),
+                    "compile",
+                    str(res_file),
+                    "-o",
+                    str(compiled_res),
+                ]
+            )
+        flat_res = [str(p) for p in sorted(compiled_res.glob("*.flat"))]
 
         base_apk = work / "base.apk"
-        _run(
-            [
-                str(sdk.tool("aapt2")),
-                "link",
-                "-o",
-                str(base_apk),
-                "-I",
-                str(sdk.android_jar),
-                "--manifest",
-                str(manifest),
-                "--min-sdk-version",
-                str(MIN_SDK),
-                "--target-sdk-version",
-                str(COMPILE_SDK),
-                "--version-code",
-                os.environ.get("GITHUB_RUN_NUMBER", "1"),
-                "--version-name",
-                os.environ.get("CANBAN_RELEASE_VERSION", "0.1.0"),
-                "--debug-mode",
-                *flat_res,
-            ]
-        )
+        link_cmd = [
+            str(sdk.tool("aapt2")),
+            "link",
+            "-o",
+            str(base_apk),
+            "-I",
+            str(sdk.android_jar),
+            "--manifest",
+            str(manifest),
+            "--min-sdk-version",
+            str(MIN_SDK),
+            "--target-sdk-version",
+            str(COMPILE_SDK),
+            "--version-code",
+            resolved_ver_code,
+            "--version-name",
+            resolved_ver_name,
+        ]
+        if not release:
+            link_cmd.append("--debug-mode")
+        link_cmd.extend(flat_res)
+        _run(link_cmd)
 
         unaligned_apk = work / "unaligned.apk"
         with (
@@ -475,32 +744,32 @@ def build_apk(*, release: bool = False, out_apk: Path | None = None) -> Path:
                 str(aligned_apk),
             ]
         )
-        keystore = _ensure_debug_keystore()
-        _run(
-            [
-                str(sdk.tool("apksigner")),
-                "sign",
-                "--ks",
-                str(keystore),
-                "--ks-key-alias",
-                "androiddebugkey",
-                "--ks-pass",
-                "pass:android",
-                "--key-pass",
-                "pass:android",
-                str(aligned_apk),
-            ]
-        )
+        cert_sha256 = _sign_and_verify_apk(sdk, aligned_apk, signing, release=release)
         os.replace(aligned_apk, apk_path)
+        if cert_sha256_out is not None:
+            cert_sha256_out.parent.mkdir(parents=True, exist_ok=True)
+            cert_sha256_out.write_text(cert_sha256 + "\n", encoding="utf-8")
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
-    print(f"Packaged Android APK: {apk_path}")
+    size_mib = apk_path.stat().st_size / (1024 * 1024)
+    sign_kind = "debug" if signing.is_debug else "release"
+    print(
+        f"Packaged Android APK: {apk_path} ({size_mib:.2f} MiB, "
+        f"versionName={resolved_ver_name}, versionCode={resolved_ver_code}, "
+        f"{sign_kind} signer sha256={cert_sha256})"
+    )
     return apk_path
 
 
+def _require_adb(sdk: AndroidSdk) -> Path:
+    if sdk.adb is None:
+        raise RuntimeError("adb not found in Android SDK platform-tools or PATH")
+    return sdk.adb
+
+
 def _adb_cmd(sdk: AndroidSdk, serial: str | None, *args: str) -> list[str]:
-    base = [str(sdk.adb)]
+    base = [str(_require_adb(sdk))]
     if serial:
         base.extend(["-s", serial])
     base.extend(args)
@@ -508,7 +777,7 @@ def _adb_cmd(sdk: AndroidSdk, serial: str | None, *args: str) -> list[str]:
 
 
 def _online_devices(sdk: AndroidSdk) -> list[str]:
-    out = _capture([str(sdk.adb), "devices"])
+    out = _capture([str(_require_adb(sdk)), "devices"])
     serials: list[str] = []
     for line in out.splitlines()[1:]:
         parts = line.split()
@@ -556,7 +825,7 @@ def ensure_emulator_booted(
             start_new_session=True,
         )
 
-    _run([str(sdk.adb), "wait-for-device"])
+    _run([str(_require_adb(sdk)), "wait-for-device"])
     deadline = time.monotonic() + 180.0
     while time.monotonic() < deadline:
         devices = _online_devices(sdk)
@@ -578,6 +847,7 @@ def run_emu(
     *,
     build: bool = True,
     release: bool = False,
+    debug_sign: bool = False,
     serial: str | None = None,
     avd_name: str = AVD_NAME,
     headless: bool = False,
@@ -585,7 +855,7 @@ def run_emu(
     sdk = find_sdk()
     apk_path = ROOT / ".local" / "android" / "Canban.apk"
     if build or not apk_path.is_file():
-        apk_path = build_apk(release=release, out_apk=apk_path)
+        apk_path = build_apk(release=release, debug_sign=debug_sign, out_apk=apk_path)
 
     target = ensure_emulator_booted(sdk, serial=serial, avd_name=avd_name, headless=headless)
     _run(_adb_cmd(sdk, target, "install", "-r", "-t", str(apk_path)))
@@ -611,8 +881,16 @@ def main() -> int:
     sub.add_parser("check", help="Cross-compile check canban-terminal and canban-android for aarch64-linux-android")
 
     p_build = sub.add_parser("build-apk", help="Compile canban-android and package .local/android/Canban.apk")
-    p_build.add_argument("--release", action="store_true", help="Build with Cargo release profile and strip symbols")
+    p_build.add_argument("--release", action="store_true", help="Build with Cargo release profile, strip symbols, and omit --debug-mode")
     p_build.add_argument("--out", type=Path, help="Output APK path")
+    p_build.add_argument("--version-name", help="APK android:versionName override (default: CANBAN_RELEASE_VERSION or 0.1.0)")
+    p_build.add_argument("--version-code", help="APK android:versionCode override (default: derived from YYYYMMDD-N)")
+    p_build.add_argument("--keystore", type=Path, help="Release keystore file path (or set ANDROID_KEYSTORE_PATH / ANDROID_KEYSTORE_B64)")
+    p_build.add_argument("--ks-alias", help="Keystore alias (or set ANDROID_KEY_ALIAS)")
+    p_build.add_argument("--ks-pass", help="Keystore password (or set ANDROID_KEYSTORE_PASS)")
+    p_build.add_argument("--key-pass", help="Key password (or set ANDROID_KEY_PASS, defaults to keystore password)")
+    p_build.add_argument("--debug-sign", action="store_true", help="Sign a --release APK with the local debug keystore for local testing only")
+    p_build.add_argument("--cert-sha256-out", type=Path, help="Write verified Signer #1 SHA-256 hex digest to a file")
 
     p_boot = sub.add_parser("boot-emu", help="Boot AVD and wait until Android is ready")
     p_boot.add_argument("--avd", default=AVD_NAME, help="AVD name")
@@ -621,6 +899,7 @@ def main() -> int:
     p_run = sub.add_parser("run-emu", help="Build, install, and launch Canban.apk on Android emulator/device")
     p_run.add_argument("--no-build", action="store_true", help="Skip building if .local/android/Canban.apk exists")
     p_run.add_argument("--release", action="store_true", help="Build/launch release APK")
+    p_run.add_argument("--debug-sign", action="store_true", help="Allow debug-keystore signing when running --release on emulator")
     p_run.add_argument("--serial", help="Specific adb device serial")
     p_run.add_argument("--avd", default=AVD_NAME, help="AVD name when booting emulator")
     p_run.add_argument("--headless", action="store_true", help="Start emulator with -no-window")
@@ -629,7 +908,18 @@ def main() -> int:
     if args.cmd == "check":
         check_android()
     elif args.cmd == "build-apk":
-        build_apk(release=args.release, out_apk=args.out)
+        build_apk(
+            release=args.release,
+            out_apk=args.out,
+            version_name=args.version_name,
+            version_code=args.version_code,
+            keystore=args.keystore,
+            ks_alias=args.ks_alias,
+            ks_pass=args.ks_pass,
+            key_pass=args.key_pass,
+            debug_sign=args.debug_sign,
+            cert_sha256_out=args.cert_sha256_out,
+        )
     elif args.cmd == "boot-emu":
         sdk = find_sdk()
         ensure_emulator_booted(sdk, avd_name=args.avd, headless=args.headless)
@@ -637,6 +927,7 @@ def main() -> int:
         run_emu(
             build=not args.no_build,
             release=args.release,
+            debug_sign=args.debug_sign,
             serial=args.serial,
             avd_name=args.avd,
             headless=args.headless,
