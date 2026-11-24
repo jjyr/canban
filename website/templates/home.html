@@ -712,15 +712,18 @@
             </h2>
 
             <div class="install-tabs" role="tablist" aria-label="Installation mode">
-              <button type="button" role="tab" class="install-tab" data-install-tab="desktop" aria-selected="true" data-i18n="tab_desktop">
+              <button type="button" role="tab" class="install-tab" id="install-tab-desktop" data-install-tab="desktop" aria-selected="true" aria-controls="closing-install-shell" data-i18n="tab_desktop">
                 Desktop
               </button>
-              <button type="button" role="tab" class="install-tab" data-install-tab="headless" aria-selected="false" data-i18n="tab_headless">
+              <button type="button" role="tab" class="install-tab" id="install-tab-headless" data-install-tab="headless" aria-selected="false" aria-controls="closing-install-shell" data-i18n="tab_headless">
                 Headless
+              </button>
+              <button type="button" role="tab" class="install-tab" id="install-tab-android" data-install-tab="android" aria-selected="false" aria-controls="closing-install-android" data-i18n="tab_android">
+                Android
               </button>
             </div>
 
-            <div class="install-shell is-large">
+            <div class="install-shell is-large" id="closing-install-shell" role="tabpanel" aria-labelledby="install-tab-desktop">
               <div class="install-code-wrap">
                 <span class="install-prompt">$</span>
                 <code class="install-cmd" id="closing-install-cmd">curl -fsSL https://canban.dev/install.sh | bash</code>
@@ -737,6 +740,37 @@
               </button>
             </div>
 
+            <div class="install-shell is-large install-shell-android" id="closing-install-android" role="tabpanel" aria-labelledby="install-tab-android" hidden>
+              <div class="install-android-meta">
+                <svg class="android-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+                  <rect x="4" y="1.5" width="8" height="13" rx="1.75"></rect>
+                  <line x1="6.75" y1="12.25" x2="9.25" y2="12.25" stroke-linecap="round"></line>
+                </svg>
+                <span class="install-android-label" data-i18n="android_meta">Android · arm64-v8a</span>
+              </div>
+              <div class="install-android-actions">
+                <a
+                  href="{{android_apk_url}}"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="install-action-btn is-primary"
+                  data-i18n="android_download_short"
+                >Download APK</a>
+                <a
+                  href="{{obtainium_url}}"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="install-action-btn"
+                  data-i18n="android_obtainium_short"
+                >Obtainium</a>
+                <a
+                  href="{{install_url}}#mobile"
+                  class="install-guide-link"
+                  data-i18n="android_guide_short"
+                >Guide →</a>
+              </div>
+            </div>
+
             <div class="closing-cta-row">
               <a href="https://github.com/jjyr/canban" target="_blank" rel="noopener noreferrer" class="star-pill is-big">
                 <svg class="gh-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
@@ -745,13 +779,6 @@
                 <span class="star-icon">★</span>
                 <span data-i18n="cta_star">Star jjyr/canban on GitHub</span>
                 <span class="star-count"></span>
-              </a>
-              <a href="{{install_url}}#mobile" class="star-pill is-big mobile-pill">
-                <svg class="mobile-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
-                  <rect x="4" y="1.5" width="8" height="13" rx="1.75"></rect>
-                  <line x1="6.75" y1="12.25" x2="9.25" y2="12.25" stroke-linecap="round"></line>
-                </svg>
-                <span data-i18n="cta_mobile">Mobile</span>
               </a>
             </div>
 

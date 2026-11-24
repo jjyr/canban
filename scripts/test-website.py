@@ -138,7 +138,7 @@ class WebsiteTest(unittest.TestCase):
                     self.assertEqual(md_alts[0]["href"], website.ORIGIN + website.md_route(lang, section))
                     self.assertEqual(page.attrs("meta", property="og:url")[0]["content"], website.ORIGIN + route)
                     self.assertEqual(page.attrs("meta", property="og:locale")[0]["content"], info["og_locale"])
-                    self.assertIsNone(re.search(r"\{\{(?:lang_switcher|(?:en|zh|install|docs|workflows|cli|guide_parallel|guide_native|guide_worktree_gc|changelog)_url)\}\}", text))
+                    self.assertIsNone(re.search(r"\{\{(?:lang_switcher|(?:en|zh|install|docs|workflows|cli|guide_parallel|guide_native|guide_worktree_gc|changelog|android_apk|obtainium)_url)\}\}", text))
                     if section not in ("docs/workflows", "guides/scheduled-worktree-cleanup"):
                         self.assertNotIn("{{", text)
                     self.assertNotIn("localStorage", text)
@@ -251,6 +251,18 @@ class WebsiteTest(unittest.TestCase):
                         self.assertEqual(set(page.ch1_links), expected_ch1)
                         hrefs = {attrs.get("href") for tag, attrs in page.elements if tag == "a"}
                         self.assertIn(f"{website.route(lang, 'install')}#mobile", hrefs, lang)
+                        self.assertIn(website.ANDROID_APK_URL, hrefs, lang)
+                        self.assertIn(website.OBTAINIUM_URL, hrefs, lang)
+                        install_tabs = [
+                            attrs.get("data-install-tab")
+                            for tag, attrs in page.elements
+                            if tag == "button" and attrs.get("data-install-tab")
+                        ]
+                        self.assertEqual(install_tabs, ["desktop", "headless", "android"], lang)
+                        self.assertNotIn("mobile-pill", text, lang)
+                        android_panel = page.attrs("div", id="closing-install-android")
+                        self.assertEqual(len(android_panel), 1, lang)
+                        self.assertIn("hidden", android_panel[0], lang)
                         self.assertFalse([img for img in page.attrs("img") if img.get("src", "").startswith("/screenshots/")])
 
                     expected_screenshots = {

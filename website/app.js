@@ -537,20 +537,48 @@
   }
 
   function setupInstallTabs() {
-    const tabs = document.querySelectorAll("[data-install-tab]");
+    const tabs = Array.from(document.querySelectorAll("[data-install-tab]"));
+    const shellEl = document.getElementById("closing-install-shell");
+    const androidEl = document.getElementById("closing-install-android");
     const cmdEl = document.getElementById("closing-install-cmd");
     const copyBtn = document.getElementById("closing-copy-btn");
 
-    tabs.forEach((tab) => {
+    const activateTab = (mode) => {
+      if (mode !== "android" && !INSTALL_COMMANDS[mode]) return;
+      activeInstallTab = mode;
+      tabs.forEach((t) =>
+        t.setAttribute("aria-selected", t.getAttribute("data-install-tab") === mode ? "true" : "false")
+      );
+      if (mode === "android") {
+        if (shellEl) shellEl.hidden = true;
+        if (androidEl) androidEl.hidden = false;
+        return;
+      }
+      if (shellEl) {
+        shellEl.hidden = false;
+        shellEl.setAttribute("aria-labelledby", `install-tab-${mode}`);
+      }
+      if (androidEl) androidEl.hidden = true;
+      if (cmdEl) cmdEl.textContent = INSTALL_COMMANDS[mode];
+      if (copyBtn) copyBtn.setAttribute("data-copy-value", INSTALL_COMMANDS[mode]);
+    };
+
+    tabs.forEach((tab, idx) => {
       tab.addEventListener("click", () => {
-        const mode = tab.getAttribute("data-install-tab");
-        if (!INSTALL_COMMANDS[mode]) return;
-        activeInstallTab = mode;
-        tabs.forEach((t) =>
-          t.setAttribute("aria-selected", t.getAttribute("data-install-tab") === mode ? "true" : "false")
-        );
-        if (cmdEl) cmdEl.textContent = INSTALL_COMMANDS[mode];
-        if (copyBtn) copyBtn.setAttribute("data-copy-value", INSTALL_COMMANDS[mode]);
+        activateTab(tab.getAttribute("data-install-tab"));
+      });
+      tab.addEventListener("keydown", (e) => {
+        if (!tabs.length) return;
+        let nextIdx = null;
+        if (e.key === "ArrowRight") nextIdx = (idx + 1) % tabs.length;
+        else if (e.key === "ArrowLeft") nextIdx = (idx - 1 + tabs.length) % tabs.length;
+        else if (e.key === "Home") nextIdx = 0;
+        else if (e.key === "End") nextIdx = tabs.length - 1;
+        if (nextIdx === null) return;
+        e.preventDefault();
+        const nextTab = tabs[nextIdx];
+        activateTab(nextTab.getAttribute("data-install-tab"));
+        nextTab.focus();
       });
     });
   }
@@ -591,7 +619,10 @@
 
     document.querySelectorAll("[data-copy-btn]").forEach((btn) => {
       btn.addEventListener("click", () => {
-        const val = btn.getAttribute("data-copy-value") || INSTALL_COMMANDS[activeInstallTab];
+        const val =
+          btn.getAttribute("data-copy-value") ||
+          INSTALL_COMMANDS[activeInstallTab] ||
+          INSTALL_COMMANDS.desktop;
         copyText(val, btn);
       });
     });

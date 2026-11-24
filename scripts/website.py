@@ -656,6 +656,8 @@ def localize_home(lang, strings):
         "guide_native_url": route(lang, "guides/native-terminal-and-multi-machine"),
         "guide_worktree_gc_url": route(lang, "guides/scheduled-worktree-cleanup"),
         "changelog_url": route(lang, "changelog"),
+        "android_apk_url": html.escape(ANDROID_APK_URL, quote=True),
+        "obtainium_url": html.escape(OBTAINIUM_URL, quote=True),
     }.items():
         body = body.replace("{{" + key + "}}", value)
     return body
@@ -1018,7 +1020,8 @@ def document(lang, page, body, strings, labels, docs_spec=None, latest_release=N
 <link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/pages.css">
 <noscript><style>.home-root{{height:auto;overflow:auto}}.home-page{{height:auto;overflow:visible}}.home-page .crt-shell{{height:auto;display:block}}
 .home-page .crt-glass{{overflow:visible}}.home-page .crt-screen{{position:relative;visibility:visible;opacity:1;pointer-events:auto}}
-.home-page .crt-topbar,.home-page .crt-bottombar{{min-height:48px}}</style></noscript>
+.home-page .crt-topbar,.home-page .crt-bottombar{{min-height:48px}}
+.home-page .install-shell-android[hidden]{{display:flex;margin-top:8px}}</style></noscript>
 </head><body class="{'home-page' if not page else 'document-page'}">
 {body}<script type="application/json" id="page-copy">{script_json({key: strings[key] for key in ('copy_label', 'copied_label')})}</script>
 <script src="/app.js" defer></script></body></html>
@@ -1051,7 +1054,7 @@ def render_home_markdown(lang, strings):
         HEADLESS,
         "```",
         "",
-        f"- **{strings['cta_mobile']}**: [{ANDROID_APK_URL}]({ORIGIN + route(lang, 'install') + '#mobile'})",
+        f"- **{strings['tab_android']} ({strings['android_meta']})**: [{strings['android_download_short']}]({ANDROID_APK_URL}) · [{strings['android_obtainium_short']}]({OBTAINIUM_URL}) · [{strings['android_guide_short']}]({ORIGIN + route(lang, 'install') + '#mobile'})",
         "",
         "## Navigation",
         "",
