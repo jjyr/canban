@@ -1,10 +1,180 @@
 //! Bounded, coalesced context discovery. Git IO never holds the product DB lock.
 use super::*;
+use canban_workspaces::context::WatchTarget;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    path::Component,
     time::Instant,
 };
+
+const STATUS_DEBOUNCE: Duration = Duration::from_millis(300);
+const STATUS_MIN_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Pure trailing-edge coalescer for Git status invalidations.
+///
+/// Debounces rapid bursts by [`STATUS_DEBOUNCE`] without starving continuous writes
+/// or dropping trailing updates inside the [`STATUS_MIN_INTERVAL`] cooldown window.
+#[derive(Clone, Debug, Default)]
+struct StatusInvalidationCoalescer {
+    last_flush: Option<Instant>,
+    pending_since: Option<Instant>,
+    due_at: Option<Instant>,
+}
+
+impl StatusInvalidationCoalescer {
+    fn record(&mut self, now: Instant) -> Instant {
+        let first = *self.pending_since.get_or_insert(now);
+        let quiet_due = now + STATUS_DEBOUNCE;
+        let max_due = first + STATUS_MIN_INTERVAL;
+        let rate_due = self
+            .last_flush
+            .map(|last| last + STATUS_MIN_INTERVAL)
+            .unwrap_or(now);
+        let due = quiet_due.min(max_due).max(rate_due);
+        self.due_at = Some(due);
+        due
+    }
+
+    fn record_immediate_flush(&mut self, now: Instant) {
+        self.last_flush = Some(now);
+        self.pending_since = None;
+        self.due_at = None;
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        self.due_at
+    }
+
+    fn poll_flush(&mut self, now: Instant) -> bool {
+        if self.due_at.is_some_and(|due| now >= due) {
+            self.last_flush = Some(now);
+            self.pending_since = None;
+            self.due_at = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn reset(&mut self) {
+        self.last_flush = None;
+        self.pending_since = None;
+        self.due_at = None;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InvalidationKind {
+    Structural,
+    Immediate,
+    Coalesced,
+}
+
+impl InvalidationKind {
+    fn upgrade(current: Option<Self>, next: Self) -> Option<Self> {
+        match (current, next) {
+            (Some(Self::Structural), _) | (_, Self::Structural) => Some(Self::Structural),
+            (Some(Self::Immediate), _) | (_, Self::Immediate) => Some(Self::Immediate),
+            (_, Self::Coalesced) => Some(Self::Coalesced),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct WatcherClassification {
+    kind: Option<InvalidationKind>,
+    new_watches: Vec<WatchTarget>,
+}
+
+fn is_ref_path(path: &Path) -> bool {
+    let normals: Vec<&std::ffi::OsStr> = path
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(name) => Some(name),
+            _ => None,
+        })
+        .collect();
+    if normals.iter().any(|name| *name == "reftable") {
+        return true;
+    }
+    normals
+        .windows(2)
+        .any(|pair| pair[0] == "refs" && (pair[1] == "heads" || pair[1] == "remotes"))
+}
+
+fn classify_watcher_paths(paths: &[PathBuf]) -> WatcherClassification {
+    let mut out = WatcherClassification::default();
+    for p in paths {
+        let name = p.file_name();
+        if name.is_some_and(|n| n == ".git") {
+            out.kind = InvalidationKind::upgrade(out.kind, InvalidationKind::Structural);
+            if p.is_dir() {
+                out.new_watches.push(WatchTarget {
+                    path: p.clone(),
+                    recursive: false,
+                });
+                let refs_dir = p.join("refs");
+                if refs_dir.is_dir() {
+                    out.new_watches.push(WatchTarget {
+                        path: refs_dir.clone(),
+                        recursive: false,
+                    });
+                    for sub in ["heads", "remotes"] {
+                        let sub_dir = refs_dir.join(sub);
+                        if sub_dir.is_dir() {
+                            out.new_watches.push(WatchTarget {
+                                path: sub_dir,
+                                recursive: true,
+                            });
+                        }
+                    }
+                }
+                let reftable_dir = p.join("reftable");
+                if reftable_dir.is_dir() {
+                    out.new_watches.push(WatchTarget {
+                        path: reftable_dir,
+                        recursive: false,
+                    });
+                }
+            }
+            continue;
+        }
+        if name.is_some_and(|n| n == "HEAD" || n == "HEAD.lock") {
+            out.kind = InvalidationKind::upgrade(out.kind, InvalidationKind::Immediate);
+            continue;
+        }
+        if is_ref_path(p)
+            || name.is_some_and(|n| {
+                n == "index"
+                    || n == "index.lock"
+                    || n == "FETCH_HEAD"
+                    || n == "ORIG_HEAD"
+                    || n == "packed-refs"
+                    || n == "packed-refs.lock"
+            })
+        {
+            out.kind = InvalidationKind::upgrade(out.kind, InvalidationKind::Coalesced);
+        }
+        if p.parent()
+            .and_then(|par| par.file_name())
+            .is_some_and(|n| n == "refs")
+            && name.is_some_and(|n| n == "heads" || n == "remotes")
+            && p.is_dir()
+        {
+            out.new_watches.push(WatchTarget {
+                path: p.clone(),
+                recursive: true,
+            });
+        } else if name.is_some_and(|n| n == "reftable") && p.is_dir() {
+            out.new_watches.push(WatchTarget {
+                path: p.clone(),
+                recursive: false,
+            });
+        }
+    }
+    out
+}
 
 #[derive(Clone)]
 struct Job {
@@ -29,9 +199,9 @@ pub(super) struct ContextQueue {
     cache: Arc<Mutex<canban_workspaces::context::ContextCache>>,
     mapping: Option<(String, Arc<Snapshot>)>,
     watcher: Option<RecommendedWatcher>,
-    watched: BTreeSet<PathBuf>,
-    pending_watches: BTreeSet<PathBuf>,
-    last_status_invalidation: Option<Instant>,
+    watched: BTreeSet<WatchTarget>,
+    pending_watches: BTreeSet<WatchTarget>,
+    coalescer: StatusInvalidationCoalescer,
 }
 impl ContextQueue {
     pub fn retain_targets(&mut self, wanted: &BTreeSet<String>) {
@@ -57,6 +227,7 @@ impl ContextQueue {
         self.cache = Default::default();
         self.mapping = None;
         self.pending_watches.clear();
+        self.coalescer.reset();
     }
 }
 fn signature(s: &Snapshot) -> String {
@@ -274,55 +445,56 @@ impl AppServer {
     pub(super) fn start_context_workers(self: &Arc<Self>) {
         let weak = Arc::downgrade(self);
         let watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-            let (head_or_git, structural, status_meta, dot_git_dirs) = match result {
-                Ok(e) if !e.kind.is_access() => {
-                    let has_name = |pred: fn(&std::ffi::OsStr) -> bool| {
-                        e.paths.iter().any(|p| p.file_name().is_some_and(pred))
-                    };
-                    let dot_git_dirs = e
-                        .paths
-                        .iter()
-                        .filter(|p| p.file_name().is_some_and(|n| n == ".git") && p.is_dir())
-                        .cloned()
-                        .collect();
-                    (
-                        has_name(|n| n == "HEAD" || n == "HEAD.lock" || n == ".git"),
-                        has_name(|n| n == ".git"),
-                        has_name(|n| {
-                            n == "index"
-                                || n == "FETCH_HEAD"
-                                || n == "ORIG_HEAD"
-                                || n == "packed-refs"
-                        }),
-                        dot_git_dirs,
-                    )
-                }
-                Ok(_) => (false, false, false, Vec::new()),
-                Err(_) => (true, true, false, Vec::new()),
+            let cls = match result {
+                Ok(e) if !e.kind.is_access() => classify_watcher_paths(&e.paths),
+                Ok(_) => return,
+                Err(_) => WatcherClassification {
+                    kind: Some(InvalidationKind::Structural),
+                    new_watches: Vec::new(),
+                },
             };
-            if !head_or_git && !status_meta {
+            if cls.kind.is_none() && cls.new_watches.is_empty() {
                 return;
             }
             if let Some(server) = weak.upgrade() {
-                let mut q = server.contexts.lock().unwrap();
-                if !head_or_git {
-                    if q.last_status_invalidation
-                        .is_some_and(|t| t.elapsed() < Duration::from_secs(5))
-                    {
-                        return;
+                let had_new_watches = !cls.new_watches.is_empty();
+                let mut wake_runtime_now = false;
+                let mut wake_worker = false;
+                {
+                    let mut q = server.contexts.lock().unwrap();
+                    q.pending_watches.extend(cls.new_watches);
+                    let now = Instant::now();
+                    match cls.kind {
+                        Some(InvalidationKind::Structural) => {
+                            q.cache = Default::default();
+                            q.results.clear();
+                            q.generation += 1;
+                            q.coalescer.record_immediate_flush(now);
+                            wake_runtime_now = true;
+                        }
+                        Some(InvalidationKind::Immediate) => {
+                            q.cache.lock().unwrap().invalidate_branches();
+                            q.results.clear();
+                            q.generation += 1;
+                            q.coalescer.record_immediate_flush(now);
+                            wake_runtime_now = true;
+                        }
+                        Some(InvalidationKind::Coalesced) => {
+                            q.coalescer.record(now);
+                            wake_worker = true;
+                        }
+                        None => {}
                     }
-                    q.last_status_invalidation = Some(Instant::now());
+                    if had_new_watches {
+                        wake_worker = true;
+                    }
                 }
-                q.pending_watches.extend(dot_git_dirs);
-                if structural {
-                    q.cache = Default::default();
-                } else {
-                    q.cache.lock().unwrap().invalidate_branches();
+                if wake_runtime_now {
+                    server.wake_runtime();
                 }
-                q.results.clear();
-                q.generation += 1;
-                drop(q);
-                server.wake_runtime();
+                if wake_worker {
+                    server.context_notify.notify_one();
+                }
             }
         })
         .ok();
@@ -337,6 +509,7 @@ impl AppServer {
         q.generation += 1;
         q.results.clear();
         q.cache.lock().unwrap().invalidate_branches();
+        q.coalescer.record_immediate_flush(Instant::now());
         drop(q);
         self.wake_runtime();
     }
@@ -345,6 +518,7 @@ impl AppServer {
         q.generation += 1;
         q.results.clear();
         q.cache = Default::default();
+        q.coalescer.record_immediate_flush(Instant::now());
         drop(q);
         self.wake_runtime();
     }
@@ -379,6 +553,27 @@ impl AppServer {
     }
 }
 
+enum WorkerStep {
+    More,
+    Wait(Option<Duration>),
+}
+
+fn register_watch_target(q: &mut ContextQueue, target: WatchTarget) {
+    if !q.watched.insert(target.clone()) {
+        return;
+    }
+    if let Some(w) = &mut q.watcher {
+        let mode = if target.recursive {
+            RecursiveMode::Recursive
+        } else {
+            RecursiveMode::NonRecursive
+        };
+        if let Err(e) = w.watch(&target.path, mode) {
+            eprintln!("Canban context watcher {}: {e}", target.path.display());
+        }
+    }
+}
+
 async fn context_worker_loop(
     weak: std::sync::Weak<AppServer>,
     notify: Arc<tokio::sync::Notify>,
@@ -391,16 +586,18 @@ async fn context_worker_loop(
             if server.stopped() {
                 return None;
             }
+            let mut wake_runtime = false;
             let next = {
                 let mut q = server.contexts.lock().unwrap();
                 let pending_watches = std::mem::take(&mut q.pending_watches);
-                for path in pending_watches {
-                    if q.watched.insert(path.clone())
-                        && let Some(w) = &mut q.watcher
-                        && let Err(e) = w.watch(&path, RecursiveMode::NonRecursive)
-                    {
-                        eprintln!("Canban context watcher {}: {e}", path.display());
-                    }
+                for target in pending_watches {
+                    register_watch_target(&mut q, target);
+                }
+                if q.coalescer.poll_flush(Instant::now()) {
+                    q.cache.lock().unwrap().invalidate_branches();
+                    q.results.clear();
+                    q.generation += 1;
+                    wake_runtime = true;
                 }
                 if !q.running
                     && let Some(key) = q.pending.keys().next().cloned()
@@ -408,13 +605,27 @@ async fn context_worker_loop(
                     let job = q.pending.remove(&key).unwrap();
                     q.running = true;
                     let cache = q.cache.clone();
-                    Some((key, job, cache))
+                    Ok((key, job, cache))
                 } else {
-                    None
+                    let wait = q
+                        .coalescer
+                        .next_deadline()
+                        .map(|due| due.saturating_duration_since(Instant::now()));
+                    Err(wait)
                 }
             };
-            let Some((key, job, cache)) = next else {
-                return Some(false);
+            let (key, job, cache) = match next {
+                Ok(work) => work,
+                Err(wait) => {
+                    if wake_runtime {
+                        server.wake_runtime();
+                    }
+                    return Some(if wait == Some(Duration::ZERO) {
+                        WorkerStep::More
+                    } else {
+                        WorkerStep::Wait(wait)
+                    });
+                }
             };
             let permit = server.check();
             let result = server.ops().directory_context_full_cached(
@@ -474,27 +685,34 @@ async fn context_worker_loop(
                     contexts.retain(|c| c.terminal_id != context.terminal_id);
                     contexts.push(context);
                 }
-                for path in cache.lock().unwrap().watch_paths() {
-                    if q.watched.insert(path.clone())
-                        && let Some(w) = &mut q.watcher
-                        && let Err(e) = w.watch(&path, RecursiveMode::NonRecursive)
-                    {
-                        eprintln!("Canban context watcher {}: {e}", path.display());
-                    }
+                let watch_targets = cache.lock().unwrap().watch_targets();
+                for target in watch_targets {
+                    register_watch_target(&mut q, target);
                 }
             }
             let more = !q.pending.is_empty();
+            let wait = q
+                .coalescer
+                .next_deadline()
+                .map(|due| due.saturating_duration_since(Instant::now()));
             drop(q);
+            if wake_runtime {
+                server.wake_runtime();
+            }
             if changed {
                 server.emit("terminals", None);
             }
-            Some(more)
+            Some(if more || wait == Some(Duration::ZERO) {
+                WorkerStep::More
+            } else {
+                WorkerStep::Wait(wait)
+            })
         })
         .await;
         match worked {
-            Ok(Some(true)) => continue,
-            Ok(Some(false)) => {
-                if !AppServer::wait_or_stop(&notify, &mut stop_rx, None).await {
+            Ok(Some(WorkerStep::More)) => continue,
+            Ok(Some(WorkerStep::Wait(timeout))) => {
+                if !AppServer::wait_or_stop(&notify, &mut stop_rx, timeout).await {
                     break;
                 }
             }
@@ -533,5 +751,271 @@ mod tests {
             j.join().unwrap();
         }
         assert!(!*app.check_slots.lock().unwrap());
+    }
+
+    #[test]
+    fn coalescer_debounces_bursts_preserves_trailing_event_and_prevents_starvation() {
+        let t0 = Instant::now();
+        let mut c = StatusInvalidationCoalescer::default();
+
+        // Single event flushes after STATUS_DEBOUNCE (300ms).
+        assert_eq!(c.record(t0), t0 + STATUS_DEBOUNCE);
+        assert!(!c.poll_flush(t0 + STATUS_DEBOUNCE - Duration::from_millis(1)));
+        assert!(c.poll_flush(t0 + STATUS_DEBOUNCE));
+        assert_eq!(c.next_deadline(), None);
+
+        // Cooldown follow-up (`git push` right after `git commit` flush) is scheduled, not dropped.
+        let t1 = t0 + STATUS_DEBOUNCE;
+        let follow = t1 + Duration::from_millis(400);
+        assert_eq!(c.record(follow), t1 + STATUS_MIN_INTERVAL);
+        assert!(!c.poll_flush(t1 + STATUS_MIN_INTERVAL - Duration::from_millis(1)));
+        assert!(c.poll_flush(t1 + STATUS_MIN_INTERVAL));
+        assert_eq!(c.next_deadline(), None);
+
+        // Burst debounce shifts deadline cleanly until quiet.
+        let b0 = t1 + STATUS_MIN_INTERVAL + Duration::from_secs(5);
+        assert_eq!(c.record(b0), b0 + STATUS_DEBOUNCE);
+        let b1 = b0 + Duration::from_millis(150);
+        assert_eq!(c.record(b1), b1 + STATUS_DEBOUNCE);
+        assert!(!c.poll_flush(b1 + STATUS_DEBOUNCE - Duration::from_millis(1)));
+        assert!(c.poll_flush(b1 + STATUS_DEBOUNCE));
+
+        // Continuous writes every 100ms for 5s never starve and still flush a trailing event.
+        let churn_start = b1 + STATUS_MIN_INTERVAL + Duration::from_secs(5);
+        let mut flushes = Vec::new();
+        for step in 0..=50u64 {
+            let now = churn_start + Duration::from_millis(step * 100);
+            if c.poll_flush(now) {
+                flushes.push(now);
+            }
+            c.record(now);
+        }
+        assert!(
+            flushes.len() >= 2,
+            "expected periodic flushes during churn: {flushes:?}"
+        );
+        let settle = churn_start + Duration::from_millis(5000) + STATUS_MIN_INTERVAL;
+        assert!(c.poll_flush(settle));
+        assert_eq!(c.next_deadline(), None);
+
+        // Immediate flush cancels any pending coalesced deadline and resets cooldown baseline.
+        let t_imm = settle + Duration::from_secs(1);
+        c.record(t_imm);
+        c.record_immediate_flush(t_imm + Duration::from_millis(50));
+        assert_eq!(c.next_deadline(), None);
+        assert_eq!(
+            c.record(t_imm + Duration::from_millis(100)),
+            t_imm + Duration::from_millis(50) + STATUS_MIN_INTERVAL
+        );
+    }
+
+    #[test]
+    fn classify_watcher_paths_handles_refs_worktrees_dynamic_remotes_and_ignores_noise() {
+        let dir = tempfile::tempdir().unwrap();
+        let dot_git = dir.path().join(".git");
+        let refs_heads = dot_git.join("refs/heads");
+        let refs_remotes = dot_git.join("refs/remotes");
+        let reftable = dot_git.join("reftable");
+        std::fs::create_dir_all(&refs_heads).unwrap();
+        std::fs::create_dir_all(&refs_remotes).unwrap();
+        std::fs::create_dir_all(&reftable).unwrap();
+
+        let cls_git = classify_watcher_paths(std::slice::from_ref(&dot_git));
+        assert_eq!(cls_git.kind, Some(InvalidationKind::Structural));
+        assert!(cls_git.new_watches.contains(&WatchTarget {
+            path: refs_heads.clone(),
+            recursive: true,
+        }));
+        assert!(cls_git.new_watches.contains(&WatchTarget {
+            path: refs_remotes.clone(),
+            recursive: true,
+        }));
+        assert!(cls_git.new_watches.contains(&WatchTarget {
+            path: reftable.clone(),
+            recursive: false,
+        }));
+
+        assert_eq!(
+            classify_watcher_paths(&[dot_git.join("HEAD")]).kind,
+            Some(InvalidationKind::Immediate)
+        );
+        assert_eq!(
+            classify_watcher_paths(&[dot_git.join("HEAD.lock")]).kind,
+            Some(InvalidationKind::Immediate)
+        );
+        for rel in [
+            "index",
+            "index.lock",
+            "FETCH_HEAD",
+            "ORIG_HEAD",
+            "packed-refs",
+            "packed-refs.lock",
+            "refs/heads/main",
+            "refs/heads/feat/x.lock",
+            "refs/remotes/origin/main",
+            "refs/remotes/origin",
+            "reftable/tables.list",
+        ] {
+            let p = dot_git.join(rel);
+            assert_eq!(
+                classify_watcher_paths(&[p]).kind,
+                Some(InvalidationKind::Coalesced),
+                "expected Coalesced for {rel}"
+            );
+        }
+
+        // Dynamic `refs/remotes` directory creation yields a new recursive watch.
+        let dyn_cls = classify_watcher_paths(std::slice::from_ref(&refs_remotes));
+        assert_eq!(dyn_cls.kind, Some(InvalidationKind::Coalesced));
+        assert_eq!(
+            dyn_cls.new_watches,
+            vec![WatchTarget {
+                path: refs_remotes,
+                recursive: true,
+            }]
+        );
+
+        // Unwatched noise must not trigger invalidations.
+        for noise in [
+            dot_git.join("refs/tags/v1"),
+            dot_git.join("objects/ab/1234"),
+            dir.path().join("src/main.rs"),
+        ] {
+            let cls = classify_watcher_paths(&[noise]);
+            assert_eq!(cls.kind, None);
+            assert!(cls.new_watches.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn watcher_refreshes_ahead_after_external_git_commit_and_push_without_rpc() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let remote = base.join("remote.git");
+        let repo = base.join("repo");
+        let home = base.join("canban-home");
+        std::fs::create_dir_all(&remote).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let git_ok = |cwd: &Path, args: &[&str]| {
+            let out = canban_exec::raw_command("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap_or_else(|e| panic!("failed to run git {args:?} in {}: {e}", cwd.display()));
+            assert!(
+                out.status.success(),
+                "git {args:?} failed in {}: {}",
+                cwd.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git_ok(&remote, &["init", "--bare", "-b", "main"]);
+        git_ok(&repo, &["init", "-b", "main"]);
+        let commit_env = [
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+        ];
+        let mut init_commit = commit_env.to_vec();
+        init_commit.extend(["commit", "--allow-empty", "-m", "Initial"]);
+        git_ok(&repo, &init_commit);
+        git_ok(
+            &repo,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git_ok(&repo, &["push", "-u", "origin", "main"]);
+
+        let app = AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
+        let wake = Arc::new(tokio::sync::Notify::new());
+        *app.runtime_handle.lock().unwrap() = Some(tokio::runtime::Handle::current());
+        *app.runtime_wake.lock().unwrap() = Some(wake.clone());
+        app.start_context_workers();
+
+        let snap = Arc::new(Snapshot::default());
+        let repo_str = repo.to_str().unwrap().to_owned();
+        let term_val = json!({"cwd": repo_str});
+        app.queue_context(&snap, "t1", "c1", "pty1", &term_val);
+
+        let refs_heads_watch = WatchTarget {
+            path: repo.join(".git/refs/heads"),
+            recursive: true,
+        };
+        let refs_remotes_watch = WatchTarget {
+            path: repo.join(".git/refs/remotes"),
+            recursive: true,
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let ready_ctx = app.cached_context("t1", "c1", "pty1", Some(&repo_str));
+            let watched_ok = {
+                let q = app.contexts.lock().unwrap();
+                q.watched.contains(&refs_heads_watch) && q.watched.contains(&refs_remotes_watch)
+            };
+            if let Some(ctx) = ready_ctx
+                && ctx.ahead == 0
+                && ctx.behind == 0
+                && watched_ok
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for initial context and ref watches"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        // Wait until any initial watch registration noise settles cleanly, then commit externally.
+        let mut next_commit = commit_env.to_vec();
+        next_commit.extend(["commit", "--allow-empty", "-m", "Local commit"]);
+        git_ok(&repo, &next_commit);
+
+        let commit_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            app.queue_context(&snap, "t1", "c1", "pty1", &term_val);
+            if app
+                .cached_context("t1", "c1", "pty1", Some(&repo_str))
+                .is_some_and(|ctx| ctx.ahead == 1 && ctx.behind == 0)
+            {
+                break;
+            }
+            let remaining = commit_deadline
+                .checked_duration_since(Instant::now())
+                .expect("timed out waiting for external git commit ahead=1");
+            tokio::select! {
+                _ = wake.notified() => {}
+                _ = tokio::time::sleep(remaining.min(Duration::from_millis(100))) => {}
+            }
+        }
+
+        // Immediately run `git push` inside the 2s cooldown window: trailing coalescer must still update ahead -> 0.
+        git_ok(&repo, &["push", "origin", "main"]);
+        let push_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            app.queue_context(&snap, "t1", "c1", "pty1", &term_val);
+            if app
+                .cached_context("t1", "c1", "pty1", Some(&repo_str))
+                .is_some_and(|ctx| ctx.ahead == 0 && ctx.behind == 0)
+            {
+                break;
+            }
+            let remaining = push_deadline
+                .checked_duration_since(Instant::now())
+                .expect("timed out waiting for external git push ahead=0");
+            tokio::select! {
+                _ = wake.notified() => {}
+                _ = tokio::time::sleep(remaining.min(Duration::from_millis(100))) => {}
+            }
+        }
+
+        app.trigger_stop();
+        *app.runtime_handle.lock().unwrap() = None;
     }
 }

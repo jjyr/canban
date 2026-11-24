@@ -157,6 +157,12 @@ pub fn parse_porcelain_v2_branch(stdout: &str) -> GitStatus {
     status
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct WatchTarget {
+    pub path: PathBuf,
+    pub recursive: bool,
+}
+
 #[derive(Default)]
 pub struct ContextCache {
     paths: BTreeMap<String, Value>,
@@ -170,34 +176,57 @@ impl ContextCache {
     pub fn invalidate_statuses(&mut self) {
         self.statuses.clear();
     }
-    pub fn watch_paths(&self) -> Vec<PathBuf> {
-        let mut out: Vec<PathBuf> = self
-            .paths
-            .values()
-            .flat_map(|v| {
-                let mut paths: Vec<PathBuf> = [
-                    v["git_dir"].as_str(),
-                    v["repo"].as_str(),
-                    v["path"].as_str(),
-                ]
-                .into_iter()
-                .flatten()
-                .map(PathBuf::from)
-                .collect();
-                if v["git_dir"].is_null()
-                    && let Some(p) = v["path"].as_str()
-                {
-                    let dot_git = Path::new(p).join(".git");
-                    if dot_git.is_dir() {
-                        paths.push(dot_git);
+    pub fn watch_targets(&self) -> Vec<WatchTarget> {
+        let mut by_path: BTreeMap<PathBuf, bool> = BTreeMap::new();
+        let mut insert = |path: PathBuf, recursive: bool| {
+            by_path
+                .entry(path)
+                .and_modify(|existing| *existing |= recursive)
+                .or_insert(recursive);
+        };
+        for v in self.paths.values() {
+            for key in ["git_dir", "repo", "path"] {
+                if let Some(p) = v[key].as_str() {
+                    insert(PathBuf::from(p), false);
+                }
+            }
+            if v["git_dir"].is_null()
+                && let Some(p) = v["path"].as_str()
+            {
+                let dot_git = Path::new(p).join(".git");
+                if dot_git.is_dir() {
+                    insert(dot_git, false);
+                }
+            }
+            if let Some(repo) = v["repo"].as_str() {
+                let repo_path = Path::new(repo);
+                let refs_dir = repo_path.join("refs");
+                if refs_dir.is_dir() {
+                    // Non-recursive watch on `refs/` catches newly created `refs/remotes` on first push.
+                    insert(refs_dir.clone(), false);
+                    for sub in ["heads", "remotes"] {
+                        let sub_dir = refs_dir.join(sub);
+                        if sub_dir.is_dir() {
+                            insert(sub_dir, true);
+                        }
                     }
                 }
-                paths
-            })
-            .collect();
-        out.sort();
-        out.dedup();
-        out
+                let reftable_dir = repo_path.join("reftable");
+                if reftable_dir.is_dir() {
+                    insert(reftable_dir, false);
+                }
+            }
+        }
+        by_path
+            .into_iter()
+            .map(|(path, recursive)| WatchTarget { path, recursive })
+            .collect()
+    }
+    pub fn watch_paths(&self) -> Vec<PathBuf> {
+        self.watch_targets()
+            .into_iter()
+            .map(|target| target.path)
+            .collect()
     }
 }
 
@@ -969,5 +998,101 @@ mod cache_tests {
         let zero_ctx = ops.directory_context_full(&Snapshot::default(), repo.to_str().unwrap());
         assert!(zero_ctx.dirty);
         assert_eq!((zero_ctx.additions, zero_ctx.deletions), (0, 0));
+    }
+
+    #[test]
+    fn watch_targets_cover_refs_heads_and_remotes_across_worktrees_without_objects_or_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let remote = dir.path().join("remote.git");
+        let source = dir.path().join("repo");
+        std::fs::create_dir(&remote).unwrap();
+        std::fs::create_dir(&source).unwrap();
+        checked(&remote, &["init", "--bare", "-b", "main"]).unwrap();
+        checked(&source, &["init", "-b", "main"]).unwrap();
+        checked(
+            &source,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "Initial",
+            ],
+        )
+        .unwrap();
+        checked(&source, &["tag", "v1"]).unwrap();
+        checked(
+            &source,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        )
+        .unwrap();
+        checked(&source, &["push", "-u", "origin", "main"]).unwrap();
+
+        let wt_path = dir.path().join("wt-feature");
+        checked(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat/watch",
+                wt_path.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let ops = Ops::local();
+        let mut cache = ContextCache::default();
+        let s = Snapshot::default();
+        ops.directory_context_full_cached(&s, source.to_str().unwrap(), &mut cache)
+            .unwrap();
+        ops.directory_context_full_cached(&s, wt_path.to_str().unwrap(), &mut cache)
+            .unwrap();
+
+        let common_git = source.canonicalize().unwrap().join(".git");
+        let targets = cache.watch_targets();
+        assert_eq!(
+            targets
+                .iter()
+                .filter(|t| t.path == common_git.join("refs"))
+                .collect::<Vec<_>>(),
+            vec![&WatchTarget {
+                path: common_git.join("refs"),
+                recursive: false,
+            }]
+        );
+        assert_eq!(
+            targets
+                .iter()
+                .filter(|t| t.path == common_git.join("refs/heads"))
+                .collect::<Vec<_>>(),
+            vec![&WatchTarget {
+                path: common_git.join("refs/heads"),
+                recursive: true,
+            }]
+        );
+        assert_eq!(
+            targets
+                .iter()
+                .filter(|t| t.path == common_git.join("refs/remotes"))
+                .collect::<Vec<_>>(),
+            vec![&WatchTarget {
+                path: common_git.join("refs/remotes"),
+                recursive: true,
+            }]
+        );
+        assert!(
+            !targets
+                .iter()
+                .any(|t| t.path.ends_with("objects") || t.path.ends_with("tags")),
+            "watch targets must exclude objects/tags: {targets:?}"
+        );
     }
 }
