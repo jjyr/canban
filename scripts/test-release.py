@@ -180,6 +180,8 @@ class Releases(unittest.TestCase):
         self.assertNotIn('actions/checkout@v4',content)
         self.assertNotIn('jdx/mise-action@v2',content)
         self.assertNotIn('actions/upload-artifact@v4',content)
+        self.assertNotIn('actions/setup-java@v4',content)
+        self.assertIn('actions/setup-java@v5',content)
         self.assertNotIn('get.nexte.st/latest',content)
         self.assertIn('cargo-nextest',mise_content)
         self.assertIn('cargo nextest run --workspace --locked',mise_content)
