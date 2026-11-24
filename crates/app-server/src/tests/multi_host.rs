@@ -11,6 +11,7 @@ fn tcp_listener_probe_token_auth_and_diagnostics_work_end_to_end() {
         port: 0,
         listen: Some("127.0.0.1:0".into()),
         allow_insecure_bind: false,
+        trust_tailscale_self: true,
     };
     let running = app.start_with_listen(Some(listen)).unwrap();
     let bound = app.bound_tcp_addrs();
@@ -110,6 +111,7 @@ fn host_registry_merges_multi_host_routes_mutations_caches_offline_and_recovers(
             port: 0,
             listen: Some("127.0.0.1:0".into()),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         }))
         .unwrap();
     let local_tcp_addr = local_app.bound_tcp_addrs()[0].clone();
@@ -142,6 +144,7 @@ fn host_registry_merges_multi_host_routes_mutations_caches_offline_and_recovers(
             port: 0,
             listen: Some("127.0.0.1:0".into()),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         }))
         .unwrap();
     let remote_addr = remote_app.bound_tcp_addrs()[0].clone();
@@ -489,6 +492,7 @@ fn host_registry_merges_multi_host_routes_mutations_caches_offline_and_recovers(
             port: remote_port,
             listen: Some(format!("127.0.0.1:{remote_port}")),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         }))
         .unwrap();
 
@@ -593,6 +597,7 @@ fn host_registry_detects_same_field_conflict_and_resolves_via_use_mine() {
             port: 0,
             listen: Some("127.0.0.1:0".into()),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         }))
         .unwrap();
     let remote_addr = remote_app.bound_tcp_addrs()[0].clone();
@@ -660,6 +665,7 @@ fn host_registry_detects_same_field_conflict_and_resolves_via_use_mine() {
             port: remote_port,
             listen: Some(format!("127.0.0.1:{remote_port}")),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         }))
         .unwrap();
 
@@ -742,6 +748,7 @@ fn remote_host_push_updates_merged_snapshot_without_polling_and_detects_disconne
             port: 0,
             listen: Some("127.0.0.1:0".into()),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         }))
         .unwrap();
     let remote_addr = remote_app.bound_tcp_addrs()[0].clone();
@@ -907,6 +914,7 @@ fn stalled_remote_host_does_not_block_healthy_remote_host_push_updates() {
             port: 0,
             listen: Some("127.0.0.1:0".into()),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         }))
         .unwrap();
     let remote_addr = remote_app.bound_tcp_addrs()[0].clone();
@@ -1011,6 +1019,7 @@ fn host_registry_lifecycle_closes_remote_push_connections_and_forwards_local_sid
             port: 0,
             listen: Some("127.0.0.1:0".into()),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         }))
         .unwrap();
     let remote_addr = remote_app.bound_tcp_addrs()[0].clone();
@@ -1615,6 +1624,7 @@ fn single_tcp_yamux_multiplexes_rpc_subscribe_and_multiple_herdr_relays() {
             port: 0,
             listen: Some("127.0.0.1:0".into()),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         }))
         .unwrap();
     let remote_addr = remote_app.bound_tcp_addrs()[0].clone();
@@ -1770,6 +1780,7 @@ fn revoking_paired_device_immediately_disconnects_mux_session_and_relays() {
             port: 0,
             listen: Some("127.0.0.1:0".into()),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         }))
         .unwrap();
     let addr = remote_app.bound_tcp_addrs()[0].clone();
@@ -1830,6 +1841,7 @@ fn pairing_code_and_legacy_server_token_upgrade_persist_in_hosts_json_and_remove
             port: 0,
             listen: Some("127.0.0.1:0".into()),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         }))
         .unwrap();
     let legacy_addr = legacy_app.bound_tcp_addrs()[0].clone();
@@ -1843,6 +1855,7 @@ fn pairing_code_and_legacy_server_token_upgrade_persist_in_hosts_json_and_remove
             port: 0,
             listen: Some("127.0.0.1:0".into()),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         }))
         .unwrap();
     let invite_addr = invite_app.bound_tcp_addrs()[0].clone();
@@ -1943,6 +1956,7 @@ fn global_env_replicates_via_outbox_with_coalescing_tombstones_lww_and_zero_plai
             port: 0,
             listen: Some("127.0.0.1:0".into()),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         }))
         .unwrap();
     let remote_addr = remote_app.bound_tcp_addrs()[0].clone();
@@ -2034,6 +2048,7 @@ fn global_env_replicates_via_outbox_with_coalescing_tombstones_lww_and_zero_plai
             port: 0,
             listen: Some("127.0.0.1:0".into()),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         }))
         .unwrap();
     let remote2_addr = remote2_app.bound_tcp_addrs()[0].clone();
@@ -2220,6 +2235,7 @@ fn global_env_replicates_via_outbox_with_coalescing_tombstones_lww_and_zero_plai
             port: remote_port,
             listen: Some(format!("127.0.0.1:{remote_port}")),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         }))
         .unwrap();
     registry.reconnect(Some("home-linux"));
@@ -2345,6 +2361,7 @@ fn remote_agent_and_project_env_save_seal_over_tcp_and_isolate_across_hosts() {
             port: 0,
             listen: Some("127.0.0.1:0".into()),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         }))
         .unwrap();
     let remote_addr = remote_app.bound_tcp_addrs()[0].clone();
@@ -2357,6 +2374,7 @@ fn remote_agent_and_project_env_save_seal_over_tcp_and_isolate_across_hosts() {
             port: 0,
             listen: Some("127.0.0.1:0".into()),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         }))
         .unwrap();
     let legacy_addr = legacy_app.bound_tcp_addrs()[0].clone();
@@ -2545,4 +2563,98 @@ fn remote_agent_and_project_env_save_seal_over_tcp_and_isolate_across_hosts() {
         leg_resolved.env.get("UPGRADED_SEC").map(String::as_str),
         Some("upgraded_dev_secret_777")
     );
+}
+
+#[test]
+fn tailscale_verifier_and_discovery_rpc_work_on_app_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let home_a = dir.path().join("home-a");
+    let home_b = dir.path().join("home-b");
+
+    let app_b = AppServer::open(home_b, PathBuf::from("/bin/echo")).unwrap();
+    let _run_b = app_b
+        .start_with_listen(Some(ServerListenConfig {
+            tailscale: false,
+            port: 0,
+            listen: Some("127.0.0.1:0".into()),
+            allow_insecure_bind: false,
+            trust_tailscale_self: true,
+        }))
+        .unwrap();
+    let addr_b = app_b.bound_tcp_addrs()[0].clone();
+
+    let dead_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let dead_addr = dead_listener.local_addr().unwrap().to_string();
+    drop(dead_listener);
+
+    let hosts_file = HostsFile {
+        hosts: vec![
+            SavedHost {
+                id: "b-live".into(),
+                name: "Live Server B".into(),
+                transport: HostTransport::Tcp {
+                    addr: addr_b.clone(),
+                    token: "dev_unused".into(),
+                },
+                ssh_target: None,
+                server_id: Some(app_b.server_id().to_owned()),
+                enabled: true,
+                added_at: 1,
+            },
+            SavedHost {
+                id: "c-dead".into(),
+                name: "Unreachable Host".into(),
+                transport: HostTransport::Tcp {
+                    addr: dead_addr,
+                    token: "dev_unused".into(),
+                },
+                ssh_target: None,
+                server_id: None,
+                enabled: true,
+                added_at: 2,
+            },
+        ],
+    };
+    std::fs::create_dir_all(home_a.join("config")).unwrap();
+    std::fs::write(
+        home_a.join("config/hosts.json"),
+        serde_json::to_vec_pretty(&hosts_file).unwrap(),
+    )
+    .unwrap();
+
+    let app_a = AppServer::open(home_a, PathBuf::from("/bin/echo")).unwrap();
+    struct AllowAll;
+    impl canban_transport::TailscalePeerVerifier for AllowAll {
+        fn verify_peer(
+            &self,
+            _peer_addr: std::net::SocketAddr,
+        ) -> Option<canban_transport::TailscalePeerIdentity> {
+            Some(canban_transport::TailscalePeerIdentity {
+                node_id: "nDesktop01".into(),
+                device_name: "Studio Desktop".into(),
+                login_name: "jjy@example.com".into(),
+            })
+        }
+    }
+    app_a.set_tailscale_verifier(Some(Arc::new(AllowAll)));
+    let _run_a = app_a
+        .start_with_listen(Some(ServerListenConfig {
+            tailscale: false,
+            port: 0,
+            listen: Some("127.0.0.1:0".into()),
+            allow_insecure_bind: false,
+            trust_tailscale_self: true,
+        }))
+        .unwrap();
+    let addr_a = app_a.bound_tcp_addrs()[0].clone();
+
+    let client = AppClient::connect_tcp(addr_a, TAILSCALE_AUTH_SENTINEL.into()).unwrap();
+    assert_eq!(client.upgraded_token(), None);
+    let discovered = client.call("host.discover_canban", json!({})).unwrap();
+    let items: Vec<DiscoveredCanbanHost> =
+        serde_json::from_value(discovered["hosts"].clone()).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].addr, addr_b);
+    assert_eq!(items[0].name, "Live Server B");
+    assert!(items[0].linked_on_host);
 }

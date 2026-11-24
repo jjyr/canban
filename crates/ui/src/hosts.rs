@@ -1653,17 +1653,40 @@ fn connect_tailscale_tab(
                                 let res = blocking(move || {
                                     #[cfg(feature = "local-host")]
                                     {
+                                        let direct_addr = format!("{ip_c}:{DEFAULT_DAEMON_PORT}");
                                         let probe = canban_app_server::network::probe_tcp_reachable(
-                                            &format!("{ip_c}:{DEFAULT_DAEMON_PORT}"),
+                                            &direct_addr,
                                             Duration::from_secs(2),
                                         );
-                                        let ssh_pair =
+                                        let pair_res = if probe.is_ok() {
+                                            match canban_app_server::AppClient::connect_tcp(
+                                                direct_addr.clone(),
+                                                TAILSCALE_AUTH_SENTINEL.into(),
+                                            ) {
+                                                Ok(client) => {
+                                                    let sid = client.server_id().map(str::to_owned);
+                                                    drop(client);
+                                                    Ok(json!({
+                                                        "addr": direct_addr,
+                                                        "token": TAILSCALE_AUTH_SENTINEL,
+                                                        "server_id": sid,
+                                                        "via": "tailscale_whois",
+                                                    }))
+                                                }
+                                                Err(_) => canban_app_server::network::pair_via_ssh_noninteractive(
+                                                    &ssh_c,
+                                                    true,
+                                                    DEFAULT_DAEMON_PORT,
+                                                ),
+                                            }
+                                        } else {
                                             canban_app_server::network::pair_via_ssh_noninteractive(
                                                 &ssh_c,
                                                 true,
                                                 DEFAULT_DAEMON_PORT,
-                                            );
-                                        (probe, ssh_pair)
+                                            )
+                                        };
+                                        (probe, pair_res)
                                     }
                                     #[cfg(not(feature = "local-host"))]
                                     {
@@ -1694,13 +1717,15 @@ fn connect_tailscale_tab(
                                                 .unwrap_or_else(|| {
                                                     format!("{peer_ip}:{DEFAULT_DAEMON_PORT}")
                                                 });
+                                            let via_ts = paired.get("via").and_then(|v| v.as_str())
+                                                == Some("tailscale_whois");
                                             finish_host_registration(
                                                 ui,
                                                 SavedHost {
                                                     id: sanitize_host_id(&peer_name),
                                                     name: peer_name,
                                                     transport: HostTransport::Tcp { addr, token },
-                                                    ssh_target: Some(ssh_spec),
+                                                    ssh_target: (!via_ts).then_some(ssh_spec),
                                                     server_id: paired["server_id"]
                                                         .as_str()
                                                         .map(str::to_owned),
@@ -3171,6 +3196,7 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
         } else {
             let count = state.devices.len();
             for (idx, dev) in state.devices.into_iter().enumerate() {
+                let is_tailscale = dev.auth_kind == "tailscale";
                 let rev_id = dev.id.clone();
                 let rev_name = dev.name.clone();
                 let dot_color = if dev.last_seen_at.is_some() {
@@ -3182,6 +3208,45 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
                     .last_seen_at
                     .map(|ts| format!("Last seen {}", format_relative_age(ts)))
                     .unwrap_or_else(|| "Pending first connection".into());
+                let meta_line = if is_tailscale {
+                    format!("Tailscale · {seen_text}")
+                } else {
+                    format!("Paired {} · {seen_text}", format_relative_age(dev.created_at))
+                };
+                let trailing: AnyElement = if is_tailscale {
+                    muted("Managed in Tailscale Admin")
+                        .text_size(px(11.5))
+                        .into_element()
+                } else {
+                    compact_action("Revoke", Variant::Danger, move |_| {
+                        let did = rev_id.clone();
+                        let dname = rev_name.clone();
+                        if !crate::backend::is_connected() {
+                            ui.paired_devices_preview.update(|slot| {
+                                if let Some(p) = slot.as_mut() {
+                                    p.devices.retain(|d| d.id != did);
+                                }
+                            });
+                            return;
+                        }
+                        let did_rpc = did.clone();
+                        run_device_rpc(
+                            ui,
+                            devices_busy,
+                            devices_err,
+                            "device.revoke",
+                            json!({"device_id": did_rpc}),
+                            move |_| {
+                                update_paired_devices(devices_live, |cur| {
+                                    cur.devices.retain(|d| d.id != did);
+                                });
+                                ui.notify(format!("Revoked device {dname}"));
+                            },
+                        );
+                    })
+                    .disabled(move || devices_busy.get())
+                    .into_element()
+                };
                 let mut row = view()
                     .px_3p5()
                     .py_3()
@@ -3202,40 +3267,13 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
                                     .min_w(px(0.))
                                     .child(live_dot(dot_color))
                                     .child(label(dev.name).font_weight(FontWeight::SEMIBOLD))
+                                    .children(is_tailscale.then(|| badge("Tailscale")))
                                     .child(badge(dev.id)),
                             )
-                            .child(
-                                compact_action("Revoke", Variant::Danger, move |_| {
-                                    let did = rev_id.clone();
-                                    let dname = rev_name.clone();
-                                    if !crate::backend::is_connected() {
-                                        ui.paired_devices_preview.update(|slot| {
-                                            if let Some(p) = slot.as_mut() {
-                                                p.devices.retain(|d| d.id != did);
-                                            }
-                                        });
-                                        return;
-                                    }
-                                    let did_rpc = did.clone();
-                                    run_device_rpc(
-                                        ui,
-                                        devices_busy,
-                                        devices_err,
-                                        "device.revoke",
-                                        json!({"device_id": did_rpc}),
-                                        move |_| {
-                                            update_paired_devices(devices_live, |cur| {
-                                                cur.devices.retain(|d| d.id != did);
-                                            });
-                                            ui.notify(format!("Revoked device {dname}"));
-                                        },
-                                    );
-                                })
-                                .disabled(move || devices_busy.get()),
-                            ),
+                            .child(trailing),
                     )
                     .child(
-                        muted(format!("Paired {} · {seen_text}", format_relative_age(dev.created_at)))
+                        muted(meta_line)
                             .font_family(MONO_FONT)
                             .text_size(px(11.5)),
                     );
@@ -3716,12 +3754,21 @@ mod tests {
                         name: "Work MacBook Pro".into(),
                         created_at: canban_types::now().saturating_sub(3_600_000),
                         last_seen_at: Some(canban_types::now().saturating_sub(120_000)),
+                        auth_kind: String::new(),
                     },
                     PairedDevice {
                         id: "dev-iphone".into(),
                         name: "iPhone 17".into(),
                         created_at: canban_types::now().saturating_sub(300_000),
                         last_seen_at: None,
+                        auth_kind: String::new(),
+                    },
+                    PairedDevice {
+                        id: "ts:nPixel01".into(),
+                        name: "Pixel 9".into(),
+                        created_at: canban_types::now().saturating_sub(60_000),
+                        last_seen_at: Some(canban_types::now().saturating_sub(5_000)),
+                        auth_kind: "tailscale".into(),
                     },
                 ],
                 has_legacy_token: true,
@@ -3742,6 +3789,9 @@ mod tests {
         assert!(texts.iter().any(|t| t == "Paired Devices"));
         assert!(texts.iter().any(|t| t == "Work MacBook Pro"));
         assert!(texts.iter().any(|t| t == "iPhone 17"));
+        assert!(texts.iter().any(|t| t == "Pixel 9"));
+        assert!(texts.iter().any(|t| t == "Tailscale"));
+        assert!(texts.iter().any(|t| t == "Managed in Tailscale Admin"));
         assert!(texts.iter().any(|t| t == "Generate Pairing URI"));
         assert!(texts.iter().any(|t| t == "Copy URI"));
         assert!(texts.iter().any(|t| t == "Remove Legacy Token"));

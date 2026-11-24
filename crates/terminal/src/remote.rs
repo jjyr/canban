@@ -479,7 +479,7 @@ mod tests {
     use crate::session::{SessionInit, evict_session, get_or_spawn_session};
     use canban_transport::{
         AcceptedStream, ClientEndpoint, DeviceTokenStore, PairingCodeStore, RevocationBus,
-        ServerTransportConfig, spawn_tcp_listener,
+        ServerTransportConfig, TailscaleSessionRegistry, spawn_tcp_listener,
     };
     use canban_types::Config;
     use std::sync::atomic::AtomicUsize;
@@ -539,6 +539,8 @@ mod tests {
             pairing_codes,
             revocations,
             active_tcp_connections: active_tcp.clone(),
+            tailscale_verifier: None,
+            tailscale_devices: Arc::new(TailscaleSessionRegistry::new()),
         });
 
         let expected_core = expected_core.to_owned();

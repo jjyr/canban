@@ -104,6 +104,7 @@ fn push_subscription_observes_worker_commits_without_emit_side_channels_and_hear
             port: 0,
             listen: Some("127.0.0.1:0".into()),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         }))
         .unwrap();
     let addr = app.bound_tcp_addrs().into_iter().next().unwrap();
@@ -259,6 +260,7 @@ fn push_subscription_handles_auth_second_frame_lagged_resync_and_client_subscrib
             port: 0,
             listen: Some("127.0.0.1:0".into()),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         }))
         .unwrap();
     let addr = app.bound_tcp_addrs().into_iter().next().unwrap();
@@ -478,6 +480,7 @@ fn active_update_checks_push_update_changed_progress_without_ui_polling() {
             port: 0,
             listen: Some("127.0.0.1:0".into()),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         }))
         .unwrap();
 

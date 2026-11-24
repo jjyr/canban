@@ -1,6 +1,8 @@
 //! Single-address pairing URI parsing/formatting, transport security classification
 //! (including Tailscale & SSH), and single-address TCP reachability probing.
-use canban_types::{HostTransport, normalize_daemon_addr};
+use canban_types::{
+    HostTransport, TAILSCALE_AUTH_SENTINEL, extract_daemon_host, normalize_daemon_addr,
+};
 use std::{
     net::IpAddr,
     time::{Duration, Instant},
@@ -17,37 +19,11 @@ pub enum TransportSecurity {
 
 /// Returns `true` for Tailscale CGNAT (`100.64.0.0/10`) and ULA (`fd7a:115c:a1e0::/48`) IPs.
 pub fn is_tailscale_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            octets[0] == 100 && (octets[1] & 0b1100_0000) == 64
-        }
-        IpAddr::V6(v6) => {
-            let segs = v6.segments();
-            segs[0] == 0xfd7a && segs[1] == 0x115c && segs[2] == 0xa1e0
-        }
-    }
+    canban_types::is_tailscale_ip(ip)
 }
 
 fn extract_host_part(addr: &str) -> &str {
-    let trimmed = addr
-        .trim()
-        .strip_prefix("tcp://")
-        .or_else(|| addr.trim().strip_prefix("canban://"))
-        .unwrap_or(addr.trim())
-        .trim_end_matches('/');
-    if let Some(rest) = trimmed.strip_prefix('[')
-        && let Some((host, _)) = rest.split_once(']')
-    {
-        return host;
-    }
-    if let Some((host, port_str)) = trimmed.rsplit_once(':')
-        && !host.contains(':')
-        && port_str.parse::<u16>().is_ok()
-    {
-        return host;
-    }
-    trimmed
+    extract_daemon_host(addr)
 }
 
 impl TransportSecurity {
@@ -110,6 +86,57 @@ pub struct PairingInvite {
     pub server_id: Option<String>,
     pub host_name: Option<String>,
     pub secret: String,
+}
+
+impl PairingInvite {
+    /// Constructs a Tailscale same-account auto-auth invite from a `.ts.net` or Tailscale IP address.
+    pub fn tailscale(addr: &str, host_name: Option<&str>, server_id: Option<&str>) -> Option<Self> {
+        let norm = normalize_daemon_addr(addr);
+        if norm.is_empty() {
+            return None;
+        }
+        let security = TransportSecurity::classify_tcp_addr(&norm);
+        if security != TransportSecurity::Tailscale {
+            return None;
+        }
+        let clean_name = host_name
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        Some(Self {
+            addr: norm,
+            security,
+            server_id: server_id
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+            host_name: clean_name,
+            secret: TAILSCALE_AUTH_SENTINEL.to_owned(),
+        })
+    }
+}
+
+/// Parses a bare Tailscale endpoint (`100.x.y.z`, `host.ts.net`, `canban://host.ts.net`,
+/// or `tcp://100.x.y.z:7680` without `#secret`) into a Tailscale same-account `PairingInvite`.
+pub fn parse_tailscale_host_input(raw: &str) -> Option<PairingInvite> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.contains('#') || trimmed.contains('?') {
+        return None;
+    }
+    let without_scheme = trimmed
+        .strip_prefix("canban://")
+        .or_else(|| trimmed.strip_prefix("tcp://"))
+        .unwrap_or(trimmed)
+        .trim_end_matches('/');
+    if without_scheme.is_empty() || without_scheme.contains(char::is_whitespace) {
+        return None;
+    }
+    let host_part = extract_host_part(without_scheme);
+    let derived_name = host_part
+        .split('.')
+        .next()
+        .filter(|s| !s.is_empty() && host_part.parse::<IpAddr>().is_err());
+    PairingInvite::tailscale(without_scheme, derived_name, None)
 }
 
 fn percent_encode(input: &str) -> String {
@@ -415,6 +442,28 @@ mod tests {
             parse_pairing_invite(&format!("canban://pair?v=2&a=100.64.1.2:7680#{secret}"))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn parse_tailscale_host_input_accepts_tailscale_endpoints_and_rejects_lan_or_secrets() {
+        let ts_ip = parse_tailscale_host_input("100.84.12.5").expect("tailscale ipv4");
+        assert_eq!(ts_ip.addr, "100.84.12.5:7680");
+        assert_eq!(ts_ip.security, TransportSecurity::Tailscale);
+        assert_eq!(ts_ip.secret, TAILSCALE_AUTH_SENTINEL);
+        assert_eq!(ts_ip.host_name, None);
+
+        let ts_dns = parse_tailscale_host_input("canban://home-linux.tailnet-abc.ts.net:7680")
+            .expect("magicdns");
+        assert_eq!(ts_dns.addr, "home-linux.tailnet-abc.ts.net:7680");
+        assert_eq!(ts_dns.host_name.as_deref(), Some("home-linux"));
+        assert_eq!(ts_dns.secret, TAILSCALE_AUTH_SENTINEL);
+
+        let ts_v6 = parse_tailscale_host_input("fd7a:115c:a1e0::1").expect("tailscale ipv6");
+        assert_eq!(ts_v6.addr, "[fd7a:115c:a1e0::1]:7680");
+
+        assert!(parse_tailscale_host_input("192.168.1.20").is_none());
+        assert!(parse_tailscale_host_input("example.com").is_none());
+        assert!(parse_tailscale_host_input("100.84.12.5:7680#pair_0123456789abcdef").is_none());
     }
 
     #[tokio::test]

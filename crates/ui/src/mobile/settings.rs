@@ -10,7 +10,7 @@ use super::{
         mobile_subhead, mobile_switch, mobile_title, section_header, security_badge,
         tab_scroll_bottom_pad, trigger_haptic,
     },
-    host_security, mobile_hosts,
+    host_security, is_tailscale_auto_host, mobile_hosts,
 };
 use crate::presenter::*;
 use canban_client::TransportSecurity;
@@ -270,6 +270,7 @@ pub(crate) fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
                     })
                     .collect();
 
+                let has_any_host = !host_rows.is_empty();
                 host_rows.push(
                     press_target()
                         .w_full()
@@ -294,6 +295,58 @@ pub(crate) fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
                         })
                         .into_element(),
                 );
+                if has_any_host {
+                    let disc_count = state.discovered_hosts.with(|h| h.len());
+                    let disc_badge = if disc_count > 0 {
+                        Some(status(format!("{disc_count} found"), Tone::Info))
+                    } else {
+                        None
+                    };
+                    host_rows.push(
+                        press_target()
+                            .w_full()
+                            .min_h(px(54.))
+                            .px_4()
+                            .py_2p5()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .cursor_pointer()
+                            .active(|s| s.opacity(0.75))
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_3()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .child(icon_badge(Icon::Refresh, ACCENT, SELECTED))
+                                    .child(
+                                        text("Discover on Tailnet")
+                                            .text_size(px(16.))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(TEXT)
+                                            .truncate(),
+                                    ),
+                            )
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .flex_shrink_0()
+                                    .children(disc_badge)
+                                    .child(disclosure_chevron()),
+                            )
+                            .on_press(move |_: &()| {
+                                trigger_haptic(Haptic::Selection);
+                                state.open_sheet(MobileSheet::DiscoverHosts);
+                                super::pairing::run_tailnet_discovery(ui, state, None, false);
+                            })
+                            .into_element(),
+                    );
+                }
 
                 let hosts_section = view()
                     .w_full()
@@ -499,6 +552,11 @@ pub(crate) fn host_detail_page(ui: Ui, state: MobileState, host_id: String) -> i
                     )
                     .into_element();
 
+                let sec_hint = if is_tailscale_auto_host(&host.id) {
+                    "Tailscale same-account sign-in · revoke access in Tailscale Admin"
+                } else {
+                    sec.hint()
+                };
                 let security_row = view()
                     .w_full()
                     .min_h(px(58.))
@@ -515,7 +573,7 @@ pub(crate) fn host_detail_page(ui: Ui, state: MobileState, host_id: String) -> i
                             .child(text("Security").text_size(px(MOBILE_BODY)).text_color(TEXT))
                             .child(security_badge(sec)),
                     )
-                    .child(mobile_footnote(sec.hint()))
+                    .child(mobile_footnote(sec_hint))
                     .into_element();
 
                 let workload_row = key_value_row(

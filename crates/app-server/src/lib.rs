@@ -47,6 +47,8 @@ pub struct AppServer {
     device_store: Arc<auth::DeviceTokenStore>,
     pairing_codes: Arc<auth::PairingCodeStore>,
     device_revocations: canban_transport::RevocationBus,
+    tailscale_devices: Arc<canban_transport::TailscaleSessionRegistry>,
+    tailscale_verifier_override: Mutex<Option<Arc<dyn canban_transport::TailscalePeerVerifier>>>,
     started_at: u64,
     bound_tcp: Mutex<Vec<String>>,
     active_tcp_connections: Arc<AtomicUsize>,
@@ -678,6 +680,7 @@ impl AppServer {
         let device_store = Arc::new(auth::DeviceTokenStore::open(&home));
         let pairing_codes = Arc::new(auth::PairingCodeStore::open(&home));
         let device_revocations = canban_transport::RevocationBus::new();
+        let tailscale_devices = Arc::new(canban_transport::TailscaleSessionRegistry::new());
 
         {
             let hook_changes = db_changes.clone();
@@ -742,6 +745,8 @@ impl AppServer {
             device_store,
             pairing_codes,
             device_revocations,
+            tailscale_devices,
+            tailscale_verifier_override: Mutex::new(None),
             started_at: now(),
             bound_tcp: Mutex::new(Vec::new()),
             active_tcp_connections: Arc::new(AtomicUsize::new(0)),
@@ -980,7 +985,20 @@ impl AppServer {
         Ok(removed)
     }
     pub fn paired_devices(&self) -> Vec<PairedDevice> {
-        self.device_store.list()
+        let mut items = self.device_store.list();
+        items.extend(self.tailscale_devices.list());
+        items.sort_by(|a, b| {
+            let ka = a.last_seen_at.unwrap_or(a.created_at);
+            let kb = b.last_seen_at.unwrap_or(b.created_at);
+            kb.cmp(&ka).then_with(|| a.name.cmp(&b.name))
+        });
+        items
+    }
+    pub fn set_tailscale_verifier(
+        &self,
+        verifier: Option<Arc<dyn canban_transport::TailscalePeerVerifier>>,
+    ) {
+        *self.tailscale_verifier_override.lock().unwrap() = verifier;
     }
     pub fn bound_tcp_addrs(&self) -> Vec<String> {
         self.bound_tcp.lock().unwrap().clone()

@@ -312,6 +312,7 @@ fn into_sync_stream<S: SyncRpcSocket>(
 struct MuxConnectResult {
     mux: Arc<MuxClient>,
     upgraded_token: Option<String>,
+    session_token: Option<String>,
 }
 
 async fn try_connect_mux(
@@ -388,11 +389,13 @@ async fn try_connect_mux(
         return Ok(None);
     }
     let upgraded_token = result["upgraded_token"].as_str().map(str::to_owned);
+    let session_token = result["session_token"].as_str().map(str::to_owned);
     let leftover = reader.buffer().to_vec();
     let tcp = reader.into_inner().unsplit(writer);
     Ok(Some(MuxConnectResult {
         mux: Arc::new(connect_mux(PrefixedStream::new(leftover, tcp))),
         upgraded_token,
+        session_token,
     }))
 }
 
@@ -493,7 +496,11 @@ impl ClientTransport {
     ) -> Result<Self> {
         let normalized = canban_types::normalize_daemon_addr(&addr);
         if let Some(res) = try_connect_mux(normalized.clone(), token.clone(), device_name).await? {
-            let effective_token = res.upgraded_token.clone().unwrap_or(token);
+            let effective_token = res
+                .session_token
+                .clone()
+                .or_else(|| res.upgraded_token.clone())
+                .unwrap_or(token);
             let key = canban_types::id();
             mux_relay_registry()
                 .lock()
@@ -509,6 +516,11 @@ impl ClientTransport {
                 upgraded_token: res.upgraded_token,
                 rpc_pool: Mutex::new(Vec::new()),
             });
+        }
+        if canban_types::is_tailscale_auth(&token) {
+            bail!(
+                "auth_failed: Remote daemon does not support Tailscale automatic sign-in. Update the remote daemon or pair with a canban:// URI."
+            );
         }
         let stream = tokio::time::timeout(
             Duration::from_secs(10),
@@ -545,7 +557,11 @@ impl ClientTransport {
             async move { try_connect_mux(a, t, device_name).await }
         })?;
         if let Some(res) = res_opt {
-            let effective_token = res.upgraded_token.clone().unwrap_or(token);
+            let effective_token = res
+                .session_token
+                .clone()
+                .or_else(|| res.upgraded_token.clone())
+                .unwrap_or(token);
             let key = canban_types::id();
             mux_relay_registry()
                 .lock()
@@ -562,6 +578,11 @@ impl ClientTransport {
                 rpc_pool: Mutex::new(Vec::new()),
             });
         }
+        if canban_types::is_tailscale_auth(&token) {
+            bail!(
+                "auth_failed: Remote daemon does not support Tailscale automatic sign-in. Update the remote daemon or pair with a canban:// URI."
+            );
+        }
         Self::connect_direct(ClientEndpoint::Tcp {
             addr: normalized,
             token,
@@ -570,6 +591,14 @@ impl ClientTransport {
 
     pub fn endpoint(&self) -> &ClientEndpoint {
         &self.endpoint
+    }
+
+    /// Returns the active TCP token/session secret for this transport, if any.
+    pub fn active_token(&self) -> Option<&str> {
+        match &self.endpoint {
+            ClientEndpoint::Tcp { token, .. } if !token.trim().is_empty() => Some(token.as_str()),
+            _ => None,
+        }
     }
 
     pub fn is_mux(&self) -> bool {

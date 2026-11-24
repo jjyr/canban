@@ -1436,6 +1436,7 @@ fn run() -> Result<()> {
             | "diagnostics.status"
             | "diagnostics.logs"
             | "host.discover"
+            | "host.discover_canban"
             | "host.probe"
             | "schedule.list"
             | "schedule.runs"

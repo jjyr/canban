@@ -161,6 +161,17 @@ impl AppServer {
                 },
             );
             if !std_tcp_listeners.is_empty() {
+                let tailscale_verifier = self
+                    .tailscale_verifier_override
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .or_else(|| {
+                        listen_cfg.trust_tailscale_self_enabled().then(|| {
+                            Arc::new(network::SystemTailscaleVerifier::new())
+                                as Arc<dyn canban_transport::TailscalePeerVerifier>
+                        })
+                    });
                 let transport_cfg = Arc::new(canban_transport::ServerTransportConfig {
                     home: self.home.clone(),
                     server_id: self.identity.clone(),
@@ -169,6 +180,8 @@ impl AppServer {
                     pairing_codes: self.pairing_codes.clone(),
                     revocations: self.device_revocations.clone(),
                     active_tcp_connections: self.active_tcp_connections.clone(),
+                    tailscale_verifier,
+                    tailscale_devices: self.tailscale_devices.clone(),
                 });
                 for std_tcp in std_tcp_listeners {
                     let tcp_listener = tokio::net::TcpListener::from_std(std_tcp)?;
@@ -2124,6 +2137,7 @@ mod tests {
                 port: 0,
                 listen: Some("127.0.0.1:0".into()),
                 allow_insecure_bind: false,
+                trust_tailscale_self: true,
             }))
             .unwrap();
         let addr = app.bound_tcp_addrs().into_iter().next().unwrap();
@@ -2326,6 +2340,7 @@ else:
                 port: 0,
                 listen: Some("127.0.0.1:0".into()),
                 allow_insecure_bind: false,
+                trust_tailscale_self: true,
             }))
             .unwrap();
         let addr = app.bound_tcp_addrs().into_iter().next().unwrap();

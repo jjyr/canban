@@ -119,6 +119,7 @@ impl AppServer {
                     | "device.list"
                     | "host.probe"
                     | "host.discover"
+                    | "host.discover_canban"
                     | "diagnostics.status"
                     | "diagnostics.logs"
                     | "update.state"
@@ -226,6 +227,18 @@ impl AppServer {
             "env.global.sync" => self.global_env_sync(p, transport_token),
             "env.preview" => self.env_preview(p),
             "host.discover" => Ok(serde_json::to_value(network::discover_all())?),
+            "host.discover_canban" => {
+                let has_override = self.tailscale_verifier_override.lock().unwrap().is_some();
+                let (hosts, ts_avail) = if has_override {
+                    network::discover_canban_hosts_with_status(&self.home, &self.identity, None)
+                } else {
+                    network::discover_canban_hosts(&self.home, &self.identity)
+                };
+                Ok(json!({
+                    "hosts": hosts,
+                    "tailscale_available": ts_avail,
+                }))
+            }
             "directory.list" => self.browse_directory(p),
             "project.update" => self.update_project(p),
             "project.agents" => self.update_project_agents(p),
@@ -261,10 +274,11 @@ impl AppServer {
                 let bound = self.bound_tcp.lock().unwrap().clone();
                 let listen_cfg = network::load_listen_config(&self.home);
                 Ok(json!({
-                    "devices": self.device_store.list(),
+                    "devices": self.paired_devices(),
                     "has_legacy_token": network::read_server_token(&self.home).is_some(),
                     "tcp_enabled": !bound.is_empty() || listen_cfg.tcp_enabled(),
                     "listen_addrs": bound,
+                    "trust_tailscale_self": listen_cfg.trust_tailscale_self_enabled(),
                 }))
             }
             "device.invite.create" => {

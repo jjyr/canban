@@ -43,17 +43,153 @@ pub fn verify_token(expected: &str, provided: &str) -> bool {
 }
 
 pub fn is_tailscale_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            // 100.64.0.0/10 (RFC 6598 CGNAT range used by Tailscale)
-            octets[0] == 100 && (octets[1] & 0b1100_0000) == 64
+    canban_types::is_tailscale_ip(ip)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TailscaleSelfIdentity {
+    pub user_id: u64,
+    pub stable_id: String,
+    pub ips: Vec<String>,
+}
+
+/// Extracts the daemon host's personal Tailscale `UserID` and identity from `tailscale status --json`.
+/// Tagged servers (`Self.Tags` non-empty) have no personal `UserID` match and are rejected.
+pub fn parse_tailscale_self_identity(raw: &str) -> Result<TailscaleSelfIdentity> {
+    let v: Value = serde_json::from_str(raw).context("Invalid tailscale status JSON")?;
+    let backend_state = v["BackendState"].as_str().unwrap_or_default();
+    ensure!(
+        backend_state.is_empty() || backend_state == "Running",
+        "Tailscale is not running (state: {backend_state})"
+    );
+    let self_obj = &v["Self"];
+    let self_tags_empty = self_obj["Tags"].as_array().is_none_or(|a| a.is_empty());
+    ensure!(
+        self_tags_empty,
+        "Tagged Tailscale nodes do not carry a personal UserID"
+    );
+    let user_id = self_obj["UserID"].as_u64().unwrap_or(0);
+    ensure!(user_id > 0, "Tailscale self UserID unavailable");
+    let stable_id = self_obj["ID"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let ips = self_obj["TailscaleIPs"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(TailscaleSelfIdentity {
+        user_id,
+        stable_id,
+        ips,
+    })
+}
+
+/// Validates `tailscale whois --json` output against `self_user_id` for same-account auto-auth.
+pub fn parse_tailscale_whois_json(
+    raw: &str,
+    self_user_id: u64,
+) -> Option<canban_transport::TailscalePeerIdentity> {
+    if self_user_id == 0 {
+        return None;
+    }
+    let v: Value = serde_json::from_str(raw).ok()?;
+    let node = &v["Node"];
+    if node["Tags"].as_array().is_some_and(|a| !a.is_empty()) {
+        return None;
+    }
+    if node["MachineAuthorized"].as_bool() == Some(false) {
+        return None;
+    }
+    if node["IsShareeNode"].as_bool() == Some(true) {
+        return None;
+    }
+    let node_user = node["User"].as_u64().unwrap_or(0);
+    let profile_id = v["UserProfile"]["ID"].as_u64().unwrap_or(0);
+    if node_user != self_user_id || profile_id != self_user_id {
+        return None;
+    }
+    let node_id = node["StableID"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| node["ID"].as_u64().map(|n| n.to_string()))?;
+    let dns_short = node["Name"]
+        .as_str()
+        .map(|s| s.trim_end_matches('.'))
+        .and_then(|s| s.split('.').next())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let device_name = node["ComputedName"]
+        .as_str()
+        .or_else(|| node["Hostinfo"]["Hostname"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "localhost")
+        .or(dns_short)
+        .unwrap_or("Tailscale device")
+        .to_owned();
+    let login_name = v["UserProfile"]["LoginName"]
+        .as_str()
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    Some(canban_transport::TailscalePeerIdentity {
+        node_id,
+        device_name,
+        login_name,
+    })
+}
+
+/// Verifies incoming Tailscale TCP connections against the local `tailscaled` daemon (`whois`).
+pub struct SystemTailscaleVerifier {
+    cached_self_user: Mutex<Option<(u64, std::time::Instant)>>,
+}
+
+impl Default for SystemTailscaleVerifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SystemTailscaleVerifier {
+    pub fn new() -> Self {
+        Self {
+            cached_self_user: Mutex::new(None),
         }
-        IpAddr::V6(v6) => {
-            let segs = v6.segments();
-            // fd7a:115c:a1e0::/48
-            segs[0] == 0xfd7a && segs[1] == 0x115c && segs[2] == 0xa1e0
+    }
+
+    fn self_user_id(&self) -> Option<u64> {
+        const SELF_CACHE_TTL: Duration = Duration::from_secs(60);
+        if let Some((uid, fetched_at)) = *self.cached_self_user.lock().unwrap()
+            && fetched_at.elapsed() < SELF_CACHE_TTL
+        {
+            return Some(uid);
         }
+        let status_json = run_tailscale(&["status", "--json"]).ok()?;
+        let self_id = parse_tailscale_self_identity(&status_json).ok()?;
+        *self.cached_self_user.lock().unwrap() = Some((self_id.user_id, std::time::Instant::now()));
+        Some(self_id.user_id)
+    }
+}
+
+impl canban_transport::TailscalePeerVerifier for SystemTailscaleVerifier {
+    fn verify_peer(
+        &self,
+        peer_addr: SocketAddr,
+    ) -> Option<canban_transport::TailscalePeerIdentity> {
+        if !is_tailscale_ip(peer_addr.ip()) {
+            return None;
+        }
+        let self_user_id = self.self_user_id()?;
+        let whois_json = run_tailscale(&["whois", "--json", &peer_addr.to_string()]).ok()?;
+        parse_tailscale_whois_json(&whois_json, self_user_id)
     }
 }
 
@@ -418,6 +554,224 @@ pub fn discover_all() -> DiscoveryCatalog {
     catalog
 }
 
+fn is_mobile_or_tv_os(os: &str) -> bool {
+    let lower = os.trim().to_ascii_lowercase();
+    matches!(lower.as_str(), "ios" | "android" | "tvos")
+}
+
+/// Collects candidate remote Canban TCP endpoints from saved `hosts.json` + online same-user Tailscale peers.
+pub fn collect_canban_discovery_candidates(
+    saved_hosts: &[SavedHost],
+    status_json: Option<&str>,
+    self_server_id: &str,
+) -> (Vec<DiscoveredCanbanHost>, bool) {
+    let mut candidates = Vec::new();
+    let mut seen_addrs = std::collections::HashSet::new();
+    let mut seen_hosts = std::collections::HashSet::new();
+
+    for host in saved_hosts {
+        if !host.enabled {
+            continue;
+        }
+        if host.server_id.as_deref() == Some(self_server_id) {
+            continue;
+        }
+        let HostTransport::Tcp { addr, .. } = &host.transport else {
+            continue;
+        };
+        let norm_addr = canban_types::normalize_daemon_addr(addr);
+        if norm_addr.is_empty() || !seen_addrs.insert(norm_addr.clone()) {
+            continue;
+        }
+        let host_part = canban_types::extract_daemon_host(&norm_addr).to_ascii_lowercase();
+        if !host_part.is_empty() {
+            seen_hosts.insert(host_part);
+        }
+        candidates.push(DiscoveredCanbanHost {
+            name: host.name.clone(),
+            addr: norm_addr,
+            server_id: host.server_id.clone(),
+            os: String::new(),
+            rtt_ms: 0,
+            linked_on_host: true,
+            is_tailscale: canban_types::is_tailscale_addr(addr),
+        });
+    }
+
+    let Some(raw) = status_json else {
+        return (candidates, false);
+    };
+    let Ok(v) = serde_json::from_str::<Value>(raw) else {
+        return (candidates, false);
+    };
+    let backend_state = v["BackendState"].as_str().unwrap_or_default();
+    let ts_available = backend_state == "Running";
+    let self_user_id = v["Self"]["UserID"].as_u64().unwrap_or(0);
+    let self_tags_empty = v["Self"]["Tags"].as_array().is_none_or(|a| a.is_empty());
+    let mut self_ips = std::collections::HashSet::new();
+    if let Some(arr) = v["Self"]["TailscaleIPs"].as_array() {
+        for ip in arr.iter().filter_map(Value::as_str) {
+            self_ips.insert(ip.to_ascii_lowercase());
+        }
+    }
+
+    if !ts_available || self_user_id == 0 || !self_tags_empty {
+        return (candidates, ts_available);
+    }
+
+    if let Some(peer_map) = v["Peer"].as_object() {
+        for peer in peer_map.values() {
+            if peer["Online"].as_bool() != Some(true)
+                || peer["IsShareeNode"].as_bool() == Some(true)
+            {
+                continue;
+            }
+            if peer["Tags"].as_array().is_some_and(|a| !a.is_empty()) {
+                continue;
+            }
+            if peer["UserID"].as_u64() != Some(self_user_id) {
+                continue;
+            }
+            let os = peer["OS"].as_str().unwrap_or("unknown").to_owned();
+            if is_mobile_or_tv_os(&os) {
+                continue;
+            }
+            let ips: Vec<String> = peer["TailscaleIPs"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let Some(preferred_ip) = ips
+                .iter()
+                .find(|ip| ip.contains('.'))
+                .or_else(|| ips.first())
+                .map(String::as_str)
+            else {
+                continue;
+            };
+            let raw_dns = peer["DNSName"]
+                .as_str()
+                .unwrap_or_default()
+                .trim_end_matches('.');
+            let dns_lower = raw_dns.to_ascii_lowercase();
+            let is_self = ips
+                .iter()
+                .any(|ip| self_ips.contains(&ip.to_ascii_lowercase()));
+            let already_seen = ips
+                .iter()
+                .any(|ip| seen_hosts.contains(&ip.to_ascii_lowercase()))
+                || (!dns_lower.is_empty() && seen_hosts.contains(&dns_lower));
+            if is_self || already_seen {
+                continue;
+            }
+            let norm_addr = canban_types::normalize_daemon_addr(preferred_ip);
+            if norm_addr.is_empty() || !seen_addrs.insert(norm_addr.clone()) {
+                continue;
+            }
+            for ip in &ips {
+                seen_hosts.insert(ip.to_ascii_lowercase());
+            }
+            if !dns_lower.is_empty() {
+                seen_hosts.insert(dns_lower);
+            }
+            let raw_host = peer["HostName"].as_str().unwrap_or_default().trim();
+            let name = if !raw_host.is_empty() && raw_host != "localhost" {
+                raw_host.to_owned()
+            } else if let Some((first, _)) = raw_dns.split_once('.') {
+                first.to_owned()
+            } else {
+                preferred_ip.to_owned()
+            };
+            candidates.push(DiscoveredCanbanHost {
+                name,
+                addr: norm_addr,
+                server_id: None,
+                os,
+                rtt_ms: 0,
+                linked_on_host: false,
+                is_tailscale: true,
+            });
+        }
+    }
+
+    (candidates, ts_available)
+}
+
+/// Performs a one-shot bounded parallel TCP probe across `candidates`, keeping only reachable Canban hosts.
+pub fn probe_canban_discovery_candidates(
+    mut candidates: Vec<DiscoveredCanbanHost>,
+    timeout: Duration,
+) -> Vec<DiscoveredCanbanHost> {
+    if candidates.is_empty() {
+        return candidates;
+    }
+    let total = candidates.len();
+    let workers = total.min(16);
+    let next_idx = std::sync::atomic::AtomicUsize::new(0);
+    let results: Vec<Mutex<Option<u64>>> = (0..total).map(|_| Mutex::new(None)).collect();
+
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            s.spawn(|| {
+                loop {
+                    let i = next_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if i >= total {
+                        break;
+                    }
+                    if let Ok(rtt) = probe_tcp_reachable(&candidates[i].addr, timeout) {
+                        *results[i].lock().unwrap() = Some(rtt);
+                    }
+                }
+            });
+        }
+    });
+
+    let mut reachable = Vec::new();
+    for (cand, rtt_slot) in candidates.drain(..).zip(results) {
+        if let Some(rtt_ms) = rtt_slot.into_inner().unwrap() {
+            let mut item = cand;
+            item.rtt_ms = rtt_ms;
+            reachable.push(item);
+        }
+    }
+    reachable.sort_by(|a, b| {
+        b.linked_on_host
+            .cmp(&a.linked_on_host)
+            .then_with(|| a.rtt_ms.cmp(&b.rtt_ms))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    reachable
+}
+
+/// Discovers reachable Canban hosts across this machine's saved TCP hosts and an optional Tailscale status snapshot.
+pub fn discover_canban_hosts_with_status(
+    home: &Path,
+    self_server_id: &str,
+    status_json: Option<&str>,
+) -> (Vec<DiscoveredCanbanHost>, bool) {
+    let hosts_file: HostsFile = std::fs::read(home.join("config/hosts.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let (candidates, ts_available) =
+        collect_canban_discovery_candidates(&hosts_file.hosts, status_json, self_server_id);
+    let reachable = probe_canban_discovery_candidates(candidates, Duration::from_millis(1500));
+    (reachable, ts_available)
+}
+
+/// Discovers reachable Canban hosts across this machine's saved TCP hosts and same-user Tailscale peers.
+pub fn discover_canban_hosts(
+    home: &Path,
+    self_server_id: &str,
+) -> (Vec<DiscoveredCanbanHost>, bool) {
+    let status_json = run_tailscale(&["status", "--json"]).ok();
+    discover_canban_hosts_with_status(home, self_server_id, status_json.as_deref())
+}
+
 /// Probe whether a remote Canban TCP endpoint accepts connections and measure connect RTT (ms).
 pub fn probe_tcp_reachable(raw_addr: &str, timeout: Duration) -> Result<u64> {
     let normalized = canban_types::normalize_daemon_addr(raw_addr);
@@ -657,6 +1011,7 @@ pub fn install_user_service(
         port,
         listen,
         allow_insecure_bind,
+        trust_tailscale_self: true,
     };
     save_listen_config(home, &cfg)?;
     let user_home = std::env::var_os("HOME")
@@ -917,6 +1272,7 @@ mod tests {
             port: 7680,
             listen: Some("127.0.0.1:7680".into()),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         };
         assert_eq!(
             resolve_bind_addrs(&safe_loopback).unwrap(),
@@ -928,6 +1284,7 @@ mod tests {
             port: 7680,
             listen: Some("10.10.0.2:7680".into()),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         };
         let wg_err = resolve_bind_addrs(&rejected_wg).unwrap_err();
         assert!(wg_err.to_string().contains("--allow-insecure-bind"));
@@ -937,6 +1294,7 @@ mod tests {
             port: 7680,
             listen: Some("0.0.0.0:7680".into()),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         };
         assert!(resolve_bind_addrs(&rejected_unspec).is_err());
 
@@ -957,5 +1315,125 @@ mod tests {
             resolve_bind_addrs(&allowed_unspec).unwrap(),
             vec!["0.0.0.0:7680".parse().unwrap()]
         );
+    }
+
+    #[test]
+    fn tailscale_whois_and_discovery_enforce_same_user_no_tags_and_skip_non_desktop_or_offline() {
+        let status = r#"{
+            "BackendState": "Running",
+            "Self": {
+                "ID": "nSelf",
+                "HostName": "my-mac",
+                "UserID": 42,
+                "TailscaleIPs": ["100.84.0.1"]
+            },
+            "Peer": {
+                "k1": {
+                    "HostName": "linux-box",
+                    "DNSName": "linux-box.tailnet.ts.net.",
+                    "OS": "linux",
+                    "UserID": 42,
+                    "TailscaleIPs": ["100.84.0.2"],
+                    "Online": true
+                },
+                "k2": {
+                    "HostName": "my-iphone",
+                    "DNSName": "my-iphone.tailnet.ts.net.",
+                    "OS": "iOS",
+                    "UserID": 42,
+                    "TailscaleIPs": ["100.84.0.3"],
+                    "Online": true
+                },
+                "k3": {
+                    "HostName": "colleague-mac",
+                    "DNSName": "colleague.tailnet.ts.net.",
+                    "OS": "macOS",
+                    "UserID": 99,
+                    "TailscaleIPs": ["100.84.0.4"],
+                    "Online": true
+                },
+                "k4": {
+                    "HostName": "tagged-srv",
+                    "DNSName": "tagged.tailnet.ts.net.",
+                    "OS": "linux",
+                    "UserID": 42,
+                    "Tags": ["tag:server"],
+                    "TailscaleIPs": ["100.84.0.5"],
+                    "Online": true
+                },
+                "k5": {
+                    "HostName": "shared-in",
+                    "DNSName": "shared.tailnet.ts.net.",
+                    "OS": "linux",
+                    "UserID": 42,
+                    "IsShareeNode": true,
+                    "TailscaleIPs": ["100.84.0.6"],
+                    "Online": true
+                },
+                "k6": {
+                    "HostName": "sleepy-pc",
+                    "DNSName": "sleepy.tailnet.ts.net.",
+                    "OS": "windows",
+                    "UserID": 42,
+                    "TailscaleIPs": ["100.84.0.7"],
+                    "Online": false
+                },
+                "k7": {
+                    "HostName": "linked-via-dns",
+                    "DNSName": "linked-via-dns.tailnet.ts.net.",
+                    "OS": "linux",
+                    "UserID": 42,
+                    "TailscaleIPs": ["100.84.0.8"],
+                    "Online": true
+                }
+            }
+        }"#;
+        let self_id = parse_tailscale_self_identity(status).unwrap();
+        assert_eq!(self_id.user_id, 42);
+        assert_eq!(self_id.stable_id, "nSelf");
+
+        let saved = vec![SavedHost {
+            id: "b".into(),
+            name: "Linked DNS Host".into(),
+            transport: HostTransport::Tcp {
+                addr: "linked-via-dns.tailnet.ts.net:7680".into(),
+                token: "dev_token".into(),
+            },
+            ssh_target: None,
+            server_id: Some("srv-b".into()),
+            enabled: true,
+            added_at: 1,
+        }];
+        let (cands, ts_ok) = collect_canban_discovery_candidates(&saved, Some(status), "srv-self");
+        assert!(ts_ok);
+        let addrs: Vec<&str> = cands.iter().map(|c| c.addr.as_str()).collect();
+        assert_eq!(
+            addrs,
+            vec!["linked-via-dns.tailnet.ts.net:7680", "100.84.0.2:7680"]
+        );
+        assert!(cands[0].linked_on_host);
+        assert!(!cands[1].linked_on_host);
+
+        let whois_ok = r#"{
+            "Node": {
+                "ID": 7,
+                "StableID": "nPhone",
+                "User": 42,
+                "ComputedName": "iPhone 17",
+                "MachineAuthorized": true
+            },
+            "UserProfile": { "ID": 42, "LoginName": "me@example.com" }
+        }"#;
+        let verified = parse_tailscale_whois_json(whois_ok, 42).expect("same user must pass");
+        assert_eq!(verified.node_id, "nPhone");
+        assert_eq!(verified.device_name, "iPhone 17");
+
+        // Different UserID, tagged node, or unauthorized node must be rejected.
+        assert!(parse_tailscale_whois_json(whois_ok, 99).is_none());
+        let whois_tagged = r#"{
+            "Node": { "StableID": "nTag", "User": 42, "Tags": ["tag:ci"] },
+            "UserProfile": { "ID": 42 }
+        }"#;
+        assert!(parse_tailscale_whois_json(whois_tagged, 42).is_none());
     }
 }

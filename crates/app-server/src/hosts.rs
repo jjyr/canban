@@ -2080,6 +2080,7 @@ impl HostRegistry {
             || method.starts_with("update.")
             || method.starts_with("workflow.default.")
             || method == "host.discover"
+            || method == "host.discover_canban"
             || method == "activity.record"
             || method.starts_with("github.auth.")
             || matches!(
@@ -3885,6 +3886,7 @@ mod tests {
                     port,
                     listen: Some(format!("127.0.0.1:{port}")),
                     allow_insecure_bind: false,
+                    trust_tailscale_self: true,
                 }))
                 .unwrap();
             (restarted_app, restarted_running)

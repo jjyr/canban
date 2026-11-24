@@ -11,7 +11,7 @@ pub mod terminals;
 
 use crate::presenter::Ui;
 use canban_client::TransportSecurity;
-use canban_types::HostSummary;
+use canban_types::{DiscoveredCanbanHost, HostSummary, HostTransport, is_tailscale_auth};
 use canban_ui_kit::{tokens::*, *};
 use nsh_base::{MenuButtonItem, menu_button, nav_page, nav_stack};
 use nsh_core::{
@@ -20,7 +20,7 @@ use nsh_core::{
     platform::Lifecycle,
     prelude::*,
 };
-use std::rc::Rc;
+use std::{collections::BTreeSet, rc::Rc};
 
 /// Bottom tab bar destinations on mobile.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -110,6 +110,7 @@ impl MobileRoute {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MobileSheet {
     Pairing(Option<String>),
+    DiscoverHosts,
     CreateCard(String),
     MoveCard(String),
     CreateTerminal,
@@ -137,6 +138,10 @@ pub struct MobileState {
     pub pairing_probe: Signal<pairing::ProbeState>,
     pub pairing_busy: Signal<bool>,
     pub pairing_error: Signal<String>,
+    pub discovered_hosts: Signal<Vec<DiscoveredCanbanHost>>,
+    pub discovering_hosts: Signal<bool>,
+    pub discover_error: Signal<String>,
+    pub joining_host_addrs: Signal<BTreeSet<String>>,
     pub force_onboarding: Signal<bool>,
 }
 
@@ -158,6 +163,10 @@ impl MobileState {
             pairing_probe: signal(pairing::ProbeState::Idle),
             pairing_busy: signal(false),
             pairing_error: signal(String::new()),
+            discovered_hosts: signal(Vec::new()),
+            discovering_hosts: signal(false),
+            discover_error: signal(String::new()),
+            joining_host_addrs: signal(BTreeSet::new()),
             force_onboarding: signal(false),
         }
     }
@@ -284,6 +293,18 @@ pub fn host_security(_ui: Ui, summary: &HostSummary) -> TransportSecurity {
     TransportSecurity::classify_tcp_addr(&summary.endpoint_label)
 }
 
+/// Returns `true` when `host_id` is configured to use automatic Tailscale `WhoIs` sign-in (`ts_auto`).
+pub(crate) fn is_tailscale_auto_host(host_id: &str) -> bool {
+    crate::backend::get()
+        .and_then(|b| b.saved_hosts().into_iter().find(|h| h.id == host_id))
+        .is_some_and(|saved| {
+            matches!(
+                &saved.transport,
+                HostTransport::Tcp { token, .. } if is_tailscale_auth(token)
+            )
+        })
+}
+
 type NavProjectEntry = (String, String, usize);
 type NavHostGroup = (String, String, Vec<NavProjectEntry>);
 
@@ -390,6 +411,10 @@ fn render_sheet_modal(ui: Ui, state: MobileState, active: MobileSheet) -> AnyEle
         MobileSheet::Pairing(_) => (
             "Pair Machine".into(),
             pairing::pairing_panel(ui, state).into_element(),
+        ),
+        MobileSheet::DiscoverHosts => (
+            "Tailnet Hosts".into(),
+            pairing::discover_hosts_sheet_body(ui, state).into_element(),
         ),
         MobileSheet::CreateCard(pid) => (
             "New Card".into(),

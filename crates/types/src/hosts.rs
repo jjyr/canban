@@ -10,6 +10,10 @@ fn default_enabled() -> bool {
     true
 }
 
+fn default_trust_tailscale_self() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerListenConfig {
     #[serde(default)]
@@ -20,6 +24,8 @@ pub struct ServerListenConfig {
     pub listen: Option<String>,
     #[serde(default)]
     pub allow_insecure_bind: bool,
+    #[serde(default = "default_trust_tailscale_self")]
+    pub trust_tailscale_self: bool,
 }
 
 impl Default for ServerListenConfig {
@@ -29,12 +35,14 @@ impl Default for ServerListenConfig {
             port: DEFAULT_DAEMON_PORT,
             listen: None,
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         }
     }
 }
 
 pub const PAIRING_CODE_PREFIX: &str = "pair_";
 pub const DEVICE_TOKEN_PREFIX: &str = "dev_";
+pub const TAILSCALE_AUTH_SENTINEL: &str = "ts_auto";
 
 pub fn is_pairing_code(token: &str) -> bool {
     token.trim().starts_with(PAIRING_CODE_PREFIX)
@@ -44,6 +52,10 @@ pub fn is_device_token(token: &str) -> bool {
     token.trim().starts_with(DEVICE_TOKEN_PREFIX)
 }
 
+pub fn is_tailscale_auth(token: &str) -> bool {
+    token.trim() == TAILSCALE_AUTH_SENTINEL
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PairedDevice {
     pub id: String,
@@ -51,11 +63,33 @@ pub struct PairedDevice {
     pub created_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub auth_kind: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiscoveredCanbanHost {
+    pub name: String,
+    pub addr: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
+    #[serde(default)]
+    pub os: String,
+    #[serde(default)]
+    pub rtt_ms: u64,
+    #[serde(default)]
+    pub linked_on_host: bool,
+    #[serde(default)]
+    pub is_tailscale: bool,
 }
 
 impl ServerListenConfig {
     pub fn tcp_enabled(&self) -> bool {
         self.tailscale || self.listen.as_deref().is_some_and(|s| !s.trim().is_empty())
+    }
+
+    pub fn trust_tailscale_self_enabled(&self) -> bool {
+        self.trust_tailscale_self && self.tcp_enabled()
     }
 }
 
@@ -326,6 +360,51 @@ pub struct DiscoveryCatalog {
     pub tailscale_peers: Vec<TailscalePeer>,
     #[serde(default)]
     pub ssh_hosts: Vec<SshHostEntry>,
+}
+
+/// Returns `true` for Tailscale CGNAT (`100.64.0.0/10`) and ULA (`fd7a:115c:a1e0::/48`) IPs.
+pub fn is_tailscale_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            octets[0] == 100 && (octets[1] & 0b1100_0000) == 64
+        }
+        std::net::IpAddr::V6(v6) => {
+            let segs = v6.segments();
+            segs[0] == 0xfd7a && segs[1] == 0x115c && segs[2] == 0xa1e0
+        }
+    }
+}
+
+/// Extracts the host/IP component from `host:port`, `[ipv6]:port`, or `canban://...` strings.
+pub fn extract_daemon_host(addr: &str) -> &str {
+    let trimmed = addr
+        .trim()
+        .strip_prefix("tcp://")
+        .or_else(|| addr.trim().strip_prefix("canban://"))
+        .unwrap_or(addr.trim())
+        .trim_end_matches('/');
+    if let Some(rest) = trimmed.strip_prefix('[')
+        && let Some((host, _)) = rest.split_once(']')
+    {
+        return host;
+    }
+    if let Some((host, port_str)) = trimmed.rsplit_once(':')
+        && !host.contains(':')
+        && port_str.parse::<u16>().is_ok()
+    {
+        return host;
+    }
+    trimmed
+}
+
+/// Returns `true` when `addr` targets a `.ts.net` MagicDNS hostname or Tailscale IP address.
+pub fn is_tailscale_addr(addr: &str) -> bool {
+    let host = extract_daemon_host(addr);
+    if host.eq_ignore_ascii_case("ts.net") || host.to_ascii_lowercase().ends_with(".ts.net") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>().is_ok_and(is_tailscale_ip)
 }
 
 /// Format a copyable pairing URI (`canban://<addr>#<token>`).

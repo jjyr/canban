@@ -7,9 +7,11 @@ use canban_types::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     fs::OpenOptions,
     io::Write,
     marker::PhantomData,
+    net::SocketAddr,
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -148,8 +150,83 @@ impl From<&StoredDeviceToken> for PairedDevice {
             name: s.name.clone(),
             created_at: s.created_at,
             last_seen_at: s.last_seen_at,
+            auth_kind: String::new(),
         }
     }
+}
+
+/// Verified Tailscale peer identity resolved from `tailscaled` `whois` on the daemon host.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TailscalePeerIdentity {
+    pub node_id: String,
+    pub device_name: String,
+    pub login_name: String,
+}
+
+/// Server-side verifier injected by `canban-app-server` to authorize same-account Tailscale peers.
+pub trait TailscalePeerVerifier: Send + Sync + 'static {
+    fn verify_peer(&self, peer_addr: SocketAddr) -> Option<TailscalePeerIdentity>;
+}
+
+/// In-memory registry of Tailscale devices connected during the daemon's current lifetime.
+#[derive(Default)]
+pub struct TailscaleSessionRegistry {
+    devices: Mutex<BTreeMap<String, PairedDevice>>,
+}
+
+impl TailscaleSessionRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records or refreshes a live Tailscale peer entry (last_seen throttled to 30s).
+    pub fn record(&self, device_id: &str, name: &str) {
+        let clean = name.trim();
+        let display_name = if clean.is_empty() {
+            "Tailscale device"
+        } else {
+            clean
+        };
+        let current_ms = now();
+        let mut guard = self.devices.lock().unwrap();
+        if let Some(existing) = guard.get_mut(device_id) {
+            existing.name = display_name.to_owned();
+            if existing
+                .last_seen_at
+                .is_none_or(|prev| current_ms.saturating_sub(prev) >= 30_000)
+            {
+                existing.last_seen_at = Some(current_ms);
+            }
+        } else {
+            guard.insert(
+                device_id.to_owned(),
+                PairedDevice {
+                    id: device_id.to_owned(),
+                    name: display_name.to_owned(),
+                    created_at: current_ms,
+                    last_seen_at: Some(current_ms),
+                    auth_kind: "tailscale".to_owned(),
+                },
+            );
+        }
+    }
+
+    /// Returns recorded Tailscale devices sorted by most recent activity first.
+    pub fn list(&self) -> Vec<PairedDevice> {
+        let guard = self.devices.lock().unwrap();
+        let mut items: Vec<PairedDevice> = guard.values().cloned().collect();
+        items.sort_by(|a, b| {
+            let ka = a.last_seen_at.unwrap_or(a.created_at);
+            let kb = b.last_seen_at.unwrap_or(b.created_at);
+            kb.cmp(&ka).then_with(|| a.name.cmp(&b.name))
+        });
+        items
+    }
+}
+
+/// Generates an ephemeral per-session secret for `enc:v1:` Vault sealing on Tailscale connections.
+pub fn generate_ephemeral_session_token() -> String {
+    generate_prefixed_secret("ts_sess_")
 }
 
 /// Broadcast bus notifying active transport sessions immediately when a device token is revoked.

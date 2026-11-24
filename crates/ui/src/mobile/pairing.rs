@@ -1,14 +1,19 @@
-//! Mobile-first QR / URI pairing screen & confirmation sheet with transport security badges.
+//! Mobile-first QR / URI / Tailscale pairing screen, confirmation sheet, and Tailnet host discovery.
 use super::{
-    MobileState,
+    MobileSheet, MobileState,
     chrome::{
-        MOBILE_CAPTION, MOBILE_HEADLINE, MOBILE_HERO_TITLE, MOBILE_RADIUS, grouped_card,
-        is_mobile_os, mobile_button, mobile_field, mobile_footnote, mobile_inline_button,
-        mobile_subhead, section_header, security_badge, trigger_haptic,
+        MOBILE_CAPTION, MOBILE_HEADLINE, MOBILE_HERO_TITLE, MOBILE_RADIUS, empty_state,
+        grouped_card, icon_badge, is_mobile_os, mobile_button, mobile_field, mobile_footnote,
+        mobile_inline_button, mobile_subhead, mobile_title, section_header, security_badge,
+        trigger_haptic,
     },
 };
 use crate::presenter::*;
-use canban_client::{AddrProbeResult, PairingInvite, TransportSecurity, parse_pairing_invite};
+use canban_client::{
+    AddrProbeResult, PairingInvite, TransportSecurity, parse_pairing_invite,
+    parse_tailscale_host_input,
+};
+use canban_types::{DiscoveredCanbanHost, is_tailscale_auth};
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::{Haptic, HapticNotification, prelude::*};
 use std::time::Duration;
@@ -100,6 +105,7 @@ fn connect_invite(ui: Ui, state: MobileState, invite: PairingInvite, name_overri
                 ui.notify(format!("Connected to {}", summary.name));
                 state.close_sheet();
                 crate::presenter::refresh(ui);
+                run_tailnet_discovery(ui, state, Some(summary.id), true);
             }
             Ok(Err(e)) => {
                 trigger_haptic(Haptic::Notification(HapticNotification::Error));
@@ -119,7 +125,7 @@ pub(crate) fn pairing_panel(ui: Ui, state: MobileState) -> impl IntoElement {
     let show_manual = signal(false);
     let parsed_invite = computed(move || {
         let raw = state.pairing_uri_input.get();
-        parse_pairing_invite(&raw)
+        parse_pairing_invite(&raw).or_else(|| parse_tailscale_host_input(&raw))
     });
 
     // Trigger automatic probe whenever parsed invite address changes.
@@ -157,7 +163,7 @@ pub(crate) fn pairing_panel(ui: Ui, state: MobileState) -> impl IntoElement {
                     let trimmed = clip.trim().to_owned();
                     if trimmed.is_empty() {
                         state.pairing_error.try_set(
-                            "Clipboard is empty. Copy a `canban://` link from Settings -> Remote Access on your desktop.".into(),
+                            "Clipboard is empty. Enter a Tailscale address (host.ts.net or 100.x.y.z) or copy a `canban://` link from Settings -> Remote Access.".into(),
                         );
                     } else {
                         state.pairing_uri_input.try_set(trimmed);
@@ -191,7 +197,7 @@ pub(crate) fn pairing_panel(ui: Ui, state: MobileState) -> impl IntoElement {
                                     if show_manual.get() {
                                         "Hide manual entry"
                                     } else {
-                                        "Enter URI manually"
+                                        "Enter Tailscale address or URI"
                                     }
                                 })
                                 .text_size(px(14.5))
@@ -211,11 +217,11 @@ pub(crate) fn pairing_panel(ui: Ui, state: MobileState) -> impl IntoElement {
                                 .gap_2()
                                 .child(mobile_field(
                                     state.pairing_uri_input,
-                                    "canban://host:7680?name=...#code",
+                                    "host.ts.net, 100.x.y.z, or canban://...#code",
                                 ))
                                 .children((!raw_empty).then(|| {
                                     notice(
-                                        "Invalid pairing URI. Expected `canban://<addr>?name=...#<secret>`.",
+                                        "Enter a Tailscale address (host.ts.net or 100.x.y.z) or a `canban://<addr>?name=...#<secret>` pairing link.",
                                         Tone::Attention,
                                     )
                                 }))
@@ -347,7 +353,11 @@ pub(crate) fn pairing_panel(ui: Ui, state: MobileState) -> impl IntoElement {
                         .font_family(MONO_FONT)
                         .text_color(MUTED),
                 )
-                .child(mobile_footnote(invite.security.hint()))
+                .child(mobile_footnote(if is_tailscale_auth(&invite.secret) {
+                    "Tailscale — automatic same-account sign-in (managed in Tailscale Admin)"
+                } else {
+                    invite.security.hint()
+                }))
                 .into_element();
 
             let label_row = view()
@@ -470,7 +480,7 @@ pub(crate) fn onboarding_screen(ui: Ui, state: MobileState) -> impl IntoElement 
                     .child(
                         view().w_full().max_w(px(320.)).items_center().child(
                             mobile_subhead(
-                                "Scan the QR code in desktop Settings -> Remote Access with your phone Camera, or paste a pairing link below.",
+                                "Enter a Tailscale address (host.ts.net or 100.x.y.z), scan a QR code in desktop Settings -> Remote Access, or paste a pairing link.",
                             )
                             .line_height(px(21.))
                             .text_center(),
@@ -484,4 +494,346 @@ pub(crate) fn onboarding_screen(ui: Ui, state: MobileState) -> impl IntoElement 
                 }),
             ),
     )
+}
+
+/// Runs a one-shot on-demand Tailnet discovery via an already connected host (never background-polled).
+pub(crate) fn run_tailnet_discovery(
+    ui: Ui,
+    state: MobileState,
+    via_host_id: Option<String>,
+    open_if_found: bool,
+) {
+    let Some(client) = crate::backend::remote_client() else {
+        state.discovering_hosts.set(false);
+        return;
+    };
+    if state.discovering_hosts.get_untracked() {
+        return;
+    }
+    batch(move || {
+        state.discovering_hosts.set(true);
+        state.discover_error.set(String::new());
+    });
+    ui.spawn(async move {
+        let client_call = client.clone();
+        let via = via_host_id.clone();
+        let res = blocking(move || {
+            client_call.block_on(client_call.discover_canban_hosts(via.as_deref()))
+        })
+        .await;
+        let _ = state.discovering_hosts.try_set(false);
+        match res {
+            Ok(Ok(hosts)) => {
+                let has_new = !hosts.is_empty();
+                let _ = state.discovered_hosts.try_set(hosts);
+                if open_if_found && has_new && state.sheet.try_get().is_some_and(|s| s.is_none()) {
+                    state.open_sheet(MobileSheet::DiscoverHosts);
+                }
+            }
+            Ok(Err(e)) => {
+                if !open_if_found {
+                    let _ = state.discover_error.try_set(format!("{e:#}"));
+                }
+            }
+            Err(e) => {
+                if !open_if_found {
+                    let _ = state.discover_error.try_set(e.to_string());
+                }
+            }
+        }
+    });
+}
+
+fn join_discovered_hosts(ui: Ui, state: MobileState, hosts: Vec<DiscoveredCanbanHost>) {
+    let ts_hosts: Vec<DiscoveredCanbanHost> =
+        hosts.into_iter().filter(|h| h.is_tailscale).collect();
+    if ts_hosts.is_empty() {
+        return;
+    }
+    let addrs: Vec<String> = ts_hosts.iter().map(|h| h.addr.clone()).collect();
+    state.discover_error.set(String::new());
+    state.joining_host_addrs.update(|set| {
+        for addr in &addrs {
+            set.insert(addr.clone());
+        }
+    });
+
+    let Some(client) = crate::backend::remote_client() else {
+        let count = addrs.len();
+        state.joining_host_addrs.update(|set| {
+            for addr in &addrs {
+                set.remove(addr);
+            }
+        });
+        state
+            .discovered_hosts
+            .update(|items| items.retain(|h| !addrs.contains(&h.addr)));
+        ui.notify(format!("Gallery preview · joined {count} host(s)"));
+        if state.discovered_hosts.with_untracked(Vec::is_empty) {
+            state.close_sheet();
+        }
+        return;
+    };
+
+    ui.spawn(async move {
+        let client_call = client.clone();
+        let outcome = blocking(move || {
+            let mut joined_addrs = Vec::new();
+            let mut first_err: Option<anyhow::Error> = None;
+            for host in ts_hosts {
+                match client_call.block_on(client_call.pair_tailscale_host(
+                    &host.addr,
+                    Some(&host.name),
+                    host.server_id.as_deref(),
+                )) {
+                    Ok(_) => joined_addrs.push(host.addr),
+                    Err(e) => {
+                        if first_err.is_none() {
+                            first_err = Some(e);
+                        }
+                    }
+                }
+            }
+            let sums = client_call.host_summaries();
+            let snap = client_call.merged_snapshot()?;
+            anyhow::Ok((joined_addrs, first_err, sums, snap))
+        })
+        .await;
+
+        if let Some(mut cur_joining) = state.joining_host_addrs.try_get() {
+            for addr in &addrs {
+                cur_joining.remove(addr);
+            }
+            let _ = state.joining_host_addrs.try_set(cur_joining);
+        }
+        match outcome {
+            Ok(Ok((joined_addrs, first_err, sums, snap))) => {
+                let joined_count = joined_addrs.len();
+                let mut remaining_empty = false;
+                if let Some(mut items) = state.discovered_hosts.try_get() {
+                    items.retain(|h| !joined_addrs.contains(&h.addr));
+                    remaining_empty = items.is_empty();
+                    let _ = state.discovered_hosts.try_set(items);
+                }
+                if joined_count > 0 {
+                    let _ = ui.hosts.try_set(sums);
+                    ui.accept_snapshot(snap);
+                    if ui.project.try_get().is_some_and(|p| p.is_empty())
+                        && let Some(first_proj) = ui
+                            .snapshot
+                            .with_untracked(|s| s.projects.first().map(|p| p.id.clone()))
+                    {
+                        let _ = ui.project.try_set(first_proj);
+                    }
+                    trigger_haptic(Haptic::Notification(HapticNotification::Success));
+                    ui.notify(if joined_count == 1 {
+                        "Joined 1 host".to_owned()
+                    } else {
+                        format!("Joined {joined_count} hosts")
+                    });
+                    crate::presenter::refresh(ui);
+                }
+                if let Some(err) = first_err {
+                    trigger_haptic(Haptic::Notification(HapticNotification::Error));
+                    let _ = state.discover_error.try_set(format!("{err:#}"));
+                } else if remaining_empty {
+                    state.close_sheet();
+                }
+            }
+            Ok(Err(e)) => {
+                trigger_haptic(Haptic::Notification(HapticNotification::Error));
+                let _ = state.discover_error.try_set(format!("{e:#}"));
+            }
+            Err(e) => {
+                let _ = state.discover_error.try_set(e.to_string());
+            }
+        }
+    });
+}
+
+/// Modal sheet displaying Canban hosts discovered via a connected machine's Tailnet / saved hosts.
+pub(crate) fn discover_hosts_sheet_body(ui: Ui, state: MobileState) -> impl IntoElement {
+    let model = computed(move || {
+        (
+            state.discovered_hosts.get(),
+            state.discovering_hosts.get(),
+            state.discover_error.get(),
+            state.joining_host_addrs.get(),
+        )
+    });
+
+    view().w_full().gap_4().child(dynamic(move || {
+        let (hosts, discovering, err, joining) = model.get();
+        let mut col = view().w_full().gap_4();
+
+        if !err.is_empty() {
+            col = col.child(notice(err, Tone::Danger));
+        }
+
+        if discovering && hosts.is_empty() {
+            return col
+                .child(
+                    view()
+                        .w_full()
+                        .p_4()
+                        .rounded(px(MOBILE_RADIUS))
+                        .border_1()
+                        .border_color(BORDER)
+                        .bg(SURFACE)
+                        .flex_row()
+                        .items_center()
+                        .gap_3()
+                        .child(loading_spinner(16., ACCENT))
+                        .child(mobile_subhead("Checking online Tailnet machines…")),
+                )
+                .into_element();
+        }
+
+        if hosts.is_empty() {
+            let rescan_cta = mobile_inline_button("Scan Again", Variant::Secondary, move |_| {
+                run_tailnet_discovery(ui, state, None, false);
+            })
+            .into_element();
+            return col
+                .child(empty_state(
+                    Icon::Server,
+                    Tone::Neutral,
+                    "No new Canban hosts found",
+                    "Online machines running Canban on the same Tailscale account will appear here.",
+                    Some(rescan_cta),
+                ))
+                .into_element();
+        }
+
+        let joinable: Vec<DiscoveredCanbanHost> =
+            hosts.iter().filter(|h| h.is_tailscale).cloned().collect();
+        let any_joining = !joining.is_empty();
+
+        let rows: Vec<AnyElement> = hosts
+            .into_iter()
+            .map(|host| {
+                let is_busy = joining.contains(&host.addr);
+                let subtitle = if host.os.trim().is_empty() {
+                    format!("{} · {}ms", host.addr, host.rtt_ms)
+                } else {
+                    format!("{} · {} · {}ms", host.os, host.addr, host.rtt_ms)
+                };
+                let (sec_ic, sec_col) = if host.is_tailscale {
+                    (Icon::Check, SUCCESS)
+                } else {
+                    (Icon::TriangleAlert, ATTENTION)
+                };
+                let action_btn = if host.is_tailscale {
+                    let h_one = host.clone();
+                    mobile_inline_button(
+                        if is_busy { "Joining…" } else { "Join" },
+                        Variant::Primary,
+                        move |_| join_discovered_hosts(ui, state, vec![h_one.clone()]),
+                    )
+                    .disabled(move || is_busy || any_joining)
+                    .flex_shrink_0()
+                    .into_element()
+                } else {
+                    let prefill = format!("canban://{}#", host.addr);
+                    mobile_inline_button("URI…", Variant::Secondary, move |_| {
+                        state.open_pairing(Some(prefill.clone()));
+                    })
+                    .flex_shrink_0()
+                    .into_element()
+                };
+
+                view()
+                    .w_full()
+                    .min_h(px(64.))
+                    .px_4()
+                    .py_2p5()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_3()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .child(icon_badge(Icon::Server, ACCENT, SELECTED))
+                            .child(
+                                view()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .gap_0p5()
+                                    .child(
+                                        view()
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .child(mobile_title(host.name).truncate())
+                                            .child(
+                                                icon_tinted(sec_ic, sec_col)
+                                                    .w(px(13.))
+                                                    .h(px(13.)),
+                                            )
+                                            .children(
+                                                host.linked_on_host
+                                                    .then(|| status("Linked", Tone::Info)),
+                                            ),
+                                    )
+                                    .child(
+                                        text(subtitle)
+                                            .text_size(px(MOBILE_CAPTION))
+                                            .font_family(MONO_FONT)
+                                            .text_color(MUTED)
+                                            .truncate(),
+                                    ),
+                            ),
+                    )
+                    .child(action_btn)
+                    .into_element()
+            })
+            .collect();
+
+        col = col
+            .child(
+                view()
+                    .w_full()
+                    .child(section_header("AVAILABLE ON TAILNET", None))
+                    .child(grouped_card(rows))
+                    .child(view().px_2().pt_2().child(mobile_footnote(
+                        "Connects directly from this device over Tailscale using your personal account.",
+                    ))),
+            );
+
+        if joinable.len() > 1 {
+            let join_count = joinable.len();
+            let all = joinable;
+            col = col.child(
+                mobile_button(format!("Join All ({join_count})"), Variant::Primary, move |_| {
+                    join_discovered_hosts(ui, state, all.clone());
+                })
+                .disabled(move || any_joining || discovering),
+            );
+        }
+
+        col.child(
+            view()
+                .w_full()
+                .flex_row()
+                .gap_2()
+                .child(
+                    mobile_button(
+                        if discovering { "Scanning…" } else { "Rescan" },
+                        Variant::Secondary,
+                        move |_| run_tailnet_discovery(ui, state, None, false),
+                    )
+                    .disabled(move || discovering || any_joining)
+                    .flex_1(),
+                )
+                .child(
+                    mobile_button("Done", Variant::Quiet, move |_| state.close_sheet()).flex_1(),
+                ),
+        )
+        .into_element()
+    }))
 }

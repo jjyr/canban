@@ -1,7 +1,10 @@
 //! Server-side transport listeners (`Unix` and `Tcp`), TCP first-frame authentication,
 //! `transport.mux` (`yamux/1`) session demultiplexing, and live device revocation enforcement.
 use crate::{
-    auth::{self, DeviceTokenStore, PairingCodeStore, RevocationBus, TcpAuthOutcome},
+    auth::{
+        self, DeviceTokenStore, PairingCodeStore, RevocationBus, TailscalePeerVerifier,
+        TailscaleSessionRegistry, TcpAuthOutcome,
+    },
     framing::{
         MAX_FRAME_BYTES, PrefixedStream, TransportStream, read_bounded_line, write_json_line_async,
     },
@@ -27,6 +30,8 @@ pub struct ServerTransportConfig {
     pub pairing_codes: Arc<PairingCodeStore>,
     pub revocations: RevocationBus,
     pub active_tcp_connections: Arc<AtomicUsize>,
+    pub tailscale_verifier: Option<Arc<dyn TailscalePeerVerifier>>,
+    pub tailscale_devices: Arc<TailscaleSessionRegistry>,
 }
 
 /// An authenticated bidirectional application stream handed to the server dispatcher.
@@ -151,7 +156,7 @@ async fn wait_device_revoked(
         match revoke_rx.recv().await {
             Ok(revoked_id) if revoked_id == device_id => return,
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                if device_id != "legacy-server-token" {
+                if device_id != "legacy-server-token" && !device_id.starts_with("ts:") {
                     let store = device_store.clone();
                     let did = device_id.to_owned();
                     let valid = tokio::task::spawn_blocking(move || store.is_valid_device_id(&did))
@@ -215,6 +220,7 @@ where
     if *stop_rx.borrow() {
         return Ok(());
     }
+    let peer_addr = stream.peer_addr().ok();
     let (read_half, mut writer) = tokio::io::split(stream);
     let mut reader = tokio::io::BufReader::new(read_half);
     let line_opt = tokio::select! {
@@ -242,22 +248,51 @@ where
     let home = cfg.home.clone();
     let device_store = cfg.device_store.clone();
     let pairing_codes = cfg.pairing_codes.clone();
+    let ts_verifier = cfg.tailscale_verifier.clone();
+    let ts_devices = cfg.tailscale_devices.clone();
     let provided = input["auth"].as_str().unwrap_or("").to_owned();
     let provided_auth = provided.clone();
+    let is_ts_request = canban_types::is_tailscale_auth(&provided_auth);
     let device_name = input["params"]["device_name"].as_str().map(str::to_owned);
     let allow_upgrade = method == "transport.mux";
 
-    let outcome = tokio::task::spawn_blocking(move || {
-        auth::authenticate_tcp_token(
-            &home,
-            &device_store,
-            &pairing_codes,
-            &provided_auth,
-            device_name.as_deref(),
-            allow_upgrade,
-        )
-    })
-    .await??;
+    let (outcome, ephemeral_session_token, is_tailscale_session) =
+        tokio::task::spawn_blocking(move || {
+            if canban_types::is_tailscale_auth(&provided_auth) {
+                if let (Some(verifier), Some(addr)) = (ts_verifier.as_deref(), peer_addr)
+                    && let Some(peer) = verifier.verify_peer(addr)
+                {
+                    let device_id = format!("ts:{}", peer.node_id);
+                    let effective_name = device_name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(&peer.device_name);
+                    ts_devices.record(&device_id, effective_name);
+                    let session_secret = auth::generate_ephemeral_session_token();
+                    return Ok((
+                        TcpAuthOutcome::Authenticated {
+                            device_id,
+                            upgraded_token: None,
+                            deprecated_legacy: false,
+                        },
+                        Some(session_secret),
+                        true,
+                    ));
+                }
+                return Ok((TcpAuthOutcome::Rejected, None, false));
+            }
+            let res = auth::authenticate_tcp_token(
+                &home,
+                &device_store,
+                &pairing_codes,
+                &provided_auth,
+                device_name.as_deref(),
+                allow_upgrade,
+            )?;
+            Ok::<_, anyhow::Error>((res, None, false))
+        })
+        .await??;
 
     let (device_id, upgraded_token, deprecated_legacy) = match outcome {
         TcpAuthOutcome::Authenticated {
@@ -266,18 +301,22 @@ where
             deprecated_legacy,
         } => (device_id, upgraded_token, deprecated_legacy),
         TcpAuthOutcome::Rejected => {
-            send_rpc_error(
-                &mut writer,
-                &id,
-                -32001,
-                "Authentication required: invalid or missing device token",
-            )
-            .await;
+            let msg = if is_ts_request {
+                "Tailscale authentication failed: ensure both devices are signed into the same personal Tailscale account"
+            } else {
+                "Authentication required: invalid or missing device token"
+            };
+            send_rpc_error(&mut writer, &id, -32001, msg).await;
             let _ = writer.shutdown().await;
             return Ok(());
         }
     };
-    let session_token = zeroize::Zeroizing::new(upgraded_token.clone().unwrap_or(provided));
+    let session_token = zeroize::Zeroizing::new(
+        ephemeral_session_token
+            .clone()
+            .or_else(|| upgraded_token.clone())
+            .unwrap_or(provided),
+    );
 
     if method == "transport.mux" {
         if !reader.buffer().is_empty() {
@@ -311,6 +350,12 @@ where
         });
         if let Some(tok) = upgraded_token {
             res_obj["upgraded_token"] = json!(tok);
+        }
+        if is_tailscale_session {
+            res_obj["auth_mode"] = json!("tailscale");
+            if let Some(st) = ephemeral_session_token {
+                res_obj["session_token"] = json!(st);
+            }
         }
         let reply = json!({
             "jsonrpc": "2.0",

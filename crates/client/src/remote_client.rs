@@ -17,9 +17,9 @@ use canban_sync::{
 use canban_terminal::{RemotePtyTransport, session::PtyTransport};
 use canban_transport::ClientTransport;
 use canban_types::{
-    AppEvent, Config, GlobalEnvSyncSummary, HostConnectionState, HostSummary, HostTransport,
-    RuntimeState, SavedHost, Snapshot, SyncAction, SyncItemState, SyncItemView, TerminalEntry,
-    is_device_token, is_pairing_code, normalize_daemon_addr, now,
+    AppEvent, Config, DiscoveredCanbanHost, GlobalEnvSyncSummary, HostConnectionState, HostSummary,
+    HostTransport, RuntimeState, SavedHost, Snapshot, SyncAction, SyncItemState, SyncItemView,
+    TerminalEntry, is_device_token, is_pairing_code, normalize_daemon_addr, now,
 };
 use serde_json::{Value, json};
 use std::{
@@ -188,6 +188,9 @@ impl RemoteHostSlot {
     }
 
     fn tcp_token(&self) -> Option<String> {
+        if let Some(active) = self.client.as_ref().and_then(|c| c.active_token()) {
+            return Some(active.to_owned());
+        }
         match &self.saved.transport {
             HostTransport::Tcp { token, .. } if !token.trim().is_empty() => Some(token.clone()),
             _ => None,
@@ -700,6 +703,85 @@ impl RemoteClient {
         display_name: Option<&str>,
     ) -> Result<HostSummary> {
         self.pair_internal(None, invite, display_name).await
+    }
+
+    /// Pairs directly with a same-account Tailscale Canban daemon without a pairing URI/code.
+    pub async fn pair_tailscale_host(
+        &self,
+        addr: &str,
+        display_name: Option<&str>,
+        server_id: Option<&str>,
+    ) -> Result<HostSummary> {
+        let invite = PairingInvite::tailscale(addr, display_name, server_id).ok_or_else(|| {
+            anyhow!(
+                "Address `{addr}` is not a Tailscale endpoint; pair with a canban:// URI instead"
+            )
+        })?;
+        self.pair_with_invite(&invite, display_name).await
+    }
+
+    /// Queries an already-connected host (`via_host_id` or the first connected host) for
+    /// reachable Canban daemons on its saved host list and Tailnet, excluding already-paired hosts.
+    pub async fn discover_canban_hosts(
+        &self,
+        via_host_id: Option<&str>,
+    ) -> Result<Vec<DiscoveredCanbanHost>> {
+        let via_client = {
+            let guard = self.hosts.read().unwrap();
+            if let Some(hid) = via_host_id {
+                guard.get(hid).and_then(|s| s.client.clone())
+            } else {
+                guard
+                    .values()
+                    .find(|s| s.connection.is_connected() && s.client.is_some())
+                    .or_else(|| guard.values().find(|s| s.client.is_some()))
+                    .and_then(|s| s.client.clone())
+            }
+        }
+        .context("Connect to at least one Canban host before discovering Tailnet machines")?;
+
+        let raw = match via_client
+            .call_async("host.discover_canban", &json!({}))
+            .await
+        {
+            Ok(val) => val,
+            Err(err) => {
+                let msg = format!("{err:#}");
+                if msg.contains("Unknown operation") && msg.contains("host.discover_canban") {
+                    return Ok(Vec::new());
+                }
+                return Err(err);
+            }
+        };
+
+        let items: Vec<DiscoveredCanbanHost> =
+            serde_json::from_value(raw["hosts"].clone()).unwrap_or_default();
+        let (known_sids, known_addrs) = {
+            let guard = self.hosts.read().unwrap();
+            let mut sids = BTreeSet::new();
+            let mut addrs = BTreeSet::new();
+            for slot in guard.values() {
+                if let Some(sid) = slot.saved.server_id.as_deref() {
+                    sids.insert(sid.to_owned());
+                }
+                if let HostTransport::Tcp { addr, .. } = &slot.saved.transport {
+                    addrs.insert(normalize_daemon_addr(addr));
+                }
+            }
+            (sids, addrs)
+        };
+
+        Ok(items
+            .into_iter()
+            .filter(|h| {
+                let norm = normalize_daemon_addr(&h.addr);
+                !known_addrs.contains(&norm)
+                    && !h
+                        .server_id
+                        .as_deref()
+                        .is_some_and(|sid| known_sids.contains(sid))
+            })
+            .collect())
     }
 
     async fn pair_internal(
@@ -2457,17 +2539,22 @@ mod tests {
     use canban_app_server::AppServer;
     use canban_types::{Card, Project, ServerListenConfig, SyncMark};
 
-    async fn start_tcp_server(
+    async fn start_tcp_server_with_verifier(
         home: PathBuf,
         port: u16,
+        verifier: Option<Arc<dyn canban_transport::TailscalePeerVerifier>>,
     ) -> (Arc<AppServer>, canban_app_server::Running, String) {
         let server = AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
+        if let Some(v) = verifier {
+            server.set_tailscale_verifier(Some(v));
+        }
         let running = server
             .start_with_listen(Some(ServerListenConfig {
                 tailscale: false,
                 port,
                 listen: Some(format!("127.0.0.1:{port}")),
                 allow_insecure_bind: false,
+                trust_tailscale_self: true,
             }))
             .unwrap();
         let addr = server
@@ -2476,6 +2563,13 @@ mod tests {
             .next()
             .expect("server bound TCP address");
         (server, running, addr)
+    }
+
+    async fn start_tcp_server(
+        home: PathBuf,
+        port: u16,
+    ) -> (Arc<AppServer>, canban_app_server::Running, String) {
+        start_tcp_server_with_verifier(home, port, None).await
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2872,7 +2966,8 @@ mod tests {
     async fn runtime_only_push_uses_runtime_state_and_updates_merged_runtime_state() {
         use canban_transport::{
             AcceptedStream, DeviceTokenStore, MAX_FRAME_BYTES, PairingCodeStore, RevocationBus,
-            ServerTransportConfig, read_bounded_line, spawn_tcp_listener, write_json_line_async,
+            ServerTransportConfig, TailscaleSessionRegistry, read_bounded_line, spawn_tcp_listener,
+            write_json_line_async,
         };
         use canban_types::{TerminalReclaimStatus, Workflow};
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2937,6 +3032,8 @@ mod tests {
             pairing_codes,
             revocations,
             active_tcp_connections: active_tcp,
+            tailscale_verifier: None,
+            tailscale_devices: Arc::new(TailscaleSessionRegistry::new()),
         });
 
         let handle = tokio::runtime::Handle::current();
@@ -3210,7 +3307,8 @@ mod tests {
     async fn supervisor_falls_back_to_polling_when_daemon_lacks_app_subscribe() {
         use canban_transport::{
             AcceptedStream, DeviceTokenStore, MAX_FRAME_BYTES, PairingCodeStore, RevocationBus,
-            ServerTransportConfig, read_bounded_line, spawn_tcp_listener, write_json_line_async,
+            ServerTransportConfig, TailscaleSessionRegistry, read_bounded_line, spawn_tcp_listener,
+            write_json_line_async,
         };
         use canban_types::Workflow;
         use std::sync::atomic::AtomicUsize;
@@ -3258,6 +3356,8 @@ mod tests {
             pairing_codes,
             revocations,
             active_tcp_connections: active_tcp,
+            tailscale_verifier: None,
+            tailscale_devices: Arc::new(TailscaleSessionRegistry::new()),
         });
 
         let handle = tokio::runtime::Handle::current();
@@ -3391,5 +3491,199 @@ mod tests {
         assert_eq!(snap.projects[0].name, "fiber");
 
         let _ = stop_tx.send(true);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tailscale_whois_auto_auth_and_discover_canban_hosts_work_without_stored_device_token()
+    {
+        use canban_transport::{TailscalePeerIdentity, TailscalePeerVerifier};
+        use canban_types::{EnvEntryMeta, EnvWriteEntry, PairedDevice, TAILSCALE_AUTH_SENTINEL};
+        use std::collections::BTreeMap;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct ToggleTailscaleVerifier {
+            allow: Arc<AtomicBool>,
+        }
+
+        impl TailscalePeerVerifier for ToggleTailscaleVerifier {
+            fn verify_peer(
+                &self,
+                _peer_addr: std::net::SocketAddr,
+            ) -> Option<TailscalePeerIdentity> {
+                self.allow
+                    .load(Ordering::SeqCst)
+                    .then(|| TailscalePeerIdentity {
+                        node_id: "nMobile01".into(),
+                        device_name: "Pixel Test".into(),
+                        login_name: "jjy@example.com".into(),
+                    })
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let home_a = dir.path().join("host-a");
+        let home_b = dir.path().join("host-b");
+        let client_dir = dir.path().join("mobile-client");
+        std::fs::create_dir_all(&home_a).unwrap();
+        std::fs::create_dir_all(&home_b).unwrap();
+
+        let allow = Arc::new(AtomicBool::new(true));
+        let (server_a, _run_a, addr_a) = start_tcp_server_with_verifier(
+            home_a.clone(),
+            0,
+            Some(Arc::new(ToggleTailscaleVerifier {
+                allow: allow.clone(),
+            })),
+        )
+        .await;
+        let (server_b, _run_b, addr_b) = start_tcp_server_with_verifier(
+            home_b.clone(),
+            0,
+            Some(Arc::new(ToggleTailscaleVerifier {
+                allow: allow.clone(),
+            })),
+        )
+        .await;
+
+        // Register host B in host A's hosts.json (linked host discovery without requiring host Tailscale CLI).
+        let b_probe = server_b.call("host.probe", json!({})).unwrap();
+        let b_sid = b_probe["server_id"].as_str().unwrap().to_owned();
+        let hosts_file = canban_types::HostsFile {
+            hosts: vec![SavedHost {
+                id: "host-b".into(),
+                name: "Host B".into(),
+                transport: HostTransport::Tcp {
+                    addr: addr_b.clone(),
+                    token: "dev_unused_on_a".into(),
+                },
+                ssh_target: None,
+                server_id: Some(b_sid.clone()),
+                enabled: true,
+                added_at: 1,
+            }],
+        };
+        std::fs::create_dir_all(home_a.join("config")).unwrap();
+        std::fs::write(
+            home_a.join("config/hosts.json"),
+            serde_json::to_vec_pretty(&hosts_file).unwrap(),
+        )
+        .unwrap();
+
+        let creds = Arc::new(MemoryCredentialStore::new());
+        let client = RemoteClient::with_runtime(
+            RemoteClientConfig::new(client_dir),
+            creds.clone(),
+            tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+
+        // Pair mobile directly with Host A using Tailscale sentinel (no pair_ code or dev_ token issued upfront).
+        let invite_a = PairingInvite {
+            addr: addr_a.clone(),
+            security: TransportSecurity::Tailscale,
+            server_id: None,
+            host_name: Some("Host A".into()),
+            secret: TAILSCALE_AUTH_SENTINEL.into(),
+        };
+        let sum_a = client
+            .pair_with_invite(&invite_a, Some("Host A"))
+            .await
+            .expect("Tailscale WhoIs auto-auth must succeed for verified peer");
+        assert!(sum_a.is_connected());
+        assert_eq!(
+            creds.get_token(&sum_a.id).unwrap().as_deref(),
+            Some(TAILSCALE_AUTH_SENTINEL),
+            "Tailscale connections must preserve ts_auto rather than persisting static device tokens"
+        );
+
+        // Ephemeral session token must seal TCP env.save secrets end-to-end.
+        client
+            .call_routed_async(
+                "env.save",
+                json!({
+                    "host_id": sum_a.id,
+                    "scope": "global",
+                    "target_id": "",
+                    "entries": BTreeMap::from([(
+                        "TS_SECRET".to_owned(),
+                        EnvWriteEntry::Secret {
+                            value: Some("tailscale-sealed-secret".into()),
+                            keep_existing: false,
+                        },
+                    )]),
+                }),
+                None,
+            )
+            .await
+            .expect("env.save sealed with ephemeral ts_sess secret must succeed");
+        let snap_a = server_a.snapshot().unwrap();
+        assert!(matches!(
+            snap_a.global_env.get("TS_SECRET"),
+            Some(EnvEntryMeta::Secret {
+                configured: true,
+                ..
+            })
+        ));
+
+        // device.list surfaces active Tailscale peer with auth_kind == "tailscale".
+        let devs_val = server_a.call("device.list", json!({})).unwrap();
+        let devs: Vec<PairedDevice> = serde_json::from_value(devs_val["devices"].clone()).unwrap();
+        let ts_dev = devs
+            .iter()
+            .find(|d| d.id == "ts:nMobile01")
+            .expect("Tailscale session listed in device.list");
+        assert_eq!(ts_dev.auth_kind, "tailscale");
+
+        // On-demand discovery via Host A finds Host B (and excludes Host A).
+        let discovered = client
+            .discover_canban_hosts(Some(&sum_a.id))
+            .await
+            .expect("discover_canban_hosts succeeds");
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].addr, addr_b);
+        assert_eq!(discovered[0].name, "Host B");
+        assert!(discovered[0].linked_on_host);
+
+        // Mobile joins Host B directly using Tailscale sentinel too.
+        let invite_b = PairingInvite {
+            addr: discovered[0].addr.clone(),
+            security: TransportSecurity::Tailscale,
+            server_id: discovered[0].server_id.clone(),
+            host_name: Some(discovered[0].name.clone()),
+            secret: TAILSCALE_AUTH_SENTINEL.into(),
+        };
+        let sum_b = client
+            .pair_with_invite(&invite_b, Some("Host B"))
+            .await
+            .unwrap();
+        assert!(sum_b.is_connected());
+        assert!(
+            client
+                .discover_canban_hosts(Some(&sum_a.id))
+                .await
+                .unwrap()
+                .is_empty(),
+            "already-paired Host B must be filtered out on subsequent discovery"
+        );
+
+        // Disallowing peer in Tailscale rejects new Tailscale auto-auth cleanly with auth_failed.
+        allow.store(false, Ordering::SeqCst);
+        let rej_err = client
+            .pair_with_invite(
+                &PairingInvite {
+                    addr: addr_a,
+                    security: TransportSecurity::Tailscale,
+                    server_id: None,
+                    host_name: Some("Host A Again".into()),
+                    secret: TAILSCALE_AUTH_SENTINEL.into(),
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{rej_err:#}").contains("auth_failed:"),
+            "unverified Tailscale peer must fail with auth_failed, got {rej_err:#}"
+        );
     }
 }

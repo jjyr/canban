@@ -434,6 +434,7 @@ fn tcp_first_frame_accepts_payloads_over_64_kib() {
             port: 0,
             listen: Some("127.0.0.1:0".into()),
             allow_insecure_bind: false,
+            trust_tailscale_self: true,
         }))
         .unwrap();
     let addr = app.bound_tcp_addrs()[0].clone();

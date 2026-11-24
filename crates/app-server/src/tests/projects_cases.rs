@@ -214,6 +214,7 @@ fn app_shutdown_flushes_rpc_reply_over_tcp_and_yamux_before_teardown() {
         port: 0,
         listen: Some("127.0.0.1:0".into()),
         allow_insecure_bind: false,
+        trust_tailscale_self: true,
     };
 
     // Direct TCP RPC
