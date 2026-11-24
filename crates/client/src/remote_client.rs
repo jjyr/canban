@@ -814,11 +814,11 @@ impl RemoteClient {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| invite.secret.clone());
 
-        let probe_res = transport.call_async("host.probe", &json!({})).await;
+        let ping_res = transport.call_async("app.ping", &json!({})).await;
         let state_res = transport
             .call_async("app.state", &json!({"after": Value::Null}))
             .await;
-        let (probe_val, state_val) = match (probe_res, state_res) {
+        let (ping_val, state_val) = match (ping_res, state_res) {
             (Ok(p), Ok(s)) => (p, s),
             (Err(e), _) | (_, Err(e)) => {
                 transport.close();
@@ -828,7 +828,7 @@ impl RemoteClient {
 
         let server_id = state_val["server_id"]
             .as_str()
-            .or_else(|| probe_val["server_id"].as_str())
+            .or_else(|| ping_val["server_id"].as_str())
             .or(invite.server_id.as_deref())
             .filter(|s| !s.trim().is_empty())
             .map(str::to_owned);
@@ -838,7 +838,7 @@ impl RemoteClient {
             .filter(|s| !s.is_empty())
             .or_else(|| invite.host_name.as_deref().filter(|s| !s.trim().is_empty()))
             .or_else(|| {
-                probe_val["hostname"]
+                ping_val["hostname"]
                     .as_str()
                     .or_else(|| state_val["hostname"].as_str())
                     .filter(|s| !s.trim().is_empty())
@@ -882,7 +882,7 @@ impl RemoteClient {
                     &self.config.data_dir,
                     &state_val,
                     Some(rtt_ms),
-                    Some(&probe_val),
+                    Some(&ping_val),
                     None,
                 );
                 let summary = slot.summary();
@@ -917,7 +917,7 @@ impl RemoteClient {
                     &self.config.data_dir,
                     &state_val,
                     Some(rtt_ms),
-                    Some(&probe_val),
+                    Some(&ping_val),
                     None,
                 );
                 let summary = slot.summary();
@@ -1850,7 +1850,7 @@ impl RemoteClient {
                 }
             };
 
-        let probe_res = transport.call_async("host.probe", &json!({})).await;
+        let ping_res = transport.call_async("app.ping", &json!({})).await;
         let after = if saved_at == 0 {
             Value::Null
         } else {
@@ -1859,7 +1859,7 @@ impl RemoteClient {
         let state_res = transport
             .call_async("app.state", &json!({"after": after}))
             .await;
-        let (probe_val, state_val) = match (probe_res, state_res) {
+        let (ping_val, state_val) = match (ping_res, state_res) {
             (Ok(p), Ok(s)) => (p, s),
             (Err(e), _) | (_, Err(e)) => {
                 transport.close();
@@ -1870,7 +1870,7 @@ impl RemoteClient {
         if let Some(expected_sid) = server_id.as_deref()
             && let Some(actual_sid) = state_val["server_id"]
                 .as_str()
-                .or_else(|| probe_val["server_id"].as_str())
+                .or_else(|| ping_val["server_id"].as_str())
             && actual_sid != expected_sid
         {
             transport.close();
@@ -1914,7 +1914,7 @@ impl RemoteClient {
                 &self.config.data_dir,
                 &state_val,
                 Some(rtt_ms),
-                Some(&probe_val),
+                Some(&ping_val),
                 None,
             );
             let conn_gen = slot.conn_gen;
@@ -2630,8 +2630,8 @@ mod tests {
         )
         .unwrap();
         let (code, _) = server.create_pairing_code(300).unwrap();
-        let probe = server.call("host.probe", json!({})).unwrap();
-        let server_id = probe["server_id"].as_str().unwrap().to_owned();
+        let ping = server.call("app.ping", json!({})).unwrap();
+        let server_id = ping["server_id"].as_str().unwrap().to_owned();
 
         let uri = format_pairing_uri(&server_addr, &code, Some(&server_id), Some("Studio Mac"));
         let invite = parse_pairing_invite(&uri).expect("valid single-address invite");
@@ -2777,7 +2777,7 @@ mod tests {
             )
             .unwrap();
         let (code, _) = server1.create_pairing_code(300).unwrap();
-        let server1_id = server1.call("host.probe", json!({})).unwrap()["server_id"]
+        let server1_id = server1.call("app.ping", json!({})).unwrap()["server_id"]
             .as_str()
             .unwrap()
             .to_owned();
@@ -3111,7 +3111,7 @@ mod tests {
                         };
                         let id = req["id"].clone();
                         match req["method"].as_str() {
-                            Some("host.probe") => {
+                            Some("app.ping") => {
                                 let _ = write_json_line_async(
                                     &mut writer,
                                     &json!({
@@ -3426,7 +3426,7 @@ mod tests {
                         };
                         let id = req["id"].clone();
                         match req["method"].as_str() {
-                            Some("host.probe") => {
+                            Some("app.ping") => {
                                 let _ = write_json_line_async(
                                     &mut writer,
                                     &json!({
@@ -3584,8 +3584,8 @@ mod tests {
         .await;
 
         // Register host B in host A's hosts.json (linked host discovery without requiring host Tailscale CLI).
-        let b_probe = server_b.call("host.probe", json!({})).unwrap();
-        let b_sid = b_probe["server_id"].as_str().unwrap().to_owned();
+        let b_ping = server_b.call("app.ping", json!({})).unwrap();
+        let b_sid = b_ping["server_id"].as_str().unwrap().to_owned();
         let hosts_file = canban_types::HostsFile {
             hosts: vec![SavedHost {
                 id: "host-b".into(),

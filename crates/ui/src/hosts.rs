@@ -26,6 +26,17 @@ fn sanitize_host_id(raw: &str) -> String {
     format!("{base}-{}", &canban_types::id()[..6])
 }
 
+/// Parses either a `canban://...#<secret>` pairing URI or a bare Tailscale endpoint
+/// (`host.ts.net`, `100.x.y.z`, `fd7a:115c:a1e0::1`) for automatic Tailscale WhoIs sign-in.
+fn parse_desktop_connect_input(raw: &str) -> Option<(String, String, Option<String>)> {
+    if let Some(inv) = canban_client::parse_pairing_invite(raw)
+        .or_else(|| canban_client::parse_tailscale_host_input(raw))
+    {
+        return Some((inv.addr, inv.secret, inv.host_name));
+    }
+    parse_pairing_uri(raw).map(|(addr, token)| (addr, token, None))
+}
+
 pub(crate) fn sync_chip_spec(mark: SyncMark) -> (&'static str, Tone) {
     match mark {
         SyncMark::Pending => ("Not synced", Tone::Neutral),
@@ -1445,7 +1456,7 @@ pub fn connect_modal(ui: Ui) -> impl IntoElement {
                                             },
                                         ))
                                         .child(compact_segment(
-                                            "Pairing URI",
+                                            "Address / URI",
                                             Some(Icon::Copy),
                                             move || active_tab.get() == "uri",
                                             move |_| {
@@ -1540,7 +1551,7 @@ fn connect_tailscale_tab(
         body = body.child(notice(
             cat.tailscale_error.unwrap_or_else(|| {
                 format!(
-                    "Tailscale CLI is not running on {}. Start Tailscale or connect via SSH / Pairing URI.",
+                    "Tailscale CLI is not running on {}. Start Tailscale, or enter a Tailscale address (host.ts.net / 100.x.y.z) or Pairing URI in the Address / URI tab.",
                     crate::platform::LOCAL_HOST_NAME
                 )
             }),
@@ -1603,7 +1614,7 @@ fn connect_tailscale_tab(
                 )
                 .child(
                     compact_action(
-                        "Pair & Connect",
+                        "Connect",
                         if online {
                             Variant::Primary
                         } else {
@@ -1623,7 +1634,7 @@ fn connect_tailscale_tab(
                                         name: peer_name,
                                         transport: HostTransport::Tcp {
                                             addr: format!("{peer_ip}:{DEFAULT_DAEMON_PORT}"),
-                                            token: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+                                            token: TAILSCALE_AUTH_SENTINEL.into(),
                                         },
                                         ssh_target: None,
                                         server_id: None,
@@ -1645,7 +1656,7 @@ fn connect_tailscale_tab(
                             busy.set(true);
                             feedback_tone.set(Tone::Neutral);
                             feedback.set(format!(
-                                "Probing {peer_name} ({peer_ip}:{DEFAULT_DAEMON_PORT}) & attempting SSH auto-pair…"
+                                "Connecting to {peer_name} ({peer_ip}:{DEFAULT_DAEMON_PORT}) via Tailscale…"
                             ));
                             ui.spawn(async move {
                                 let ip_c = peer_ip.clone();
@@ -1658,6 +1669,7 @@ fn connect_tailscale_tab(
                                             &direct_addr,
                                             Duration::from_secs(2),
                                         );
+                                        let mut ts_auth_err: Option<String> = None;
                                         let pair_res = if probe.is_ok() {
                                             match canban_app_server::AppClient::connect_tcp(
                                                 direct_addr.clone(),
@@ -1673,11 +1685,14 @@ fn connect_tailscale_tab(
                                                         "via": "tailscale_whois",
                                                     }))
                                                 }
-                                                Err(_) => canban_app_server::network::pair_via_ssh_noninteractive(
-                                                    &ssh_c,
-                                                    true,
-                                                    DEFAULT_DAEMON_PORT,
-                                                ),
+                                                Err(ts_err) => {
+                                                    ts_auth_err = Some(format!("{ts_err:#}"));
+                                                    canban_app_server::network::pair_via_ssh_noninteractive(
+                                                        &ssh_c,
+                                                        true,
+                                                        DEFAULT_DAEMON_PORT,
+                                                    )
+                                                }
                                             }
                                         } else {
                                             canban_app_server::network::pair_via_ssh_noninteractive(
@@ -1686,7 +1701,7 @@ fn connect_tailscale_tab(
                                                 DEFAULT_DAEMON_PORT,
                                             )
                                         };
-                                        (probe, pair_res)
+                                        (probe, ts_auth_err, pair_res)
                                     }
                                     #[cfg(not(feature = "local-host"))]
                                     {
@@ -1695,6 +1710,7 @@ fn connect_tailscale_tab(
                                             Err::<u64, anyhow::Error>(anyhow::anyhow!(
                                                 "Host probing requires the local-host feature"
                                             )),
+                                            None::<String>,
                                             Err::<serde_json::Value, anyhow::Error>(anyhow::anyhow!(
                                                 "SSH pairing requires the local-host feature"
                                             )),
@@ -1703,7 +1719,7 @@ fn connect_tailscale_tab(
                                 })
                                 .await;
                                 let _ = busy.try_set(false);
-                                if let Ok((probe_res, pair_res)) = res {
+                                if let Ok((probe_res, ts_auth_err, pair_res)) = res {
                                     match pair_res {
                                         Ok(paired) => {
                                             let token = paired["token"]
@@ -1741,8 +1757,15 @@ fn connect_tailscale_tab(
                                             let msg = format!("{pair_err:#}");
                                             if probe_res.is_ok() {
                                                 let _ = feedback_tone.try_set(Tone::Attention);
+                                                let detail = if let Some(ts_msg) = ts_auth_err {
+                                                    format!(
+                                                        "Tailscale direct auth failed ({ts_msg}); SSH auto-pair fallback also failed ({msg})."
+                                                    )
+                                                } else {
+                                                    format!("automatic SSH key auth was skipped ({msg}).")
+                                                };
                                                 let _ = feedback.try_set(format!(
-                                                    "Canban daemon is running on {peer_name}:{DEFAULT_DAEMON_PORT}, automatic SSH key auth was skipped ({msg}). Paste `canban pair --tailscale` URI below or adjust SSH user."
+                                                    "Canban daemon is running on {peer_name}:{DEFAULT_DAEMON_PORT}, {detail} Paste `canban pair --tailscale` URI below or adjust SSH user."
                                                 ));
                                             } else {
                                                 let _ = ts_needs_bootstrap.try_set(true);
@@ -1817,7 +1840,7 @@ fn connect_tailscale_tab(
                     view()
                         .gap_1()
                         .child(
-                            muted("Or paste pairing URI from `canban pair --tailscale`:")
+                            muted("Or enter a Tailscale address (host.ts.net / 100.x.y.z) or paste a `canban pair --tailscale` URI:")
                                 .text_size(px(11.5)),
                         )
                         .child(
@@ -1827,29 +1850,36 @@ fn connect_tailscale_tab(
                                 .gap_2()
                                 .child(
                                     view().flex_1().child(
-                                        field(ts_manual_uri, "canban://100.x.y.z:7680#pair_...")
-                                            .label("Pairing URI"),
+                                        field(ts_manual_uri, "host.ts.net, 100.x.y.z, or canban://100.x.y.z:7680#pair_...")
+                                            .label("Address or Pairing URI"),
                                     ),
                                 )
                                 .child(compact_action(
-                                    "Connect URI",
+                                    "Connect",
                                     Variant::Primary,
                                     move |_| {
                                         let raw = ts_manual_uri.get_untracked();
-                                        let Some((addr, token)) = parse_pairing_uri(&raw) else {
+                                        let Some((addr, token, parsed_name)) =
+                                            parse_desktop_connect_input(&raw)
+                                        else {
                                             feedback_tone.set(Tone::Danger);
                                             feedback.set(
-                                                "Enter a valid `canban://host:port#token` URI."
+                                                "Enter a Tailscale address (`host.ts.net` or `100.x.y.z`) or a `canban://host:port#token` URI."
                                                     .into(),
                                             );
                                             return;
                                         };
                                         let nm = selected_ts_name.get_untracked();
+                                        let display = if !nm.trim().is_empty() {
+                                            nm
+                                        } else {
+                                            parsed_name.unwrap_or_else(|| addr.clone())
+                                        };
                                         finish_host_registration(
                                             ui,
                                             SavedHost {
-                                                id: sanitize_host_id(&nm),
-                                                name: if nm.is_empty() { addr.clone() } else { nm },
+                                                id: sanitize_host_id(&display),
+                                                name: display,
                                                 transport: HostTransport::Tcp { addr, token },
                                                 ssh_target: None,
                                                 server_id: None,
@@ -2095,13 +2125,19 @@ fn connect_uri_tab(
         .gap_3()
         .min_w(px(0.))
         .child(muted(
-            "Run `canban pair --tailscale` on your remote Linux or macOS machine and paste the pairing URI below:",
+            "Enter a Tailscale address (host.ts.net or 100.x.y.z) for automatic same-account sign-in, or paste a pairing URI from `canban pair --tailscale`:",
         ))
         .child(
             view()
                 .gap_1p5()
-                .child(label("Pairing URI"))
-                .child(field(uri_input, "canban://100.64.0.10:7680#pair_...").label("Pairing URI")),
+                .child(label("Address or Pairing URI"))
+                .child(
+                    field(
+                        uri_input,
+                        "host.ts.net, 100.x.y.z, or canban://100.64.0.10:7680#pair_...",
+                    )
+                    .label("Address or Pairing URI"),
+                ),
         )
         .child(
             view()
@@ -2117,20 +2153,23 @@ fn connect_uri_tab(
                 .child(
                     action("Connect Machine", Variant::Primary, move |_| {
                         let raw = uri_input.get_untracked();
-                        let Some((addr, token)) = parse_pairing_uri(&raw) else {
+                        let Some((addr, token, parsed_name)) = parse_desktop_connect_input(&raw)
+                        else {
                             feedback_tone.set(Tone::Danger);
                             feedback.set(
-                                "Invalid pairing URI. Expected `canban://<host>:<port>#<token>`."
+                                "Enter a Tailscale address (`host.ts.net` or `100.x.y.z`) or a pairing URI (`canban://<host>:<port>#<token>`)."
                                     .into(),
                             );
                             return;
                         };
                         let disp = {
                             let custom = uri_display_name.get_untracked();
-                            if custom.trim().is_empty() {
-                                addr.split(':').next().unwrap_or(&addr).to_owned()
-                            } else {
+                            if !custom.trim().is_empty() {
                                 custom.trim().to_owned()
+                            } else if let Some(name) = parsed_name {
+                                name
+                            } else {
+                                extract_daemon_host(&addr).to_owned()
                             }
                         };
                         finish_host_registration(
@@ -3429,6 +3468,33 @@ mod tests {
             Some(("100.64.0.10:7680".into(), "secret-token-12345678".into()))
         );
         assert_eq!(parse_pairing_uri("https://example.com"), None);
+        assert_eq!(
+            parse_desktop_connect_input("100.84.12.5"),
+            Some((
+                "100.84.12.5:7680".into(),
+                TAILSCALE_AUTH_SENTINEL.into(),
+                None
+            ))
+        );
+        assert_eq!(
+            parse_desktop_connect_input("home-linux.tailnet.ts.net"),
+            Some((
+                "home-linux.tailnet.ts.net:7680".into(),
+                TAILSCALE_AUTH_SENTINEL.into(),
+                Some("home-linux".into())
+            ))
+        );
+        assert_eq!(
+            parse_desktop_connect_input(
+                "canban://192.168.1.20:7680?name=Lab#pair_0123456789abcdef"
+            ),
+            Some((
+                "192.168.1.20:7680".into(),
+                "pair_0123456789abcdef".into(),
+                Some("Lab".into())
+            ))
+        );
+        assert_eq!(parse_desktop_connect_input("192.168.1.20"), None);
 
         #[component]
         fn ProbeConnectModal() -> impl IntoElement {
