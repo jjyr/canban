@@ -12,9 +12,9 @@
     "nav_aria": "Main navigation",
     "markdown_mirror": "Markdown (.md)",
     "llms_full": "llms-full.txt",
-    "install_updated": "2026-11-23",
+    "install_updated": "2026-11-24",
     "install_title": "Install Canban",
-    "install_desc": "Install or update Canban on macOS and Linux, set up a headless server, and find answers to common questions.",
+    "install_desc": "Install or update Canban on macOS, Linux, and Android, set up a headless server, and find answers to common questions.",
     "install_intro": "A native workbench on your desktop. Persistent agents on your server.",
     "install_screenshot": {
       "src": "/screenshots/board-terminal.png",
@@ -35,8 +35,14 @@
     "linux_deps": "Linux runtime dependencies",
     "headless": "Headless Linux server",
     "headless_text": "Install the CLI and daemon without GTK4 or a desktop session. Connect from the desktop app over SSH or Tailscale. Install Git, Herdr Core, your agent CLI, and project dependencies on the server.",
+    "mobile": "Mobile",
+    "android": "Android · arm64-v8a",
+    "android_text": "Download the signed release APK to connect to your macOS or Linux canband hosts over Tailscale (zero-QR WhoIs auto-auth and on-demand Tailnet discovery) or one-time QR pairing. Subscribe with Obtainium for automatic updates directly from GitHub Releases.",
+    "android_download": "Download Android APK",
+    "android_obtainium": "Get it on Obtainium",
+    "android_releases_link": "Latest release on GitHub",
     "updates": "Updates",
-    "updates_text": "Run the same installation command again to update an existing installation. The desktop app also provides an update action when a new version is available.",
+    "updates_text": "Run the same installation command again to update an existing installation. The desktop app also provides an update action when a new version is available, and Android users can update via Obtainium or download the latest APK from GitHub Releases.",
     "releases_link": "Read the Changelog",
     "source": "Build from source",
     "source_text": "For platform build dependencies and source installation instructions, see the GitHub README.",
@@ -52,7 +58,7 @@
       ],
       [
         "Which operating systems are supported?",
-        "Canban is available for macOS 13.0 or later on Apple Silicon, and Linux on x86_64 and arm64. Linux desktops require GTK4 and GStreamer runtime libraries. Linux servers without a desktop can use headless mode."
+        "Canban is available for macOS 13.0 or later on Apple Silicon, Linux on x86_64 and arm64, and as a companion client for Android (arm64-v8a). Linux desktops require GTK4 and GStreamer runtime libraries. Linux servers without a desktop can use headless mode."
       ],
       [
         "How do I install or update Canban?",
@@ -89,9 +95,9 @@
     "nav_aria": "主导航",
     "markdown_mirror": "Markdown (.md)",
     "llms_full": "llms-full.txt",
-    "install_updated": "2026-11-23",
+    "install_updated": "2026-11-24",
     "install_title": "安装 Canban",
-    "install_desc": "在 macOS 和 Linux 上安装或更新 Canban，配置无桌面的远程服务器，并查看常见问题解答。",
+    "install_desc": "在 macOS、Linux 和 Android 上安装或更新 Canban，配置无桌面的远程服务器，并查看常见问题解答。",
     "install_intro": "桌面上的原生工作台，服务器上持续运行的 Agent。",
     "install_screenshot": {
       "src": "/screenshots/board-terminal.png",
@@ -112,8 +118,14 @@
     "linux_deps": "Linux 运行库依赖",
     "headless": "Headless Linux 服务器",
     "headless_text": "安装 CLI 和后台服务，无需 GTK4 或桌面环境。通过桌面端使用 SSH 或 Tailscale 连接。请在服务器上安装 Git、Herdr Core、Agent CLI 和项目开发依赖。",
+    "mobile": "移动端",
+    "android": "Android · arm64-v8a",
+    "android_text": "下载官方签名 Release APK，通过 Tailscale（同账号 WhoIs 免扫码自动认证与按需 Tailnet 发现）或一次性二维码配对连接 macOS / Linux 上的 canband 主机。搭配 Obtainium 可直接从 GitHub Releases 自动接收更新。",
+    "android_download": "下载 Android APK",
+    "android_obtainium": "在 Obtainium 订阅更新",
+    "android_releases_link": "前往 GitHub Releases 查看",
     "updates": "更新",
-    "updates_text": "再次运行相同的安装命令即可更新已有安装。桌面应用在检测到新版本时也会提供更新入口。",
+    "updates_text": "再次运行相同的安装命令即可更新已有安装。桌面应用在检测到新版本时也会提供更新入口，Android 用户可通过 Obtainium 订阅或在 GitHub Releases 下载最新 APK 更新。",
     "releases_link": "查看版本更新",
     "source": "从源码构建",
     "source_text": "各平台构建依赖和源码安装步骤，请参阅 GitHub README。",
@@ -129,7 +141,7 @@
       ],
       [
         "支持哪些操作系统？",
-        "Canban 提供 macOS 13.0 及以上 Apple Silicon 版本，以及 Linux x86_64 和 arm64 版本。Linux 桌面版需要 GTK4 和 GStreamer 运行库；无桌面的 Linux 服务器可以使用 Headless 模式。"
+        "Canban 提供 macOS 13.0 及以上 Apple Silicon 版本、Linux x86_64 / arm64 版本，以及 Android（arm64-v8a）移动端伴侣客户端。Linux 桌面版需要 GTK4 和 GStreamer 运行库；无桌面的 Linux 服务器可以使用 Headless 模式。"
       ],
       [
         "如何安装和更新？",
@@ -166,9 +178,9 @@
     "nav_aria": "主導覽",
     "markdown_mirror": "Markdown (.md)",
     "llms_full": "llms-full.txt",
-    "install_updated": "2026-11-23",
+    "install_updated": "2026-11-24",
     "install_title": "安裝 Canban",
-    "install_desc": "在 macOS 與 Linux 上安裝或更新 Canban，部署無桌面環境的遠端伺服器，並查看常見問題解答。",
+    "install_desc": "在 macOS、Linux 與 Android 上安裝或更新 Canban，部署無桌面環境的遠端伺服器，並查看常見問題解答。",
     "install_intro": "桌面上的原生工作台，伺服器上持續運作的 Agent。",
     "install_screenshot": {
       "src": "/screenshots/board-terminal.png",
@@ -189,8 +201,14 @@
     "linux_deps": "Linux 執行環境相依套件",
     "headless": "Headless Linux 伺服器",
     "headless_text": "安裝 CLI 與背景服務（canband），無需 GTK4 或桌面環境。可從桌面端透過 SSH 或 Tailscale 連線，並在伺服器上安裝 Git、Herdr Core、Agent CLI 與專案開發相依套件。",
+    "mobile": "行動端",
+    "android": "Android · arm64-v8a",
+    "android_text": "下載官方簽章 Release APK，透過 Tailscale（同帳號 WhoIs 免掃碼自動驗證與按需 Tailnet 探索）或一次性 QR 配對連線 macOS / Linux 上的 canband 主機。搭配 Obtainium 可直接從 GitHub Releases 自動接收更新。",
+    "android_download": "下載 Android APK",
+    "android_obtainium": "在 Obtainium 訂閱更新",
+    "android_releases_link": "前往 GitHub Releases 查看",
     "updates": "更新",
-    "updates_text": "再次執行相同的安裝指令即可更新現有安裝；桌面應用偵測到新版本時也會提供更新按鈕。",
+    "updates_text": "再次執行相同的安裝指令即可更新現有安裝；桌面應用偵測到新版本時也會提供更新按鈕，Android 用戶可透過 Obtainium 訂閱或從 GitHub Releases 下載最新 APK 更新。",
     "releases_link": "查看版本更新",
     "source": "從原始碼建置",
     "source_text": "各平台編譯相依套件與原始碼安裝步驟，請參閱 GitHub README。",
@@ -206,7 +224,7 @@
       ],
       [
         "支援哪些作業系統？",
-        "Canban 提供 macOS 13.0 及以上 Apple Silicon 版本，以及 Linux x86_64 與 arm64 版本。Linux 桌面版需要 GTK4 與 GStreamer 函式庫；無桌面的 Linux 伺服器可使用 Headless 模式。"
+        "Canban 提供 macOS 13.0 及以上 Apple Silicon 版本、Linux x86_64 / arm64 版本，以及 Android（arm64-v8a）行動端伴侶用戶端。Linux 桌面版需要 GTK4 與 GStreamer 函式庫；無桌面的 Linux 伺服器可使用 Headless 模式。"
       ],
       [
         "如何安裝與更新 Canban？",
@@ -243,9 +261,9 @@
     "nav_aria": "メインナビゲーション",
     "markdown_mirror": "Markdown (.md)",
     "llms_full": "llms-full.txt",
-    "install_updated": "2026-11-23",
+    "install_updated": "2026-11-24",
     "install_title": "Canban をインストール",
-    "install_desc": "macOS および Linux への Canban のインストール・更新方法、ヘッドレス Linux サーバー構築、よくある質問をまとめています。",
+    "install_desc": "macOS、Linux、Android への Canban のインストール・更新方法、ヘッドレス Linux サーバー構築、よくある質問をまとめています。",
     "install_intro": "デスクトップにはネイティブワークベンチを。サーバーには止まらない永続エージェントを。",
     "install_screenshot": {
       "src": "/screenshots/board-terminal.png",
@@ -266,8 +284,14 @@
     "linux_deps": "Linux ランタイム依存パッケージ",
     "headless": "Headless Linux サーバー",
     "headless_text": "GTK4 やデスクトップセッションなしで CLI とデーモン（canband）のみを導入します。デスクトップアプリから SSH または Tailscale 経由で接続できます。サーバー側にも Git、Herdr Core、Agent CLI、プロジェクトの依存ツールを入れておいてください。",
+    "mobile": "モバイル",
+    "android": "Android · arm64-v8a",
+    "android_text": "署名済みリリース APK をダウンロードし、Tailscale（同一アカウント WhoIs 自動認証・オンデマンド Tailnet 検出）または使い捨て QR ペアリングで macOS / Linux の canband ホストに接続できます。Obtainium に登録すると GitHub Releases から自動で更新を受け取れます。",
+    "android_download": "Android APK をダウンロード",
+    "android_obtainium": "Obtainium で自動更新",
+    "android_releases_link": "GitHub Releases で確認",
     "updates": "アップデート",
-    "updates_text": "同じインストールコマンドを再実行すると既存環境を更新できます。新しいリリースが公開されるとデスクトップアプリ上にも更新アクションが表示されます。",
+    "updates_text": "同じインストールコマンドを再実行すると既存環境を更新できます。新しいリリースが公開されるとデスクトップアプリ上にも更新アクションが表示され、Android ユーザーは Obtainium 経由または GitHub Releases の最新 APK から更新できます。",
     "releases_link": "変更履歴を見る",
     "source": "ソースからビルド",
     "source_text": "各プラットフォームのビルド依存関係とソースからの導入手順は GitHub README をご覧ください。",
@@ -283,7 +307,7 @@
       ],
       [
         "対応している OS は何ですか？",
-        "macOS 13.0 以降の Apple Silicon、および Linux の x86_64 / arm64 に対応しています。Linux デスクトップでは GTK4 と GStreamer ランタイムが必要ですが、GUI のない Linux サーバーでは Headless モードを利用できます。"
+        "macOS 13.0 以降の Apple Silicon、Linux の x86_64 / arm64、および Android（arm64-v8a）コンパニオンクライアントに対応しています。Linux デスクトップでは GTK4 と GStreamer ランタイムが必要ですが、GUI のない Linux サーバーでは Headless モードを利用できます。"
       ],
       [
         "インストールやアップデートはどう行いますか？",
@@ -320,9 +344,9 @@
     "nav_aria": "기본 내비게이션",
     "markdown_mirror": "Markdown (.md)",
     "llms_full": "llms-full.txt",
-    "install_updated": "2026-11-23",
+    "install_updated": "2026-11-24",
     "install_title": "Canban 설치",
-    "install_desc": "macOS 및 Linux에 Canban을 설치·업데이트하고, 헤드리스 Linux 서버를 구성하며, 자주 묻는 질문의 답변을 확인하세요.",
+    "install_desc": "macOS, Linux 및 Android에 Canban을 설치·업데이트하고, 헤드리스 Linux 서버를 구성하며, 자주 묻는 질문의 답변을 확인하세요.",
     "install_intro": "데스크톱에서는 네이티브 워크벤치를, 서버에서는 끊김 없는 에이전트를 실행하세요.",
     "install_screenshot": {
       "src": "/screenshots/board-terminal.png",
@@ -343,8 +367,14 @@
     "linux_deps": "Linux 런타임 의존성",
     "headless": "Headless Linux 서버",
     "headless_text": "GTK4나 데스크톱 세션 없이 CLI와 데몬(canband)만 설치합니다. 데스크톱 앱에서 SSH 또는 Tailscale로 연결할 수 있으며, 서버에 Git, Herdr Core, Agent CLI 및 프로젝트 빌드 도구를 설치해 두어야 합니다.",
+    "mobile": "모바일",
+    "android": "Android · arm64-v8a",
+    "android_text": "서명된 릴리스 APK를 다운로드해 Tailscale(동일 계정 WhoIs 자동 인증 및 온디맨드 Tailnet 탐색) 또는 일회용 QR 페어링으로 macOS / Linux canband 호스트에 연결하세요. Obtainium에 등록하면 GitHub Releases에서 자동으로 업데이트를 받을 수 있습니다.",
+    "android_download": "Android APK 다운로드",
+    "android_obtainium": "Obtainium으로 자동 업데이트",
+    "android_releases_link": "GitHub Releases에서 보기",
     "updates": "업데이트",
-    "updates_text": "동일한 설치 명령을 다시 실행하면 기존 설치를 바로 업데이트할 수 있습니다. 새 버전이 출시되면 데스크톱 앱에서도 업데이트 동작을 제공합니다.",
+    "updates_text": "동일한 설치 명령을 다시 실행하면 기존 설치를 바로 업데이트할 수 있습니다. 새 버전이 출시되면 데스크톱 앱에서도 업데이트 동작을 제공하며, Android 사용자는 Obtainium 또는 GitHub Releases의 최신 APK로 업데이트할 수 있습니다.",
     "releases_link": "변경 로그 보기",
     "source": "소스에서 빌드",
     "source_text": "플랫폼별 빌드 의존성과 소스 설치 방법은 GitHub README를 참고하세요.",
@@ -360,7 +390,7 @@
       ],
       [
         "어떤 운영체제를 지원하나요?",
-        "Apple Silicon용 macOS 13.0 이상과 Linux x86_64 및 arm64를 지원합니다. Linux 데스크톱은 GTK4와 GStreamer 런타임이 필요하며, GUI가 없는 Linux 서버는 Headless 모드로 실행할 수 있습니다."
+        "Apple Silicon용 macOS 13.0 이상, Linux x86_64 및 arm64, 그리고 Android(arm64-v8a) 컴패니언 클라이언트를 지원합니다. Linux 데스크톱은 GTK4와 GStreamer 런타임이 필요하며, GUI가 없는 Linux 서버는 Headless 모드로 실행할 수 있습니다."
       ],
       [
         "Canban은 어떻게 설치하고 업데이트하나요?",

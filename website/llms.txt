@@ -24,7 +24,7 @@ Canban organizes human context on flexible Kanban cards, catches waiting agents 
 - [Remote Linux Hosts, Tailscale & SSH (EN)](https://canban.dev/docs/remote-hosts.md) · [简体中文](https://canban.dev/zh/docs/remote-hosts.md) · [繁體中文](https://canban.dev/zh-tw/docs/remote-hosts.md) · [日本語](https://canban.dev/ja/docs/remote-hosts.md) · [한국어](https://canban.dev/ko/docs/remote-hosts.md)
 - [Changelog (EN)](https://canban.dev/changelog.md)
 
-## Installation (macOS 13.0+ Apple Silicon & Linux x86_64 / arm64)
+## Installation (macOS 13.0+ Apple Silicon, Linux x86_64 / arm64 & Android arm64-v8a)
 
 ```sh
 curl -fsSL https://canban.dev/install.sh | bash
@@ -35,6 +35,11 @@ For headless Linux `canband` hosts (without GTK4/GUI):
 ```sh
 curl -fsSL https://canban.dev/install.sh | bash -s -- --headless
 ```
+
+For Android (`arm64-v8a`, `dev.canban.mobile`):
+
+- Direct signed APK download: https://github.com/jjyr/canban/releases/latest/download/Canban-android-arm64-v8a.apk
+- Obtainium auto-update import: https://apps.obtainium.imranr.dev/redirect?r=obtainium://app/%7B%22id%22%3A%22dev.canban.mobile%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2Fjjyr%2Fcanban%22%2C%22author%22%3A%22jjyr%22%2C%22name%22%3A%22Canban%22%7D
 
 Or build from source:
 

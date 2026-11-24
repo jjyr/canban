@@ -68,6 +68,14 @@
 .doc-command pre { flex: 1; min-width: 0; }
 .doc-command .copy-btn { position: static; flex: 0 0 auto; padding: 10px 14px; }
 .platform-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+.closing-cta-row { flex-wrap: wrap; gap: 12px; }
+.mobile-pill:hover { border-color: var(--green); }
+.mobile-icon { width: 14px; height: 14px; color: var(--green); flex-shrink: 0; }
+.action-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 18px 0 12px; }
+.action-btn { display: inline-flex; align-items: center; gap: 8px; padding: 10px 16px; border-radius: 8px; border: 1px solid var(--border-strong); background: var(--bg-surface); color: var(--fg); font: 600 13.5px var(--font-mono); text-decoration: none; transition: border-color 140ms ease, transform 140ms ease, background 140ms ease; }
+.action-btn:hover { border-color: var(--cyan); transform: translateY(-1px); }
+.action-btn.is-primary { background: var(--green-soft); border-color: rgba(166, 226, 46, 0.55); color: var(--green); }
+.action-btn.is-primary:hover { border-color: var(--green); }
 .doc-screenshot { margin: 22px 0 4px; padding: 0; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-inset); overflow: hidden; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
 .doc-screenshot img { display: block; width: 100%; max-width: 100%; height: auto; }
 .doc-screenshot figcaption { padding: 10px 14px; border-top: 1px solid var(--border); background: var(--bg-surface); color: var(--fg-sec); font-size: 12.5px; line-height: 1.55; }
@@ -196,6 +204,7 @@
   .doc-command { gap: 8px; }
   .doc-command pre { padding: 12px; font-size: 12px; }
   .doc-command .copy-btn { padding: 10px 12px; min-height: 40px; }
+  .action-btn { font-size: 13px; padding: 10px 14px; }
   .table-wrap th, .table-wrap td { padding: 8px 10px; font-size: 12.5px; }
   .table-wrap th { white-space: normal; min-width: 110px; }
   .table-wrap td:first-child { min-width: 96px; }

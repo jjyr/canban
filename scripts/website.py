@@ -20,6 +20,12 @@ ORIGIN = "https://canban.dev"
 REPOSITORY = "https://github.com/jjyr/canban"
 DESKTOP = "curl -fsSL https://canban.dev/install.sh | bash"
 HEADLESS = "curl -fsSL https://canban.dev/install.sh | bash -s -- --headless"
+ANDROID_APK_URL = f"{REPOSITORY}/releases/latest/download/Canban-android-arm64-v8a.apk"
+OBTAINIUM_URL = (
+    "https://apps.obtainium.imranr.dev/redirect?r=obtainium://app/"
+    "%7B%22id%22%3A%22dev.canban.mobile%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2Fjjyr%2Fcanban%22%2C"
+    "%22author%22%3A%22jjyr%22%2C%22name%22%3A%22Canban%22%7D"
+)
 
 LANGUAGES = (
     {
@@ -740,6 +746,12 @@ def install_body(lang, labels):
       <article><h3>{t('linux')}</h3><p>{t('linux_text')}</p></article></div>
       <details><summary>{t('linux_deps')}</summary>{dependencies}</details></section>
     <section id="headless"><h2>{t('headless')}</h2><p>{t('headless_text')}</p>{command(HEADLESS, labels)}</section>
+    <section id="mobile"><h2>{t('mobile')}</h2><h3>{t('android')}</h3><p>{t('android_text')}</p>
+      <div class="action-row">
+        <a class="action-btn is-primary" href="{ANDROID_APK_URL}" target="_blank" rel="noopener noreferrer">{t('android_download')}</a>
+        <a class="action-btn" href="{OBTAINIUM_URL}" target="_blank" rel="noopener noreferrer">{t('android_obtainium')}</a>
+      </div>
+      <a class="text-link" href="{REPOSITORY}/releases/latest" target="_blank" rel="noopener noreferrer">{t('android_releases_link')} →</a></section>
     <section id="updates"><h2>{t('updates')}</h2><p>{t('updates_text')}</p>
       <a class="text-link" href="{route(lang, 'changelog')}">{t('releases_link')} →</a></section>
     <section><h2>{t('source')}</h2><p>{t('source_text')}</p>
@@ -1039,6 +1051,8 @@ def render_home_markdown(lang, strings):
         HEADLESS,
         "```",
         "",
+        f"- **{strings['cta_mobile']}**: [{ANDROID_APK_URL}]({ORIGIN + route(lang, 'install') + '#mobile'})",
+        "",
         "## Navigation",
         "",
         f"- {strings['nav_install']}: {ORIGIN + route(lang, 'install')}",
@@ -1100,6 +1114,16 @@ def render_install_markdown(lang, labels):
         "```sh",
         HEADLESS,
         "```",
+        "",
+        f"## {labels['mobile']}",
+        "",
+        f"### {labels['android']}",
+        "",
+        labels["android_text"],
+        "",
+        f"- {labels['android_download']}: {ANDROID_APK_URL}",
+        f"- {labels['android_obtainium']}: {OBTAINIUM_URL}",
+        f"- {labels['android_releases_link']}: {REPOSITORY}/releases/latest",
         "",
         f"## {labels['updates']}",
         "",

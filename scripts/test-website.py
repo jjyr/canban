@@ -229,6 +229,10 @@ class WebsiteTest(unittest.TestCase):
                             self.assertIn(answer, visible)
                         self.assertIn("Herdr", visible)
                         self.assertIn(website.HEADLESS, visible)
+                        self.assertTrue(page.attrs("section", id="mobile"), (lang, section))
+                        hrefs = {attrs.get("href") for tag, attrs in page.elements if tag == "a"}
+                        self.assertIn(website.ANDROID_APK_URL, hrefs, (lang, section))
+                        self.assertIn(website.OBTAINIUM_URL, hrefs, (lang, section))
                     if section in website.ARTICLE_PAGES and docs_by_lang[lang][section].get("faq_items"):
                         for question, answer in docs_by_lang[lang][section]["faq_items"]:
                             self.assertIn(question, visible)
@@ -245,6 +249,8 @@ class WebsiteTest(unittest.TestCase):
                             for hub in ("install", "docs", "docs/workflows", "docs/cli", "changelog")
                         }
                         self.assertEqual(set(page.ch1_links), expected_ch1)
+                        hrefs = {attrs.get("href") for tag, attrs in page.elements if tag == "a"}
+                        self.assertIn(f"{website.route(lang, 'install')}#mobile", hrefs, lang)
                         self.assertFalse([img for img in page.attrs("img") if img.get("src", "").startswith("/screenshots/")])
 
                     expected_screenshots = {
@@ -370,8 +376,15 @@ class WebsiteTest(unittest.TestCase):
             localized_gc_md = (self.output / website.md_route(lang, "guides/scheduled-worktree-cleanup").lstrip("/")).read_text()
             self.assertNotIn("canban snapshot", localized_gc_md, lang)
 
+        for lang in website.LANGUAGE_CODES:
+            install_md = (self.output / website.md_route(lang, "install").lstrip("/")).read_text()
+            self.assertIn(website.ANDROID_APK_URL, install_md, lang)
+            self.assertIn(website.OBTAINIUM_URL, install_md, lang)
+
         llms_txt = (self.output / "llms.txt").read_text()
         self.assertIn("https://canban.dev/llms-full.txt", llms_txt)
+        self.assertIn(website.ANDROID_APK_URL, llms_txt)
+        self.assertIn(website.OBTAINIUM_URL, llms_txt)
         self.assertIn("Canban = Kanban + Workflow + Herdr", llms_txt)
         for slug in (
             "install",
@@ -393,6 +406,8 @@ class WebsiteTest(unittest.TestCase):
 
         llms_full = (self.output / "llms-full.txt").read_text()
         self.assertIn("Canban = Kanban + Workflow + Herdr", llms_full)
+        self.assertIn(website.ANDROID_APK_URL, llms_full)
+        self.assertIn(website.OBTAINIUM_URL, llms_full)
         self.assertIn("canban --human snapshot", llms_full)
         self.assertIn("canban card adopt", llms_full)
         self.assertIn("batch report", llms_full)
@@ -477,7 +492,7 @@ class WebsiteTest(unittest.TestCase):
                 # Page-scoped lastmod must reflect content metadata, not blindly mirror latest release date.
                 self.assertNotEqual(lastmod, self.releases[0]["published_at"][:10], loc)
                 self.assertEqual(lastmod, expected_lastmod[loc], loc)
-        self.assertEqual(pages_json["en"]["install_updated"], "2026-11-23")
+        self.assertEqual(pages_json["en"]["install_updated"], "2026-11-24")
         self.assertEqual(locales_json["en"]["updated"], "2026-11-24")
         self.assertEqual(docs_by_lang["en"]["docs/workflows"]["updated"], "2026-11-24")
         self.assertEqual(docs_by_lang["en"]["guides/parallel-coding-agents"]["updated"], "2026-11-24")

@@ -35,7 +35,7 @@
       ],
       "applicationCategory": "DeveloperApplication",
       "applicationSubCategory": "AI Coding Agent Kanban & Native Terminal Workbench",
-      "operatingSystem": "macOS 13.0+, Linux (x86_64, arm64)",
+      "operatingSystem": "macOS 13.0+, Linux (x86_64, arm64), Android (arm64-v8a)",
       "softwareRequirements": "git, Herdr Core (hc), GTK4 runtime on Linux desktop, and any native Agent CLI (Claude Code, Codex, Antigravity agy, Pi, Cursor CLI, Gemini CLI, OpenCode)",
       "license": "https://www.apache.org/licenses/LICENSE-2.0",
       "isAccessibleForFree": true,
