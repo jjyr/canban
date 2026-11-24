@@ -1888,6 +1888,175 @@ fn global_new_terminal_opens_in_project_root_while_in_page_new_tab_inherits_curr
 }
 
 #[test]
+fn in_page_new_terminal_inherits_managed_and_external_worktree_scopes_even_when_project_root_is_open()
+ {
+    use crate::terminals::worktrees::{WorktreeScope, entry_scope};
+
+    let runtime = nsh_core::element::Runtime::default();
+    let _entered = runtime.enter();
+    let (_owner, ()) = nsh_core::element::create_root(|| {
+        let mut s = fixture();
+        s.projects[0].directory = "/repo/p1".into();
+        s.projects[0].target_branch = Some("main".into());
+        s.worktrees.push(canban_types::ManagedWorktree {
+            id: "wt1".into(),
+            project_id: "p1".into(),
+            branch: "feat/a".into(),
+            base_branch: "main".into(),
+            base_commit: None,
+            path: "/wt/feat-a".into(),
+            directory: "/repo/p1".into(),
+            created_at: 1,
+        });
+
+        let add_shell = |s: &mut Snapshot, id: &str, number: u64, ctx: TerminalContext| {
+            s.terminals.push(TerminalEntry {
+                id: id.into(),
+                conversation_id: None,
+                number,
+                name: Some(format!("Terminal {number}")),
+                origin_project_id: Some("p1".into()),
+                origin_card_id: None,
+                agent_engine: None,
+                created_at: 1,
+                runtime: Some(TerminalRuntime {
+                    core_id: Some("core".into()),
+                    terminal: Some(format!("t-{id}")),
+                    state: "running".into(),
+                    connection: "connected".into(),
+                    error: None,
+                    agent_status: None,
+                    agent_turn: None,
+                    observed_agent: None,
+                    waiting: None,
+                }),
+                agent: None,
+            });
+            s.terminal_contexts.push(ctx);
+        };
+
+        add_shell(
+            &mut s,
+            "shell-root",
+            10,
+            TerminalContext {
+                terminal_id: "shell-root".into(),
+                core_id: "core".into(),
+                terminal: "t-shell-root".into(),
+                cwd: Some("/repo/p1".into()),
+                directory_root: Some("/repo/p1".into()),
+                project_id: Some("p1".into()),
+                branch: Some("main".into()),
+                ..Default::default()
+            },
+        );
+        add_shell(
+            &mut s,
+            "shell-wt",
+            11,
+            TerminalContext {
+                terminal_id: "shell-wt".into(),
+                core_id: "core".into(),
+                terminal: "t-shell-wt".into(),
+                cwd: Some("/wt/feat-a/sub".into()),
+                directory_root: Some("/wt/feat-a".into()),
+                project_id: Some("p1".into()),
+                worktree_id: Some("wt1".into()),
+                branch: Some("feat/a".into()),
+                ..Default::default()
+            },
+        );
+        add_shell(
+            &mut s,
+            "shell-ext",
+            12,
+            TerminalContext {
+                terminal_id: "shell-ext".into(),
+                core_id: "core".into(),
+                terminal: "t-shell-ext".into(),
+                cwd: Some("/ext/wt-b/src".into()),
+                directory_root: Some("/ext/wt-b".into()),
+                project_id: Some("p1".into()),
+                branch: Some("feat/ext".into()),
+                ..Default::default()
+            },
+        );
+
+        let ui = crate::presenter::Ui::new();
+        observe_fixture_locations(&mut s);
+        ui.snapshot.set(s);
+        ui.snapshot_ready.set(true);
+        ui.project.set("p1".into());
+
+        // 1. Selecting a Managed Branch Worktree terminal and running in-page `new-terminal`
+        //    must stay inside `ManagedWorktree("wt1")` with its subdirectory `cwd`.
+        ui.open_terminal("shell-wt".into());
+        crate::commands::execute(ui, "new-terminal");
+        let wt_new_id = ui.terminal_selection.get_untracked();
+        assert_ne!(wt_new_id, "shell-wt");
+        let snap1 = ui.snapshot.get_untracked();
+        let wt_new = crate::terminals::entries(&snap1)
+            .into_iter()
+            .find(|e| e.saved.id == wt_new_id)
+            .unwrap();
+        assert_eq!(
+            entry_scope(&snap1, &wt_new),
+            WorktreeScope::ManagedWorktree("wt1".into())
+        );
+        assert_eq!(
+            wt_new.location.as_ref().and_then(|l| l.cwd.as_deref()),
+            Some("/wt/feat-a/sub")
+        );
+
+        // 2. Selecting an external git worktree terminal and running in-page `new-terminal`
+        //    must stay inside that external worktree's `Directory` scope and subdirectory `cwd`.
+        ui.open_terminal("shell-ext".into());
+        crate::commands::execute(ui, "new-terminal");
+        let ext_new_id = ui.terminal_selection.get_untracked();
+        assert_ne!(ext_new_id, "shell-ext");
+        let snap2 = ui.snapshot.get_untracked();
+        let ext_new = crate::terminals::entries(&snap2)
+            .into_iter()
+            .find(|e| e.saved.id == ext_new_id)
+            .unwrap();
+        assert_eq!(
+            entry_scope(&snap2, &ext_new),
+            WorktreeScope::Directory {
+                host: "local".into(),
+                path: "/ext/wt-b".into(),
+                project: Some("p1".into()),
+            }
+        );
+        assert_eq!(
+            ext_new.location.as_ref().and_then(|l| l.cwd.as_deref()),
+            Some("/ext/wt-b/src")
+        );
+
+        // 3. Global ⌘T from Board still opens in `ProjectRoot("p1")`.
+        ui.navigate("board");
+        crate::commands::execute(ui, "new-terminal");
+        assert_eq!(ui.page.get_untracked(), "terminals");
+        let global_id = ui.terminal_selection.get_untracked();
+        let snap3 = ui.snapshot.get_untracked();
+        let global_entry = crate::terminals::entries(&snap3)
+            .into_iter()
+            .find(|e| e.saved.id == global_id)
+            .unwrap();
+        assert_eq!(
+            entry_scope(&snap3, &global_entry),
+            WorktreeScope::ProjectRoot("p1".into())
+        );
+        assert_eq!(
+            global_entry
+                .location
+                .as_ref()
+                .and_then(|l| l.cwd.as_deref()),
+            Some("/repo/p1")
+        );
+    });
+}
+
+#[test]
 fn merge_batch_terminal_uses_its_actual_checkout_and_git_summary() {
     use crate::terminals::worktrees::{WorktreeScope, entry_scope, scope_git_summary};
 

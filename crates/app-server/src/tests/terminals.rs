@@ -1608,3 +1608,351 @@ fn replayed_stale_closing_receipt_preserves_closing_when_live_or_rebound() {
         Some("t-new")
     );
 }
+
+#[test]
+fn inherit_terminal_prefers_worktree_and_subdirectory_cwd_over_project_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let home = root.join("home");
+    let src = root.join("source");
+    std::fs::create_dir_all(src.join("docs")).unwrap();
+    std::fs::write(src.join("README.md"), "# Seed\n").unwrap();
+    let git = |cwd: &Path, args: &[&str]| {
+        let out = canban_exec::raw_command("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&src, &["init", "-b", "main"]);
+    git(&src, &["config", "user.name", "Tester"]);
+    git(&src, &["config", "user.email", "tester@example.invalid"]);
+    git(&src, &["config", "commit.gpgsign", "false"]);
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "-m", "seed"]);
+
+    let app = AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
+    core(&app, dir.path());
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Worktree Inherit", "directory": src}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let c: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"view":"full","project_id": p.id, "title": "Card worktree", "body": "Notes"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let last_launch = || -> Value {
+        let raw = std::fs::read_to_string(dir.path().join("launches")).unwrap();
+        serde_json::from_str(raw.lines().last().unwrap()).unwrap()
+    };
+
+    // 1. Managed Branch Worktree root and subdirectory inherit that worktree (not `p.directory`).
+    let managed = app
+        .call(
+            "worktree.create",
+            json!({
+                "project_id": p.id,
+                "branch": "feat/managed-wt",
+                "launch": "shell",
+                "request_key": "inherit-wt-create"
+            }),
+        )
+        .unwrap();
+    let wt: ManagedWorktree = serde_json::from_value(managed["worktree"].clone()).unwrap();
+    let wt_tid = managed["terminal"]["id"].as_str().unwrap().to_owned();
+    let wt_sub = PathBuf::from(&wt.path).join("sub");
+    std::fs::create_dir_all(&wt_sub).unwrap();
+
+    app.call("terminal.create", json!({"inherit_terminal_id": wt_tid}))
+        .unwrap();
+    let launch_wt_root = last_launch();
+    assert_eq!(launch_wt_root["cwd"], wt.path);
+    assert_eq!(launch_wt_root["env"]["CANBAN_PROJECT"], p.id);
+    assert!(launch_wt_root["env"].get("CANBAN_CARD").is_none());
+
+    std::fs::write(dir.path().join("cwd"), wt_sub.to_string_lossy().as_ref()).unwrap();
+    let wt_sub_entry: TerminalEntry = serde_json::from_value(
+        app.call("terminal.create", json!({"inherit_terminal_id": wt_tid}))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        wt_sub_entry.origin_project_id.as_deref(),
+        Some(p.id.as_str())
+    );
+    assert_eq!(last_launch()["cwd"], wt_sub.to_string_lossy().as_ref());
+
+    // 2. External `git worktree` (matched via common `.git`) root and subdirectory inherit that worktree.
+    let ext_wt = root.join("external-wt");
+    git(
+        &src,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feat/external-wt",
+            ext_wt.to_str().unwrap(),
+        ],
+    );
+    let ext_sub = ext_wt.join("nested");
+    std::fs::create_dir_all(&ext_sub).unwrap();
+    let ext_seed = app.call("terminal.create", json!({"cwd": ext_wt})).unwrap();
+    let ext_tid = ext_seed["id"].as_str().unwrap().to_owned();
+    std::fs::remove_file(dir.path().join("cwd")).unwrap();
+
+    app.call("terminal.create", json!({"inherit_terminal_id": ext_tid}))
+        .unwrap();
+    let launch_ext_root = last_launch();
+    assert_eq!(launch_ext_root["cwd"], ext_wt.to_string_lossy().as_ref());
+    assert_eq!(launch_ext_root["env"]["CANBAN_PROJECT"], p.id);
+
+    std::fs::write(dir.path().join("cwd"), ext_sub.to_string_lossy().as_ref()).unwrap();
+    app.call("terminal.create", json!({"inherit_terminal_id": ext_tid}))
+        .unwrap();
+    assert_eq!(last_launch()["cwd"], ext_sub.to_string_lossy().as_ref());
+
+    // 3. Active Card worktree subdirectory retains the subdirectory while keeping Card env.
+    std::fs::remove_file(dir.path().join("cwd")).unwrap();
+    let card_shell = app
+        .call(
+            "terminal.create",
+            json!({"project_id": p.id, "card_id": c.id}),
+        )
+        .unwrap();
+    let card_tid = card_shell["id"].as_str().unwrap().to_owned();
+    let card_wt = app
+        .snapshot()
+        .unwrap()
+        .cards
+        .into_iter()
+        .find(|x| x.id == c.id)
+        .unwrap()
+        .worktree
+        .unwrap();
+    let card_sub = PathBuf::from(&card_wt).join("pkg");
+    std::fs::create_dir_all(&card_sub).unwrap();
+    std::fs::write(dir.path().join("cwd"), card_sub.to_string_lossy().as_ref()).unwrap();
+    app.call("terminal.create", json!({"inherit_terminal_id": card_tid}))
+        .unwrap();
+    let launch_card_sub = last_launch();
+    assert_eq!(launch_card_sub["cwd"], card_sub.to_string_lossy().as_ref());
+    assert_eq!(launch_card_sub["env"]["CANBAN_CARD"], c.number.to_string());
+    assert_eq!(launch_card_sub["env"]["CARD_ID"], c.id);
+    assert_eq!(launch_card_sub["env"]["CANBAN_PROJECT"], p.id);
+
+    // 4. Project root subdirectory retains the subdirectory.
+    let proj_seed = app
+        .call("terminal.create", json!({"project_id": p.id}))
+        .unwrap();
+    let proj_tid = proj_seed["id"].as_str().unwrap().to_owned();
+    let proj_sub = src.join("docs");
+    std::fs::write(dir.path().join("cwd"), proj_sub.to_string_lossy().as_ref()).unwrap();
+    app.call("terminal.create", json!({"inherit_terminal_id": proj_tid}))
+        .unwrap();
+    assert_eq!(last_launch()["cwd"], proj_sub.to_string_lossy().as_ref());
+
+    // 5. Explicit `project_id` / `card_id` launches still target Project root and Card worktree root.
+    app.call("terminal.create", json!({"project_id": p.id}))
+        .unwrap();
+    assert_eq!(last_launch()["cwd"], p.directory);
+    app.call(
+        "terminal.create",
+        json!({"project_id": p.id, "card_id": c.id}),
+    )
+    .unwrap();
+    assert_eq!(last_launch()["cwd"], card_wt);
+
+    // 6. Deleted inherited subdirectory falls back to Card worktree root or cached `directory_root`.
+    std::fs::remove_dir_all(&card_sub).unwrap();
+    std::fs::remove_dir_all(&wt_sub).unwrap();
+    app.observer_running.store(true, Ordering::SeqCst);
+    {
+        let mut inv = app.inventory.lock().unwrap();
+        inv.core = "original".into();
+        inv.last_at = now();
+        inv.records.insert(
+            "t1".into(),
+            json!({
+                "address": "t1",
+                "state": "live",
+                "foreground": {"cwd": card_sub}
+            }),
+        );
+    }
+    *app.terminal_contexts.lock().unwrap() = vec![TerminalContext {
+        terminal_id: card_tid.clone(),
+        core_id: "original".into(),
+        terminal: "t1".into(),
+        cwd: Some(card_sub.to_string_lossy().into_owned()),
+        directory_root: None,
+        project_id: Some(p.id.clone()),
+        card_id: Some(c.id.clone()),
+        ..Default::default()
+    }];
+    app.call("terminal.create", json!({"inherit_terminal_id": card_tid}))
+        .unwrap();
+    assert_eq!(last_launch()["cwd"], card_wt);
+
+    {
+        let mut inv = app.inventory.lock().unwrap();
+        inv.last_at = now();
+        inv.records.insert(
+            "t1".into(),
+            json!({
+                "address": "t1",
+                "state": "live",
+                "foreground": {"cwd": wt_sub}
+            }),
+        );
+    }
+    *app.terminal_contexts.lock().unwrap() = vec![TerminalContext {
+        terminal_id: wt_tid.clone(),
+        core_id: "original".into(),
+        terminal: "t1".into(),
+        cwd: Some(wt_sub.to_string_lossy().into_owned()),
+        directory_root: Some(wt.path.clone()),
+        project_id: Some(p.id.clone()),
+        worktree_id: Some(wt.id.clone()),
+        branch: Some(wt.branch),
+        ..Default::default()
+    }];
+    app.call("terminal.create", json!({"inherit_terminal_id": wt_tid}))
+        .unwrap();
+    assert_eq!(last_launch()["cwd"], wt.path);
+}
+
+#[test]
+fn inherit_terminal_uses_live_inventory_cwd_while_directory_context_is_updating() {
+    let (dir, app, p, _) = setup();
+    core(&app, dir.path());
+    let src = PathBuf::from(&p.directory);
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("README.md"), "# Seed\n").unwrap();
+    let git = |cwd: &Path, args: &[&str]| {
+        let out = canban_exec::raw_command("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&src, &["init", "-b", "main"]);
+    git(&src, &["config", "user.name", "Tester"]);
+    git(&src, &["config", "user.email", "tester@example.invalid"]);
+    git(&src, &["config", "commit.gpgsign", "false"]);
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "-m", "seed"]);
+
+    let created = app
+        .call(
+            "worktree.create",
+            json!({
+                "project_id": p.id,
+                "branch": "feat/live-inventory",
+                "launch": "none",
+                "request_key": "live-inv-wt"
+            }),
+        )
+        .unwrap();
+    let wt: ManagedWorktree = serde_json::from_value(created["worktree"].clone()).unwrap();
+    let wt_sub = PathBuf::from(&wt.path).join("sub");
+    std::fs::create_dir_all(&wt_sub).unwrap();
+
+    app.observer_running.store(true, Ordering::SeqCst);
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let entry = TerminalEntry {
+                id: "shell-wt".into(),
+                conversation_id: None,
+                number: db.counter("terminal-number")?,
+                name: Some("Terminal 1".into()),
+                origin_project_id: Some(p.id.clone()),
+                origin_card_id: None,
+                agent_engine: None,
+                created_at: now(),
+                runtime: Some(TerminalRuntime {
+                    core_id: Some("original".into()),
+                    terminal: Some("t1".into()),
+                    state: "running".into(),
+                    connection: "connected".into(),
+                    error: None,
+                    agent_status: None,
+                    agent_turn: None,
+                    observed_agent: None,
+                    waiting: None,
+                }),
+                agent: None,
+            };
+            db.save(&entry)
+        })
+        .unwrap();
+    assert!(app.snapshot().unwrap().terminal_contexts.is_empty());
+
+    {
+        let mut inv = app.inventory.lock().unwrap();
+        inv.core = "original".into();
+        inv.last_at = now();
+        inv.records.insert(
+            "t1".into(),
+            json!({
+                "address": "t1",
+                "state": "live",
+                "foreground": {"cwd": wt_sub}
+            }),
+        );
+    }
+
+    let inherited_entry: TerminalEntry = serde_json::from_value(
+        app.call(
+            "terminal.create",
+            json!({"inherit_terminal_id": "shell-wt"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        inherited_entry.origin_project_id.as_deref(),
+        Some(p.id.as_str())
+    );
+    let launches = std::fs::read_to_string(dir.path().join("launches")).unwrap();
+    let first_launch: Value = serde_json::from_str(launches.lines().last().unwrap()).unwrap();
+    assert_eq!(first_launch["cwd"], wt_sub.to_string_lossy().as_ref());
+
+    // Core identity fence: a mismatched Core inventory must never supply an inherited cwd.
+    {
+        let mut inv = app.inventory.lock().unwrap();
+        inv.core = "replacement".into();
+    }
+    app.terminal_contexts.lock().unwrap().clear();
+    app.call(
+        "terminal.create",
+        json!({"inherit_terminal_id": "shell-wt"}),
+    )
+    .unwrap();
+    let launches = std::fs::read_to_string(dir.path().join("launches")).unwrap();
+    let second_launch: Value = serde_json::from_str(launches.lines().last().unwrap()).unwrap();
+    assert_ne!(second_launch["cwd"], wt_sub.to_string_lossy().as_ref());
+    assert_ne!(second_launch["cwd"], p.directory);
+}

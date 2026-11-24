@@ -17,10 +17,27 @@ pub(crate) fn location_hint(
             .find(|e| e.saved.id == id && e.host_id == host)
             .and_then(|e| e.location.as_ref())
     });
-    let card = params["card_id"]
+    let explicit_card = params["card_id"]
         .as_str()
-        .or_else(|| inherited.and_then(|c| c.card_id.as_deref()))
-        .and_then(|id| snapshot.cards.iter().find(|c| c.id == id));
+        .is_some_and(|s| !s.trim().is_empty());
+    let explicit_project = params["project_id"]
+        .as_str()
+        .is_some_and(|s| !s.trim().is_empty());
+    let inherited_cwd = inherited
+        .and_then(|c| c.cwd.as_deref())
+        .filter(|s| !s.is_empty());
+    let card = if explicit_card {
+        params["card_id"]
+            .as_str()
+            .and_then(|id| snapshot.cards.iter().find(|c| c.id == id))
+    } else {
+        inherited.and_then(|c| c.card_id.as_deref()).and_then(|id| {
+            snapshot
+                .cards
+                .iter()
+                .find(|c| c.id == id && c.archived_at.is_none())
+        })
+    };
     let project = params["project_id"]
         .as_str()
         .or_else(|| card.map(|c| c.project_id.as_str()))
@@ -28,6 +45,7 @@ pub(crate) fn location_hint(
         .and_then(|id| snapshot.projects.iter().find(|p| p.id == id));
     if params["cwd"].as_str().is_none_or(str::is_empty)
         && !params["setup_argv"].is_array()
+        && (explicit_card || inherited_cwd.is_none())
         && card.is_some_and(|c| {
             c.active()
                 && !c.resolved()
@@ -49,11 +67,16 @@ pub(crate) fn location_hint(
         .as_str()
         .filter(|s| !s.is_empty())
         .or_else(|| {
+            (!explicit_card && !explicit_project)
+                .then_some(inherited_cwd)
+                .flatten()
+        })
+        .or_else(|| {
             card.and_then(|c| c.worktree.as_deref())
                 .filter(|s| !s.is_empty())
         })
         .or(directory)
-        .or_else(|| inherited.and_then(|c| c.cwd.as_deref()))?;
+        .or(inherited_cwd)?;
     let known = rows
         .iter()
         .filter(|e| e.listed() && e.host_id == host)
@@ -61,7 +84,10 @@ pub(crate) fn location_hint(
         .filter(|c| c.cwd.is_some())
         .filter_map(|c| {
             let root = c.directory_root.as_deref().or(c.cwd.as_deref())?;
-            let same = Path::new(cwd) == Path::new(root);
+            let same = Path::new(cwd) == Path::new(root)
+                || c.cwd
+                    .as_deref()
+                    .is_some_and(|d| Path::new(cwd) == Path::new(d));
             let git = c.branch.is_some() || c.card_id.is_some() || c.worktree_id.is_some();
             (same || (git && Path::new(cwd).starts_with(root))).then_some((root, c))
         })
@@ -233,5 +259,159 @@ mod tests {
         )
         .unwrap();
         assert_eq!(hint.worktree_id.as_deref(), Some("managed"));
+    }
+
+    #[test]
+    fn inherit_terminal_prefers_observed_cwd_over_project_root_and_card_root() {
+        let (mut s, terminal) = fixture();
+        s.worktrees.push(canban_types::ManagedWorktree {
+            id: "wt1".into(),
+            project_id: "p".into(),
+            branch: "feat/managed".into(),
+            base_branch: "main".into(),
+            base_commit: None,
+            path: "/wt/feat-managed".into(),
+            directory: "/repo".into(),
+            created_at: 1,
+        });
+        s.cards.push(
+            serde_json::from_value(json!({
+                "id":"c", "project_id":"p", "number":1, "title":"Card", "body":"",
+                "stage":"develop", "revision":1, "created_at":1, "worktree":"/repo/card"
+            }))
+            .unwrap(),
+        );
+
+        let add_terminal = |s: &mut Snapshot, id: &str, ctx: TerminalContext| {
+            let mut row = terminal.clone();
+            row.id = id.into();
+            s.terminals.push(row);
+            s.terminal_contexts.push(ctx);
+        };
+
+        add_terminal(
+            &mut s,
+            "managed",
+            TerminalContext {
+                terminal_id: "managed".into(),
+                cwd: Some("/wt/feat-managed/sub".into()),
+                directory_root: Some("/wt/feat-managed".into()),
+                project_id: Some("p".into()),
+                worktree_id: Some("wt1".into()),
+                branch: Some("feat/managed".into()),
+                ..Default::default()
+            },
+        );
+        add_terminal(
+            &mut s,
+            "ext",
+            TerminalContext {
+                terminal_id: "ext".into(),
+                cwd: Some("/ext/wt/nested".into()),
+                directory_root: Some("/ext/wt".into()),
+                project_id: Some("p".into()),
+                branch: Some("feat/ext".into()),
+                ..Default::default()
+            },
+        );
+        add_terminal(
+            &mut s,
+            "detached",
+            TerminalContext {
+                terminal_id: "detached".into(),
+                cwd: Some("/ext/detached/sub".into()),
+                directory_root: Some("/ext/detached".into()),
+                project_id: Some("p".into()),
+                branch: None,
+                ..Default::default()
+            },
+        );
+        add_terminal(
+            &mut s,
+            "card_term",
+            TerminalContext {
+                terminal_id: "card_term".into(),
+                cwd: Some("/repo/card/pkg".into()),
+                directory_root: Some("/repo/card".into()),
+                project_id: Some("p".into()),
+                card_id: Some("c".into()),
+                branch: Some("canban/1".into()),
+                ..Default::default()
+            },
+        );
+
+        let rows = super::super::entries(&s);
+
+        let managed_hint = location_hint(
+            &s,
+            &rows,
+            &json!({"inherit_terminal_id": "managed"}),
+            &terminal,
+            "local",
+        )
+        .unwrap();
+        assert_eq!(managed_hint.worktree_id.as_deref(), Some("wt1"));
+        assert_eq!(
+            managed_hint.directory_root.as_deref(),
+            Some("/wt/feat-managed")
+        );
+        assert_eq!(managed_hint.cwd.as_deref(), Some("/wt/feat-managed/sub"));
+
+        let ext_hint = location_hint(
+            &s,
+            &rows,
+            &json!({"inherit_terminal_id": "ext"}),
+            &terminal,
+            "local",
+        )
+        .unwrap();
+        assert_eq!(ext_hint.directory_root.as_deref(), Some("/ext/wt"));
+        assert_eq!(ext_hint.cwd.as_deref(), Some("/ext/wt/nested"));
+        assert_eq!(ext_hint.branch.as_deref(), Some("feat/ext"));
+
+        let detached_hint = location_hint(
+            &s,
+            &rows,
+            &json!({"inherit_terminal_id": "detached"}),
+            &terminal,
+            "local",
+        )
+        .unwrap();
+        assert_eq!(
+            detached_hint.directory_root.as_deref(),
+            Some("/ext/detached")
+        );
+        assert_eq!(detached_hint.cwd.as_deref(), Some("/ext/detached/sub"));
+
+        let card_hint = location_hint(
+            &s,
+            &rows,
+            &json!({"inherit_terminal_id": "card_term"}),
+            &terminal,
+            "local",
+        )
+        .unwrap();
+        assert_eq!(card_hint.card_id.as_deref(), Some("c"));
+        assert_eq!(card_hint.directory_root.as_deref(), Some("/repo/card"));
+        assert_eq!(card_hint.cwd.as_deref(), Some("/repo/card/pkg"));
+
+        let root_sub_hint = location_hint(
+            &s,
+            &rows,
+            &json!({"inherit_terminal_id": "old"}),
+            &terminal,
+            "local",
+        )
+        .unwrap();
+        assert_eq!(root_sub_hint.directory_root.as_deref(), Some("/repo"));
+        assert_eq!(root_sub_hint.cwd.as_deref(), Some("/repo/src"));
+
+        let explicit_proj =
+            location_hint(&s, &rows, &json!({"project_id": "p"}), &terminal, "local").unwrap();
+        assert_eq!(explicit_proj.cwd.as_deref(), Some("/repo"));
+
+        let explicit_card =
+            location_hint(&s, &rows, &json!({"card_id": "c"}), &terminal, "local").unwrap();
+        assert_eq!(explicit_card.cwd.as_deref(), Some("/repo/card"));
     }
 }

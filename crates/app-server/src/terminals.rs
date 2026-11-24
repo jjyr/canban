@@ -582,17 +582,53 @@ impl AppServer {
         }
         Ok((saved_card, project))
     }
+    /// Read the current Herdr-observed `cwd` for `terminal_id` (fenced by original Core)
+    /// even while background directory/Git context discovery is still updating.
+    fn live_terminal_cwd(&self, terminal_id: &str) -> Option<String> {
+        let s = self.store.lock().unwrap().db().terminal_snapshot().ok()?;
+        let item = s.terminals.iter().find(|t| t.id == terminal_id)?;
+        let (core, terminal) = Self::terminal_binding(&s, item)?;
+        #[cfg(test)]
+        if !self.observer_running.load(Ordering::SeqCst) {
+            let client = canban_herdr::Client {
+                config: self.config(),
+            };
+            if client.status().ok()?["core"]["id"] != core {
+                return None;
+            }
+            let value = client.get(&terminal).ok()?;
+            return canban_herdr::cwd(&value)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+        }
+        let (observed_core, values) = self.runtime_inventory().ok()?;
+        if observed_core != core {
+            return None;
+        }
+        let value = values.iter().find(|v| v["address"] == terminal)?;
+        canban_herdr::cwd(value)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    }
+
     pub(super) fn create_terminal(&self, p: Value) -> Result<Value> {
         let _gate = self.terminal_gate.lock().unwrap();
         let explicit_size = Self::parse_terminal_size(&p["size"]);
         if let Some(sz) = explicit_size {
             self.record_terminal_size(sz, true);
         }
-        let inherited = p["inherit_terminal_id"]
+        let inherit_terminal_id = p["inherit_terminal_id"]
             .as_str()
-            .filter(|id| !id.is_empty())
-            .map(|id| self.terminal_context(json!({"terminal_id":id})))
+            .filter(|id| !id.is_empty());
+        let inherited = inherit_terminal_id
+            .map(|id| self.terminal_context(json!({"terminal_id": id})))
             .transpose()?;
+        let inherited_cwd = inherited
+            .as_ref()
+            .and_then(|v| v["cwd"].as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .or_else(|| inherit_terminal_id.and_then(|id| self.live_terminal_cwd(id)));
         let explicit_profile = p["profile_id"]
             .as_str()
             .filter(|s| !s.is_empty())
@@ -604,21 +640,44 @@ impl AppServer {
                 "Standalone Agent CLI launch requires a user action"
             );
         }
+        let explicit_project_arg = p["project_id"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty());
         let explicit_card_arg = p["card_id"].as_str().is_some_and(|s| !s.trim().is_empty())
             || super::parse_card_number(&p["card"]).is_some();
+        let host = canban_herdr::host::Host::new(self.config());
+        let valid_dir = |path: &str| Path::new(path).is_absolute() && host.is_dir(Path::new(path));
+        let inherited_dir = inherited_cwd
+            .as_deref()
+            .filter(|d| valid_dir(d))
+            .or_else(|| {
+                inherited
+                    .as_ref()
+                    .and_then(|v| v["directory_root"].as_str())
+                    .filter(|d| valid_dir(d))
+            })
+            .map(str::to_owned);
         // Prepare the Card's dedicated worktree upfront (outside the SQLite write lock)
-        // whenever opening a Terminal from an active unmerged Card without an explicit cwd.
+        // whenever opening a Terminal from an active unmerged Card without an explicit cwd
+        // or inherited working directory.
         let pre_card_id = {
             let store = self.store.lock().unwrap();
             let db = store.db();
             if explicit_card_arg {
                 Some(super::resolve_card(db, &p)?.id)
-            } else {
+            } else if !explicit_project_arg && inherited_dir.is_none() {
                 inherited
                     .as_ref()
                     .and_then(|v| v["card_id"].as_str())
                     .filter(|s| !s.is_empty())
-                    .and_then(|cid| db.get::<Card>(cid).ok().map(|c| c.id))
+                    .and_then(|cid| {
+                        db.get::<Card>(cid)
+                            .ok()
+                            .filter(|c| c.archived_at.is_none())
+                            .map(|c| c.id)
+                    })
+            } else {
+                None
             }
         };
         if p["cwd"].as_str().is_none_or(|s| s.is_empty())
@@ -646,7 +705,7 @@ impl AppServer {
                 && let Some(cid) = inherited.as_ref().and_then(|v| v["card_id"].as_str())
                 && !cid.is_empty()
             {
-                card = db.get::<Card>(cid).ok();
+                card = db.get::<Card>(cid).ok().filter(|c| c.archived_at.is_none());
             }
             if project.is_none() {
                 if let Some(c) = &card {
@@ -671,23 +730,22 @@ impl AppServer {
                 .as_ref()
                 .and_then(|c| c.workspace.as_ref().map(|w| w.directory.clone()))
                 .or_else(|| project.as_ref().map(|p| p.directory.clone()));
-            let host = canban_herdr::host::Host::new(self.config());
             let cwd = p["cwd"]
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned)
                 .or_else(|| {
+                    (!explicit_card_arg && !explicit_project_arg)
+                        .then(|| inherited_dir.clone())
+                        .flatten()
+                })
+                .or_else(|| {
                     card.as_ref()
                         .and_then(|c| c.worktree.clone())
-                        .filter(|wt| Path::new(wt).is_absolute() && host.is_dir(Path::new(wt)))
+                        .filter(|wt| valid_dir(wt))
                 })
                 .or(directory)
-                .or_else(|| {
-                    inherited
-                        .as_ref()
-                        .and_then(|v| v["cwd"].as_str())
-                        .map(str::to_owned)
-                })
+                .or_else(|| inherited_dir.clone())
                 .unwrap_or(host.home()?);
             ensure!(
                 Path::new(&cwd).is_absolute() && host.is_dir(Path::new(&cwd)),
@@ -733,6 +791,17 @@ impl AppServer {
                     .find(|w| super::path_within(&w.path, &cwd))
                 {
                     project = db.get::<Project>(&wt.project_id).ok();
+                } else if let Some(c) = db
+                    .list::<Card>()?
+                    .into_iter()
+                    .filter(|c| c.archived_at.is_none())
+                    .find(|c| {
+                        c.worktree
+                            .as_deref()
+                            .is_some_and(|wt| super::path_within(wt, &cwd))
+                    })
+                {
+                    project = db.get::<Project>(&c.project_id).ok();
                 } else {
                     let mut best: Option<(usize, Project)> = None;
                     for proj in db.list::<Project>()? {
