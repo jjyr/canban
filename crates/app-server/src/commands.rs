@@ -673,6 +673,8 @@ impl AppServer {
                 }
                 Ok(result)
             }
+            "project.export" => self.export_project(p),
+            "project.import" => self.import_project(p),
             "project.delete" => {
                 ensure!(
                     p["execution"].is_null(),

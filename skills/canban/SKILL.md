@@ -318,3 +318,29 @@ Supported placeholders in `card.title` / `card.body`: `{{date}}`, `{{datetime}}`
 # Garbage-collect merged clean worktrees older than a retention window
 "$CANBAN_CLI" worktree gc --merged-before 7d [--project-id <PROJECT_ID>] [--dry-run] [--fail-on-dirty] [--env-dirty DIRTY_WORKTREES]
 ```
+
+## Exporting & Importing Projects (Cross-Host Migration)
+
+Canban supports self-contained `*.canban.tar.zst` project bundles via `canban project export` and `canban project import` (`project.export` / `project.import` RPCs) to back up a Project or migrate it from one `canband` host to another:
+
+```sh
+# Export active Cards, Workflows, Schedules, Timeline, Reports, and Artifacts (excludes archived Cards by default)
+"$CANBAN_CLI" project export \
+  --project-id <PROJECT_ID_OR_NAME> \
+  --output /tmp/project.canban.tar.zst \
+  [--include-archived] [--overwrite]
+
+# Import onto a target host pointing at its local repository directory
+"$CANBAN_CLI" project import \
+  --file /tmp/project.canban.tar.zst \
+  --directory /path/to/repo \
+  [--name <OVERRIDE_NAME>] [--pause-github]
+```
+
+- **Default vs `--include-archived`**: By default, `export` packages only non-archived active Cards (preserving `cards:<pid>` numbering and GitHub removed-card tombstones so dismissed open Issues/PRs are not re-imported). Pass `--include-archived` for a full migration including archived Cards, `archives/` packages, legacy Notes, and Insights `activity_segments`.
+- **Secrets, terminals, & Git repositories**: Live/historical terminals and host-local provider session bindings are omitted from bundles (Card timelines, comments, reports, and attachments are preserved, and future runs on the target host start fresh sessions with full Card context). Project secrets (`vault_entries`) and Git repository checkouts/worktrees are also omitted (plain env vars are included, and secret key names are reported in `secret_keys` / `missing_secrets`). Card `branch` and `base_commit` metadata is preserved so new worktrees recreate cleanly on the target host.
+- **Cross-host migration checklist**:
+  1. Sync the Git repository (and any unpushed active Card branches listed in `git_hints`) to the target host; do not copy `.canban/worktrees/` or build caches across OSes.
+  2. Run `project export` on the source host and transfer the `.canban.tar.zst` bundle to the target host.
+  3. Run `project import --directory <TARGET_REPO>` on the target host (pass `--pause-github` if you want to verify before enabling GitHub polling), then inspect `missing_profiles`, `missing_secrets`, `git_hints`, and `warnings` in the JSON receipt.
+  4. Once verified, pause GitHub intake / schedules or delete the source Project to prevent duplicate polling and dual-host execution.

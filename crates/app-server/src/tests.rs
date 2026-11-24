@@ -1867,6 +1867,7 @@ mod lifecycle_cases;
 #[path = "tests/terminals.rs"]
 mod terminal_cases;
 
+mod project_bundle_cases;
 mod projects_cases;
 
 #[test]

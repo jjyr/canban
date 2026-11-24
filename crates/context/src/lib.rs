@@ -1,3 +1,11 @@
+pub mod project_bundle;
+pub use project_bundle::{
+    CardBranchHint, LoadedProjectBundle, PROJECT_BUNDLE_FORMAT_VERSION, ProjectBundleFileMeta,
+    ProjectBundleManifest, ProjectGitHints, WorktreeHint, cleanup_extracted_files,
+    extract_project_bundle_files, read_project_bundle, validate_relative_bundle_path,
+    write_project_bundle,
+};
+
 use anyhow::{Result, ensure};
 use canban_types::{Artifact, Card, Event, ExecutionTrigger, Project, Snapshot, TerminalEntry, id};
 use sha2::{Digest, Sha256};

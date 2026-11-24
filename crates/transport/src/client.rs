@@ -29,12 +29,13 @@ pub enum ClientEndpoint {
 
 pub const DEFAULT_RPC_READ_TIMEOUT: Duration = Duration::from_secs(90);
 pub const DAEMON_UPDATE_RPC_READ_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+pub const PROJECT_BUNDLE_RPC_READ_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 pub fn rpc_read_timeout(method: &str) -> Duration {
-    if method == "update.daemon" {
-        DAEMON_UPDATE_RPC_READ_TIMEOUT
-    } else {
-        DEFAULT_RPC_READ_TIMEOUT
+    match method {
+        "update.daemon" => DAEMON_UPDATE_RPC_READ_TIMEOUT,
+        "project.export" | "project.import" => PROJECT_BUNDLE_RPC_READ_TIMEOUT,
+        _ => DEFAULT_RPC_READ_TIMEOUT,
     }
 }
 

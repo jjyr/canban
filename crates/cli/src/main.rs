@@ -204,10 +204,51 @@ enum Cmd {
         #[command(subcommand)]
         command: BatchCmd,
     },
+    /// Export or import a portable Project bundle (`*.canban.tar.zst`) for cross-host migration or backup.
+    Project {
+        #[command(subcommand)]
+        command: ProjectCmd,
+    },
     /// Stage or clear local unpublished PR/diff review drafts for the current Card.
     Review {
         #[command(subcommand)]
         command: ReviewCmd,
+    },
+}
+#[derive(Subcommand)]
+enum ProjectCmd {
+    /// Export a Project to a self-contained `*.canban.tar.zst` bundle (active Cards by default).
+    Export {
+        /// Project ID, hex prefix, or exact Project name.
+        #[arg(long, env = "CANBAN_PROJECT")]
+        project_id: String,
+        /// Destination bundle path (for example `/tmp/fiber.canban.tar.zst`).
+        #[arg(short = 'o', long)]
+        output: PathBuf,
+        /// Include archived Cards, compressed `archives/` packages, Notes, and Insights activity history.
+        #[arg(long)]
+        include_archived: bool,
+        /// Overwrite the destination file if it already exists.
+        #[arg(long)]
+        overwrite: bool,
+    },
+    /// Import a Project from a `*.canban.tar.zst` bundle into a target repository directory.
+    Import {
+        /// Path to the `*.canban.tar.zst` bundle file.
+        #[arg(short = 'f', long)]
+        file: PathBuf,
+        /// Target repository directory on this host (created if missing).
+        #[arg(short = 'd', long)]
+        directory: PathBuf,
+        /// Optional Project display name override.
+        #[arg(long)]
+        name: Option<String>,
+        /// Pause imported GitHub Issue/PR intake to avoid duplicate polling with the source host.
+        #[arg(long)]
+        pause_github: bool,
+        /// Optional idempotency request key.
+        #[arg(long)]
+        request_key: Option<String>,
     },
 }
 #[derive(Subcommand)]
@@ -571,6 +612,18 @@ fn card_scope(card: Option<u64>, project: Option<String>) -> Value {
     }
     params
 }
+fn resolve_cli_path(path: PathBuf) -> Result<String> {
+    let raw = path.to_string_lossy();
+    if path.is_absolute() || raw == "~" || raw.starts_with("~/") {
+        Ok(raw.into_owned())
+    } else {
+        Ok(std::env::current_dir()?
+            .join(path)
+            .to_string_lossy()
+            .into_owned())
+    }
+}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("{}", json!({"error":{"message":format!("{e:#}")}}));
@@ -1399,6 +1452,42 @@ fn run() -> Result<()> {
                 ("batch.report".into(), params)
             }
         },
+        Cmd::Project { command } => match command {
+            ProjectCmd::Export {
+                project_id,
+                output,
+                include_archived,
+                overwrite,
+            } => (
+                "project.export".into(),
+                json!({
+                    "project_id": project_id,
+                    "output": resolve_cli_path(output)?,
+                    "include_archived": include_archived,
+                    "overwrite": overwrite,
+                }),
+            ),
+            ProjectCmd::Import {
+                file,
+                directory,
+                name,
+                pause_github,
+                request_key,
+            } => {
+                let mut params = json!({
+                    "file": resolve_cli_path(file)?,
+                    "directory": resolve_cli_path(directory)?,
+                    "pause_github": pause_github,
+                });
+                if let Some(name) = name {
+                    params["name"] = json!(name);
+                }
+                if let Some(key) = request_key {
+                    params["request_key"] = json!(key);
+                }
+                ("project.import".into(), params)
+            }
+        },
         Cmd::Device { command } => match command {
             DeviceCmd::List => ("device.list".into(), json!({})),
             DeviceCmd::Invite { ttl_secs } => (
@@ -1441,6 +1530,7 @@ fn run() -> Result<()> {
             | "schedule.list"
             | "schedule.runs"
             | "schedule.read_artifact"
+            | "project.export"
     ) && p.get("request_key").is_none()
     {
         p["request_key"] = json!(canban_types::id());
@@ -1587,6 +1677,74 @@ mod tests {
 
         let by_cmd = Args::try_parse_from(["canban", "skill"]).unwrap();
         assert!(matches!(by_cmd.command, Some(Cmd::Skill)));
+    }
+
+    #[test]
+    fn parses_project_export_and_import_commands() {
+        let exp = Args::try_parse_from([
+            "canban",
+            "project",
+            "export",
+            "--project-id",
+            "fiber",
+            "--output",
+            "/tmp/fiber.canban.tar.zst",
+            "--include-archived",
+            "--overwrite",
+        ])
+        .unwrap();
+        match exp.command {
+            Some(Cmd::Project {
+                command:
+                    ProjectCmd::Export {
+                        project_id,
+                        output,
+                        include_archived,
+                        overwrite,
+                    },
+            }) => {
+                assert_eq!(project_id, "fiber");
+                assert_eq!(output, PathBuf::from("/tmp/fiber.canban.tar.zst"));
+                assert!(include_archived);
+                assert!(overwrite);
+            }
+            _ => panic!("expected project export"),
+        }
+
+        let imp = Args::try_parse_from([
+            "canban",
+            "project",
+            "import",
+            "--file",
+            "/tmp/fiber.canban.tar.zst",
+            "--directory",
+            "/home/user/Workspace/fiber",
+            "--name",
+            "fiber-remote",
+            "--pause-github",
+            "--request-key",
+            "rk-import",
+        ])
+        .unwrap();
+        match imp.command {
+            Some(Cmd::Project {
+                command:
+                    ProjectCmd::Import {
+                        file,
+                        directory,
+                        name,
+                        pause_github,
+                        request_key,
+                    },
+            }) => {
+                assert_eq!(file, PathBuf::from("/tmp/fiber.canban.tar.zst"));
+                assert_eq!(directory, PathBuf::from("/home/user/Workspace/fiber"));
+                assert_eq!(name.as_deref(), Some("fiber-remote"));
+                assert!(pause_github);
+                assert_eq!(request_key.as_deref(), Some("rk-import"));
+            }
+            _ => panic!("expected project import"),
+        }
     }
 
     #[test]

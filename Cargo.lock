@@ -596,6 +596,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "canban-types",
+ "serde",
  "serde_json",
  "sha2",
  "tar",

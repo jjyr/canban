@@ -1380,6 +1380,7 @@ mod configuration;
 mod events;
 mod herdr_setup;
 mod merge_batch;
+mod project_bundle;
 mod projects;
 mod workflow;
 
