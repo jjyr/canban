@@ -53,14 +53,25 @@ impl ModalState {
     }
 
     pub fn reset_for(&self, ui: Ui, scope: String) {
-        let is_global = is_global_project_id(&scope);
-        let default_prof = crate::sessions::default_profile(ui);
+        let (actual_pid, target_hid) = ui
+            .snapshot
+            .with_untracked(|s| super::decode_scope_key(s, &scope));
+        let normalized_scope = super::encode_scope_key(&actual_pid, &target_hid);
+        let is_global = is_global_project_id(&actual_pid);
+        let host_cfg = crate::backend::config_for_host(&target_hid);
+        let default_prof = host_cfg
+            .profiles
+            .iter()
+            .find(|p| p.enabled && p.id == host_cfg.default_agent)
+            .or_else(|| host_cfg.profiles.iter().find(|p| p.enabled))
+            .map(|p| p.id.clone())
+            .unwrap_or_else(|| crate::sessions::default_profile(ui));
         let first_col = if !is_global {
             ui.snapshot
                 .with_untracked(|s| {
                     s.projects
                         .iter()
-                        .find(|p| p.id == scope)
+                        .find(|p| p.id == actual_pid)
                         .and_then(|p| p.workflow.stages.first())
                         .map(|st| st.id.clone())
                 })
@@ -69,7 +80,7 @@ impl ModalState {
             "develop".into()
         };
         batch(move || {
-            self.scope.set(scope);
+            self.scope.set(normalized_scope);
             self.name.set(String::new());
             self.cron.set("0 3 * * *".into());
             self.timezone.set("Local".into());
@@ -134,12 +145,22 @@ pub fn open_create_modal(ui: Ui, scope: Option<String>) {
 fn validate_modal(ui: Ui) -> Result<Value, String> {
     let m = ui.schedules.modal;
     let raw_scope = m.scope.get_untracked();
-    let scope_id = if raw_scope.trim().is_empty() {
-        GLOBAL_PROJECT_ID.to_owned()
+    let (scope_id, target_host) = if raw_scope.trim().is_empty() {
+        (GLOBAL_PROJECT_ID.to_owned(), "local".to_owned())
     } else {
-        raw_scope
+        ui.snapshot
+            .with_untracked(|s| super::decode_scope_key(s, &raw_scope))
     };
     let is_global = is_global_project_id(&scope_id);
+    if ui
+        .snapshot
+        .with_untracked(|s| s.is_host_offline(&target_host))
+    {
+        let hname = ui
+            .snapshot
+            .with_untracked(|s| s.host_display_name(&target_host).to_owned());
+        return Err(format!("Machine '{hname}' is offline."));
+    }
     let name = m.name.get_untracked().trim().to_owned();
     if name.is_empty() {
         return Err("Enter a schedule name.".into());
@@ -168,6 +189,7 @@ fn validate_modal(ui: Ui) -> Result<Value, String> {
     let mut payload = json!({
         "scope": if is_global { "global" } else { "project" },
         "project_id": scope_id,
+        "host_id": target_host,
         "name": name,
         "cron": cron,
         "timezone": tz_opt,
@@ -227,20 +249,25 @@ fn submit_create_modal(ui: Ui) {
         .as_str()
         .unwrap_or(GLOBAL_PROJECT_ID)
         .to_owned();
+    let target_host = payload["host_id"].as_str().unwrap_or("local").to_owned();
+    let encoded_scope = super::encode_scope_key(&scope_id, &target_host);
     dispatch_complete(ui, "schedule.create", payload, move |res| match res {
         Ok(val) => {
             let sid = val["schedule"]["id"].as_str().map(str::to_owned);
             let fname = val["filename"].as_str().map(str::to_owned);
             ui.schedules.create_modal.set(false);
             if !ui.schedules.scope.get_untracked().is_empty() {
-                ui.schedules.scope.set(scope_id.clone());
+                ui.schedules.scope.set(encoded_scope.clone());
             }
             if let Some(id) = sid {
                 ui.schedules.selected.set(id);
             } else if let Some(f) = fname {
-                ui.schedules
-                    .selected
-                    .set(super::schedule_key(&scope_id, &f, "schedule"));
+                ui.schedules.selected.set(super::schedule_key_for_host(
+                    &scope_id,
+                    &target_host,
+                    &f,
+                    "schedule",
+                ));
             }
             ui.notify("Scheduled task created");
         }
@@ -344,6 +371,7 @@ fn create_offline_schedule(ui: Ui, p: Value) {
         selected_key = super::schedule_key(&scope_id, &fname, "schedule");
         let _ = super::push_offline_workflow_source(s, &scope_id, &fname, &yaml);
         s.schedule_states.push(ScheduleState {
+            host_id: String::new(),
             id: sid,
             project_id: scope_id.clone(),
             workflow_id: wf_id,
@@ -566,35 +594,125 @@ pub fn create_modal(ui: Ui) -> impl IntoElement {
                                             move || {
                                                 let cur = m.scope.get();
                                                 ui.snapshot.with(|s| {
-                                                    let mut opts = Vec::with_capacity(s.projects.len() + 1);
-                                                    opts.push(
-                                                        PickerOption::new(GLOBAL_PROJECT_ID, "Global · Host")
-                                                            .detail("Host-level automation (no Card / Project)")
-                                                            .icon(Icon::Server)
-                                                            .selected(is_global_project_id(&cur)),
-                                                    );
+                                                    let (cur_pid, cur_hid) =
+                                                        super::decode_scope_key(s, &cur);
+                                                    let mut opts =
+                                                        Vec::with_capacity(s.projects.len() + 4);
+                                                    let has_remote = s.has_remote_hosts();
+                                                    let mut host_ids = vec!["local".to_owned()];
+                                                    let mut remotes: Vec<(&str, &str)> = s
+                                                        .host_summaries
+                                                        .iter()
+                                                        .filter(|(id, _)| id.as_str() != "local")
+                                                        .map(|(id, h)| {
+                                                            (h.name.as_str(), id.as_str())
+                                                        })
+                                                        .collect();
+                                                    remotes.sort_by(|a, b| {
+                                                        a.0.to_ascii_lowercase()
+                                                            .cmp(&b.0.to_ascii_lowercase())
+                                                            .then_with(|| a.1.cmp(b.1))
+                                                    });
+                                                    for (_, hid) in remotes {
+                                                        host_ids.push(hid.to_owned());
+                                                    }
+                                                    for hid in host_ids {
+                                                        let offline = s.is_host_offline(&hid);
+                                                        let hname = s.host_display_name(&hid);
+                                                        let label = if !has_remote {
+                                                            "Global · Host".to_owned()
+                                                        } else if offline {
+                                                            format!("Global · {hname} (offline)")
+                                                        } else {
+                                                            format!("Global · {hname}")
+                                                        };
+                                                        let opt_val = super::encode_scope_key(
+                                                            GLOBAL_PROJECT_ID,
+                                                            &hid,
+                                                        );
+                                                        let mut opt = PickerOption::new(
+                                                            opt_val,
+                                                            label,
+                                                        )
+                                                        .detail("Host-level automation (no Card / Project)")
+                                                        .icon(Icon::Server)
+                                                        .selected(
+                                                            is_global_project_id(&cur_pid)
+                                                                && cur_hid == hid,
+                                                        );
+                                                        if has_remote {
+                                                            opt = opt.group("Global · Hosts");
+                                                        }
+                                                        opts.push(opt);
+                                                    }
                                                     for p in &s.projects {
+                                                        let hid = s.project_host(&p.id);
+                                                        let offline = s.is_host_offline(hid);
+                                                        let mut label =
+                                                            s.project_display_name(&p.id);
+                                                        if offline {
+                                                            label.push_str(" (offline)");
+                                                        }
                                                         opts.push(
-                                                            PickerOption::new(p.id.clone(), p.name.clone())
+                                                            PickerOption::new(p.id.clone(), label)
                                                                 .group("Projects")
                                                                 .icon(Icon::Folder)
-                                                                .selected(cur == p.id),
+                                                                .selected(cur_pid == p.id),
                                                         );
                                                     }
                                                     opts
                                                 })
                                             },
                                             move |picked| {
+                                                let (actual_pid, target_hid) = ui
+                                                    .snapshot
+                                                    .with_untracked(|s| {
+                                                        super::decode_scope_key(s, &picked)
+                                                    });
+                                                if ui
+                                                    .snapshot
+                                                    .with_untracked(|s| s.is_host_offline(&target_hid))
+                                                {
+                                                    let hname = ui.snapshot.with_untracked(|s| {
+                                                        s.host_display_name(&target_hid).to_owned()
+                                                    });
+                                                    m.error.set(format!(
+                                                        "Machine '{hname}' is offline."
+                                                    ));
+                                                    return;
+                                                }
+                                                m.error.set(String::new());
                                                 m.scope.set(picked.clone());
-                                                if is_global_project_id(&picked)
+                                                let host_cfg =
+                                                    crate::backend::config_for_host(&target_hid);
+                                                let enabled_profs: Vec<_> = host_cfg
+                                                    .profiles
+                                                    .iter()
+                                                    .filter(|p| p.enabled)
+                                                    .collect();
+                                                let cur_prof = m.profile_id.get_untracked();
+                                                if !enabled_profs.is_empty()
+                                                    && !enabled_profs
+                                                        .iter()
+                                                        .any(|p| p.id == cur_prof)
+                                                {
+                                                    let fallback = enabled_profs
+                                                        .iter()
+                                                        .find(|p| p.id == host_cfg.default_agent)
+                                                        .or_else(|| enabled_profs.first())
+                                                        .map(|p| p.id.clone())
+                                                        .unwrap_or_default();
+                                                    m.profile_id.set(fallback);
+                                                }
+                                                if is_global_project_id(&actual_pid)
                                                     && m.mode.get_untracked() == "card"
                                                 {
                                                     m.mode.set("script_agent".into());
-                                                } else if !is_global_project_id(&picked) {
+                                                } else if !is_global_project_id(&actual_pid) {
                                                     let first = ui.snapshot.with_untracked(|s| {
                                                         s.projects
                                                             .iter()
-                                                            .find(|p| p.id == picked)
+                                                            .find(|p| p.id == actual_pid)
                                                             .and_then(|p| p.workflow.stages.first())
                                                             .map(|st| st.id.clone())
                                                     });
@@ -718,7 +836,13 @@ pub fn create_modal(ui: Ui) -> impl IntoElement {
                                             move |_| m.mode.set("agent".into()),
                                         ))
                                         .child(when(
-                                            move || !is_global_project_id(&m.scope.get()),
+                                            move || {
+                                                let scope = m.scope.get();
+                                                let pid = ui.snapshot.with(|s| {
+                                                    super::decode_scope_key(s, &scope).0
+                                                });
+                                                !is_global_project_id(&pid)
+                                            },
                                             move || {
                                                 compact_segment(
                                                     "Create Card",
@@ -730,7 +854,13 @@ pub fn create_modal(ui: Ui) -> impl IntoElement {
                                         )),
                                 )
                                 .child(when(
-                                    move || is_global_project_id(&m.scope.get()),
+                                    move || {
+                                        let scope = m.scope.get();
+                                        let pid = ui.snapshot.with(|s| {
+                                            super::decode_scope_key(s, &scope).0
+                                        });
+                                        is_global_project_id(&pid)
+                                    },
                                     move || {
                                         muted("Global schedules run script & agent automation directly without consuming an Agent slot on clean script exits (exit 0).")
                                     },
@@ -761,7 +891,20 @@ pub fn create_modal(ui: Ui) -> impl IntoElement {
                                 .child(when(
                                     move || matches!(m.mode.get().as_str(), "script_agent" | "agent"),
                                     move || {
-                                        let profiles = ui.profiles.get();
+                                        let hid = ui.snapshot.with(|s| {
+                                            super::decode_scope_key(s, &m.scope.get()).1
+                                        });
+                                        let host_profs: Vec<_> =
+                                            crate::backend::config_for_host(&hid)
+                                                .profiles
+                                                .into_iter()
+                                                .filter(|p| p.enabled)
+                                                .collect();
+                                        let profiles = if host_profs.is_empty() {
+                                            ui.profiles.get()
+                                        } else {
+                                            host_profs
+                                        };
                                         view()
                                             .p_3()
                                             .gap_2()
@@ -843,22 +986,30 @@ pub fn create_modal(ui: Ui) -> impl IntoElement {
 }
 
 pub fn open_yaml_editor(ui: Ui, scope_id: String, filename: String) {
-    let local_draft = if !is_global_project_id(&scope_id) {
+    let (actual_pid, target_hid) = ui
+        .snapshot
+        .with_untracked(|s| super::decode_scope_key(s, &scope_id));
+    let draft_k = super::draft_key(&actual_pid, &target_hid);
+    let local_draft = if !is_global_project_id(&actual_pid) {
         ui.workflows.drafts.with_untracked(|d| {
-            d.get(&scope_id)
+            d.get(&draft_k)
                 .and_then(|dr| dr.sources.get(&filename).cloned())
         })
     } else {
         None
     };
     let snap_src = ui.snapshot.with_untracked(|s| {
-        crate::workflows::project_template_files_from_snapshot(s, &scope_id)
-            .into_iter()
-            .find(|ws| ws.filename == filename)
-            .map(|ws| ws.source)
+        crate::workflows::project_template_files_from_snapshot_for_host(
+            s,
+            &actual_pid,
+            Some(&target_hid),
+        )
+        .into_iter()
+        .find(|ws| ws.filename == filename)
+        .map(|ws| ws.source)
     });
     let initial = local_draft.or(snap_src).unwrap_or_default();
-    ui.schedules.yaml_scope.set(scope_id.clone());
+    ui.schedules.yaml_scope.set(scope_id);
     ui.schedules.yaml_filename.set(filename);
     ui.schedules.yaml_revision.set(String::new());
     ui.schedules.yaml_source.set(initial);
@@ -868,12 +1019,11 @@ pub fn open_yaml_editor(ui: Ui, scope_id: String, filename: String) {
     if !crate::backend::is_connected() {
         return;
     }
-    let origin_scope = scope_id.clone();
     ui.spawn(async move {
         let res = blocking(move || {
             crate::routed_call(
                 "workflow.sources",
-                json!({ "project_id": origin_scope }),
+                json!({ "project_id": actual_pid, "host_id": target_hid }),
                 None,
             )
         })
@@ -894,7 +1044,10 @@ pub fn open_yaml_editor(ui: Ui, scope_id: String, filename: String) {
 }
 
 fn save_yaml_modal(ui: Ui) {
-    let scope = ui.schedules.yaml_scope.get_untracked();
+    let raw_scope = ui.schedules.yaml_scope.get_untracked();
+    let (scope, target_hid) = ui
+        .snapshot
+        .with_untracked(|s| super::decode_scope_key(s, &raw_scope));
     let filename = ui.schedules.yaml_filename.get_untracked();
     let body = ui.schedules.yaml_source.get_untracked();
     if let Err(e) = source::parse(&body) {
@@ -911,11 +1064,15 @@ fn save_yaml_modal(ui: Ui) {
     }
     let s_for_rpc = scope.clone();
     let f_for_rpc = filename.clone();
+    let h_for_rpc = target_hid.clone();
     let rev = ui.schedules.yaml_revision.get_untracked();
     ui.spawn(async move {
         let res = blocking(move || {
-            let col =
-                crate::routed_call("workflow.sources", json!({ "project_id": s_for_rpc }), None)?;
+            let col = crate::routed_call(
+                "workflow.sources",
+                json!({ "project_id": s_for_rpc, "host_id": h_for_rpc }),
+                None,
+            )?;
             let actual_rev = if rev.is_empty() {
                 col["revision"].as_str().unwrap_or("").to_owned()
             } else {
@@ -934,6 +1091,7 @@ fn save_yaml_modal(ui: Ui) {
                 "workflow.apply",
                 json!({
                     "project_id": s_for_rpc,
+                    "host_id": h_for_rpc,
                     "revision": actual_rev,
                     "sources": inputs,
                     "request_key": canban_types::id(),
@@ -969,11 +1127,9 @@ pub fn yaml_modal(ui: Ui) -> impl IntoElement {
                     .child(icon_tinted(Icon::Trigger, ACCENT))
                     .child(heading(move || s.yaml_filename.get()))
                     .child(badge(move || {
-                        if is_global_project_id(&s.yaml_scope.get()) {
-                            "Global · Host"
-                        } else {
-                            "Project"
-                        }
+                        let scope = s.yaml_scope.get();
+                        ui.snapshot
+                            .with(|snap| super::scope_display_name(snap, &scope))
                     }))
                     .child(view().flex_1())
                     .child(chrome_button(Icon::Close, "Close YAML editor", move |_| {

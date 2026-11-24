@@ -513,6 +513,7 @@ fn hash_tag_search_matches_tagged_cards_without_false_matching_title_subsequence
 fn quick_open_indexes_global_and_project_schedules() {
     let mut s = fixture();
     s.schedule_states.push(ScheduleState {
+        host_id: String::new(),
         id: "sched-global-gc".into(),
         project_id: GLOBAL_PROJECT_ID.into(),
         workflow_id: "global:worktree-gc".into(),
@@ -535,6 +536,7 @@ fn quick_open_indexes_global_and_project_schedules() {
         updated_at: 100,
     });
     s.scheduled_runs.push(ScheduledRun {
+        host_id: String::new(),
         id: "run-blocked".into(),
         schedule_id: "sched-global-gc".into(),
         project_id: GLOBAL_PROJECT_ID.into(),
@@ -675,4 +677,175 @@ fn quick_open_searches_cards_by_github_issue_and_pr_numbers() {
         ranked(&rows, "399", &[], false)[0].target,
         Target::Card("c-issue".into())
     );
+}
+
+#[test]
+fn quick_open_shows_host_names_on_duplicate_and_unique_multi_host_entries() {
+    let mut local = Snapshot::default();
+    for (id, name) in [("fiber", "fiber"), ("canban", "Canban")] {
+        local.projects.push(Project {
+            github: None,
+            detected_github: None,
+            github_disconnected: false,
+            delivery_mode: Default::default(),
+            agent_overrides: Default::default(),
+            tags: Default::default(),
+            id: id.into(),
+            name: name.into(),
+            directory: format!("/local/{id}"),
+            workflow: Workflow::default(),
+            target_branch: None,
+            created_at: 1,
+        });
+    }
+    local.terminals.push(TerminalEntry {
+        id: "t-local".into(),
+        conversation_id: None,
+        number: 1,
+        name: Some("Local Shell".into()),
+        origin_project_id: Some("fiber".into()),
+        origin_card_id: None,
+        agent_engine: None,
+        runtime: None,
+        agent: None,
+        created_at: 1,
+    });
+    local.register_host_entities("local");
+    local.host_summaries.insert(
+        "local".into(),
+        HostSummary {
+            id: "local".into(),
+            name: crate::platform::LOCAL_HOST_NAME.into(),
+            is_local: true,
+            transport_label: "Local socket".into(),
+            endpoint_label: "~/.canban/app.sock".into(),
+            ssh_target: None,
+            server_id: None,
+            connection: HostConnectionState::Connected {
+                rtt_ms: 0,
+                api_version: 1,
+                version: "1".into(),
+                platform: "macos".into(),
+            },
+            active_agents: 0,
+            max_agents: 4,
+            project_count: 2,
+            reconnect_count: 0,
+            last_synced_at: None,
+            pending_mutations: 0,
+            sync_conflicts: 0,
+        },
+    );
+
+    let mut remote = Snapshot::default();
+    remote.projects.push(Project {
+        github: None,
+        detected_github: None,
+        github_disconnected: false,
+        delivery_mode: Default::default(),
+        agent_overrides: Default::default(),
+        tags: Default::default(),
+        id: "fiber".into(),
+        name: "fiber".into(),
+        directory: "/home/devpc/fiber".into(),
+        workflow: Workflow::default(),
+        target_branch: None,
+        created_at: 2,
+    });
+    remote.terminals.push(TerminalEntry {
+        id: "t-remote".into(),
+        conversation_id: None,
+        number: 2,
+        name: Some("Remote Shell".into()),
+        origin_project_id: Some("fiber".into()),
+        origin_card_id: None,
+        agent_engine: None,
+        runtime: None,
+        agent: None,
+        created_at: 2,
+    });
+    remote.schedule_states.push(ScheduleState {
+        host_id: String::new(),
+        id: "schedule:__global:global:worktree-gc:schedule".into(),
+        project_id: "__global".into(),
+        workflow_id: "global:worktree-gc".into(),
+        workflow_name: "Worktree GC".into(),
+        filename: "worktree-gc.yaml".into(),
+        rule_id: "schedule".into(),
+        cron: "0 3 * * *".into(),
+        timezone: None,
+        overlap: ScheduleOverlap::Skip,
+        creates_card: false,
+        starts_with_script: true,
+        target_column: None,
+        profile_id: None,
+        enabled: true,
+        last_scheduled_at: None,
+        next_run_at: None,
+        last_run_id: None,
+        run_count: 0,
+        queued_triggers: 0,
+        updated_at: 2,
+    });
+
+    local.merge_remote_snapshot(
+        remote,
+        HostSummary {
+            id: "devpc".into(),
+            name: "devpc".into(),
+            is_local: false,
+            transport_label: "SSH".into(),
+            endpoint_label: "devpc".into(),
+            ssh_target: Some("devpc".into()),
+            server_id: None,
+            connection: HostConnectionState::Connected {
+                rtt_ms: 8,
+                api_version: 1,
+                version: "1".into(),
+                platform: "linux".into(),
+            },
+            active_agents: 0,
+            max_agents: 4,
+            project_count: 1,
+            reconnect_count: 0,
+            last_synced_at: None,
+            pending_mutations: 0,
+            sync_conflicts: 0,
+        },
+    );
+
+    let rows = candidates(&local);
+    let fiber_projects: Vec<_> = rows
+        .iter()
+        .filter(|r| r.kind == "Project" && r.title == "fiber")
+        .collect();
+    assert_eq!(fiber_projects.len(), 2);
+    assert!(
+        fiber_projects
+            .iter()
+            .any(|r| r.detail.contains(crate::platform::LOCAL_HOST_NAME))
+    );
+    assert!(fiber_projects.iter().any(|r| r.detail.contains("devpc")));
+
+    let canban_project = rows
+        .iter()
+        .find(|r| r.kind == "Project" && r.title == "Canban")
+        .unwrap();
+    assert!(
+        canban_project
+            .detail
+            .contains(crate::platform::LOCAL_HOST_NAME)
+    );
+
+    let remote_term = rows
+        .iter()
+        .find(|r| r.kind == "Terminal" && r.title.contains("Remote Shell"))
+        .unwrap();
+    assert!(remote_term.detail.contains("devpc"));
+
+    let remote_sched = rows
+        .iter()
+        .find(|r| r.kind == "Schedule" && r.title.contains("Worktree GC"))
+        .unwrap();
+    assert!(remote_sched.detail.contains("devpc"));
 }

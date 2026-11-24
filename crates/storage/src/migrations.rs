@@ -3941,6 +3941,7 @@ mod tests {
         let store = crate::Store::open(home.path()).unwrap();
         assert_eq!(version(&store.conn).unwrap(), CURRENT);
         let state = canban_types::ScheduleState {
+            host_id: String::new(),
             id: "schedule:p1:wf1:nightly".into(),
             project_id: "p1".into(),
             workflow_id: "wf1".into(),

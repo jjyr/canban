@@ -1042,7 +1042,7 @@ fn workflow_picker(ui: Ui, choice: Signal<WorkflowChoice>) -> impl IntoElement {
                                     .projects
                                     .iter()
                                     .find(|p| p.id == pid)
-                                    .map(|p| format!("Copy from {}", p.name))
+                                    .map(|p| format!("Copy from {}", s.project_display_name(&p.id)))
                                     .unwrap_or_else(|| "Default workflow".into()),
                             }
                         })
@@ -1102,15 +1102,23 @@ fn workflow_picker(ui: Ui, choice: Signal<WorkflowChoice>) -> impl IntoElement {
                             );
                         }
                         for p in &s.projects {
+                            let label = s.project_display_name(&p.id);
+                            let hid = s.project_host(&p.id);
                             opts.push(
-                                PickerOption::new(format!("project:{}", p.id), p.name.clone())
+                                PickerOption::new(format!("project:{}", p.id), label)
                                     .detail(summarize_project_workflow(s, &p.id))
                                     .group("Copy from existing Project")
                                     .icon(Icon::Projects)
                                     .selected(
                                         matches!(&cur, WorkflowChoice::Project(pid) if pid == &p.id),
                                     )
-                                    .keywords(["copy", "clone", "project", p.directory.as_str()]),
+                                    .keywords([
+                                        "copy",
+                                        "clone",
+                                        "project",
+                                        p.directory.as_str(),
+                                        s.host_display_name(hid),
+                                    ]),
                             );
                         }
                         opts
@@ -1342,7 +1350,12 @@ pub fn new_project_form(
                                                 .projects
                                                 .iter()
                                                 .find(|p| p.id == pid)
-                                                .map(|p| format!("Copy from {}", p.name))
+                                                .map(|p| {
+                                                    format!(
+                                                        "Copy from {}",
+                                                        s.project_display_name(&p.id)
+                                                    )
+                                                })
                                                 .unwrap_or_else(|| "Default".into()),
                                         }
                                     });

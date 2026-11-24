@@ -2658,3 +2658,165 @@ fn tailscale_verifier_and_discovery_rpc_work_on_app_server() {
     assert_eq!(items[0].name, "Live Server B");
     assert!(items[0].linked_on_host);
 }
+
+#[test]
+fn colliding_projects_remote_globals_and_call_all_hosts_skip_offline_work_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let local_home = dir.path().join("local-home");
+    let remote_home = dir.path().join("remote-home");
+    let local_repo = dir.path().join("local-fiber");
+    let remote_repo = dir.path().join("remote-fiber");
+    std::fs::create_dir_all(&local_repo).unwrap();
+    std::fs::create_dir_all(&remote_repo).unwrap();
+
+    let local_app = AppServer::open(local_home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let _local_running = local_app.start_with_listen(None).unwrap();
+    local_app
+        .call(
+            "project.create",
+            json!({ "name": "fiber", "directory": local_repo }),
+        )
+        .unwrap();
+
+    let remote_app = AppServer::open(remote_home, PathBuf::from("/bin/echo")).unwrap();
+    let (_, remote_token) = remote_app.issue_device_token("devpc-client").unwrap();
+    let _remote_running = remote_app
+        .start_with_listen(Some(ServerListenConfig {
+            tailscale: false,
+            port: 0,
+            listen: Some("127.0.0.1:0".into()),
+            allow_insecure_bind: false,
+            trust_tailscale_self: true,
+        }))
+        .unwrap();
+    let remote_addr = remote_app.bound_tcp_addrs()[0].clone();
+    remote_app
+        .call(
+            "project.create",
+            json!({ "name": "fiber", "directory": remote_repo }),
+        )
+        .unwrap();
+
+    let dead_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let dead_addr = dead_listener.local_addr().unwrap().to_string();
+    drop(dead_listener);
+
+    let hosts_file = HostsFile {
+        hosts: vec![SavedHost {
+            id: "offline-box".into(),
+            name: "Offline Box".into(),
+            transport: HostTransport::Tcp {
+                addr: dead_addr,
+                token: "dev_unused".into(),
+            },
+            ssh_target: None,
+            server_id: None,
+            enabled: true,
+            added_at: now(),
+        }],
+    };
+    canban_context::atomic(
+        &HostRegistry::hosts_path(&local_home),
+        &serde_json::to_vec_pretty(&hosts_file).unwrap(),
+    )
+    .unwrap();
+
+    let local_client = AppClient::connect_home(local_home, Path::new("/bin/echo")).unwrap();
+    let registry = HostRegistry::new(local_client);
+    registry
+        .add_host(SavedHost {
+            id: "devpc".into(),
+            name: "devpc".into(),
+            transport: HostTransport::Tcp {
+                addr: remote_addr,
+                token: remote_token,
+            },
+            ssh_target: None,
+            server_id: None,
+            enabled: true,
+            added_at: now(),
+        })
+        .unwrap();
+
+    let merged = registry.merged_snapshot().unwrap();
+    let fibers: Vec<_> = merged
+        .projects
+        .iter()
+        .filter(|p| p.name == "fiber")
+        .collect();
+    assert_eq!(
+        fibers.len(),
+        2,
+        "local and remote fiber projects must both survive"
+    );
+    assert_eq!(
+        fibers
+            .iter()
+            .filter(|p| merged.project_host(&p.id) == "local")
+            .count(),
+        1
+    );
+    assert_eq!(
+        fibers
+            .iter()
+            .filter(|p| merged.project_host(&p.id) == "devpc")
+            .count(),
+        1
+    );
+
+    let remote_fiber_id = fibers
+        .iter()
+        .find(|p| merged.project_host(&p.id) == "devpc")
+        .unwrap()
+        .id
+        .clone();
+    let refs = registry
+        .call_routed(
+            "git.refs",
+            json!({ "project_id": remote_fiber_id }),
+            Some(&remote_fiber_id),
+        )
+        .unwrap();
+    assert!(
+        refs.is_object(),
+        "git.refs should route cleanly on remote project"
+    );
+
+    // Remote global schedule creation via explicit host_id must reach devpc and survive merge.
+    registry
+        .call_routed(
+            "schedule.create",
+            json!({
+                "host_id": "devpc",
+                "scope": "global",
+                "name": "Remote Clean",
+                "cron": "0 4 * * *",
+                "mode": "script",
+                "script": "echo clean",
+                "request_key": "rem-clean-1"
+            }),
+            None,
+        )
+        .unwrap();
+    let after_sched = registry.merged_snapshot().unwrap();
+    assert!(
+        after_sched
+            .schedule_states
+            .iter()
+            .any(|s| s.host_id == "devpc" && s.workflow_name == "Remote Clean"),
+        "remote global schedule should appear in merged snapshot under devpc"
+    );
+
+    // call_all_hosts must skip the offline host without blocking or failing.
+    let fanout = registry.call_all_hosts(
+        "insights.activity",
+        json!({ "from_ms": 0, "to_ms": 60_000 }),
+    );
+    let host_ids: Vec<&str> = fanout.iter().map(|(hid, _)| hid.as_str()).collect();
+    assert!(host_ids.contains(&"local"));
+    assert!(host_ids.contains(&"devpc"));
+    assert!(!host_ids.contains(&"offline-box"));
+    for (hid, res) in fanout {
+        assert!(res.is_ok(), "connected host {hid} fanout failed: {res:?}");
+    }
+}

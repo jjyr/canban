@@ -789,7 +789,14 @@ pub fn execute(ui: Ui, id: &str) {
             s.schedule_states
                 .iter()
                 .find(|st| st.id == sched_id)
-                .map(|st| st.project_id.clone())
+                .map(|st| {
+                    let hid = if st.host_id.is_empty() {
+                        s.schedule_host(&st.id)
+                    } else {
+                        st.host_id.as_str()
+                    };
+                    crate::schedules::encode_scope_key(&st.project_id, hid)
+                })
         });
         crate::schedules::open(ui, scope, Some(sched_id.to_owned()));
         return;

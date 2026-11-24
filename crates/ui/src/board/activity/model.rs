@@ -46,14 +46,12 @@ impl Summary {
 
 pub fn projects(snapshot: &Snapshot) -> Vec<Summary> {
     let reminders = canban_notifications::reminders(snapshot);
-    let remote_hosts = snapshot.has_remote_hosts();
     let hosts = snapshot
         .projects
         .iter()
         .map(|p| {
             let hid = snapshot.project_host(&p.id);
-            let label = (hid != "local" && remote_hosts)
-                .then(|| snapshot.host_display_name(hid).to_owned());
+            let label = snapshot.project_host_badge(&p.id);
             let offline = snapshot.is_host_offline(hid);
             (p.id.clone(), (label, offline))
         })

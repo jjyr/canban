@@ -79,11 +79,12 @@ impl Default for State {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScheduleItem {
-    /// Canonical UI selection key: `<project_id>::<filename>::<rule_id>`.
+    /// Canonical UI selection key: `<project_id>::<filename>::<rule_id>` (or `global:<host_id>::...`).
     pub key: String,
     pub legacy_key: String,
     pub schedule_id: String,
     pub project_id: String,
+    pub host_id: String,
     pub scope_name: String,
     pub filename: String,
     pub workflow_id: String,
@@ -161,20 +162,76 @@ impl ScheduleItem {
     }
 }
 
+pub const GLOBAL_SCOPE_PREFIX: &str = "global:";
+
 pub fn schedule_key(project_id: &str, filename: &str, rule_id: &str) -> String {
     format!("{project_id}::{filename}::{rule_id}")
 }
 
-pub fn scope_display_name(s: &Snapshot, project_id: &str) -> String {
+pub fn schedule_key_for_host(
+    project_id: &str,
+    host_id: &str,
+    filename: &str,
+    rule_id: &str,
+) -> String {
+    if is_global_project_id(project_id) && !host_id.is_empty() && host_id != "local" {
+        format!("{GLOBAL_SCOPE_PREFIX}{host_id}::{filename}::{rule_id}")
+    } else {
+        schedule_key(project_id, filename, rule_id)
+    }
+}
+
+pub fn encode_scope_key(project_id: &str, host_id: &str) -> String {
     if is_global_project_id(project_id) {
-        "Global · Host".into()
-    } else if project_id.trim().is_empty() {
-        "All Scopes".into()
+        let h = if host_id.is_empty() { "local" } else { host_id };
+        format!("{GLOBAL_SCOPE_PREFIX}{h}")
+    } else {
+        project_id.to_owned()
+    }
+}
+
+pub fn decode_scope_key(s: &Snapshot, raw: &str) -> (String, String) {
+    if let Some(hid) = raw.strip_prefix(GLOBAL_SCOPE_PREFIX) {
+        let h = if hid.is_empty() { "local" } else { hid };
+        (GLOBAL_PROJECT_ID.to_owned(), h.to_owned())
+    } else if is_global_project_id(raw) {
+        (GLOBAL_PROJECT_ID.to_owned(), "local".to_owned())
+    } else {
+        (raw.to_owned(), s.project_host(raw).to_owned())
+    }
+}
+
+pub fn draft_key(project_id: &str, host_id: &str) -> String {
+    if is_global_project_id(project_id) && !host_id.is_empty() && host_id != "local" {
+        format!("{GLOBAL_SCOPE_PREFIX}{host_id}")
+    } else {
+        project_id.to_owned()
+    }
+}
+
+pub fn scope_display_name(s: &Snapshot, project_id: &str) -> String {
+    if project_id.trim().is_empty() {
+        return "All Scopes".into();
+    }
+    if let Some(hid) = project_id.strip_prefix(GLOBAL_SCOPE_PREFIX) {
+        let h = if hid.is_empty() { "local" } else { hid };
+        return if s.has_remote_hosts() {
+            format!("Global · {}", s.host_display_name(h))
+        } else {
+            "Global · Host".into()
+        };
+    }
+    if is_global_project_id(project_id) {
+        if s.has_remote_hosts() {
+            format!("Global · {}", s.host_display_name("local"))
+        } else {
+            "Global · Host".into()
+        }
     } else {
         s.projects
             .iter()
             .find(|p| p.id == project_id)
-            .map(|p| p.name.clone())
+            .map(|p| s.project_display_name(&p.id))
             .unwrap_or_else(|| "Project".into())
     }
 }
@@ -268,17 +325,27 @@ fn collect_scope_items(
     s: &Snapshot,
     drafts: &BTreeMap<String, crate::workflows::Draft>,
     scope_id: &str,
+    host_id: &str,
     now_ms: u64,
     items: &mut Vec<ScheduleItem>,
 ) {
-    let draft_opt = drafts.get(scope_id);
-    let scope_name = scope_display_name(s, scope_id);
+    let dk = draft_key(scope_id, host_id);
+    let draft_opt = drafts.get(&dk);
+    let scope_name = if is_global_project_id(scope_id) {
+        if s.has_remote_hosts() {
+            format!("Global · {}", s.host_display_name(host_id))
+        } else {
+            "Global · Host".into()
+        }
+    } else {
+        scope_display_name(s, scope_id)
+    };
     let sources_map: BTreeMap<String, String> = if let Some(draft) = draft_opt
         && !draft.sources.is_empty()
     {
         draft.sources.clone()
     } else {
-        crate::workflows::project_template_files_from_snapshot(s, scope_id)
+        crate::workflows::project_template_files_from_snapshot_for_host(s, scope_id, Some(host_id))
             .into_iter()
             .map(|f| (f.filename, f.source))
             .collect()
@@ -287,10 +354,14 @@ fn collect_scope_items(
     let mut covered_state_ids = BTreeSet::new();
     for (filename, raw) in &sources_map {
         let dirty = draft_opt.is_some_and(|d| crate::workflows::source_dirty(d, filename));
-        let saved_src = s
-            .workflow_sources
-            .iter()
-            .find(|ws| ws.project_id == scope_id && &ws.filename == filename);
+        let saved_src = s.workflow_sources.iter().find(|ws| {
+            let ws_host = if ws.host_id.is_empty() {
+                s.workflow_source_host(&ws.id)
+            } else {
+                ws.host_id.as_str()
+            };
+            ws.project_id == scope_id && ws_host == host_id && &ws.filename == filename
+        });
         let Ok(doc) = source::parse(raw) else {
             continue;
         };
@@ -306,12 +377,24 @@ fn collect_scope_items(
             if !rule.is_schedule() {
                 continue;
             }
-            let sid = format!("schedule:{scope_id}:{wf_id}:{rule_id}");
+            let raw_sid = format!("schedule:{scope_id}:{wf_id}:{rule_id}");
+            let sid = if host_id != "local" && is_global_project_id(scope_id) {
+                canban_types::qualify_host_id(host_id, &raw_sid)
+            } else {
+                raw_sid.clone()
+            };
             let persisted = s.schedule_states.iter().find(|st| {
-                st.id == sid
-                    || (st.project_id == scope_id
-                        && st.filename == *filename
-                        && st.rule_id == *rule_id)
+                let st_host = if st.host_id.is_empty() {
+                    s.schedule_host(&st.id)
+                } else {
+                    st.host_id.as_str()
+                };
+                st_host == host_id
+                    && (st.id == sid
+                        || st.id == raw_sid
+                        || (st.project_id == scope_id
+                            && st.filename == *filename
+                            && st.rule_id == *rule_id))
             });
             if let Some(p) = persisted {
                 covered_state_ids.insert(p.id.clone());
@@ -340,26 +423,39 @@ fn collect_scope_items(
                 .scheduled_runs
                 .iter()
                 .filter(|r| {
-                    r.schedule_id == actual_sid
-                        || (r.project_id == scope_id
-                            && r.filename == *filename
-                            && r.rule_id == *rule_id)
+                    let rh = if r.host_id.is_empty() {
+                        s.host_of(&r.id)
+                    } else {
+                        r.host_id.as_str()
+                    };
+                    rh == host_id
+                        && (r.schedule_id == actual_sid
+                            || (r.project_id == scope_id
+                                && r.filename == *filename
+                                && r.rule_id == *rule_id))
                 })
                 .max_by_key(|r| (r.scheduled_at, r.number))
                 .cloned();
             let active_blocked = s.scheduled_runs.iter().any(|r| {
-                (r.schedule_id == actual_sid
-                    || (r.project_id == scope_id
-                        && r.filename == *filename
-                        && r.rule_id == *rule_id))
+                let rh = if r.host_id.is_empty() {
+                    s.host_of(&r.id)
+                } else {
+                    r.host_id.as_str()
+                };
+                rh == host_id
+                    && (r.schedule_id == actual_sid
+                        || (r.project_id == scope_id
+                            && r.filename == *filename
+                            && r.rule_id == *rule_id))
                     && r.state == "blocked"
             });
 
             items.push(ScheduleItem {
-                key: schedule_key(scope_id, filename, rule_id),
+                key: schedule_key_for_host(scope_id, host_id, filename, rule_id),
                 legacy_key: format!("{filename}::{rule_id}"),
                 schedule_id: actual_sid,
                 project_id: scope_id.to_owned(),
+                host_id: host_id.to_owned(),
                 scope_name: scope_name.clone(),
                 filename: (*filename).clone(),
                 workflow_id: wf_id.clone(),
@@ -387,11 +483,14 @@ fn collect_scope_items(
     }
 
     // Fallback for any ScheduleState present in Snapshot whose WorkflowSource isn't mapped yet.
-    for st in s
-        .schedule_states
-        .iter()
-        .filter(|st| st.project_id == scope_id && !covered_state_ids.contains(&st.id))
-    {
+    for st in s.schedule_states.iter().filter(|st| {
+        let st_host = if st.host_id.is_empty() {
+            s.schedule_host(&st.id)
+        } else {
+            st.host_id.as_str()
+        };
+        st.project_id == scope_id && st_host == host_id && !covered_state_ids.contains(&st.id)
+    }) {
         let latest_run = s
             .scheduled_runs
             .iter()
@@ -403,10 +502,11 @@ fn collect_scope_items(
             .iter()
             .any(|r| r.schedule_id == st.id && r.state == "blocked");
         items.push(ScheduleItem {
-            key: schedule_key(scope_id, &st.filename, &st.rule_id),
+            key: schedule_key_for_host(scope_id, host_id, &st.filename, &st.rule_id),
             legacy_key: format!("{}::{}", st.filename, st.rule_id),
             schedule_id: st.id.clone(),
             project_id: st.project_id.clone(),
+            host_id: host_id.to_owned(),
             scope_name: scope_name.clone(),
             filename: st.filename.clone(),
             workflow_id: st.workflow_id.clone(),
@@ -443,20 +543,84 @@ fn collect_scope_items(
     }
 }
 
-/// Collects scheduled tasks for Global and/or Project scopes.
+fn ordered_global_hosts(s: &Snapshot) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut hosts = Vec::new();
+    seen.insert("local".to_owned());
+    hosts.push("local".to_owned());
+
+    let mut remotes: Vec<(&str, &str)> = s
+        .host_summaries
+        .iter()
+        .filter(|(id, _)| id.as_str() != "local")
+        .map(|(id, h)| (h.name.as_str(), id.as_str()))
+        .collect();
+    remotes.sort_by(|a, b| {
+        a.0.to_ascii_lowercase()
+            .cmp(&b.0.to_ascii_lowercase())
+            .then_with(|| a.1.cmp(b.1))
+    });
+    for (_, hid) in remotes {
+        if seen.insert(hid.to_owned()) {
+            hosts.push(hid.to_owned());
+        }
+    }
+    for st in &s.schedule_states {
+        if is_global_project_id(&st.project_id) {
+            let h = if st.host_id.is_empty() {
+                s.schedule_host(&st.id)
+            } else {
+                st.host_id.as_str()
+            };
+            if seen.insert(h.to_owned()) {
+                hosts.push(h.to_owned());
+            }
+        }
+    }
+    for ws in &s.workflow_sources {
+        if is_global_project_id(&ws.project_id) {
+            let h = if ws.host_id.is_empty() {
+                s.workflow_source_host(&ws.id)
+            } else {
+                ws.host_id.as_str()
+            };
+            if seen.insert(h.to_owned()) {
+                hosts.push(h.to_owned());
+            }
+        }
+    }
+    hosts
+}
+
+/// Collects scheduled tasks for Global and/or Project scopes across hosts.
 pub fn collect_schedules(ui: Ui, scope_filter: &str) -> Vec<ScheduleItem> {
     let drafts = ui.workflows.drafts.get();
     let pending_toggle = ui.schedules.pending_toggle.get();
     ui.snapshot.with(|s| {
         let now_ms = canban_types::now();
         let mut items = Vec::new();
-        if scope_filter.is_empty() || is_global_project_id(scope_filter) {
-            collect_scope_items(s, &drafts, GLOBAL_PROJECT_ID, now_ms, &mut items);
-        }
-        for p in &s.projects {
-            if scope_filter.is_empty() || scope_filter == p.id {
-                collect_scope_items(s, &drafts, &p.id, now_ms, &mut items);
+        if scope_filter.is_empty() {
+            for hid in ordered_global_hosts(s) {
+                collect_scope_items(s, &drafts, GLOBAL_PROJECT_ID, &hid, now_ms, &mut items);
             }
+            for p in &s.projects {
+                let ph = s.project_host(&p.id);
+                collect_scope_items(s, &drafts, &p.id, ph, now_ms, &mut items);
+            }
+        } else if let Some(target_hid) = scope_filter.strip_prefix(GLOBAL_SCOPE_PREFIX) {
+            let hid = if target_hid.is_empty() {
+                "local"
+            } else {
+                target_hid
+            };
+            collect_scope_items(s, &drafts, GLOBAL_PROJECT_ID, hid, now_ms, &mut items);
+        } else if is_global_project_id(scope_filter) {
+            for hid in ordered_global_hosts(s) {
+                collect_scope_items(s, &drafts, GLOBAL_PROJECT_ID, &hid, now_ms, &mut items);
+            }
+        } else {
+            let ph = s.project_host(scope_filter);
+            collect_scope_items(s, &drafts, scope_filter, ph, now_ms, &mut items);
         }
         if let Some((id, enabled)) = pending_toggle.as_ref()
             && let Some(item) = items
@@ -526,7 +690,7 @@ pub fn open_schedules(ui: Ui, select_schedule: Option<String>) {
             collect_schedules(ui, "")
                 .into_iter()
                 .find(|i| i.matches_selection(sel))
-                .map(|i| i.project_id)
+                .map(|i| encode_scope_key(&i.project_id, &i.host_id))
         })
         .or_else(|| {
             let pid = ui.project.get_untracked();
@@ -535,15 +699,20 @@ pub fn open_schedules(ui: Ui, select_schedule: Option<String>) {
     open(ui, scope, select_schedule);
 }
 
-fn ensure_draft_initialized(ui: Ui, project_id: &str) {
+fn ensure_draft_initialized(ui: Ui, scope_key: &str) {
     let state = ui.workflows;
-    let has = state.drafts.with_untracked(|d| d.contains_key(project_id));
+    let has = state.drafts.with_untracked(|d| d.contains_key(scope_key));
     if has {
         return;
     }
-    let files: Vec<WorkflowTemplateFile> = ui
-        .snapshot
-        .with_untracked(|s| crate::workflows::project_template_files_from_snapshot(s, project_id));
+    let files: Vec<WorkflowTemplateFile> = ui.snapshot.with_untracked(|s| {
+        let (actual_pid, target_hid) = decode_scope_key(s, scope_key);
+        crate::workflows::project_template_files_from_snapshot_for_host(
+            s,
+            &actual_pid,
+            Some(&target_hid),
+        )
+    });
     if files.is_empty() {
         return;
     }
@@ -552,7 +721,7 @@ fn ensure_draft_initialized(ui: Ui, project_id: &str) {
         .map(|f| json!({"filename": f.filename, "source": f.source}))
         .collect();
     state.drafts.update(|d| {
-        d.entry(project_id.to_owned())
+        d.entry(scope_key.to_owned())
             .or_default()
             .accept(json!({"revision": "local", "sources": base_sources}));
     });
@@ -759,18 +928,19 @@ fn toggle_gallery_schedule(
 pub fn toggle_schedule(ui: Ui, item: &ScheduleItem, enabled: bool) {
     let state = ui.workflows;
     let project = item.project_id.clone();
+    let host_id = item.host_id.clone();
+    let dk = draft_key(&project, &host_id);
     let filename = item.filename.clone();
     let rule_id = item.rule_id.clone();
 
-    let draft_dirty = state.drafts.with_untracked(|d| {
-        d.get(&project)
-            .is_some_and(crate::workflows::Draft::needs_apply)
-    });
+    let draft_dirty = state
+        .drafts
+        .with_untracked(|d| d.get(&dk).is_some_and(crate::workflows::Draft::needs_apply));
 
     // If there are unsaved draft edits, or this schedule has not been published yet,
     // mutate the draft directly so the user's unsaved edits are never clobbered.
     if draft_dirty || !item.published {
-        mutate_workflow_file(ui, &project, &filename, |doc| {
+        mutate_workflow_file(ui, &dk, &filename, |doc| {
             if enabled {
                 doc.enabled = true;
             }
@@ -783,7 +953,7 @@ pub fn toggle_schedule(ui: Ui, item: &ScheduleItem, enabled: bool) {
 
     let sid = item.schedule_id.clone();
     if !crate::backend::is_connected() {
-        toggle_gallery_schedule(ui, &project, &filename, &rule_id, &sid, enabled);
+        toggle_gallery_schedule(ui, &dk, &filename, &rule_id, &sid, enabled);
         ui.notify(if enabled {
             "Schedule enabled"
         } else {
@@ -803,6 +973,7 @@ pub fn toggle_schedule(ui: Ui, item: &ScheduleItem, enabled: bool) {
         "schedule.toggle",
         json!({
             "schedule_id": sid,
+            "host_id": host_id,
             "enabled": enabled,
         }),
         move |res| {
@@ -829,6 +1000,8 @@ pub fn toggle_schedule(ui: Ui, item: &ScheduleItem, enabled: bool) {
 
 pub fn delete_schedule(ui: Ui, item: &ScheduleItem) {
     let project = item.project_id.clone();
+    let host_id = item.host_id.clone();
+    let dk = draft_key(&project, &host_id);
     let filename = item.filename.clone();
     let rule_id = item.rule_id.clone();
     let sid = item.schedule_id.clone();
@@ -836,12 +1009,12 @@ pub fn delete_schedule(ui: Ui, item: &ScheduleItem) {
 
     if !crate::backend::is_connected() || !item.published {
         let mut empty_doc = false;
-        mutate_workflow_file(ui, &project, &filename, |doc| {
+        mutate_workflow_file(ui, &dk, &filename, |doc| {
             doc.on.remove(&rule_id);
             empty_doc = doc.on.is_empty();
         });
         ui.workflows.drafts.update(|d| {
-            if let Some(dr) = d.get_mut(&project)
+            if let Some(dr) = d.get_mut(&dk)
                 && empty_doc
                 && (is_global_project_id(&project) || dr.sources.len() > 1)
             {
@@ -854,8 +1027,9 @@ pub fn delete_schedule(ui: Ui, item: &ScheduleItem) {
         ui.snapshot.update(|s| {
             s.schedule_states.retain(|st| st.id != sid);
             if empty_doc {
-                s.workflow_sources
-                    .retain(|ws| !(ws.project_id == project && ws.filename == filename));
+                s.workflow_sources.retain(|ws| {
+                    !(ws.project_id == project && ws.filename == filename && ws.host_id == host_id)
+                });
             }
         });
         ui.notify("Scheduled task removed");
@@ -868,6 +1042,7 @@ pub fn delete_schedule(ui: Ui, item: &ScheduleItem) {
         json!({
             "schedule_id": sid,
             "project_id": project,
+            "host_id": host_id,
             "filename": filename,
             "rule_id": rule_id,
         }),
@@ -888,10 +1063,10 @@ pub fn delete_schedule(ui: Ui, item: &ScheduleItem) {
 pub fn trigger_schedule(ui: Ui, item: &ScheduleItem) {
     let state = ui.workflows;
     let project = item.project_id.clone();
-    let has_unsaved = state.drafts.with_untracked(|d| {
-        d.get(&project)
-            .is_some_and(crate::workflows::Draft::needs_apply)
-    });
+    let dk = draft_key(&project, &item.host_id);
+    let has_unsaved = state
+        .drafts
+        .with_untracked(|d| d.get(&dk).is_some_and(crate::workflows::Draft::needs_apply));
     if has_unsaved || !item.published {
         ui.notify(format!(
             "Save workflow changes first ({}) before running this schedule",
@@ -1014,6 +1189,7 @@ pub fn trigger_schedule(ui: Ui, item: &ScheduleItem) {
             s.scheduled_runs.insert(
                 0,
                 ScheduledRun {
+                    host_id: item.host_id.clone(),
                     id: run_id.clone(),
                     schedule_id: sid.clone(),
                     project_id: project.clone(),
@@ -1059,10 +1235,11 @@ pub fn trigger_schedule(ui: Ui, item: &ScheduleItem) {
     }
 
     let sid = item.schedule_id.clone();
+    let host_id = item.host_id.clone();
     dispatch_complete(
         ui,
         "schedule.trigger",
-        json!({ "schedule_id": sid }),
+        json!({ "schedule_id": sid, "host_id": host_id }),
         move |res| match res {
             Ok(v) => {
                 if let Some(cnum) = v["card_number"].as_u64() {
@@ -1100,19 +1277,24 @@ pub fn toggle_schedule_by_id(ui: Ui, schedule_id: &str) {
         toggle_schedule(ui, item, !item.effective_enabled);
         return;
     }
-    let cur = ui.snapshot.with_untracked(|s| {
+    if let Some((host_id, enabled)) = ui.snapshot.with_untracked(|s| {
         s.schedule_states
             .iter()
             .find(|st| st.id == schedule_id)
-            .map(|st| st.enabled)
-    });
-    if let Some(enabled) = cur
-        && crate::backend::is_connected()
+            .map(|st| {
+                let h = if st.host_id.is_empty() {
+                    s.schedule_host(&st.id)
+                } else {
+                    st.host_id.as_str()
+                };
+                (h.to_owned(), st.enabled)
+            })
+    }) && crate::backend::is_connected()
     {
         dispatch(
             ui,
             "schedule.toggle",
-            json!({ "schedule_id": schedule_id, "enabled": !enabled }),
+            json!({ "schedule_id": schedule_id, "host_id": host_id, "enabled": !enabled }),
         );
     }
 }
@@ -1143,6 +1325,7 @@ pub(crate) fn offline_save_schedules(ui: Ui, project_id: &str) {
                 None
             };
             s.schedule_states.push(ScheduleState {
+                host_id: item.host_id,
                 id: item.schedule_id,
                 project_id: project_id.to_owned(),
                 workflow_id: item.workflow_id,
@@ -1289,25 +1472,47 @@ pub fn chrome_bar(ui: Ui) -> View {
             let cur = s.scope.get();
             let list = all_items.get();
             let total_n = list.len();
-            let global_n = list.iter().filter(|i| i.is_global()).count();
             ui.snapshot.with(|snap| {
-                let mut opts = Vec::with_capacity(snap.projects.len() + 2);
+                let (cur_pid, cur_hid) = decode_scope_key(snap, &cur);
+                let has_remote = snap.has_remote_hosts();
+                let mut opts = Vec::with_capacity(snap.projects.len() + 4);
                 opts.push(
                     PickerOption::new(ALL_SCOPES_OPTION, "All Scopes")
                         .detail(format!("{total_n} total"))
                         .icon(Icon::Projects)
                         .selected(cur.is_empty()),
                 );
-                opts.push(
-                    PickerOption::new(GLOBAL_PROJECT_ID, "Global · Host")
-                        .detail(format!("{global_n} host tasks"))
+                for hid in ordered_global_hosts(snap) {
+                    let gn = list
+                        .iter()
+                        .filter(|i| i.is_global() && i.host_id == hid)
+                        .count();
+                    let opt_val = if has_remote {
+                        encode_scope_key(GLOBAL_PROJECT_ID, &hid)
+                    } else {
+                        GLOBAL_PROJECT_ID.to_owned()
+                    };
+                    let opt_label = if has_remote {
+                        format!("Global · {}", snap.host_display_name(&hid))
+                    } else {
+                        "Global · Host".to_owned()
+                    };
+                    let selected = !cur.is_empty()
+                        && is_global_project_id(&cur_pid)
+                        && (cur_hid == hid || !has_remote);
+                    let mut opt = PickerOption::new(opt_val, opt_label)
+                        .detail(format!("{gn} host tasks"))
                         .icon(Icon::Server)
-                        .selected(is_global_project_id(&cur)),
-                );
+                        .selected(selected);
+                    if has_remote {
+                        opt = opt.group("Global · Hosts");
+                    }
+                    opts.push(opt);
+                }
                 for p in &snap.projects {
                     let pn = list.iter().filter(|i| i.project_id == p.id).count();
                     opts.push(
-                        PickerOption::new(p.id.clone(), p.name.clone())
+                        PickerOption::new(p.id.clone(), snap.project_display_name(&p.id))
                             .group("Projects")
                             .detail(format!("{pn} scheduled"))
                             .icon(Icon::Folder)
@@ -1469,9 +1674,9 @@ pub fn render(ui: Ui) -> AnyElement {
             move || selected_dirty.get(),
             move || {
                 let item = selected_item.get();
-                let pid = item
+                let dk = item
                     .as_ref()
-                    .map(|i| i.project_id.clone())
+                    .map(|i| draft_key(&i.project_id, &i.host_id))
                     .unwrap_or_default();
                 let scope_lbl = item
                     .as_ref()
@@ -1496,7 +1701,7 @@ pub fn render(ui: Ui) -> AnyElement {
                             .items_center()
                             .gap_2()
                             .child(compact_action("Discard", Variant::Quiet, {
-                                let p = pid.clone();
+                                let p = dk.clone();
                                 move |_| {
                                     ui.workflows.drafts.update(|d| {
                                         d.remove(&p);
@@ -1504,7 +1709,7 @@ pub fn render(ui: Ui) -> AnyElement {
                                 }
                             }))
                             .child(compact_action("Save Changes", Variant::Primary, {
-                                let p = pid;
+                                let p = dk;
                                 move |_| save_scope_draft(ui, &p)
                             })),
                     )
@@ -1558,11 +1763,14 @@ pub fn render(ui: Ui) -> AnyElement {
         .into_element()
 }
 
-fn save_scope_draft(ui: Ui, scope_id: &str) {
+fn save_scope_draft(ui: Ui, scope_key: &str) {
+    let (actual_pid, target_hid) = ui
+        .snapshot
+        .with_untracked(|s| decode_scope_key(s, scope_key));
     if !crate::backend::is_connected() {
-        offline_save_schedules(ui, scope_id);
+        offline_save_schedules(ui, &actual_pid);
         ui.workflows.drafts.update(|d| {
-            if let Some(dr) = d.get_mut(scope_id) {
+            if let Some(dr) = d.get_mut(scope_key) {
                 dr.base = json!({ "revision": "gallery", "sources": dr.inputs() });
             }
         });
@@ -1572,20 +1780,26 @@ fn save_scope_draft(ui: Ui, scope_id: &str) {
     let Some(inputs) = ui
         .workflows
         .drafts
-        .with_untracked(|d| d.get(scope_id).map(crate::workflows::Draft::inputs))
+        .with_untracked(|d| d.get(scope_key).map(crate::workflows::Draft::inputs))
     else {
         return;
     };
-    let pid = scope_id.to_owned();
-    let remove_pid = scope_id.to_owned();
+    let pid = actual_pid;
+    let hid = target_hid;
+    let remove_pid = scope_key.to_owned();
     ui.spawn(async move {
         let res = blocking(move || {
-            let col = crate::routed_call("workflow.sources", json!({"project_id": pid}), None)?;
+            let col = crate::routed_call(
+                "workflow.sources",
+                json!({"project_id": pid, "host_id": hid}),
+                None,
+            )?;
             let rev = col["revision"].as_str().unwrap_or("").to_owned();
             crate::routed_call(
                 "workflow.apply",
                 json!({
                     "project_id": pid,
+                    "host_id": hid,
                     "revision": rev,
                     "sources": inputs,
                     "request_key": canban_types::id(),
@@ -1747,8 +1961,10 @@ fn master_list(ui: Ui, items: Memo<Vec<ScheduleItem>>) -> impl IntoElement {
                                     .gap_1p5()
                                     .min_w(px(0.))
                                     .child(badge(move || {
+                                        let has_remote =
+                                            ui.snapshot.with(|snap| snap.has_remote_hosts());
                                         item_sig.with(|i| {
-                                            if i.is_global() {
+                                            if i.is_global() && !has_remote {
                                                 "Global".to_owned()
                                             } else {
                                                 i.scope_name.clone()
@@ -2074,9 +2290,13 @@ fn detail_header_card(
     let filename = item.filename.clone();
     let filename_yaml = item.filename.clone();
     let filename_studio = item.filename.clone();
-    let scope_id_yaml = item.project_id.clone();
+    let scope_id_yaml = encode_scope_key(&item.project_id, &item.host_id);
     let scope_id_studio = item.project_id.clone();
     let is_global = item.is_global();
+    let host_offline = ui.snapshot.with(|s| s.is_host_offline(&item.host_id));
+    let host_display = ui
+        .snapshot
+        .with(|s| s.host_display_name(&item.host_id).to_owned());
     let enabled = item.effective_enabled;
     let wf_name = item.workflow_name.clone();
     let rule_id = item.rule_id.clone();
@@ -2102,136 +2322,168 @@ fn detail_header_card(
         )
     };
 
-    panel().gap_2p5().border_1().border_color(BORDER).child(
-        view()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .child(
-                view()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .min_w(px(0.))
-                    .child(tone_icon_badge(
-                        Icon::Clock,
-                        if item.active_blocked {
-                            Tone::Attention
-                        } else if enabled {
-                            Tone::Info
-                        } else {
-                            Tone::Neutral
-                        },
-                        item.active_blocked,
-                    ))
-                    .child(
-                        view()
-                            .gap_0p5()
-                            .min_w(px(0.))
-                            .child(
-                                view()
-                                    .flex_row()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(badge(item.scope_name.clone()))
-                                    .child(heading(if rule_id == "schedule" {
-                                        wf_name.clone()
-                                    } else {
-                                        format!("{wf_name} / {rule_id}")
-                                    }))
-                                    .child(badge(filename))
-                                    .child(if dirty {
-                                        status("Unsaved draft", Tone::Attention)
-                                    } else if enabled {
-                                        status("Enabled", Tone::Success)
-                                    } else {
-                                        status("Paused", Tone::Neutral)
-                                    }),
-                            )
-                            .child(muted(subtitle)),
-                    ),
-            )
-            .child(
-                view()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_2()
-                    .child(if let Some(tid) = active_terminal_id {
-                        compact_action("Live Terminal →", Variant::Secondary, move |_| {
-                            ui.open_terminal(tid.clone());
-                        })
-                        .into_element()
-                    } else {
-                        view().into_element()
-                    })
-                    .child(compact_action(
-                        if enabled { "Pause" } else { "Enable" },
-                        Variant::Secondary,
-                        move |_| {
-                            toggle_schedule(ui, &item_for_toggle, !enabled);
-                        },
-                    ))
-                    .child(
-                        action_with_icon(Icon::Zap, "Run now", Variant::Primary, move |_| {
-                            trigger_schedule(ui, &item_for_run)
-                        })
-                        .disabled(move || {
-                            ui.is_method_pending("schedule.trigger") || dirty || !published
-                        }),
-                    )
-                    .child(compact_action("Edit YAML", Variant::Quiet, move |_| {
-                        modal::open_yaml_editor(ui, scope_id_yaml.clone(), filename_yaml.clone());
-                    }))
-                    .child(if !is_global {
-                        compact_action("Open Studio", Variant::Quiet, move |_| {
-                            ui.project.set(scope_id_studio.clone());
-                            ui.workflows.drafts.update(|d| {
-                                if let Some(dr) = d.get_mut(&scope_id_studio) {
-                                    dr.selected = filename_studio.clone();
-                                }
-                            });
-                            ui.workflows.selected.set(filename_studio.clone());
-                            ui.workflows.mode.set("visual".into());
-                            ui.navigate("workflows");
-                        })
-                        .into_element()
-                    } else {
-                        view().into_element()
-                    })
-                    .child(dynamic(move || {
-                        let confirming = ui
-                            .schedules
-                            .confirm_delete
-                            .with(|c| c.as_deref() == Some(sid_del.as_str()));
-                        if confirming {
-                            let del_item = item_for_del.clone();
+    panel()
+        .gap_2p5()
+        .border_1()
+        .border_color(BORDER)
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .min_w(px(0.))
+                        .child(tone_icon_badge(
+                            Icon::Clock,
+                            if item.active_blocked {
+                                Tone::Attention
+                            } else if enabled {
+                                Tone::Info
+                            } else {
+                                Tone::Neutral
+                            },
+                            item.active_blocked,
+                        ))
+                        .child(
                             view()
-                                .flex_row()
-                                .items_center()
-                                .gap_1()
-                                .child(compact_action(
-                                    "Confirm Delete",
-                                    Variant::Danger,
-                                    move |_| delete_schedule(ui, &del_item),
-                                ))
-                                .child(compact_action("Cancel", Variant::Quiet, move |_| {
-                                    ui.schedules.confirm_delete.set(None);
-                                }))
-                                .into_element()
-                        } else {
-                            let s_click = sid_del_confirm.clone();
-                            compact_action("Delete", Variant::Quiet, move |_| {
-                                ui.schedules.confirm_delete.set(Some(s_click.clone()));
+                                .gap_0p5()
+                                .min_w(px(0.))
+                                .child(
+                                    view()
+                                        .flex_row()
+                                        .flex_wrap()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(badge(item.scope_name.clone()))
+                                        .child(heading(if rule_id == "schedule" {
+                                            wf_name.clone()
+                                        } else {
+                                            format!("{wf_name} / {rule_id}")
+                                        }))
+                                        .child(badge(filename))
+                                        .child(if host_offline {
+                                            status(format!("{host_display} offline"), Tone::Attention)
+                                        } else if dirty {
+                                            status("Unsaved draft", Tone::Attention)
+                                        } else if enabled {
+                                            status("Enabled", Tone::Success)
+                                        } else {
+                                            status("Paused", Tone::Neutral)
+                                        }),
+                                )
+                                .child(muted(subtitle)),
+                        ),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(if let Some(tid) = active_terminal_id {
+                            compact_action("Live Terminal →", Variant::Secondary, move |_| {
+                                ui.open_terminal(tid.clone());
                             })
                             .into_element()
-                        }
-                    })),
-            ),
-    )
+                        } else {
+                            view().into_element()
+                        })
+                        .child(
+                            compact_action(
+                                if enabled { "Pause" } else { "Enable" },
+                                Variant::Secondary,
+                                move |_| {
+                                    toggle_schedule(ui, &item_for_toggle, !enabled);
+                                },
+                            )
+                            .disabled(move || host_offline),
+                        )
+                        .child(
+                            action_with_icon(Icon::Zap, "Run now", Variant::Primary, move |_| {
+                                trigger_schedule(ui, &item_for_run)
+                            })
+                            .disabled(move || {
+                                host_offline
+                                    || ui.is_method_pending("schedule.trigger")
+                                    || dirty
+                                    || !published
+                            }),
+                        )
+                        .child(
+                            compact_action("Edit YAML", Variant::Quiet, move |_| {
+                                modal::open_yaml_editor(
+                                    ui,
+                                    scope_id_yaml.clone(),
+                                    filename_yaml.clone(),
+                                );
+                            })
+                            .disabled(move || host_offline),
+                        )
+                        .child(if !is_global {
+                            compact_action("Open Studio", Variant::Quiet, move |_| {
+                                ui.project.set(scope_id_studio.clone());
+                                ui.workflows.drafts.update(|d| {
+                                    if let Some(dr) = d.get_mut(&scope_id_studio) {
+                                        dr.selected = filename_studio.clone();
+                                    }
+                                });
+                                ui.workflows.selected.set(filename_studio.clone());
+                                ui.workflows.mode.set("visual".into());
+                                ui.navigate("workflows");
+                            })
+                            .into_element()
+                        } else {
+                            view().into_element()
+                        })
+                        .child(dynamic(move || {
+                            let confirming = ui
+                                .schedules
+                                .confirm_delete
+                                .with(|c| c.as_deref() == Some(sid_del.as_str()));
+                            if confirming {
+                                let del_item = item_for_del.clone();
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        compact_action(
+                                            "Confirm Delete",
+                                            Variant::Danger,
+                                            move |_| delete_schedule(ui, &del_item),
+                                        )
+                                        .disabled(move || host_offline),
+                                    )
+                                    .child(compact_action("Cancel", Variant::Quiet, move |_| {
+                                        ui.schedules.confirm_delete.set(None);
+                                    }))
+                                    .into_element()
+                            } else {
+                                let s_click = sid_del_confirm.clone();
+                                compact_action("Delete", Variant::Quiet, move |_| {
+                                    ui.schedules.confirm_delete.set(Some(s_click.clone()));
+                                })
+                                .disabled(move || host_offline)
+                                .into_element()
+                            }
+                        })),
+                ),
+        )
+        .child(when(
+            move || host_offline,
+            move || {
+                notice(
+                    format!("Machine '{host_display}' is offline. Reconnect to edit or run this schedule."),
+                    Tone::Attention,
+                )
+            },
+        ))
 }
 
 fn config_panel(
@@ -2242,7 +2494,7 @@ fn config_panel(
     cron_desc: String,
     next_preview: Option<String>,
 ) -> AnyElement {
-    let pid = item.project_id.clone();
+    let pid = draft_key(&item.project_id, &item.host_id);
     let filename = item.filename.clone();
     let rule_id = item.rule_id.clone();
     let cur_cron = item.cron_str().to_owned();
@@ -2683,12 +2935,21 @@ fn execution_mode_section(
 }
 
 fn cardless_mode_fields(ui: Ui, item: &ScheduleItem) -> impl IntoElement {
-    let profiles = ui.profiles.get();
+    let host_profs: Vec<_> = crate::backend::config_for_host(&item.host_id)
+        .profiles
+        .into_iter()
+        .filter(|p| p.enabled)
+        .collect();
+    let profiles = if host_profs.is_empty() {
+        ui.profiles.get()
+    } else {
+        host_profs
+    };
     let cur_prof = item.profile_id.clone().unwrap_or_default();
     let step_id = item.agent_step_id.clone();
     let instruction = item.agent_instruction.clone();
-    let pid = item.project_id.clone();
-    let pid_inst = item.project_id.clone();
+    let pid = draft_key(&item.project_id, &item.host_id);
+    let pid_inst = pid.clone();
     let fname = item.filename.clone();
     let fname_inst = item.filename.clone();
     let step_for_inst = step_id.clone();
@@ -3193,6 +3454,7 @@ pub(crate) fn push_offline_workflow_source(
     s.workflow_sources
         .retain(|ws| !(ws.project_id == project_id && ws.filename == filename));
     s.workflow_sources.push(WorkflowSource {
+        host_id: String::new(),
         id: format!("{project_id}:{filename}"),
         project_id: project_id.to_owned(),
         filename: filename.to_owned(),
@@ -3205,6 +3467,7 @@ pub(crate) fn push_offline_workflow_source(
         rules: doc.on.clone(),
     });
     s.workflow_revisions.push(WorkflowRevision {
+        host_id: String::new(),
         source_yaml: Some(yaml.to_owned()),
         id: rev_id,
         project_id: project_id.to_owned(),
@@ -3264,6 +3527,7 @@ mod tests {
                 push_offline_workflow_source(s, GLOBAL_PROJECT_ID, "worktree-gc.yaml", global_yaml)
                     .unwrap();
                 s.schedule_states.push(ScheduleState {
+                    host_id: String::new(),
                     id: format!("schedule:{GLOBAL_PROJECT_ID}:global:worktree-gc:schedule"),
                     project_id: GLOBAL_PROJECT_ID.into(),
                     workflow_id: "global:worktree-gc".into(),
@@ -3286,6 +3550,7 @@ mod tests {
                     updated_at: now_ms,
                 });
                 s.scheduled_runs.push(ScheduledRun {
+                    host_id: String::new(),
                     id: "sched-global-blocked".into(),
                     schedule_id: format!("schedule:{GLOBAL_PROJECT_ID}:global:worktree-gc:schedule"),
                     project_id: GLOBAL_PROJECT_ID.into(),
@@ -3521,5 +3786,172 @@ mod tests {
                 "unexpected country timezone preset {country_tz} in {texts:?}"
             );
         }
+    }
+
+    #[test]
+    fn multi_host_schedules_collect_separate_local_and_remote_globals_and_filter_scopes() {
+        use canban_types::HostSummary;
+        let runtime = nsh_core::element::Runtime::default();
+        let _entered = runtime.enter();
+        let ui = fixture_ui();
+        let mut local = ui.snapshot.get_untracked();
+        let now_ms = canban_types::now();
+        local.schedule_states.push(ScheduleState {
+            host_id: "local".into(),
+            id: format!("schedule:{GLOBAL_PROJECT_ID}:global:worktree-gc:schedule"),
+            project_id: GLOBAL_PROJECT_ID.into(),
+            workflow_id: "global:worktree-gc".into(),
+            workflow_name: "Worktree GC".into(),
+            filename: "worktree-gc.yaml".into(),
+            rule_id: "schedule".into(),
+            cron: "0 3 * * *".into(),
+            timezone: None,
+            overlap: ScheduleOverlap::Skip,
+            creates_card: false,
+            starts_with_script: true,
+            target_column: None,
+            profile_id: None,
+            enabled: true,
+            last_scheduled_at: None,
+            next_run_at: Some(now_ms + 3_600_000),
+            last_run_id: None,
+            run_count: 0,
+            queued_triggers: 0,
+            updated_at: now_ms,
+        });
+        local.register_host_entities("local");
+        local.host_summaries.insert(
+            "local".into(),
+            HostSummary {
+                id: "local".into(),
+                name: crate::platform::LOCAL_HOST_NAME.into(),
+                is_local: true,
+                transport_label: "Local socket".into(),
+                endpoint_label: "~/.canban/app.sock".into(),
+                ssh_target: None,
+                server_id: None,
+                connection: canban_types::HostConnectionState::Connected {
+                    rtt_ms: 0,
+                    api_version: 1,
+                    version: "1".into(),
+                    platform: "macos".into(),
+                },
+                active_agents: 0,
+                max_agents: 4,
+                project_count: 1,
+                reconnect_count: 0,
+                last_synced_at: None,
+                pending_mutations: 0,
+                sync_conflicts: 0,
+            },
+        );
+
+        let mut remote = Snapshot::default();
+        remote.projects.push(Project {
+            id: "rem-p".into(),
+            name: "Remote Repo".into(),
+            directory: "/home/devpc/repo".into(),
+            github: None,
+            detected_github: None,
+            github_disconnected: false,
+            delivery_mode: Default::default(),
+            agent_overrides: BTreeMap::new(),
+            tags: Vec::new(),
+            workflow: Workflow::default(),
+            target_branch: Some("main".into()),
+            created_at: 2,
+        });
+        remote.schedule_states.push(ScheduleState {
+            host_id: String::new(),
+            id: format!("schedule:{GLOBAL_PROJECT_ID}:global:worktree-gc:schedule"),
+            project_id: GLOBAL_PROJECT_ID.into(),
+            workflow_id: "global:worktree-gc".into(),
+            workflow_name: "Worktree GC".into(),
+            filename: "worktree-gc.yaml".into(),
+            rule_id: "schedule".into(),
+            cron: "0 4 * * *".into(),
+            timezone: None,
+            overlap: ScheduleOverlap::Skip,
+            creates_card: false,
+            starts_with_script: true,
+            target_column: None,
+            profile_id: None,
+            enabled: false,
+            last_scheduled_at: None,
+            next_run_at: Some(now_ms + 7_200_000),
+            last_run_id: None,
+            run_count: 0,
+            queued_triggers: 0,
+            updated_at: now_ms,
+        });
+        remote.schedule_states.push(ScheduleState {
+            host_id: String::new(),
+            id: "schedule:rem-p:nightly:schedule".into(),
+            project_id: "rem-p".into(),
+            workflow_id: "nightly".into(),
+            workflow_name: "Remote Nightly".into(),
+            filename: "nightly.yaml".into(),
+            rule_id: "schedule".into(),
+            cron: "30 2 * * *".into(),
+            timezone: None,
+            overlap: ScheduleOverlap::Skip,
+            creates_card: true,
+            starts_with_script: false,
+            target_column: Some("develop".into()),
+            profile_id: Some("developer".into()),
+            enabled: true,
+            last_scheduled_at: None,
+            next_run_at: Some(now_ms + 5_000_000),
+            last_run_id: None,
+            run_count: 0,
+            queued_triggers: 0,
+            updated_at: now_ms,
+        });
+        local.merge_remote_snapshot(
+            remote,
+            HostSummary {
+                id: "devpc".into(),
+                name: "devpc".into(),
+                is_local: false,
+                transport_label: "SSH".into(),
+                endpoint_label: "devpc".into(),
+                ssh_target: Some("devpc".into()),
+                server_id: None,
+                connection: canban_types::HostConnectionState::Connected {
+                    rtt_ms: 8,
+                    api_version: 1,
+                    version: "1".into(),
+                    platform: "linux".into(),
+                },
+                active_agents: 0,
+                max_agents: 4,
+                project_count: 1,
+                reconnect_count: 0,
+                last_synced_at: None,
+                pending_mutations: 0,
+                sync_conflicts: 0,
+            },
+        );
+        ui.snapshot.set(local);
+
+        let all = collect_schedules(ui, "");
+        assert_eq!(all.len(), 3);
+        let keys: std::collections::BTreeSet<_> = all.iter().map(|i| i.key.clone()).collect();
+        assert_eq!(keys.len(), 3);
+        assert!(all.iter().any(|i| i.host_id == "local"
+            && i.scope_name == format!("Global · {}", crate::platform::LOCAL_HOST_NAME)));
+        assert!(
+            all.iter()
+                .any(|i| i.host_id == "devpc" && i.scope_name == "Global · devpc")
+        );
+        assert!(
+            all.iter()
+                .any(|i| i.host_id == "devpc" && i.workflow_name == "Remote Nightly")
+        );
+
+        let devpc_globals = collect_schedules(ui, &encode_scope_key(GLOBAL_PROJECT_ID, "devpc"));
+        assert_eq!(devpc_globals.len(), 1);
+        assert_eq!(devpc_globals[0].host_id, "devpc");
+        assert_eq!(devpc_globals[0].rule.cron.as_deref(), Some("0 4 * * *"));
     }
 }

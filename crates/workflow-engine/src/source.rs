@@ -3231,6 +3231,7 @@ steps:
             let def = doc.compile().unwrap();
             let rev_id = format!("{}:1", def.id);
             let src = WorkflowSource {
+                host_id: String::new(),
                 id: format!("proj:{filename}"),
                 project_id: "proj".into(),
                 filename: filename.into(),
@@ -3243,6 +3244,7 @@ steps:
                 rules: doc.on.clone(),
             };
             let rev = WorkflowRevision {
+                host_id: String::new(),
                 source_yaml: Some(encode(doc).unwrap()),
                 id: rev_id,
                 project_id: "proj".into(),

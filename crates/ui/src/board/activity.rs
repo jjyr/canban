@@ -11,13 +11,11 @@ pub fn strip(ui: Ui, trailing: impl IntoElement) -> impl IntoElement {
     let rows = computed(move || {
         let idx = ui.index.get();
         let hosts = ui.snapshot.with(|s| {
-            let remote_hosts = s.has_remote_hosts();
             idx.project_order
                 .iter()
                 .map(|p| {
                     let hid = s.project_host(&p.id);
-                    let label = (hid != "local" && remote_hosts)
-                        .then(|| s.host_display_name(hid).to_owned());
+                    let label = s.project_host_badge(&p.id);
                     let offline = s.is_host_offline(hid);
                     (p.id.clone(), (label, offline))
                 })

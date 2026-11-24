@@ -168,10 +168,20 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                         })
                     }))
                 } else {
-                    view().items_start().gap_3().child(
+                    let has_remote = ui.snapshot.with(|s| s.has_remote_hosts());
+                    let mut row = view().flex_row().items_center().gap_2().child(
                         action("New terminal", Variant::Secondary, move |_| new_tab(ui))
                             .disabled(move || ui.pending.get()),
-                    )
+                    );
+                    if has_remote {
+                        row = row.child(
+                            action("New on Machine ▾", Variant::Quiet, move |_| {
+                                super::machine_menu(ui)
+                            })
+                            .disabled(move || ui.pending.get()),
+                        );
+                    }
+                    row
                 })
         };
         let focus_req = move || canban_terminal::FocusRequest {

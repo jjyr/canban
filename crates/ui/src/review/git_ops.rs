@@ -826,7 +826,22 @@ pub fn render_checkout_picker(ui: Ui) -> impl IntoElement {
             .min_w(px(0.)),
         )
         .child(icon(Icon::ChevronDown).w(px(11.)).h(px(11.)));
-    view().tooltip(hint_tooltip(move || st.refs_data.with(|v| v["cwd"].as_str().unwrap_or("").to_owned())))
+    view().tooltip(hint_tooltip(move || {
+        let cwd = st.refs_data.with(|v| v["cwd"].as_str().unwrap_or("").to_owned());
+        ui.snapshot.with(|s| {
+            if s.has_remote_hosts() {
+                let hid = ui.active_project_host();
+                let host = s.host_display_name(&hid);
+                if cwd.is_empty() {
+                    format!("Host: {host}")
+                } else {
+                    format!("{cwd}\nHost: {host}")
+                }
+            } else {
+                cwd
+            }
+        })
+    }))
         .child(search_popover(trigger, move || {
             let refs = st.refs_data.get();
             let cur = refs["cwd"].as_str().unwrap_or("");
@@ -890,7 +905,7 @@ pub fn render_sync_controls(ui: Ui) -> impl IntoElement {
             .gap_1()
             .child(
                 compact_action("Fetch", Variant::Quiet, move |_| run_fetch(ui))
-                    .disabled(move || sync_pending(ui)),
+                    .disabled(move || sync_pending(ui) || ui.is_active_project_offline()),
             )
             .child(
                 compact_action(
@@ -902,7 +917,7 @@ pub fn render_sync_controls(ui: Ui) -> impl IntoElement {
                     },
                     move |_| run_pull(ui),
                 )
-                .disabled(move || sync_pending(ui) || !on_branch),
+                .disabled(move || sync_pending(ui) || !on_branch || ui.is_active_project_offline()),
             )
             .child(
                 compact_action(
@@ -914,7 +929,7 @@ pub fn render_sync_controls(ui: Ui) -> impl IntoElement {
                     },
                     move |_| run_push(ui),
                 )
-                .disabled(move || sync_pending(ui) || !on_branch),
+                .disabled(move || sync_pending(ui) || !on_branch || ui.is_active_project_offline()),
             )
             .into_element()
     })
@@ -1597,12 +1612,12 @@ pub fn render_discard_modal(ui: Ui) -> impl IntoElement {
             let paths = st.discard_confirm.get_untracked().unwrap_or_default();
             let summary = if paths.len() == 1 {
                 format!(
-                    "Permanently discard all local edits to `{}`? Uncommitted changes cannot be recovered.",
+                    "Permanently discard all uncommitted edits to `{}`? Uncommitted changes cannot be recovered.",
                     paths[0]
                 )
             } else {
                 format!(
-                    "Permanently discard all local edits to {} files? Uncommitted changes cannot be recovered.",
+                    "Permanently discard all uncommitted edits to {} files? Uncommitted changes cannot be recovered.",
                     paths.len()
                 )
             };
@@ -1627,7 +1642,7 @@ pub fn render_discard_modal(ui: Ui) -> impl IntoElement {
                                 .border_color(BORDER)
                                 .gap_3()
                                 .child(
-                                    label("Discard Local Changes?")
+                                    label("Discard Uncommitted Changes?")
                                         .font_weight(FontWeight::SEMIBOLD),
                                 )
                                 .child(notice(summary, Tone::Danger))

@@ -1157,8 +1157,12 @@ impl RemoteClient {
     /// Merges the lightweight runtime state (`terminals`, `terminal_contexts`, `reclaim_status`,
     /// `merging_cards`) across enabled and offline-cached hosts with optimistic outbox projections.
     pub fn merged_runtime_state(&self) -> Result<RuntimeState> {
+        use std::collections::HashSet;
+
         let guard = self.hosts.read().unwrap();
         let mut combined = RuntimeState::default();
+        let mut seen_ids: HashSet<String> = HashSet::new();
+        let mut entity_owners: BTreeMap<String, String> = BTreeMap::new();
         for slot in guard.values() {
             if !slot.saved.enabled && slot.cached.saved_at == 0 {
                 continue;
@@ -1167,6 +1171,22 @@ impl RemoteClient {
             let mut host_snap = slot.cached.snapshot.clone();
             if !outbox.ops.is_empty() {
                 canban_sync::apply(&mut host_snap, &slot.saved.id, &outbox.ops);
+            }
+            for id in host_snap
+                .projects
+                .iter()
+                .map(|p| &p.id)
+                .chain(host_snap.cards.iter().map(|c| &c.id))
+                .chain(host_snap.terminals.iter().map(|t| &t.id))
+            {
+                if !seen_ids.insert(id.clone()) {
+                    let q = canban_types::qualify_host_id(&slot.saved.id, id);
+                    entity_owners.insert(q, slot.saved.id.clone());
+                } else {
+                    entity_owners
+                        .entry(id.clone())
+                        .or_insert_with(|| slot.saved.id.clone());
+                }
             }
             let active_agents = count_active_agents(&host_snap);
             let has_durable = !host_snap.projects.is_empty() || !host_snap.cards.is_empty();
@@ -1179,7 +1199,7 @@ impl RemoteClient {
                 host_active_agents: BTreeMap::from([(slot.saved.id.clone(), active_agents)]),
             };
             if slot.saved.enabled || has_durable || !rt.terminals.is_empty() {
-                combined.merge_remote(rt, &slot.saved.id);
+                combined.merge_remote_with_owners(rt, &slot.saved.id, &entity_owners);
             }
         }
         Ok(combined)
@@ -1195,8 +1215,18 @@ impl RemoteClient {
         if let Some(explicit) = params["host_id"].as_str().filter(|s| !s.is_empty()) {
             return explicit.to_owned();
         }
-        let guard = self.hosts.read().unwrap();
         let candidates = entity_id_candidates(method, params);
+        for candidate in &candidates {
+            if let Some((h, _)) = canban_types::split_qualified_host_id(candidate) {
+                return h.to_owned();
+            }
+        }
+        if let Some(pid) = active_project_id.filter(|s| !s.is_empty())
+            && let Some((h, _)) = canban_types::split_qualified_host_id(pid)
+        {
+            return h.to_owned();
+        }
+        let guard = self.hosts.read().unwrap();
         for candidate in candidates {
             for slot in guard.values() {
                 let outbox = slot.outbox.lock().unwrap();
@@ -1246,6 +1276,10 @@ impl RemoteClient {
     ) -> Result<Value> {
         let host_id = self.resolve_target_host(method, &params, active_project_id);
         ensure!(!host_id.is_empty(), "No remote Canban host configured");
+        if let Some(obj) = params.as_object_mut() {
+            obj.remove("host_id");
+        }
+        canban_types::strip_qualified_host_ids(&mut params, &host_id);
 
         if method == "card.resolve.preview" {
             return self.handle_resolve_preview_async(&host_id, &params).await;
@@ -1525,34 +1559,37 @@ impl RemoteClient {
         )
     }
 
-    /// Fans out `method` across all enabled hosts concurrently.
+    /// Fans out `method` across all connected hosts concurrently (skipping offline/disabled hosts).
     pub async fn call_all_hosts_async(
         &self,
         method: &str,
         params: Value,
     ) -> Vec<(String, Result<Value>)> {
-        let targets: Vec<(String, Option<Arc<ClientTransport>>, Option<String>)> = {
+        let targets: Vec<(String, Arc<ClientTransport>, Option<String>)> = {
             let guard = self.hosts.read().unwrap();
             guard
                 .values()
-                .filter(|s| s.saved.enabled)
-                .map(|s| (s.saved.id.clone(), s.client.clone(), s.tcp_token()))
+                .filter(|s| s.saved.enabled && s.connection.is_connected())
+                .filter_map(|s| Some((s.saved.id.clone(), s.client.clone()?, s.tcp_token())))
                 .collect()
         };
-        let mut out = Vec::with_capacity(targets.len());
-        for (host_id, client_opt, token_opt) in targets {
-            let res = match client_opt {
-                Some(client) => {
-                    let mut p = params.clone();
-                    if let Err(e) = seal_params_for_tcp(method, &mut p, token_opt.as_deref()) {
-                        Err(e)
-                    } else {
-                        client.call_async(method, &p).await
-                    }
-                }
-                None => Err(anyhow!("Remote host '{host_id}' is offline")),
-            };
-            out.push((host_id, res));
+        let mut set = tokio::task::JoinSet::new();
+        for (host_id, client, token_opt) in targets {
+            let method = method.to_owned();
+            let mut p = params.clone();
+            set.spawn(async move {
+                let res = match seal_params_for_tcp(&method, &mut p, token_opt.as_deref()) {
+                    Err(e) => Err(e),
+                    Ok(()) => client.call_async(&method, &p).await,
+                };
+                (host_id, res)
+            });
+        }
+        let mut out = Vec::new();
+        while let Some(joined) = set.join_next().await {
+            if let Ok(item) = joined {
+                out.push(item);
+            }
         }
         out
     }

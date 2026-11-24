@@ -493,8 +493,14 @@ fn render_submit_drawer(ui: Ui) -> impl IntoElement {
                                         ),
                                 )
                                 .child(
-                                    muted("Local only — never posts to GitHub.")
-                                        .text_size(px(11.5)),
+                                    muted(move || {
+                                        let host = ui.snapshot.with(|s| {
+                                            s.host_display_name(&ui.active_project_host())
+                                                .to_owned()
+                                        });
+                                        format!("Stays on {host} — never posts to GitHub.")
+                                    })
+                                    .text_size(px(11.5)),
                                 ),
                         )
                         .child(submit_primary_button(ui, pr_info.clone()))
@@ -504,9 +510,23 @@ fn render_submit_drawer(ui: Ui) -> impl IntoElement {
         }))
 }
 
+fn host_profiles_for_review(ui: Ui) -> Vec<canban_types::Profile> {
+    let hid = untracked(|| ui.active_project_host());
+    let list: Vec<canban_types::Profile> = crate::backend::config_for_host(&hid)
+        .profiles
+        .into_iter()
+        .filter(|p| p.enabled)
+        .collect();
+    if list.is_empty() {
+        ui.profiles.get_untracked()
+    } else {
+        list
+    }
+}
+
 fn profile_picker(ui: Ui, selected: Signal<String>) -> impl IntoElement {
     let trigger = computed(move || {
-        let profiles = ui.profiles.get();
+        let profiles = host_profiles_for_review(ui);
         let current = selected.get();
         let display = if current.is_empty() {
             default_profile_id(ui)
@@ -528,7 +548,7 @@ fn profile_picker(ui: Ui, selected: Signal<String>) -> impl IntoElement {
             format!("@{display} ▾"),
             Variant::Secondary,
             move |_| {
-                let list = ui.profiles.get_untracked();
+                let list = host_profiles_for_review(ui);
                 ui.spawn(async move {
                     let items: Vec<MenuItem> = if list.is_empty() {
                         vec![MenuItem::new("@developer").on_select(move || {

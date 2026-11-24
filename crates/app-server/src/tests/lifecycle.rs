@@ -1473,6 +1473,7 @@ for line in sys.stdin:
     let sched_id = format!("scheduled:{}:r99", project.id);
     let t0 = now();
     let run = ScheduledRun {
+        host_id: String::new(),
         id: sched_id.clone(),
         schedule_id: "sched-1".into(),
         project_id: project.id.clone(),

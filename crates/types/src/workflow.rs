@@ -214,6 +214,8 @@ impl WorkflowStep {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct WorkflowRevision {
     #[serde(default)]
+    pub host_id: String,
+    #[serde(default)]
     pub source_yaml: Option<String>,
     pub id: String,
     pub project_id: String,
@@ -502,6 +504,8 @@ pub struct JournalEvent {
 /// Active SQL source reference. Original YAML lives on immutable revisions.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct WorkflowSource {
+    #[serde(default)]
+    pub host_id: String,
     pub id: String,
     pub project_id: String,
     pub filename: String,
@@ -601,6 +605,8 @@ pub struct ScheduleSourceRef {
 /// Persistent timer state for an active scheduled `WorkflowRule` (`schedule:<project_id>:<workflow_id>:<rule_id>`).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScheduleState {
+    #[serde(default)]
+    pub host_id: String,
     pub id: String,
     pub project_id: String,
     pub workflow_id: String,
@@ -656,6 +662,8 @@ pub struct ScheduledStepRecord {
 /// Persistent execution record for a scheduled workflow trigger (Card-creating or Cardless Terminal Agent).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ScheduledRun {
+    #[serde(default)]
+    pub host_id: String,
     pub id: String,
     pub schedule_id: String,
     pub project_id: String,

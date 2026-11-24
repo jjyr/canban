@@ -12,24 +12,27 @@ use canban_types::{ActivityBucket, ActivitySegment, AgentBucketStat, DwellBucket
 use canban_ui_kit::{tokens::*, *};
 use model::{
     ActivityFetchPlan, ActivityInput, ActivityMetric, AgentGroup, Comparison, Dashboard,
-    DayActivityRow, DayBucket, DurationSample, HeatmapMetric, ModelAgentStat, ProfileStat,
-    ProjectSort, RangeWindow, TimelineLaneKind, ViewOptions, format_duration_compact,
+    DayActivityRow, DayBucket, DurationSample, HeatmapMetric, HostStat, ModelAgentStat,
+    ProfileStat, ProjectSort, RangeWindow, TimelineLaneKind, ViewOptions, format_duration_compact,
     format_duration_delta, percentile,
 };
 use nsh_core::{
     element::{AdaptiveColor, ImageSrc, rgb},
     prelude::*,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
 const ALL_PROJECTS_OPTION: &str = "__all__";
+const ALL_HOSTS_OPTION: &str = "__all_hosts__";
 const CHART_HEIGHT: f32 = 148.0;
 const TIMING_PAGE_SIZE: usize = 10;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct ActivityCacheKey {
     pub scope: String,
+    pub scope_host: String,
+    pub connected_hosts: Vec<String>,
     pub range: RangeWindow,
     pub selected_date: Option<chrono::NaiveDate>,
     pub comparison: Comparison,
@@ -40,6 +43,7 @@ pub struct ActivityCacheKey {
 #[derive(Clone, PartialEq)]
 pub struct LoadedInsights {
     pub scope: String,
+    pub scope_host: String,
     pub range: RangeWindow,
     pub selected_date: Option<chrono::NaiveDate>,
     pub comparison: Comparison,
@@ -49,10 +53,23 @@ pub struct LoadedInsights {
     pub now_ms: u64,
 }
 
+type EventsCacheKey = (String, String, Vec<String>, u64);
+type AnnualCacheKey = (String, String, String, Vec<String>, u64);
+type FetchedInsightsBatch = (
+    (bool, u64),
+    Option<Vec<canban_types::Event>>,
+    ActivityInput,
+    Vec<(String, String)>,
+);
+
 #[derive(Clone, Copy)]
 pub struct State {
     /// Empty string means `All Projects`; otherwise holds a `Project.id`.
     pub scope_project: Signal<String>,
+    /// Empty string means `All Hosts`; otherwise holds `"local"` or a remote host ID.
+    pub scope_host: Signal<String>,
+    /// Skipped offline or unavailable hosts recorded during the latest Insights load.
+    pub unavailable_hosts: Signal<Vec<(String, String)>>,
     pub range: Signal<RangeWindow>,
     pub selected_date: Signal<Option<chrono::NaiveDate>>,
     pub date_text: Signal<String>,
@@ -71,10 +88,10 @@ pub struct State {
     /// Optional fixed timestamp (ms) for deterministic Gallery/test rendering; `None` uses live clock.
     pub anchor_ms: Signal<Option<u64>>,
     pub events: Signal<Rc<Vec<canban_types::Event>>>,
-    pub events_key: Signal<Option<(String, u64)>>,
+    pub events_key: Signal<Option<EventsCacheKey>>,
     pub activity: Signal<Rc<ActivityInput>>,
     pub activity_key: Signal<Option<ActivityCacheKey>>,
-    pub annual_activity_key: Signal<Option<(String, String, u64)>>,
+    pub annual_activity_key: Signal<Option<AnnualCacheKey>>,
     pub manual_refresh_seq: Signal<u64>,
     pub request_seq: Signal<u64>,
     pub loading: Signal<bool>,
@@ -94,6 +111,8 @@ impl State {
     pub fn new() -> Self {
         Self {
             scope_project: signal(String::new()),
+            scope_host: signal(String::new()),
+            unavailable_hosts: signal(Vec::new()),
             range: signal(RangeWindow::Today),
             selected_date: signal(None),
             date_text: signal(String::new()),
@@ -130,54 +149,220 @@ fn has_backend() -> bool {
     crate::backend::is_connected()
 }
 
-fn fetch_events_for_scope(scope: &str) -> Vec<canban_types::Event> {
-    let parse_events = |val: serde_json::Value| -> Vec<canban_types::Event> {
-        val["events"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| serde_json::from_value::<canban_types::Event>(v.clone()).ok())
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    if !scope.is_empty() {
-        crate::routed_call(
-            "insights.events",
-            serde_json::json!({"project_id": scope}),
-            Some(scope),
-        )
-        .map(parse_events)
-        .unwrap_or_default()
-    } else {
-        let mut all = Vec::new();
-        for (_host, res) in crate::call_all_hosts("insights.events", serde_json::json!({})) {
-            if let Ok(val) = res {
-                all.extend(parse_events(val));
-            }
+pub(crate) fn connected_hosts_key(hosts: &[canban_types::HostSummary]) -> Vec<String> {
+    let mut ids: Vec<String> = hosts
+        .iter()
+        .filter(|h| h.is_local || h.connection.is_connected())
+        .map(|h| h.id.clone())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn is_host_connected(host_id: &str, hosts: &[canban_types::HostSummary]) -> bool {
+    host_id.is_empty()
+        || host_id == "local"
+        || hosts
+            .iter()
+            .any(|h| h.id == host_id && h.connection.is_connected())
+}
+
+fn collect_skipped_offline_hosts(
+    snap: &canban_types::Snapshot,
+    hosts: &[canban_types::HostSummary],
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for h in hosts {
+        if !h.is_local && !h.connection.is_connected() && seen.insert(h.name.clone()) {
+            out.push((h.name.clone(), h.connection.short_status().to_owned()));
         }
-        all
+    }
+    for (id, h) in &snap.host_summaries {
+        if id != "local"
+            && h.is_offline()
+            && !hosts.iter().any(|live| &live.id == id)
+            && seen.insert(h.name.clone())
+        {
+            out.push((h.name.clone(), h.connection.short_status().to_owned()));
+        }
+    }
+    out
+}
+
+fn host_unavailable_entry(
+    host_id: &str,
+    snap: &canban_types::Snapshot,
+    hosts: &[canban_types::HostSummary],
+) -> (String, String) {
+    if let Some(h) = hosts
+        .iter()
+        .find(|h| h.id == host_id)
+        .or_else(|| snap.host_summaries.get(host_id))
+    {
+        (h.name.clone(), h.connection.short_status().to_owned())
+    } else {
+        (
+            snap.host_display_name(host_id).to_owned(),
+            "offline".to_owned(),
+        )
     }
 }
 
-fn fetch_merged_segments(from_ms: u64, to_ms: u64, scope: &str) -> Vec<ActivitySegment> {
+fn build_project_remaps(snap: &canban_types::Snapshot) -> HashMap<(String, String), String> {
+    let mut out = HashMap::new();
+    for p in &snap.projects {
+        if let Some((hid, raw)) = canban_types::split_qualified_host_id(&p.id) {
+            out.insert((hid.to_owned(), raw.to_owned()), p.id.clone());
+        }
+    }
+    out
+}
+
+fn remap_project_id(
+    remaps: &HashMap<(String, String), String>,
+    host_id: &str,
+    raw_pid: &str,
+) -> String {
+    if raw_pid.is_empty() || canban_types::split_qualified_host_id(raw_pid).is_some() {
+        return raw_pid.to_owned();
+    }
+    remaps
+        .get(&(host_id.to_owned(), raw_pid.to_owned()))
+        .cloned()
+        .unwrap_or_else(|| raw_pid.to_owned())
+}
+
+fn fanout_insights_rpc(
+    method: &str,
+    params: serde_json::Value,
+    scope_project: &str,
+    scope_host: &str,
+    owner_host: &str,
+) -> Vec<(String, anyhow::Result<serde_json::Value>)> {
+    if !scope_project.is_empty() {
+        vec![(
+            owner_host.to_owned(),
+            crate::routed_call(method, params, Some(scope_project)),
+        )]
+    } else if !scope_host.is_empty() {
+        let mut p = params;
+        p["host_id"] = serde_json::json!(scope_host);
+        vec![(scope_host.to_owned(), crate::routed_call(method, p, None))]
+    } else {
+        crate::call_all_hosts(method, params)
+    }
+}
+
+fn fetch_events_for_scope(
+    scope: &str,
+    scope_host: &str,
+    owner_host: &str,
+    remaps: &HashMap<(String, String), String>,
+    snap: &canban_types::Snapshot,
+    hosts: &[canban_types::HostSummary],
+    failed_hosts: &mut Vec<(String, String)>,
+) -> Vec<canban_types::Event> {
+    let mut params = serde_json::json!({});
+    if !scope.is_empty() {
+        params["project_id"] = serde_json::json!(scope);
+    }
+    let mut all = Vec::new();
+    for (hid, res) in fanout_insights_rpc("insights.events", params, scope, scope_host, owner_host)
+    {
+        match res {
+            Ok(val) => {
+                if let Some(arr) = val["events"].as_array() {
+                    for v in arr {
+                        if let Ok(mut ev) = serde_json::from_value::<canban_types::Event>(v.clone())
+                        {
+                            ev.project_id = remap_project_id(remaps, &hid, &ev.project_id);
+                            all.push(ev);
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                failed_hosts.push((
+                    snap.host_display_name(&hid).to_owned(),
+                    host_unavailable_entry(&hid, snap, hosts).1,
+                ));
+            }
+        }
+    }
+    all
+}
+
+struct InsightsFetchCtx<'a> {
+    scope: &'a str,
+    scope_host: &'a str,
+    owner_host: &'a str,
+    remaps: &'a HashMap<(String, String), String>,
+    snap: &'a canban_types::Snapshot,
+    hosts: &'a [canban_types::HostSummary],
+}
+
+fn fetch_merged_segments(
+    from_ms: u64,
+    to_ms: u64,
+    ctx: &InsightsFetchCtx<'_>,
+    failed_hosts: &mut Vec<(String, String)>,
+    host_totals: Option<&mut BTreeMap<String, (u64, u64)>>,
+) -> Vec<ActivitySegment> {
     if to_ms <= from_ms {
         return Vec::new();
     }
     let mut params = serde_json::json!({ "from_ms": from_ms, "to_ms": to_ms });
-    if !scope.is_empty() {
-        params["project_id"] = serde_json::json!(scope);
+    if !ctx.scope.is_empty() {
+        params["project_id"] = serde_json::json!(ctx.scope);
     }
+    let mut host_totals = host_totals;
     let mut segments = Vec::new();
-    for (_host, res) in crate::call_all_hosts("insights.activity", params) {
-        if let Ok(val) = res
-            && let Ok(parsed) = serde_json::from_value::<Vec<ActivitySegment>>(
-                val.get("segments")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null),
-            )
-        {
-            segments.extend(parsed);
+    for (hid, res) in fanout_insights_rpc(
+        "insights.activity",
+        params,
+        ctx.scope,
+        ctx.scope_host,
+        ctx.owner_host,
+    ) {
+        match res {
+            Ok(val) => {
+                if let Ok(mut parsed) = serde_json::from_value::<Vec<ActivitySegment>>(
+                    val.get("segments")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                ) {
+                    let mut dwell_sum = 0u64;
+                    let mut agent_sum = 0u64;
+                    for seg in &mut parsed {
+                        if let Some(ref mut pid) = seg.project_id {
+                            *pid = remap_project_id(ctx.remaps, &hid, pid);
+                        }
+                        let dur = seg.duration_ms();
+                        match seg.kind {
+                            canban_types::ActivityKind::Dwell => {
+                                dwell_sum = dwell_sum.saturating_add(dur);
+                            }
+                            canban_types::ActivityKind::Agent => {
+                                agent_sum = agent_sum.saturating_add(dur);
+                            }
+                        }
+                    }
+                    if let Some(totals) = host_totals.as_deref_mut() {
+                        let e = totals.entry(hid.clone()).or_default();
+                        e.0 = e.0.saturating_add(dwell_sum);
+                        e.1 = e.1.saturating_add(agent_sum);
+                    }
+                    segments.extend(parsed);
+                }
+            }
+            Err(_) => {
+                failed_hosts.push((
+                    ctx.snap.host_display_name(&hid).to_owned(),
+                    host_unavailable_entry(&hid, ctx.snap, ctx.hosts).1,
+                ));
+            }
         }
     }
     segments.sort_by_key(|s| (s.start_ms, s.end_ms));
@@ -241,24 +426,62 @@ fn merge_bucket_lists(lists: Vec<Vec<ActivityBucket>>, boundaries: &[u64]) -> Ve
     merged
 }
 
-fn fetch_merged_buckets(boundaries: &[u64], scope: &str) -> Vec<ActivityBucket> {
+fn fetch_merged_buckets(
+    boundaries: &[u64],
+    ctx: &InsightsFetchCtx<'_>,
+    failed_hosts: &mut Vec<(String, String)>,
+    host_totals: Option<&mut BTreeMap<String, (u64, u64)>>,
+) -> Vec<ActivityBucket> {
     if boundaries.len() < 2 {
         return Vec::new();
     }
     let mut params = serde_json::json!({ "boundaries": boundaries });
-    if !scope.is_empty() {
-        params["project_id"] = serde_json::json!(scope);
+    if !ctx.scope.is_empty() {
+        params["project_id"] = serde_json::json!(ctx.scope);
     }
+    let mut host_totals = host_totals;
     let mut per_host = Vec::new();
-    for (_host, res) in crate::call_all_hosts("insights.activity_buckets", params) {
-        if let Ok(val) = res
-            && let Ok(parsed) = serde_json::from_value::<Vec<ActivityBucket>>(
-                val.get("buckets")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null),
-            )
-        {
-            per_host.push(parsed);
+    for (hid, res) in fanout_insights_rpc(
+        "insights.activity_buckets",
+        params,
+        ctx.scope,
+        ctx.scope_host,
+        ctx.owner_host,
+    ) {
+        match res {
+            Ok(val) => {
+                if let Ok(mut parsed) = serde_json::from_value::<Vec<ActivityBucket>>(
+                    val.get("buckets")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                ) {
+                    let mut dwell_sum = 0u64;
+                    let mut agent_sum = 0u64;
+                    for b in &mut parsed {
+                        dwell_sum = dwell_sum.saturating_add(b.dwell.total());
+                        agent_sum = agent_sum.saturating_add(b.agent_ms);
+                        let raw_map = std::mem::take(&mut b.by_project);
+                        for (raw_pid, pt) in raw_map {
+                            let mapped = remap_project_id(ctx.remaps, &hid, &raw_pid);
+                            let entry = b.by_project.entry(mapped).or_default();
+                            entry.dwell_ms = entry.dwell_ms.saturating_add(pt.dwell_ms);
+                            entry.agent_ms = entry.agent_ms.saturating_add(pt.agent_ms);
+                        }
+                    }
+                    if let Some(totals) = host_totals.as_deref_mut() {
+                        let e = totals.entry(hid.clone()).or_default();
+                        e.0 = e.0.saturating_add(dwell_sum);
+                        e.1 = e.1.saturating_add(agent_sum);
+                    }
+                    per_host.push(parsed);
+                }
+            }
+            Err(_) => {
+                failed_hosts.push((
+                    ctx.snap.host_display_name(&hid).to_owned(),
+                    host_unavailable_entry(&hid, ctx.snap, ctx.hosts).1,
+                ));
+            }
         }
     }
     merge_bucket_lists(per_host, boundaries)
@@ -272,6 +495,10 @@ pub fn refresh_data(ui: Ui, visit_seq: u64) {
         return;
     }
     let scope = ui.insights.scope_project.get_untracked();
+    let scope_host = ui.insights.scope_host.get_untracked();
+    let hosts = ui.hosts.get_untracked();
+    let snap = ui.snapshot.get_untracked();
+    let connected_hosts = connected_hosts_key(&hosts);
     let range = ui.insights.range.get_untracked();
     let selected_date = ui.insights.selected_date.get_untracked();
     let comparison = ui.insights.comparison.get_untracked();
@@ -288,10 +515,17 @@ pub fn refresh_data(ui: Ui, visit_seq: u64) {
         .date_naive()
         .to_string();
 
-    let events_cache_key = (scope.clone(), visit_seq);
+    let events_cache_key = (
+        scope.clone(),
+        scope_host.clone(),
+        connected_hosts.clone(),
+        visit_seq,
+    );
     let need_events = ui.insights.events_key.get_untracked().as_ref() != Some(&events_cache_key);
     let key = ActivityCacheKey {
         scope: scope.clone(),
+        scope_host: scope_host.clone(),
+        connected_hosts: connected_hosts.clone(),
         range,
         selected_date,
         comparison,
@@ -308,7 +542,60 @@ pub fn refresh_data(ui: Ui, visit_seq: u64) {
         return;
     }
 
-    let annual_cache_key = (scope.clone(), actual_today_key, visit_seq);
+    let owner_host = if !scope.is_empty() {
+        snap.project_host(&scope).to_owned()
+    } else if !scope_host.is_empty() {
+        scope_host.clone()
+    } else {
+        String::new()
+    };
+
+    // Strict offline-host skip: if scoped specifically to an offline host (or project on one),
+    // skip RPCs completely without blocking, erroring, or retrying.
+    if !owner_host.is_empty() && !is_host_connected(&owner_host, &hosts) {
+        let entry = host_unavailable_entry(&owner_host, &snap, &hosts);
+        let empty_events = Rc::new(Vec::new());
+        let empty_activity = Rc::new(ActivityInput {
+            loaded: true,
+            ..Default::default()
+        });
+        batch(move || {
+            ui.insights.unavailable_hosts.set(vec![entry]);
+            ui.insights.events.set(empty_events.clone());
+            ui.insights.events_key.set(Some(events_cache_key));
+            ui.insights.activity.set(empty_activity.clone());
+            ui.insights.activity_key.set(Some(key));
+            ui.insights.loaded_data.set(Some(LoadedInsights {
+                scope,
+                scope_host,
+                range,
+                selected_date,
+                comparison,
+                events: empty_events,
+                activity: empty_activity,
+                annual_loaded: want_annual,
+                now_ms: now,
+            }));
+            ui.insights.inflight_key.set(None);
+            ui.insights.loading.set(false);
+            ui.insights.heatmap_loading.set(false);
+        });
+        return;
+    }
+
+    let skipped_offline = if scope.is_empty() && scope_host.is_empty() {
+        collect_skipped_offline_hosts(&snap, &hosts)
+    } else {
+        Vec::new()
+    };
+
+    let annual_cache_key = (
+        scope.clone(),
+        scope_host.clone(),
+        actual_today_key,
+        connected_hosts,
+        visit_seq,
+    );
     let annual_cached =
         ui.insights.annual_activity_key.get_untracked().as_ref() == Some(&annual_cache_key);
     let fetch_annual = want_annual && !annual_cached;
@@ -339,37 +626,70 @@ pub fn refresh_data(ui: Ui, visit_seq: u64) {
 
     ui.spawn(async move {
         let scope_req = scope.clone();
+        let scope_host_req = scope_host.clone();
+        let owner_host_req = owner_host;
+        let remaps = build_project_remaps(&snap);
         let pending_for_req = pending_dwell.clone();
-        let fetched = blocking(
-            move || -> ((bool, u64), Option<Vec<canban_types::Event>>, ActivityInput) {
-                let flush_res = crate::activity::flush_batch_blocking(&pending_for_req);
-                let fetched_events = need_events.then(|| fetch_events_for_scope(&scope_req));
-                let mut input = ActivityInput {
-                    loaded: true,
-                    annual_buckets: existing_annual,
-                    ..Default::default()
-                };
-                if range == RangeWindow::Today {
-                    input.period_segments =
-                        fetch_merged_segments(plan.period_from, plan.period_until, &scope_req);
-                    input.baseline_segments =
-                        fetch_merged_segments(plan.prev_from, plan.prev_until, &scope_req);
-                } else {
-                    input.range_buckets = fetch_merged_buckets(&plan.range_boundaries, &scope_req);
-                    input.baseline_buckets =
-                        fetch_merged_buckets(&plan.baseline_boundaries, &scope_req);
-                }
-                if fetch_annual {
-                    input.annual_buckets =
-                        fetch_merged_buckets(&plan.annual_boundaries, &scope_req);
-                }
-                (flush_res, fetched_events, input)
-            },
-        )
+        let mut unavailable = skipped_offline;
+        let fetched = blocking(move || -> FetchedInsightsBatch {
+            let flush_res = crate::activity::flush_batch_blocking(&pending_for_req);
+            let mut failed = Vec::new();
+            let ctx = InsightsFetchCtx {
+                scope: &scope_req,
+                scope_host: &scope_host_req,
+                owner_host: &owner_host_req,
+                remaps: &remaps,
+                snap: &snap,
+                hosts: &hosts,
+            };
+            let fetched_events = need_events.then(|| {
+                fetch_events_for_scope(
+                    ctx.scope,
+                    ctx.scope_host,
+                    ctx.owner_host,
+                    ctx.remaps,
+                    ctx.snap,
+                    ctx.hosts,
+                    &mut failed,
+                )
+            });
+            let mut host_totals: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+            let mut input = ActivityInput {
+                loaded: true,
+                annual_buckets: existing_annual,
+                ..Default::default()
+            };
+            if range == RangeWindow::Today {
+                input.period_segments = fetch_merged_segments(
+                    plan.period_from,
+                    plan.period_until,
+                    &ctx,
+                    &mut failed,
+                    Some(&mut host_totals),
+                );
+                input.baseline_segments =
+                    fetch_merged_segments(plan.prev_from, plan.prev_until, &ctx, &mut failed, None);
+            } else {
+                input.range_buckets = fetch_merged_buckets(
+                    &plan.range_boundaries,
+                    &ctx,
+                    &mut failed,
+                    Some(&mut host_totals),
+                );
+                input.baseline_buckets =
+                    fetch_merged_buckets(&plan.baseline_boundaries, &ctx, &mut failed, None);
+            }
+            if fetch_annual {
+                input.annual_buckets =
+                    fetch_merged_buckets(&plan.annual_boundaries, &ctx, &mut failed, None);
+            }
+            input.host_totals = host_totals;
+            (flush_res, fetched_events, input, failed)
+        })
         .await;
 
         let (flush_ok, flush_recorded) = match &fetched {
-            Ok((res, _, _)) => *res,
+            Ok((res, _, _, _)) => *res,
             Err(_) => (false, 0),
         };
         crate::activity::complete_insights_flush(ui, pending_dwell, flush_ok, flush_recorded);
@@ -378,7 +698,14 @@ pub fn refresh_data(ui: Ui, visit_seq: u64) {
             return;
         }
         match fetched {
-            Ok((_, maybe_events, input)) => {
+            Ok((_, maybe_events, input, failed)) => {
+                let mut seen_names: BTreeSet<String> =
+                    unavailable.iter().map(|(n, _)| n.clone()).collect();
+                for (name, reason) in failed {
+                    if seen_names.insert(name.clone()) {
+                        unavailable.push((name, reason));
+                    }
+                }
                 let events_rc = maybe_events
                     .map(Rc::new)
                     .or(existing_events)
@@ -386,6 +713,7 @@ pub fn refresh_data(ui: Ui, visit_seq: u64) {
                 let activity_rc = Rc::new(input);
                 let annual_loaded = want_annual || annual_cached;
                 batch(move || {
+                    ui.insights.unavailable_hosts.set(unavailable);
                     ui.insights.events.set(events_rc.clone());
                     ui.insights.events_key.set(Some(events_cache_key));
                     ui.insights.activity.set(activity_rc.clone());
@@ -395,6 +723,7 @@ pub fn refresh_data(ui: Ui, visit_seq: u64) {
                     }
                     ui.insights.loaded_data.set(Some(LoadedInsights {
                         scope,
+                        scope_host,
                         range,
                         selected_date,
                         comparison,
@@ -602,7 +931,112 @@ pub fn intent(ui: Ui, operation: &str) {
     }
 }
 
+fn build_insights_host_picker(ui: Ui, host_label: Memo<String>) -> impl IntoElement {
+    search_popover(
+        press_target()
+            .h(px(26.))
+            .px_2p5()
+            .rounded(px(6.))
+            .border_1()
+            .border_color(BORDER)
+            .bg(INSET)
+            .hover(|s| s.bg(CARD_HOVER))
+            .focus(|s| s.border_color(ACCENT))
+            .active(|s| s.opacity(0.75))
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .accessibility_label(move || Some(format!("Host scope: {}", host_label.get()).into()))
+            .child(icon(Icon::Server).w(px(13.)).h(px(13.)))
+            .child(
+                label(move || host_label.get())
+                    .text_size(px(CAPTION_SIZE))
+                    .font_weight(FontWeight::MEDIUM)
+                    .max_w(px(140.))
+                    .truncate(),
+            )
+            .child(icon(Icon::ChevronDown).w(px(11.)).h(px(11.))),
+        move || {
+            let cur = ui.insights.scope_host.get();
+            ui.snapshot.with(|s| {
+                let mut opts = Vec::new();
+                opts.push(
+                    PickerOption::new(ALL_HOSTS_OPTION, "All Hosts")
+                        .detail(format!("{} hosts", s.host_summaries.len().max(1)))
+                        .icon(Icon::Server)
+                        .selected(cur.is_empty()),
+                );
+                let mut hosts: Vec<(&str, &str, bool)> = Vec::new();
+                hosts.push(("local", s.host_display_name("local"), false));
+                let mut remotes: Vec<_> = s
+                    .host_summaries
+                    .iter()
+                    .filter(|(id, _)| id.as_str() != "local")
+                    .map(|(id, h)| (id.as_str(), h.name.as_str(), s.is_host_offline(id)))
+                    .collect();
+                remotes.sort_by_key(|a| a.1.to_ascii_lowercase());
+                hosts.extend(remotes);
+                for (hid, name, offline) in hosts {
+                    let count = s
+                        .projects
+                        .iter()
+                        .filter(|p| s.project_host(&p.id) == hid)
+                        .count();
+                    let opt_label = if offline {
+                        format!("{name} (offline)")
+                    } else {
+                        name.to_owned()
+                    };
+                    opts.push(
+                        PickerOption::new(hid, opt_label)
+                            .group("Machines")
+                            .detail(format!("{count} projects"))
+                            .icon(Icon::Server)
+                            .selected(cur == hid),
+                    );
+                }
+                opts
+            })
+        },
+        move |selected_host| {
+            let next = if selected_host == ALL_HOSTS_OPTION {
+                String::new()
+            } else {
+                selected_host
+            };
+            ui.insights.scope_host.set(next.clone());
+            let cur_proj = ui.insights.scope_project.get_untracked();
+            if !cur_proj.is_empty() && !next.is_empty() {
+                let proj_host = ui
+                    .snapshot
+                    .with_untracked(|s| s.project_host(&cur_proj).to_owned());
+                if proj_host != next {
+                    ui.insights.scope_project.set(String::new());
+                }
+            }
+        },
+    )
+    .placeholder("Filter Insights by Machine…")
+    .width(240.)
+}
+
 pub fn chrome_bar(ui: Ui) -> View {
+    let has_remote_hosts = computed(move || ui.snapshot.with(|s| s.has_remote_hosts()));
+    let host_label = computed(move || {
+        let sh = ui.insights.scope_host.get();
+        if sh.is_empty() {
+            "All Hosts".to_owned()
+        } else {
+            ui.snapshot.with(|s| {
+                let name = s.host_display_name(&sh);
+                if s.is_host_offline(&sh) {
+                    format!("{name} (offline)")
+                } else {
+                    name.to_owned()
+                }
+            })
+        }
+    });
     let scope_label = computed(move || {
         let scope = ui.insights.scope_project.get();
         if scope.is_empty() {
@@ -612,7 +1046,7 @@ pub fn chrome_bar(ui: Ui) -> View {
             s.projects
                 .iter()
                 .find(|p| p.id == scope)
-                .map(|p| p.name.clone())
+                .map(|p| s.project_display_name(&p.id))
                 .unwrap_or_else(|| "All Projects".to_owned())
         })
     });
@@ -750,17 +1184,23 @@ pub fn chrome_bar(ui: Ui) -> View {
                 label(move || scope_label.get())
                     .text_size(px(CAPTION_SIZE))
                     .font_weight(FontWeight::MEDIUM)
-                    .max_w(px(160.))
+                    .max_w(px(180.))
                     .truncate(),
             )
             .child(icon(Icon::ChevronDown).w(px(11.)).h(px(11.))),
         move || {
             let cur = ui.insights.scope_project.get();
+            let host_filter = ui.insights.scope_host.get();
             ui.snapshot.with(|s| {
                 let total_merged = s
                     .cards
                     .iter()
-                    .filter(|c| c.removed_at.is_none() && c.resolved())
+                    .filter(|c| {
+                        c.removed_at.is_none()
+                            && c.resolved()
+                            && (host_filter.is_empty()
+                                || s.project_host(&c.project_id) == host_filter)
+                    })
                     .count();
                 let mut opts = Vec::with_capacity(s.projects.len() + 1);
                 opts.push(
@@ -770,13 +1210,21 @@ pub fn chrome_bar(ui: Ui) -> View {
                         .selected(cur.is_empty()),
                 );
                 for p in &s.projects {
+                    if !host_filter.is_empty() && s.project_host(&p.id) != host_filter {
+                        continue;
+                    }
                     let p_merged = s
                         .cards
                         .iter()
                         .filter(|c| c.project_id == p.id && c.removed_at.is_none() && c.resolved())
                         .count();
+                    let offline = s.is_host_offline(s.project_host(&p.id));
+                    let mut pname = s.project_display_name(&p.id);
+                    if offline {
+                        pname.push_str(" (offline)");
+                    }
                     opts.push(
-                        PickerOption::new(p.id.clone(), p.name.clone())
+                        PickerOption::new(p.id.clone(), pname)
                             .group("Projects")
                             .detail(format!("{p_merged} resolved"))
                             .icon(Icon::Folder)
@@ -795,7 +1243,7 @@ pub fn chrome_bar(ui: Ui) -> View {
         },
     )
     .placeholder("Filter Insights by Project…")
-    .width(280.);
+    .width(300.);
 
     let range_bar = view()
         .flex_row()
@@ -894,6 +1342,10 @@ pub fn chrome_bar(ui: Ui) -> View {
                 .child(view().w(px(1.)).h(px(14.)).bg(BORDER))
                 .child(range_bar)
                 .child(view().w(px(1.)).h(px(14.)).bg(BORDER))
+                .child(when(
+                    move || has_remote_hosts.get(),
+                    move || build_insights_host_picker(ui, host_label),
+                ))
                 .child(scope_picker)
                 .child(chrome_button(
                     Icon::Refresh,
@@ -1745,12 +2197,17 @@ fn render_timeline_1d(ui: Ui, dash: &Dashboard, project_order: &[String]) -> Vie
             if idx > 0 {
                 footer = footer.child(note(" "));
             }
+            let legend_name = if let Some(ref badge) = p.host_badge {
+                format!("{} · {badge}", p.name)
+            } else {
+                p.name.clone()
+            };
             footer = footer.child(
                 view()
                     .flex_row()
                     .items_center()
                     .gap_1()
-                    .child(note(p.name.clone()))
+                    .child(note(legend_name))
                     .child(
                         view()
                             .w(px(8.))
@@ -2764,9 +3221,13 @@ fn render_projects(ui: Ui, dash: &Dashboard, project_order: &[String]) -> View {
                 ProjectSort::Runs => format!("{} runs", p.agent_runs),
             };
 
+            let display_title = if let Some(ref badge) = p.host_badge {
+                format!("{} · {badge}", p.name)
+            } else {
+                p.name.clone()
+            };
             let tip = format!(
-                "{} · Me {} · Agent {} · {} resolved · +{} created · WIP {total_wip} · {} runs",
-                p.name,
+                "{display_title} · Me {} · Agent {} · {} resolved · +{} created · WIP {total_wip} · {} runs",
                 format_duration_compact(p.dwell_ms),
                 format_duration_compact(p.agent_ms),
                 p.merged,
@@ -2789,7 +3250,7 @@ fn render_projects(ui: Ui, dash: &Dashboard, project_order: &[String]) -> View {
                             AdaptiveColor::TRANSPARENT
                         })
                         .hover(|s| s.bg(CARD_HOVER))
-                        .accessibility_label(format!("Insights Project: {}", p.name))
+                        .accessibility_label(format!("Insights Project: {display_title}"))
                         .on_press(move |_: &()| {
                             let cur = ui.insights.scope_project.get_untracked();
                             if cur == pid {
@@ -2829,7 +3290,19 @@ fn render_projects(ui: Ui, dash: &Dashboard, project_order: &[String]) -> View {
                                                         .font_weight(FontWeight::MEDIUM)
                                                         .truncate()
                                                         .min_w(px(0.)),
-                                                ),
+                                                )
+                                                .child({
+                                                    let has_badge = p.host_badge.is_some();
+                                                    let b = p.host_badge.clone().unwrap_or_default();
+                                                    when(
+                                                        move || has_badge,
+                                                        move || {
+                                                            view()
+                                                                .flex_shrink_0()
+                                                                .child(badge(b.clone()))
+                                                        },
+                                                    )
+                                                }),
                                         )
                                         .child(
                                             view()
@@ -3720,6 +4193,10 @@ fn render_card_drilldown(ui: Ui, dash: &Dashboard) -> View {
     );
     for id in ids.iter().take(100) {
         if let Some(card) = ui.index.with(|idx| idx.cards.get(id).cloned()) {
+            let proj_badge = ui.snapshot.with(|s| {
+                s.has_remote_hosts()
+                    .then(|| s.project_display_name(&card.project_id))
+            });
             let id = id.clone();
             panel = panel.child(
                 press_target()
@@ -3728,7 +4205,27 @@ fn render_card_drilldown(ui: Ui, dash: &Dashboard) -> View {
                     .rounded(px(5.))
                     .hover(|s| s.bg(CARD_HOVER))
                     .on_press(move |_: &()| ui.open_card(id.clone()))
-                    .child(label(format!("#{} {}", card.number, card.title)).truncate()),
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                label(format!("#{} {}", card.number, card.title))
+                                    .truncate()
+                                    .flex_1()
+                                    .min_w(px(0.)),
+                            )
+                            .child({
+                                let has_badge = proj_badge.is_some();
+                                let b = proj_badge.unwrap_or_default();
+                                when(
+                                    move || has_badge,
+                                    move || view().flex_shrink_0().child(badge(b.clone())),
+                                )
+                            }),
+                    ),
             );
         }
     }
@@ -3740,30 +4237,191 @@ fn render_card_drilldown(ui: Ui, dash: &Dashboard) -> View {
     panel
 }
 
+fn render_hosts(ui: Ui, dash: &Dashboard) -> View {
+    let active_host = ui.insights.scope_host.get();
+    let max_time = dash
+        .host_stats
+        .iter()
+        .map(HostStat::total_time_ms)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+
+    let mut rows: Vec<AnyElement> = Vec::with_capacity(dash.host_stats.len());
+    for h in &dash.host_stats {
+        let hid = h.id.clone();
+        let is_selected = active_host == hid;
+        let tot = h.total_time_ms();
+        let ratio = if tot == 0 {
+            0.0
+        } else {
+            (tot as f32 / max_time as f32).clamp(0.05, 1.0)
+        };
+        let fill = if h.offline {
+            MUTED.resolve()
+        } else {
+            ACCENT.resolve()
+        };
+        let bar_track = view()
+            .w(px(64.))
+            .flex_shrink_0()
+            .h(px(6.))
+            .rounded(px(3.))
+            .bg(INSET)
+            .overflow_hidden()
+            .flex_row()
+            .child(
+                view()
+                    .flex_grow(ratio.max(0.0))
+                    .basis(px(0.))
+                    .h_full()
+                    .rounded(px(3.))
+                    .bg(fill),
+            )
+            .child(
+                view()
+                    .flex_grow((1.0 - ratio).max(0.0))
+                    .basis(px(0.))
+                    .h_full(),
+            );
+
+        rows.push(
+            press_target()
+                .w_full()
+                .px_2()
+                .py_1p5()
+                .rounded(px(6.))
+                .bg(if is_selected {
+                    SELECTED.resolve()
+                } else {
+                    AdaptiveColor::TRANSPARENT
+                })
+                .hover(|s| s.bg(CARD_HOVER))
+                .accessibility_label(format!("Insights Host: {}", h.name))
+                .on_press(move |_: &()| {
+                    let cur = ui.insights.scope_host.get_untracked();
+                    if cur == hid {
+                        ui.insights.scope_host.set(String::new());
+                    } else {
+                        ui.insights.scope_host.set(hid.clone());
+                        let cur_proj = ui.insights.scope_project.get_untracked();
+                        if !cur_proj.is_empty() {
+                            let ph = ui
+                                .snapshot
+                                .with_untracked(|s| s.project_host(&cur_proj).to_owned());
+                            if ph != hid {
+                                ui.insights.scope_project.set(String::new());
+                            }
+                        }
+                    }
+                })
+                .child(
+                    view()
+                        .w_full()
+                        .gap_0p5()
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    view()
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_1p5()
+                                        .child(
+                                            icon_tinted(
+                                                Icon::Server,
+                                                if h.offline { MUTED } else { ACCENT },
+                                            )
+                                            .w(px(12.))
+                                            .h(px(12.))
+                                            .flex_shrink_0(),
+                                        )
+                                        .child(
+                                            label(h.name.clone())
+                                                .text_size(px(12.5))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(if h.offline { MUTED } else { TEXT })
+                                                .truncate()
+                                                .min_w(px(0.)),
+                                        )
+                                        .child({
+                                            let is_offline = h.offline;
+                                            when(
+                                                move || is_offline,
+                                                || view().flex_shrink_0().child(badge("offline")),
+                                            )
+                                        }),
+                                )
+                                .child(
+                                    view()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_2()
+                                        .flex_shrink_0()
+                                        .child(note(format!(
+                                            "Me {}",
+                                            format_duration_compact(h.dwell_ms)
+                                        )))
+                                        .child(bar_track),
+                                ),
+                        )
+                        .child(
+                            view()
+                                .pl(px(18.))
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(note(format!(
+                                    "Agent {}",
+                                    format_duration_compact(h.agent_ms)
+                                )))
+                                .child(note(format!(
+                                    "{} runs · {} resolved",
+                                    h.agent_runs, h.merged
+                                ))),
+                        ),
+                )
+                .into_element(),
+        );
+    }
+
+    card_surface()
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(heading("By Host"))
+                .child(note(format!("{} machines", dash.host_stats.len()))),
+        )
+        .child(view().gap_1().children(rows))
+}
+
 fn render_footer(ui: Ui, dash: &Dashboard) -> View {
     let intake = &dash.intake;
     let excl = dash.exclude_initial_sync;
+    let live_unavailable = ui.insights.unavailable_hosts.get();
     let offline = ui.snapshot.with(|s| {
-        s.host_summaries
-            .values()
-            .filter(|h| h.is_offline())
-            .map(|h| {
-                format!(
-                    "{} (last sync: {})",
-                    h.name,
-                    h.last_synced_at
-                        .map(|t| {
-                            chrono::DateTime::from_timestamp_millis(t as i64)
-                                .unwrap()
-                                .with_timezone(&chrono::Local)
-                                .format("%m-%d %H:%M")
-                                .to_string()
-                        })
-                        .unwrap_or_else(|| "unknown".into())
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
+        let mut entries: Vec<String> = Vec::new();
+        let mut seen = BTreeSet::new();
+        for (name, reason) in &live_unavailable {
+            if seen.insert(name.clone()) {
+                entries.push(format!("{name} ({reason})"));
+            }
+        }
+        for h in s.host_summaries.values().filter(|h| h.is_offline()) {
+            if seen.insert(h.name.clone()) {
+                entries.push(format!("{} ({})", h.name, h.connection.short_status()));
+            }
+        }
+        entries.join(", ")
     });
 
     let toggle_box = nsh_base::checkbox()
@@ -3809,9 +4467,10 @@ fn render_footer(ui: Ui, dash: &Dashboard) -> View {
     if offline.is_empty() {
         row_view
     } else {
-        view().gap_1p5().child(row_view).child(note(format!(
-            "Offline hosts: {offline}; cached data may be stale."
-        )))
+        view()
+            .gap_1p5()
+            .child(row_view)
+            .child(note(format!("Unavailable hosts (skipped): {offline}.")))
     }
 }
 
@@ -4032,8 +4691,24 @@ fn overview_row(narrow: bool, a: View, b: View, c: View) -> View {
     }
 }
 
+fn merged_insights_profiles(ui: Ui) -> Vec<canban_types::Profile> {
+    let mut out = ui.all_profiles.get();
+    let mut seen: BTreeSet<String> = out.iter().map(|p| p.id.clone()).collect();
+    let host_ids: Vec<String> = ui
+        .snapshot
+        .with(|s| s.host_summaries.keys().cloned().collect());
+    for hid in host_ids {
+        for p in crate::backend::config_for_host(&hid).profiles {
+            if seen.insert(p.id.clone()) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
 fn dashboard(ui: Ui) -> Option<Dashboard> {
-    let profiles = ui.all_profiles.get();
+    let profiles = merged_insights_profiles(ui);
     if has_backend() {
         let loaded = ui.insights.loaded_data.get()?;
         let effective_heatmap = if loaded.annual_loaded {
@@ -4054,11 +4729,12 @@ fn dashboard(ui: Ui) -> Option<Dashboard> {
             exclude_initial_sync: ui.insights.exclude_initial_sync.get(),
         };
         return Some(ui.snapshot.with(|s| {
-            model::compute_dashboard(
+            model::compute_dashboard_scoped(
                 s,
                 &loaded.events,
                 &loaded.activity,
                 (!loaded.scope.is_empty()).then_some(loaded.scope.as_str()),
+                (!loaded.scope_host.is_empty()).then_some(loaded.scope_host.as_str()),
                 &chrono::Local,
                 &profiles,
                 opts,
@@ -4071,6 +4747,7 @@ fn dashboard(ui: Ui) -> Option<Dashboard> {
     }
 
     let scope = ui.insights.scope_project.get();
+    let scope_host = ui.insights.scope_host.get();
     let range = ui.insights.range.get();
     let now = now_ms(ui);
     let opts = ViewOptions {
@@ -4087,11 +4764,12 @@ fn dashboard(ui: Ui) -> Option<Dashboard> {
     Some(ui.insights.activity.with(|act| {
         ui.insights.events.with(|evs| {
             ui.snapshot.with(|s| {
-                model::compute_dashboard(
+                model::compute_dashboard_scoped(
                     s,
                     evs,
                     act,
                     (!scope.is_empty()).then_some(scope.as_str()),
+                    (!scope_host.is_empty()).then_some(scope_host.as_str()),
                     &chrono::Local,
                     &profiles,
                     opts,
@@ -4103,9 +4781,12 @@ fn dashboard(ui: Ui) -> Option<Dashboard> {
 
 pub fn screen(ui: Ui) -> impl IntoElement {
     let visit = stored((false, 0u64));
+    let connected_hosts = computed(move || connected_hosts_key(&ui.hosts.get()));
     effect(move || {
         let page = ui.page.get();
         let _scope = ui.insights.scope_project.get();
+        let _scope_host = ui.insights.scope_host.get();
+        let _connected = connected_hosts.get();
         let _range = ui.insights.range.get();
         let _date = ui.insights.selected_date.get();
         let _cmp = ui.insights.comparison.get();
@@ -4179,6 +4860,12 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                 render_automation_funnel(&dash),
                                 render_projects(ui, &dash, &project_order),
                             ));
+
+                            let show_hosts_card = ui.insights.scope_host.get().is_empty()
+                                && dash.host_stats.len() > 1;
+                            if show_hosts_card {
+                                body = body.child(render_hosts(ui, &dash));
+                            }
 
                             body = body
                                 .child(render_agents(ui, &dash))
@@ -4628,5 +5315,144 @@ mod tests {
             tree.has_mounted_text("Color = Project · Hover for card & duration · Click to open")
         );
         assert!(!tree.has_mounted_substring("Color = Project ("));
+    }
+
+    #[test]
+    fn connected_hosts_key_ignores_reconnecting_and_renders_skipped_offline_hosts() {
+        use canban_types::{HostConnectionState, HostSummary};
+
+        let hosts_attempt_1 = vec![
+            HostSummary {
+                id: "local".into(),
+                name: crate::platform::LOCAL_HOST_NAME.into(),
+                is_local: true,
+                transport_label: "Local socket".into(),
+                endpoint_label: "~/.canban/app.sock".into(),
+                ssh_target: None,
+                server_id: None,
+                connection: HostConnectionState::Connected {
+                    rtt_ms: 0,
+                    api_version: 1,
+                    version: "1".into(),
+                    platform: "macos".into(),
+                },
+                active_agents: 0,
+                max_agents: 4,
+                project_count: 1,
+                reconnect_count: 0,
+                last_synced_at: None,
+                pending_mutations: 0,
+                sync_conflicts: 0,
+            },
+            HostSummary {
+                id: "devpc".into(),
+                name: "devpc".into(),
+                is_local: false,
+                transport_label: "SSH".into(),
+                endpoint_label: "devpc".into(),
+                ssh_target: Some("devpc".into()),
+                server_id: None,
+                connection: HostConnectionState::Reconnecting {
+                    attempt: 1,
+                    error: "reconnecting".into(),
+                },
+                active_agents: 0,
+                max_agents: 4,
+                project_count: 1,
+                reconnect_count: 1,
+                last_synced_at: None,
+                pending_mutations: 0,
+                sync_conflicts: 0,
+            },
+        ];
+        let mut hosts_attempt_2 = hosts_attempt_1.clone();
+        hosts_attempt_2[1].connection = HostConnectionState::Reconnecting {
+            attempt: 9,
+            error: "still reconnecting".into(),
+        };
+        let mut hosts_offline = hosts_attempt_1.clone();
+        hosts_offline[1].connection = HostConnectionState::Offline {
+            error: "Timed out".into(),
+            cached_at: None,
+        };
+
+        assert_eq!(connected_hosts_key(&hosts_attempt_1), vec!["local"]);
+        assert_eq!(connected_hosts_key(&hosts_attempt_2), vec!["local"]);
+        assert_eq!(connected_hosts_key(&hosts_offline), vec!["local"]);
+
+        #[component]
+        fn MultiHostOfflineHarness() -> impl IntoElement {
+            let ui = build_test_ui(1_794_744_000_000u64, false);
+            let mut hosts = vec![
+                HostSummary {
+                    id: "local".into(),
+                    name: crate::platform::LOCAL_HOST_NAME.into(),
+                    is_local: true,
+                    transport_label: "Local socket".into(),
+                    endpoint_label: "~/.canban/app.sock".into(),
+                    ssh_target: None,
+                    server_id: None,
+                    connection: HostConnectionState::Connected {
+                        rtt_ms: 0,
+                        api_version: 1,
+                        version: "1".into(),
+                        platform: "macos".into(),
+                    },
+                    active_agents: 0,
+                    max_agents: 4,
+                    project_count: 1,
+                    reconnect_count: 0,
+                    last_synced_at: None,
+                    pending_mutations: 0,
+                    sync_conflicts: 0,
+                },
+                HostSummary {
+                    id: "devpc".into(),
+                    name: "devpc".into(),
+                    is_local: false,
+                    transport_label: "SSH".into(),
+                    endpoint_label: "devpc".into(),
+                    ssh_target: Some("devpc".into()),
+                    server_id: None,
+                    connection: HostConnectionState::Offline {
+                        error: "Timed out".into(),
+                        cached_at: None,
+                    },
+                    active_agents: 0,
+                    max_agents: 4,
+                    project_count: 1,
+                    reconnect_count: 0,
+                    last_synced_at: None,
+                    pending_mutations: 0,
+                    sync_conflicts: 0,
+                },
+            ];
+            let mut snap = ui.snapshot.get_untracked();
+            snap.register_host_entities("local");
+            for h in &hosts {
+                snap.host_summaries.insert(h.id.clone(), h.clone());
+            }
+            ui.hosts.set(std::mem::take(&mut hosts));
+            ui.snapshot.set(snap);
+            ui.project.set(ALL_PROJECTS_OPTION.into());
+            ui.insights
+                .unavailable_hosts
+                .set(vec![("devpc".into(), "Offline".into())]);
+            view()
+                .w(px(1400.))
+                .h(px(3600.))
+                .child(crate::frame::screen(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1400.), px(3600.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<MultiHostOfflineHarness>());
+        let mut tree = Tracker::new();
+        pump(&mut core, &mut tree);
+
+        assert!(tree.has_mounted_text("By Host"));
+        assert!(tree.has_mounted_substring("Unavailable hosts (skipped):"));
+        assert!(tree.has_mounted_substring("devpc"));
+        assert!(!tree.has_mounted_substring("Could not load"));
     }
 }

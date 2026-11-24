@@ -6222,3 +6222,174 @@ fn mounted_sidebar_scope_and_project_headers_keep_hover_and_press_targets_stable
     assert!(!tree.deleted.contains(&new_term_btn_id) && tree.is_mounted(new_term_btn_id));
     assert!(!tree.labels[&project_press_id].contains("Collapsed"));
 }
+
+#[test]
+fn visible_project_tree_groups_by_host_and_shows_empty_remote_hosts_and_projects() {
+    let mut s = Snapshot::default();
+    s.projects.push(Project {
+        id: "fiber".into(),
+        name: "fiber".into(),
+        directory: "/Users/jjy/fiber".into(),
+        github: None,
+        detected_github: None,
+        github_disconnected: false,
+        delivery_mode: Default::default(),
+        agent_overrides: BTreeMap::new(),
+        tags: Vec::new(),
+        workflow: Workflow::default(),
+        target_branch: None,
+        created_at: 1,
+    });
+    s.register_host_entities("local");
+    s.host_summaries.insert(
+        "local".into(),
+        HostSummary {
+            id: "local".into(),
+            name: crate::platform::LOCAL_HOST_NAME.into(),
+            is_local: true,
+            transport_label: "Local socket".into(),
+            endpoint_label: "~/.canban/app.sock".into(),
+            ssh_target: None,
+            server_id: None,
+            connection: HostConnectionState::Connected {
+                rtt_ms: 0,
+                api_version: 1,
+                version: "1".into(),
+                platform: "macos".into(),
+            },
+            active_agents: 0,
+            max_agents: 4,
+            project_count: 1,
+            reconnect_count: 0,
+            last_synced_at: None,
+            pending_mutations: 0,
+            sync_conflicts: 0,
+        },
+    );
+
+    let mut devpc = Snapshot::default();
+    devpc.projects.push(Project {
+        id: "fiber".into(),
+        name: "fiber".into(),
+        directory: "/home/devpc/fiber".into(),
+        github: None,
+        detected_github: None,
+        github_disconnected: false,
+        delivery_mode: Default::default(),
+        agent_overrides: BTreeMap::new(),
+        tags: Vec::new(),
+        workflow: Workflow::default(),
+        target_branch: None,
+        created_at: 2,
+    });
+    devpc.terminals.push(TerminalEntry {
+        id: "devpc-misc".into(),
+        conversation_id: None,
+        number: 1,
+        name: Some("devpc scratch".into()),
+        origin_project_id: None,
+        origin_card_id: None,
+        agent_engine: None,
+        runtime: Some(TerminalRuntime {
+            core_id: Some("c1".into()),
+            terminal: Some("t1".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: None,
+            agent_turn: None,
+            observed_agent: None,
+            waiting: None,
+        }),
+        agent: None,
+        created_at: 2,
+    });
+    devpc.terminal_contexts.push(TerminalContext {
+        terminal_id: "devpc-misc".into(),
+        cwd: Some("/tmp/devpc-other".into()),
+        directory_root: Some("/tmp/devpc-other".into()),
+        ..Default::default()
+    });
+    s.merge_remote_snapshot(
+        devpc,
+        HostSummary {
+            id: "devpc".into(),
+            name: "devpc".into(),
+            is_local: false,
+            transport_label: "SSH".into(),
+            endpoint_label: "devpc".into(),
+            ssh_target: Some("devpc".into()),
+            server_id: None,
+            connection: HostConnectionState::Connected {
+                rtt_ms: 10,
+                api_version: 1,
+                version: "1".into(),
+                platform: "linux".into(),
+            },
+            active_agents: 0,
+            max_agents: 4,
+            project_count: 1,
+            reconnect_count: 0,
+            last_synced_at: None,
+            pending_mutations: 0,
+            sync_conflicts: 0,
+        },
+    );
+    // Third host with zero projects and zero terminals must still render a HostHeader.
+    s.merge_remote_snapshot(
+        Snapshot::default(),
+        HostSummary {
+            id: "gpu-box".into(),
+            name: "GPU Box".into(),
+            is_local: false,
+            transport_label: "SSH".into(),
+            endpoint_label: "gpu-box".into(),
+            ssh_target: Some("gpu-box".into()),
+            server_id: None,
+            connection: HostConnectionState::Connected {
+                rtt_ms: 12,
+                api_version: 1,
+                version: "1".into(),
+                platform: "linux".into(),
+            },
+            active_agents: 0,
+            max_agents: 4,
+            project_count: 0,
+            reconnect_count: 0,
+            last_synced_at: None,
+            pending_mutations: 0,
+            sync_conflicts: 0,
+        },
+    );
+
+    let entries = crate::terminals::entries(&s);
+    let nodes = crate::terminals::tree::visible_project_tree(
+        &s,
+        &entries,
+        &std::collections::BTreeSet::new(),
+    );
+    let rem_fiber_id = canban_types::qualify_host_id("devpc", "fiber");
+
+    assert!(
+        nodes.contains(&crate::terminals::tree::TreeNode::HostHeader(
+            "local".into()
+        ))
+    );
+    assert!(
+        nodes.contains(&crate::terminals::tree::TreeNode::HostHeader(
+            "devpc".into()
+        ))
+    );
+    assert!(
+        nodes.contains(&crate::terminals::tree::TreeNode::HostHeader(
+            "gpu-box".into()
+        ))
+    );
+    assert!(nodes.contains(&crate::terminals::tree::TreeNode::Project(rem_fiber_id)));
+    assert!(
+        nodes.contains(&crate::terminals::tree::TreeNode::HostDirectoriesHeader(
+            "devpc".into()
+        ))
+    );
+    assert!(!nodes.contains(&crate::terminals::tree::TreeNode::OtherHeader));
+}

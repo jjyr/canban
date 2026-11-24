@@ -3614,6 +3614,28 @@ pub fn Gallery() -> impl IntoElement {
                     scene.set("workspace".into());
                     ui.navigate("insights");
                 }))
+                .child(action("Insights · Multi-host Offline", Variant::Quiet, move |_| {
+                    let (mut snap, hosts) = fixtures::multi_host_workspace(true);
+                    let (_, events) = fixtures::insights();
+                    let mut activity = fixtures::insights_activity();
+                    activity.host_totals.insert("local".into(), (1_800_000, 3_600_000));
+                    snap.projects[0].id = "gallery-project".into();
+                    ui.hosts.set(hosts);
+                    ui.snapshot.set(snap);
+                    ui.insights.preview_loading.set(false);
+                    ui.insights.loading.set(false);
+                    ui.insights.events.set(std::rc::Rc::new(events));
+                    ui.insights.activity.set(std::rc::Rc::new(activity));
+                    ui.insights.anchor_ms.set(Some(fixtures::INSIGHTS_NOW));
+                    ui.project.set("gallery-project".into());
+                    ui.insights.scope_project.set(String::new());
+                    ui.insights.scope_host.set(String::new());
+                    ui.insights
+                        .unavailable_hosts
+                        .set(vec![("Home Linux".into(), "Offline".into())]);
+                    scene.set("workspace".into());
+                    ui.navigate("insights");
+                }))
                 .child(action("Acknowledgements", Variant::Quiet, move |_| {
                     scene.set("workspace".into());
                     ui.open_settings_section("acknowledgements");

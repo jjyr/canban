@@ -510,6 +510,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                                     ),
                             );
                         } else if let Some(project) = e.project_id.clone() {
+                            let proj_label = s.project_display_name(&project);
                             context_bar = context_bar.child(
                                 canban_ui_kit::press_target()
                                     .flex_shrink(1.)
@@ -522,7 +523,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                                     .bg(CLEAR)
                                     .hover(|st| st.bg(SURFACE))
                                     .focus(|st| st.border_1().border_color(ACCENT))
-                                    .child(label(e.project_name.clone()).w_full().truncate())
+                                    .child(label(proj_label).w_full().truncate())
                                     .accessibility_label(move || {
                                         Some("Open current Project".into())
                                     })
@@ -530,6 +531,15 @@ pub fn header(ui: Ui) -> impl IntoElement {
                             );
                         } else if let Some(cwd) = e.cwd() {
                             let title = super::worktrees::display_directory_path(&cwd, &e.host_id);
+                            let host_suffix = if s.has_remote_hosts() {
+                                format!(" · {}", s.host_display_name(&e.host_id))
+                            } else {
+                                String::new()
+                            };
+                            let display = format!(
+                                "{}{host_suffix}",
+                                compact(&title, if ui.narrow.get() { 14 } else { 32 })
+                            );
                             context_bar = context_bar.child(
                                 view()
                                     .flex_shrink(1.)
@@ -539,17 +549,14 @@ pub fn header(ui: Ui) -> impl IntoElement {
                                     .px_2()
                                     .overflow_hidden()
                                     .tooltip(
-                                        hint_tooltip(e.cwd().unwrap_or_default())
-                                            .placement(Placement::Bottom),
-                                    )
-                                    .child(
-                                        muted(compact(
-                                            &title,
-                                            if ui.narrow.get() { 14 } else { 32 },
+                                        hint_tooltip(format!(
+                                            "{}\nHost: {}",
+                                            e.cwd().unwrap_or_default(),
+                                            s.host_display_name(&e.host_id)
                                         ))
-                                        .w_full()
-                                        .truncate(),
-                                    ),
+                                        .placement(Placement::Bottom),
+                                    )
+                                    .child(muted(display).w_full().truncate()),
                             );
                         }
                     }

@@ -7,6 +7,10 @@ use super::*;
 use crate::drafts::{capture_scroll, scroll_position};
 use canban_types::Snapshot;
 
+pub(crate) fn host_fold_key(host_id: &str) -> String {
+    format!("host:{host_id}")
+}
+
 pub(crate) fn project_fold_key(project_id: &str) -> String {
     format!("project:{project_id}")
 }
@@ -766,7 +770,9 @@ fn row(ui: Ui, id: String, model: Memo<Option<TerminalRowModel>>) -> impl IntoEl
 /// Flat keys allow a Terminal row to move between parents without remounting.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum TreeNode {
+    HostHeader(String),
     Project(String),
+    HostDirectoriesHeader(String),
     OtherHeader,
     Scope(String, WorktreeScope),
     Terminal(String),
@@ -775,7 +781,9 @@ pub(super) enum TreeNode {
 impl TreeNode {
     fn key(&self) -> String {
         match self {
+            Self::HostHeader(id) => format!("host:{id}"),
             Self::Project(id) => format!("project:{id}"),
+            Self::HostDirectoriesHeader(id) => format!("host-dirs:{id}"),
             Self::OtherHeader => "section:other".into(),
             Self::Scope(key, _) => key.clone(),
             Self::Terminal(id) => format!("terminal:{id}"),
@@ -784,6 +792,13 @@ impl TreeNode {
     }
     fn height(&self, ui: Ui, is_first: bool) -> f32 {
         match self {
+            Self::HostHeader(_) => {
+                if is_first {
+                    28.
+                } else {
+                    36.
+                }
+            }
             Self::Project(_) => {
                 if is_first {
                     28.
@@ -791,7 +806,7 @@ impl TreeNode {
                     38.
                 }
             }
-            Self::OtherHeader => 34.,
+            Self::HostDirectoriesHeader(_) | Self::OtherHeader => 34.,
             Self::Scope(key, scope) => {
                 let stacked = ui.terminal_width.get() < 340.
                     && ui
@@ -814,6 +829,43 @@ impl TreeNode {
     }
 }
 
+fn ordered_host_ids<'a>(s: &Snapshot, extra_hosts: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    seen.insert("local".to_owned());
+    out.push("local".to_owned());
+
+    let mut remotes: Vec<(&str, &str)> = s
+        .host_summaries
+        .iter()
+        .filter(|(id, _)| id.as_str() != "local")
+        .map(|(id, h)| (h.name.as_str(), id.as_str()))
+        .collect();
+    remotes.sort_by(|a, b| {
+        a.0.to_ascii_lowercase()
+            .cmp(&b.0.to_ascii_lowercase())
+            .then_with(|| a.1.cmp(b.1))
+    });
+    for (_, id) in remotes {
+        if seen.insert(id.to_owned()) {
+            out.push(id.to_owned());
+        }
+    }
+    for p in &s.projects {
+        let hid = s.project_host(&p.id);
+        if seen.insert(hid.to_owned()) {
+            out.push(hid.to_owned());
+        }
+    }
+    for hid in extra_hosts {
+        let h = if hid.is_empty() { "local" } else { hid };
+        if seen.insert(h.to_owned()) {
+            out.push(h.to_owned());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 pub(super) fn project_tree<'a>(
     s: &Snapshot,
@@ -827,11 +879,99 @@ pub(super) fn visible_project_tree<'a>(
     rows: impl IntoIterator<Item = &'a Entry>,
     folds: &std::collections::BTreeSet<String>,
 ) -> Vec<TreeNode> {
+    let row_vec: Vec<&'a Entry> = rows.into_iter().collect();
+    if s.has_remote_hosts() {
+        let mut by_host = std::collections::BTreeMap::<
+            String,
+            std::collections::BTreeMap<
+                Option<String>,
+                std::collections::BTreeMap<String, (WorktreeScope, Vec<String>)>,
+            >,
+        >::new();
+        for e in &row_vec {
+            let scope = entry_scope(s, e);
+            let pid = scope.project_id(s);
+            let hid = pid
+                .as_deref()
+                .filter(|p| !canban_types::is_global_project_id(p))
+                .map(|p| s.project_host(p))
+                .unwrap_or_else(|| {
+                    if e.host_id.is_empty() {
+                        s.terminal_host(&e.saved.id)
+                    } else {
+                        e.host_id.as_str()
+                    }
+                })
+                .to_owned();
+            let key = super::worktrees::location_key(e);
+            let group = by_host
+                .entry(hid)
+                .or_default()
+                .entry(pid)
+                .or_default()
+                .entry(key)
+                .or_insert_with(|| (scope, Vec::new()));
+            group.1.push(e.saved.id.clone());
+        }
+        let hosts = ordered_host_ids(s, by_host.keys().map(String::as_str));
+        let mut out = Vec::new();
+        for hid in hosts {
+            out.push(TreeNode::HostHeader(hid.clone()));
+            if folds.contains(&host_fold_key(&hid)) {
+                continue;
+            }
+            let mut host_groups = by_host.remove(&hid).unwrap_or_default();
+            for pid in s
+                .projects
+                .iter()
+                .filter(|p| s.project_host(&p.id) == hid)
+                .map(|p| p.id.clone())
+            {
+                let folded = folds.contains(&project_fold_key(&pid));
+                out.push(TreeNode::Project(pid.clone()));
+                if folded {
+                    host_groups.remove(&Some(pid));
+                    continue;
+                }
+                if let Some(scopes) = host_groups.remove(&Some(pid)) {
+                    for (key, (scope, children)) in scopes {
+                        let scope_folded = folds.contains(&scope_fold_key(&key));
+                        out.push(TreeNode::Scope(key, scope));
+                        if !scope_folded {
+                            out.extend(children.into_iter().map(TreeNode::Terminal));
+                        }
+                    }
+                }
+            }
+            if let Some(other_scopes) = host_groups.remove(&None) {
+                out.push(TreeNode::HostDirectoriesHeader(hid.clone()));
+                for (key, (scope, children)) in other_scopes {
+                    let scope_folded = folds.contains(&scope_fold_key(&key));
+                    out.push(TreeNode::Scope(key, scope));
+                    if !scope_folded {
+                        out.extend(children.into_iter().map(TreeNode::Terminal));
+                    }
+                }
+            }
+            // Any remaining global/orphan project scopes belonging to this host.
+            for (_pid, scopes) in host_groups {
+                for (key, (scope, children)) in scopes {
+                    let scope_folded = folds.contains(&scope_fold_key(&key));
+                    out.push(TreeNode::Scope(key, scope));
+                    if !scope_folded {
+                        out.extend(children.into_iter().map(TreeNode::Terminal));
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
     let mut groups = std::collections::BTreeMap::<
         Option<String>,
         std::collections::BTreeMap<String, (WorktreeScope, Vec<String>)>,
     >::new();
-    for e in rows {
+    for e in row_vec {
         let scope = entry_scope(s, e);
         let key = super::worktrees::location_key(e);
         let group = groups
@@ -931,11 +1071,250 @@ pub(crate) fn collapse_other_worktrees(ui: Ui) {
             }
             folds.remove(&scope_fold_key(&loc));
         }
+        if let Some(ref e) = active {
+            let hid = ui.snapshot.with_untracked(|s| {
+                e.project_id
+                    .as_deref()
+                    .filter(|p| !canban_types::is_global_project_id(p))
+                    .map(|p| s.project_host(p).to_owned())
+                    .unwrap_or_else(|| e.host_id.clone())
+            });
+            folds.remove(&host_fold_key(&hid));
+        }
     });
 }
 
 pub(crate) fn expand_all_worktrees(ui: Ui) {
     ui.terminal_folds.update(|folds| folds.clear());
+}
+
+fn open_host_launch_menu(ui: Ui, host_id: String, at: Option<Point<Points>>) {
+    use nsh_core::element::desktop::{MenuItem, popup_menu, popup_menu_at};
+    let (host_name, offline, projects) = ui.snapshot.with_untracked(|s| {
+        let name = s.host_display_name(&host_id).to_owned();
+        let offline = s.is_host_offline(&host_id);
+        let projs: Vec<(String, String)> = s
+            .projects
+            .iter()
+            .filter(|p| s.project_host(&p.id) == host_id)
+            .map(|p| (p.id.clone(), p.name.clone()))
+            .collect();
+        (name, offline, projs)
+    });
+    ui.spawn(async move {
+        let mut items = Vec::new();
+        let home_host = host_id.clone();
+        items.push(
+            MenuItem::new(format!("New Terminal ($HOME · {host_name})"))
+                .disabled(offline)
+                .on_select(move || super::launch(ui, serde_json::json!({ "host_id": home_host }))),
+        );
+        if !projects.is_empty() {
+            items.push(MenuItem::separator());
+            for (pid, pname) in projects {
+                let p_open = pid.clone();
+                items.push(
+                    MenuItem::new(format!("New Terminal in {pname}"))
+                        .disabled(offline)
+                        .on_select(move || super::create(ui, p_open.clone(), None)),
+                );
+            }
+        }
+        if let Some(pt) = at {
+            popup_menu_at(items, pt).await;
+        } else {
+            popup_menu(items).await;
+        }
+    });
+}
+
+fn host_directories_heading() -> impl IntoElement {
+    view()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .h(px(34.))
+        .min_w(px(0.))
+        .px_1()
+        .pt_2()
+        .child(
+            label("DIRECTORIES")
+                .text_size(px(10.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(MUTED)
+                .flex_shrink_0(),
+        )
+        .child(view().flex_1().h(px(1.)).bg(BORDER))
+}
+
+fn host_heading(ui: Ui, host_id: String, is_first: Memo<bool>) -> impl IntoElement {
+    let fold_key = host_fold_key(&host_id);
+    let info = computed({
+        let host_id = host_id.clone();
+        let fold_key = fold_key.clone();
+        move || {
+            let folded = ui.terminal_folds.with(|folds| folds.contains(&fold_key));
+            ui.snapshot.with(|s| {
+                let name = s.host_display_name(&host_id).to_owned();
+                let offline = s.is_host_offline(&host_id);
+                let summary = folded.then(|| {
+                    ui.closing_terminals.with(|closing| {
+                        ui.terminal_entries.with(|rows| {
+                            super::labels::group_status_summary(rows.iter().filter(|e| {
+                                e.listed()
+                                    && !closing.contains(&e.saved.id)
+                                    && (e.host_id == host_id
+                                        || (host_id == "local" && e.host_id.is_empty()))
+                            }))
+                        })
+                    })
+                });
+                (folded, name, offline, summary)
+            })
+        }
+    });
+    let is_folded = computed(move || info.with(|(f, ..)| *f));
+    let host_name = computed(move || info.with(|(_, n, ..)| n.clone()));
+    let is_offline = computed(move || info.with(|(_, _, off, _)| *off));
+    let summary = computed(move || info.with(|(_, _, _, s)| *s));
+    let fold_toggle = fold_key.clone();
+    let fold_ctx = fold_key;
+    let host_menu_ctx = host_id.clone();
+    let plus_ref = element_ref();
+    let host_for_plus = host_id;
+
+    let header_btn = canban_ui_kit::press_target()
+        .flex_1()
+        .min_w(px(0.))
+        .h(px(26.))
+        .px_1()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .rounded(px(5.))
+        .bg(CLEAR)
+        .hover(|s| s.bg(INSET))
+        .focus(|s| s.border_1().border_color(ACCENT))
+        .accessibility_label(move || {
+            let name = host_name.get();
+            Some(SharedString::from(format!("Machine {name}")))
+        })
+        .child(dynamic(move || {
+            icon_tinted(
+                if is_folded.get() {
+                    Icon::Forward
+                } else {
+                    Icon::ChevronDown
+                },
+                MUTED,
+            )
+            .w(px(10.))
+            .h(px(10.))
+            .flex_shrink_0()
+        }))
+        .child(
+            icon_tinted(Icon::Projects, MUTED)
+                .w(px(11.))
+                .h(px(11.))
+                .flex_shrink_0(),
+        )
+        .child(
+            label(move || SharedString::from(host_name.get().to_uppercase()))
+                .flex_1()
+                .min_w(px(0.))
+                .text_size(px(11.))
+                .text_color(move || if is_offline.get() { MUTED } else { TEXT })
+                .font_weight(FontWeight::SEMIBOLD)
+                .truncate(),
+        )
+        .child(when(
+            move || is_offline.get(),
+            move || muted("(offline)").text_size(px(10.)).flex_shrink_0(),
+        ))
+        .child(dynamic(move || {
+            summary.get().and_then(super::labels::group_summary_badge)
+        }))
+        .on_press(move |_: &()| {
+            ui.terminal_folds.update(|folds| {
+                if !folds.remove(&fold_toggle) {
+                    folds.insert(fold_toggle.clone());
+                }
+            });
+        });
+
+    let row = view()
+        .flex_row()
+        .items_center()
+        .h(px(28.))
+        .min_w(px(0.))
+        .on_context_menu(move |ev: &nsh_core::ContextMenuEvent| {
+            use nsh_core::element::desktop::{MenuItem, popup_menu_at};
+            let (folded, name, offline, _) = info.get_untracked();
+            let hid_open = host_menu_ctx.clone();
+            let fold_key = fold_ctx.clone();
+            let at = ev.page_position;
+            ui.spawn(async move {
+                let toggle_label = if folded {
+                    format!("Expand {name}")
+                } else {
+                    format!("Collapse {name}")
+                };
+                let items = vec![
+                    MenuItem::new(format!("New Terminal ($HOME · {name})"))
+                        .disabled(offline)
+                        .on_select(move || {
+                            super::launch(ui, serde_json::json!({ "host_id": hid_open }))
+                        }),
+                    MenuItem::separator(),
+                    MenuItem::new(toggle_label).on_select(move || {
+                        ui.terminal_folds.update(|folds| {
+                            if !folds.remove(&fold_key) {
+                                folds.insert(fold_key.clone());
+                            }
+                        });
+                    }),
+                ];
+                popup_menu_at(items, at).await;
+            });
+        })
+        .child(header_btn)
+        .child(view().element_ref(&plus_ref).child(tree_icon_button(
+            Icon::Plus,
+            move || {
+                if is_offline.get() {
+                    SharedString::from("Machine offline")
+                } else {
+                    SharedString::from(format!("New terminal on {}", host_name.get()))
+                }
+            },
+            move || ui.pending.get() || is_offline.get(),
+            move |_| {
+                let hid = host_for_plus.clone();
+                let anchor = plus_ref;
+                ui.spawn(async move {
+                    let at = anchor
+                        .measure()
+                        .await
+                        .map(|b| point(b.page.x, b.page.y + b.frame.size.height));
+                    open_host_launch_menu(ui, hid, at);
+                });
+            },
+        )));
+
+    view()
+        .flex_col()
+        .min_w(px(0.))
+        .child(when(
+            move || !is_first.get(),
+            || {
+                view()
+                    .h(px(8.))
+                    .px_1()
+                    .justify_center()
+                    .child(view().h(px(1.)).bg(BORDER))
+            },
+        ))
+        .child(row)
 }
 
 fn other_heading() -> impl IntoElement {
@@ -972,6 +1351,8 @@ fn project_heading(ui: Ui, id: String, is_first: Memo<bool>) -> impl IntoElement
                     .find(|p| p.id == id)
                     .map(|p| p.name.clone())
                     .unwrap_or_default();
+                let offline = s.is_host_offline(s.project_host(&id));
+                let has_remote = s.has_remote_hosts();
                 let summary = folded.then(|| {
                     ui.closing_terminals.with(|closing| {
                         ui.terminal_entries.with(|rows| {
@@ -984,13 +1365,15 @@ fn project_heading(ui: Ui, id: String, is_first: Memo<bool>) -> impl IntoElement
                         })
                     })
                 });
-                (folded, name, summary)
+                (folded, name, offline, has_remote, summary)
             })
         }
     });
     let is_folded = computed(move || info.with(|(f, ..)| *f));
-    let proj_name = computed(move || info.with(|(_, n, _)| n.clone()));
-    let summary = computed(move || info.with(|(_, _, s)| *s));
+    let proj_name = computed(move || info.with(|(_, n, ..)| n.clone()));
+    let is_offline = computed(move || info.with(|(_, _, off, ..)| *off));
+    let in_host_group = computed(move || info.with(|(_, _, _, r, _)| *r));
+    let summary = computed(move || info.with(|(_, _, _, _, s)| *s));
 
     let pid_wt = id.clone();
     let pid_new = id.clone();
@@ -1067,7 +1450,7 @@ fn project_heading(ui: Ui, id: String, is_first: Memo<bool>) -> impl IntoElement
         .on_mouse_leave(move |_: &MouseEvent| hovered.set(false))
         .on_context_menu(move |ev: &nsh_core::ContextMenuEvent| {
             use nsh_core::element::desktop::{MenuItem, popup_menu_at};
-            let (folded, name, _) = info.get_untracked();
+            let (folded, name, offline, _, _) = info.get_untracked();
             let pid_new = pid_ctx_new.clone();
             let pid_wt = pid_ctx_wt.clone();
             let fold_key = fold_ctx.clone();
@@ -1080,8 +1463,10 @@ fn project_heading(ui: Ui, id: String, is_first: Memo<bool>) -> impl IntoElement
                 };
                 let items = vec![
                     MenuItem::new(format!("New Terminal in {name}"))
+                        .disabled(offline)
                         .on_select(move || create(ui, pid_new.clone(), None)),
                     MenuItem::new("New Managed Branch Worktree…")
+                        .disabled(offline)
                         .on_select(move || ui.worktree_modal.set(Some(pid_wt.clone()))),
                     MenuItem::separator(),
                     MenuItem::new(toggle_label).on_select(move || {
@@ -1115,13 +1500,13 @@ fn project_heading(ui: Ui, id: String, is_first: Memo<bool>) -> impl IntoElement
                     .child(tree_icon_button(
                         Icon::Branch,
                         "New branch worktree",
-                        move || ui.pending.get(),
+                        move || ui.pending.get() || is_offline.get(),
                         move |_| ui.worktree_modal.set(Some(pid_wt.clone())),
                     ))
                     .child(tree_icon_button(
                         Icon::Plus,
                         "New terminal",
-                        move || ui.pending.get(),
+                        move || ui.pending.get() || is_offline.get(),
                         move |_| create(ui, pid_new.clone(), None),
                     ))
             },
@@ -1130,8 +1515,9 @@ fn project_heading(ui: Ui, id: String, is_first: Memo<bool>) -> impl IntoElement
     view()
         .flex_col()
         .min_w(px(0.))
+        .pl(move || px(if in_host_group.get() { 6. } else { 0. }))
         .child(when(
-            move || !is_first.get(),
+            move || !is_first.get() && !in_host_group.get(),
             || {
                 view()
                     .h(px(10.))
@@ -1150,7 +1536,9 @@ fn node_content(
     is_first: Memo<bool>,
 ) -> AnyElement {
     match node.get_untracked() {
+        TreeNode::HostHeader(id) => host_heading(ui, id, is_first).into_element(),
         TreeNode::Project(id) => project_heading(ui, id, is_first).into_element(),
+        TreeNode::HostDirectoriesHeader(_) => host_directories_heading().into_element(),
         TreeNode::OtherHeader => other_heading().into_element(),
         TreeNode::Terminal(id) => {
             let id_model = id.clone();
@@ -1341,21 +1729,39 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                 .px_1p5()
                 .pb_1()
                 .child(label("Terminals").font_weight(FontWeight::SEMIBOLD))
-                .child(dynamic(move || match fold_button_mode.get() {
-                    Some(true) => Some(tree_icon_button(
-                        Icon::Collapse,
-                        "Collapse other worktrees",
-                        || false,
-                        move |_| collapse_other_worktrees(ui),
-                    )),
-                    Some(false) => Some(tree_icon_button(
-                        Icon::Expand,
-                        "Expand all worktrees",
-                        || false,
-                        move |_| expand_all_worktrees(ui),
-                    )),
-                    None => None,
-                })),
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .child(dynamic(move || match fold_button_mode.get() {
+                            Some(true) => Some(tree_icon_button(
+                                Icon::Collapse,
+                                "Collapse other worktrees",
+                                || false,
+                                move |_| collapse_other_worktrees(ui),
+                            )),
+                            Some(false) => Some(tree_icon_button(
+                                Icon::Expand,
+                                "Expand all worktrees",
+                                || false,
+                                move |_| expand_all_worktrees(ui),
+                            )),
+                            None => None,
+                        }))
+                        .child(tree_icon_button(
+                            Icon::Plus,
+                            "New terminal…",
+                            move || ui.pending.get(),
+                            move |_| {
+                                if ui.snapshot.with_untracked(|s| s.has_remote_hosts()) {
+                                    super::machine_menu(ui);
+                                } else {
+                                    new_tab(ui);
+                                }
+                            },
+                        )),
+                ),
         )
         .child(
             scroll()

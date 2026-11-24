@@ -908,7 +908,14 @@ impl HostRegistry {
         let mut eh = self.entity_hosts.write().unwrap();
         eh.retain(|k, v| v != host_id || snap_entities.contains_key(k));
         for (k, v) in snap_entities {
-            eh.insert(k.clone(), v.clone());
+            match eh.get(k) {
+                Some(existing) if existing != v => {
+                    eh.insert(canban_types::qualify_host_id(host_id, k), v.clone());
+                }
+                _ => {
+                    eh.insert(k.clone(), v.clone());
+                }
+            }
         }
     }
 
@@ -1832,8 +1839,9 @@ impl HostRegistry {
                 .collect()
         };
 
+        let entity_owners = self.entity_hosts.read().unwrap().clone();
         for (host_id, remote_rt) in remote_states {
-            combined.merge_remote(remote_rt, &host_id);
+            combined.merge_remote_with_owners(remote_rt, &host_id, &entity_owners);
         }
 
         let acknowledged: Vec<(String, String)> = self
@@ -2059,11 +2067,23 @@ impl HostRegistry {
             return match params["scope"].as_str().unwrap_or("") {
                 "global" => "local".into(),
                 "project" => {
-                    let map = self.entity_hosts.read().unwrap();
-                    params["target_id"]
+                    let target_id = params["target_id"]
                         .as_str()
                         .map(str::trim)
-                        .filter(|s| !s.is_empty())
+                        .filter(|s| !s.is_empty());
+                    if let Some(tid) = target_id
+                        && let Some((h, _)) = canban_types::split_qualified_host_id(tid)
+                    {
+                        return h.to_owned();
+                    }
+                    if let Some(pid) = active_project_id.filter(|s| !s.is_empty())
+                        && let Some((h, _)) = canban_types::split_qualified_host_id(pid)
+                        && target_id.is_none()
+                    {
+                        return h.to_owned();
+                    }
+                    let map = self.entity_hosts.read().unwrap();
+                    target_id
                         .and_then(|id| map.get(id).cloned())
                         .or_else(|| {
                             active_project_id
@@ -2094,16 +2114,43 @@ impl HostRegistry {
         {
             return "local".into();
         }
-        let map = self.entity_hosts.read().unwrap();
-        for key in [
+        let candidate_keys = [
             "card_id",
             "project_id",
             "schedule_id",
             "schedule_run_id",
+            "run_id",
+            "source_id",
+            "workflow_id",
+            "revision_id",
             "terminal_id",
             "worktree_id",
             "inherit_terminal_id",
-        ] {
+            "session_id",
+            "batch_id",
+            "execution_id",
+            "comment_id",
+            "notification_id",
+            "target_id",
+            "id",
+        ];
+        for key in candidate_keys {
+            if let Some(id) = params[key]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                && let Some((h, _)) = canban_types::split_qualified_host_id(id)
+            {
+                return h.to_owned();
+            }
+        }
+        if let Some(pid) = active_project_id.filter(|s| !s.is_empty())
+            && let Some((h, _)) = canban_types::split_qualified_host_id(pid)
+        {
+            return h.to_owned();
+        }
+        let map = self.entity_hosts.read().unwrap();
+        for key in candidate_keys {
             if let Some(id) = params[key]
                 .as_str()
                 .map(str::trim)
@@ -2195,6 +2242,9 @@ impl HostRegistry {
         if let Some(obj) = params.as_object_mut() {
             obj.remove("host_id");
         }
+        if host_id != "local" {
+            canban_types::strip_qualified_host_ids(&mut params, &host_id);
+        }
         if host_id == "local" {
             return self.local.call(method, params);
         }
@@ -2272,6 +2322,7 @@ impl HostRegistry {
                             let snap = base_snap.unwrap_or_default();
                             enrich_timeline_with_pending(&mut val, &ops, cid, &snap);
                         }
+                        self.qualify_remote_response(&host_id, &mut val);
                         return Ok(val);
                     }
                     Err(err) if is_connection_error(&err) => {
@@ -2304,15 +2355,17 @@ impl HostRegistry {
                         let snap = base_snap.unwrap_or_default();
                         enrich_timeline_with_pending(&mut val, &ops, cid, &snap);
                     }
+                    self.qualify_remote_response(&host_id, &mut val);
                     return Ok(val);
                 }
-            } else if let Some(val) = cached {
+            } else if let Some(mut val) = cached {
+                self.qualify_remote_response(&host_id, &mut val);
                 return Ok(val);
             }
             return Err(conn_err.unwrap_or_else(unavailable_err));
         }
 
-        let res = match canban_sync::classify_remote_mutation(method, &params) {
+        let mut res = match canban_sync::classify_remote_mutation(method, &params) {
             QueueDecision::RejectOffline(msg) => {
                 if let Some(client) = client_opt {
                     let tcp_token = match client.endpoint() {
@@ -2474,6 +2527,10 @@ impl HostRegistry {
                     | "project.detect_github"
                     | "project.archived.list"
                     | "project.export"
+                    | "git.compare"
+                    | "git.refs"
+                    | "git.log"
+                    | "git.commit_detail"
                     | "git.file_lines"
                     | "review.preview"
                     | "card.resolve.preview"
@@ -2553,22 +2610,35 @@ impl HostRegistry {
             ) {
                 // These replies contain the committed entity/receipt. Do not make
                 // acknowledgement wait for a second full remote state transfer.
+                self.qualify_remote_response(&host_id, &mut res);
                 if matches!(
                     method,
                     "card.create" | "github.issue.add" | "github.item.add" | "terminal.create"
                 ) && let Some(id) = res["id"].as_str()
                 {
+                    let existing_other = {
+                        let eh = self.entity_hosts.read().unwrap();
+                        eh.get(id).is_some_and(|owner| owner != &host_id)
+                    };
+                    let tracked_id = if existing_other {
+                        let q = canban_types::qualify_host_id(&host_id, id);
+                        res["id"] = json!(q);
+                        q
+                    } else {
+                        id.to_owned()
+                    };
                     self.acknowledged_owners
                         .lock()
                         .unwrap()
-                        .insert(id.into(), host_id.clone());
+                        .insert(tracked_id.clone(), host_id.clone());
                     self.entity_hosts
                         .write()
                         .unwrap()
-                        .insert(id.into(), host_id.clone());
+                        .insert(tracked_id, host_id.clone());
                 }
                 self.wake_host(&host_id);
             } else {
+                self.qualify_remote_response(&host_id, &mut res);
                 self.sync_host_now(&host_id);
             }
             self.emit(
@@ -2578,24 +2648,53 @@ impl HostRegistry {
                     card_id: None,
                 },
             );
+        } else {
+            self.qualify_remote_response(&host_id, &mut res);
         }
         Ok(res)
     }
 
+    fn qualify_remote_response(&self, host_id: &str, val: &mut Value) {
+        let eh = self.entity_hosts.read().unwrap();
+        canban_types::qualify_remote_value_ids(val, host_id, &eh);
+    }
+
     pub fn call_all_hosts(&self, method: &str, params: Value) -> Vec<(String, Result<Value>)> {
-        let mut results = Vec::new();
-        results.push(("local".into(), self.local.call(method, params.clone())));
         let remote_clients: Vec<(String, Arc<AppClient>)> = {
             let guard = self.remotes.lock().unwrap();
             guard
                 .iter()
-                .filter_map(|(id, slot)| Some((id.clone(), slot.client.clone()?)))
+                .filter_map(|(id, slot)| {
+                    if !slot.saved.enabled || !slot.connection.is_connected() {
+                        return None;
+                    }
+                    Some((id.clone(), slot.client.clone()?))
+                })
                 .collect()
         };
-        for (hid, client) in remote_clients {
-            results.push((hid, client.call(method, params.clone())));
-        }
-        results
+        std::thread::scope(|scope| {
+            let local_handle =
+                scope.spawn(|| ("local".to_owned(), self.local.call(method, params.clone())));
+            let remote_handles: Vec<_> = remote_clients
+                .into_iter()
+                .map(|(hid, client)| {
+                    let p = params.clone();
+                    scope.spawn(move || (hid, client.call(method, p)))
+                })
+                .collect();
+            let mut results = Vec::with_capacity(1 + remote_handles.len());
+            results.push(
+                local_handle
+                    .join()
+                    .unwrap_or_else(|_| ("local".into(), Err(anyhow::anyhow!("local panicked")))),
+            );
+            for handle in remote_handles {
+                if let Ok(item) = handle.join() {
+                    results.push(item);
+                }
+            }
+            results
+        })
     }
 
     fn mark_host_reconnecting(&self, host_id: &str, err: &anyhow::Error) {

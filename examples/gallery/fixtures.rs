@@ -935,6 +935,7 @@ pub fn workspace() -> canban_types::Snapshot {
     let default_yaml = canban_workflow_engine::source::encode(&default_doc).unwrap();
     let default_def = default_doc.compile().unwrap();
     s.workflow_revisions.push(WorkflowRevision {
+        host_id: String::new(),
         source_yaml: Some(default_yaml),
         id: "delivery:gallery-project:1".into(),
         project_id: "gallery-project".into(),
@@ -944,6 +945,7 @@ pub fn workspace() -> canban_types::Snapshot {
         created_at: now(),
     });
     s.workflow_sources.push(WorkflowSource {
+        host_id: String::new(),
         id: "gallery-project:development.yaml".into(),
         project_id: "gallery-project".into(),
         filename: "development.yaml".into(),
@@ -2581,6 +2583,7 @@ pub fn automation_board() -> canban_types::Snapshot {
     canban_workflow_engine::source::set_backlog_admission(&mut primary, true, Some(2));
     let primary_yaml = canban_workflow_engine::source::encode(&primary).unwrap();
     snapshot.workflow_revisions.push(WorkflowRevision {
+        host_id: String::new(),
         source_yaml: Some(primary_yaml),
         id: "delivery:gallery-project:1".into(),
         project_id: "gallery-project".into(),
@@ -2590,6 +2593,7 @@ pub fn automation_board() -> canban_types::Snapshot {
         created_at: now(),
     });
     snapshot.workflow_sources.push(WorkflowSource {
+        host_id: String::new(),
         id: "gallery-project:development.yaml".into(),
         project_id: "gallery-project".into(),
         filename: "development.yaml".into(),
@@ -2610,6 +2614,7 @@ pub fn automation_board() -> canban_types::Snapshot {
     definition.id = workflow_id.clone();
     definition.name = "Extra Develop helper".into();
     snapshot.workflow_revisions.push(WorkflowRevision {
+        host_id: String::new(),
         source_yaml: Some(raw.into()),
         id: revision_id.clone(),
         project_id: "gallery-project".into(),
@@ -2619,6 +2624,7 @@ pub fn automation_board() -> canban_types::Snapshot {
         created_at: now(),
     });
     snapshot.workflow_sources.push(WorkflowSource {
+        host_id: String::new(),
         id: workflow_id.clone(),
         project_id: "gallery-project".into(),
         filename: "extra-develop.yaml".into(),
@@ -2809,6 +2815,11 @@ pub fn multi_host_workspace(
 ) -> (canban_types::Snapshot, Vec<canban_types::HostSummary>) {
     use canban_types::*;
     let mut local = workspace();
+    let mut local_fiber = local.projects[0].clone();
+    local_fiber.id = "fiber".into();
+    local_fiber.name = "fiber".into();
+    local_fiber.directory = "/Users/jjy/Workspace/fiber".into();
+    local.projects.push(local_fiber);
     local.register_host_entities("local");
 
     let mut remote = Snapshot::default();
@@ -2818,12 +2829,49 @@ pub fn multi_host_workspace(
     remote_proj.directory = "/home/builder/workspaces/core-service".into();
     remote.projects.push(remote_proj);
 
+    let mut remote_fiber = local.projects[0].clone();
+    remote_fiber.id = "fiber".into();
+    remote_fiber.name = "fiber".into();
+    remote_fiber.directory = "/home/builder/workspaces/fiber".into();
+    remote.projects.push(remote_fiber);
+
     let mut remote_card = local.cards[0].clone();
     remote_card.id = "remote-card-1".into();
     remote_card.project_id = "remote-linux-core".into();
     remote_card.number = 12;
     remote_card.title = "Autonomous overnight workflow execution on Home Linux".into();
     remote.cards.push(remote_card);
+
+    let mut remote_fiber_card = local.cards[0].clone();
+    remote_fiber_card.id = "fiber-card-1".into();
+    remote_fiber_card.project_id = "fiber".into();
+    remote_fiber_card.number = 1;
+    remote_fiber_card.title = "Cross-host fiber benchmark".into();
+    remote.cards.push(remote_fiber_card);
+
+    remote.schedule_states.push(ScheduleState {
+        host_id: String::new(),
+        id: "schedule:__global:global:worktree-gc:schedule".into(),
+        project_id: "__global".into(),
+        workflow_id: "global:worktree-gc".into(),
+        workflow_name: "Worktree GC".into(),
+        filename: "worktree-gc.yaml".into(),
+        rule_id: "schedule".into(),
+        cron: "0 3 * * *".into(),
+        timezone: None,
+        overlap: ScheduleOverlap::Skip,
+        creates_card: false,
+        starts_with_script: true,
+        target_column: None,
+        profile_id: None,
+        enabled: true,
+        last_scheduled_at: None,
+        next_run_at: Some(now().saturating_add(3_600_000)),
+        last_run_id: None,
+        run_count: 0,
+        queued_triggers: 0,
+        updated_at: now(),
+    });
 
     let local_summary = HostSummary {
         id: "local".into(),
@@ -2871,7 +2919,7 @@ pub fn multi_host_workspace(
         },
         active_agents: 2,
         max_agents: 12,
-        project_count: 1,
+        project_count: remote.projects.len(),
         reconnect_count: if offline_remote { 2 } else { 0 },
         last_synced_at: Some(now().saturating_sub(if offline_remote { 300_000 } else { 800 })),
         pending_mutations: 0,
@@ -3689,6 +3737,7 @@ pub fn insights_activity() -> canban_ui::insights::model::ActivityInput {
         range_buckets: annual_buckets.clone(),
         baseline_buckets: annual_buckets.clone(),
         annual_buckets,
+        host_totals: std::collections::BTreeMap::new(),
         loaded: true,
     }
 }
@@ -3839,6 +3888,7 @@ steps:
     let global_gc_doc = canban_workflow_engine::source::parse(global_gc_yaml).unwrap();
     let global_gc_def = global_gc_doc.compile().unwrap();
     s.workflow_sources.push(WorkflowSource {
+        host_id: String::new(),
         id: format!("{}:worktree-gc.yaml", canban_types::GLOBAL_PROJECT_ID),
         project_id: canban_types::GLOBAL_PROJECT_ID.into(),
         filename: "worktree-gc.yaml".into(),
@@ -3851,6 +3901,7 @@ steps:
         rules: global_gc_doc.on.clone(),
     });
     s.workflow_revisions.push(WorkflowRevision {
+        host_id: String::new(),
         source_yaml: Some(global_gc_yaml.into()),
         id: "global:worktree-gc:1".into(),
         project_id: canban_types::GLOBAL_PROJECT_ID.into(),
@@ -3862,6 +3913,7 @@ steps:
 
     s.schedule_states = vec![
         ScheduleState {
+            host_id: String::new(),
             id: sid_global_gc.clone(),
             project_id: canban_types::GLOBAL_PROJECT_ID.into(),
             workflow_id: "global:worktree-gc".into(),
@@ -3884,6 +3936,7 @@ steps:
             updated_at: now_ms,
         },
         ScheduleState {
+            host_id: String::new(),
             id: sid_audit.clone(),
             project_id: project_id.clone(),
             workflow_id: "dependency-audit:gallery-project".into(),
@@ -3906,6 +3959,7 @@ steps:
             updated_at: now_ms,
         },
         ScheduleState {
+            host_id: String::new(),
             id: sid_qa.clone(),
             project_id: project_id.clone(),
             workflow_id: "nightly-qa:gallery-project".into(),
@@ -3928,6 +3982,7 @@ steps:
             updated_at: now_ms,
         },
         ScheduleState {
+            host_id: String::new(),
             id: sid_cleanup,
             project_id: project_id.clone(),
             workflow_id: "weekly-cleanup:gallery-project".into(),
@@ -4053,6 +4108,7 @@ steps:
 
     s.scheduled_runs = vec![
         ScheduledRun {
+            host_id: String::new(),
             id: "scheduled:global:gc12".into(),
             schedule_id: sid_global_gc,
             project_id: canban_types::GLOBAL_PROJECT_ID.into(),
@@ -4110,6 +4166,7 @@ steps:
             updated_at: now_ms.saturating_sub(30_000),
         },
         ScheduledRun {
+            host_id: String::new(),
             id: "scheduled:gallery-project:run42".into(),
             schedule_id: sid_audit.clone(),
             project_id: project_id.clone(),
@@ -4143,6 +4200,7 @@ steps:
             updated_at: now_ms,
         },
         ScheduledRun {
+            host_id: String::new(),
             id: "scheduled:gallery-project:run41".into(),
             schedule_id: sid_audit.clone(),
             project_id: project_id.clone(),
@@ -4179,6 +4237,7 @@ steps:
             updated_at: now_ms.saturating_sub(86_350_000),
         },
         ScheduledRun {
+            host_id: String::new(),
             id: "scheduled:gallery-project:run40".into(),
             schedule_id: sid_audit,
             project_id: project_id.clone(),
@@ -4212,6 +4271,7 @@ steps:
             updated_at: now_ms.saturating_sub(172_800_000),
         },
         ScheduledRun {
+            host_id: String::new(),
             id: "scheduled:gallery-project:qa14".into(),
             schedule_id: sid_qa,
             project_id,
@@ -4539,6 +4599,7 @@ pub fn terminal_managed_reclaim() -> canban_types::Snapshot {
         created_at: now(),
     });
     s.scheduled_runs.push(ScheduledRun {
+        host_id: String::new(),
         id: sched_id.clone(),
         schedule_id: "sched-audit".into(),
         project_id: "gallery-project".into(),

@@ -765,7 +765,16 @@ pub fn render_top_bar(ui: Ui) -> impl IntoElement {
                                 .child(
                                     label(move || {
                                         ui.current_project()
-                                            .map(|p| p.name)
+                                            .map(|p| {
+                                                ui.snapshot.with(|s| {
+                                                    let name = s.project_display_name(&p.id);
+                                                    if s.is_host_offline(s.project_host(&p.id)) {
+                                                        format!("{name} (offline)")
+                                                    } else {
+                                                        name
+                                                    }
+                                                })
+                                            })
                                             .unwrap_or_else(|| "Select Project".into())
                                     })
                                     .text_size(px(12.))
@@ -773,28 +782,65 @@ pub fn render_top_bar(ui: Ui) -> impl IntoElement {
                                 )
                                 .child(icon(Icon::ChevronDown).w(px(11.)).h(px(11.)))
                                 .on_press(move |_: &()| {
-                                    let projects =
-                                        ui.snapshot.with_untracked(|s| s.projects.clone());
-                                    if projects.is_empty() {
+                                    let entries = ui.snapshot.with_untracked(|s| {
+                                        let has_remote = s.has_remote_hosts();
+                                        let mut rows = s
+                                            .projects
+                                            .iter()
+                                            .map(|p| {
+                                                let hid = s.project_host(&p.id).to_owned();
+                                                let host_name =
+                                                    s.host_display_name(&hid).to_owned();
+                                                let offline = s.is_host_offline(&hid);
+                                                let label = if has_remote {
+                                                    if offline {
+                                                        format!("{} (offline)", p.name)
+                                                    } else {
+                                                        p.name.clone()
+                                                    }
+                                                } else {
+                                                    p.name.clone()
+                                                };
+                                                (p.id.clone(), hid, host_name, label, has_remote)
+                                            })
+                                            .collect::<Vec<_>>();
+                                        rows.sort_by(|a, b| {
+                                            (a.1 != "local")
+                                                .cmp(&(b.1 != "local"))
+                                                .then_with(|| a.2.cmp(&b.2))
+                                        });
+                                        rows
+                                    });
+                                    if entries.is_empty() {
                                         return;
                                     }
+                                    let cur_pid = ui.project.get_untracked();
                                     ui.spawn(async move {
-                                        let items: Vec<MenuItem> = projects
-                                            .into_iter()
-                                            .map(|p| {
-                                                let pid = p.id.clone();
-                                                let is_cur = ui.project.get_untracked() == pid;
-                                                MenuItem::new(format!(
-                                                    "{}{}",
-                                                    if is_cur { "✓ " } else { "" },
-                                                    p.name
-                                                ))
-                                                .on_select(move || {
+                                        let mut items: Vec<MenuItem> = Vec::new();
+                                        let mut last_host: Option<String> = None;
+                                        for (pid, hid, host_name, proj_label, grouped) in entries {
+                                            if grouped && last_host.as_deref() != Some(hid.as_str())
+                                            {
+                                                if last_host.is_some() {
+                                                    items.push(MenuItem::separator());
+                                                }
+                                                items.push(MenuItem::new(host_name).disabled(true));
+                                                last_host = Some(hid);
+                                            }
+                                            let is_cur = cur_pid == pid;
+                                            let prefix = if is_cur { "✓ " } else { "" };
+                                            let item_label = if grouped {
+                                                format!("  {prefix}{proj_label}")
+                                            } else {
+                                                format!("{prefix}{proj_label}")
+                                            };
+                                            items.push(MenuItem::new(item_label).on_select(
+                                                move || {
                                                     ui.select_project(pid.clone());
                                                     open_compare(ui);
-                                                })
-                                            })
-                                            .collect();
+                                                },
+                                            ));
+                                        }
                                         if let Some(bounds) = project_anchor.measure().await {
                                             popup_menu_at(
                                                 items,
@@ -936,6 +982,7 @@ struct ActiveDeliveryModel {
     has_worktree: bool,
     has_local: bool,
     is_remote: bool,
+    has_remote_hosts: bool,
     pr_view: Option<crate::components::pr_status::CardPrView>,
     pr_summary_state: Option<(String, String)>,
     pr_target: Option<(u64, String)>,
@@ -1020,6 +1067,7 @@ pub fn render_card_delivery_banner(ui: Ui) -> impl IntoElement {
             has_worktree,
             has_local,
             is_remote,
+            has_remote_hosts: ui.snapshot.with(|s| s.has_remote_hosts()),
             pr_view,
             pr_summary_state,
             pr_target,
@@ -1339,11 +1387,22 @@ fn render_active_delivery_banner(ui: Ui, st: State, model: ActiveDeliveryModel) 
 
     if model.has_worktree && !model.is_remote {
         let default_msg_check = default_commit_msg;
+        let has_remote = model.has_remote_hosts;
         right_controls = right_controls
             .child(crate::github::choice(
                 ui,
                 st.delivery_mode,
-                vec![("local", "Local merge"), ("github_pr", "GitHub PR")],
+                vec![
+                    (
+                        "local",
+                        if has_remote {
+                            "Direct merge"
+                        } else {
+                            "Local merge"
+                        },
+                    ),
+                    ("github_pr", "GitHub PR"),
+                ],
             ))
             .child(when(
                 move || st.delivery_mode.get() == "local",

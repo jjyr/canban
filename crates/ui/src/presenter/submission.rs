@@ -360,7 +360,10 @@ impl CommittedWrites {
                 }
             }
             "schedule.toggle" => {
-                if let Ok(state) = serde_json::from_value::<ScheduleState>(reply.clone()) {
+                if let Ok(mut state) = serde_json::from_value::<ScheduleState>(reply.clone()) {
+                    if state.host_id.is_empty() {
+                        state.host_id = host.to_owned();
+                    }
                     self.schedule_states.insert(state.id.clone(), state);
                 }
             }

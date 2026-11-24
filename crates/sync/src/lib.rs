@@ -64,6 +64,12 @@ pub fn classify_remote_mutation(method: &str, params: &Value) -> QueueDecision {
 pub fn is_read_cacheable_method(method: &str) -> bool {
     matches!(
         method,
-        "timeline.list" | "git.compare" | "review.preview" | "git.file_lines"
+        "timeline.list"
+            | "git.compare"
+            | "git.refs"
+            | "git.log"
+            | "git.commit_detail"
+            | "review.preview"
+            | "git.file_lines"
     )
 }

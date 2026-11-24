@@ -61,27 +61,22 @@ pub fn candidates(s: &Snapshot) -> Vec<Candidate> {
 pub fn candidates_with_tags(s: &Snapshot, local_tags: &BTreeSet<String>) -> Vec<Candidate> {
     let known_tags = crate::tags::known_map(s, local_tags, None);
     let project = |id: &str| {
-        let base = s
-            .projects
+        s.projects
             .iter()
             .find(|p| p.id == id)
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| "Unknown Project".into());
-        let hid = s.project_host(id);
-        if hid != "local" && s.has_remote_hosts() {
-            format!("{base} · {}", s.host_display_name(hid))
-        } else {
-            base
-        }
+            .map(|p| s.project_display_name(&p.id))
+            .unwrap_or_else(|| "Unknown Project".into())
     };
+    let has_remote = s.has_remote_hosts();
     let mut rows = Vec::new();
     for p in &s.projects {
         let hid = s.project_host(&p.id);
-        let host_suffix = if hid != "local" && s.has_remote_hosts() {
+        let host_label = s.host_display_name(hid);
+        let host_suffix = if has_remote || s.has_duplicate_project_name(&p.id) {
             if s.is_host_offline(hid) {
-                format!(" · {} (offline)", s.host_display_name(hid))
+                format!(" · {host_label} (offline)")
             } else {
-                format!(" · {}", s.host_display_name(hid))
+                format!(" · {host_label}")
             }
         } else {
             String::new()
@@ -92,11 +87,7 @@ pub fn candidates_with_tags(s: &Snapshot, local_tags: &BTreeSet<String>) -> Vec<
             detail: format!("Project{host_suffix} · {}", p.directory),
             kind: "Project",
             target: Target::Project(p.id.clone()),
-            fields: vec![
-                p.name.clone(),
-                p.directory.clone(),
-                s.host_display_name(hid).to_owned(),
-            ],
+            fields: vec![p.name.clone(), p.directory.clone(), host_label.to_owned()],
             tags: Vec::new(),
         });
     }
@@ -150,9 +141,10 @@ pub fn candidates_with_tags(s: &Snapshot, local_tags: &BTreeSet<String>) -> Vec<
             continue;
         };
         let title = format!("@{} · #{} {}", profile_id, row.card.number, row.card.title);
+        let owner = project(&row.card.project_id);
+        let host_name = s.host_display_name(s.card_host(&row.card.id)).to_owned();
         let detail = format!(
-            "Agent · {} · {} · {}",
-            row.project_name,
+            "Agent · {owner} · {} · {}",
             row.card.stage,
             format_args!(
                 "{} · {}",
@@ -166,7 +158,7 @@ pub fn candidates_with_tags(s: &Snapshot, local_tags: &BTreeSet<String>) -> Vec<
             detail,
             kind: "Agent",
             target: Target::Agent(row.id),
-            fields: vec![title, row.project_name, command_name, row.group],
+            fields: vec![title, owner, host_name, command_name, row.group],
             tags: Vec::new(),
         });
     }
@@ -175,15 +167,27 @@ pub fn candidates_with_tags(s: &Snapshot, local_tags: &BTreeSet<String>) -> Vec<
             && !e.ended()
             && e.card.as_ref().is_none_or(|c| c.active() && !c.resolved())
     }) {
+        let hid = s.terminal_host(&e.saved.id);
+        let host_name = s.host_display_name(hid).to_owned();
+        let owner_label = if let Some(pid) = e.project_id.as_deref()
+            && s.projects.iter().any(|p| p.id == pid)
+        {
+            s.project_display_name(pid)
+        } else if has_remote {
+            format!("{} · {host_name}", e.project_name)
+        } else {
+            e.project_name.clone()
+        };
         rows.push(Candidate {
             id: format!("terminal:{}", e.saved.id),
             title: e.saved.title(),
-            detail: format!("Terminal · {}", e.project_name),
+            detail: format!("Terminal · {owner_label}"),
             kind: "Terminal",
             target: Target::Terminal(e.saved.id.clone()),
             fields: vec![
                 e.saved.title(),
-                e.project_name.clone(),
+                owner_label,
+                host_name,
                 e.cwd().unwrap_or_default(),
             ],
             tags: Vec::new(),
@@ -207,8 +211,18 @@ pub fn candidates_with_tags(s: &Snapshot, local_tags: &BTreeSet<String>) -> Vec<
         });
     }
     for st in &s.schedule_states {
+        let shid = if st.host_id.is_empty() {
+            s.schedule_host(&st.id)
+        } else {
+            st.host_id.as_str()
+        };
+        let host_name = s.host_display_name(shid);
         let scope_label = if is_global_project_id(&st.project_id) {
-            "Global · Host".to_owned()
+            if has_remote {
+                format!("Global · {host_name}")
+            } else {
+                "Global · Host".to_owned()
+            }
         } else {
             project(&st.project_id)
         };

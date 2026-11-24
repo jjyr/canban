@@ -136,6 +136,7 @@ pub(super) fn sync_scope_schedules(
             };
 
             let state = ScheduleState {
+                host_id: String::new(),
                 id: sid,
                 project_id: scope_id.to_owned(),
                 filename: source.filename.clone(),
@@ -407,6 +408,7 @@ pub(super) fn fire_schedule(
         };
         let completed_at = (!wf_run.active()).then_some(now_ms);
         let run = ScheduledRun {
+            host_id: String::new(),
             id: run_id,
             schedule_id: state.id.clone(),
             project_id: project.id.clone(),
@@ -495,6 +497,7 @@ pub(super) fn fire_schedule(
             None
         };
         let run = ScheduledRun {
+            host_id: String::new(),
             id: run_id,
             schedule_id: state.id.clone(),
             project_id: state.project_id.clone(),
@@ -554,6 +557,7 @@ fn record_skipped_overlap(
     let now_ms = now();
     let run_id = format!("scheduled:{}:{}", state.project_id, id());
     let run = ScheduledRun {
+        host_id: String::new(),
         id: run_id.clone(),
         schedule_id: state.id.clone(),
         project_id: state.project_id.clone(),

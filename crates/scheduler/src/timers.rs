@@ -194,6 +194,7 @@ mod tests {
         next_run_at: Option<u64>,
     ) -> ScheduleState {
         ScheduleState {
+            host_id: String::new(),
             id: "schedule:p1:wf1:nightly".into(),
             project_id: "p1".into(),
             workflow_id: "wf1".into(),
@@ -243,6 +244,7 @@ mod tests {
     fn respects_skip_queue_and_allow_overlap_policies() {
         let due = 1_763_200_800_000u64;
         let active_run = ScheduledRun {
+            host_id: String::new(),
             id: "scheduled:p1:r1".into(),
             schedule_id: "schedule:p1:wf1:nightly".into(),
             project_id: "p1".into(),

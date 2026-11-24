@@ -460,9 +460,195 @@ pub fn normalize_daemon_addr(raw: &str) -> String {
     }
 }
 
+pub const QUALIFIED_HOST_PREFIX: &str = "host::";
+
+pub fn qualify_host_id(host_id: &str, raw_id: &str) -> String {
+    if split_qualified_host_id(raw_id).is_some() {
+        return raw_id.to_owned();
+    }
+    format!("{QUALIFIED_HOST_PREFIX}{host_id}::{raw_id}")
+}
+
+pub fn split_qualified_host_id(id: &str) -> Option<(&str, &str)> {
+    id.strip_prefix(QUALIFIED_HOST_PREFIX)?.split_once("::")
+}
+
+pub fn unqualified_entity_id(id: &str) -> &str {
+    split_qualified_host_id(id).map_or(id, |(_, raw)| raw)
+}
+
+fn is_id_json_key(key: &str) -> bool {
+    key == "id"
+        || key == "terminal"
+        || key == "target_id"
+        || key == "merging_cards"
+        || key.ends_with("_id")
+        || key.ends_with("_ids")
+}
+
+/// Unwraps `host::<host_id>::<raw_id>` identifiers inside RPC params before forwarding to `host_id`.
+pub fn strip_qualified_host_ids(value: &mut serde_json::Value, host_id: &str) {
+    match value {
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                strip_qualified_host_ids(item, host_id);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (k, v) in map.iter_mut() {
+                if is_id_json_key(k) {
+                    strip_id_value(v, host_id);
+                } else if matches!(
+                    v,
+                    serde_json::Value::Object(_) | serde_json::Value::Array(_)
+                ) {
+                    strip_qualified_host_ids(v, host_id);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn strip_id_value(value: &mut serde_json::Value, host_id: &str) {
+    match value {
+        serde_json::Value::String(s) => {
+            if let Some((h, raw)) = split_qualified_host_id(s)
+                && h == host_id
+            {
+                *s = raw.to_owned();
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                strip_id_value(item, host_id);
+            }
+        }
+        serde_json::Value::Object(_) => strip_qualified_host_ids(value, host_id),
+        _ => {}
+    }
+}
+
+/// Re-qualifies ID fields in a remote host's JSON response whenever the entity is known to be
+/// qualified in `entity_hosts` or represents a remote `__global` schedule/workflow identifier.
+pub fn qualify_remote_value_ids(
+    value: &mut serde_json::Value,
+    host_id: &str,
+    entity_hosts: &BTreeMap<String, String>,
+) {
+    match value {
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                qualify_remote_value_ids(item, host_id, entity_hosts);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (k, v) in map.iter_mut() {
+                if is_id_json_key(k) {
+                    qualify_id_value(v, host_id, entity_hosts);
+                } else if matches!(
+                    v,
+                    serde_json::Value::Object(_) | serde_json::Value::Array(_)
+                ) {
+                    qualify_remote_value_ids(v, host_id, entity_hosts);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_remote_global_qualified_target(raw: &str) -> bool {
+    raw.starts_with("schedule:__global:")
+        || raw.starts_with("scheduled:__global:")
+        || raw.starts_with("__global:")
+}
+
+fn qualify_id_value(
+    value: &mut serde_json::Value,
+    host_id: &str,
+    entity_hosts: &BTreeMap<String, String>,
+) {
+    match value {
+        serde_json::Value::String(s) => {
+            if s.is_empty() || split_qualified_host_id(s).is_some() {
+                return;
+            }
+            let q = qualify_host_id(host_id, s);
+            if entity_hosts.get(&q).map(String::as_str) == Some(host_id)
+                || is_remote_global_qualified_target(s)
+            {
+                *s = q;
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                qualify_id_value(item, host_id, entity_hosts);
+            }
+        }
+        serde_json::Value::Object(_) => qualify_remote_value_ids(value, host_id, entity_hosts),
+        _ => {}
+    }
+}
+
+fn remap_string(id: &mut String, map: &std::collections::HashMap<String, String>) {
+    if let Some(mapped) = map.get(id.as_str()) {
+        *id = mapped.clone();
+    }
+}
+
+fn remap_opt(id: &mut Option<String>, map: &std::collections::HashMap<String, String>) {
+    if let Some(cur) = id.as_deref()
+        && let Some(mapped) = map.get(cur)
+    {
+        *id = Some(mapped.clone());
+    }
+}
+
+fn resolve_runtime_id(
+    entity_hosts: &BTreeMap<String, String>,
+    host_id: &str,
+    raw_id: &str,
+    term_map: &std::collections::HashMap<String, String>,
+) -> String {
+    if let Some(mapped) = term_map.get(raw_id) {
+        return mapped.clone();
+    }
+    let qualified = qualify_host_id(host_id, raw_id);
+    if entity_hosts.get(&qualified).map(String::as_str) == Some(host_id)
+        || entity_hosts
+            .get(raw_id)
+            .is_some_and(|owner| owner != host_id)
+    {
+        qualified
+    } else {
+        raw_id.to_owned()
+    }
+}
+
 impl Snapshot {
     pub fn register_host_entities(&mut self, host_id: &str) {
         let h = host_id.to_owned();
+        for s in &mut self.workflow_sources {
+            if s.host_id.is_empty() {
+                s.host_id = h.clone();
+            }
+        }
+        for r in &mut self.workflow_revisions {
+            if r.host_id.is_empty() {
+                r.host_id = h.clone();
+            }
+        }
+        for st in &mut self.schedule_states {
+            if st.host_id.is_empty() {
+                st.host_id = h.clone();
+            }
+        }
+        for sr in &mut self.scheduled_runs {
+            if sr.host_id.is_empty() {
+                sr.host_id = h.clone();
+            }
+        }
         for p in &self.projects {
             self.entity_hosts.insert(p.id.clone(), h.clone());
         }
@@ -481,6 +667,9 @@ impl Snapshot {
         for s in &self.workflow_sources {
             self.entity_hosts.insert(s.id.clone(), h.clone());
         }
+        for r in &self.workflow_revisions {
+            self.entity_hosts.insert(r.id.clone(), h.clone());
+        }
         for cs in &self.configuration_sessions {
             self.entity_hosts.insert(cs.id.clone(), h.clone());
         }
@@ -493,78 +682,477 @@ impl Snapshot {
         for sr in &self.scheduled_runs {
             self.entity_hosts.insert(sr.id.clone(), h.clone());
         }
+        for gi in &self.github_issues {
+            self.entity_hosts.insert(gi.id.clone(), h.clone());
+        }
+        for cr in &self.card_reads {
+            self.entity_hosts.insert(cr.id.clone(), h.clone());
+        }
+        for rem in &self.reminders {
+            self.entity_hosts.insert(rem.id.clone(), h.clone());
+        }
+        for rep in &self.reports {
+            self.entity_hosts.insert(rep.id.clone(), h.clone());
+        }
+        for note in &self.notes {
+            self.entity_hosts.insert(note.id.clone(), h.clone());
+        }
+        for notice in &self.notices {
+            self.entity_hosts.insert(notice.id.clone(), h.clone());
+        }
+        for art in &self.artifacts {
+            self.entity_hosts.insert(art.id.clone(), h.clone());
+        }
+        for conv in &self.conversations {
+            self.entity_hosts.insert(conv.id.clone(), h.clone());
+        }
+        for q in &self.questions {
+            self.entity_hosts.insert(q.id.clone(), h.clone());
+        }
+        for ne in &self.note_events {
+            self.entity_hosts.insert(ne.id.clone(), h.clone());
+        }
+        for rd in &self.review_drafts {
+            self.entity_hosts.insert(rd.card_id.clone(), h.clone());
+        }
     }
 
     pub fn merge_remote_snapshot(&mut self, mut remote: Snapshot, summary: HostSummary) {
+        use std::collections::{HashMap, HashSet};
+
         let host_id = summary.id.clone();
         remote.register_host_entities(&host_id);
-        self.github_sync.extend(remote.github_sync.clone());
-        for (k, v) in remote.entity_hosts {
-            self.entity_hosts.insert(k, v);
-        }
-        for (key, entries) in remote.scoped_env {
-            if key.starts_with("project:") {
-                self.scoped_env.insert(key, entries);
-            } else if let Some(pid) = key.strip_prefix("agent:") {
-                self.scoped_env
-                    .insert(Self::agent_env_key(&host_id, pid), entries);
-            }
-        }
-        self.host_summaries.insert(host_id, summary);
+        self.host_summaries.insert(host_id.clone(), summary);
 
-        let existing_projects: std::collections::HashSet<String> =
+        let existing_projects: HashSet<String> =
             self.projects.iter().map(|p| p.id.clone()).collect();
-        for p in remote.projects {
+        let existing_cards: HashSet<String> = self.cards.iter().map(|c| c.id.clone()).collect();
+        let existing_terminals: HashSet<String> =
+            self.terminals.iter().map(|t| t.id.clone()).collect();
+        let existing_worktrees: HashSet<String> =
+            self.worktrees.iter().map(|w| w.id.clone()).collect();
+        let existing_workflow_sources: HashSet<String> =
+            self.workflow_sources.iter().map(|w| w.id.clone()).collect();
+        let existing_workflow_revisions: HashSet<String> = self
+            .workflow_revisions
+            .iter()
+            .map(|r| r.id.clone())
+            .collect();
+        let existing_workflow_runs: HashSet<String> =
+            self.workflow_runs.iter().map(|r| r.id.clone()).collect();
+        let existing_config_sessions: HashSet<String> = self
+            .configuration_sessions
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+        let existing_merge_batches: HashSet<String> =
+            self.merge_batches.iter().map(|b| b.id.clone()).collect();
+        let existing_schedule_states: HashSet<String> =
+            self.schedule_states.iter().map(|s| s.id.clone()).collect();
+        let existing_scheduled_runs: HashSet<String> =
+            self.scheduled_runs.iter().map(|r| r.id.clone()).collect();
+        let existing_github_issues: HashSet<String> =
+            self.github_issues.iter().map(|g| g.id.clone()).collect();
+        let existing_card_reads: HashSet<String> =
+            self.card_reads.iter().map(|c| c.id.clone()).collect();
+        let existing_reminders: HashSet<String> =
+            self.reminders.iter().map(|r| r.id.clone()).collect();
+        let existing_reports: HashSet<String> = self.reports.iter().map(|r| r.id.clone()).collect();
+        let existing_notes: HashSet<String> = self.notes.iter().map(|n| n.id.clone()).collect();
+        let existing_notices: HashSet<String> = self.notices.iter().map(|n| n.id.clone()).collect();
+        let existing_artifacts: HashSet<String> =
+            self.artifacts.iter().map(|a| a.id.clone()).collect();
+        let existing_conversations: HashSet<String> =
+            self.conversations.iter().map(|c| c.id.clone()).collect();
+        let existing_questions: HashSet<String> =
+            self.questions.iter().map(|q| q.id.clone()).collect();
+        let existing_note_events: HashSet<String> =
+            self.note_events.iter().map(|e| e.id.clone()).collect();
+        let existing_review_drafts: HashSet<String> = self
+            .review_drafts
+            .iter()
+            .map(|d| d.card_id.clone())
+            .collect();
+
+        let mut project_map: HashMap<String, String> = HashMap::new();
+        let mut card_map: HashMap<String, String> = HashMap::new();
+        let mut terminal_map: HashMap<String, String> = HashMap::new();
+        let mut worktree_map: HashMap<String, String> = HashMap::new();
+        let mut workflow_source_map: HashMap<String, String> = HashMap::new();
+        let mut workflow_revision_map: HashMap<String, String> = HashMap::new();
+        let mut workflow_run_map: HashMap<String, String> = HashMap::new();
+        let mut schedule_map: HashMap<String, String> = HashMap::new();
+        let mut scheduled_run_map: HashMap<String, String> = HashMap::new();
+        let mut note_map: HashMap<String, String> = HashMap::new();
+
+        // 1. Projects
+        for mut p in remote.projects {
+            if existing_projects.contains(&p.id) {
+                let q = qualify_host_id(&host_id, &p.id);
+                project_map.insert(p.id, q.clone());
+                p.id = q;
+            }
+            self.entity_hosts
+                .entry(p.id.clone())
+                .or_insert_with(|| host_id.clone());
             if !existing_projects.contains(&p.id) {
                 self.projects.push(p);
             }
         }
 
-        let existing_cards: std::collections::HashSet<String> =
-            self.cards.iter().map(|c| c.id.clone()).collect();
-        for c in remote.cards {
-            if !existing_cards.contains(&c.id) {
-                self.cards.push(c);
+        // 2. Cards (build card_map before runs/terminals/comments/drafts)
+        for mut c in remote.cards {
+            remap_string(&mut c.project_id, &project_map);
+            if existing_cards.contains(&c.id) {
+                let q = qualify_host_id(&host_id, &c.id);
+                card_map.insert(c.id, q.clone());
+                c.id = q;
+            }
+            self.cards.push(c);
+        }
+
+        // 3. Worktrees
+        for mut w in remote.worktrees {
+            remap_string(&mut w.project_id, &project_map);
+            if existing_worktrees.contains(&w.id) {
+                let q = qualify_host_id(&host_id, &w.id);
+                worktree_map.insert(w.id, q.clone());
+                w.id = q;
+            }
+            self.entity_hosts
+                .entry(w.id.clone())
+                .or_insert_with(|| host_id.clone());
+            self.worktrees.push(w);
+        }
+
+        // 4. Workflow sources & revisions (always qualify remote __global entries or collisions)
+        for mut wr in remote.workflow_revisions {
+            if wr.host_id.is_empty() {
+                wr.host_id = host_id.clone();
+            }
+            let is_global = wr.project_id == GLOBAL_PROJECT_ID;
+            remap_string(&mut wr.project_id, &project_map);
+            if is_global || existing_workflow_revisions.contains(&wr.id) {
+                let q = qualify_host_id(&host_id, &wr.id);
+                workflow_revision_map.insert(wr.id, q.clone());
+                wr.id = q;
+            }
+            self.entity_hosts
+                .entry(wr.id.clone())
+                .or_insert_with(|| host_id.clone());
+            self.workflow_revisions.push(wr);
+        }
+        for mut ws in remote.workflow_sources {
+            if ws.host_id.is_empty() {
+                ws.host_id = host_id.clone();
+            }
+            let is_global = ws.project_id == GLOBAL_PROJECT_ID;
+            remap_string(&mut ws.project_id, &project_map);
+            remap_string(&mut ws.revision_id, &workflow_revision_map);
+            if is_global || existing_workflow_sources.contains(&ws.id) {
+                let q = qualify_host_id(&host_id, &ws.id);
+                workflow_source_map.insert(ws.id, q.clone());
+                ws.id = q;
+            }
+            self.entity_hosts
+                .entry(ws.id.clone())
+                .or_insert_with(|| host_id.clone());
+            self.workflow_sources.push(ws);
+        }
+
+        // 5. Terminals (and AgentRuns) & ScheduledRuns & ScheduleStates
+        // Pre-pass schedule_states/runs IDs and workflow_runs IDs so cross-references align.
+        for sr in &remote.scheduled_runs {
+            let is_global = sr.project_id == GLOBAL_PROJECT_ID;
+            if is_global || existing_scheduled_runs.contains(&sr.id) {
+                scheduled_run_map.insert(sr.id.clone(), qualify_host_id(&host_id, &sr.id));
+            }
+        }
+        for ss in &remote.schedule_states {
+            let is_global = ss.project_id == GLOBAL_PROJECT_ID;
+            if is_global || existing_schedule_states.contains(&ss.id) {
+                schedule_map.insert(ss.id.clone(), qualify_host_id(&host_id, &ss.id));
+            }
+        }
+        for r in &remote.workflow_runs {
+            if existing_workflow_runs.contains(&r.id) {
+                workflow_run_map.insert(r.id.clone(), qualify_host_id(&host_id, &r.id));
+            }
+        }
+        for t in &remote.terminals {
+            if existing_terminals.contains(&t.id) {
+                terminal_map.insert(t.id.clone(), qualify_host_id(&host_id, &t.id));
             }
         }
 
-        let existing_terminals: std::collections::HashSet<String> =
-            self.terminals.iter().map(|t| t.id.clone()).collect();
-        for t in remote.terminals {
-            if !existing_terminals.contains(&t.id) {
-                self.terminals.push(t);
+        // Fixup Card schedule_source refs now that schedule_map / scheduled_run_map are populated.
+        for mut c_fix in std::mem::take(&mut self.cards) {
+            if !existing_cards.contains(&c_fix.id) || card_map.values().any(|v| v == &c_fix.id) {
+                // Card either wasn't in `self` originally or was remapped for this remote host.
+                if let Some(ref mut ss_ref) = c_fix.schedule_source {
+                    remap_string(&mut ss_ref.schedule_id, &schedule_map);
+                    remap_string(&mut ss_ref.run_id, &scheduled_run_map);
+                }
+            }
+            self.cards.push(c_fix);
+        }
+
+        for c in &self.cards {
+            if !existing_cards.contains(&c.id) || card_map.values().any(|v| v == &c.id) {
+                self.entity_hosts
+                    .entry(c.id.clone())
+                    .or_insert_with(|| host_id.clone());
             }
         }
 
-        self.terminal_contexts.extend(remote.terminal_contexts);
-        for mc in remote.merging_cards {
+        for mut r in remote.workflow_runs {
+            remap_string(&mut r.project_id, &project_map);
+            remap_opt(&mut r.card_id, &card_map);
+            remap_opt(&mut r.terminal_id, &terminal_map);
+            remap_string(&mut r.id, &workflow_run_map);
+            self.entity_hosts
+                .entry(r.id.clone())
+                .or_insert_with(|| host_id.clone());
+            self.workflow_runs.push(r);
+        }
+
+        for mut ss in remote.schedule_states {
+            if ss.host_id.is_empty() {
+                ss.host_id = host_id.clone();
+            }
+            remap_string(&mut ss.project_id, &project_map);
+            remap_string(&mut ss.id, &schedule_map);
+            remap_opt(&mut ss.last_run_id, &scheduled_run_map);
+            self.entity_hosts
+                .entry(ss.id.clone())
+                .or_insert_with(|| host_id.clone());
+            self.schedule_states.push(ss);
+        }
+
+        for mut sr in remote.scheduled_runs {
+            if sr.host_id.is_empty() {
+                sr.host_id = host_id.clone();
+            }
+            remap_string(&mut sr.project_id, &project_map);
+            remap_string(&mut sr.schedule_id, &schedule_map);
+            remap_opt(&mut sr.card_id, &card_map);
+            remap_opt(&mut sr.workflow_run_id, &workflow_run_map);
+            remap_opt(&mut sr.terminal_id, &terminal_map);
+            remap_string(&mut sr.id, &scheduled_run_map);
+            self.entity_hosts
+                .entry(sr.id.clone())
+                .or_insert_with(|| host_id.clone());
+            self.scheduled_runs.push(sr);
+        }
+
+        for mut t in remote.terminals {
+            remap_string(&mut t.id, &terminal_map);
+            remap_opt(&mut t.origin_project_id, &project_map);
+            remap_opt(&mut t.origin_card_id, &card_map);
+            if let Some(ref mut a) = t.agent {
+                remap_string(&mut a.project_id, &project_map);
+                remap_string(&mut a.card_id, &card_map);
+                remap_opt(&mut a.workflow_run_id, &workflow_run_map);
+                remap_opt(&mut a.terminal, &terminal_map);
+            }
+            self.entity_hosts
+                .entry(t.id.clone())
+                .or_insert_with(|| host_id.clone());
+            self.terminals.push(t);
+        }
+
+        for mut ctx in remote.terminal_contexts {
+            remap_string(&mut ctx.terminal_id, &terminal_map);
+            remap_opt(&mut ctx.project_id, &project_map);
+            remap_opt(&mut ctx.card_id, &card_map);
+            remap_opt(&mut ctx.worktree_id, &worktree_map);
+            self.terminal_contexts.push(ctx);
+        }
+
+        for mut mc in remote.merging_cards {
+            remap_string(&mut mc, &card_map);
             if !self.merging_cards.contains(&mc) {
                 self.merging_cards.push(mc);
             }
         }
-        self.worktrees.extend(remote.worktrees);
-        self.workflow_runs.extend(remote.workflow_runs);
-        self.workflow_sources.extend(remote.workflow_sources);
-        self.workflow_revisions.extend(remote.workflow_revisions);
-        self.event_subscriptions.extend(remote.event_subscriptions);
-        self.configuration_sessions
-            .extend(remote.configuration_sessions);
-        self.merge_batches.extend(remote.merge_batches);
-        self.schedule_states.extend(remote.schedule_states);
-        self.scheduled_runs.extend(remote.scheduled_runs);
-        self.card_reads.extend(remote.card_reads);
-        self.github_issues.extend(remote.github_issues);
-        self.card_summaries.extend(remote.card_summaries);
-        self.reminders.extend(remote.reminders);
-        self.sound_event_ids.extend(remote.sound_event_ids);
-        self.reports.extend(remote.reports);
-        self.notes.extend(remote.notes);
-        self.notices.extend(remote.notices);
-        self.artifacts.extend(remote.artifacts);
-        self.conversations.extend(remote.conversations);
-        self.questions.extend(remote.questions);
-        self.note_events.extend(remote.note_events);
-        for status in remote.reclaim_status {
+
+        for mut cs in remote.configuration_sessions {
+            remap_string(&mut cs.project_id, &project_map);
+            if existing_config_sessions.contains(&cs.id) {
+                cs.id = qualify_host_id(&host_id, &cs.id);
+            }
+            self.entity_hosts
+                .entry(cs.id.clone())
+                .or_insert_with(|| host_id.clone());
+            self.configuration_sessions.push(cs);
+        }
+
+        for mut mb in remote.merge_batches {
+            remap_string(&mut mb.project_id, &project_map);
+            for item in &mut mb.items {
+                remap_string(&mut item.card_id, &card_map);
+                remap_string(&mut item.workflow_run_id, &workflow_run_map);
+            }
+            if existing_merge_batches.contains(&mb.id) {
+                mb.id = qualify_host_id(&host_id, &mb.id);
+            }
+            self.entity_hosts
+                .entry(mb.id.clone())
+                .or_insert_with(|| host_id.clone());
+            self.merge_batches.push(mb);
+        }
+
+        for mut cr in remote.card_reads {
+            remap_string(&mut cr.project_id, &project_map);
+            remap_string(&mut cr.card_id, &card_map);
+            if existing_card_reads.contains(&cr.id) {
+                cr.id = qualify_host_id(&host_id, &cr.id);
+            }
+            self.entity_hosts
+                .entry(cr.id.clone())
+                .or_insert_with(|| host_id.clone());
+            self.card_reads.push(cr);
+        }
+
+        for mut gi in remote.github_issues {
+            remap_string(&mut gi.project_id, &project_map);
+            if existing_github_issues.contains(&gi.id) {
+                gi.id = qualify_host_id(&host_id, &gi.id);
+            }
+            self.entity_hosts
+                .entry(gi.id.clone())
+                .or_insert_with(|| host_id.clone());
+            self.github_issues.push(gi);
+        }
+
+        for (mut cid, summary) in remote.card_summaries {
+            remap_string(&mut cid, &card_map);
+            self.card_summaries.entry(cid).or_insert(summary);
+        }
+
+        for mut rem in remote.reminders {
+            remap_string(&mut rem.project_id, &project_map);
+            remap_string(&mut rem.card_id, &card_map);
+            if existing_reminders.contains(&rem.id) {
+                rem.id = qualify_host_id(&host_id, &rem.id);
+            }
+            self.entity_hosts
+                .entry(rem.id.clone())
+                .or_insert_with(|| host_id.clone());
+            self.reminders.push(rem);
+        }
+
+        for sid in remote.sound_event_ids {
+            if !self.sound_event_ids.contains(&sid) {
+                self.sound_event_ids.push(sid);
+            }
+        }
+
+        for mut rep in remote.reports {
+            remap_string(&mut rep.project_id, &project_map);
+            remap_string(&mut rep.card_id, &card_map);
+            remap_opt(&mut rep.terminal_id, &terminal_map);
+            remap_opt(&mut rep.workflow_run_id, &workflow_run_map);
+            if existing_reports.contains(&rep.id) {
+                rep.id = qualify_host_id(&host_id, &rep.id);
+            }
+            self.entity_hosts
+                .entry(rep.id.clone())
+                .or_insert_with(|| host_id.clone());
+            self.reports.push(rep);
+        }
+
+        for mut note in remote.notes {
+            remap_string(&mut note.project_id, &project_map);
+            for cid in &mut note.card_ids {
+                remap_string(cid, &card_map);
+            }
+            if existing_notes.contains(&note.id) {
+                let q = qualify_host_id(&host_id, &note.id);
+                note_map.insert(note.id, q.clone());
+                note.id = q;
+            }
+            self.entity_hosts
+                .entry(note.id.clone())
+                .or_insert_with(|| host_id.clone());
+            self.notes.push(note);
+        }
+
+        for mut notice in remote.notices {
+            remap_string(&mut notice.project_id, &project_map);
+            remap_string(&mut notice.card_id, &card_map);
+            if existing_notices.contains(&notice.id) {
+                notice.id = qualify_host_id(&host_id, &notice.id);
+            }
+            self.entity_hosts
+                .entry(notice.id.clone())
+                .or_insert_with(|| host_id.clone());
+            self.notices.push(notice);
+        }
+
+        for mut art in remote.artifacts {
+            remap_string(&mut art.project_id, &project_map);
+            remap_string(&mut art.card_id, &card_map);
+            if existing_artifacts.contains(&art.id) {
+                art.id = qualify_host_id(&host_id, &art.id);
+            }
+            self.entity_hosts
+                .entry(art.id.clone())
+                .or_insert_with(|| host_id.clone());
+            self.artifacts.push(art);
+        }
+
+        for mut conv in remote.conversations {
+            remap_string(&mut conv.project_id, &project_map);
+            remap_string(&mut conv.card_id, &card_map);
+            if existing_conversations.contains(&conv.id) {
+                conv.id = qualify_host_id(&host_id, &conv.id);
+            }
+            self.entity_hosts
+                .entry(conv.id.clone())
+                .or_insert_with(|| host_id.clone());
+            self.conversations.push(conv);
+        }
+
+        for mut q in remote.questions {
+            remap_string(&mut q.project_id, &project_map);
+            remap_string(&mut q.card_id, &card_map);
+            remap_opt(&mut q.terminal_id, &terminal_map);
+            if existing_questions.contains(&q.id) {
+                q.id = qualify_host_id(&host_id, &q.id);
+            }
+            self.entity_hosts
+                .entry(q.id.clone())
+                .or_insert_with(|| host_id.clone());
+            self.questions.push(q);
+        }
+
+        for mut ne in remote.note_events {
+            remap_string(&mut ne.project_id, &project_map);
+            remap_string(&mut ne.note_id, &note_map);
+            remap_opt(&mut ne.card_id, &card_map);
+            if existing_note_events.contains(&ne.id) {
+                ne.id = qualify_host_id(&host_id, &ne.id);
+            }
+            self.entity_hosts
+                .entry(ne.id.clone())
+                .or_insert_with(|| host_id.clone());
+            self.note_events.push(ne);
+        }
+
+        for mut rd in remote.review_drafts {
+            remap_string(&mut rd.card_id, &card_map);
+            if existing_review_drafts.contains(&rd.card_id) {
+                continue;
+            }
+            self.entity_hosts
+                .entry(rd.card_id.clone())
+                .or_insert_with(|| host_id.clone());
+            self.review_drafts.push(rd);
+        }
+
+        for mut status in remote.reclaim_status {
+            remap_string(&mut status.terminal_id, &terminal_map);
             if !self
                 .reclaim_status
                 .iter()
@@ -573,10 +1161,42 @@ impl Snapshot {
                 self.reclaim_status.push(status);
             }
         }
-        self.pending_sync.extend(remote.pending_sync);
+
+        for (mut cid, mark) in remote.pending_sync {
+            remap_string(&mut cid, &card_map);
+            self.pending_sync.entry(cid).or_insert(mark);
+        }
+
+        for (mut k, v) in remote.github_sync {
+            remap_string(&mut k, &project_map);
+            self.github_sync.entry(k).or_insert(v);
+        }
+
+        for (key, entries) in remote.scoped_env {
+            if let Some(pid) = key.strip_prefix("project:") {
+                let target_pid = project_map.get(pid).map(String::as_str).unwrap_or(pid);
+                self.scoped_env
+                    .entry(Self::project_env_key(target_pid))
+                    .or_insert(entries);
+            } else if let Some(pid) = key.strip_prefix("agent:") {
+                self.scoped_env
+                    .entry(Self::agent_env_key(&host_id, pid))
+                    .or_insert(entries);
+            }
+        }
+
+        self.event_subscriptions.extend(remote.event_subscriptions);
     }
 
     pub fn host_of<'a>(&'a self, entity_id: &str) -> &'a str {
+        if let Some((h, _)) = split_qualified_host_id(entity_id) {
+            if h == "local" {
+                return "local";
+            }
+            if let Some((k, _)) = self.host_summaries.get_key_value(h) {
+                return k.as_str();
+            }
+        }
         self.entity_hosts
             .get(entity_id)
             .map(String::as_str)
@@ -588,9 +1208,77 @@ impl Snapshot {
         self.host_of(project_id)
     }
 
+    pub fn schedule_host<'a>(&'a self, schedule_id: &str) -> &'a str {
+        if let Some(st) = self
+            .schedule_states
+            .iter()
+            .find(|s| s.id == schedule_id && !s.host_id.is_empty())
+        {
+            return st.host_id.as_str();
+        }
+        self.host_of(schedule_id)
+    }
+
+    pub fn workflow_source_host<'a>(&'a self, source_id: &str) -> &'a str {
+        if let Some(ws) = self
+            .workflow_sources
+            .iter()
+            .find(|s| s.id == source_id && !s.host_id.is_empty())
+        {
+            return ws.host_id.as_str();
+        }
+        self.host_of(source_id)
+    }
+
+    pub fn has_duplicate_project_name(&self, project_id: &str) -> bool {
+        let Some(target) = self
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .map(|p| p.name.trim())
+        else {
+            return false;
+        };
+        self.projects
+            .iter()
+            .filter(|p| p.name.trim() == target)
+            .count()
+            > 1
+    }
+
+    pub fn project_host_badge(&self, project_id: &str) -> Option<String> {
+        let hid = self.project_host(project_id);
+        if self.has_duplicate_project_name(project_id)
+            || (hid != "local" && self.has_remote_hosts())
+        {
+            Some(self.host_display_name(hid).to_owned())
+        } else {
+            None
+        }
+    }
+
+    pub fn project_display_name(&self, project_id: &str) -> String {
+        let Some(p) = self.projects.iter().find(|p| p.id == project_id) else {
+            return project_id.to_owned();
+        };
+        if let Some(badge) = self.project_host_badge(project_id) {
+            format!("{} · {badge}", p.name)
+        } else {
+            p.name.clone()
+        }
+    }
+
     pub fn card_host<'a>(&'a self, card_id: &str) -> &'a str {
         if let Some(h) = self.entity_hosts.get(card_id).filter(|s| !s.is_empty()) {
             return h.as_str();
+        }
+        if let Some((h, _)) = split_qualified_host_id(card_id) {
+            if h == "local" {
+                return "local";
+            }
+            if let Some((k, _)) = self.host_summaries.get_key_value(h) {
+                return k.as_str();
+            }
         }
         if let Some(card) = self.cards.iter().find(|c| c.id == card_id) {
             return self.project_host(&card.project_id);
@@ -601,6 +1289,14 @@ impl Snapshot {
     pub fn terminal_host<'a>(&'a self, terminal_id: &str) -> &'a str {
         if let Some(h) = self.entity_hosts.get(terminal_id).filter(|s| !s.is_empty()) {
             return h.as_str();
+        }
+        if let Some((h, _)) = split_qualified_host_id(terminal_id) {
+            if h == "local" {
+                return "local";
+            }
+            if let Some((k, _)) = self.host_summaries.get_key_value(h) {
+                return k.as_str();
+            }
         }
         if let Some(t) = self.terminals.iter().find(|t| t.id == terminal_id)
             && let Some(pid) = self.terminal_project_id(t)
@@ -674,6 +1370,7 @@ impl Snapshot {
             .chain(self.worktrees.iter().map(|w| w.id.as_str()))
             .chain(self.workflow_runs.iter().map(|r| r.id.as_str()))
             .chain(self.workflow_sources.iter().map(|s| s.id.as_str()))
+            .chain(self.workflow_revisions.iter().map(|r| r.id.as_str()))
             .chain(self.configuration_sessions.iter().map(|c| c.id.as_str()))
             .chain(self.merge_batches.iter().map(|b| b.id.as_str()))
             .chain(self.schedule_states.iter().map(|s| s.id.as_str()))
@@ -688,7 +1385,7 @@ impl Snapshot {
             }
         }
         for (tid, host) in runtime.terminal_hosts {
-            self.entity_hosts.insert(tid, host);
+            self.entity_hosts.entry(tid).or_insert(host);
         }
         for (host_id, active) in runtime.host_active_agents {
             if let Some(summary) = self.host_summaries.get_mut(&host_id) {
@@ -713,22 +1410,96 @@ impl RuntimeState {
         }
     }
 
-    pub fn merge_remote(&mut self, mut remote: RuntimeState, host_id: &str) {
+    pub fn merge_remote(&mut self, remote: RuntimeState, host_id: &str) {
+        let empty = BTreeMap::new();
+        self.merge_remote_with_owners(remote, host_id, &empty);
+    }
+
+    pub fn merge_remote_for_snapshot(
+        &mut self,
+        remote: RuntimeState,
+        host_id: &str,
+        snapshot: Option<&Snapshot>,
+    ) {
+        if let Some(s) = snapshot {
+            self.merge_remote_with_owners(remote, host_id, &s.entity_hosts);
+        } else {
+            self.merge_remote(remote, host_id);
+        }
+    }
+
+    pub fn merge_remote_with_owners(
+        &mut self,
+        mut remote: RuntimeState,
+        host_id: &str,
+        entity_hosts: &BTreeMap<String, String>,
+    ) {
+        use std::collections::{HashMap, HashSet};
+
         remote.register_host(host_id);
-        self.terminal_hosts.extend(remote.terminal_hosts);
+        let existing_terminals: HashSet<String> =
+            self.terminals.iter().map(|t| t.id.clone()).collect();
+        let mut term_map: HashMap<String, String> = HashMap::new();
+
+        for t in &remote.terminals {
+            let q = qualify_host_id(host_id, &t.id);
+            if existing_terminals.contains(&t.id)
+                || entity_hosts.get(&q).map(String::as_str) == Some(host_id)
+                || entity_hosts
+                    .get(&t.id)
+                    .is_some_and(|owner| owner != host_id)
+            {
+                term_map.insert(t.id.clone(), q);
+            }
+        }
+
+        for (raw_tid, host) in remote.terminal_hosts {
+            let tid = resolve_runtime_id(entity_hosts, host_id, &raw_tid, &term_map);
+            self.terminal_hosts.entry(tid).or_insert(host);
+        }
         self.host_active_agents.extend(remote.host_active_agents);
 
-        let existing_terminals: std::collections::HashSet<String> =
-            self.terminals.iter().map(|t| t.id.clone()).collect();
-        for t in remote.terminals {
+        for mut t in remote.terminals {
+            t.id = resolve_runtime_id(entity_hosts, host_id, &t.id, &term_map);
+            if let Some(ref mut pid) = t.origin_project_id {
+                *pid = resolve_runtime_id(entity_hosts, host_id, pid, &term_map);
+            }
+            if let Some(ref mut cid) = t.origin_card_id {
+                *cid = resolve_runtime_id(entity_hosts, host_id, cid, &term_map);
+            }
+            if let Some(ref mut a) = t.agent {
+                a.project_id = resolve_runtime_id(entity_hosts, host_id, &a.project_id, &term_map);
+                a.card_id = resolve_runtime_id(entity_hosts, host_id, &a.card_id, &term_map);
+                if let Some(ref mut wrid) = a.workflow_run_id {
+                    *wrid = resolve_runtime_id(entity_hosts, host_id, wrid, &term_map);
+                }
+                if let Some(ref mut term) = a.terminal {
+                    *term = resolve_runtime_id(entity_hosts, host_id, term, &term_map);
+                }
+            }
             if !existing_terminals.contains(&t.id) {
                 self.terminals.push(t);
             }
         }
 
-        self.terminal_contexts.extend(remote.terminal_contexts);
+        for mut ctx in remote.terminal_contexts {
+            ctx.terminal_id =
+                resolve_runtime_id(entity_hosts, host_id, &ctx.terminal_id, &term_map);
+            if let Some(ref mut pid) = ctx.project_id {
+                *pid = resolve_runtime_id(entity_hosts, host_id, pid, &term_map);
+            }
+            if let Some(ref mut cid) = ctx.card_id {
+                *cid = resolve_runtime_id(entity_hosts, host_id, cid, &term_map);
+            }
+            if let Some(ref mut wid) = ctx.worktree_id {
+                *wid = resolve_runtime_id(entity_hosts, host_id, wid, &term_map);
+            }
+            self.terminal_contexts.push(ctx);
+        }
 
-        for status in remote.reclaim_status {
+        for mut status in remote.reclaim_status {
+            status.terminal_id =
+                resolve_runtime_id(entity_hosts, host_id, &status.terminal_id, &term_map);
             if !self
                 .reclaim_status
                 .iter()
@@ -739,8 +1510,9 @@ impl RuntimeState {
         }
 
         for mc in remote.merging_cards {
-            if !self.merging_cards.contains(&mc) {
-                self.merging_cards.push(mc);
+            let mapped = resolve_runtime_id(entity_hosts, host_id, &mc, &term_map);
+            if !self.merging_cards.contains(&mapped) {
+                self.merging_cards.push(mapped);
             }
         }
     }
@@ -1050,5 +1822,306 @@ mod host_tests {
             .unwrap();
         assert_eq!(preserved.started_at, Some(1_750_000_000_123));
         assert_eq!(local.merging_cards, vec!["c1", "c2"]);
+    }
+
+    #[test]
+    fn colliding_project_ids_and_global_schedules_merge_with_host_qualification_without_shadowing()
+    {
+        let mut local = Snapshot::default();
+        local.projects.push(Project {
+            id: "fiber".into(),
+            name: "fiber".into(),
+            directory: "/Users/jjy/Workspace/fiber".into(),
+            github: None,
+            detected_github: None,
+            github_disconnected: false,
+            delivery_mode: Default::default(),
+            agent_overrides: BTreeMap::new(),
+            tags: Vec::new(),
+            workflow: Workflow::default(),
+            target_branch: Some("main".into()),
+            created_at: 1,
+        });
+        let local_card: Card = serde_json::from_value(serde_json::json!({
+            "id": "card-1",
+            "project_id": "fiber",
+            "number": 1,
+            "title": "Local fiber card",
+            "body": "",
+            "stage": "backlog",
+            "revision": 1,
+            "created_at": 1
+        }))
+        .unwrap();
+        local.cards.push(local_card);
+        local.workflow_revisions.push(WorkflowRevision {
+            host_id: String::new(),
+            source_yaml: Some("schema: 9\nid: global:worktree-gc\n".into()),
+            id: "rev-1".into(),
+            project_id: "__global".into(),
+            workflow_id: "global:worktree-gc".into(),
+            revision: 1,
+            definition: WorkflowDefinition {
+                id: "global:worktree-gc".into(),
+                name: "Worktree GC".into(),
+                scope: WorkflowScope::Global,
+                columns: Vec::new(),
+                entries: BTreeMap::new(),
+                steps: BTreeMap::new(),
+                env: BTreeMap::new(),
+                workspace: WorkspaceSettings::default(),
+                max_steps: 64,
+            },
+            created_at: 1,
+        });
+        local.workflow_sources.push(WorkflowSource {
+            host_id: String::new(),
+            id: "src-1".into(),
+            project_id: "__global".into(),
+            workflow_id: "global:worktree-gc".into(),
+            filename: "worktree-gc.yaml".into(),
+            revision: 1,
+            hash: "h-local".into(),
+            revision_id: "rev-1".into(),
+            enabled: true,
+            columns: Vec::new(),
+            rules: BTreeMap::new(),
+        });
+        local.schedule_states.push(ScheduleState {
+            host_id: String::new(),
+            id: "schedule:__global:global:worktree-gc:schedule".into(),
+            project_id: "__global".into(),
+            workflow_id: "global:worktree-gc".into(),
+            workflow_name: "Worktree GC".into(),
+            filename: "worktree-gc.yaml".into(),
+            rule_id: "schedule".into(),
+            cron: "0 3 * * *".into(),
+            timezone: None,
+            overlap: ScheduleOverlap::Skip,
+            creates_card: false,
+            starts_with_script: true,
+            target_column: None,
+            profile_id: None,
+            enabled: true,
+            last_scheduled_at: None,
+            next_run_at: Some(200),
+            last_run_id: None,
+            run_count: 0,
+            queued_triggers: 0,
+            updated_at: 10,
+        });
+        local.register_host_entities("local");
+        local.host_summaries.insert(
+            "local".into(),
+            HostSummary {
+                id: "local".into(),
+                name: "This Mac".into(),
+                is_local: true,
+                transport_label: "Local socket".into(),
+                endpoint_label: "~/.canban/app.sock".into(),
+                ssh_target: None,
+                server_id: None,
+                connection: HostConnectionState::Connected {
+                    rtt_ms: 0,
+                    api_version: 1,
+                    version: "1".into(),
+                    platform: "macos".into(),
+                },
+                active_agents: 0,
+                max_agents: 4,
+                project_count: 1,
+                reconnect_count: 0,
+                last_synced_at: None,
+                pending_mutations: 0,
+                sync_conflicts: 0,
+            },
+        );
+
+        let mut remote = Snapshot::default();
+        remote.projects.push(Project {
+            id: "fiber".into(),
+            name: "fiber".into(),
+            directory: "/home/devpc/fiber".into(),
+            github: None,
+            detected_github: None,
+            github_disconnected: false,
+            delivery_mode: Default::default(),
+            agent_overrides: BTreeMap::new(),
+            tags: Vec::new(),
+            workflow: Workflow::default(),
+            target_branch: Some("main".into()),
+            created_at: 2,
+        });
+        let remote_card: Card = serde_json::from_value(serde_json::json!({
+            "id": "card-1",
+            "project_id": "fiber",
+            "number": 1,
+            "title": "Remote fiber card",
+            "body": "",
+            "stage": "backlog",
+            "revision": 1,
+            "created_at": 2
+        }))
+        .unwrap();
+        remote.cards.push(remote_card);
+        remote.workflow_revisions.push(WorkflowRevision {
+            host_id: String::new(),
+            source_yaml: Some("schema: 9\nid: global:worktree-gc\n".into()),
+            id: "rev-1".into(),
+            project_id: "__global".into(),
+            workflow_id: "global:worktree-gc".into(),
+            revision: 1,
+            definition: WorkflowDefinition {
+                id: "global:worktree-gc".into(),
+                name: "Worktree GC".into(),
+                scope: WorkflowScope::Global,
+                columns: Vec::new(),
+                entries: BTreeMap::new(),
+                steps: BTreeMap::new(),
+                env: BTreeMap::new(),
+                workspace: WorkspaceSettings::default(),
+                max_steps: 64,
+            },
+            created_at: 2,
+        });
+        remote.workflow_sources.push(WorkflowSource {
+            host_id: String::new(),
+            id: "src-1".into(),
+            project_id: "__global".into(),
+            workflow_id: "global:worktree-gc".into(),
+            filename: "worktree-gc.yaml".into(),
+            revision: 1,
+            hash: "h-remote".into(),
+            revision_id: "rev-1".into(),
+            enabled: true,
+            columns: Vec::new(),
+            rules: BTreeMap::new(),
+        });
+        remote.schedule_states.push(ScheduleState {
+            host_id: String::new(),
+            id: "schedule:__global:global:worktree-gc:schedule".into(),
+            project_id: "__global".into(),
+            workflow_id: "global:worktree-gc".into(),
+            workflow_name: "Worktree GC".into(),
+            filename: "worktree-gc.yaml".into(),
+            rule_id: "schedule".into(),
+            cron: "0 4 * * *".into(),
+            timezone: None,
+            overlap: ScheduleOverlap::Skip,
+            creates_card: false,
+            starts_with_script: true,
+            target_column: None,
+            profile_id: None,
+            enabled: false,
+            last_scheduled_at: None,
+            next_run_at: Some(300),
+            last_run_id: None,
+            run_count: 2,
+            queued_triggers: 0,
+            updated_at: 20,
+        });
+
+        local.merge_remote_snapshot(
+            remote,
+            HostSummary {
+                id: "devpc".into(),
+                name: "devpc".into(),
+                is_local: false,
+                transport_label: "SSH".into(),
+                endpoint_label: "devpc".into(),
+                ssh_target: Some("devpc".into()),
+                server_id: None,
+                connection: HostConnectionState::Connected {
+                    rtt_ms: 8,
+                    api_version: 1,
+                    version: "1".into(),
+                    platform: "linux".into(),
+                },
+                active_agents: 0,
+                max_agents: 4,
+                project_count: 1,
+                reconnect_count: 0,
+                last_synced_at: None,
+                pending_mutations: 0,
+                sync_conflicts: 0,
+            },
+        );
+
+        let rem_fiber_id = qualify_host_id("devpc", "fiber");
+        assert_eq!(local.projects.len(), 2);
+        assert_eq!(local.project_host("fiber"), "local");
+        assert_eq!(local.project_host(&rem_fiber_id), "devpc");
+        assert!(local.has_duplicate_project_name("fiber"));
+        assert_eq!(local.project_display_name("fiber"), "fiber · This Mac");
+        assert_eq!(local.project_display_name(&rem_fiber_id), "fiber · devpc");
+
+        assert_eq!(local.cards.len(), 2);
+        let rem_card_id = qualify_host_id("devpc", "card-1");
+        let rem_card = local.cards.iter().find(|c| c.id == rem_card_id).unwrap();
+        assert_eq!(rem_card.project_id, rem_fiber_id);
+
+        assert_eq!(local.workflow_sources.len(), 2);
+        let rem_src = local
+            .workflow_sources
+            .iter()
+            .find(|s| s.host_id == "devpc")
+            .unwrap();
+        assert_eq!(rem_src.revision_id, qualify_host_id("devpc", "rev-1"));
+
+        assert_eq!(local.schedule_states.len(), 2);
+        assert!(
+            local
+                .schedule_states
+                .iter()
+                .any(|s| s.host_id == "local" && s.cron == "0 3 * * *")
+        );
+        assert!(
+            local
+                .schedule_states
+                .iter()
+                .any(|s| s.host_id == "devpc" && s.cron == "0 4 * * *")
+        );
+
+        let mut rt = RuntimeState::default();
+        rt.terminals.push(TerminalEntry {
+            id: "term-1".into(),
+            conversation_id: None,
+            number: 1,
+            name: Some("Local".into()),
+            origin_project_id: Some("fiber".into()),
+            origin_card_id: None,
+            agent_engine: None,
+            runtime: None,
+            agent: None,
+            created_at: 1,
+        });
+        rt.register_host("local");
+        let rem_rt = RuntimeState {
+            terminals: vec![TerminalEntry {
+                id: "term-1".into(),
+                conversation_id: None,
+                number: 1,
+                name: Some("Remote".into()),
+                origin_project_id: Some("fiber".into()),
+                origin_card_id: None,
+                agent_engine: None,
+                runtime: None,
+                agent: None,
+                created_at: 2,
+            }],
+            ..Default::default()
+        };
+        let owners = BTreeMap::from([
+            ("term-1".into(), "local".into()),
+            ("fiber".into(), "local".into()),
+        ]);
+        rt.merge_remote_with_owners(rem_rt, "devpc", &owners);
+        assert_eq!(rt.terminals.len(), 2);
+        let rem_term_id = qualify_host_id("devpc", "term-1");
+        let rem_term = rt.terminals.iter().find(|t| t.id == rem_term_id).unwrap();
+        assert_eq!(
+            rem_term.origin_project_id.as_deref(),
+            Some(rem_fiber_id.as_str())
+        );
     }
 }

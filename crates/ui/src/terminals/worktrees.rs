@@ -1057,29 +1057,41 @@ fn create_modal(ui: Ui) -> impl IntoElement {
                                                             s.projects
                                                                 .iter()
                                                                 .find(|p| p.id == pid)
-                                                                .map(|p| p.name.clone())
+                                                                .map(|p| s.project_display_name(&p.id))
                                                         })
                                                         .unwrap_or_else(|| "Select Project".into())
                                                 }))
                                                 .child(icon(Icon::ChevronDown).w(px(13.)).h(px(13.)))
                                                 .on_press(move |_: &()| {
-                                                    let projects = ui
-                                                        .snapshot
-                                                        .with_untracked(|s| s.projects.clone());
-                                                    if projects.is_empty() {
+                                                    let items_data = ui.snapshot.with_untracked(|s| {
+                                                        s.projects
+                                                            .iter()
+                                                            .map(|p| {
+                                                                let offline = s.is_host_offline(
+                                                                    s.project_host(&p.id),
+                                                                );
+                                                                let mut label =
+                                                                    s.project_display_name(&p.id);
+                                                                if offline {
+                                                                    label.push_str(" (offline)");
+                                                                }
+                                                                (p.id.clone(), label, offline)
+                                                            })
+                                                            .collect::<Vec<_>>()
+                                                    });
+                                                    if items_data.is_empty() {
                                                         return;
                                                     }
                                                     ui.spawn(async move {
-                                                        let items: Vec<_> = projects
+                                                        let items: Vec<_> = items_data
                                                             .into_iter()
-                                                            .map(|p| {
-                                                                let id = p.id.clone();
-                                                                MenuItem::new(p.name).on_select(
-                                                                    move || {
+                                                            .map(|(id, label, offline)| {
+                                                                MenuItem::new(label)
+                                                                    .disabled(offline)
+                                                                    .on_select(move || {
                                                                         let _ = project_id
                                                                             .try_set(id.clone());
-                                                                    },
-                                                                )
+                                                                    })
                                                             })
                                                             .collect();
                                                         if let Some(b) = proj_anchor.measure().await
@@ -1300,9 +1312,22 @@ fn create_modal(ui: Ui) -> impl IntoElement {
                                         .child(when(
                                             move || launch_mode.get() == "agent",
                                             move || {
+                                                let hid = ui.snapshot.with(|s| {
+                                                    s.project_host(&project_id.get()).to_owned()
+                                                });
+                                                let profiles =
+                                                    crate::backend::config_for_host(&hid)
+                                                        .profiles
+                                                        .into_iter()
+                                                        .filter(|p| p.enabled)
+                                                        .collect::<Vec<_>>();
+                                                let profiles = if profiles.is_empty() {
+                                                    ui.profiles.get()
+                                                } else {
+                                                    profiles
+                                                };
                                                 segmented().children(
-                                                    ui.profiles
-                                                        .get()
+                                                    profiles
                                                         .into_iter()
                                                         .map(|p| {
                                                             let id = p.id.clone();

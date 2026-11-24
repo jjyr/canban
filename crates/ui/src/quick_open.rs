@@ -395,25 +395,12 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                 let mut rows = candidates_with_tags(&snapshot, &local_tags);
                 if ui.project_picker.get() {
                     for row in &mut rows {
-                        if let Target::Project(id) = &row.target
-                            && let Some(project) =
-                                projects.with(|ps| ps.iter().find(|p| &p.id == id).cloned())
-                        {
-                            row.detail = if snapshot
-                                .projects
-                                .iter()
-                                .filter(|p| p.name == project.name)
-                                .count()
-                                > 1
-                            {
-                                // Duplicate names still need their directory to distinguish them.
-                                row.detail
-                                    .strip_prefix("Project · ")
-                                    .unwrap_or(&row.detail)
-                                    .into()
-                            } else {
-                                String::new()
-                            };
+                        if let Target::Project(_) = &row.target {
+                            row.detail = row
+                                .detail
+                                .strip_prefix("Project · ")
+                                .unwrap_or(&row.detail)
+                                .into();
                         }
                     }
                 }

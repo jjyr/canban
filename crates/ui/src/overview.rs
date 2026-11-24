@@ -1561,7 +1561,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     chips.push((canban_types::GLOBAL_PROJECT_ID.into(), "Global".into()));
                 }
                 for p in &s.projects {
-                    chips.push((p.id.clone(), p.name.clone()));
+                    chips.push((p.id.clone(), s.project_display_name(&p.id)));
                 }
                 Some(chips)
             })

@@ -145,10 +145,11 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
                 }))
                 .child(
                     label(move || {
-                        format!(
-                            "{} / Workflows",
-                            ui.current_project().map(|p| p.name).unwrap_or_default()
-                        )
+                        let proj = ui
+                            .current_project()
+                            .map(|p| ui.snapshot.with(|s| s.project_display_name(&p.id)))
+                            .unwrap_or_default();
+                        format!("{proj} / Workflows")
                     })
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_size(px(13.5))
@@ -187,10 +188,31 @@ pub(crate) fn project_template_files_from_snapshot(
     snapshot: &canban_types::Snapshot,
     project_id: &str,
 ) -> Vec<canban_types::WorkflowTemplateFile> {
+    project_template_files_from_snapshot_for_host(snapshot, project_id, None)
+}
+
+pub(crate) fn project_template_files_from_snapshot_for_host(
+    snapshot: &canban_types::Snapshot,
+    project_id: &str,
+    host_id: Option<&str>,
+) -> Vec<canban_types::WorkflowTemplateFile> {
     let mut active: Vec<_> = snapshot
         .workflow_sources
         .iter()
-        .filter(|s| s.project_id == project_id)
+        .filter(|s| {
+            s.project_id == project_id
+                && match host_id {
+                    Some(hid) => {
+                        let sh = if s.host_id.is_empty() {
+                            snapshot.workflow_source_host(&s.id)
+                        } else {
+                            s.host_id.as_str()
+                        };
+                        sh == hid
+                    }
+                    None => true,
+                }
+        })
         .collect();
     active.sort_by(|a, b| a.filename.cmp(&b.filename));
     active

@@ -669,17 +669,31 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
                     .map(|pid| s.project_host(pid))
                     .filter(|h| *h != "local")
             })
+            .or_else(|| {
+                t.origin_project_id
+                    .as_deref()
+                    .filter(|pid| !is_global_project_id(pid))
+                    .map(|pid| s.project_host(pid))
+                    .filter(|h| *h != "local")
+            })
             .unwrap_or("local")
             .to_owned();
+        let has_remote = s.has_remote_hosts();
         out.push(Entry {
-            host_id,
+            host_id: host_id.clone(),
             project_name: match project_id.as_deref() {
-                Some(id) if is_global_project_id(id) => "Global · Host".into(),
+                Some(id) if is_global_project_id(id) => {
+                    if has_remote {
+                        format!("Global · {}", s.host_display_name(&host_id))
+                    } else {
+                        "Global · Host".into()
+                    }
+                }
                 Some(id) => s
                     .projects
                     .iter()
                     .find(|p| p.id == id)
-                    .map(|p| p.name.clone())
+                    .map(|p| s.project_display_name(&p.id))
                     .unwrap_or_else(|| "Other".into()),
                 None => "Other".into(),
             },

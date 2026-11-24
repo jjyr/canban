@@ -169,6 +169,7 @@ pub struct ActivityInput {
     pub range_buckets: Vec<ActivityBucket>,
     pub baseline_buckets: Vec<ActivityBucket>,
     pub annual_buckets: Vec<ActivityBucket>,
+    pub host_totals: BTreeMap<String, (u64, u64)>,
     pub loaded: bool,
 }
 
@@ -525,6 +526,7 @@ pub struct Dashboard {
     pub reference_merged: Option<f64>,
     pub reference_days: usize,
     pub project_stats: Vec<ProjectStat>,
+    pub host_stats: Vec<HostStat>,
     pub providers: usize,
     pub used_profiles: usize,
     pub used_runs: usize,
@@ -622,9 +624,31 @@ impl ActivityMetric {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HostStat {
+    pub id: String,
+    pub name: String,
+    pub is_local: bool,
+    pub offline: bool,
+    pub dwell_ms: u64,
+    pub agent_ms: u64,
+    pub agent_runs: usize,
+    pub created: usize,
+    pub merged: usize,
+    pub wip: usize,
+}
+
+impl HostStat {
+    pub fn total_time_ms(&self) -> u64 {
+        self.dwell_ms.saturating_add(self.agent_ms)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProjectStat {
     pub id: String,
     pub name: String,
+    pub host_id: String,
+    pub host_badge: Option<String>,
     pub created: usize,
     pub initial_sync: usize,
     pub merged: usize,
@@ -1758,7 +1782,7 @@ fn describe_segment_target(seg: &ActivitySegment, snapshot: &Snapshot, fallback:
     if let Some(pid) = seg.project_id.as_deref()
         && let Some(proj) = snapshot.projects.iter().find(|p| p.id == pid)
     {
-        return proj.name.clone();
+        return snapshot.project_display_name(&proj.id);
     }
     fallback.to_owned()
 }
@@ -2034,6 +2058,29 @@ pub fn compute_dashboard<Tz: TimeZone>(
     profiles: &[Profile],
     opts: ViewOptions,
 ) -> Dashboard {
+    compute_dashboard_scoped(
+        snapshot,
+        events,
+        activity,
+        scope_project,
+        None,
+        tz,
+        profiles,
+        opts,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn compute_dashboard_scoped<Tz: TimeZone>(
+    snapshot: &Snapshot,
+    events: &[Event],
+    activity: &ActivityInput,
+    scope_project: Option<&str>,
+    scope_host: Option<&str>,
+    tz: &Tz,
+    profiles: &[Profile],
+    opts: ViewOptions,
+) -> Dashboard {
     let ViewOptions {
         range,
         now_ms,
@@ -2046,11 +2093,27 @@ pub fn compute_dashboard<Tz: TimeZone>(
         exclude_initial_sync,
     } = opts;
     let scope = scope_project.filter(|s| !s.is_empty());
+    let host_scope = scope_host.filter(|s| !s.is_empty());
     let in_scope = |pid: &str| {
-        scope.map_or_else(
-            || snapshot.projects.is_empty() || snapshot.projects.iter().any(|p| p.id == pid),
-            |s| s == pid,
-        )
+        if let Some(s) = scope {
+            return s == pid;
+        }
+        if let Some(hs) = host_scope {
+            return snapshot.project_host(pid) == hs;
+        }
+        snapshot.projects.is_empty() || snapshot.projects.iter().any(|p| p.id == pid)
+    };
+    let seg_in_host_scope = |s: &ActivitySegment| -> bool {
+        let Some(hs) = host_scope else {
+            return true;
+        };
+        if let Some(pid) = s.project_id.as_deref().filter(|p| !p.is_empty()) {
+            return snapshot.project_host(pid) == hs;
+        }
+        if let Some(tid) = s.terminal_id.as_deref().filter(|t| !t.is_empty()) {
+            return snapshot.terminal_host(tid) == hs;
+        }
+        hs == "local"
     };
     let now = chrono::DateTime::from_timestamp_millis(now_ms as i64)
         .unwrap()
@@ -2095,6 +2158,7 @@ pub fn compute_dashboard<Tz: TimeZone>(
             s.end_ms > from
                 && s.start_ms < until
                 && scope.is_none_or(|pid| s.project_id.as_deref() == Some(pid))
+                && seg_in_host_scope(s)
                 && !is_excluded_terminal_dwell(s, snapshot, &managed_terminals)
         })
         .collect();
@@ -2105,6 +2169,7 @@ pub fn compute_dashboard<Tz: TimeZone>(
             s.end_ms > prev_from
                 && s.start_ms < prev_until
                 && scope.is_none_or(|pid| s.project_id.as_deref() == Some(pid))
+                && seg_in_host_scope(s)
                 && !is_excluded_terminal_dwell(s, snapshot, &managed_terminals)
         })
         .collect();
@@ -2186,6 +2251,8 @@ pub fn compute_dashboard<Tz: TimeZone>(
                 ProjectStat {
                     id: p.id.clone(),
                     name: p.name.clone(),
+                    host_id: snapshot.project_host(&p.id).to_owned(),
+                    host_badge: snapshot.project_host_badge(&p.id),
                     ..Default::default()
                 },
             )
@@ -3097,6 +3164,49 @@ pub fn compute_dashboard<Tz: TimeZone>(
             .then_with(|| a.name.cmp(&b.name))
     });
 
+    let mut host_map: BTreeMap<String, HostStat> = BTreeMap::new();
+    let ensure_host = |map: &mut BTreeMap<String, HostStat>, hid: &str| {
+        let key = if hid.is_empty() { "local" } else { hid };
+        map.entry(key.to_owned()).or_insert_with(|| HostStat {
+            id: key.to_owned(),
+            name: snapshot.host_display_name(key).to_owned(),
+            is_local: key == "local",
+            offline: snapshot.is_host_offline(key),
+            ..Default::default()
+        });
+    };
+    ensure_host(&mut host_map, "local");
+    for hid in snapshot.host_summaries.keys() {
+        ensure_host(&mut host_map, hid);
+    }
+    for p in &project_stats {
+        ensure_host(&mut host_map, &p.host_id);
+        if let Some(hs) = host_map.get_mut(&p.host_id) {
+            hs.created = hs.created.saturating_add(p.created);
+            hs.merged = hs.merged.saturating_add(p.merged);
+            hs.wip = hs.wip.saturating_add(p.total_wip());
+            hs.agent_runs = hs.agent_runs.saturating_add(p.agent_runs);
+            hs.dwell_ms = hs.dwell_ms.saturating_add(p.dwell_ms);
+            hs.agent_ms = hs.agent_ms.saturating_add(p.agent_ms);
+        }
+    }
+    for (hid, (dwell, agent)) in &activity.host_totals {
+        ensure_host(&mut host_map, hid);
+        if let Some(hs) = host_map.get_mut(hid) {
+            hs.dwell_ms = hs.dwell_ms.max(*dwell);
+            hs.agent_ms = hs.agent_ms.max(*agent);
+        }
+    }
+    let mut host_stats: Vec<HostStat> = host_map.into_values().collect();
+    host_stats.sort_by(|a, b| {
+        b.total_time_ms()
+            .cmp(&a.total_time_ms())
+            .then_with(|| b.agent_runs.cmp(&a.agent_runs))
+            .then_with(|| b.merged.cmp(&a.merged))
+            .then_with(|| (!a.is_local).cmp(&!b.is_local))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
     let time_totals = time_totals_filtered(
         range,
         &cur_segments,
@@ -3397,6 +3507,7 @@ pub fn compute_dashboard<Tz: TimeZone>(
             .then(|| reference_merged as f64 / reference_days as f64),
         reference_days,
         project_stats,
+        host_stats,
         providers,
         used_profiles,
         used_runs,
@@ -4672,6 +4783,7 @@ mod tests {
 
         let act = ActivityInput {
             loaded: true,
+            host_totals: BTreeMap::new(),
             period_segments: vec![
                 // Split checkpoint blocks in same Card -> should merge in timeline
                 ActivitySegment {
@@ -5185,6 +5297,7 @@ mod tests {
 
         let act = ActivityInput {
             loaded: true,
+            host_totals: BTreeMap::new(),
             period_segments: vec![
                 // 1. Automated / managed terminals -> must be excluded from Me · Terminal and KPI totals
                 dwell_term(1, t0, t0 + 3 * min, "card-1:developer"),
@@ -5268,5 +5381,183 @@ mod tests {
             .expect("Agent lane");
         assert_eq!(agent_lane.blocks.len(), 1);
         assert_eq!(agent_lane.blocks[0].active_ms, 15 * sec);
+    }
+
+    #[test]
+    fn multi_host_dashboard_computes_host_stats_scopes_by_host_and_disambiguates_duplicate_projects()
+     {
+        use canban_types::{DwellData, DwellLane, HostConnectionState, HostSummary};
+        let tz = tz_plus_8();
+        let t0 = ts_utc8(2026, 11, 15, 9, 0);
+        let now = t0 + 2 * 3_600_000;
+        let min = 60_000;
+
+        let mut local = Snapshot::default();
+        local.projects.push(sample_project("fiber", "fiber"));
+        local.register_host_entities("local");
+        local.host_summaries.insert(
+            "local".into(),
+            HostSummary {
+                id: "local".into(),
+                name: crate::platform::LOCAL_HOST_NAME.into(),
+                is_local: true,
+                transport_label: "Local socket".into(),
+                endpoint_label: "~/.canban/app.sock".into(),
+                ssh_target: None,
+                server_id: None,
+                connection: HostConnectionState::Connected {
+                    rtt_ms: 0,
+                    api_version: 1,
+                    version: "1".into(),
+                    platform: "macos".into(),
+                },
+                active_agents: 0,
+                max_agents: 4,
+                project_count: 1,
+                reconnect_count: 0,
+                last_synced_at: None,
+                pending_mutations: 0,
+                sync_conflicts: 0,
+            },
+        );
+
+        let mut devpc = Snapshot::default();
+        devpc.projects.push(sample_project("fiber", "fiber"));
+        local.merge_remote_snapshot(
+            devpc,
+            HostSummary {
+                id: "devpc".into(),
+                name: "devpc".into(),
+                is_local: false,
+                transport_label: "SSH".into(),
+                endpoint_label: "devpc".into(),
+                ssh_target: Some("devpc".into()),
+                server_id: None,
+                connection: HostConnectionState::Connected {
+                    rtt_ms: 8,
+                    api_version: 1,
+                    version: "1".into(),
+                    platform: "linux".into(),
+                },
+                active_agents: 0,
+                max_agents: 4,
+                project_count: 1,
+                reconnect_count: 0,
+                last_synced_at: None,
+                pending_mutations: 0,
+                sync_conflicts: 0,
+            },
+        );
+        local.merge_remote_snapshot(
+            Snapshot::default(),
+            HostSummary {
+                id: "gpu-box".into(),
+                name: "GPU Box".into(),
+                is_local: false,
+                transport_label: "SSH".into(),
+                endpoint_label: "gpu-box".into(),
+                ssh_target: Some("gpu-box".into()),
+                server_id: None,
+                connection: HostConnectionState::Offline {
+                    error: "Offline".into(),
+                    cached_at: None,
+                },
+                active_agents: 0,
+                max_agents: 4,
+                project_count: 0,
+                reconnect_count: 0,
+                last_synced_at: None,
+                pending_mutations: 0,
+                sync_conflicts: 0,
+            },
+        );
+
+        let rem_fiber_id = canban_types::qualify_host_id("devpc", "fiber");
+        let act = ActivityInput {
+            loaded: true,
+            host_totals: BTreeMap::from([
+                ("local".into(), (10 * min, 20 * min)),
+                ("devpc".into(), (5 * min, 15 * min)),
+            ]),
+            period_segments: vec![
+                ActivitySegment {
+                    id: Some(1),
+                    kind: ActivityKind::Dwell,
+                    start_ms: t0,
+                    end_ms: t0 + 10 * min,
+                    project_id: Some("fiber".into()),
+                    card_id: None,
+                    terminal_id: None,
+                    open: false,
+                    data: ActivityDetail::Dwell(DwellData {
+                        lane: DwellLane::Other,
+                        page: "board".into(),
+                    }),
+                },
+                ActivitySegment {
+                    id: Some(2),
+                    kind: ActivityKind::Dwell,
+                    start_ms: t0 + 20 * min,
+                    end_ms: t0 + 25 * min,
+                    project_id: Some(rem_fiber_id.clone()),
+                    card_id: None,
+                    terminal_id: None,
+                    open: false,
+                    data: ActivityDetail::Dwell(DwellData {
+                        lane: DwellLane::Other,
+                        page: "board".into(),
+                    }),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let all_dash = compute_dashboard_scoped(
+            &local,
+            &[],
+            &act,
+            None,
+            None,
+            &tz,
+            &[],
+            ViewOptions::with_now(now),
+        );
+        assert_eq!(all_dash.project_stats.len(), 2);
+        let local_p = all_dash
+            .project_stats
+            .iter()
+            .find(|p| p.id == "fiber")
+            .unwrap();
+        let devpc_p = all_dash
+            .project_stats
+            .iter()
+            .find(|p| p.id == rem_fiber_id)
+            .unwrap();
+        assert_eq!(
+            local_p.host_badge.as_deref(),
+            Some(crate::platform::LOCAL_HOST_NAME)
+        );
+        assert_eq!(devpc_p.host_badge.as_deref(), Some("devpc"));
+        assert_eq!(all_dash.host_stats.len(), 3);
+        let gpu = all_dash
+            .host_stats
+            .iter()
+            .find(|h| h.id == "gpu-box")
+            .unwrap();
+        assert!(gpu.offline);
+
+        let devpc_dash = compute_dashboard_scoped(
+            &local,
+            &[],
+            &act,
+            None,
+            Some("devpc"),
+            &tz,
+            &[],
+            ViewOptions::with_now(now),
+        );
+        assert_eq!(devpc_dash.project_stats.len(), 1);
+        assert_eq!(devpc_dash.project_stats[0].id, rem_fiber_id);
+        assert_eq!(devpc_dash.time_totals.dwell_total_ms, 5 * min);
     }
 }

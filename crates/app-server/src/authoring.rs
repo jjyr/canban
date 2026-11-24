@@ -250,6 +250,7 @@ fn publish_scope(
         };
         if !latest.as_ref().is_some_and(|w| w.revision == revision) {
             db.save(&WorkflowRevision {
+                host_id: String::new(),
                 source_yaml: Some(raw.clone()),
                 id: format!("{}:{revision}", definition.id),
                 project_id: scope_id.to_owned(),
@@ -260,6 +261,7 @@ fn publish_scope(
             })?;
         }
         let file = WorkflowSource {
+            host_id: String::new(),
             id: format!("{scope_id}:{name}"),
             project_id: scope_id.to_owned(),
             filename: name,

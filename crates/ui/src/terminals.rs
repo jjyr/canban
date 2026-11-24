@@ -883,7 +883,7 @@ pub fn machine_menu(ui: Ui) {
                     s.projects
                         .iter()
                         .find(|p| p.id == pid)
-                        .map(|p| p.name.clone())
+                        .map(|p| s.project_display_name(&p.id))
                 })
                 .unwrap_or_else(|| "Project".into());
             let pid_root = pid.clone();
@@ -924,10 +924,17 @@ pub fn machine_menu(ui: Ui) {
                     ))
                     .on_select(move || launch(ui, json!({ "host_id": "local" }))),
                 );
-            } else if h.is_connected() {
+            } else {
                 let hid = h.id.clone();
+                let offline = !h.is_connected();
+                let label = if offline {
+                    format!("New Terminal ($HOME · {} · offline)", h.name)
+                } else {
+                    format!("New Terminal ($HOME · {})", h.name)
+                };
                 items.push(
-                    MenuItem::new(format!("New Terminal ($HOME · {})", h.name))
+                    MenuItem::new(label)
+                        .disabled(offline)
                         .on_select(move || launch(ui, json!({ "host_id": hid }))),
                 );
             }

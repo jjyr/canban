@@ -125,8 +125,10 @@ fn route_chrome(ui: Ui) -> impl IntoElement {
                         }))
                         .child(
                             label(move || {
-                                let proj =
-                                    ui.current_project().map(|pr| pr.name).unwrap_or_default();
+                                let proj = ui
+                                    .current_project()
+                                    .map(|pr| ui.snapshot.with(|s| s.project_display_name(&pr.id)))
+                                    .unwrap_or_default();
                                 if let Some(c) = ui.current_card() {
                                     format!("{proj} / Card #{} · {}", c.number, c.title)
                                 } else {
@@ -154,7 +156,10 @@ fn route_chrome(ui: Ui) -> impl IntoElement {
                 "github-repository" => {
                     subpage_chrome(ui, Some(("← Board", "board")), move || {
                         ui.current_project()
-                            .map(|pr| format!("{} / GitHub repository", pr.name))
+                            .map(|pr| {
+                                let name = ui.snapshot.with(|s| s.project_display_name(&pr.id));
+                                format!("{name} / GitHub repository")
+                            })
                             .unwrap_or_else(|| "GitHub repository".into())
                     })
                     .into_element()
@@ -180,9 +185,18 @@ fn route_chrome(ui: Ui) -> impl IntoElement {
                             .child(
                                 label(move || {
                                     if let Some(c) = ui.current_card() {
-                                        format!("Git · #{} {}", c.number, c.title)
+                                        let proj = ui
+                                            .snapshot
+                                            .with(|s| s.project_display_name(&c.project_id));
+                                        if ui.snapshot.with(|s| s.has_remote_hosts()) {
+                                            format!("Git · {proj} · #{} {}", c.number, c.title)
+                                        } else {
+                                            format!("Git · #{} {}", c.number, c.title)
+                                        }
                                     } else if let Some(pr) = ui.current_project() {
-                                        format!("Git · {}", pr.name)
+                                        let proj =
+                                            ui.snapshot.with(|s| s.project_display_name(&pr.id));
+                                        format!("Git · {proj}")
                                     } else {
                                         "Git".into()
                                     }
@@ -198,7 +212,10 @@ fn route_chrome(ui: Ui) -> impl IntoElement {
                 "settings" => subpage_chrome(ui, None, "Settings").into_element(),
                 "archive" => subpage_chrome(ui, Some(("← Board", "board")), move || {
                     ui.current_project()
-                        .map(|pr| format!("{} / Archive", pr.name))
+                        .map(|pr| {
+                            let name = ui.snapshot.with(|s| s.project_display_name(&pr.id));
+                            format!("{name} / Archive")
+                        })
                         .unwrap_or_else(|| "Archive".into())
                 })
                 .into_element(),
@@ -208,13 +225,19 @@ fn route_chrome(ui: Ui) -> impl IntoElement {
                 }
                 "project-location" => subpage_chrome(ui, Some(("← Board", "board")), move || {
                     ui.current_project()
-                        .map(|pr| format!("{} / Work location", pr.name))
+                        .map(|pr| {
+                            let name = ui.snapshot.with(|s| s.project_display_name(&pr.id));
+                            format!("{name} / Work location")
+                        })
                         .unwrap_or_else(|| "Work location".into())
                 })
                 .into_element(),
                 "project-agents" => subpage_chrome(ui, Some(("← Board", "board")), move || {
                     ui.current_project()
-                        .map(|pr| format!("{} / Project Agents", pr.name))
+                        .map(|pr| {
+                            let name = ui.snapshot.with(|s| s.project_display_name(&pr.id));
+                            format!("{name} / Project Agents")
+                        })
                         .unwrap_or_else(|| "Project Agents".into())
                 })
                 .into_element(),
