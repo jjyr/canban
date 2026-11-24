@@ -1,6 +1,6 @@
 # Mobile interaction design (iOS and Android)
 
-Status: Proposal — user-approved direction, 2026-11-22; not implemented. Runtime acceptance requires a running mobile build and device/simulator validation.
+Status: Shared mobile UI (`crates/ui/src/mobile/`), portable Terminal controls, iOS/Android shells, Tailscale WhoIs auto-auth, and on-demand Tailnet discovery implemented (2026-11-23–2026-11-24). Public app-store distribution and Android/physical-device validation tracked separately; see [implementation.md](implementation.md).
 
 ## Scope
 
@@ -244,10 +244,12 @@ Link confidentiality is provided by the user's chosen network path (Tailscale Wi
 - Desktop already supports encrypted SSH tunnels via `HostTransport::Ssh`; mobile presently connects over TCP (Tailscale or another VPN) because iOS sandboxing forbids spawning `ssh` subprocesses, and any future pure-Rust SSH tunnel transport on mobile will share the same `🔒` `TransportSecurity::Ssh` classification.
 - Application-layer TLS (e.g., TLS 1.3 with QR-pinned certificates) and mandatory Tailscale-only enforcement were evaluated and declined on 2026-11-22 so users remain free to route traffic through their own VPN setups.
 
-### Pairing credentials
+### Pairing credentials & Tailscale WhoIs auto-auth
 
-- **One-time pairing code -> per-device revocable token:** The QR / pairing URI carries a short-lived (e.g., 5-minute) single-use pairing code rather than the shared `server.token`. On first connection, the client exchanges that pairing code for a **per-device revocable bearer token** persisted on `canband` (and stored in OS Keychain/Keystore on the client).
-- **Paired devices management:** Desktop `Settings -> Hosts` provides a `Paired devices` list showing device name, last seen time, and `[Revoke]` to invalidate an individual device's token without rotating tokens for other devices.
+- **Zero-QR Tailscale same-account sign-in (`ts_auto`):** Both first-run onboarding and the Add Host / Pairing sheet accept bare Tailscale addresses without `#secret` (`host.ts.net`, `100.x.y.z`, `canban://host.ts.net`, or `tcp://100.x.y.z:7680`). During `transport.mux`, `canband` verifies the peer via local `tailscale whois --json` (requiring the same personal Tailscale `UserID` and rejecting tagged or shared-in peers unless `"trust_tailscale_self": false` is configured) and returns an ephemeral per-connection `session_token` for RPCs and `enc:v1:` secret sealing. Confirmation cards and `Settings` host detail rows show `Tailscale — automatic same-account sign-in (managed in Tailscale Admin)`.
+- **On-demand Tailnet host discovery (`host.discover_canban`):** After pairing with a first host—and manually via **Settings → Hosts → Discover on Tailnet** (never background-polled)—`canban-client` invokes `host.discover_canban` on the connected host, which probes its enabled saved TCP entries in `config/hosts.json` (`linked_on_host: true`) and online same-user non-tagged desktop/server Tailscale peers (`16` parallel workers, `1.5s` timeout). Already-paired hosts are filtered out by `server_id` and normalized address; reachable peers appear in the `AVAILABLE ON TAILNET` sheet with one-tap **Join** / **Join All (N)** for Tailscale endpoints and **URI…** (`canban://<addr>#` prefill) for linked non-Tailscale TCP hosts.
+- **One-time pairing code -> per-device revocable token:** For cross-account peers, tagged servers, non-Tailscale VPNs, or hosts with `"trust_tailscale_self": false`, the QR / pairing URI carries a short-lived (5-minute) single-use `pair_...` pairing code rather than a static shared secret. On first connection, the client exchanges that pairing code for a **per-device revocable bearer token** (`dev_...`) persisted on `canband` (and stored locally in the client's `CredentialStore`).
+- **Paired devices management:** Desktop `Settings -> Hosts` provides a `Paired devices` list showing persistent `dev_...` tokens (with `[Revoke]` to invalidate an individual device live) alongside active Tailscale WhoIs sessions (`Tailscale` badge and `Managed in Tailscale Admin`).
 - **Backward compatibility:** Bare single-address URIs without query parameters (`canban://<host>:<port>#<token>` or `<host>:<port>#<token>`) remain accepted by the parser.
 
 ## Planned Gallery scenes

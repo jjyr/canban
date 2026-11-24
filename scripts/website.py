@@ -72,7 +72,11 @@ LANGUAGE_CODES = tuple(item["code"] for item in LANGUAGES)
 LANGUAGE_BY_CODE = {item["code"]: item for item in LANGUAGES}
 
 DOC_PAGES = ("docs", "docs/workflows", "docs/agents", "docs/cli", "docs/remote-hosts")
-GUIDE_PAGES = ("guides/parallel-coding-agents", "guides/native-terminal-and-multi-machine")
+GUIDE_PAGES = (
+    "guides/parallel-coding-agents",
+    "guides/native-terminal-and-multi-machine",
+    "guides/scheduled-worktree-cleanup",
+)
 ARTICLE_PAGES = (*DOC_PAGES, *GUIDE_PAGES)
 PAGES = ("", "install", *ARTICLE_PAGES, "changelog")
 NAV_PAGES = (
@@ -228,6 +232,271 @@ def is_table_separator(line):
     return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells)
 
 
+def _tok(cls, text):
+    esc = html.escape(text, quote=False)
+    return f'<span class="{cls}">{esc}</span>' if cls else esc
+
+
+def _highlight_exprs(text, base_cls=None):
+    parts = []
+    pos = 0
+    for m in re.finditer(r"\$\{\{[^{}]*\}\}", text):
+        if m.start() > pos:
+            parts.append(_tok(base_cls, text[pos:m.start()]))
+        parts.append(_tok("tok-expr", m.group(0)))
+        pos = m.end()
+    if pos < len(text):
+        parts.append(_tok(base_cls, text[pos:]))
+    return "".join(parts)
+
+
+_PY_KEYWORDS = frozenset({
+    "and", "as", "assert", "break", "class", "continue", "def", "del", "elif",
+    "else", "except", "False", "finally", "for", "from", "global", "if",
+    "import", "in", "is", "lambda", "None", "nonlocal", "not", "or", "pass",
+    "raise", "return", "True", "try", "while", "with", "yield",
+})
+_PY_TOKEN_RE = re.compile(
+    r'(""".*?"""|\'\'\'.*?\'\'\'|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|#.*$|\b[A-Za-z_][A-Za-z0-9_]*\b|\b\d+(?:\.\d+)?\b)'
+)
+
+
+def _highlight_python_line(line):
+    out, pos, after_def = [], 0, False
+    for m in _PY_TOKEN_RE.finditer(line):
+        if m.start() > pos:
+            out.append(_tok(None, line[pos:m.start()]))
+        tok = m.group(0)
+        if tok.startswith("#"):
+            out.append(_tok("tok-cm", tok))
+            after_def = False
+        elif tok[0] in ("'", '"'):
+            out.append(_tok("tok-str", tok))
+            after_def = False
+        elif tok[0].isdigit():
+            out.append(_tok("tok-num", tok))
+            after_def = False
+        elif after_def:
+            out.append(_tok("tok-fn", tok))
+            after_def = False
+        elif tok in _PY_KEYWORDS:
+            out.append(_tok("tok-kw", tok))
+            after_def = (tok == "def")
+        else:
+            out.append(_tok(None, tok))
+            after_def = False
+        pos = m.end()
+    if pos < len(line):
+        out.append(_tok(None, line[pos:]))
+    return "".join(out)
+
+
+_SH_TOKEN_RE = re.compile(
+    r'("(?:\\.|[^"\\])*"|\'(?:[^\']*)\'|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_@*?#!0-9][A-Za-z0-9_]*|&&|\|\||>>|[|;<>]|--?[A-Za-z0-9][A-Za-z0-9_-]*)'
+)
+
+
+def _highlight_sh_exprs(text, base_cls=None):
+    parts, pos = [], 0
+    for m in re.finditer(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_@*?#!0-9][A-Za-z0-9_]*", text):
+        if m.start() > pos:
+            parts.append(_tok(base_cls, text[pos:m.start()]))
+        parts.append(_tok("tok-expr", m.group(0)))
+        pos = m.end()
+    if pos < len(text):
+        parts.append(_tok(base_cls, text[pos:]))
+    return "".join(parts)
+
+
+def _split_sh_comment(line):
+    quote = None
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if quote:
+            if ch == "\\" and quote == '"' and i + 1 < len(line):
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        else:
+            if ch in ('"', "'"):
+                quote = ch
+            elif ch == "#" and (i == 0 or line[i - 1].isspace()):
+                return line[:i], line[i:]
+        i += 1
+    return line, ""
+
+
+def _highlight_sh_line(line):
+    stripped = line.lstrip()
+    if not stripped:
+        return ""
+    if stripped.startswith("#"):
+        indent = line[:len(line) - len(stripped)]
+        return indent + _tok("tok-cm", stripped)
+    code, comment = _split_sh_comment(line)
+    out, pos = [], 0
+    indent_m = re.match(r"^\s*", code)
+    if indent_m:
+        out.append(indent_m.group(0))
+        pos = indent_m.end()
+    assign_m = re.match(r"([A-Za-z_][A-Za-z0-9_]*)(=)", code[pos:])
+    if assign_m:
+        out.append(_tok("tok-key", assign_m.group(1)))
+        out.append(_tok("tok-op", "="))
+        pos += assign_m.end()
+    expect_cmd = not bool(assign_m)
+    cmd_re = re.compile(r'[^\s|&;<>]+')
+    idx = pos
+    while idx < len(code):
+        if code[idx].isspace():
+            ws = idx
+            while idx < len(code) and code[idx].isspace():
+                idx += 1
+            out.append(code[ws:idx])
+            continue
+        m = _SH_TOKEN_RE.match(code, idx)
+        if m:
+            tok = m.group(0)
+            if tok[0] == "'":
+                out.append(_tok("tok-str", tok))
+                expect_cmd = False
+            elif tok[0] == '"':
+                out.append(_highlight_sh_exprs(tok, "tok-str"))
+                expect_cmd = False
+            elif tok.startswith("$"):
+                out.append(_tok("tok-expr", tok))
+                expect_cmd = False
+            elif tok in ("&&", "||", "|", ";", ">", ">>", "<"):
+                out.append(_tok("tok-op", tok))
+                expect_cmd = tok in ("&&", "||", "|", ";")
+            elif tok.startswith("-"):
+                out.append(_tok("tok-key", tok))
+            idx = m.end()
+            continue
+        if expect_cmd:
+            cm = cmd_re.match(code, idx)
+            if cm:
+                out.append(_tok("tok-fn", cm.group(0)))
+                expect_cmd = False
+                idx = cm.end()
+                continue
+        out.append(_tok(None, code[idx]))
+        idx += 1
+    if comment:
+        out.append(_tok("tok-cm", comment))
+    return "".join(out)
+
+
+def _split_yaml_comment(text):
+    quote = None
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\" and quote == '"' and i + 1 < len(text):
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        else:
+            if ch in ('"', "'"):
+                quote = ch
+            elif ch == "#" and (i == 0 or text[i - 1].isspace()):
+                return text[:i], text[i:]
+        i += 1
+    return text, ""
+
+
+def _highlight_yaml_value(val):
+    if not val:
+        return ""
+    leading = val[:len(val) - len(val.lstrip())]
+    rest = val[len(leading):]
+    code_part, comment = _split_yaml_comment(rest)
+    trail_ws = code_part[len(code_part.rstrip()):]
+    core = code_part.rstrip()
+    if not core:
+        rendered = ""
+    elif core in ("|", ">", "|-", ">-"):
+        rendered = _tok("tok-op", core)
+    elif (core.startswith('"') and core.endswith('"') and len(core) >= 2) or (
+        core.startswith("'") and core.endswith("'") and len(core) >= 2
+    ):
+        rendered = _highlight_exprs(core, "tok-str")
+    elif core in ("true", "false", "null", "~"):
+        rendered = _tok("tok-kw", core)
+    elif re.fullmatch(r"-?\d+(?:\.\d+)?", core):
+        rendered = _tok("tok-num", core)
+    elif "${{" in core:
+        rendered = _highlight_exprs(core, None)
+    else:
+        rendered = _tok(None, core)
+    return leading + rendered + trail_ws + (_tok("tok-cm", comment) if comment else "")
+
+
+def _highlight_yaml(code_text):
+    out = []
+    scalar_indent = None
+    scalar_kind = None
+    in_py_heredoc = False
+    for line in code_text.splitlines():
+        if not line.strip():
+            out.append("")
+            continue
+        indent_len = len(line) - len(line.lstrip(" "))
+        if scalar_indent is not None and indent_len > scalar_indent:
+            if in_py_heredoc:
+                if line.strip() == "PY":
+                    in_py_heredoc = False
+                    out.append(line[:indent_len] + _tok("tok-op", "PY"))
+                else:
+                    out.append(_highlight_python_line(line))
+            elif scalar_kind == "run":
+                out.append(_highlight_sh_line(line))
+                if "<<'PY'" in line or '<<"PY"' in line or "<<PY" in line:
+                    in_py_heredoc = True
+            else:
+                out.append(_tok(None, line))
+            continue
+        scalar_indent = None
+        scalar_kind = None
+        in_py_heredoc = False
+
+        indent = line[:indent_len]
+        rest = line[indent_len:]
+        if rest.startswith("#"):
+            out.append(indent + _tok("tok-cm", rest))
+            continue
+        prefix = indent
+        if rest.startswith("- "):
+            prefix += _tok("tok-op", "-") + " "
+            rest = rest[2:]
+        elif rest == "-":
+            out.append(indent + _tok("tok-op", "-"))
+            continue
+        kv = re.match(r"^([A-Za-z0-9_.-]+)(\s*:)(.*)$", rest)
+        if kv:
+            key, colon, val = kv.groups()
+            out.append(prefix + _tok("tok-key", key) + _tok("tok-op", colon) + _highlight_yaml_value(val))
+            val_stripped = _split_yaml_comment(val.strip())[0].strip()
+            if val_stripped in ("|", ">", "|-", ">-"):
+                scalar_indent = indent_len
+                scalar_kind = "run" if key == "run" else "text"
+        else:
+            out.append(prefix + _highlight_yaml_value(rest))
+    return "\n".join(out)
+
+
+def highlight_code(code_text, lang_hint):
+    if lang_hint in ("yaml", "yml"):
+        return _highlight_yaml(code_text)
+    if lang_hint in ("sh", "bash"):
+        return "\n".join(_highlight_sh_line(line) for line in code_text.splitlines())
+    return html.escape(code_text, quote=False)
+
+
 def doc_markdown(text, labels):
     """Render trusted documentation markdown (headings, lists, tables, blockquotes, copyable code)."""
     blocks, paragraph = [], []
@@ -258,13 +527,15 @@ def doc_markdown(text, labels):
                 code_lines.append(lines[idx])
                 idx += 1
             code_text = "\n".join(code_lines)
-            if lang_hint in ("yaml", "yml", "sh", "bash"):
+            if lang_hint in ("yaml", "yml", "sh", "bash", "prompt"):
                 label = html.escape(lang_hint or "code")
+                extra_cls = " code-block-prompt" if lang_hint == "prompt" else ""
+                rendered_code = highlight_code(code_text, lang_hint)
                 blocks.append(
-                    f'<div class="code-block"><div class="code-block-head"><span>{label}</span>'
+                    f'<div class="code-block{extra_cls}"><div class="code-block-head"><span>{label}</span>'
                     f'<button class="copy-btn" type="button" data-copy-btn data-copy-value="{html.escape(code_text, quote=True)}">'
                     f'<span class="copy-text">{html.escape(labels["copy"])}</span></button></div>'
-                    f'<pre><code>{html.escape(code_text)}</code></pre></div>'
+                    f'<pre><code>{rendered_code}</code></pre></div>'
                 )
             else:
                 blocks.append(f"<pre><code>{html.escape(code_text)}</code></pre>")
@@ -377,6 +648,7 @@ def localize_home(lang, strings):
         "cli_url": route(lang, "docs/cli"),
         "guide_parallel_url": route(lang, "guides/parallel-coding-agents"),
         "guide_native_url": route(lang, "guides/native-terminal-and-multi-machine"),
+        "guide_worktree_gc_url": route(lang, "guides/scheduled-worktree-cleanup"),
         "changelog_url": route(lang, "changelog"),
     }.items():
         body = body.replace("{{" + key + "}}", value)
@@ -436,6 +708,7 @@ def footer(lang, page, labels):
       <a href="{route(lang, 'docs/cli')}">{html.escape(labels['cli'])}</a>
       <a href="{route(lang, 'guides/parallel-coding-agents')}">{html.escape(labels['guide_parallel'])}</a>
       <a href="{route(lang, 'guides/native-terminal-and-multi-machine')}">{html.escape(labels['guide_native'])}</a>
+      <a href="{route(lang, 'guides/scheduled-worktree-cleanup')}">{html.escape(labels['guide_worktree_gc'])}</a>
       <a href="{route(lang, 'changelog')}">{html.escape(labels['changelog'])}</a>
       <a href="{md_route(lang, page)}">{html.escape(labels['markdown_mirror'])}</a>
       <a href="/llms-full.txt">{html.escape(labels['llms_full'])}</a>
@@ -494,6 +767,15 @@ def changelog_body(lang, labels, releases):
       </main>{footer(lang, 'changelog', labels)}</div>'''
 
 
+def render_details(details, labels):
+    if not details:
+        return ""
+    return (
+        f'<details class="doc-details"><summary>{html.escape(details["summary"])}</summary>'
+        f'<div class="doc-details-body">{doc_markdown(details["markdown"], labels)}</div></details>'
+    )
+
+
 def doc_body(lang, page, spec, labels):
     crumbs = [f'<a href="{route(lang)}">{html.escape(labels["home"])}</a>']
     for crumb_label, crumb_slug in spec["breadcrumbs"]:
@@ -516,7 +798,8 @@ def doc_body(lang, page, spec, labels):
     intro_shot = render_screenshot(spec.get("screenshot"))
     sections_html = "".join(
         f'<section id="{html.escape(sec["id"], quote=True)}"><h2>{html.escape(sec["heading"])}</h2>'
-        f'{doc_markdown(sec["markdown"], labels)}{render_screenshot(sec.get("screenshot"))}</section>'
+        f'{doc_markdown(sec["markdown"], labels)}{render_screenshot(sec.get("screenshot"))}'
+        f'{render_details(sec.get("details"), labels)}</section>'
         for sec in spec["sections"]
     )
     faq_html = render_faq_section(labels["faq"], spec["faq_items"]) if spec.get("faq_items") else ""
@@ -764,6 +1047,7 @@ def render_home_markdown(lang, strings):
         f"- {strings['nav_cli']}: {ORIGIN + route(lang, 'docs/cli')}",
         f"- {strings['nav_guide_parallel']}: {ORIGIN + route(lang, 'guides/parallel-coding-agents')}",
         f"- {strings['nav_guide_native']}: {ORIGIN + route(lang, 'guides/native-terminal-and-multi-machine')}",
+        f"- {strings['nav_guide_worktree_gc']}: {ORIGIN + route(lang, 'guides/scheduled-worktree-cleanup')}",
         f"- {strings['nav_changelog']}: {ORIGIN + route(lang, 'changelog')}",
         f"- GitHub: {REPOSITORY}",
     ]
@@ -864,6 +1148,8 @@ def render_doc_markdown_mirror(lang, spec, labels):
     for sec in spec["sections"]:
         lines.extend([f"## {sec['heading']}", "", sec["markdown"].strip(), ""])
         lines.extend(screenshot_markdown(sec.get("screenshot")))
+        if sec.get("details"):
+            lines.extend([f"### {sec['details']['summary']}", "", sec["details"]["markdown"].strip(), ""])
     if spec.get("faq_items"):
         lines.extend([f"## {labels['faq']}", ""])
         for question, answer in spec["faq_items"]:

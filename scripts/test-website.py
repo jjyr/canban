@@ -138,11 +138,13 @@ class WebsiteTest(unittest.TestCase):
                     self.assertEqual(md_alts[0]["href"], website.ORIGIN + website.md_route(lang, section))
                     self.assertEqual(page.attrs("meta", property="og:url")[0]["content"], website.ORIGIN + route)
                     self.assertEqual(page.attrs("meta", property="og:locale")[0]["content"], info["og_locale"])
-                    self.assertIsNone(re.search(r"\{\{(?:lang_switcher|(?:en|zh|install|docs|workflows|cli|guide_parallel|guide_native|changelog)_url)\}\}", text))
-                    if section != "docs/workflows":
+                    self.assertIsNone(re.search(r"\{\{(?:lang_switcher|(?:en|zh|install|docs|workflows|cli|guide_parallel|guide_native|guide_worktree_gc|changelog)_url)\}\}", text))
+                    if section not in ("docs/workflows", "guides/scheduled-worktree-cleanup"):
                         self.assertNotIn("{{", text)
                     self.assertNotIn("localStorage", text)
                     self.assertNotIn("schema v11", text.lower())
+                    self.assertNotIn("schema: 10", text.lower())
+                    self.assertNotIn("host.probe", text.lower())
 
                     lang_links = [
                         attrs for tag, attrs in page.elements
@@ -265,7 +267,7 @@ class WebsiteTest(unittest.TestCase):
                             self.assertNotIn("loading", shot_imgs[0], (lang, section))
 
     def test_removed_routes_are_not_generated(self):
-        self.assertEqual(len(website.PAGES), 10)
+        self.assertEqual(len(website.PAGES), 11)
         self.assertEqual(len(website.LANGUAGES), 5)
         sitemap = (self.output / "sitemap.xml").read_text()
         for info in website.LANGUAGES:
@@ -286,27 +288,32 @@ class WebsiteTest(unittest.TestCase):
                     self.assertTrue(content.startswith("# "), md_path)
                     self.assertNotIn("<script", content)
                     self.assertNotIn("schema v11", content.lower())
+                    self.assertNotIn("schema: 10", content.lower())
+                    self.assertNotIn("host.probe", content.lower())
 
         agents_md = (self.output / "docs/agents.md").read_text()
         for cli_id in BUILTIN_24_CLI_IDS:
             self.assertIn(f"`{cli_id}`", agents_md)
         self.assertIn("canban card adopt", agents_md)
         self.assertIn("libghostty-vt", agents_md)
+        for term in ("viewer.presence", "Reclaiming soon", "Orchestrator"):
+            self.assertIn(term, agents_md)
 
         workflows_doc_md = (self.output / "docs/workflows.md").read_text()
         for term in (
-            "schema: 10", "development.yaml", "admit", "script", "deliver",
+            "schema: 12", "development.yaml", "admit", "script", "deliver",
             "condition", "approval", "card.move", "notify", "complete",
             "external_pr", "on_changes_requested", "on_failure", "_merge_queue",
+            "cardless", "exclude_self", "secrets.", "vars.", "XChaCha20-Poly1305",
         ):
             self.assertIn(term, workflows_doc_md)
 
         cli_doc_md = (self.output / "docs/cli.md").read_text()
         for term in (
-            "snapshot", "status", "call", "card show", "card adopt", "report",
-            "reply", "bind-session", "review draft", "workflow sources", "schedule",
-            "worktree gc", "batch report", "serve", "pair", "service", "skill",
-            "build-info", "--fields", "--full", "request_key", "CANBAN_CLI",
+            "snapshot", "status", "call", "card show", "card adopt", "resolve", "reopen", "report",
+            "reply", "bind-session", "review draft", "publish", "workflow sources", "schedule",
+            "worktree gc", "batch report", "serve", "pair", "service", "device", "skill",
+            "build-info", "--fields", "--full", "--allow-insecure-bind", "request_key", "CANBAN_CLI",
             "CANBAN_RUN_DIR", "canban skill",
             "npx skills add ~/.canban/skills --skill canban -g",
             "canban --human snapshot",
@@ -326,16 +333,42 @@ class WebsiteTest(unittest.TestCase):
                 self.assertIn(term, localized_cli_md, (lang, term))
 
         remote_md = (self.output / "docs/remote-hosts.md").read_text()
-        for term in ("canband", "Tailscale", "SSH", "--headless"):
+        for term in (
+            "canband", "Tailscale", "SSH", "--headless", "yamux/1",
+            "canban device", "pair_", "canban-sync", "enc:v1:",
+            "trust_tailscale_self", "host.discover_canban", "WhoIs", "Tailscale Admin",
+        ):
             self.assertIn(term, remote_md)
+        for lang in website.LANGUAGE_CODES:
+            localized_remote_md = (self.output / website.md_route(lang, "docs/remote-hosts").lstrip("/")).read_text()
+            for term in ("trust_tailscale_self", "host.discover_canban", "WhoIs"):
+                self.assertIn(term, localized_remote_md, (lang, term))
 
         parallel_md = (self.output / "guides/parallel-coding-agents.md").read_text()
-        for term in ("Attention Inbox", "FIFO Queue Merge", "canban card adopt", "Antigravity", "Pi"):
+        for term in ("Attention Inbox", "FIFO Queue Merge", "canban card adopt", "Antigravity", "Pi", "Insights"):
             self.assertIn(term, parallel_md)
 
         native_md = (self.output / "guides/native-terminal-and-multi-machine.md").read_text()
-        for term in ("libghostty-vt", "herdr-core", "tmux", "Tailscale", "canband"):
+        for term in ("libghostty-vt", "herdr-core", "tmux", "Tailscale", "canband", "yamux/1", "canban-sync"):
             self.assertIn(term, native_md)
+
+        gc_md = (self.output / "guides/scheduled-worktree-cleanup.md").read_text()
+        for term in (
+            "schema: 12", "scope: global", "worktree gc", "merge-base",
+            "_merge_queue", "DRY_RUN", "project.list", "card.create",
+            "card resolve", "create_worktree: false",
+            "workflow sources --global", "--revision", "Settings → Environment & Secrets",
+            "Describe with agent", "uses: agent",
+        ):
+            self.assertIn(term, gc_md)
+        gc_html = (self.output / "guides/scheduled-worktree-cleanup/index.html").read_text()
+        self.assertIn('class="code-block code-block-prompt"', gc_html)
+        self.assertIn('<details class="doc-details">', gc_html)
+        self.assertIn('<span class="tok-key">schema</span>', gc_html)
+        self.assertIn('<span class="tok-num">12</span>', gc_html)
+        for lang in website.LANGUAGE_CODES:
+            localized_gc_md = (self.output / website.md_route(lang, "guides/scheduled-worktree-cleanup").lstrip("/")).read_text()
+            self.assertNotIn("canban snapshot", localized_gc_md, lang)
 
         llms_txt = (self.output / "llms.txt").read_text()
         self.assertIn("https://canban.dev/llms-full.txt", llms_txt)
@@ -349,6 +382,7 @@ class WebsiteTest(unittest.TestCase):
             "docs/remote-hosts",
             "guides/parallel-coding-agents",
             "guides/native-terminal-and-multi-machine",
+            "guides/scheduled-worktree-cleanup",
             "changelog",
         ):
             self.assertIn(f"https://canban.dev/{slug}.md", llms_txt)
@@ -366,6 +400,7 @@ class WebsiteTest(unittest.TestCase):
         self.assertIn("worktree gc", llms_full)
         self.assertIn("Run Multiple AI Coding Agents in Parallel with Kanban & Git Worktrees", llms_full)
         self.assertIn("Native Terminal Workbench vs. tmux & Chat Wrappers", llms_full)
+        self.assertIn("Safely Reclaim Old Git Worktrees with a Pure-Script Schedule", llms_full)
         for cli_id in BUILTIN_24_CLI_IDS:
             self.assertIn(f"`{cli_id}`", llms_full)
 
@@ -417,12 +452,19 @@ class WebsiteTest(unittest.TestCase):
             for page in website.PAGES
             if website.is_indexable(lang, page)
         }
-        self.assertEqual(len(expected), 46)
+        self.assertEqual(len(expected), 51)
         self.assertEqual({entry.find("s:loc", ns).text for entry in entries}, expected)
 
         for lang in ("zh", "zh-tw", "ja", "ko"):
             self.assertNotIn(website.ORIGIN + website.route(lang, "changelog"), expected)
 
+        expected_lastmod = {
+            website.ORIGIN + website.route(lang, page): website.page_updated(
+                lang, page, locales_json, pages_json, docs_by_lang, self.releases[0]
+            )
+            for lang in website.LANGUAGE_CODES
+            for page in website.PAGES
+        }
         for entry in entries:
             loc = entry.find("s:loc", ns).text
             lastmod = entry.find("s:lastmod", ns).text
@@ -434,9 +476,12 @@ class WebsiteTest(unittest.TestCase):
                 self.assertTrue(all(link.attrib["href"] in expected for link in entry.findall("x:link", ns)))
                 # Page-scoped lastmod must reflect content metadata, not blindly mirror latest release date.
                 self.assertNotEqual(lastmod, self.releases[0]["published_at"][:10], loc)
-                self.assertEqual(lastmod, locales_json["en"]["updated"])
+                self.assertEqual(lastmod, expected_lastmod[loc], loc)
         self.assertEqual(pages_json["en"]["install_updated"], "2026-11-23")
-        self.assertEqual(docs_by_lang["en"]["guides/parallel-coding-agents"]["updated"], "2026-11-23")
+        self.assertEqual(locales_json["en"]["updated"], "2026-11-24")
+        self.assertEqual(docs_by_lang["en"]["docs/workflows"]["updated"], "2026-11-24")
+        self.assertEqual(docs_by_lang["en"]["guides/parallel-coding-agents"]["updated"], "2026-11-24")
+        self.assertEqual(docs_by_lang["en"]["guides/scheduled-worktree-cleanup"]["updated"], "2026-11-24")
 
     def test_unpublished_release_exclusion_and_safe_markdown(self):
         release = {"tag_name": "20261118-1", "published_at": "2026-11-18T01:00:00Z", "html_url": website.REPOSITORY + "/releases/tag/20261118-1", "draft": False}
@@ -452,7 +497,7 @@ class WebsiteTest(unittest.TestCase):
 
     def test_doc_markdown_escapes_html_and_rejects_unsafe_links(self):
         rendered = website.doc_markdown(
-            '<script>alert(1)</script>\n\n**`source_trust == "external_pr"` gate**\n\n[ok](/docs/)\n[bad](javascript:alert(1))\n\n```yaml\nschema: 10\n```',
+            '<script>alert(1)</script>\n\n**`source_trust == "external_pr"` gate**\n\n[ok](/docs/)\n[bad](javascript:alert(1))\n\n```yaml\nschema: 12\n# <script>bad</script>\nenv:\n  REPORT: ${{ vars.GC_REPORT_PROJECT_ID }}\n```\n\n```sh\ncanban workflow sources --global # <script>bad</script>\n```\n\n```prompt\nGenerate pure script\n<script>bad</script>\n```',
             website.load("pages.json")["en"],
         )
         self.assertNotIn("<script>", rendered)
@@ -460,7 +505,10 @@ class WebsiteTest(unittest.TestCase):
         self.assertIn('<a href="/docs/">ok</a>', rendered)
         self.assertNotIn('href="javascript:', rendered)
         self.assertIn('class="code-block"', rendered)
-        self.assertIn('data-copy-value="schema: 10"', rendered)
+        self.assertIn('class="code-block code-block-prompt"', rendered)
+        self.assertIn('<span class="tok-key">schema</span><span class="tok-op">:</span> <span class="tok-num">12</span>', rendered)
+        self.assertIn('<span class="tok-expr">${{ vars.GC_REPORT_PROJECT_ID }}</span>', rendered)
+        self.assertIn("Generate pure script", rendered)
 
     def test_installer_is_canonical_and_history_is_rendered(self):
         self.assertEqual((self.output / "install.sh").read_bytes(), (website.ROOT / "scripts/install.sh").read_bytes())

@@ -55,7 +55,7 @@
         "GitHub Actions-like YAML workflows & Visual Studio with shell scripts, agent + prompt steps, cron schedules, and serialized FIFO Queue Merge",
         "Global Attention Inbox (⌘I) across all projects, terminals, and remote hosts with one-click jump to Card and live TTY",
         "Native Agent CLI support in persistent Herdr PTY terminals (Claude Code, Codex, Antigravity agy, Pi, Cursor CLI, Gemini CLI, OpenCode, and 20+ CLIs) powered by Rust, longbridge/nsh, and libghostty-vt",
-        "Built-in inline Git diff review and simultaneous multi-host Linux canband connections over Tailscale TCP or managed SSH tunnels"
+        "Built-in inline Git diff review, Timeline-first Insights, XChaCha20-Poly1305 encrypted secret vaults, and simultaneous multi-host Linux canband connections with Tailscale WhoIs auto-auth, yamux/1 per-device tokens, on-demand Tailnet discovery, SSH tunnels, and offline editing with 3-way sync"
       ],
       "keywords": "Canban, Kanban, canban.dev, AI coding agent kanban, coding agents workbench, Claude Code, Codex, Antigravity, agy, Pi, Cursor CLI, Gemini CLI, OpenCode, Herdr, Git worktree, Attention Inbox, libghostty, Tailscale, SSH, macOS Rust app, Linux GTK4 Rust app"
     }
@@ -71,7 +71,7 @@
         "GitHub Actions-like YAML workflows & Visual Studio with shell scripts, agent + prompt steps, cron schedules, and serialized FIFO Queue Merge",
         "Global Attention Inbox (⌘I) across all projects, terminals, and remote hosts with one-click jump to Card and live TTY",
         "Native Agent CLI support in persistent Herdr PTY terminals (Claude Code, Codex, Antigravity agy, Pi, Cursor CLI, Gemini CLI, OpenCode, and 20+ CLIs) powered by Rust, longbridge/nsh, and libghostty-vt",
-        "Built-in inline Git diff review and simultaneous multi-host Linux canband connections over Tailscale TCP or managed SSH tunnels"
+        "Built-in inline Git diff review, Timeline-first Insights, XChaCha20-Poly1305 encrypted secret vaults, and simultaneous multi-host Linux canband connections with Tailscale WhoIs auto-auth, yamux/1 per-device tokens, on-demand Tailnet discovery, SSH tunnels, and offline editing with 3-way sync"
       ],
       "keywords": "Canban, Kanban, canban.dev, AI coding agent kanban, coding agents workbench, Claude Code, Codex, Antigravity, agy, Pi, Cursor CLI, Gemini CLI, OpenCode, Herdr, Git worktree, Attention Inbox, libghostty, Tailscale, SSH, macOS Rust app, Linux GTK4 Rust app"
     },
@@ -85,7 +85,7 @@
         "类 GitHub Actions 的 YAML 工作流与 Visual Studio：支持 Shell 脚本、Agent 步骤、Cron 定时任务与串行 FIFO Queue Merge",
         "全局注意力收件箱（⌘I）：跨项目、本地与远程主机捕获等待输入、审批或审查的 Agent 并一键直达卡片与实时 TTY",
         "基于 Rust、longbridge/nsh、libghostty-vt 与 Herdr 持久 PTY 原生运行 Claude Code、Codex、Antigravity agy、Pi、Cursor CLI、Gemini CLI、OpenCode 等 24 种内置 CLI",
-        "内置行级 Git Diff 审查，并支持通过 Tailscale TCP 或托管 SSH 隧道同时连接多台远程 Linux canband 主机"
+        "内置行级 Git Diff 审查、时间线优先 Insights、XChaCha20-Poly1305 加密密钥库，以及通过 Tailscale WhoIs 自动认证、yamux/1 每设备 Token、按需 Tailnet 发现、SSH 隧道与离线三方同步同时连接多台远程 Linux canband 主机"
       ],
       "keywords": "Canban, Kanban, 看板, AI 编程 Agent 工作台, Claude Code, Codex, Antigravity, agy, Pi, Cursor CLI, Gemini CLI, OpenCode, Herdr, Git worktree, 注意力收件箱, libghostty, Tailscale, SSH, Rust 桌面应用"
     },
@@ -99,7 +99,7 @@
         "類 GitHub Actions 的 YAML 工作流與 Visual Studio：支援 Shell 腳本、Agent 步驟、Cron 排程與序列 FIFO Queue Merge",
         "全域注意力收件匣（⌘I）：跨專案、本機與遠端主機即時捕捉等待輸入或審核的 Agent 並一鍵跳轉卡片與即時 TTY",
         "透過 Rust、longbridge/nsh、libghostty-vt 與 Herdr 持久 PTY 原生執行 Claude Code、Codex、Antigravity agy、Pi、Cursor CLI、Gemini CLI、OpenCode 等 24 種內建 CLI",
-        "內建行級 Git Diff 審查，並支援透過 Tailscale TCP 或託管 SSH 通道同時連線多台遠端 Linux canband 主機"
+        "內建行級 Git Diff 審查、時間軸優先 Insights、XChaCha20-Poly1305 加密金鑰庫，以及透過 Tailscale WhoIs 自動驗證、yamux/1 每裝置權杖、按需 Tailnet 探索、SSH 通道與離線三方同步同時連線多台遠端 Linux canband 主機"
       ],
       "keywords": "Canban, Kanban, 看板, AI 程式設計 Agent 工作台, Claude Code, Codex, Antigravity, agy, Pi, Cursor CLI, Gemini CLI, OpenCode, Herdr, Git worktree, libghostty, Tailscale, SSH, Rust 桌面應用"
     },
@@ -113,7 +113,7 @@
         "GitHub Actions 風 YAML ワークフロー＆ Visual Studio：シェルスクリプト、Agent ステップ、Cron スケジュール、直列 FIFO Queue Merge を自動化",
         "グローバル Attention Inbox（⌘I）：複数プロジェクト・ターミナル・リモートホストを横断して入力待ちや承認待ちの Agent を検知しワンクリックで移動",
         "Rust・longbridge/nsh・libghostty-vt と永続 Herdr PTY により Claude Code、Codex、Antigravity agy、Pi、Cursor CLI、Gemini CLI、OpenCode など 24 種のネイティブ CLI をそのまま実行",
-        "内蔵インライン Git Diff レビューと、Tailscale TCP または SSH トンネル経由での複数リモート Linux canband ホスト同時接続"
+        "内蔵インライン Git Diff レビュー、タイムライン中心の Insights、XChaCha20-Poly1305 暗号化シークレット Vault、そして Tailscale WhoIs 自動認証・yamux/1 デバイス別トークン・オンデマンド Tailnet 検出・SSH トンネル・オフライン編集＆3-way 同期による複数リモート Linux canband ホスト同時接続"
       ],
       "keywords": "Canban, Kanban, カンバン, AI コーディングエージェント, Claude Code, Codex, Antigravity, agy, Pi, Cursor CLI, Gemini CLI, OpenCode, Herdr, Git worktree, libghostty, Tailscale, SSH, Rust デスクトップアプリ"
     },
@@ -127,7 +127,7 @@
         "GitHub Actions 스타일 YAML 워크플로우 및 Visual Studio: 셸 스크립트, Agent 단계, Cron 스케줄, 직렬 FIFO Queue Merge 자동화",
         "전역 Attention Inbox (⌘I): 모든 프로젝트와 원격 호스트에서 승인·입력 대기 중인 에이전트를 즉시 감지하고 카드 및 실시간 TTY로 바로 이동",
         "Rust, longbridge/nsh, libghostty-vt 및 영구 Herdr PTY로 Claude Code, Codex, Antigravity agy, Pi, Cursor CLI, Gemini CLI, OpenCode 등 24종의 네이티브 CLI 무손실 실행",
-        "내장 인라인 Git Diff 리뷰 및 Tailscale TCP·SSH 터널을 통한 다중 원격 Linux canband 호스트 동시 연결"
+        "내장 인라인 Git Diff 리뷰, 타임라인 중심 Insights, XChaCha20-Poly1305 암호화 시크릿 Vault, 그리고 Tailscale WhoIs 자동 인증·yamux/1 기기별 토큰·온디맨드 Tailnet 탐색·SSH 터널·오프라인 편집 및 3-way 동기화를 통한 다중 원격 Linux canband 호스트 동시 연결"
       ],
       "keywords": "Canban, Kanban, 칸반, AI 코딩 에이전트 워크벤치, Claude Code, Codex, Antigravity, agy, Pi, Cursor CLI, Gemini CLI, OpenCode, Herdr, Git worktree, libghostty, Tailscale, SSH, Rust 데스크톱 앱"
     }

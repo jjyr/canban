@@ -3,40 +3,45 @@
     "eyebrow": "CANBAN // ドキュメント",
     "title": "Canban ドキュメント＆実践ガイド",
     "meta_title": "Canban ドキュメント — カンバン・ワークフロー・CLI・ネイティブ Agent・マルチマシン",
-    "description": "Canban のアーキテクチャ、実践ガイド、リファレンス：カンバンと Git Worktree による複数 AI コーディングエージェント並列実行、tmux やチャットラッパーとの比較＆リモート Linux ホスト、schema 10 ワークフロー構文、Agent ファースト canban CLI、組み込み CLI 一覧。",
-    "intro": "Canban（canban.dev）は、Human Context をまとめるカンバンカード、宣言的 schema 10 ワークフローエンジン、Agent ファーストな `canban` CLI、そしてネイティブ AI コーディングエージェント CLI を動かす Herdr 永続 PTY ターミナルを 1 つのネイティブワークベンチに統合します。",
+    "description": "Canban のアーキテクチャ、実践ガイド、リファレンス：カンバンと Git Worktree による複数 AI コーディングエージェント並列実行、tmux やチャットラッパーとの比較＆リモート Linux ホスト（yamux/1 多重化＋オフライン編集・3-way 同期）、schema 12 ワークフローと暗号化 Vault、Timeline-first Insights、canban CLI、組み込み CLI 一覧。",
+    "intro": "Canban（canban.dev）は、Human Context をまとめるカンバンカード、宣言的 schema 12 ワークフローエンジン（暗号化 Vault・カードレス GitHub トリガー・多層環境変数）、Timeline-first の **Insights**、Agent ファーストな `canban` CLI、そしてネイティブ AI コーディングエージェント CLI を動かす Herdr 永続 PTY ターミナルを 1 つのネイティブワークベンチに統合します。",
     "date_published": "2026-11-19",
-    "updated": "2026-11-23",
+    "updated": "2026-11-24",
     "breadcrumbs": [["ドキュメント", "docs"]],
     "cards": [
       {
         "title": "ガイド：複数エージェント並列運用",
-        "summary": "Claude Code、Codex、Antigravity (agy)、Pi、Cursor CLI などを同時稼働。カードの文脈管理、独立 Git Worktree、通知インボックス（⌘I）、FIFO マージキューでタブ地獄を解消します。",
+        "summary": "Claude Code、Codex、Antigravity (agy) デュアルロール、Pi、Cursor CLI などを同時稼働。カードの文脈管理、独立 Git Worktree、通知インボックス（⌘I）、FIFO マージキュー、Insights で並列開発を制御します。",
         "href": "/ja/guides/parallel-coding-agents/"
       },
       {
         "title": "ガイド：ネイティブ端末＆マルチマシン",
-        "summary": "Rust + libghostty-vt + Herdr PTY が tmux やチャット型 IDE に優れる理由と、Tailscale / SSH による 24 時間リモート Linux 運用を解説。",
+        "summary": "Rust + libghostty-vt + Herdr PTY（viewer.presence と自動回収猶予）が tmux やチャット型 IDE に優れる理由と、yamux/1＋オフライン編集同期による 24 時間リモート Linux 運用を解説。",
         "href": "/ja/guides/native-terminal-and-multi-machine/"
       },
       {
+        "title": "ガイド：Worktree 安全自動回収スケジュール",
+        "summary": "エージェント・PTY・LLM コストゼロの純スクリプト Global スケジュールで、マージ済み・クリーン・7 日非アクティブな Git Worktree を安全回収し、リポジトリ別 GB と失敗を Card 報告。",
+        "href": "/ja/guides/scheduled-worktree-cleanup/"
+      },
+      {
         "title": "Workflow YAML ＆実行セマンティクス",
-        "summary": "実装コードと一致した schema 10 Document/Step 構文、全 9 種の uses: ステップ、condition ポインタ、admit ゲート、差し戻し・失敗処理、FIFO Queue Merge。",
+        "summary": "実装コードと一致した schema 12 Document/Step 構文、GitHub イベント＋カードレス実行、9 層環境変数＋XChaCha20-Poly1305 Vault、全 9 種の uses: ステップ、FIFO Queue Merge。",
         "href": "/ja/docs/workflows/"
       },
       {
         "title": "Canban CLI ＆ --human",
-        "summary": "主要 CLI サブコマンド、コンパクト JSON とサーバー側 --fields 絞り込み、環境変数自動注入、request_key 冪等性、--human の使い方。",
+        "summary": "主要 CLI サブコマンド（card resolve/reopen、review publish、canban device 含む）、--fields 絞り込み、request_key 冪等性、--human の使い方。",
         "href": "/ja/docs/cli/"
       },
       {
         "title": "ネイティブ Agent CLI ＆ Herdr PTY",
-        "summary": "24 種の組み込み CLI エージェント、libghostty-vt によるネイティブ TUI・MCP・スキル保持、canban card adopt によるセッション引き継ぎ。",
+        "summary": "24 種の組み込み CLI エージェント、agy Orchestrator とモデル別推論強度検出、libghostty-vt、Managed/Manual 端末と回収保護、canban card adopt。",
         "href": "/ja/docs/agents/"
       },
       {
         "title": "リモート Linux ホスト (canband)",
-        "summary": "Headless Linux canband デーモン、Bearer 認証付き Tailscale TCP 直結、SSH 起動/フォールバック、オフラインキャッシュ、診断画面。",
+        "summary": "Headless Linux canband、Tailscale WhoIs 同一アカウント自動認証＆オンデマンド Tailnet 検出、yamux/1 デバイス別トークン、SSH フォールバック、canban-sync オフライン編集・3-way 同期。",
         "href": "/ja/docs/remote-hosts/"
       },
       {
@@ -54,12 +59,12 @@
       {
         "id": "architecture",
         "heading": "システムアーキテクチャ",
-        "markdown": "Canban は Rust で構築されており、ネイティブ UI（`longbridge/nsh` — macOS 13.0+ Apple Silicon では AppKit/Metal、Linux `x86_64` / `arm64` では GTK4）とターミナルエミュレーションに `libghostty-vt` を採用しています。\n\n- **Canban UI (`canban-ui`)**: ローカルの `AppServer` には Unix ソケット（`~/.canban/app.sock`）で接続し、同時に Tailscale TCP または SSH トンネル経由で複数のリモート `canband` ホストへ接続します。\n- **AppServer (`canban serve` / `canband`)**: SQLite WAL ストレージ、カード、ワークフローエンジン、スケジューラ、Git Worktree 管理、マージキューを統括します。デスクトップウィンドウを閉じてもバックグラウンド処理は止まりません。\n- **Herdr Core (`hc`)**: 永続 PTY セッションスーパーバイザとしてネイティブ Agent CLI（`claude`、`codex`、`agy`、`pi`、`gemini`、`opencode`、`cursor-agent` など）を実行し、UI の再起動やアップデートをまたいでセッションを維持します。"
+        "markdown": "Canban は Rust で構築されており、ネイティブ UI（`longbridge/nsh` — macOS 13.0+ Apple Silicon では AppKit/Metal、Linux `x86_64` / `arm64` では GTK4）とターミナルエミュレーションに `libghostty-vt` を採用しています。\n\n- **Canban UI (`canban-ui`)**: ローカルの `AppServer` には Unix ソケット（`~/.canban/app.sock`）で接続し、複数のリモート `canband` ホストへは単一 TCP 接続上の **`yamux/1` 多重化**（Tailscale WhoIs 同一アカウント自動認証またはデバイス別トークン・SSH フォールバック対応、JSON-RPC + `app.subscribe` プッシュ配信 + `herdr.connect` PTY ストリームを 1 本で多重化）で同時接続し、iOS / Android 向け共有モバイル UI と `canban-sync` オフライン編集にも対応します。\n- **AppServer (`canban serve` / `canband`)**: SQLite WAL ストレージ、カード、ワークフローエンジン（`CURRENT = 12`）、`XChaCha20-Poly1305` Vault、スケジューラ、Git Worktree 管理、マージキューを統括します。デスクトップウィンドウを閉じてもバックグラウンド処理は止まりません。\n- **Herdr Core (`hc`)**: 永続 PTY セッションスーパーバイザとしてネイティブ Agent CLI（`claude`、`codex`、`agy`、`pi`、`gemini`、`opencode`、`cursor-agent` など）を実行し、`viewer.presence` リースと安全な回収猶予付きで UI 再起動をまたぎセッションを維持します。"
       },
       {
         "id": "formula",
         "heading": "なぜ Canban = Kanban + Workflow + Herdr なのか",
-        "markdown": "1. **Kanban が Human Context を保持**: 機能仕様、貼り付けたスクリーンショット、`#Card` や GitHub Issue/PR 参照、`@Agent` との議論、構造化レポート、コード差分をカード単位で一元管理します。\n2. **Workflow が Worktree と配送を自動化**: カードを `Develop` に動かすと独立した Git Worktree（`<dir>-<proj4>/<card-number>`）が割り当てられ、`Review` では直列 FIFO Queue Merge で安全に統合されます。\n3. **Herdr がネイティブ Agent CLI を無改造で稼働**: 各 CLI 本来の TUI、MCP サーバー、スキル、権限確認プロンプト、正確なセッション ID 再開をそのまま利用できます。",
+        "markdown": "1. **Kanban が Human Context を保持**: 機能仕様、貼り付けたスクリーンショット、`#Card` や `@Agent` 補完（タイトル・本文共通）、GitHub Issue/PR 連携、`Resolved` 完了状態、コード差分をカード単位で一元管理します。\n2. **Workflow が Worktree・環境変数・配送を自動化**: カードを `Develop` に動かすと独立した Git Worktree（`<dir>-<proj4>/<card-number>`）が割り当てられ、9 層環境変数と Vault シークレット（`external_pr` は最小環境へ隔離）を安全に引き継ぎ、`Review` では直列 FIFO Queue Merge で統合されます。\n3. **Herdr がネイティブ Agent CLI を無改造で稼働**: 各 CLI 本来の TUI、MCP サーバー、スキル、権限確認プロンプト、正確なセッション ID 再開（`agy` の Planner/Worker デュアルロール含む）をそのまま利用できます。",
         "screenshot": {
           "src": "/screenshots/review-diff.png",
           "alt": "Canban Card #1 の Worktree Git Diff インスペクタ画面：コミット履歴、変更された Rust ファイル、インライン差分、Copy Markdown、Review & Send to @Agent ボタンを表示。",
@@ -68,6 +73,11 @@
           "height": 1800,
           "lazy": true
         }
+      },
+      {
+        "id": "insights",
+        "heading": "Timeline-first の Insights（並列・効率・自動化計測）",
+        "markdown": "左サイドバーの **Insights** を開くと、コードを書いた時間帯・どの Agent Profile やモデルが並走したか・自動ワークフローが実際にどれほど人手を省いたかを **時間軸中心** で可視化できます：\n\n- **1D タイムライン＆スイムレーン**: 当日の 24 時間アクティビティを `Me`（Card / Terminal / Other）、`Profile` または `Model` ごとの Agent レーン、そして `Merges`（カード統合タイムスタンプ）で表示します。\n- **公平な期間比較とファネル**: `7D` / `30D` / `90D` で同時刻比（same-progress）の比較を行い、`Created → Agent → Review → Merged` の自動化ファネル、人手ゼロ完走率、`p50`/`p90` 所要時間、365 日ヒートマップ（`Resolved` / `My time` / `Agent time`）を集計します。\n- **設計原則として非監視的**: キーストロークフックやトークン課金計数は行わず、既存 SQLite の構造化タイムラインイベントと全接続ホスト集約から導出します。"
       },
       {
         "id": "cli-quickstart",
@@ -80,16 +90,16 @@
     "eyebrow": "CANBAN // ドキュメント // ワークフロー",
     "title": "ローカル AI エージェントワークフロー・Git Worktree・Queue Merge",
     "meta_title": "ローカル AI エージェントワークフロー — Git Worktree・YAML パイプライン・FIFO マージキュー | Canban",
-    "description": "crates/workflow-engine schema 10 の実装と一致したワークフロー解説：GitHub Actions 風ローカルパイプライン、Visual Studio の Stage マッピング、全 9 種の uses: ステップ、condition ポインタ、admit ゲート、差し戻し・失敗処理、直列 FIFO Queue Merge。",
-    "intro": "Canban のワークフローは SQLite（`workflow_sources` とイミュータブルな `workflow_revisions`）を単一ソースとする宣言的 YAML 1.2 実行グラフ（現行 `CURRENT = 10`）です。Visual Studio、YAML 直接編集、Edit with agent のすべてが同一の Rust エンジンで検証・コンパイルされます。",
+    "description": "crates/workflow-engine schema 12 の実装と一致したワークフロー解説：GitHub リポジトリイベント・カードレス実行、9 層環境変数＆XChaCha20-Poly1305 Vault、Visual Studio、全 9 種の uses: ステップ、admit ゲート、差し戻し・失敗処理、FIFO Queue Merge。",
+    "intro": "Canban のワークフローは SQLite（`workflow_sources` とイミュータブルな `workflow_revisions`）を単一ソースとする宣言的 YAML 1.2 実行グラフ（現行 `CURRENT = 12`）です。Visual Studio、YAML 直接編集、Edit with agent のすべてが同一の Rust エンジンで検証・コンパイルされます。",
     "date_published": "2026-11-19",
-    "updated": "2026-11-23",
+    "updated": "2026-11-24",
     "breadcrumbs": [["ドキュメント", "docs"], ["ワークフロー", "docs/workflows"]],
     "sections": [
       {
         "id": "visual-studio",
         "heading": "Visual Studio、SQLite 単一ソース＆Stage 投影",
-        "markdown": "任意のプロジェクトヘッダーから **Workflows** を開くと、**Visual Studio**、**YAML Source**、**History**、**Edit with agent** を切り替えられます。\n\n- **SQLite 単一ソース**: ワークフロー定義と不変リビジョンは `~/.canban` の隠しファイルではなく `canban.sqlite`（`workflow_sources` と `workflow_revisions`）に保存されます。実行中の `WorkflowRun` は作成時の `definition` と `definition_revision` を凍結するため、YAML を更新しても稼働中のタスクを壊しません。\n- **線形 Schema マイグレーション（`1..=10`）**: `crates/workflow-engine/src/migrations.rs` が `BASELINE = 1`・`CURRENT = 10` を定義し、古い YAML をパース時に順次アップグレードします。\n- **Visual Studio の Stage マッピング（`stages.rs`）**: YAML トップレベルに `stages:` ブロックはなく、`canban_workflow_engine::stages` が `columns`・`on` エントリ規則・`card.move`（`column: $next` / `next: $entry`）からボード列ごとの `StageView` レーン（`column`、`name`、`steps`、`entry_rule`、`exit`）を自動投影します。各 `Step` には `stage: <column_id>` や `enabled: false` も指定できます。",
+        "markdown": "任意のプロジェクトヘッダーから **Workflows** を開くと、**Visual Studio**、**YAML Source**、**History**、**Edit with agent** を切り替えられます。\n\n- **SQLite 単一ソース**: ワークフロー定義と不変リビジョンは `~/.canban` の隠しファイルではなく `canban.sqlite`（`workflow_sources` と `workflow_revisions`）に保存されます。実行中の `WorkflowRun` は作成時の `definition` と `definition_revision` を凍結するため、YAML を更新しても稼働中のタスクを壊しません。\n- **線形 Schema マイグレーション（`1..=12`）**: `crates/workflow-engine/src/migrations.rs` が `BASELINE = 1`・`CURRENT = 12` を定義し（v11: GitHub イベント・`cardless: true`・`exclude_self`、v12: `${{ secrets.KEY }}` / `${{ vars.KEY }}`）、古い YAML をパース時に順次アップグレードします。\n- **Visual Studio の Stage マッピング（`stages.rs`）**: YAML トップレベルに `stages:` ブロックはなく、`canban_workflow_engine::stages` が `columns`・`on` エントリ規則・`card.move`（`column: $next` / `next: $entry`）からボード列ごとの `StageView` レーン（`column`、`name`、`steps`、`entry_rule`、`exit`）を自動投影します。各 `Step` には `stage: <column_id>` や `enabled: false` も指定できます。",
         "screenshot": {
           "src": "/screenshots/workflow-studio.png",
           "alt": "Canban Workflows Visual Studio 画面：development.yaml の Backlog、Develop（@developer Implement）、Review（External PR check 分岐、Human approval、Queue merge）レーンを表示。",
@@ -101,8 +111,8 @@
       },
       {
         "id": "yaml-structure",
-        "heading": "検証済み YAML 構造（schema: 10）",
-        "markdown": "`serde_yaml_ng` によるパース時に `Document`、`Step`、`WorkflowColumn`、`WorkflowRule`、`EventSelector`、`ScheduleCardConfig` すべてで `#[serde(deny_unknown_fields)]` が有効になっており、未知のフィールドは公開前に拒否されます。\n\n### トップレベル `Document` キー（`crates/workflow-engine/src/source.rs`）\n\n| キー | 型・デフォルト | 役割 |\n| --- | --- | --- |\n| `schema` | `u32`（必須・現行 `10`） | Schema バージョン（`1..=10` を受け付け `10` へ自動移行）。 |\n| `id` | `String`（必須） | 空でないワークフロー ID（例: `delivery:default`）。 |\n| `name` | `String`（必須） | Studio やボードに表示する名称。 |\n| `scope` | `project`（既定）または `global` | `global`（`__global`）はボード列や `card:` 生成を持たないホスト全体の定期/スクリプト用ワークフロー。 |\n| `enabled` | `bool`（既定 `true`） | イベント一致とスケジューリングの有効/無効。 |\n| `columns` | `{ id, name }` の配列 | ボード列を宣言（`id` は ASCII 英数字・`-`・`_`）。省略時はプロジェクトの列を使用。 |\n| `env` | `{ KEY: VALUE }` マップ | すべての `agent` / `script` ステップへ引き継ぐスカラー環境変数。 |\n| `on` | `{ <rule_id>: WorkflowRule }`（空不可） | イベントトリガー（`event`、`start_at`、`match`、`enabled`）または Cron スケジュール（`cron`、`timezone`、`overlap`、`card`）。GitHub Actions 風の `on: { schedule: [{ cron: ... }] }` にも対応。 |\n| `steps` | `Step` 配列（`1..=256`） | 非循環有向グラフ（DAG）を構成する順序付きステップ群。 |\n| `workspace` | `WorkspaceSettings` | `create_worktree`（既定 `true`）、`base_branch`、`sync_base`（`create_worktree: true` が必要）、`remote`（既定 `origin`）。 |\n| `max_steps` | `u32`（`1..=1000`、既定 `100`） | 1 つの `WorkflowRun` あたりの最大ステップ訪問数ガード。 |\n\n### `on.<rule_id>` トリガーとスケジュール規則\n\n- **イベント規則**: `event`（`card.column_entered`、`card.column_left`、`card.created`、`card.updated`、`manual` 等）、`start_at`、`match`（`EventSelector`: `column`、`actor`、`origin`、`source_kind`、`reason`、`changed_fields`、`repository`、`subject`、`reply_to`、`include_related`、`include_initial`）、`enabled`。\n- **スケジュール規則**: `cron`（5 フィールド POSIX cron または `@hourly` / `@daily` / `@weekly` / `@monthly`）を指定すると `event: schedule` になります。`timezone`（既定 `Local`、`UTC`、`+08:00`、IANA 名）、`overlap`（`skip` 既定、`queue`、`allow`）、`card: { column, title, body }`（`{{date}}`、`{{datetime}}`、`{{run_number}}`、`{{workflow}}`、`{{rule}}` 置換に対応。`card` 省略でカードなし実行）。\n\n### `steps[]` フィールド\n\n- 共通キー: `id`、`name`、`uses`（トップレベル `run:` 指定時は省略可）、`with`、`next`（`condition` と `complete` 以外は次要素が既定、`card.move` は `$entry` 指定可）、`stage`、`enabled`（既定 `true`）、`on_changes_requested`（`approval` / `deliver` 用の差し戻し先）、`on_failure`（`script` 用の初回限定自動フォールバック先）。\n- `script` 専用キー（トップレベルまたは `with:` 内、競合不可）: `run`、`shell`（既定 `bash -eo pipefail`、代替 `sh -e`）、`working_directory`（`..` 禁止）、`timeout_minutes`（`1..=1440`）、`timeout_seconds`（`1..=86400`）、`continue_on_error`（既定 `false`）。\n- `env`: `agent` と `script` のみ指定可能。優先順: ホスト & `CANBAN_*` < ワークフロー `env` < `$CANBAN_ENV` < ステップ `env`。\n\n### 標準デフォルト `development.yaml` (`default_document`)\n\n```yaml\nschema: 10\nid: delivery:default\nname: Development\nenabled: true\ncolumns:\n  - id: backlog\n    name: Backlog\n  - id: develop\n    name: Develop\n  - id: review\n    name: Review\non:\n  develop:\n    event: card.column_entered\n    start_at: agent:develop\n    match:\n      column: develop\n  review:\n    event: card.column_entered\n    start_at: condition:external_pr\n    match:\n      column: review\nsteps:\n  - id: agent:develop\n    name: Implement\n    uses: agent\n    with:\n      profile: developer\n    next: move:develop\n  - id: move:develop\n    name: Move to Review\n    uses: card.move\n    with:\n      column: review\n    next: condition:external_pr\n  - id: condition:external_pr\n    name: External PR check\n    uses: condition\n    with:\n      pointer: /card/source_trust\n      equals: external_pr\n      then: approval:review\n      otherwise: deliver:review\n  - id: deliver:review\n    name: Queue merge\n    uses: deliver\n    with:\n      sync_upstream: true\n    next: __end\n    on_changes_requested: agent:develop\n  - id: approval:review\n    name: Human approval\n    uses: approval\n    with:\n      title: External PR; human approval is required before merging\n    next: __end\n    on_changes_requested: agent:develop\n  - id: __end\n    uses: complete\nworkspace:\n  create_worktree: true\n  sync_base: true\n  remote: origin\n```"
+        "heading": "検証済み YAML 構造（schema: 12）",
+        "markdown": "`serde_yaml_ng` によるパース時に `Document`、`Step`、`WorkflowColumn`、`WorkflowRule`、`EventSelector`、`ScheduleCardConfig` すべてで `#[serde(deny_unknown_fields)]` が有効になっており、未知のフィールドは公開前に拒否されます。\n\n### トップレベル `Document` キー（`crates/workflow-engine/src/source.rs`）\n\n| キー | 型・デフォルト | 役割 |\n| --- | --- | --- |\n| `schema` | `u32`（必須・現行 `12`） | Schema バージョン（`1..=12` を受け付け `12` へ自動移行）。 |\n| `id` | `String`（必須） | 空でないワークフロー ID（例: `delivery:default`）。 |\n| `name` | `String`（必須） | Studio やボードに表示する名称。 |\n| `scope` | `project`（既定）または `global` | `global`（`__global`）はボード列や `card:` 生成を持たないホスト全体の定期/スクリプト用ワークフロー。 |\n| `enabled` | `bool`（既定 `true`） | イベント一致とスケジューリングの有効/無効。 |\n| `columns` | `{ id, name }` の配列 | ボード列を宣言（`id` は ASCII 英数字・`-`・`_`）。省略時はプロジェクトの列を使用。 |\n| `env` | `{ KEY: VALUE }` マップ | すべての `agent` / `script` ステップへ引き継ぐスカラー環境変数・`${{ secrets.KEY }}`・`${{ vars.KEY }}`。 |\n| `on` | `{ <rule_id>: WorkflowRule }`（空不可） | イベントトリガー（`event`、`start_at`、`cardless`、`match`、`enabled`）または Cron スケジュール（`cron`、`timezone`、`overlap`、`card`）。GitHub Actions 風の `on: { schedule: [{ cron: ... }] }` にも対応。 |\n| `steps` | `Step` 配列（`1..=256`） | 非循環有向グラフ（DAG）を構成する順序付きステップ群。 |\n| `workspace` | `WorkspaceSettings` | `create_worktree`（既定 `true`）、`base_branch`、`sync_base`（`create_worktree: true` が必要）、`remote`（既定 `origin`）。 |\n| `max_steps` | `u32`（`1..=1000`、既定 `100`） | 1 つの `WorkflowRun` あたりの最大ステップ訪問数ガード。 |\n\n### `on.<rule_id>` トリガー、GitHub リポジトリイベント＆カードレス実行\n\n- **イベント規則**: `event`（`card.column_entered`、`card.column_left`、`card.created`、`card.updated`、`github.issue.*`、`github.pr.*`、`github.pr.ci_failed`、`github.pr.ci_succeeded`、`manual` 等）、`start_at`、`cardless: true`（ボードにカードを作らずバックグラウンド起動）、`enabled`。\n- **イベントセレクタ（`match`）**: `column`、`actor`、`origin`、`source_kind`、`reason`、`changed_fields`、`repository`、`subject`、`reply_to`、`include_related`、`include_initial`、さらに自己ループを防ぐ `exclude_self: true`（ログイン中の GitHub ユーザー自身を除外）を指定可能。プロジェクト設定の `intake: off` 時も永続ウォーターマーク付きでリポジトリイベントを検知できます。\n- **スケジュール規則**: `cron`（5 フィールド POSIX cron または `@hourly` / `@daily` / `@weekly` / `@monthly`）を指定すると `event: schedule` になります。`timezone`（既定 `Local`、`UTC`、`+08:00`、IANA 名）、`overlap`（`skip` 既定、`queue`、`allow`）、`card: { column, title, body }`（`{{date}}`、`{{datetime}}`、`{{run_number}}`、`{{workflow}}`、`{{rule}}` 置換に対応。`card` 省略でカードなし実行）。\n\n### `steps[]` フィールドと 9 層環境変数解決\n\n- 共通キー: `id`、`name`、`uses`（トップレベル `run:` 指定時は省略可）、`with`、`next`（`condition` と `complete` 以外は次要素が既定、`card.move` は `$entry` 指定可）、`stage`、`enabled`（既定 `true`）、`on_changes_requested`（`approval` / `deliver` 用の差し戻し先）、`on_failure`（`script` 用の初回限定自動フォールバック先）。\n- `script` 専用キー（トップレベルまたは `with:` 内、競合不可）: `run`、`shell`（既定 `bash -eo pipefail`、代替 `sh -e`）、`working_directory`（`..` 禁止）、`timeout_minutes`（`1..=1440`）、`timeout_seconds`（`1..=86400`）、`continue_on_error`（既定 `false`）。\n- `env` 優先順（`agent` / `script` のみ指定可、`${{ secrets.KEY }}`・`${{ vars.KEY }}` 対応）: `Host Login Shell < Global vars/secrets < CLI Agent < @Identity < Project < protected CANBAN_* < Workflow env < $CANBAN_ENV < Step env`。\n\n### 標準デフォルト `development.yaml` (`default_document`)\n\n```yaml\nschema: 12\nid: delivery:default\nname: Development\nenabled: true\ncolumns:\n  - id: backlog\n    name: Backlog\n  - id: develop\n    name: Develop\n  - id: review\n    name: Review\non:\n  develop:\n    event: card.column_entered\n    start_at: agent:develop\n    match:\n      column: develop\n  review:\n    event: card.column_entered\n    start_at: condition:external_pr\n    match:\n      column: review\nsteps:\n  - id: agent:develop\n    name: Implement\n    uses: agent\n    with:\n      profile: developer\n    next: move:develop\n  - id: move:develop\n    name: Move to Review\n    uses: card.move\n    with:\n      column: review\n    next: condition:external_pr\n  - id: condition:external_pr\n    name: External PR check\n    uses: condition\n    with:\n      pointer: /card/source_trust\n      equals: external_pr\n      then: approval:review\n      otherwise: deliver:review\n  - id: deliver:review\n    name: Queue merge\n    uses: deliver\n    with:\n      sync_upstream: true\n    next: __end\n    on_changes_requested: agent:develop\n  - id: approval:review\n    name: Human approval\n    uses: approval\n    with:\n      title: External PR; human approval is required before merging\n    next: __end\n    on_changes_requested: agent:develop\n  - id: __end\n    uses: complete\nworkspace:\n  create_worktree: true\n  sync_base: true\n  remote: origin\n```"
       },
       {
         "id": "step-types",
@@ -113,6 +123,11 @@
         "id": "conditions-admit",
         "heading": "条件分岐（condition）と同時実行ゲート（admit）",
         "markdown": "### 条件評価（`condition`）\n\n実行時（`crates/workflow-engine/src/runtime.rs`）、`condition` は `{ \"inputs\": run.inputs, \"outputs\": run.outputs, \"card\": card }`（`card.source_trust` には `\"local\"`、`\"collaborator\"`、`\"external_pr\"` が格納）を組み立て、`with.pointer`（空または `/` 始まり）を評価します。\n\n- **比較ルール**: 厳密な JSON 一致に加え、`\"true\"`/`\"false\"` 文字列と真偽値、数値文字列と数値、未定義ポインタと `null` が一致します。\n- **外部 PR ゲート**: `pointer: /card/source_trust` + `equals: external_pr` で未検証の外部 PR だけを `approval:review` へ送り、信頼できるブランチは `deliver:review` へ流します。\n- **スクリプト出力による分岐**: 先行する `script` が `$CANBAN_OUTPUT` に書いた `KEY=VALUE` は `/outputs/<step_id>/<KEY>` で参照できます（例: `pointer: /outputs/script:check/gate`、`equals: ok`）。\n\n### キャパシティ＆レディ数ゲート（`admit`）\n\n`admit` は `agent_slot: true` または `max_ready: 1..=100` のいずれかが必須です（`definition.rs`）。到達したランは `waiting_capacity` に入り、`canban_scheduler::admissions` が各列の**ボード順**で厳密に解放します。\n\n- `agent_slot: true`（既定）: グローバル並列枠（`scheduler.max_agents`、既定 `8`）が空くまで待機。\n- `max_ready: K`: その列でゲート通過後に滞留できるカード上限（例: `Backlog` の計画済みカードを最大 `2` 枚に制限）。\n- `canban card adopt`: 既存のライブ端末から `start_adopted` で引き継ぐ場合は `admit` 待ちをスキップします。"
+      },
+      {
+        "id": "env-and-secrets",
+        "heading": "9 層環境変数・暗号化 Vault＆外部 PR 隔離",
+        "markdown": "Canban は明示的な環境変数モデルとホスト単位の暗号化シークレット Vault（`crates/storage/src/vault.rs`、`crates/app-server/src/env.rs`）を提供します：\n\n- **9 層優先順（下位→上位で上書き）**: ホストのログインシェル → `Global` vars/secrets → `CLI Agent` → `@Identity` → `Project` → 保護された `CANBAN_*` 変数 → Workflow `env` → `$CANBAN_ENV` → Step `env`。YAML では `${{ vars.KEY }}` と `${{ secrets.KEY }}` を参照できます。\n- **`XChaCha20-Poly1305` ホスト Vault**: シークレットはホスト上の `<CANBAN_HOME>/vault.key`（256-bit、`0600`）で暗号化され SQLite の `vault_entries` に保存されます。UI とリモートデーモン間の通信では **`enc:v1:`** AEAD シールで復号前に保護送信され、`.outbox.json` には保存されません（オンライン専用）。\n- **`external_pr` 信頼境界とマスキング**: `source_trust == external_pr` またはカードレスな外部 GitHub イベントでは、ホスト環境ポリシーを自動的に **`Minimal (PATH only)`** へ落とし（ログインシェルの認証情報を漏洩させず）、シークレット参照も遮断します。平文値（長さ 6 文字以上）はログ・ストリーミング出力・`$CANBAN_OUTPUT` で自動的に `***` にマスクされます。\n\n```yaml\nschema: 12\nid: ci:watch-pr\nname: Auto Fix Failed CI\non:\n  ci_failed:\n    event: github.pr.ci_failed\n    cardless: true\n    start_at: script:diagnose\n    match:\n      exclude_self: true\nenv:\n  GITHUB_TOKEN: ${{ secrets.CI_BOT_TOKEN }}\n  DEPLOY_TARGET: ${{ vars.STAGING_URL }}\n```"
       },
       {
         "id": "rework-failure",
@@ -127,7 +142,7 @@
       {
         "id": "cli-workflows",
         "heading": "CLI からのワークフロー管理",
-        "markdown": "ターミナルからライブスキーマの確認、エクスポート、ドライラン検証（`--check`）、公開、グローバル既定の設定を行えます。\n\n```sh\ncanban call workflow.schema '{}'\ncanban workflow sources --project-id <PROJECT_ID>\ncanban workflow export --project-id <PROJECT_ID> --name development.yaml --output development.yaml\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml --check\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml\ncanban workflow set-default --project-id <PROJECT_ID>\n```\n\n`--global` フラグ、`schedule` コマンド、`--human` 出力は [Canban CLI・Agent 最適化・--human](/ja/docs/cli/) をご参照ください。"
+        "markdown": "ターミナルからライブスキーマの確認、エクスポート、ドライラン検証（`--check`）、公開、グローバル既定の設定を行えます。\n\n```sh\ncanban call workflow.schema '{}'\ncanban workflow sources --project-id <PROJECT_ID>\ncanban workflow export --project-id <PROJECT_ID> --name development.yaml --output development.yaml\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml --check\ncanban workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file development.yaml\ncanban workflow set-default --project-id <PROJECT_ID>\n```\n\n`--global` フラグ、`schedule` コマンド、`--human` 出力は [Canban CLI・Agent 最適化・--human](/ja/docs/cli/) をご参照ください。実践テンプレートとしては [純スクリプトによる Git Worktree 安全自動回収ガイド](/ja/guides/scheduled-worktree-cleanup/) もあわせてご覧ください。"
       }
     ],
     "faq_items": [
@@ -145,7 +160,11 @@
       ],
       [
         "Cron 定期実行ワークフローでボードに不要なカードが増え続けませんか？",
-        "用途に応じて選べます。cron ルールに card: { column, title, body } を書けば実行ごとにカードが生成され、省略すればカードなしのバックグラウンド実行（skip / queue / allow 制御付き）になります。"
+        "用途に応じて選べます。cron ルールに card: { column, title, body } を書けば実行ごとにカードが生成され、card を省略するかイベント規則で cardless: true を設定すればボード上にカードを作らずバックグラウンド実行できます。"
+      ],
+      [
+        "External PR や GitHub トリガーの自動実行からホストのシークレットは保護されますか？",
+        "はい。Vault シークレットはホストごとの 256-bit vault.key（XChaCha20-Poly1305）で暗号化され、ログや出力では *** でマスクされます。さらに source_trust == external_pr または信頼境界外のカードレス実行では Minimal (PATH only) 環境へ隔離され、secrets.* は一切注入されません。"
       ]
     ]
   },
@@ -156,18 +175,18 @@
     "description": "canban CLI 完全リファレンス：主要コマンド、コンパクト単一行 JSON とサーバー側 --fields/--full 絞り込み、環境変数自動注入、request_key 冪等性、組み込み Skill、--human 整形出力。",
     "intro": "`canban` バイナリ（`crates/cli/src/main.rs`）はネイティブデスクトップ UI と同一の `AppServer` JSON-RPC 権限と通信します。デフォルトは Agent のコンテキスト節約に特化したコンパクト契約ですが、`--human` を付けるだけで人間にも読みやすい形式になります。",
     "date_published": "2026-11-19",
-    "updated": "2026-11-23",
+    "updated": "2026-11-24",
     "breadcrumbs": [["ドキュメント", "docs"], ["CLI", "docs/cli"]],
     "sections": [
       {
         "id": "core-commands",
         "heading": "主要 CLI コマンド一覧",
-        "markdown": "グローバルオプション `--home <PATH>`（`CANBAN_HOME`）、`--endpoint <PATH>`（`CANBAN_ENDPOINT`）、`--human`、`--fields <COLS>`、`--full` は全サブコマンドで使えます：\n\n| コマンド | 用途 |\n| --- | --- |\n| `canban snapshot`, `canban status` | `app.snapshot` 全状態または `herdr.status` ランタイム状態を取得。 |\n| `canban call <METHOD> '<JSON>'` | 公開 `AppServer` JSON-RPC メソッドを呼び出し（ファイル入力は `@/path/to/params.json`）。 |\n| `canban card show`, `card update`, `card adopt` | カード閲覧、`--title` / `--file` 更新、重複 Agent を起動せず `--stage develop` で既存ライブ PTY を引き継ぎ。 |\n| `canban report` | カードまたは `--schedule-run-id` の実行結果（`--state`: `completed`, `backlog`, `blocked`, `failed`, `working`）を報告。 |\n| `canban reply` | 実行中のタスクを終了せず追加質問（`--to <QUESTION_ID> --file <PATH>`）へ回答。 |\n| `canban bind-session` | プロバイダの `--session-id <ID>` をカード・スケジュールラン・マージバッチ等へ紐付け。 |\n| `canban review draft`, `review clear` | Card Diff UI 用のローカル未公開レビュー JSON（`{ summary, verdict, comments }`）を一時保存・削除。 |\n| `canban workflow sources`, `export`, `submit`, `set-default` | SQLite 管理の `workflow_sources`（`--project-id` / `--global`、`--check` 検証、グローバル既定）を操作。 |\n| `canban schedule` | `list`, `runs`, `create`, `trigger`, `toggle`（`--on` / `--off`）, `delete`, `artifact` で Cron ワークフローを管理。 |\n| `canban worktree gc` | マージ済みのクリーンな Worktree を整理（`--merged-before 7d`, `--dry-run`, `--env-dirty`, `--fail-on-dirty`）。 |\n| `canban batch report` | `_merge_queue` の `@merger` 解決結果を報告（`--state`, `--evict <CARD_NUMBER>`）。 |\n| `canban serve`, `pair`, `service` | Headless `AppServer` 起動（`--tailscale`, `--port 7680`, `--listen`）、`canban://` ペアリング URI 表示、`systemd` / `launchd` 管理。 |\n| `canban skill`, `--skill`, `build-info` | アプリデータを開かずに内蔵 `SKILL.md` やビルド情報を出力。 |"
+        "markdown": "グローバルオプション `--home <PATH>`（`CANBAN_HOME`）、`--endpoint <PATH>`（`CANBAN_ENDPOINT`）、`--human`、`--fields <COLS>`、`--full` は全サブコマンドで使えます：\n\n| コマンド | 用途 |\n| --- | --- |\n| `canban snapshot`, `canban status` | `app.snapshot` 全状態または `herdr.status` ランタイム状態を取得。 |\n| `canban call <METHOD> '<JSON>'` | 公開 `AppServer` JSON-RPC メソッドを呼び出し（例: `host.discover_canban`、ファイル入力は `@/path/to/params.json`）。 |\n| `canban card show`, `update`, `adopt`, `resolve`, `reopen` | カード閲覧・更新、既存ライブ PTY 引き継ぎ（`--stage develop`）、`Resolved` 完了状態への遷移（`--message` 可）および再オープン。 |\n| `canban report` | カードまたは `--schedule-run-id` の実行結果（`--state`: `completed`, `backlog`, `blocked`, `failed`, `working`）を報告。 |\n| `canban reply` | 実行中のタスクを終了せず追加質問（`--to <QUESTION_ID> --file <PATH>`）へ回答。 |\n| `canban bind-session` | プロバイダの `--session-id <ID>` をカード・スケジュールラン・マージバッチ等へ紐付け。 |\n| `canban review draft`, `clear`, `publish` | 未公開レビュー JSON（`{ summary, verdict, comments }`）の一時保存・削除、および公開（`--event-override` 指定可）。 |\n| `canban workflow sources`, `export`, `submit`, `set-default` | SQLite 管理の `workflow_sources`（`--project-id` / `--global`、`--check` 検証、グローバル既定）を操作。 |\n| `canban schedule` | `list`, `runs`, `create`, `trigger`, `toggle`（`--on` / `--off`）, `delete`, `artifact` で Cron ワークフローを管理。 |\n| `canban worktree gc` | マージ済みのクリーンな Worktree を整理（`--merged-before 7d`, `--resolved-before <SPEC>`, `--dry-run`, `--env-dirty`, `--fail-on-dirty`）。 |\n| `canban batch report` | `_merge_queue` の `@merger` 解決結果を報告（`--state`, `--evict <CARD_NUMBER>`）。 |\n| `canban serve`, `pair`, `service` | Headless `AppServer` 起動（`--tailscale`, `--allow-insecure-bind`, `--port 7680`；`trust_tailscale_self: true` により同一アカウント Tailscale WhoIs 自動認証が既定で有効）、別アカウント・tagged・カスタム VPN 等向けに 5 分有効な招待生成（`--device-name`, `--ttl-secs`, `--allow-insecure-bind`, `--json`）、`systemd` / `launchd` 管理。 |\n| `canban device` | 永続 `dev_...` トークンとアクティブな Tailscale WhoIs セッションの確認および管理：`list`, `invite`, `revoke <id>`, `remove-legacy-token`。 |\n| `canban skill`, `--skill`, `build-info` | アプリデータを開かずに内蔵 `SKILL.md` やビルド情報を出力。 |"
       },
       {
         "id": "agent-optimizations",
         "heading": "Agent ファースト設計と最適化",
-        "markdown": "CLI と RPC 層（`crates/app-server/src/representation.rs`）は、コンテキストトークンの浪費や不整合を防ぐよう設計されています：\n\n- **標準でコンパクト単一行 JSON**: 出力先が端末かパイプかにかかわらず 1 行のコンパクト JSON を返し、エラー時は構造化 `{\"error\":{\"message\":...}}` を stderr へ出して非 0 で終了します。\n- **サーバー側レスポンス整形（`--fields` と `--full`）**: `card.show`・`card.get`・`card.list` の既定値は軽量サマリー（`id`, `number`, `title`, `stage`, `revision`）のみ。`--fields number,title,body,stage,revision` で必要列だけ取得でき、全体が必要なら `--full`（`view: \"full\"`）を指定します。\n- **有界カーソルページネーション**: `card.list`（`limit` 1..500、既定 50）は不透明 `cursor` と `cursor_stale` / `cursor_scope_mismatch` 保護を備え、`timeline.list` は SQL 側で `kinds` を絞り込みます。\n- **ゼロ設定の環境変数注入**: 起動セッションに `CANBAN_CLI`, `CANBAN_ENDPOINT`, `CANBAN_HOME`, `CANBAN_CARD`, `CARD_ID`, `CANBAN_PROJECT`, `CANBAN_PROFILE_ID`, `CANBAN_RUN_DIR`（および該当時は `CANBAN_SCHEDULE_RUN_ID`, `CANBAN_SCHEDULE_ID`, `CANBAN_BATCH_ID`）を自動注入します。\n- **`request_key` 冪等性とアップデート引き継ぎ**: 変更系コマンドは `request_key` を付与し、ライブアップグレード中に実行された `report` / `batch report` / `reply` は `canban_updater::handoff` に永続キューイングされます。\n- **明示的な `report --state` ゲート**: プロセス終了や待機状態では進行せず、明示報告でのみ遷移します。\n- **バイナリ内蔵 `canban skill`（`SKILL.md`）**: `canban skill` で出力でき、`AppServer::open` が `<CANBAN_HOME>/skills/canban/SKILL.md` に自動展開します。\n- **ローカル未公開 `review draft`**: エージェントが直接 GitHub へ投稿せず、まずローカル SQLite に下書きを保存して人間が Diff UI から確認・公開できます。"
+        "markdown": "CLI と RPC 層（`crates/app-server/src/representation.rs`）は、コンテキストトークンの浪費や不整合を防ぐよう設計されています：\n\n- **標準でコンパクト単一行 JSON**: 出力先が端末かパイプかにかかわらず 1 行のコンパクト JSON を返し、エラー時は構造化 `{\"error\":{\"message\":...}}` を stderr へ出して非 0 で終了します。\n- **サーバー側レスポンス整形（`--fields` と `--full`）**: `card.show`・`card.get`・`card.list` の既定値は軽量サマリー（`id`, `number`, `title`, `stage`, `revision`）のみ。`--fields number,title,body,stage,revision` で必要列だけ取得でき、全体が必要なら `--full`（`view: \"full\"`）を指定します。\n- **有界カーソルページネーション**: `card.list`（`limit` 1..500、既定 50）は不透明 `cursor` と `cursor_stale` / `cursor_scope_mismatch` 保護を備え、`timeline.list` は SQL 側で `kinds` を絞り込みます。\n- **ゼロ設定の環境変数注入**: 起動セッションに `CANBAN_CLI`, `CANBAN_ENDPOINT`, `CANBAN_HOME`, `CANBAN_CARD`, `CARD_ID`, `CANBAN_PROJECT`, `CANBAN_PROFILE_ID`, `CANBAN_RUN_DIR`（および該当時は `CANBAN_SCHEDULE_RUN_ID`, `CANBAN_SCHEDULE_ID`, `CANBAN_BATCH_ID`）を自動注入します。\n- **`request_key` 冪等性とアップデート引き継ぎ**: 変更系コマンドは `request_key` を付与し、ライブアップグレード中に実行された `report` / `batch report` / `reply` は `canban_updater::handoff` に永続キューイングされます。\n- **明示的な `report --state` ゲート**: プロセス終了や待機状態では進行せず、明示報告でのみ遷移します。\n- **バイナリ内蔵 `canban skill`（`SKILL.md`）**: `canban skill` で出力でき、`AppServer::open` が `<CANBAN_HOME>/skills/canban/SKILL.md` に自動展開します。\n- **ローカル未公開 `review draft` と `review publish`**: エージェントが直接 GitHub へ投稿せず、まずローカル SQLite に下書きを保存し、人間または `canban review publish [--event-override ...]` で確定・公開できます。"
       },
       {
         "id": "human-usage",
@@ -177,7 +196,7 @@
       {
         "id": "canban-skill",
         "heading": "内蔵 Canban Skill（canban skill）",
-        "markdown": "Canban はバージョンに紐付いた Agent Skill（`skills/canban/SKILL.md`、`crates/context/src/lib.rs` で `canban_context::SKILL_MD` として埋め込み）をバイナリに内蔵しており、ユーザーのグローバル設定ディレクトリを勝手に書き換えません：\n\n- **副作用なしの参照と Home 展開**: `canban skill` / `canban --skill` は SQLite やソケットを開かず `SKILL.md` を標準出力に出します。`AppServer::open` 起動時（および `stage_remote` 同期時）には `<CANBAN_HOME>/skills/canban/SKILL.md` へ安全に展開されます。\n- **エージェントへの導入・更新**: デスクトップの **Agent Setup** や **Settings → Agents & Identities** から `npx skills add` コマンドをコピーするか、`canban skill` の出力を直接書き出せます：\n\n```sh\n# Canban Home からグローバル Skill をインストール・更新\nnpx skills add ~/.canban/skills --skill canban -g\n\n# またはバイナリ内蔵の最新 Skill を直接ファイルへ書き出す\ncanban skill > ~/.agents/skills/canban/SKILL.md\n```\n\n- **Skill が定義する運用ルール**: 起動時プリフライトチェック、作業一時ファイルの `$CANBAN_RUN_DIR` 隔離、軽量 `card show` と `card adopt`、明示的な `report --state` 完了報告、`reply --to`、ローカル `review draft`、`workflow submit --check`、`worktree gc`。"
+        "markdown": "Canban はバージョンに紐付いた Agent Skill（`skills/canban/SKILL.md`、`crates/context/src/lib.rs` で `canban_context::SKILL_MD` として埋め込み）をバイナリに内蔵しており、ユーザーのグローバル設定ディレクトリを勝手に書き換えません：\n\n- **副作用なしの参照と Home 展開**: `canban skill` / `canban --skill` は SQLite やソケットを開かず `SKILL.md` を標準出力に出します。`AppServer::open` 起動時（および `stage_remote` 同期時）には `<CANBAN_HOME>/skills/canban/SKILL.md` へ安全に展開されます。\n- **エージェントへの導入・更新**: デスクトップの **Agent Setup** や **Settings → Agents & Identities** から `npx skills add` コマンドをコピーするか、`canban skill` の出力を直接書き出せます：\n\n```sh\n# Canban Home からグローバル Skill をインストール・更新\nnpx skills add ~/.canban/skills --skill canban -g\n\n# またはバイナリ内蔵の最新 Skill を直接ファイルへ書き出す\ncanban skill > ~/.agents/skills/canban/SKILL.md\n```\n\n- **Skill が定義する運用ルール**: 起動時プリフライトチェック、作業一時ファイルの `$CANBAN_RUN_DIR` 隔離、軽量 `card show` と `card adopt`、明示的な `report --state` 完了報告、`reply --to`、ローカル `review draft`、`workflow submit --check`、`worktree gc`（定期自動回収の例は [Worktree 安全自動回収ガイド](/ja/guides/scheduled-worktree-cleanup/) を参照）。"
       }
     ]
   },
@@ -185,10 +204,10 @@
     "eyebrow": "CANBAN // ドキュメント // エージェント",
     "title": "ネイティブ AI コーディングエージェント CLI ＆ Herdr PTY",
     "meta_title": "ネイティブ AI コーディングエージェント CLI — Claude Code・Codex・Antigravity (agy)・Pi・Herdr PTY | Canban",
-    "description": "Canban が標準対応するネイティブコーディングエージェント CLI（Claude Code、Codex、Antigravity agy、Pi、Cursor CLI、Gemini CLI、OpenCode など）一覧、Herdr Core と libghostty-vt による TUI/MCP/スキル保持、canban card adopt、CLI リファレンス。",
+    "description": "Canban が標準対応するネイティブコーディングエージェント CLI（Claude Code、Codex、Antigravity agy デュアルロール、Pi、Cursor CLI、Gemini CLI、OpenCode など）一覧、Herdr Core と libghostty-vt、Managed/Manual 端末と回収保護、canban card adopt、CLI リファレンス。",
     "intro": "Canban は `herdr-core` の永続 PTY ターミナル上でネイティブのコーディングエージェント CLI を実行し、`libghostty-vt` で描画することで、各ツール本来の TUI・MCP サーバー・スキル・権限モデル・会話再開を損なわず維持します。",
     "date_published": "2026-11-19",
-    "updated": "2026-11-23",
+    "updated": "2026-11-24",
     "breadcrumbs": [["ドキュメント", "docs"], ["ネイティブ Agent と PTY", "docs/agents"]],
     "sections": [
       {
@@ -205,9 +224,14 @@
         }
       },
       {
+        "id": "managed-terminals-reclaim",
+        "heading": "Managed vs. Manual 端末・viewer.presence と安全な自動回収",
+        "markdown": "大量の並列タスクでもバックグラウンドのメモリ消費を抑えるため、Canban は起動経緯によって端末を明確に区別します：\n\n- **Managed vs. Manual 分類**: カードやワークフローが起動したエージェントセッションは **Managed**、ユーザーが直接開いたシェル・ツール端末は **Manual** として扱われます（プロジェクト横断・プロジェクト別の 2 段階サイドバー折りたたみに対応）。\n- **オンメモリ `viewer.presence` リース**: 接続中のクライアント（デスクトップやリモートビュー）がどのプロジェクト/端末を閲覧中かを `AppServer` 上の軽量インメモリリースとして保持し、現在見ている端末を誤って回収するのを防ぎます。\n- **アイドル回収猶予と `Reclaiming soon` 表示**: 利用されていない Managed 端末が設定済みの `idle_minutes` に達すると **30 秒**の回収猶予期間に入り、派手なアニメーションではなく静かな **`Reclaiming soon`** バッジを表示したあと、正確なプロバイダセッション ID を保ったままスリープ回収します（カードの **Resume** から即座に会話を再開可能）。"
+      },
+      {
         "id": "catalog-24",
         "heading": "標準対応 CLI エージェント一覧とカスタム設定",
-        "markdown": "`crates/profiles/src/catalog.rs` に Herdr の状態検知・再開プランナと一致した 24 種の公式対話 CLI プリセットを内蔵するほか、`config/agents.json` での独自 CLI 追加や `herdr:<template>` 動的プロファイルにも対応しています：\n\n| ID | Agent | バイナリ | 正確なセッション再開 | モデル / 推論引数 |\n| --- | --- | --- | --- | --- |\n| `codex` | Codex | `codex` | 対応 (`resume`) | `-m`, reasoning effort |\n| `claude` | Claude Code | `claude` | 対応 (`--resume`) | `--model`, `--effort` |\n| `agy` | Antigravity | `agy` | 対応 (`--conversation`) | `--model`, `--effort` |\n| `gemini` | Gemini CLI | `gemini` | 対応 (`--resume`) | `-m` |\n| `opencode` | OpenCode | `opencode` | 対応 (`--session`) | `-m`, `--variant` |\n| `cursor` | Cursor Agent | `cursor-agent` | 対応 (`--resume`) | `--model` |\n| `pi` | Pi | `pi` | 対応 (`--session`) | `--model`, `--thinking` |\n| `omp` | Omp | `omp` | 対応 (`--resume=`) | `--model` |\n| `copilot` | GitHub Copilot | `copilot` | 対応 (`--resume=`) | `--model` |\n| `droid` | Droid | `droid` | 対応 (`--resume`) | `-m` |\n| `amp` | Amp | `amp` | 新規起動 | — |\n| `kimi` | Kimi | `kimi` | 対応 (`--session`) | `--model` |\n| `kiro` | Kiro | `kiro-cli` | 新規起動 | `--model` |\n| `qwen` | Qwen Code | `qwen` | 対応 (`--resume`) | `-m` |\n| `devin` | Devin | `devin` | 対応 (`--resume`) | — |\n| `cline` | Cline | `cline` | 新規起動 | — |\n| `grok` | Grok | `grok` | 対応 (`--resume`) | `-m` |\n| `hermes` | Hermes | `hermes` | 対応 (`--resume`) | `-m` |\n| `kilo` | Kilo | `kilo` | 対応 (`--session`) | `-m` |\n| `qodercli` | Qoder | `qodercli` | 対応 (`--resume`) | `--model` |\n| `letta` | Letta | `letta` | 対応 (`--conversation`) | `-m` |\n| `mastracode` | Mastra Code | `mastracode` | 対応 (`--thread`) | `--model` |\n| `maki` | Maki | `maki` | 新規起動 | — |\n| `muse` | Muse | `muse` | 新規起動 | — |"
+        "markdown": "`crates/profiles/src/catalog.rs` に Herdr の状態検知・再開プランナと一致した 24 種の公式対話 CLI プリセットを内蔵するほか、`config/agents.json` での独自 CLI 追加や `herdr:<template>` 動的プロファイルにも対応しています：\n\n| ID | Agent | バイナリ | 正確なセッション再開 | モデル / 推論引数 |\n| --- | --- | --- | --- | --- |\n| `codex` | Codex | `codex` | 対応 (`resume`) | `-m`, reasoning effort |\n| `claude` | Claude Code | `claude` | 対応 (`--resume`) | `--model`, `--effort` |\n| `agy` | Antigravity | `agy` | 対応 (`--conversation`) | `--model`, `--effort`, `--settings` |\n| `gemini` | Gemini CLI | `gemini` | 対応 (`--resume`) | `-m` |\n| `opencode` | OpenCode | `opencode` | 対応 (`--session`) | `-m`, `--variant` |\n| `cursor` | Cursor Agent | `cursor-agent` | 対応 (`--resume`) | `--model` |\n| `pi` | Pi | `pi` | 対応 (`--session`) | `--model`, `--thinking` |\n| `omp` | Omp | `omp` | 対応 (`--resume=`) | `--model` |\n| `copilot` | GitHub Copilot | `copilot` | 対応 (`--resume=`) | `--model` |\n| `droid` | Droid | `droid` | 対応 (`--resume`) | `-m` |\n| `amp` | Amp | `amp` | 新規起動 | — |\n| `kimi` | Kimi | `kimi` | 対応 (`--session`) | `--model` |\n| `kiro` | Kiro | `kiro-cli` | 新規起動 | `--model` |\n| `qwen` | Qwen Code | `qwen` | 対応 (`--resume`) | `-m` |\n| `devin` | Devin | `devin` | 対応 (`--resume`) | — |\n| `cline` | Cline | `cline` | 新規起動 | — |\n| `grok` | Grok | `grok` | 対応 (`--resume`) | `-m` |\n| `hermes` | Hermes | `hermes` | 対応 (`--resume`) | `-m` |\n| `kilo` | Kilo | `kilo` | 対応 (`--session`) | `-m` |\n| `qodercli` | Qoder | `qodercli` | 対応 (`--resume`) | `--model` |\n| `letta` | Letta | `letta` | 対応 (`--conversation`) | `-m` |\n| `mastracode` | Mastra Code | `mastracode` | 対応 (`--thread`) | `--model` |\n| `maki` | Maki | `maki` | 新規起動 | — |\n| `muse` | Muse | `muse` | 新規起動 | — |\n\n### Antigravity (`agy`) Orchestrator デュアルロール＆モデル別推論強度検出\n\n**Settings → Agents & Identities** では、`agy` に対して単一モデルの代わりに **デュアルロール Orchestrator**（`Planner` 用のモデル・推論強度 ＋ `Worker/Executor` 用のモデル・推論強度）を設定でき、一時的な `--settings` オーバーライド経由でエージェントを起動します。また、各 CLI プロバイダの **モデル別 Effort 対応状況**（例: `--effort` や `--thinking` がどのモデルで有効か）を自動検出し、対応しないモデルへの無効なフラグ付与を防ぎます。"
       },
       {
         "id": "card-adopt",
@@ -243,31 +267,31 @@
     "eyebrow": "CANBAN // ドキュメント // リモートホスト",
     "title": "リモート Linux サーバーで AI コーディングエージェントを動かす",
     "meta_title": "リモート Linux サーバーで AI コーディングエージェントを動かす — Tailscale・SSH・Headless canband | Canban",
-    "description": "デスクトップ環境なしの Linux サーバーで Claude Code、Codex、Antigravity (agy)、Pi 等を 24 時間稼働させる canband の導入と、Canban.app からの Tailscale 直結 TCP / SSH トンネル同時接続ガイド。",
-    "intro": "1 つの Canban.app デスクトップクライアントから、ローカルの Mac（`This Mac`）と 1 台または複数のリモート Linux / macOS `canband` ホストへ Tailscale TCP または SSH で同時に接続できます。",
+    "description": "デスクトップ環境なしの Linux サーバーで Claude Code、Codex、Antigravity (agy)、Pi 等を 24 時間稼働させる canband の導入、Tailscale WhoIs 同一アカウント自動認証＆オンデマンド Tailnet 検出、yamux/1 デバイス別トークン＆使い捨て招待、canban-sync オフライン編集・3-way 同期ガイド。",
+    "intro": "1 つの Canban デスクトップまたはモバイルクライアントから、ローカルの Mac（`This Mac`）と 1 台または複数のリモート Linux / macOS `canband` ホストへ `yamux/1` 単一 TCP 多重化（個人 Tailnet のペアリングコード不要 WhoIs 自動認証、またはデバイス別トークン）や SSH トンネルで同時に接続できます。",
     "date_published": "2026-11-19",
-    "updated": "2026-11-23",
+    "updated": "2026-11-24",
     "breadcrumbs": [["ドキュメント", "docs"], ["リモートホスト", "docs/remote-hosts"]],
     "sections": [
       {
         "id": "multi-host-model",
-        "heading": "複数ホスト同時接続とオフライン耐性",
-        "markdown": "各ホストは自己完結型の `canband` とローカル `herdr-core`（`hc`）を実行し、独自の SQLite WAL・プロジェクト・カード・ワークフロー・スケジューラ・Git Worktree を保持します：\n\n- **24 時間自律進行**: 手元のノート PC を閉じたりオフラインになっても、リモート `canband` はエージェントの実行、結果収集、FIFO Queue Merge、GitHub 連携を継続します。\n- **統合ボード＆通知**: `Canban.app` はローカルとリモートのプロジェクトを 1 つの `HostRegistry` に統合し、全ホストの `Needs you` や更新を `⌘I` に集約します。\n- **オフラインキャッシュ**: 取得に成功したリモートスナップショットは `<local-home>/cache/hosts/<host_id>.json` に保存され、回線切断中も `Offline · Cached` 読み取り専用モードで閲覧できます。"
+        "heading": "複数ホスト同時接続とオフライン編集・3-Way 同期",
+        "markdown": "各ホストは自己完結型の `canband` とローカル `herdr-core`（`hc`）を実行し、独自の SQLite WAL・プロジェクト・カード・ワークフロー・スケジューラ・Git Worktree を保持します：\n\n- **24 時間自律進行とライブ `app.subscribe` 配信**: 手元のノート PC を閉じたりオフラインになっても、リモート `canband` はエージェント実行や FIFO Queue Merge を継続します。再接続時は全ホストのプロジェクト・`Needs you`（`⌘I`）・Insights を `HostRegistry` に即時統合します。\n- **オフライン編集と永続 Outbox (`canban-sync`)**: 切断中でもローカルにキャッシュされたリモートホストは単なる読み取り専用ではありません。新しいカード作成（`Local` バッジ付き）、タイトル/本文編集、コメント送信（`@agent` / 通常）、列移動、Resolve / Archive がローカルの永続 Outbox（最大 500 操作）へ積まれ、タイムラインや作業 diff は 64 MiB LRU キャッシュから参照できます。\n- **FIFO リプレイと 3-Way マージ解決**: 再接続すると Outbox が `request_key` 付きで順番にリプレイされ、異なるフィールドへの変更は自動マージされます。同一フィールドがサーバー側と競合した場合は **Sync** モーダル（`Use server` / `Use mine` / `Edit merged` / `Retry` / `Discard`）で安全に調停できます（暗号化シークレットのみオンライン専用で `.outbox.json` には保存されません）。"
       },
       {
         "id": "headless-install",
         "heading": "Headless Linux canband の導入",
-        "markdown": "GUI のない Linux（`x86_64` / `aarch64`）サーバーには GTK4/GStreamer 不要のスタンドアロン `canban` を入れ、`systemd --user` サービスとして常駐させます：\n\n```sh\ncurl -fsSL https://canban.dev/install.sh | bash -s -- --headless\ncanban service install --tailscale --port 7680\ncanban service status\n```\n\n`canban service install` は利用可能な場合に `loginctl enable-linger` を有効化し、SSH ログアウト後もサービスと `herdr-core` PTY が生存し続けるようにします。"
+        "markdown": "GUI のない Linux（`x86_64` / `aarch64`）サーバーには GTK4/GStreamer 不要のスタンドアロン `canban` を入れ、`systemd --user` サービスとして常駐させます：\n\n```sh\ncurl -fsSL https://canban.dev/install.sh | bash -s -- --headless\ncanban service install --tailscale --port 7680\ncanban service status\n```\n\nWireGuard / ZeroTier など Tailscale 以外のプライベートネットワークを使う場合は `--allow-insecure-bind` を付けてバインドでき、`canban service install` は可能な環境で `loginctl enable-linger` を有効化して SSH ログアウト後もサービスと PTY を維持します。"
       },
       {
         "id": "tailscale-ssh-pairing",
-        "heading": "Tailscale 直結 TCP と SSH ペアリング",
-        "markdown": "Canban は Tailscale 優先のデータプレーンと SSH による自動ブートストラップ/フォールバックを備えています：\n\n- **Tailscale 直結 TCP（推奨）**: `canban serve --tailscale` はホストの Tailscale IPv4（`100.64.0.0/10`、既定ポート `7680`）にバインドし、設定を `<home>/config/server.json`、256-bit Bearer トークンを `<home>/server.token`（`0600`）に保存します。認証前の `host.probe` は最小限の識別情報のみを返し、全 RPC と `herdr.connect` PTY ストリームはトークンで保護されます。\n- **ペアリング URI**: サーバー側で `canban pair [--port 7680]` を実行して `canban://<addr>:<port>#<token>` を取得するか、デスクトップの **Connect a Machine** ウィザードで `tailscale status --json` から自動検出・SSH セットアップできます。\n- **SSH トンネルフォールバック**: Tailscale のない SSH ホスト向けには、`Canban.app` がバックグラウンドの `ssh -L` Unix ソケット転送を自動管理します。"
+        "heading": "Tailscale WhoIs 自動認証・yamux/1 多重化・デバイス別トークン・Tailnet 検出",
+        "markdown": "Canban は同一個人 Tailnet でのペアリングコード不要サインインと、デバイス単位で失効可能な資格情報を両立した多重化トランスポートを採用しています：\n\n- **Tailscale WhoIs 同一アカウント自動認証（ペアリングコード不要）**: `canban serve --tailscale` は `<home>/config/server.json` に `\"trust_tailscale_self\": true` を既定保存します。**同じ個人 Tailscale アカウント**にサインインしたデスクトップ（**Connect a Machine → Tailscale**）および iOS / Android モバイルクライアントは、QR スキャンや `canban pair` なしで `host.ts.net` や `100.x.y.z` から直接接続でき、サーバー側の `tailscale whois --json` が本人ノードを自動検証します。タグ付きノード（`Tags` 設定済み）や外部共有ノード（`IsShareeNode`）は自動的に拒否され、`\"trust_tailscale_self\": false` で無効化も可能です。接続時は **`yamux/1`** へ昇格して接続ごとの一時 `session_token` が発行され、**Settings → Hosts (Paired Devices)** には `Tailscale` バッジと `Managed in Tailscale Admin` が表示されます（権限取り消しは Tailscale Admin Console から行います）。\n- **オンデマンド Tailnet 検出（`host.discover_canban`）＆モバイル対応**: 1 台目のホストに接続後、クライアントはオンデマンドで 1 回だけ `host.discover_canban` を呼び出し（バックグラウンド定期ポーリングはしません）、接続中ホストの `hosts.json` 登録先と同一アカウントのオンラインなデスクトップ/サーバー Tailscale ピアを並列プローブします。モバイルでは初回接続直後および **Settings → Discover on Tailnet** からワンタップで **Join / Join All** できます。\n- **未認証 RPC 拒否・5 分使い捨て招待・デバイス別トークン (`dev_...`)**: 未認証の TCP JSON-RPC はすべて `-32001` で即座に拒否されます。別アカウント・タグ付きサーバー・カスタム VPN（`--allow-insecure-bind`）・自動認証オフの環境では、`canban pair [--device-name <NAME>] [--ttl-secs 300] [--allow-insecure-bind] [--json]` で 5 分有効・1 回限りの `canban://<addr>:<port>#pair_...` を発行し、クライアントごとのハッシュ化トークン `dev_...`（`<home>/device_tokens.json`, `0600`）を払い出します。管理・即時失効は **Settings → Hosts (Paired Devices)** または `canban device list` / `invite` / `revoke <id>` / `remove-legacy-token` で行い、暗号化 Vault の読み書きも現在のセッション秘密（WhoIs の一時 `session_token` または `dev_...`）から鍵導出した **`enc:v1:`** AEAD シールで保護されます。\n- **SSH トンネルフォールバック**: Tailscale のない SSH ホストでは `Canban.app` の **Connect a Machine** ウィザードが SSH 経由の自動導入とバックグラウンド `ssh -L` Unix ソケット転送を管理します。"
       },
       {
         "id": "diagnostics",
         "heading": "内蔵診断ツール＆リモートデーモン更新",
-        "markdown": "**Settings → Diagnostics** を開くと、ローカルおよび接続済みリモートホストをエンドツーエンドで診断できます：\n\n- **トランスポート＆遅延**: ソケット / Tailscale TCP / SSH トンネルの状態、RTT（`ms`）、再接続履歴。\n- **Canban サービス＆ストレージ**: デーモン PID、プラットフォーム、`DESKTOP_API` 互換性、`systemd --user` / `launchd` 状態、SQLite WAL サイズ。\n- **Herdr ＆ツールチェーン**: `hc` バイナリ、Core ID、稼働中 PTY 数、`git`・`python3`・`tailscale`・有効化された各 Agent CLI のパス解決。\n- **ライブログ＆更新**: `server.log` / `updater.log` を確認し、`ApiMismatch` 検出時は UI から直接リモート `update.daemon` を実行できます。"
+        "markdown": "**Settings → Diagnostics** を開くと、ローカルおよび接続済みリモートホストをエンドツーエンドで診断できます：\n\n- **トランスポート＆遅延**: ソケット / `yamux/1` Tailscale TCP / SSH トンネルの状態、RTT（`ms`）、再接続履歴。\n- **Canban サービス＆ストレージ**: デーモン PID、プラットフォーム、`DESKTOP_API` 互換性、`systemd --user` / `launchd` 状態、SQLite WAL サイズ。\n- **Herdr ＆ツールチェーン**: `hc` バイナリ、Core ID、稼働中 PTY 数、`git`・`python3`・`tailscale`・有効化された各 Agent CLI のパス解決。\n- **ライブログ＆更新**: `server.log` / `updater.log` を確認し、`ApiMismatch` 検出時は UI から直接リモート `update.daemon` を実行できます。"
       }
     ],
     "faq_items": [
@@ -276,12 +300,16 @@
         "いいえ。各リモート Linux ホストが独自の canband デーモンと herdr-core (hc) を動かしているため、MacBook をスリープさせてもテスト実行・FIFO Queue Merge・GitHub 同期は 24 時間止まりません。"
       ],
       [
-        "Tailscale 経由の接続はどのように認証されますか？",
-        "canban serve --tailscale は Tailscale IPv4 インターフェース（100.64.0.0/10）にのみバインドし、<home>/server.token（パーミッション 0600）の 256-bit Bearer トークンですべての JSON-RPC と herdr.connect PTY ストリームを検証します。"
+        "Tailscale 経由の接続はどのように認証・失効されますか？",
+        "すべての未認証 TCP RPC は -32001 で拒否されます。同一の個人 Tailscale アカウント上の端末は既定で tailscale whois によりペアリングコード不要で自動認証され（タグ付き・外部共有ノードは自動拒否、接続ごとの一時セッション鍵を発行、config/server.json の trust_tailscale_self: false で無効化可）、権限は Tailscale Admin で管理します。別アカウント・タグ付き・カスタム VPN 環境では canban pair が 5 分限りの使い捨て #pair_... 招待とデバイス別 dev_... トークンを発行し、Settings や canban device revoke で個別失効できます。"
+      ],
+      [
+        "オフライン中にリモートホスト上のカードを編集したりコメントを追加したりできますか？",
+        "はい。canban-sync の永続 Outbox により、切断中でもカード新規作成（Local バッジ）・タイトルや本文の編集・コメント追加・列移動・Resolve をローカルにキュー保存できます。再接続後に順次リプレイされ、異なる項目は自動マージ、同一項目の競合は Sync モーダルで解決できます。"
       ],
       [
         "Tailscale を入れていない SSH のみのサーバーにも接続できますか？",
-        "はい。Canban はバックグラウンドの ssh -L Unix ソケット転送によるフォールバックを内蔵しており、Connect a Machine ウィザードから SSH 越しに Headless 導入とペアリングを自動実行できます。"
+        "はい。Canban はバックグラウンドの ssh -L Unix ソケット転送によるフォールバックを内蔵しており、Connect a Machine ウィザードから SSH 越しに Headless 導入とペアリングを自動実行できます（WireGuard 等では --allow-insecure-bind も利用できます）。"
       ]
     ]
   },
@@ -289,10 +317,10 @@
     "eyebrow": "CANBAN // ガイド // 並列エージェント",
     "title": "カンバンと Git Worktree で複数 AI コーディングエージェントを並列稼働させる",
     "meta_title": "カンバンと Git Worktree で複数 AI コーディングエージェントを並列稼働させる | Canban",
-    "description": "Claude Code、Codex、Antigravity (agy)、Pi、Cursor CLI、OpenCode を同時に動かしてもターミナルタブ迷子にならない方法。カンバンカードで Human Context を守り、独立 Git Worktree・通知インボックス（⌘I）・直列 FIFO Queue Merge で安全に並列開発する実践ガイド。",
-    "intro": "**結論**: 生のターミナルタブで 5〜10 個のコーディングエージェントを並列起動すると、文脈喪失・作業ツリーの競合・`[Y/n]` 確認の見落としで破綻します。Canban はカンバンカード（`Human Context`）、カード単位の Git Worktree（`<dir>-<proj4>/<card-number>`）、グローバル通知インボックス（`⌘I`）、直列 FIFO マージキューを統合し、複数 CLI が互いに干渉せず並列完走できるようにします。",
+    "description": "Claude Code、Codex、Antigravity (agy) デュアルロール、Pi、Cursor CLI、OpenCode を同時に動かしてもターミナルタブ迷子にならない方法。カードの @Agent/#Card 補完・Resolved 完了、Git Diff 無制限展開＆PR/CI 追跡、通知インボックス（⌘I）、FIFO Queue Merge、Insights で安全に並列開発する実践ガイド。",
+    "intro": "**結論**: 生のターミナルタブで 5〜10 個のコーディングエージェントを並列起動すると、文脈喪失・作業ツリーの競合・`[Y/n]` 確認の見落としで破綻します。Canban はカンバンカード（`Human Context`）、カード単位の Git Worktree（`<dir>-<proj4>/<card-number>`）、グローバル通知インボックス（`⌘I`）、直列 FIFO マージキュー、Timeline-first の **Insights** を統合し、複数 CLI が互いに干渉せず並列完走できるようにします。",
     "date_published": "2026-11-23",
-    "updated": "2026-11-23",
+    "updated": "2026-11-24",
     "breadcrumbs": [["ドキュメント", "docs"], ["並列エージェントガイド", "guides/parallel-coding-agents"]],
     "sections": [
       {
@@ -311,12 +339,12 @@
       {
         "id": "card-context-worktrees",
         "heading": "カードで Human Context を管理し、ブランチごとに Git Worktree を隔離",
-        "markdown": "Canban（`Canban = Kanban + Workflow + Herdr`）では、各タスクが構造化された**カード**になり、Markdown 仕様・スクリーンショット・`#Card` / GitHub Issue/PR リンク・`@Agent` 履歴を 1 箇所に保持します。\n\nカードが `Develop` に入る（または対話端末から `canban card adopt --stage develop` を実行する）と、ワークフローエンジン（`crates/workflow-engine`）が自動で以下を実行します：\n\n1. **決定論的な Git Worktree 割り当て**: `<dir>-<proj4>/<card-number>` に独立ワークツリーを作成し、ベースブランチを同期（`workspace.sync_base: true`）。\n2. **ゼロ設定の環境注入**: `CANBAN_CLI`、`CANBAN_CARD`、`CANBAN_PROJECT`、`CANBAN_RUN_DIR` を渡し、エージェントは `canban card show --fields number,title,body,stage,revision` で必要最小限の列だけを取得します。\n3. **ボード順の同時実行制限**: `admit` ゲート（`scheduler.max_agents`、既定 `8`）によりボードの優先順で整然と投入します。"
+        "markdown": "Canban（`Canban = Kanban + Workflow + Herdr`）では、各タスクが構造化された**カード**になり、Markdown 仕様（タイトル・本文どちらでも `@Agent` と `#Card` のオートコンプリートに対応）・スクリーンショット・GitHub Issue/PR リンク・`@Agent` 履歴・完了時の `Resolved` 状態（`canban card resolve` / `reopen`、翌日自動アーカイブ）を 1 箇所に保持します。\n\nカードが `Develop` に入る（または対話端末から `canban card adopt --stage develop` を実行する）と、ワークフローエンジン（`crates/workflow-engine`）が自動で以下を実行します：\n\n1. **決定論的な Git Worktree 割り当てと外部ワークツリー検出**: `<dir>-<proj4>/<card-number>` に独立ワークツリーを作成しベースブランチを同期（`workspace.sync_base: true`）するほか、CLI や外部で作成された Git Worktree もワークベンチから自動検出できます。\n2. **ゼロ設定＋9 層環境変数の注入**: `CANBAN_CLI`、`CANBAN_CARD`、`CANBAN_PROJECT`、`CANBAN_RUN_DIR` に加え `XChaCha20-Poly1305` Vault シークレットを含む 9 層の環境変数が引き継がれ、エージェントは `canban card show --fields number,title,body,stage,revision` で必要列だけを取得します。\n3. **ボード順の同時実行制限と安全な回収**: `admit` ゲート（`scheduler.max_agents`、既定 `8`）によりボード順で投入し、離脱後のアイドル端末は 30 秒猶予（`Reclaiming soon`）後にセッション ID を保持したまま回収されます。"
       },
       {
         "id": "attention-inbox-and-review",
-        "heading": "通知インボックス（⌘I）で待ちを即検知し、アプリ内で差分レビュー",
-        "markdown": "10 個のタブを巡回する代わりに **`⌘I`** を押すだけで、プロジェクト・ホスト横断の**Attention Inbox**が開きます：\n\n- **詰まりを即把握**: ツール実行承認、追質問、人間レビュー待ち（`Needs you`）と完了報告・実行中セッションを一箇所で一覧できます。\n- **ワンクリックで現場へ移動**: 通知を選ぶと、該当カードの議論ドロワーまたはライブ Herdr PTY へ直接ジャンプします。\n- **内蔵インライン Diff レビュー**: 外部エディタを開かずに Worktree のコミットと差分を確認し、特定の行にコメントを付けて `Review & Send to @Agent` で返せます。",
+        "heading": "通知インボックス（⌘I）・Git PR/CI 追跡・無制限 Diff レビュー",
+        "markdown": "10 個のタブを巡回する代わりに **`⌘I`** を押すだけで、プロジェクト・ホスト横断の**Attention Inbox**が開きます：\n\n- **詰まりを即把握**: ツール実行承認、追質問、人間レビュー待ち（`Needs you`）と完了報告・実行中セッションを一箇所で一覧できます。\n- **Git PR ＆ Fast-Fail CI トラッキング**: Git ワークベンチはブランチに紐づく Pull Request の状態、レビュー、CI チェック（失敗時は即座に `github.pr.ci_failed` と GitHub リンクを表示）を追跡します。\n- **無制限／段階的インライン Diff レビュー**: 以前の 800 行表示上限を撤廃し、大容量差分でも段階的に全行を展開できます。特定の行にコメントを付けて `Review & Send to @Agent` で返したり、`canban review draft` / `publish` と連携できます。",
         "screenshot": {
           "src": "/screenshots/review-diff.png",
           "alt": "Canban 内蔵 Git Diff レビュー画面：コミット履歴、変更ファイル、行コメント入力、Review & Send to @Agent ボタンを表示。",
@@ -330,6 +358,11 @@
         "id": "serialized-merge-queue",
         "heading": "FIFO Queue Merge で並列ブランチを壊さず統合",
         "markdown": "エージェントが実装を終えて `canban report --state completed` を実行すると、カードはいきなり `main` を書き換えず `Review`（`deliver` ステップ）へ進みます：\n\n- **外部 PR 保護**: 外部 GitHub PR（`source_trust == external_pr`）は `approval:review` で自動的に人間承認を要求します。\n- **直列バッチ検証**: 信頼済みカードは `(queued_at, storage_index)` 順で `<home>/worktrees/<project-ns>/_merge_queue` に集約され（`batch_size` 1..=50、既定 `5`）、`rebase`（または `squash` / `merge`）後に `test_command` を一括実行し、成功したら 1 回だけ Fast-Forward＆Push してカードをアーカイブします。\n- **`@merger` による自動調停**: 競合やテスト失敗時は専用の `@merger` が `_merge_queue` で修正または `--evict <CARD_NUMBER>` で原因カードを切り離します。"
+      },
+      {
+        "id": "insights-metrics",
+        "heading": "Timeline-first の Insights で並走実績と自律率を可視化",
+        "markdown": "複数エージェントを並列運用し始めたら、左サイドバーの **Insights** で実行実態を時間軸で確認できます：\n\n- **1D スイムレーン**: 当日の人間操作（`Me · Card/Terminal/Other`）、Profile または Model ごとの Agent 稼働帯、`Merges` を並列表示。\n- **比較・ファネル・365 日ヒートマップ**: `7D`/`30D`/`90D` の同時刻比集計、`Created → Agent → Review → Merged` の自動化ファネルと人手ゼロ完了率、`p50`/`p90` 所要時間、全接続ホスト横断の年間ヒートマップを確認できます（非侵入型・トークン計数なし）。"
       },
       {
         "id": "quickstart-parallel",
@@ -360,20 +393,20 @@
     "eyebrow": "CANBAN // ガイド // ネイティブ端末＆マルチマシン",
     "title": "ネイティブ端末ワークベンチ vs. tmux ＆チャット型 IDE — 永続 PTY と複数マシン運用",
     "meta_title": "ネイティブ端末ワークベンチ vs. tmux ＆チャット型 IDE — 永続 PTY と複数マシン運用 | Canban",
-    "description": "Canban（Rust + libghostty-vt + Herdr 永続 PTY）と tmux タブ・チャットラッパー IDE のアーキテクチャ比較、および Tailscale TCP と SSH を使ったリモート Linux サーバー 24 時間運用の実践解説。",
+    "description": "Canban（Rust + libghostty-vt + Herdr 永続 PTY）と tmux タブ・チャットラッパー IDE のアーキテクチャ比較、および yamux/1 多重化・canban-sync オフライン編集＆SSH を使ったリモート Linux サーバー 24 時間運用の実践解説。",
     "intro": "**結論**: 生の `tmux` は CLI の機能を損なわない反面、タスク文脈やマージワークフロー、ホスト横断通知がありません。一方、チャットラッパー型 IDE は見た目と引き換えにネイティブ TUI・MCP・正確な再開機能を失いがちです。Canban は Rust + `libghostty-vt` + `herdr-core`（`hc`）でネイティブ端末を無改造のまま永続化し、ローカル Mac と複数のリモート Linux `canband` サーバーを一画面に統合します。",
     "date_published": "2026-11-23",
-    "updated": "2026-11-23",
+    "updated": "2026-11-24",
     "breadcrumbs": [["ドキュメント", "docs"], ["ネイティブ端末とマルチマシン", "guides/native-terminal-and-multi-machine"]],
     "sections": [
       {
         "id": "architecture-comparison",
         "heading": "徹底比較：Canban vs. tmux・端末タブ vs. チャットラッパー IDE",
-        "markdown": "| 比較項目 | Canban (`Rust + libghostty-vt + Herdr`) | 生の `tmux` / 端末タブ | チャットラッパー IDE / Web UI |\n| --- | --- | --- | --- |\n| **ネイティブ CLI TUI・MCP・スキル** | **100% そのまま** — 実バイナリ `claude`, `codex`, `agy`, `pi`, `cursor-agent`, `gemini`, `opencode` を直接実行 | **100% そのまま** | 制限・プロキシ・独自再実装になりがち |\n| **アプリ再起動・更新時の PTY 生存** | **対応** — `herdr-core` (`hc`) が GUI 終了・更新中も TTY を維持 | **対応**（各マシン上の `tmux` サーバー依存） | ウィンドウ終了やリロードで停止しがち |\n| **タスク仕様・Worktree・マージキュー** | **標準内蔵** — カンバンカード、`<dir>-<proj4>/<card>`、YAML ワークフロー、FIFO Queue Merge | 手動ブランチ＆自作スクリプトが必要 | 部分的または単一リポジトリ前提 |\n| **複数プロジェクト横断 通知インボックス（`⌘I`）** | **標準内蔵** — ローカル＆リモート全ホストの `[Y/n]` や進捗を即通知 | 各ペインを手動巡回 | タブ単位のバッジのみ |\n| **リモート Linux 24 時間マルチマシン** | **標準内蔵** — Tailscale TCP 直結 + SSH フォールバック + `Offline · Cached` | 手動 SSH ＋ 各自で `tmux` 管理 | リモート IDE 拡張やクラウド固定 |\n| **UI ランタイム** | ネイティブ AppKit/Metal（macOS）＆ GTK4（Linux） | ターミナルエミュレータ | Electron / ブラウザ DOM |",
+        "markdown": "| 比較項目 | Canban (`Rust + libghostty-vt + Herdr`) | 生の `tmux` / 端末タブ | チャットラッパー IDE / Web UI |\n| --- | --- | --- | --- |\n| **ネイティブ CLI TUI・MCP・スキル** | **100% そのまま** — 実バイナリ `claude`, `codex`, `agy`, `pi`, `cursor-agent`, `gemini`, `opencode` を直接実行 | **100% そのまま** | 制限・プロキシ・独自再実装になりがち |\n| **アプリ再起動・更新・回収時の PTY 生存** | **対応** — `herdr-core` (`hc`) + `viewer.presence` が維持し、回収後もセッション ID で再開 | **対応**（各マシン上の `tmux` サーバー依存） | ウィンドウ終了やリロードで停止しがち |\n| **タスク仕様・Worktree・マージキュー** | **標準内蔵** — カンバンカード、`<dir>-<proj4>/<card>`、YAML ワークフロー、FIFO Queue Merge | 手動ブランチ＆自作スクリプトが必要 | 部分的または単一リポジトリ前提 |\n| **複数プロジェクト横断 通知インボックス（`⌘I`）** | **標準内蔵** — ローカル＆リモート全ホストの `[Y/n]` や進捗を即通知 | 各ペインを手動巡回 | タブ単位のバッジのみ |\n| **リモート Linux 24 時間マルチマシン** | **標準内蔵** — Tailscale WhoIs 自動認証 + `yamux/1` 多重化 + SSH フォールバック + `canban-sync` オフライン編集 | 手動 SSH ＋ 各自で `tmux` 管理 | リモート IDE 拡張やクラウド固定 |\n| **UI ランタイム** | ネイティブ AppKit/Metal（macOS）＆ GTK4（Linux） | ターミナルエミュレータ | Electron / ブラウザ DOM |",
         "screenshot": {
           "src": "/screenshots/workflow-studio.png",
           "alt": "Canban Visual Workflow Studio 画面：Backlog・Develop・Review の各レーンと外部 PR 分岐・承認ゲート・Queue merge を表示。",
-          "caption": "宣言的 YAML ワークフロー（schema: 10）はローカル Mac でもリモート Headless Linux canband ホストでもネイティブ PTY を駆動します。",
+          "caption": "宣言的 YAML ワークフロー（schema: 12）はローカル Mac でもリモート Headless Linux canband ホストでもネイティブ PTY を駆動します。",
           "width": 2880,
           "height": 1800,
           "lazy": true
@@ -382,12 +415,12 @@
       {
         "id": "native-pty-preservation",
         "heading": "なぜ Canban は Agent CLI をラップしないのか",
-        "markdown": "コーディング CLI は権限承認 UI、スラッシュコマンド、MCP 連携、スキル、サンドボックス設定が毎週のように進化しています。チャット UI で包んでしまうと、CLI 側の新機能がラッパーの更新待ちになってしまいます。\n\nCanban は真のネイティブターミナルに徹します：\n\n- **`libghostty-vt` による忠実な VT 描画**: macOS では AppKit/CoreText、Linux では GTK4 で描画し、SGR/ピクセルマウス操作、OSC 8 ハイパーリンク、Monokai など 17 種のダークテーマをサポート。\n- **プロバイダ純正のセッション再開**: 対応 CLI のセッション ID と再開フラグ（`resume`, `--resume`, `--session`, `--conversation`, `--thread`）を保持し、途中から正確に再開できます。\n- **推測ではなく明示的な完了報告**: PTY の無通信時間や外部フックで完了を推測せず、`canban report --state completed` による明示宣言で次のステージへ進みます。"
+        "markdown": "コーディング CLI は権限承認 UI、スラッシュコマンド、MCP 連携、スキル、サンドボックス設定が毎週のように進化しています。チャット UI で包んでしまうと、CLI 側の新機能がラッパーの更新待ちになってしまいます。\n\nCanban は真のネイティブターミナルに徹します：\n\n- **`libghostty-vt` による忠実な VT 描画**: macOS では AppKit/CoreText、Linux では GTK4 で描画し、SGR/ピクセルマウス操作、OSC 8 ハイパーリンク、Monokai など 17 種のダークテーマをサポート。\n- **Managed / Manual 分離と `viewer.presence` 保護**: プロジェクト一覧の 2 段階折りたたみで整理し、表示中端末を `viewer.presence` で保護しつつ、非アクティブな Managed 端末は `Reclaiming soon` 猶予後に安全回収してカード **Resume** から正確に再開できます（`agy` デュアルロール対応）。\n- **推測ではなく明示的な完了報告**: PTY の無通信時間や外部フックで完了を推測せず、`canban report --state completed` による明示宣言で次のステージへ進みます。"
       },
       {
         "id": "multi-machine-remote",
-        "heading": "Tailscale と SSH による 24 時間マルチマシン開発",
-        "markdown": "重い Rust のビルド、Linux 専用のテストスイート、長時間の夜間バッチは、スリープするノート PC ではなく専用の Linux サーバー（`x86_64` / `aarch64`）に任せるのが合理的です。\n\n各リモートホストには Headless の `canband` とローカル `herdr-core`（`hc`）が常駐し、独自の SQLite WAL と Git Worktree を管理します：\n\n```sh\n# リモート Linux サーバーに Headless 導入（GTK4 / GUI 不要）\ncurl -fsSL https://canban.dev/install.sh | bash -s -- --headless\ncanban service install --tailscale --port 7680\ncanban pair --port 7680\n```\n\n- **Tailscale 直結 TCP + 256-bit Bearer 認証**: `Canban.app` が `tailscale status --json` からノードを自動検出し、`<home>/server.token`（`0600`）で全 RPC と `herdr.connect` ライブ端末ストリームを暗号化通信します。\n- **SSH トンネルフォールバック**: Tailscale がない環境でも **Connect a Machine** から SSH 経由で導入とバックグラウンド `ssh -L` 転送を自動化できます。\n- **統合ボード＆オフラインキャッシュ**: ローカル Mac（`This Mac`）と複数 Linux ホストを 1 つの `HostRegistry` と `⌘I` に統合。切断中も `Offline · Cached` モードで最新スナップショットを確認できます。"
+        "heading": "yamux/1 と SSH による 24 時間マルチマシン開発",
+        "markdown": "重い Rust のビルド、Linux 専用のテストスイート、長時間の夜間バッチは、スリープするノート PC ではなく専用の Linux サーバー（`x86_64` / `aarch64`）に任せるのが合理的です。\n\n各リモートホストには Headless の `canband` とローカル `herdr-core`（`hc`）が常駐し、独自の SQLite WAL と Git Worktree を管理します：\n\n```sh\n# リモート Linux サーバーに Headless 導入（GTK4 / GUI 不要）\ncurl -fsSL https://canban.dev/install.sh | bash -s -- --headless\ncanban service install --tailscale --port 7680\n\n# 任意（別アカウント・タグ付きサーバー・非 Tailscale VPN の場合のみ）：\ncanban pair --device-name macbook --port 7680\n```\n\n- **Tailscale WhoIs 自動認証・`yamux/1` 多重化・デバイス別トークン**: 同じ個人 Tailscale アカウントのデスクトップ（**Connect a Machine → Tailscale**）や iOS / Android モバイル（`host.ts.net` / `100.x.y.z` 直入力可）は `tailscale whois --json`（`trust_tailscale_self: true`）で自動サインインして接続ごとの一時セッション鍵を発行し、`host.discover_canban` で同網内の他ホストもオンデマンドで一括参加できます。別アカウント・タグ付き・カスタム VPN 環境では 5 分限りの `#pair_...` 招待と `dev_...` トークン（`canban device revoke` で即時失効）を使い、すべて 1 本の `yamux/1` TCP コネクション上で多重化されます。\n- **SSH トンネルフォールバック**: Tailscale がない環境でも **Connect a Machine** から SSH 経由で導入とバックグラウンド `ssh -L` 転送を自動化でき、WireGuard 等では `--allow-insecure-bind` も利用可能です。\n- **統合ボード＆`canban-sync` オフライン編集**: ローカル Mac（`This Mac`）と複数 Linux ホストを 1 つの `HostRegistry` と `⌘I` に統合。切断中も Outbox に新規作成・編集・コメントをキューイングし、再接続後に 3-Way 同期します。"
       },
       {
         "id": "diagnostics-and-upgrades",
@@ -409,8 +442,72 @@
         "いいえ。Headless canban はユーザー空間に導入され systemd --user サービスとして常駐（可能な場合は loginctl enable-linger を有効化）するため、Docker 不要で動きます。"
       ],
       [
-        "macOS とリモート Linux 間ではどの通信経路が使われますか？",
-        "256-bit Bearer トークンで保護された Tailscale IPv4 直結 TCP（100.64.0.0/10、既定ポート 7680）を優先し、SSH のみの環境ではバックグラウンドの ssh -L Unix ソケット転送に自動フォールバックします。"
+        "macOS とリモート Linux 間ではどの通信経路・認証方式が使われますか？",
+        "既定で tailscale whois による同一アカウント自動サインイン（trust_tailscale_self: true）に対応した yamux/1 単一 TCP 多重化を使用し、別アカウント・タグ付き・WireGuard 等（--allow-insecure-bind）では 5 分限りの #pair_... 招待とクライアント別 dev_... トークンを用います。SSH のみの環境では ssh -L Unix ソケット転送に自動フォールバックします。"
+      ]
+    ]
+  },
+  "guides/scheduled-worktree-cleanup": {
+    "eyebrow": "CANBAN // ガイド // WORKTREE 回収",
+    "title": "純スクリプト Schedule で古い Git Worktree を安全に回収する",
+    "meta_title": "純スクリプト Schedule で古い Git Worktree を安全に回収する | Canban",
+    "description": "Canban で最初に Agent へ一度だけ作成とドライラン検証を任せ、生成された schema 12 scope: global ワークフロー自体は純スクリプト（本番実行時は Agent・PTY・トークンゼロ）として古い Git Worktree を安全回収し、リポジトリ別の解放容量 GB と失敗内容をカード報告する方法。",
+    "intro": "**結論**: 作成と初回検証は **Agent に一度だけ任せ**、生成された定期ワークフロー自体は **純スクリプト（`run:`）のみ** で実行させます（毎日の稼働時は `uses: agent` なし・PTY ゼロ・LLM トークンゼロ）。**マージ済み かつ クリーン かつ 7 日以上非アクティブ** な Worktree だけを安全に削除し、回収または失敗があったときだけリポジトリ別 Card を作成します。",
+    "date_published": "2026-11-24",
+    "updated": "2026-11-24",
+    "breadcrumbs": [["ドキュメント", "docs"], ["Worktree 自動回収", "guides/scheduled-worktree-cleanup"]],
+    "sections": [
+      {
+        "id": "why-pure-script-schedule",
+        "heading": "作成は Agent に一度だけ、毎日の実行は純スクリプトでコストゼロ",
+        "markdown": "作成フェーズと定期実行フェーズを切り分けることで、手間とランタイムコストの両方を最小化できます：\n\n- **作成・検証は Agent が担当**: 登録済みプロジェクトの調査、報告先ボードの確認、`workflow submit --check` による検証、初回の `DRY_RUN` テストまでを Agent が一度で行います。\n- **日次実行は純スクリプトで 0 コスト**: 生成される `worktree-gc.yaml` は `script`（`run:`）から始まり **`uses: agent` や `on_failure` の Agent フォールバックを含まない** ため、遅延アドミッションにより**PTY ゼロ**、**`scheduler.max_agents` 枠ゼロ**、**LLM トークンゼロ**で動作します。\n- **ホスト一括＆決定的**: `scope: global` と軽量な `canban call project.list '{}'`（＋任意の `EXTRA_REPOS`）で全リポジトリを網羅し、削除ゼロの日はサイレント終了します。"
+      },
+      {
+        "id": "generate-with-agent",
+        "heading": "クイックスタート：プロンプトで Agent にワークフローを作らせる",
+        "markdown": "100 行超の YAML や Python を手書きする必要はありません。次の 3 ステップで Canban の Agent に生成・テストさせましょう：\n\n1. Canban サイドバーから **Schedules → New Scheduled Task → Describe with agent…** を開き、スコープに **`Global · Host`** を選択します（`canban skill` 導入済みの Agent 端末からでも可）。\n2. 下の `prompt` ボックス右上の **Copy** でコピーし、Agent へ送信します。\n3. 報告先プロジェクトを確認し、Agent が `DRY_RUN: \"true\"` で試走したプレビュー Card に問題がないことを見てから `DRY_RUN: \"false\"` への切り替えを承認します。\n\n```prompt\nCanban のホスト全体スケジュール（scope: global, schema: 12）として、期限切れ Git Worktree を安全に回収するワークフロー（worktree-gc.yaml）を作成してください（毎日ローカル時刻 03:00、overlap: skip）。\n\n最重要ルール：このワークフローの作成・構文検証・ドライラン確認を行うのは今このセッションのあなた（Agent）だけにしてください。生成する worktree-gc.yaml 自体は、必ず `script`（`run:` に埋め込んだ python3）と `complete` のみで構成し、`uses: agent` や `on_failure` による Agent 起動を一切含めないでください（毎日の自動実行時に PTY・並列スロット・LLM トークンを一切消費しない純スクリプト実行にするため）。\n\n生成する純スクリプトワークフローの要件：\n1. リポジトリ検出：`canban call project.list '{}'` で Canban 登録済みプロジェクトを自動取得し、コロン区切りの任意環境変数 `EXTRA_REPOS` でも追加できるようにすること。\n2. 2 段階の安全削除（すべて AND 条件、全量スナップショット取得は行わない）：\n   - 第 1 段階：まず `canban worktree gc --merged-before 7d --dry-run` で削除候補の `du -sk` サイズを事前計測してから `canban worktree gc --merged-before 7d`（`DRY_RUN` でない場合）を実行し、SQLite の `card.worktree` と `managed_worktrees` を同期する。\n   - 第 2 段階：各リポジトリで `git worktree list --porcelain -z` を走査し、以下をすべて満たす Worktree のみを削除する：\n     * メイン作業ツリー（index 0）、`_merge_queue`、`bare`、`locked`、`prunable`、現在の作業ディレクトリではないこと；\n     * gitdir 内に進行中の Git 操作マーカー（MERGE_HEAD、CHERRY_PICK_HEAD、REVERT_HEAD、rebase-merge、rebase-apply、BISECT_LOG）がないこと；\n     * 作業ツリーが完全にクリーンであること（`git status --porcelain --untracked-files=all --ignore-submodules=none` が空）；\n     * 最終コミット日時（`git log -1 --format=%ct`）と `<gitdir>/HEAD` の mtime の両方が `RETENTION_DAYS`（既定 `7` 日）より古いこと；\n     * デフォルトブランチへマージ済みであること（`git merge-base --is-ancestor`）；\n     * 削除前に `du -sk` で容量計測し、`--force` なしの `git worktree remove` で削除後 `git worktree prune` を実行すること（ローカルブランチ ref は消さない）。\n3. Card 報告：\n   - 0 件削除かつ 0 件失敗なら Card を作らずサイレント終了すること。\n   - 1 件以上の回収または失敗がある場合のみ、指定プロジェクト（先にプロジェクト一覧を出して報告先を私に確認し、`REPORT_PROJECT_ID` または Settings → Environment & Secrets の `${{ vars.GC_REPORT_PROJECT_ID }}` に設定）へ `canban call card.create` でサマリー Card を作成すること：\n     * タイトルに日付、解放容量（GB/MB）、回収件数を含める（ドライラン時は `[Dry-Run]`、失敗あり時は `⚠️` を先頭に付与）。\n     * 本文にサマリー、リポジトリ別集計表（回収・解放・失敗・スキップ）、失敗詳細表、回収済み一覧、安全スキップ内訳を含める（パスやエラー内の `@` を無害化し意図しない agent mention を防ぐ）。\n   - 本番モードかつ失敗 0 件時は自動で `canban card resolve` を実行し、失敗がある場合は先頭列に開いたまま残すこと。\n4. 安全な検証手順：\n   - 最初は `DRY_RUN: \"true\"` に設定し、`canban workflow sources --global` で最新 revision を取得、`canban workflow submit --global --revision <REV> --file ... --check` で検証後に登録し、`canban schedule trigger` を 1 回実行してプレビュー Card を提示してから `DRY_RUN: \"false\"` へ切り替えるか私に確認すること。\n```"
+      },
+      {
+        "id": "safety-checklist",
+        "heading": "削除前に必ず確認する安全条件と落とし穴対策",
+        "markdown": "条件はすべて **AND（論理積）** で判定する必要があります。経過日数だけやクリーン状態だけで消すと、長期ブランチや作りたての空 Worktree を消してしまうためです。\n\n| チェック項目 | 厳密な判定条件 | 見落とせない理由 |\n| --- | --- | --- |\n| **1. 二重の 7 日経過チェック** | 最終コミット（`git log -1 --format=%ct`）**かつ** Worktree の `<gitdir>/HEAD` の mtime がどちらも `7d` 超 | 古い `main` から昨日切ったばかりの未コミット Worktree を誤削除する事故を防ぎます。7 日非アクティブ条件により実行中タスクは除外されるため、重いライブスナップショット取得は不要です。 |\n| **2. 作業ツリーが完全にクリーン** | `git status --porcelain --untracked-files=all --ignore-submodules=none` が空 | 新規ディレクトリ内の未追跡ファイルや汚れたサブモジュールを見逃しません。 |\n| **3. 進行中の Git 操作がない** | `<gitdir>` に `MERGE_HEAD`、`CHERRY_PICK_HEAD`、`REVERT_HEAD`、`rebase-merge`、`rebase-apply`、`BISECT_LOG` が存在しない | 中断中の rebase・cherry-pick・bisect を壊さないためです。 |\n| **4. マージ済みであること** | 第 1 段階で `canban worktree gc --merged-before 7d`（Canban の `Resolved` / 配信済みカードは Squash Merge も認識し SQLite を同期）；第 2 段階で残余 Worktree を `git merge-base --is-ancestor <HEAD> <default_branch>` で保守的判定 | SQLite の不整合を残さず、未マージ作業を絶対に消しません（外部 Squash Merge 用に任意で `gh pr list --state merged` 連携を追加できます）。 |\n| **5. 保護パス除外** | リポジトリルート（0 番目）、`_merge_queue`、`bare`、`locked`、`prunable`、およびスクリプトの `$PWD` をスキップ | メイン作業ツリー、直列マージキュー用ディレクトリ、`git worktree lock` 済み作業ツリーを保護します。 |\n| **6. 非強制削除と削除前計測** | 削除**前**に `du -sk` で容量計測し、`--force` なしの `git worktree remove` で削除後 `git worktree prune` を実行 | 削除後はサイズ計測できないためです。`--force` を使わず Git に最後の安全確認を任せ、ローカルブランチ参照は保護します。 |\n\n> **注意（`.gitignore` 対象と初回テスト）**: `.env.local` など無視対象ファイルは dirty 扱いになりません。重要なローカル設定はメインリポジトリ側に置くか `git worktree lock` を使い、初回は `DRY_RUN: \"true\"` のまま試走してください。"
+      },
+      {
+        "id": "workflow-yaml",
+        "heading": "完全版リファレンス実装（折りたたみ YAML・手動 CLI）",
+        "markdown": "実装を直接監査したい場合や手動で登録したい場合は、下から実機検証済みの `schema: 12` リファレンス YAML を展開できます（`REPORT_PROJECT_ID` は **Settings → Environment & Secrets** の `GC_REPORT_PROJECT_ID` でも設定可能です）。",
+        "details": {
+          "summary": "完全な schema: 12 worktree-gc.yaml と手動 CLI コマンドを展開",
+          "markdown": "```yaml\nschema: 12\nscope: global\nid: global:safe_worktree_gc\nname: Safe Worktree Cleanup (7d)\non:\n  schedule:\n    - cron: \"0 3 * * *\"\n      timezone: Local\n      overlap: skip\nenv:\n  RETENTION_DAYS: \"7\"\n  DRY_RUN: \"true\"\n  REPORT_PROJECT_ID: ${{ vars.GC_REPORT_PROJECT_ID }}\n  EXTRA_REPOS: \"\"\nsteps:\n  - id: gc\n    timeout_minutes: 30\n    run: |\n      python3 - <<'PY'\n      import datetime, json, os, subprocess, time\n      from pathlib import Path\n\n      CANBAN = os.environ.get(\"CANBAN_CLI\") or \"canban\"\n      DAYS = int(os.environ.get(\"RETENTION_DAYS\", \"7\"))\n      DRY_RUN = os.environ.get(\"DRY_RUN\", \"false\").lower() in (\"1\", \"true\", \"yes\")\n      REPORT_PID = os.environ.get(\"REPORT_PROJECT_ID\", \"\").strip()\n      EXTRA = [p.strip() for p in os.environ.get(\"EXTRA_REPOS\", \"\").split(\":\") if p.strip()]\n      CUTOFF = time.time() - DAYS * 86400\n      CWD = Path.cwd().resolve()\n      GIT_OPS = (\"MERGE_HEAD\", \"CHERRY_PICK_HEAD\", \"REVERT_HEAD\", \"rebase-merge\", \"rebase-apply\", \"BISECT_LOG\")\n\n      def run(cmd, cwd=None):\n          return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)\n\n      def rpc(method, params):\n          r = run([CANBAN, \"call\", method, json.dumps(params)])\n          return json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else None\n\n      def dir_bytes(path: Path) -> int:\n          if not path.exists():\n              return 0\n          r = run([\"du\", \"-sk\", str(path)])\n          if r.returncode == 0 and r.stdout.strip():\n              return int(r.stdout.split()[0]) * 1024\n          return 0\n\n      def fmt_bytes(b: int) -> str:\n          if b >= 1024 ** 3:\n              return f\"{b / (1024 ** 3):.2f} GB\"\n          if b >= 1024 ** 2:\n              return f\"{b / (1024 ** 2):.1f} MB\"\n          return f\"{b // 1024} KB\" if b >= 1024 else f\"{b} B\"\n\n      def safe(s: str) -> str:\n          return (s or \"\").replace(\"`\", \"'\").replace(\"\\n\", \" \").replace(\"@\", \"@\\u200b\").strip()\n\n      def default_ref(repo: Path):\n          r = run([\"git\", \"-C\", str(repo), \"symbolic-ref\", \"-q\", \"refs/remotes/origin/HEAD\"])\n          if r.returncode == 0 and r.stdout.strip():\n              return r.stdout.strip()\n          for ref in (\"refs/heads/main\", \"refs/heads/master\", \"refs/remotes/origin/main\", \"refs/remotes/origin/master\"):\n              if run([\"git\", \"-C\", str(repo), \"rev-parse\", \"--verify\", \"-q\", ref]).returncode == 0:\n                  return ref\n          return None\n\n      projects = rpc(\"project.list\", {}) or []\n      proj_by_id = {p[\"id\"]: p for p in projects}\n      repos = {Path(p[\"directory\"]).resolve(): p[\"name\"] for p in projects if Path(p[\"directory\"]).exists()}\n      for extra in EXTRA:\n          ep = Path(extra).expanduser().resolve()\n          if ep.exists() and ep not in repos:\n              repos[ep] = ep.name\n\n      if not REPORT_PID and projects:\n          REPORT_PID = projects[0][\"id\"]\n\n      cleaned, failed, skipped, seen = [], [], [], set()\n      stats = {name: {\"cleaned\": 0, \"bytes\": 0, \"failed\": 0, \"skipped\": 0} for name in set(repos.values())}\n      def bump(repo_name, key, delta=1): stats.setdefault(repo_name, {\"cleaned\": 0, \"bytes\": 0, \"failed\": 0, \"skipped\": 0})[key] += delta\n\n      # 第 1 段階: Canban 管理下の Worktree をクリーン化し SQLite 状態を同期\n      dry_gc = run([CANBAN, \"worktree\", \"gc\", \"--merged-before\", f\"{DAYS}d\", \"--dry-run\"])\n      dry_data = json.loads(dry_gc.stdout) if dry_gc.returncode == 0 and dry_gc.stdout.strip() else {}\n      pre_sizes = {}\n      for bucket in (\"removed\", \"dirty\", \"skipped\"):\n          for item in dry_data.get(bucket, []):\n              raw_p = item.get(\"path\") or \"\"\n              if not raw_p:\n                  continue\n              p = Path(raw_p).resolve()\n              seen.add(p)\n              if bucket == \"removed\" and not item.get(\"missing\"):\n                  pre_sizes[str(p)] = dir_bytes(p)\n\n      gc_data = dry_data\n      if not DRY_RUN:\n          real_gc = run([CANBAN, \"worktree\", \"gc\", \"--merged-before\", f\"{DAYS}d\"])\n          if real_gc.returncode == 0 and real_gc.stdout.strip():\n              gc_data = json.loads(real_gc.stdout)\n\n      for item in gc_data.get(\"removed\", []):\n          rname = item.get(\"project_name\") or proj_by_id.get(item.get(\"project_id\", \"\"), {}).get(\"name\", \"canban\")\n          sz = pre_sizes.get(str(Path(item.get(\"path\", \"\")).resolve()), 0)\n          cleaned.append({\"repo\": rname, \"path\": item.get(\"path\", \"\"), \"branch\": item.get(\"branch\", \"\"), \"bytes\": sz, \"note\": \"canban gc\"})\n          bump(rname, \"cleaned\"); bump(rname, \"bytes\", sz)\n      for item in gc_data.get(\"dirty\", []):\n          rname = item.get(\"project_name\") or proj_by_id.get(item.get(\"project_id\", \"\"), {}).get(\"name\", \"canban\")\n          reason = item.get(\"reason\", \"\")\n          if reason in (\"uncommitted_changes\", \"live_terminal_open\"):\n              skipped.append({\"repo\": rname, \"path\": item.get(\"path\", \"\"), \"cat\": \"dirty\", \"reason\": reason})\n              bump(rname, \"skipped\")\n          else:\n              failed.append({\"repo\": rname, \"path\": item.get(\"path\", \"\"), \"branch\": item.get(\"branch\", \"\"), \"bytes\": dir_bytes(Path(item.get(\"path\", \"\"))), \"reason\": reason})\n              bump(rname, \"failed\")\n      for item in gc_data.get(\"skipped\", []):\n          rname = proj_by_id.get(item.get(\"project_id\", \"\"), {}).get(\"name\", \"canban\")\n          skipped.append({\"repo\": rname, \"path\": item.get(\"path\", \"\"), \"cat\": \"recent\", \"reason\": item.get(\"reason\", \"within_retention\")})\n          bump(rname, \"skipped\")\n\n      # 第 2 段階: 純 Git スキャン（最終コミット + HEAD mtime 7 日判定・snapshot 不要）\n      for repo, rname in repos.items():\n          base_ref = default_ref(repo)\n          wt_out = subprocess.run([\"git\", \"-C\", str(repo), \"worktree\", \"list\", \"--porcelain\", \"-z\"], capture_output=True)\n          if wt_out.returncode != 0:\n              continue\n          entries, cur = [], {}\n          for tok in wt_out.stdout.decode(\"utf-8\", \"replace\").split(\"\\0\"):\n              if not tok:\n                  if cur: entries.append(cur); cur = {}\n              elif \" \" in tok:\n                  k, v = tok.split(\" \", 1); cur[k] = v\n              else:\n                  cur[tok] = True\n          prune_needed = False\n          for idx, ent in enumerate(entries):\n              raw_wt = ent.get(\"worktree\", \"\")\n              if not raw_wt:\n                  continue\n              wt = Path(raw_wt).resolve()\n              if idx == 0 or wt == repo or wt == CWD or wt.name == \"_merge_queue\" or wt in seen:\n                  continue\n              if any(ent.get(flag) for flag in (\"bare\", \"locked\", \"prunable\")):\n                  skipped.append({\"repo\": rname, \"path\": str(wt), \"cat\": \"protected\", \"reason\": \"locked/bare/prunable\"}); bump(rname, \"skipped\"); continue\n              if not wt.exists():\n                  prune_needed = True; continue\n              if not base_ref:\n                  skipped.append({\"repo\": rname, \"path\": str(wt), \"cat\": \"unmerged\", \"reason\": \"no default branch\"}); bump(rname, \"skipped\"); continue\n              gd_raw = ent.get(\"gitdir\") or run([\"git\", \"-C\", str(wt), \"rev-parse\", \"--git-dir\"]).stdout.strip()\n              gd = Path(gd_raw) if gd_raw else wt / \".git\"\n              if not gd.is_absolute(): gd = (wt / gd).resolve()\n              if any((gd / marker).exists() for marker in GIT_OPS):\n                  skipped.append({\"repo\": rname, \"path\": str(wt), \"cat\": \"dirty\", \"reason\": \"Git 操作進行中\"}); bump(rname, \"skipped\"); continue\n              st = run([\"git\", \"-C\", str(wt), \"status\", \"--porcelain\", \"--untracked-files=all\", \"--ignore-submodules=none\"])\n              if st.returncode != 0 or st.stdout.strip():\n                  skipped.append({\"repo\": rname, \"path\": str(wt), \"cat\": \"dirty\", \"reason\": \"未コミット変更あり\"}); bump(rname, \"skipped\"); continue\n              ct_res = run([\"git\", \"-C\", str(wt), \"log\", \"-1\", \"--format=%ct\", \"HEAD\"])\n              commit_ts = int(ct_res.stdout.strip()) if ct_res.returncode == 0 and ct_res.stdout.strip().isdigit() else int(time.time())\n              head_file = gd / \"HEAD\" if (gd / \"HEAD\").exists() else wt\n              head_mtime = head_file.stat().st_mtime\n              if max(commit_ts, head_mtime) > CUTOFF:\n                  skipped.append({\"repo\": rname, \"path\": str(wt), \"cat\": \"recent\", \"reason\": f\"{DAYS} 日以内に更新あり\"}); bump(rname, \"skipped\"); continue\n              anc = run([\"git\", \"-C\", str(repo), \"merge-base\", \"--is-ancestor\", ent.get(\"HEAD\", \"HEAD\"), base_ref])\n              if anc.returncode != 0:\n                  skipped.append({\"repo\": rname, \"path\": str(wt), \"cat\": \"unmerged\", \"reason\": f\"{base_ref} へ未マージ\"}); bump(rname, \"skipped\"); continue\n              sz = dir_bytes(wt)\n              branch = str(ent.get(\"branch\", \"\")).removeprefix(\"refs/heads/\") or \"detached\"\n              age_d = int((time.time() - max(commit_ts, head_mtime)) // 86400)\n              if DRY_RUN:\n                  cleaned.append({\"repo\": rname, \"path\": str(wt), \"branch\": branch, \"bytes\": sz, \"note\": f\"最終更新 {age_d} 日前\"})\n                  bump(rname, \"cleaned\"); bump(rname, \"bytes\", sz)\n              else:\n                  rm = run([\"git\", \"-C\", str(repo), \"worktree\", \"remove\", raw_wt])\n                  if rm.returncode == 0:\n                      cleaned.append({\"repo\": rname, \"path\": str(wt), \"branch\": branch, \"bytes\": sz, \"note\": f\"最終更新 {age_d} 日前\"})\n                      bump(rname, \"cleaned\"); bump(rname, \"bytes\", sz); prune_needed = True\n                  else:\n                      failed.append({\"repo\": rname, \"path\": str(wt), \"branch\": branch, \"bytes\": sz, \"reason\": rm.stderr.strip() or rm.stdout.strip()})\n                      bump(rname, \"failed\")\n          if not DRY_RUN and prune_needed:\n              run([\"git\", \"-C\", str(repo), \"worktree\", \"prune\"])\n\n      # 第 3 段階: 0 件かつ失敗 0 件ならサイレント終了、そうでなければ Card 作成\n      if not cleaned and not failed:\n          print(f\"Worktree 整理完了: 回収 0 B, 安全スキップ {len(skipped)} 件。\")\n          raise SystemExit(0)\n\n      total_bytes = sum(x[\"bytes\"] for x in cleaned)\n      today = datetime.datetime.now().strftime(\"%Y-%m-%d\")\n      now_str = datetime.datetime.now().strftime(\"%Y-%m-%d %H:%M\")\n      prefix = \"[Dry-Run] \" if DRY_RUN else (\"⚠️ \" if failed else \"\")\n      title = f\"{prefix}Worktree 回収レポート ({today}) — {fmt_bytes(total_bytes)} 解放 ({len(cleaned)} 件)\"\n      if failed: title += f\"、{len(failed)} 件失敗\"\n\n      lines = [\n          \"## サマリー\", \"\",\n          f\"- **実行時刻**: {now_str} · **モード**: {'Dry-Run プレビュー' if DRY_RUN else '本番クリーンアップ'}（閾値 `{DAYS}d`）\",\n          f\"- **対象**: {len(repos)} リポジトリ · **回収済み**: {len(cleaned)} 件 · **解放容量**: **{fmt_bytes(total_bytes)}**\",\n          f\"- **失敗**: {len(failed)} 件 · **安全スキップ**: {len(skipped)} 件\", \"\",\n          \"## リポジトリ別集計\", \"\",\n          \"| リポジトリ | 回収数 | 解放容量 | 失敗 | スキップ |\", \"| --- | ---: | ---: | ---: | ---: |\",\n      ]\n      for rname, st in sorted(stats.items()):\n          lines.append(f\"| `{safe(rname)}` | {st['cleaned']} | {fmt_bytes(st['bytes'])} | {st['failed']} | {st['skipped']} |\")\n      if failed:\n          lines += [\"\", \"## 削除失敗（要確認）\", \"\", \"| リポジトリ | Worktree / ブランチ | 容量 | エラー内容 |\", \"| --- | --- | ---: | --- |\"]\n          for f in failed:\n              lines.append(f\"| `{safe(f['repo'])}` | `{safe(f['path'])}` (`{safe(f['branch'])}`) | {fmt_bytes(f['bytes'])} | {safe(f['reason'])} |\")\n      if cleaned:\n          lines += [\"\", f\"## 回収済み Worktree ({len(cleaned)})\", \"\"]\n          for c in cleaned[:40]:\n              lines.append(f\"- `{safe(c['repo'])}` · `{safe(c['path'])}` (`{safe(c['branch'])}`) — {fmt_bytes(c['bytes'])}（{safe(c['note'])}）\")\n          if len(cleaned) > 40: lines.append(f\"- ... 他 {len(cleaned) - 40} 件\")\n      if skipped:\n          cats = {\"dirty\": \"未コミット変更 / Git 操作中\", \"unmerged\": \"未マージ\", \"recent\": f\"{DAYS} 日以内に更新\", \"protected\": \"ロック / 保護対象\"}\n          lines += [\"\", \"## 安全スキップ内訳\", \"\"]\n          for key, label in cats.items():\n              grp = [s for s in skipped if s[\"cat\"] == key]\n              if grp:\n                  sample = \", \".join(f\"`{safe(Path(s['path']).name)}`\" for s in grp[:8])\n                  lines.append(f\"- **{label} ({len(grp)})**: {sample}{' ...' if len(grp) > 8 else ''}\")\n\n      body = \"\\n\".join(lines)\n      print(body)\n      if REPORT_PID:\n          card = rpc(\"card.create\", {\"project_id\": REPORT_PID, \"title\": title, \"body\": body, \"view\": \"full\"})\n          if not card:\n              raise SystemExit(\"Failed to create report Card; verify REPORT_PROJECT_ID\")\n          if card and not DRY_RUN and not failed and \"number\" in card:\n              run([CANBAN, \"card\", \"resolve\", \"--project\", REPORT_PID, \"--card\", str(card[\"number\"]),\n                   \"--message\", f\"{len(cleaned)} 件の worktree から {fmt_bytes(total_bytes)} を解放\"])\n      PY\n  - id: finish\n    uses: complete\n```\n\n### CLI から登録＆初回ドライラン実行\n\n```sh\nREV=$(canban workflow sources --global | python3 -c \"import json,sys; print(json.load(sys.stdin)['revision'])\")\ncanban workflow submit --global --revision \"$REV\" --file worktree-gc.yaml --check\ncanban workflow submit --global --revision \"$REV\" --file worktree-gc.yaml\ncanban schedule list --global\ncanban schedule trigger --schedule-id <SCHEDULE_ID>\n```"
+        }
+      },
+      {
+        "id": "card-report-format",
+        "heading": "Card 報告フォーマットとボード上のライフサイクル",
+        "markdown": "ボードが自動作成カードで埋まらないよう、次のように制御します：\n\n- **空振り日は無言**: 削除 `0` 件かつ失敗 `0` 件なら Card は作らず、Global スケジュール履歴のみ記録します。\n- **全件成功なら自動 `Resolved`**: 実削除で失敗が `0` 件のときは、サマリー Card を作った直後に `canban card resolve --project <ID> --card <N>` を呼び、当日の結果だけ確認して翌日に自動アーカイブさせます。\n- **失敗ありなら未解決で残す**: ロックや削除不可ディレクトリがあった場合はタイトルに `⚠️` を付けて先頭列に残し、人間の確認を待ちます。\n\n```markdown\n## サマリー\n\n- **実行時刻**: 2026-11-24 03:00 · **モード**: 本番クリーンアップ（閾値 `7d`）\n- **対象**: 3 リポジトリ · **回収済み**: 12 件 · **解放容量**: **18.42 GB**\n- **失敗**: 1 件 · **安全スキップ**: 6 件\n\n## リポジトリ別集計\n\n| リポジトリ | 回収数 | 解放容量 | 失敗 | スキップ |\n| --- | ---: | ---: | ---: | ---: |\n| `canban` | 7 | 14.80 GB | 1 | 3 |\n| `herdr` | 5 | 3.62 GB | 0 | 3 |\n\n## 削除失敗（要確認）\n\n| リポジトリ | Worktree / ブランチ | 容量 | エラー内容 |\n| --- | --- | ---: | --- |\n| `canban` | `~/.canban/worktrees/canban-a1b2/109` (`feat/sync-v2`) | 1.92 GB | error: Directory not empty |\n\n## 回収済み Worktree (12)\n\n- `canban` · `~/.canban/worktrees/canban-a1b2/118` (`feat/yamux-mux`) — 3.40 GB（最終更新 12 日前）\n```"
+      },
+      {
+        "id": "project-scoped-variant",
+        "heading": "単一プロジェクト版（宣言的 card: を使う場合）",
+        "markdown": "単一リポジトリだけで `scope: project` ＋ `on.<rule>.card:` による自動カード生成を使う場合は、**必ず `workspace: { create_worktree: false }` を指定**してください（未指定だとクリーンアップ用カード自体が先に自分用の Worktree を作ってしまいます）。あとは `\"$CANBAN_CLI\" card update --card \"$CANBAN_CARD\" --title ... --file ...` で生成されたカードにサマリーを書き込みます。"
+      }
+    ],
+    "faq_items": [
+      [
+        "Agent にスケジュールを作らせると、毎晩の定期実行でも Agent が起動しますか？",
+        "いいえ。Agent が動くのは最初の作成・ドライラン検証時だけです。生成されたワークフローは script ステップから始まり uses: agent や on_failure の Agent 回退を含まないため、毎日の定期実行は PTY ゼロ・スロットゼロ・トークンゼロの純スクリプトとして走ります。"
+      ],
+      [
+        "アクティブ端末を調べるための全量スナップショット取得を行わないのはなぜですか？",
+        "最終コミット日時と Worktree HEAD ファイルの更新日時の両方が 7 日より古いものだけを対象にしているため、稼働中の作業と衝突する可能性が極めて低く、重いスナップショット走査を省けます。さらに第 1 段階の canban worktree gc は SQLite 上のライブ端末と変更ありカードを保護します。"
+      ],
+      [
+        "なぜ最終コミット日時と HEAD の更新日時の両方を確認するのですか？",
+        "古い main コミットから昨日新しく切ったばかりでまだ 1 度もコミットしていない Worktree は、git log -1 だと古い日付に見えます。HEAD ファイルの mtime も 7 日超であることを必須にすることで、作りたての Worktree の誤削除を防ぎます。"
+      ],
+      [
+        "ローカルブランチや GitHub の Squash Merge ブランチはどう扱われますか？",
+        "巨大な作業ツリーディレクトリだけを --force なしの git worktree remove と prune で解放し、ローカルのブランチ参照は残します。Canban カード経由の Squash Merge は第 1 段階の canban worktree gc が SQLite 情報から回収し、カード外の Worktree は保守的な git merge-base --is-ancestor のみを使うため未マージ作業を誤削除しません。"
       ]
     ]
   }
