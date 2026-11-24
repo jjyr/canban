@@ -185,7 +185,8 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                 && ui.worktree_modal.get().is_none()
                 && ui.worktree_promote.get().is_none()
                 && ui.worktree_remove_confirm.get().is_none()
-                && ui.project_delete_confirm.get().is_none(),
+                && ui.project_archive_confirm.get().is_none()
+                && ui.project_restore_modal.get().is_none(),
         };
         let status_fn = move || {
             target.with(|t| {

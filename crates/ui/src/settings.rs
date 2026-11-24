@@ -1067,32 +1067,36 @@ pub fn screen(ui: Ui) -> impl IntoElement {
     };
 
     let storage_section = move || {
-        dynamic(move || {
-            let home_str = active_host_home();
-            let home_for_copy = home_str.clone();
-            view()
-                .gap_4()
-                .min_w(px(0.))
-                .child(
-                    settings_section(
-                        "Storage",
-                        "Canban keeps structured data, configuration and managed artifacts in its application home.",
+        view()
+            .gap_5()
+            .min_w(px(0.))
+            .child(dynamic(move || {
+                let home_str = active_host_home();
+                let home_for_copy = home_str.clone();
+                view()
+                    .gap_4()
+                    .min_w(px(0.))
+                    .child(
+                        settings_section(
+                            "Storage",
+                            "Canban keeps structured data, configuration and managed artifacts in its application home.",
+                        )
+                        .trailing(compact_action(
+                            "Copy path",
+                            Variant::Quiet,
+                            move |_| copy_text(ui, home_for_copy.clone()),
+                        ))
+                        .child(settings_field(
+                            "Application home",
+                            "Configuration, documents and execution history are stored here.",
+                            label(home_str).font_family(MONO_FONT).text_size(px(12.)),
+                        )),
                     )
-                    .trailing(compact_action(
-                        "Copy path",
-                        Variant::Quiet,
-                        move |_| copy_text(ui, home_for_copy.clone()),
+                    .child(muted(
+                        "Closing this window keeps AppServer and scheduling running. Herdr owns the terminal programs.",
                     ))
-                    .child(settings_field(
-                        "Application home",
-                        "Configuration, documents and execution history are stored here.",
-                        label(home_str).font_family(MONO_FONT).text_size(px(12.)),
-                    )),
-                )
-                .child(muted(
-                    "Closing this window keeps AppServer and scheduling running. Herdr owns the terminal programs.",
-                ))
-        })
+            }))
+            .child(archived_projects_section(ui))
     };
 
     let host_target_bar = move || {
@@ -1405,6 +1409,246 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         )
 }
 
+fn gallery_archived_projects(host_id: &str) -> Vec<crate::projects::ArchivedProjectSummary> {
+    if host_id.is_empty() || host_id == "local" {
+        vec![
+            crate::projects::ArchivedProjectSummary {
+                project_id: "arch-fiber".into(),
+                name: "Fiber".into(),
+                source_directory: "/Users/demo/Workspace/fiber".into(),
+                archived_at: canban_types::now().saturating_sub(2 * 86_400_000),
+                bytes: 428_032,
+                archive_path: "/Users/demo/.canban/project-archives/arch-fiber.canban.tar.zst"
+                    .into(),
+                active_cards: 12,
+                archived_cards: 120,
+                total_cards: 132,
+                files_count: 18,
+                required_profiles: vec!["developer".into(), "reviewer".into()],
+                secret_keys: vec!["GITHUB_PAT".into()],
+            },
+            crate::projects::ArchivedProjectSummary {
+                project_id: "arch-docs".into(),
+                name: "Docs Portal".into(),
+                source_directory: "/Users/demo/Workspace/docs-portal".into(),
+                archived_at: canban_types::now().saturating_sub(14 * 86_400_000),
+                bytes: 64_512,
+                archive_path: "/Users/demo/.canban/project-archives/arch-docs.canban.tar.zst"
+                    .into(),
+                active_cards: 3,
+                archived_cards: 4,
+                total_cards: 7,
+                files_count: 2,
+                required_profiles: Vec::new(),
+                secret_keys: Vec::new(),
+            },
+        ]
+    } else {
+        vec![crate::projects::ArchivedProjectSummary {
+            project_id: "arch-linux".into(),
+            name: "Core Daemon".into(),
+            source_directory: "/home/builder/workspaces/core-daemon".into(),
+            archived_at: canban_types::now().saturating_sub(5 * 86_400_000),
+            bytes: 192_000,
+            archive_path: "/home/builder/.canban/project-archives/arch-linux.canban.tar.zst".into(),
+            active_cards: 6,
+            archived_cards: 9,
+            total_cards: 15,
+            files_count: 5,
+            required_profiles: vec!["developer".into()],
+            secret_keys: Vec::new(),
+        }]
+    }
+}
+
+pub fn archived_projects_section(ui: Ui) -> impl IntoElement {
+    let items: Signal<Vec<crate::projects::ArchivedProjectSummary>> = signal(Vec::new());
+    let loading = signal(false);
+    let error = signal(String::new());
+    let ticket = signal(0_u64);
+
+    effect(move || {
+        let hid = ui.settings_host.get();
+        let _reload = ui.archived_projects_reload.get();
+        if !crate::backend::is_connected() {
+            let preview = ui
+                .archived_projects_preview
+                .get()
+                .unwrap_or_else(|| gallery_archived_projects(&hid));
+            items.set(preview);
+            loading.set(false);
+            error.set(String::new());
+            return;
+        }
+        let next_ticket = ticket.get_untracked() + 1;
+        ticket.set(next_ticket);
+        loading.set(true);
+        error.set(String::new());
+        let req_host = hid.clone();
+        ui.spawn(async move {
+            let res = blocking(move || {
+                crate::routed_call(
+                    "project.archived.list",
+                    json!({ "host_id": req_host }),
+                    None,
+                )
+            })
+            .await;
+            if ticket.try_get() != Some(next_ticket) {
+                return;
+            }
+            let _ = loading.try_set(false);
+            match res {
+                Ok(Ok(val)) => {
+                    let parsed: Vec<crate::projects::ArchivedProjectSummary> = val["projects"]
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let _ = items.try_set(parsed);
+                    let _ = error.try_set(String::new());
+                }
+                Ok(Err(e)) => {
+                    let _ = error.try_set(format!("{e:#}"));
+                }
+                Err(e) => {
+                    let _ = error.try_set(e.to_string());
+                }
+            }
+        });
+    });
+
+    settings_section(
+        "Archived Projects",
+        "Cold-archived Projects on this host. Archived Projects use zero background polling or scheduling and can be restored anytime.",
+    )
+    .trailing(
+        compact_action(
+            move || {
+                if loading.get() {
+                    "Refreshing…"
+                } else {
+                    "Refresh"
+                }
+            },
+            Variant::Secondary,
+            move |_| {
+                ui.archived_projects_reload.update(|n| *n += 1);
+            },
+        )
+        .disabled(move || loading.get()),
+    )
+    .child(dynamic(move || {
+        let err = error.get();
+        if !err.is_empty() {
+            return notice(err, Tone::Danger).into_element();
+        }
+        let list = items.get();
+        if loading.get() && list.is_empty() {
+            return loading_panel("Loading archived Projects…", "Checking cold archive bundles on this host.")
+                .into_element();
+        }
+        if list.is_empty() {
+            return muted("No archived Projects on this host.").into_element();
+        }
+        let hid = ui.settings_host.get();
+        view()
+            .gap_2()
+            .min_w(px(0.))
+            .children(list.into_iter().map(|item| {
+                let host_for_restore = hid.clone();
+                let item_for_restore = item.clone();
+                let path_for_copy = item.archive_path.clone();
+                let cards_text = if item.archived_cards > 0 {
+                    format!(
+                        "{} active · {} archived Cards",
+                        item.active_cards, item.archived_cards
+                    )
+                } else if item.total_cards == 1 {
+                    "1 Card".to_owned()
+                } else {
+                    format!("{} Cards", item.total_cards)
+                };
+                let meta_text = format!(
+                    "{} · {cards_text} · archived {}",
+                    crate::diagnostics::format_bytes(item.bytes),
+                    crate::components::activity::age(item.archived_at),
+                );
+                panel()
+                    .p_3()
+                    .bg(INSET)
+                    .border_1()
+                    .border_color(BORDER)
+                    .gap_2()
+                    .min_w(px(0.))
+                    .child(
+                        view()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                view()
+                                    .flex_1()
+                                    .min_w(px(200.))
+                                    .gap_0p5()
+                                    .child(
+                                        view()
+                                            .flex_row()
+                                            .flex_wrap()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                label(item.name.clone())
+                                                    .font_weight(FontWeight::SEMIBOLD),
+                                            )
+                                            .child(
+                                                label(item.project_id.clone())
+                                                    .font_family(MONO_FONT)
+                                                    .text_xs()
+                                                    .text_color(MUTED),
+                                            ),
+                                    )
+                                    .child(label(meta_text).text_xs().text_color(MUTED))
+                                    .child(
+                                        label(item.source_directory.clone())
+                                            .font_family(MONO_FONT)
+                                            .text_xs()
+                                            .text_color(MUTED)
+                                            .truncate(),
+                                    ),
+                            )
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(compact_action(
+                                        "Copy archive path",
+                                        Variant::Quiet,
+                                        move |_| copy_text(ui, path_for_copy.clone()),
+                                    ))
+                                    .child(compact_action(
+                                        "Restore…",
+                                        Variant::Secondary,
+                                        move |_| {
+                                            ui.project_restore_modal.set(Some((
+                                                host_for_restore.clone(),
+                                                item_for_restore.clone(),
+                                            )));
+                                        },
+                                    )),
+                            ),
+                    )
+            }))
+            .into_element()
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1660,5 +1904,57 @@ mod tests {
                 .iter()
                 .any(|t| t == "Synced to 2/2 hosts (Home Linux, Studio Mac).")
         );
+    }
+
+    #[test]
+    fn archived_projects_section_lists_entries_without_delete_action() {
+        use nsh_core::{ApproxTextEngine, Core, MountBatch, MountItem, geometry::size};
+
+        fn collect_texts(batch: MountBatch) -> Vec<String> {
+            batch
+                .items
+                .into_iter()
+                .filter_map(|item| match item {
+                    MountItem::Text { text, .. } => Some(text.text.to_string()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        #[component]
+        fn ProbeArchivedProjects() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            ui.archived_projects_preview
+                .set(Some(vec![crate::projects::ArchivedProjectSummary {
+                    project_id: "arch-1".into(),
+                    name: "Fiber".into(),
+                    source_directory: "/Users/demo/Workspace/fiber".into(),
+                    archived_at: canban_types::now().saturating_sub(3_600_000),
+                    bytes: 428_032,
+                    archive_path: "/Users/demo/.canban/project-archives/arch-1.canban.tar.zst"
+                        .into(),
+                    active_cards: 4,
+                    archived_cards: 8,
+                    total_cards: 12,
+                    files_count: 3,
+                    required_profiles: Vec::new(),
+                    secret_keys: vec!["GITHUB_PAT".into()],
+                }]));
+            archived_projects_section(ui)
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(900.), px(700.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<ProbeArchivedProjects>());
+        let texts = collect_texts(core.commit().expect("mount archived projects"));
+
+        assert!(texts.iter().any(|t| t == "Archived Projects"));
+        assert!(texts.iter().any(|t| t == "Fiber"));
+        assert!(texts.iter().any(|t| t == "arch-1"));
+        assert!(texts.iter().any(|t| t == "/Users/demo/Workspace/fiber"));
+        assert!(texts.iter().any(|t| t == "Copy archive path"));
+        assert!(texts.iter().any(|t| t == "Restore…"));
+        assert!(!texts.iter().any(|t| t.to_lowercase().contains("delete")));
     }
 }

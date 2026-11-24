@@ -4,13 +4,13 @@ use super::*;
 use canban_context::{
     CardBranchHint, ProjectBundleFileMeta, ProjectBundleManifest, ProjectGitHints, WorktreeHint,
     cleanup_extracted_files, digest, extract_project_bundle_files, read_project_bundle,
-    validate_relative_bundle_path, write_project_bundle,
+    read_project_bundle_manifest, validate_relative_bundle_path, write_project_bundle,
 };
 use canban_herdr::host::Host;
 use canban_storage::env::{SCOPE_PROJECT, apply_env_writes};
 use canban_types::WorkflowStep;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ExportedDraft {
@@ -186,14 +186,188 @@ fn prune_empty_created_dirs(home: &Path, created_files: &[PathBuf], roots: &[Pat
     }
 }
 
+struct ExportOutcome {
+    manifest: ProjectBundleManifest,
+    bytes: u64,
+    warnings: Vec<String>,
+}
+
+struct ImportOutcome {
+    project_id: String,
+    name: String,
+    directory: String,
+    manifest: ProjectBundleManifest,
+    imported_active: usize,
+    imported_archived: usize,
+    imported_tombstones: usize,
+    missing_profiles: Vec<String>,
+    github_paused: bool,
+    warnings: Vec<String>,
+}
+
+const ARCHIVED_BUNDLE_SUFFIX: &str = ".canban.tar.zst";
+
+#[derive(Hash, PartialEq, Eq)]
+struct ActivitySegmentKey {
+    kind: String,
+    start_ms: u64,
+    end_ms: u64,
+    card_id: Option<String>,
+    terminal_id: Option<String>,
+    data_json: String,
+}
+
+fn activity_segment_key(seg: &ActivitySegment) -> Result<ActivitySegmentKey> {
+    Ok(ActivitySegmentKey {
+        kind: seg.kind.as_str().to_owned(),
+        start_ms: seg.start_ms,
+        end_ms: seg.end_ms,
+        card_id: seg.card_id.clone(),
+        terminal_id: seg.terminal_id.clone(),
+        data_json: serde_json::to_string(&seg.data)?,
+    })
+}
+
+struct ArchivedBundleEntry {
+    path: PathBuf,
+    bytes: u64,
+    manifest: ProjectBundleManifest,
+}
+
+struct ArchivedScanResult {
+    entries: Vec<ArchivedBundleEntry>,
+    errors: Vec<Value>,
+}
+
 impl AppServer {
-    pub(super) fn export_project(&self, p: Value) -> Result<Value> {
-        let raw_pid = strp(&p, "project_id")?;
-        let raw_output = strp(&p, "output")?;
-        let include_archived = p["include_archived"].as_bool().unwrap_or(false);
-        let overwrite = p["overwrite"].as_bool().unwrap_or(false);
-        let host = Host::new(self.config());
-        let output_path = expand_absolute_path(&host, raw_output, "output")?;
+    fn project_archives_dir(&self) -> PathBuf {
+        self.home.join("project-archives")
+    }
+
+    fn archived_bundle_path(&self, pid: &str) -> PathBuf {
+        self.project_archives_dir()
+            .join(format!("{pid}{ARCHIVED_BUNDLE_SUFFIX}"))
+    }
+
+    pub(super) fn check_project_active_blockers(
+        &self,
+        db: Db<'_>,
+        pid: &str,
+        verb: &str,
+        gerund: &str,
+    ) -> Result<()> {
+        let card_ids: HashSet<String> = db
+            .list::<Card>()?
+            .into_iter()
+            .filter(|c| c.project_id == pid)
+            .map(|c| c.id)
+            .collect();
+
+        let live_terminals = db
+            .list::<TerminalEntry>()?
+            .into_iter()
+            .filter(|t| {
+                t.agent
+                    .as_ref()
+                    .is_some_and(|a| a.project_id == pid && !a.finished())
+                    || (t.runtime.as_ref().is_some_and(|r| r.state != "finished")
+                        && (t.origin_project_id.as_deref() == Some(pid)
+                            || t.id.starts_with(&format!("merge-queue:{pid}:"))
+                            || t.id.starts_with(&format!("configuration:{pid}:"))
+                            || t.id.starts_with(&format!("scheduled:{pid}:"))))
+            })
+            .count();
+        let active_merges = db
+            .list::<MergeBatch>()?
+            .into_iter()
+            .filter(|b| b.project_id == pid && b.active())
+            .count()
+            + self
+                .merging_cards
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|cid| card_ids.contains(cid.as_str()))
+                .count();
+        let active_config = db
+            .list::<ConfigurationSession>()?
+            .into_iter()
+            .filter(|s| {
+                s.project_id == pid && !matches!(s.state.as_str(), "finished" | "cancelled")
+            })
+            .count();
+        let active_schedules = db
+            .list::<ScheduledRun>()?
+            .into_iter()
+            .filter(|r| r.project_id == pid && r.active())
+            .count();
+
+        let mut blockers = Vec::new();
+        if live_terminals > 0 {
+            blockers.push(format!(
+                "{live_terminals} live terminal{}",
+                if live_terminals == 1 { "" } else { "s" }
+            ));
+        }
+        if active_merges > 0 {
+            blockers.push(format!(
+                "{active_merges} active merge{}",
+                if active_merges == 1 { "" } else { "s" }
+            ));
+        }
+        if active_config > 0 {
+            blockers.push(format!(
+                "{active_config} configuration session{}",
+                if active_config == 1 { "" } else { "s" }
+            ));
+        }
+        if active_schedules > 0 {
+            blockers.push(format!(
+                "{active_schedules} scheduled run{}",
+                if active_schedules == 1 { "" } else { "s" }
+            ));
+        }
+        ensure!(
+            blockers.is_empty(),
+            "Cannot {verb} Project while active runs are still in progress ({}). End them before {gerund}.",
+            blockers.join(", ")
+        );
+        Ok(())
+    }
+
+    pub(super) fn cleanup_project_after_removal(&self, pid: &str) {
+        // Remove only Canban's own metadata/archive directories (`~/.canban/projects/<id>`,
+        // `~/.canban/archives/<id>`). Never delete the user's source repository or Git worktrees.
+        for dir in [
+            self.home.join("projects").join(pid),
+            self.home.join("archives").join(pid),
+        ] {
+            if dir.exists() {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+        if self
+            .utilities
+            .clear_project(&self.home, pid)
+            .unwrap_or(false)
+        {
+            self.emit("desktop", None);
+            self.emit_utilities();
+        }
+        self.terminal_contexts
+            .lock()
+            .unwrap()
+            .retain(|ctx| ctx.project_id.as_deref() != Some(pid));
+    }
+
+    fn export_project_to_path(
+        &self,
+        raw_pid: &str,
+        output_path: &Path,
+        include_archived: bool,
+        overwrite: bool,
+        enforce_idle: bool,
+    ) -> Result<ExportOutcome> {
         if !overwrite && output_path.exists() {
             bail!(
                 "Output file already exists ({}); choose a new path or pass --overwrite",
@@ -212,6 +386,9 @@ impl AppServer {
             let store = self.store.lock().unwrap();
             let db = store.db();
             let pid = super::resolve_project_id(db, raw_pid)?;
+            if enforce_idle {
+                self.check_project_active_blockers(db, &pid, "archive", "archiving")?;
+            }
             let project: Project = db.get(&pid)?;
 
             let all_cards: Vec<Card> = db
@@ -703,50 +880,60 @@ impl AppServer {
 
         let records_json = serde_json::to_vec_pretty(&data.records)?;
         let bundle_bytes = write_project_bundle(
-            &output_path,
+            output_path,
             overwrite,
             &data.manifest,
             &records_json,
             &data.files,
         )?;
 
+        Ok(ExportOutcome {
+            manifest: data.manifest,
+            bytes: bundle_bytes,
+            warnings: data.warnings,
+        })
+    }
+
+    pub(super) fn export_project(&self, p: Value) -> Result<Value> {
+        let raw_pid = strp(&p, "project_id")?;
+        let raw_output = strp(&p, "output")?;
+        let include_archived = p["include_archived"].as_bool().unwrap_or(false);
+        let overwrite = p["overwrite"].as_bool().unwrap_or(false);
+        let host = Host::new(self.config());
+        let output_path = expand_absolute_path(&host, raw_output, "output")?;
+        let outcome =
+            self.export_project_to_path(raw_pid, &output_path, include_archived, overwrite, false)?;
+
         Ok(json!({
             "exported": true,
-            "project_id": data.manifest.project_id,
-            "name": data.manifest.project_name,
+            "project_id": outcome.manifest.project_id,
+            "name": outcome.manifest.project_name,
             "output": output_path.to_string_lossy(),
-            "bytes": bundle_bytes,
-            "include_archived": data.manifest.include_archived,
-            "exported_cards": data.manifest.exported_cards,
-            "exported_archived_cards": data.manifest.exported_archived_cards,
-            "exported_tombstones": data.manifest.exported_tombstones,
-            "skipped_archived_cards": data.manifest.skipped_archived_cards,
-            "skipped_archived_github_cards": data.manifest.skipped_archived_github_cards,
-            "files_count": data.manifest.files.len(),
-            "secret_keys": data.manifest.secret_keys,
-            "required_profiles": data.manifest.required_profiles,
-            "git_hints": data.manifest.git_hints,
-            "warnings": data.warnings,
+            "bytes": outcome.bytes,
+            "include_archived": outcome.manifest.include_archived,
+            "exported_cards": outcome.manifest.exported_cards,
+            "exported_archived_cards": outcome.manifest.exported_archived_cards,
+            "exported_tombstones": outcome.manifest.exported_tombstones,
+            "skipped_archived_cards": outcome.manifest.skipped_archived_cards,
+            "skipped_archived_github_cards": outcome.manifest.skipped_archived_github_cards,
+            "files_count": outcome.manifest.files.len(),
+            "secret_keys": outcome.manifest.secret_keys,
+            "required_profiles": outcome.manifest.required_profiles,
+            "git_hints": outcome.manifest.git_hints,
+            "warnings": outcome.warnings,
         }))
     }
 
-    pub(super) fn import_project(&self, p: Value) -> Result<Value> {
-        let raw_file = strp(&p, "file")?;
-        let host = Host::new(self.config());
-        let archive_path = expand_absolute_path(&host, raw_file, "file")?;
-        let target_directory = self.resolve_project_directory(&p)?;
-        let name_override = p
-            .get("name")
-            .and_then(Value::as_str)
-            .map(|s| {
-                let trimmed = s.trim();
-                ensure!(!trimmed.is_empty(), "Project name must not be empty");
-                Ok::<String, anyhow::Error>(trimmed.to_owned())
-            })
-            .transpose()?;
-        let pause_github = p["pause_github"].as_bool().unwrap_or(false);
-
-        let loaded = read_project_bundle(&archive_path)?;
+    fn import_project_from_path(
+        &self,
+        method: &str,
+        p: &Value,
+        archive_path: &Path,
+        target_directory: String,
+        name_override: Option<String>,
+        pause_github_override: Option<bool>,
+    ) -> Result<ImportOutcome> {
+        let loaded = read_project_bundle(archive_path)?;
         ensure!(
             loaded.manifest.sqlite_schema <= canban_storage::migrations::CURRENT,
             "Bundle SQLite schema v{} is newer than this daemon (v{}); upgrade the target Canban daemon first",
@@ -922,7 +1109,7 @@ impl AppServer {
             allowed_prefixes.push(format!("archives/{pid}/"));
         }
         let created_files =
-            extract_project_bundle_files(&archive_path, &self.home, &allowed_prefixes)?;
+            extract_project_bundle_files(archive_path, &self.home, &allowed_prefixes)?;
 
         let cleanup_roots = vec![
             self.home.join("projects").join(&pid),
@@ -935,8 +1122,13 @@ impl AppServer {
         let mut summary_github_paused = false;
         let mut summary_github_active = false;
         let mut final_project_name = records.project.name.clone();
+        let cancel_reason = if method == "project.restore" {
+            "Cancelled when project was archived"
+        } else {
+            "Cancelled during project import from another host"
+        };
 
-        let tx_result = self.mutate("project.import", &p, |db| {
+        let tx_result = self.mutate(method, p, |db| {
             ensure!(
                 db.get::<Project>(&pid).is_err(),
                 "Project {pid} already exists on this host"
@@ -955,8 +1147,8 @@ impl AppServer {
             }
             if let Some(g) = &mut project.github {
                 g.error = None;
-                if pause_github {
-                    g.paused = true;
+                if let Some(paused) = pause_github_override {
+                    g.paused = paused;
                 }
                 summary_github_paused = g.paused;
                 summary_github_active = !g.paused
@@ -1027,7 +1219,7 @@ impl AppServer {
                 run.terminal_id = None;
                 if run.active() {
                     run.state = "cancelled".into();
-                    run.error = Some("Cancelled during project import from another host".into());
+                    run.error = Some(cancel_reason.into());
                     run.updated_at = now_ms;
                 }
                 db.save(&run)?;
@@ -1052,7 +1244,7 @@ impl AppServer {
                 srun.terminal_id = None;
                 if srun.active() {
                     srun.state = "cancelled".into();
-                    srun.error = Some("Cancelled during project import from another host".into());
+                    srun.error = Some(cancel_reason.into());
                     srun.updated_at = now_ms;
                 }
                 db.save(&srun)?;
@@ -1143,11 +1335,33 @@ impl AppServer {
                 )?;
             }
             if !records.activity_segments.is_empty() {
-                db.insert_activity_segments(&records.activity_segments)?;
+                // `Db::delete_project` keeps historical `activity_segments` for Insights,
+                // so skip already-present segments when restoring onto the same host.
+                let mut existing_counts: HashMap<ActivitySegmentKey, usize> = HashMap::new();
+                db.for_each_activity_segment(0, i64::MAX as u64, Some(&pid), None, |seg| {
+                    *existing_counts
+                        .entry(activity_segment_key(&seg)?)
+                        .or_insert(0) += 1;
+                    Ok(())
+                })?;
+                let mut to_insert = Vec::new();
+                for seg in &records.activity_segments {
+                    let key = activity_segment_key(seg)?;
+                    if let Some(cnt) = existing_counts.get_mut(&key)
+                        && *cnt > 0
+                    {
+                        *cnt -= 1;
+                        continue;
+                    }
+                    to_insert.push(seg.clone());
+                }
+                if !to_insert.is_empty() {
+                    db.insert_activity_segments(&to_insert)?;
+                }
             }
 
             Ok(json!({
-                "imported": true,
+                method: true,
                 "project_id": pid,
             }))
         });
@@ -1195,28 +1409,338 @@ impl AppServer {
                 loaded.manifest.skipped_archived_github_cards
             ));
         }
-        if summary_github_active {
+        if summary_github_active && method != "project.restore" {
             warnings.push(
                 "GitHub intake is active on the imported project; pause or delete the project on the source host to prevent duplicate polling and card updates."
                     .into(),
             );
         }
 
+        Ok(ImportOutcome {
+            project_id: pid,
+            name: final_project_name,
+            directory: target_directory,
+            manifest: loaded.manifest,
+            imported_active: summary_imported_active,
+            imported_archived: summary_imported_archived,
+            imported_tombstones: summary_imported_tombstones,
+            missing_profiles,
+            github_paused: summary_github_paused,
+            warnings,
+        })
+    }
+
+    pub(super) fn import_project(&self, p: Value) -> Result<Value> {
+        let raw_file = strp(&p, "file")?;
+        let host = Host::new(self.config());
+        let archive_path = expand_absolute_path(&host, raw_file, "file")?;
+        let target_directory = self.resolve_project_directory(&p)?;
+        let name_override = p
+            .get("name")
+            .and_then(Value::as_str)
+            .map(|s| {
+                let trimmed = s.trim();
+                ensure!(!trimmed.is_empty(), "Project name must not be empty");
+                Ok::<String, anyhow::Error>(trimmed.to_owned())
+            })
+            .transpose()?;
+        let pause_github_override = p["pause_github"].as_bool().unwrap_or(false).then_some(true);
+
+        let outcome = self.import_project_from_path(
+            "project.import",
+            &p,
+            &archive_path,
+            target_directory,
+            name_override,
+            pause_github_override,
+        )?;
+
         Ok(json!({
             "imported": true,
-            "project_id": pid,
-            "name": final_project_name,
-            "directory": target_directory,
-            "include_archived": loaded.manifest.include_archived,
-            "imported_cards": summary_imported_active,
-            "imported_archived_cards": summary_imported_archived,
-            "imported_tombstones": summary_imported_tombstones,
-            "skipped_archived_cards": loaded.manifest.skipped_archived_cards,
-            "missing_profiles": missing_profiles,
-            "missing_secrets": loaded.manifest.secret_keys,
-            "github_paused": summary_github_paused,
-            "git_hints": loaded.manifest.git_hints,
-            "warnings": warnings,
+            "project_id": outcome.project_id,
+            "name": outcome.name,
+            "directory": outcome.directory,
+            "include_archived": outcome.manifest.include_archived,
+            "imported_cards": outcome.imported_active,
+            "imported_archived_cards": outcome.imported_archived,
+            "imported_tombstones": outcome.imported_tombstones,
+            "skipped_archived_cards": outcome.manifest.skipped_archived_cards,
+            "missing_profiles": outcome.missing_profiles,
+            "missing_secrets": outcome.manifest.secret_keys,
+            "github_paused": outcome.github_paused,
+            "git_hints": outcome.manifest.git_hints,
+            "warnings": outcome.warnings,
+        }))
+    }
+
+    pub(super) fn archive_project(&self, p: Value) -> Result<Value> {
+        let raw_pid = strp(&p, "project_id")?;
+        let pid = {
+            let store = self.store.lock().unwrap();
+            let db = store.db();
+            let resolved = super::resolve_project_id(db, raw_pid)?;
+            self.check_project_active_blockers(db, &resolved, "archive", "archiving")?;
+            resolved
+        };
+        let archive_path = self.archived_bundle_path(&pid);
+        let exported = self.export_project_to_path(&pid, &archive_path, true, true, true)?;
+
+        let tx_res = self.mutate("project.archive", &p, |db| {
+            let _project: Project = db.get(&pid)?;
+            self.check_project_active_blockers(db, &pid, "archive", "archiving")?;
+            let deleted_cards = db.delete_project(&pid)?;
+            Ok(json!({
+                "archived": true,
+                "project_id": pid,
+                "deleted_cards": deleted_cards,
+            }))
+        });
+
+        if let Err(err) = tx_res {
+            let _ = std::fs::remove_file(&archive_path);
+            return Err(err);
+        }
+
+        self.cleanup_project_after_removal(&pid);
+
+        Ok(json!({
+            "archived": true,
+            "project_id": exported.manifest.project_id,
+            "name": exported.manifest.project_name,
+            "archive_path": archive_path.to_string_lossy(),
+            "bytes": exported.bytes,
+            "active_cards": exported.manifest.exported_cards,
+            "archived_cards": exported.manifest.exported_archived_cards,
+            "tombstones": exported.manifest.exported_tombstones,
+            "files_count": exported.manifest.files.len(),
+            "secret_keys": exported.manifest.secret_keys,
+            "warnings": exported.warnings,
+        }))
+    }
+
+    fn scan_archived_manifests(&self) -> Result<ArchivedScanResult> {
+        let archives_dir = self.project_archives_dir();
+        if !archives_dir.exists() {
+            return Ok(ArchivedScanResult {
+                entries: Vec::new(),
+                errors: Vec::new(),
+            });
+        }
+        let mut entries = Vec::new();
+        let mut errors = Vec::new();
+        for entry in std::fs::read_dir(&archives_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let Some(fname) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if fname.starts_with('.') || !fname.ends_with(ARCHIVED_BUNDLE_SUFFIX) {
+                continue;
+            }
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            match read_project_bundle_manifest(&path) {
+                Ok(manifest) => entries.push(ArchivedBundleEntry {
+                    path,
+                    bytes: meta.len(),
+                    manifest,
+                }),
+                Err(err) => errors.push(json!({
+                    "path": path.to_string_lossy(),
+                    "error": format!("{err:#}"),
+                })),
+            }
+        }
+        entries.sort_by(|a, b| {
+            b.manifest
+                .created_at
+                .cmp(&a.manifest.created_at)
+                .then_with(|| {
+                    a.manifest
+                        .project_name
+                        .to_lowercase()
+                        .cmp(&b.manifest.project_name.to_lowercase())
+                })
+                .then_with(|| a.manifest.project_id.cmp(&b.manifest.project_id))
+        });
+        Ok(ArchivedScanResult { entries, errors })
+    }
+
+    fn resolve_archived_project(&self, query: &str) -> Result<(PathBuf, ProjectBundleManifest)> {
+        let trimmed = query.trim();
+        ensure!(!trimmed.is_empty(), "project_id is required");
+        let scan = self.scan_archived_manifests()?;
+        if let Some(entry) = scan
+            .entries
+            .iter()
+            .find(|e| e.manifest.project_id == trimmed)
+        {
+            return Ok((entry.path.clone(), entry.manifest.clone()));
+        }
+        let prefix_matches: Vec<_> = scan
+            .entries
+            .iter()
+            .filter(|e| e.manifest.project_id.starts_with(trimmed))
+            .collect();
+        if prefix_matches.len() == 1 {
+            return Ok((
+                prefix_matches[0].path.clone(),
+                prefix_matches[0].manifest.clone(),
+            ));
+        }
+        ensure!(
+            prefix_matches.is_empty(),
+            "Archived Project id prefix `{trimmed}` is ambiguous ({} matches)",
+            prefix_matches.len()
+        );
+        let lower = trimmed.to_lowercase();
+        let name_matches: Vec<_> = scan
+            .entries
+            .iter()
+            .filter(|e| e.manifest.project_name.to_lowercase() == lower)
+            .collect();
+        if name_matches.len() == 1 {
+            return Ok((
+                name_matches[0].path.clone(),
+                name_matches[0].manifest.clone(),
+            ));
+        }
+        ensure!(
+            name_matches.is_empty(),
+            "Archived Project name `{trimmed}` is ambiguous ({} matches); specify exact project_id",
+            name_matches.len()
+        );
+        bail!("Archived Project not found: {trimmed}");
+    }
+
+    pub(super) fn list_archived_projects(&self, _p: Value) -> Result<Value> {
+        let archives_dir = self.project_archives_dir();
+        let scan = self.scan_archived_manifests()?;
+        let projects: Vec<Value> = scan
+            .entries
+            .into_iter()
+            .map(|entry| {
+                let manifest = entry.manifest;
+                json!({
+                    "project_id": manifest.project_id,
+                    "name": manifest.project_name,
+                    "source_directory": manifest.source_directory,
+                    "archived_at": manifest.created_at,
+                    "bytes": entry.bytes,
+                    "archive_path": entry.path.to_string_lossy(),
+                    "active_cards": manifest.exported_cards,
+                    "archived_cards": manifest.exported_archived_cards,
+                    "total_cards": manifest.exported_cards + manifest.exported_archived_cards,
+                    "files_count": manifest.files.len(),
+                    "required_profiles": manifest.required_profiles,
+                    "secret_keys": manifest.secret_keys,
+                    "sqlite_schema": manifest.sqlite_schema,
+                })
+            })
+            .collect();
+        Ok(json!({
+            "archives_dir": archives_dir.to_string_lossy(),
+            "projects": projects,
+            "errors": scan.errors,
+        }))
+    }
+
+    pub(super) fn restore_project(&self, p: Value) -> Result<Value> {
+        let raw_pid = strp(&p, "project_id")?;
+        let (archive_path, manifest) = self.resolve_archived_project(raw_pid)?;
+        let target_directory = match p
+            .get("directory")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(_) => self.resolve_project_directory(&p)?,
+            None => {
+                let source_exists =
+                    std::fs::metadata(&manifest.source_directory).is_ok_and(|m| m.is_dir());
+                ensure!(
+                    source_exists,
+                    "Original directory no longer exists ({}); specify a target directory to restore into.",
+                    manifest.source_directory
+                );
+                self.resolve_project_directory(&json!({ "directory": manifest.source_directory }))?
+            }
+        };
+        let name_override = p
+            .get("name")
+            .and_then(Value::as_str)
+            .map(|s| {
+                let trimmed = s.trim();
+                ensure!(!trimmed.is_empty(), "Project name must not be empty");
+                Ok::<String, anyhow::Error>(trimmed.to_owned())
+            })
+            .transpose()?;
+        let pause_github = p
+            .get("pause_github")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+
+        let mut outcome = self.import_project_from_path(
+            "project.restore",
+            &p,
+            &archive_path,
+            target_directory,
+            name_override,
+            Some(pause_github),
+        )?;
+
+        if let Err(err) = std::fs::remove_file(&archive_path) {
+            outcome.warnings.push(format!(
+                "Project restored, but failed removing archive file {}: {err}",
+                archive_path.display()
+            ));
+        }
+
+        Ok(json!({
+            "restored": true,
+            "project_id": outcome.project_id,
+            "name": outcome.name,
+            "directory": outcome.directory,
+            "imported_cards": outcome.imported_active,
+            "imported_archived_cards": outcome.imported_archived,
+            "imported_tombstones": outcome.imported_tombstones,
+            "missing_profiles": outcome.missing_profiles,
+            "missing_secrets": outcome.manifest.secret_keys,
+            "github_paused": outcome.github_paused,
+            "git_hints": outcome.manifest.git_hints,
+            "warnings": outcome.warnings,
+        }))
+    }
+
+    pub(super) fn delete_archived_project(&self, p: Value) -> Result<Value> {
+        ensure!(
+            p["execution"].is_null(),
+            "Deleting an archived Project requires a user action"
+        );
+        let raw_pid = strp(&p, "project_id")?;
+        let (archive_path, manifest) = self.resolve_archived_project(raw_pid)?;
+        let archives_dir = self.project_archives_dir();
+        ensure!(
+            archive_path.parent() == Some(archives_dir.as_path()),
+            "Refusing to delete archive outside {}",
+            archives_dir.display()
+        );
+        let meta = std::fs::symlink_metadata(&archive_path)?;
+        ensure!(
+            meta.is_file(),
+            "Archive path must be a regular file: {}",
+            archive_path.display()
+        );
+        std::fs::remove_file(&archive_path)?;
+        Ok(json!({
+            "deleted": true,
+            "project_id": manifest.project_id,
+            "name": manifest.project_name,
+            "archive_path": archive_path.to_string_lossy(),
         }))
     }
 }

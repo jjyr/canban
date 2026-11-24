@@ -276,6 +276,52 @@ pub fn write_project_bundle(
     Ok(fs::metadata(output_path)?.len())
 }
 
+/// Reads only `manifest.json` from a `*.canban.tar.zst` project bundle without
+/// reading `records.json` or managed files.
+pub fn read_project_bundle_manifest(archive_path: &Path) -> Result<ProjectBundleManifest> {
+    let meta = fs::symlink_metadata(archive_path)
+        .with_context(|| format!("Bundle not found: {}", archive_path.display()))?;
+    ensure!(
+        meta.is_file(),
+        "Bundle path must be a regular file: {}",
+        archive_path.display()
+    );
+
+    let decoder = zstd::Decoder::new(File::open(archive_path)?)?;
+    let mut archive = tar::Archive::new(decoder);
+
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let entry_type = entry.header().entry_type();
+        ensure!(
+            !entry_type.is_symlink() && !entry_type.is_hard_link(),
+            "Bundle contains unsupported link entry"
+        );
+        let raw_path = entry.path()?.into_owned();
+        if raw_path == Path::new("manifest.json") {
+            ensure!(entry_type.is_file(), "manifest.json must be a regular file");
+            let mut buf = Vec::new();
+            entry.read_to_end(&mut buf)?;
+            let manifest: ProjectBundleManifest =
+                serde_json::from_slice(&buf).context("Invalid manifest.json in project bundle")?;
+            ensure!(
+                manifest.format_version == PROJECT_BUNDLE_FORMAT_VERSION,
+                "Unsupported project bundle format version {} (expected {})",
+                manifest.format_version,
+                PROJECT_BUNDLE_FORMAT_VERSION
+            );
+            ensure!(
+                manifest.codec == "zstd",
+                "Unsupported project bundle codec {}",
+                manifest.codec
+            );
+            return Ok(manifest);
+        }
+    }
+
+    bail!("Project bundle is missing manifest.json")
+}
+
 /// Reads and cryptographically verifies a `*.canban.tar.zst` project bundle without modifying disk state.
 pub fn read_project_bundle(archive_path: &Path) -> Result<LoadedProjectBundle> {
     let meta = fs::symlink_metadata(archive_path)
@@ -558,6 +604,10 @@ mod tests {
         let loaded = read_project_bundle(&bundle_path).unwrap();
         assert_eq!(loaded.manifest, manifest);
         assert_eq!(loaded.records_json, records);
+        assert_eq!(
+            read_project_bundle_manifest(&bundle_path).unwrap(),
+            manifest
+        );
 
         let created =
             extract_project_bundle_files(&bundle_path, &dst_home, &["projects/p1/".into()])
@@ -577,6 +627,9 @@ mod tests {
         let bad_zst = dir.join("bad.canban.tar.zst");
         fs::write(&bad_zst, b"not a valid zstd stream").unwrap();
         assert!(read_project_bundle(&bad_zst).is_err());
+        assert!(read_project_bundle_manifest(&bad_zst).is_err());
+        assert!(read_project_bundle_manifest(&dir.join("missing.canban.tar.zst")).is_err());
+        assert!(read_project_bundle_manifest(&dir).is_err());
 
         // 2. Crafted tar with `../` traversal inside files/
         let traversal_tar = dir.join("traversal.canban.tar.zst");

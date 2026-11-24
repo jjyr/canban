@@ -241,7 +241,10 @@ pub struct Ui {
     pub worktree_modal: Signal<Option<String>>,
     pub worktree_promote: Signal<Option<String>>,
     pub worktree_remove_confirm: Signal<Option<String>>,
-    pub project_delete_confirm: Signal<Option<String>>,
+    pub project_archive_confirm: Signal<Option<String>>,
+    pub project_restore_modal: Signal<Option<(String, crate::projects::ArchivedProjectSummary)>>,
+    pub archived_projects_reload: Signal<u64>,
+    pub archived_projects_preview: Signal<Option<Vec<crate::projects::ArchivedProjectSummary>>>,
     pub hosts: Signal<Vec<HostSummary>>,
     pub paired_devices_preview: Signal<Option<PairedDevicesPreview>>,
     pub sync_preview: Signal<Vec<SyncItemView>>,
@@ -494,7 +497,8 @@ impl Ui {
             || self.worktree_modal.get_untracked().is_some()
             || self.worktree_promote.get_untracked().is_some()
             || self.worktree_remove_confirm.get_untracked().is_some()
-            || self.project_delete_confirm.get_untracked().is_some()
+            || self.project_archive_confirm.get_untracked().is_some()
+            || self.project_restore_modal.get_untracked().is_some()
             || self.review_state.discard_confirm.get_untracked().is_some()
             || self.schedules.create_modal.get_untracked()
             || self.schedules.yaml_open.get_untracked()
@@ -716,7 +720,10 @@ impl Ui {
             worktree_modal: signal(None),
             worktree_promote: signal(None),
             worktree_remove_confirm: signal(None),
-            project_delete_confirm: signal(None),
+            project_archive_confirm: signal(None),
+            project_restore_modal: signal(None),
+            archived_projects_reload: signal(0),
+            archived_projects_preview: signal(None),
             hosts: signal(crate::host_summaries()),
             paired_devices_preview: signal(None),
             sync_preview: signal(Vec::new()),
@@ -1651,6 +1658,8 @@ pub fn dispatch_complete(
                 | "host.env.refresh"
                 | "herdr.status"
                 | "herdr.check"
+                | "project.archived.list"
+                | "project.restore"
         )
     {
         params["host_id"] = json!(ui.effective_config_host());
@@ -1808,6 +1817,28 @@ pub fn dispatch_complete(
                         "env.save" => ui.notify("Environment & Secrets saved"),
                         "scheduler.configure" => ui.notify("Scheduling settings saved"),
                         "project.update" => ui.notify("Project updated"),
+                        "project.archive" => {
+                            let name = value["name"].as_str().unwrap_or("Project");
+                            ui.notify(format!(
+                                "Archived project \"{name}\" · restore in Settings → Storage"
+                            ));
+                        }
+                        "project.restore" => {
+                            let name = value["name"].as_str().unwrap_or("Project");
+                            let has_missing_secrets = value["missing_secrets"]
+                                .as_array()
+                                .is_some_and(|a| !a.is_empty());
+                            let has_missing_profiles = value["missing_profiles"]
+                                .as_array()
+                                .is_some_and(|a| !a.is_empty());
+                            if has_missing_secrets || has_missing_profiles {
+                                ui.notify(format!(
+                                    "Restored project \"{name}\" · reconfigure missing secrets/profiles in Settings"
+                                ));
+                            } else {
+                                ui.notify(format!("Restored project \"{name}\""));
+                            }
+                        }
                         "project.delete" => {
                             let name = value["name"].as_str().unwrap_or("Project");
                             ui.notify(format!("Deleted project \"{name}\""));
@@ -1896,9 +1927,19 @@ pub fn dispatch_complete(
                             ui.page.set("board".into());
                         }
                     }
+                    "project.archive" => {
+                        ui.archived_projects_reload.update(|n| *n += 1);
+                        if let Some(id) = value["project_id"].as_str() {
+                            crate::projects::after_archive(ui, id);
+                        }
+                    }
+                    "project.restore" => {
+                        ui.archived_projects_reload.update(|n| *n += 1);
+                        ui.project_restore_modal.set(None);
+                    }
                     "project.delete" => {
                         if let Some(id) = value["project_id"].as_str() {
-                            crate::projects::after_delete(ui, id);
+                            crate::projects::after_archive(ui, id);
                         }
                     }
                     "card.create" | "github.issue.add" | "github.item.add" if active => {

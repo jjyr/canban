@@ -893,3 +893,328 @@ fn export_import_error_and_safety_boundaries() {
     );
     assert_eq!(dst.snapshot().unwrap().projects.len(), 1);
 }
+
+#[test]
+fn cold_archive_list_restore_dedups_activity_and_enforces_dir_safety() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    let alt_repo = dir.path().join("alt-repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(repo.join("README.md"), "# Keep me safe\n").unwrap();
+    std::fs::create_dir_all(&alt_repo).unwrap();
+
+    let app = AppServer::open(home.clone(), PathBuf::from("/bin/echo")).unwrap();
+
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Fiber", "directory": repo}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let active_card: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"view": "full", "project_id": p.id, "title": "Active task", "body": "Active body"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "attachment.add",
+        json!({"card_id": active_card.id, "name": "spec.txt", "media_type": "text/plain", "bytes": b"spec-bytes".to_vec()}),
+    )
+    .unwrap();
+
+    let archived_card: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"view": "full", "project_id": p.id, "title": "Archived task", "body": "Old body"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "card.archive",
+        json!({"card_id": archived_card.id, "revision": archived_card.revision}),
+    )
+    .unwrap();
+
+    // Add GitHub link (initially unpaused), project secret, note, activity segment, and a live terminal.
+    app.call(
+        "env.save",
+        json!({
+            "scope": "project",
+            "target_id": p.id,
+            "entries": {
+                "APP_ENV": { "kind": "plain", "value": "prod" },
+                "GITHUB_PAT": { "kind": "secret", "value": "secret-val" }
+            }
+        }),
+    )
+    .unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut proj: Project = db.get(&p.id)?;
+            proj.github = Some(GitHubSource {
+                repository: "nervosnetwork/fiber".into(),
+                repository_id: 77,
+                generation: "gen1".into(),
+                intake: GitHubIntake::All,
+                pr_intake: GitHubPrIntake::Off,
+                authors: Vec::new(),
+                labels: Vec::new(),
+                include_drafts: false,
+                paused: false,
+                synced_at: None,
+                error: None,
+            });
+            db.save(&proj)?;
+            db.save(&Note {
+                id: "note-arch".into(),
+                project_id: p.id.clone(),
+                title: "Design Note".into(),
+                body: "Preserved in cold archive".into(),
+                card_ids: Vec::new(),
+                links: Vec::new(),
+                revision: 1,
+                created_at: 100,
+                updated_at: 200,
+            })?;
+            db.insert_activity_segments(&[ActivitySegment {
+                id: None,
+                kind: ActivityKind::Dwell,
+                start_ms: 1000,
+                end_ms: 5000,
+                project_id: Some(p.id.clone()),
+                card_id: Some(active_card.id.clone()),
+                terminal_id: None,
+                open: false,
+                data: ActivityDetail::Dwell(DwellData {
+                    lane: DwellLane::Other,
+                    page: "board".into(),
+                }),
+            }])?;
+            db.save(&TerminalEntry {
+                id: "live-term-blocker".into(),
+                conversation_id: None,
+                number: 1,
+                name: Some("Live Shell".into()),
+                origin_project_id: Some(p.id.clone()),
+                origin_card_id: None,
+                agent_engine: None,
+                runtime: Some(TerminalRuntime {
+                    core_id: Some("c1".into()),
+                    terminal: Some("t1".into()),
+                    state: "running".into(),
+                    connection: "connected".into(),
+                    error: None,
+                    agent_status: None,
+                    agent_turn: None,
+                    observed_agent: None,
+                    waiting: None,
+                }),
+                agent: None,
+                created_at: 1,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+
+    // 1. Live terminal blocks archiving and leaves no leftover bundle.
+    let blocked_err = app
+        .call("project.archive", json!({"project_id": p.id}))
+        .unwrap_err();
+    assert!(blocked_err.to_string().contains("1 live terminal"));
+    assert_eq!(app.snapshot().unwrap().projects.len(), 1);
+    let expected_archive_path = home
+        .join("project-archives")
+        .join(format!("{}.canban.tar.zst", p.id));
+    assert!(!expected_archive_path.exists());
+
+    // Finish the terminal -> archive succeeds (even with agent execution context absent or CLI).
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut t: TerminalEntry = db.get("live-term-blocker")?;
+            t.runtime.as_mut().unwrap().state = "finished".into();
+            db.save(&t)
+        })
+        .unwrap();
+
+    let arch_res = app
+        .call("project.archive", json!({"project_id": p.id}))
+        .unwrap();
+    assert_eq!(arch_res["archived"], true);
+    assert_eq!(arch_res["project_id"], p.id);
+    assert_eq!(arch_res["active_cards"], 1);
+    assert_eq!(arch_res["archived_cards"], 1);
+    assert_eq!(arch_res["secret_keys"], json!(["GITHUB_PAT"]));
+    assert!(expected_archive_path.is_file());
+
+    // Active project + metadata dirs removed, DB active rows removed, activity_segments + repo kept.
+    assert!(app.snapshot().unwrap().projects.is_empty());
+    assert!(app.snapshot().unwrap().cards.is_empty());
+    assert!(!home.join("projects").join(&p.id).exists());
+    assert!(!home.join("archives").join(&p.id).exists());
+    assert_eq!(
+        std::fs::read_to_string(repo.join("README.md")).unwrap(),
+        "# Keep me safe\n"
+    );
+    {
+        let store = app.store.lock().unwrap();
+        let db = store.db();
+        let (segs, _) = db
+            .query_activity_segments(0, i64::MAX as u64, Some(&p.id), None, 50)
+            .unwrap();
+        assert_eq!(segs.len(), 1);
+    }
+
+    // 2. Corrupt file in project-archives/ does not prevent project.archived.list from listing Fiber.
+    let corrupt_path = home.join("project-archives").join("corrupt.canban.tar.zst");
+    std::fs::write(&corrupt_path, b"bad-archive").unwrap();
+
+    let listed = app.call("project.archived.list", json!({})).unwrap();
+    let projects_arr = listed["projects"].as_array().unwrap();
+    assert_eq!(projects_arr.len(), 1);
+    assert_eq!(projects_arr[0]["project_id"], p.id);
+    assert_eq!(projects_arr[0]["name"], "Fiber");
+    assert_eq!(projects_arr[0]["active_cards"], 1);
+    assert_eq!(projects_arr[0]["archived_cards"], 1);
+    assert_eq!(projects_arr[0]["total_cards"], 2);
+    assert_eq!(projects_arr[0]["secret_keys"], json!(["GITHUB_PAT"]));
+    assert_eq!(listed["errors"].as_array().unwrap().len(), 1);
+    let _ = std::fs::remove_file(&corrupt_path);
+
+    // 3. Removing original repo directory without supplying `directory` fails restore safely.
+    let moved_repo = dir.path().join("moved-away");
+    std::fs::rename(&repo, &moved_repo).unwrap();
+    let missing_dir_err = app
+        .call("project.restore", json!({"project_id": p.id}))
+        .unwrap_err();
+    assert!(
+        missing_dir_err
+            .to_string()
+            .contains("Original directory no longer exists")
+    );
+    assert!(
+        !repo.exists(),
+        "must not silently mkdir missing source_directory"
+    );
+    assert!(
+        expected_archive_path.is_file(),
+        "archive must stay intact on error"
+    );
+
+    // 4. Restore onto explicit alt_repo succeeds, defaults github.paused=true, deduplicates activity_segments,
+    //    and deletes the archive file after commit.
+    let restored = app
+        .call(
+            "project.restore",
+            json!({
+                "project_id": "Fiber",
+                "directory": alt_repo,
+            }),
+        )
+        .unwrap();
+    assert_eq!(restored["restored"], true);
+    assert_eq!(restored["project_id"], p.id);
+    assert_eq!(restored["github_paused"], true);
+    assert_eq!(restored["missing_secrets"], json!(["GITHUB_PAT"]));
+    assert!(!expected_archive_path.exists());
+
+    let list_after = app.call("project.archived.list", json!({})).unwrap();
+    assert!(list_after["projects"].as_array().unwrap().is_empty());
+
+    let snap = app.snapshot().unwrap();
+    assert_eq!(snap.projects.len(), 1);
+    assert!(snap.projects[0].github.as_ref().unwrap().paused);
+    assert_eq!(snap.cards.len(), 2);
+    {
+        let store = app.store.lock().unwrap();
+        let db = store.db();
+        assert_eq!(db.get::<Note>("note-arch").unwrap().title, "Design Note");
+        // Activity segments must NOT be duplicated on same-host archive+restore!
+        let (segs, _) = db
+            .query_activity_segments(0, i64::MAX as u64, Some(&p.id), None, 50)
+            .unwrap();
+        assert_eq!(segs.len(), 1);
+    }
+
+    // 5. Re-archive and restore with pause_github: false leaves GitHub unpaused.
+    app.call("project.archive", json!({"project_id": p.id}))
+        .unwrap();
+    let resumed = app
+        .call(
+            "project.restore",
+            json!({"project_id": p.id, "pause_github": false}),
+        )
+        .unwrap();
+    assert_eq!(resumed["github_paused"], false);
+    assert!(
+        !app.snapshot().unwrap().projects[0]
+            .github
+            .as_ref()
+            .unwrap()
+            .paused
+    );
+}
+
+#[test]
+fn archive_delete_requires_user_action_and_removes_bundle() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+
+    let app = AppServer::open(home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Disposable", "directory": repo}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    app.call("project.archive", json!({"project_id": p.id}))
+        .unwrap();
+    let archive_path = home
+        .join("project-archives")
+        .join(format!("{}.canban.tar.zst", p.id));
+    assert!(archive_path.is_file());
+
+    // Agent execution context cannot permanently delete archived bundles.
+    let agent_err = app
+        .call(
+            "project.archived.delete",
+            json!({"project_id": p.id, "execution": {"agent": true}}),
+        )
+        .unwrap_err();
+    assert!(
+        agent_err
+            .to_string()
+            .contains("Deleting an archived Project requires a user action")
+    );
+    assert!(archive_path.is_file());
+
+    // Explicit CLI/user call deletes the bundle cleanly.
+    let del = app
+        .call("project.archived.delete", json!({"project_id": p.id}))
+        .unwrap();
+    assert_eq!(del["deleted"], true);
+    assert_eq!(del["project_id"], p.id);
+    assert!(!archive_path.exists());
+    assert!(
+        app.call("project.archived.list", json!({})).unwrap()["projects"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}

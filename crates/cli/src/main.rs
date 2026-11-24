@@ -250,6 +250,53 @@ enum ProjectCmd {
         #[arg(long)]
         request_key: Option<String>,
     },
+    /// Cold-archive an idle Project into `<CANBAN_HOME>/project-archives/` and remove it from active SQLite.
+    Archive {
+        /// Project ID, prefix, or exact name (defaults to CANBAN_PROJECT).
+        #[arg(long, env = "CANBAN_PROJECT")]
+        project_id: String,
+        /// Optional idempotency request key.
+        #[arg(long)]
+        request_key: Option<String>,
+    },
+    /// List cold-archived Projects stored on this host.
+    Archived,
+    /// Restore a cold-archived Project back onto this host and remove its archive bundle.
+    Restore {
+        /// Archived Project ID, prefix, or exact name.
+        #[arg(long)]
+        project_id: String,
+        /// Optional target directory override (defaults to the original source directory if it still exists).
+        #[arg(short = 'd', long)]
+        directory: Option<PathBuf>,
+        /// Optional Project display name override.
+        #[arg(long)]
+        name: Option<String>,
+        /// Resume GitHub Issue/PR sync immediately on restore instead of keeping it paused.
+        #[arg(long)]
+        resume_github: bool,
+        /// Optional idempotency request key.
+        #[arg(long)]
+        request_key: Option<String>,
+    },
+    /// Permanently delete a cold-archived Project bundle from `<CANBAN_HOME>/project-archives/`.
+    DeleteArchive {
+        /// Archived Project ID, prefix, or exact name.
+        #[arg(long)]
+        project_id: String,
+        /// Optional idempotency request key.
+        #[arg(long)]
+        request_key: Option<String>,
+    },
+    /// Permanently delete an active Project and its Canban records (source repository untouched).
+    Delete {
+        /// Project ID, prefix, or exact name.
+        #[arg(long)]
+        project_id: String,
+        /// Optional idempotency request key.
+        #[arg(long)]
+        request_key: Option<String>,
+    },
 }
 #[derive(Subcommand)]
 enum ServiceCmd {
@@ -1487,6 +1534,59 @@ fn run() -> Result<()> {
                 }
                 ("project.import".into(), params)
             }
+            ProjectCmd::Archive {
+                project_id,
+                request_key,
+            } => {
+                let mut params = json!({ "project_id": project_id });
+                if let Some(key) = request_key {
+                    params["request_key"] = json!(key);
+                }
+                ("project.archive".into(), params)
+            }
+            ProjectCmd::Archived => ("project.archived.list".into(), json!({})),
+            ProjectCmd::Restore {
+                project_id,
+                directory,
+                name,
+                resume_github,
+                request_key,
+            } => {
+                let mut params = json!({
+                    "project_id": project_id,
+                    "pause_github": !resume_github,
+                });
+                if let Some(dir) = directory {
+                    params["directory"] = json!(resolve_cli_path(dir)?);
+                }
+                if let Some(name) = name {
+                    params["name"] = json!(name);
+                }
+                if let Some(key) = request_key {
+                    params["request_key"] = json!(key);
+                }
+                ("project.restore".into(), params)
+            }
+            ProjectCmd::DeleteArchive {
+                project_id,
+                request_key,
+            } => {
+                let mut params = json!({ "project_id": project_id });
+                if let Some(key) = request_key {
+                    params["request_key"] = json!(key);
+                }
+                ("project.archived.delete".into(), params)
+            }
+            ProjectCmd::Delete {
+                project_id,
+                request_key,
+            } => {
+                let mut params = json!({ "project_id": project_id });
+                if let Some(key) = request_key {
+                    params["request_key"] = json!(key);
+                }
+                ("project.delete".into(), params)
+            }
         },
         Cmd::Device { command } => match command {
             DeviceCmd::List => ("device.list".into(), json!({})),
@@ -1531,6 +1631,7 @@ fn run() -> Result<()> {
             | "schedule.runs"
             | "schedule.read_artifact"
             | "project.export"
+            | "project.archived.list"
     ) && p.get("request_key").is_none()
     {
         p["request_key"] = json!(canban_types::id());
@@ -1556,6 +1657,8 @@ fn run() -> Result<()> {
             | "schedule.toggle"
             | "schedule.delete"
             | "card.hold_auto_merge"
+            | "project.delete"
+            | "project.archived.delete"
     ) || (method.starts_with("github.") && method != "github.context"))
         && p.get("execution").is_none()
         && let Ok(profile) = std::env::var("CANBAN_PROFILE_ID")
@@ -1906,5 +2009,96 @@ mod tests {
             }
             _ => panic!("expected review publish"),
         }
+    }
+
+    #[test]
+    fn parses_project_archive_restore_and_delete_commands() {
+        let arch = Args::try_parse_from([
+            "canban",
+            "project",
+            "archive",
+            "--project-id",
+            "fiber",
+            "--request-key",
+            "rk-arch",
+        ])
+        .unwrap();
+        match arch.command {
+            Some(Cmd::Project {
+                command:
+                    ProjectCmd::Archive {
+                        project_id,
+                        request_key,
+                    },
+            }) => {
+                assert_eq!(project_id, "fiber");
+                assert_eq!(request_key.as_deref(), Some("rk-arch"));
+            }
+            _ => panic!("expected project archive"),
+        }
+
+        let list = Args::try_parse_from(["canban", "project", "archived"]).unwrap();
+        assert!(matches!(
+            list.command,
+            Some(Cmd::Project {
+                command: ProjectCmd::Archived
+            })
+        ));
+
+        let restore = Args::try_parse_from([
+            "canban",
+            "project",
+            "restore",
+            "--project-id",
+            "fiber",
+            "-d",
+            "/tmp/fiber",
+            "--name",
+            "Fiber Restored",
+            "--resume-github",
+        ])
+        .unwrap();
+        match restore.command {
+            Some(Cmd::Project {
+                command:
+                    ProjectCmd::Restore {
+                        project_id,
+                        directory,
+                        name,
+                        resume_github,
+                        ..
+                    },
+            }) => {
+                assert_eq!(project_id, "fiber");
+                assert_eq!(directory, Some(PathBuf::from("/tmp/fiber")));
+                assert_eq!(name.as_deref(), Some("Fiber Restored"));
+                assert!(resume_github);
+            }
+            _ => panic!("expected project restore"),
+        }
+
+        let del_arch = Args::try_parse_from([
+            "canban",
+            "project",
+            "delete-archive",
+            "--project-id",
+            "fiber",
+        ])
+        .unwrap();
+        assert!(matches!(
+            del_arch.command,
+            Some(Cmd::Project {
+                command: ProjectCmd::DeleteArchive { .. }
+            })
+        ));
+
+        let del =
+            Args::try_parse_from(["canban", "project", "delete", "--project-id", "fiber"]).unwrap();
+        assert!(matches!(
+            del.command,
+            Some(Cmd::Project {
+                command: ProjectCmd::Delete { .. }
+            })
+        ));
     }
 }

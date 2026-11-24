@@ -343,4 +343,22 @@ Canban supports self-contained `*.canban.tar.zst` project bundles via `canban pr
   1. Sync the Git repository (and any unpushed active Card branches listed in `git_hints`) to the target host; do not copy `.canban/worktrees/` or build caches across OSes.
   2. Run `project export` on the source host and transfer the `.canban.tar.zst` bundle to the target host.
   3. Run `project import --directory <TARGET_REPO>` on the target host (pass `--pause-github` if you want to verify before enabling GitHub polling), then inspect `missing_profiles`, `missing_secrets`, `git_hints`, and `warnings` in the JSON receipt.
-  4. Once verified, pause GitHub intake / schedules or delete the source Project to prevent duplicate polling and dual-host execution.
+  4. Once verified, pause GitHub intake / schedules or archive/remove the source Project to prevent duplicate polling and dual-host execution.
+
+## Archiving & Restoring Projects
+
+Idle Projects can be cold-archived into compressed `*.canban.tar.zst` bundles under `<CANBAN_HOME>/project-archives/<project_id>.canban.tar.zst`, removing them from active SQLite, background GitHub polling, and Cron scheduling with zero runtime overhead while preserving Insights `activity_segments` and never modifying the source Git repository or worktrees:
+
+```sh
+# Cold-archive an idle Project (fails if live terminals, merges, configs, or scheduled runs are active)
+"$CANBAN_CLI" project archive --project-id <PROJECT_ID_OR_NAME>
+
+# List cold-archived Projects on this host
+"$CANBAN_CLI" project archived
+
+# Restore an archived Project (keeps GitHub sync paused by default; pass --resume-github to enable immediately)
+"$CANBAN_CLI" project restore --project-id <PROJECT_ID_OR_NAME> [-d /path/to/repo] [--name <NAME>] [--resume-github]
+```
+
+- When `--directory` is omitted during `project restore`, Canban verifies the original `source_directory` still exists on disk and errors clearly if it is missing so you can supply `--directory`.
+- Project secrets (`vault_entries`) are not stored inside cold archive bundles and must be re-configured after restore if needed (`secret_keys` / `missing_secrets` lists affected keys).

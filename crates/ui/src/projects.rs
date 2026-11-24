@@ -280,12 +280,6 @@ pub fn project_location(ui: Ui) -> impl IntoElement {
     let target_branch = signal(initial_target);
     let expected = initial;
     let id = p.as_ref().map(|p| p.id.clone()).unwrap_or_default();
-    let delete_id = id.clone();
-    let project_name = p
-        .as_ref()
-        .map(|p| p.name.clone())
-        .unwrap_or_else(|| "this Project".into());
-    let project_dir = p.as_ref().map(|p| p.directory.clone()).unwrap_or_default();
     let refs_data = signal(Value::Null);
     let refs_loading = signal(false);
     let refs_ticket = signal(0u64);
@@ -486,47 +480,42 @@ pub fn project_location(ui: Ui) -> impl IntoElement {
                                     }),
                                 ),
                         ),
-                    )
-                    .child(when(
-                        {
-                            let has_project = !delete_id.is_empty();
-                            move || has_project
-                        },
-                        move || {
-                            let target_id = delete_id.clone();
-                            let desc = if project_dir.is_empty() {
-                                format!(
-                                    "Remove \"{project_name}\" and its Canban Cards, workflows, schedules, and history. Your source repository and Git worktrees on disk are not deleted."
-                                )
-                            } else {
-                                format!(
-                                    "Remove \"{project_name}\" and its Canban Cards, workflows, schedules, and history. Your source repository ({project_dir}) and Git worktrees on disk are not deleted."
-                                )
-                            };
-                            settings_section("Danger zone", desc).child(
-                                view().flex_row().justify_end().child(action(
-                                    "Delete Project…",
-                                    Variant::Danger,
-                                    move |_| {
-                                        ui.project_delete_confirm.set(Some(target_id.clone()));
-                                    },
-                                )),
-                            )
-                        },
-                    )),
+                    ),
             ),
         )
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ArchivedProjectSummary {
+    pub project_id: String,
+    pub name: String,
+    pub source_directory: String,
+    pub archived_at: u64,
+    pub bytes: u64,
+    pub archive_path: String,
+    #[serde(default)]
+    pub active_cards: usize,
+    #[serde(default)]
+    pub archived_cards: usize,
+    #[serde(default)]
+    pub total_cards: usize,
+    #[serde(default)]
+    pub files_count: usize,
+    #[serde(default)]
+    pub required_profiles: Vec<String>,
+    #[serde(default)]
+    pub secret_keys: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ProjectDeleteBlockers {
+pub struct ProjectArchiveBlockers {
     pub live_terminals: usize,
     pub active_merges: usize,
     pub active_config_sessions: usize,
     pub active_scheduled_runs: usize,
 }
 
-impl ProjectDeleteBlockers {
+impl ProjectArchiveBlockers {
     pub fn total(&self) -> usize {
         self.live_terminals
             + self.active_merges
@@ -576,7 +565,7 @@ impl ProjectDeleteBlockers {
     }
 }
 
-pub fn active_blockers(snapshot: &Snapshot, project_id: &str) -> ProjectDeleteBlockers {
+pub fn active_blockers(snapshot: &Snapshot, project_id: &str) -> ProjectArchiveBlockers {
     let card_ids: std::collections::HashSet<&str> = snapshot
         .cards
         .iter()
@@ -619,7 +608,7 @@ pub fn active_blockers(snapshot: &Snapshot, project_id: &str) -> ProjectDeleteBl
         .iter()
         .filter(|r| r.project_id == project_id && r.active())
         .count();
-    ProjectDeleteBlockers {
+    ProjectArchiveBlockers {
         live_terminals,
         active_merges,
         active_config_sessions,
@@ -627,27 +616,28 @@ pub fn active_blockers(snapshot: &Snapshot, project_id: &str) -> ProjectDeleteBl
     }
 }
 
-pub fn after_delete(ui: Ui, deleted_project_id: &str) {
-    let (next_project, deleted_card_ids): (String, Vec<String>) = ui.snapshot.with_untracked(|s| {
-        let remaining: Vec<Project> = s
-            .projects
-            .iter()
-            .filter(|p| p.id != deleted_project_id)
-            .cloned()
-            .collect();
-        let next = selection::restore(&remaining, None).unwrap_or_default();
-        let cids = s
-            .cards
-            .iter()
-            .filter(|c| c.project_id == deleted_project_id)
-            .map(|c| c.id.clone())
-            .collect();
-        (next, cids)
-    });
-    let deleted_pid = deleted_project_id.to_owned();
+pub fn after_archive(ui: Ui, archived_project_id: &str) {
+    let (next_project, archived_card_ids): (String, Vec<String>) =
+        ui.snapshot.with_untracked(|s| {
+            let remaining: Vec<Project> = s
+                .projects
+                .iter()
+                .filter(|p| p.id != archived_project_id)
+                .cloned()
+                .collect();
+            let next = selection::restore(&remaining, None).unwrap_or_default();
+            let cids = s
+                .cards
+                .iter()
+                .filter(|c| c.project_id == archived_project_id)
+                .map(|c| c.id.clone())
+                .collect();
+            (next, cids)
+        });
+    let archived_pid = archived_project_id.to_owned();
     batch(move || {
-        ui.project_delete_confirm.set(None);
-        if ui.project.get_untracked() == deleted_pid {
+        ui.project_archive_confirm.set(None);
+        if ui.project.get_untracked() == archived_pid {
             ui.project.set(next_project);
         }
         ui.editing_comment.set(None);
@@ -660,27 +650,27 @@ pub fn after_delete(ui: Ui, deleted_project_id: &str) {
         ui.new_draft.set(String::new());
         ui.clear_output();
         ui.drafts.with(|map| {
-            map.remove(&format!("new-card:{deleted_pid}"));
-            for cid in &deleted_card_ids {
+            map.remove(&format!("new-card:{archived_pid}"));
+            for cid in &archived_card_ids {
                 map.remove(&format!("card:{cid}"));
             }
         });
-        ui.history.update(|h| h.prune_project(&deleted_pid));
+        ui.history.update(|h| h.prune_project(&archived_pid));
         ui.page.set("board".into());
     });
 }
 
-pub fn delete_confirm_modal(ui: Ui) -> impl IntoElement {
+pub fn archive_confirm_modal(ui: Ui) -> impl IntoElement {
     when(
-        move || ui.project_delete_confirm.get().is_some(),
+        move || ui.project_archive_confirm.get().is_some(),
         move || {
             let pid = ui
-                .project_delete_confirm
+                .project_archive_confirm
                 .get_untracked()
                 .unwrap_or_default();
             let pid_for_info = pid.clone();
             let pid_for_blockers = pid.clone();
-            let pid_for_delete = pid.clone();
+            let pid_for_archive = pid.clone();
             let (name, directory, card_count) = ui.snapshot.with_untracked(|s| {
                 let proj = s.projects.iter().find(|p| p.id == pid_for_info);
                 let name = proj
@@ -699,7 +689,7 @@ pub fn delete_confirm_modal(ui: Ui) -> impl IntoElement {
                 ui.snapshot.with(|s| active_blockers(s, &target))
             });
             let close_modal = move || {
-                ui.project_delete_confirm.set(None);
+                ui.project_archive_confirm.set(None);
                 ui.terminal_focus.update(|n| *n += 1);
             };
             let card_word = if card_count == 1 { "Card" } else { "Cards" };
@@ -716,28 +706,28 @@ pub fn delete_confirm_modal(ui: Ui) -> impl IntoElement {
                         .bg(rgba(0x00000055))
                         .child(
                             panel()
-                                .w(px(460.))
+                                .w(px(480.))
                                 .max_w(Percentage(0.95))
                                 .border_1()
                                 .border_color(BORDER)
                                 .gap_3()
                                 .child(
-                                    label(format!("Delete Project “{name}”?"))
+                                    label(format!("Archive Project “{name}”?"))
                                         .font_weight(FontWeight::SEMIBOLD),
                                 )
                                 .child(
                                     label(format!(
-                                        "This permanently removes this Project from Canban, including {card_count} {card_word} (including archived), workflow definitions, scheduled tasks, and timeline history."
+                                        "Packs {card_count} {card_word} (including archived), workflows, schedules, and timeline history into a compressed cold archive (`project-archives/{pid}.canban.tar.zst`) and stops background polling and scheduling. Restore anytime from Settings → Storage."
                                     ))
                                     .text_sm()
                                     .text_color(MUTED),
                                 )
                                 .child(notice(
                                     if directory.is_empty() {
-                                        "Your source repository and Git worktrees on disk will NOT be deleted.".to_owned()
+                                        "Your source repository and Git worktrees on disk will NOT be modified or deleted. Project secrets are not stored in archive bundles and must be re-entered after restore.".to_owned()
                                     } else {
                                         format!(
-                                            "Your source repository ({directory}) and Git worktrees on disk will NOT be deleted."
+                                            "Your source repository ({directory}) and Git worktrees on disk will NOT be modified or deleted. Project secrets are not stored in archive bundles and must be re-entered after restore."
                                         )
                                     },
                                     Tone::Info,
@@ -752,7 +742,7 @@ pub fn delete_confirm_modal(ui: Ui) -> impl IntoElement {
                                         .gap_2()
                                         .child(notice(
                                             format!(
-                                                "Cannot delete while active runs are still in progress ({summary}). End them before deleting."
+                                                "Cannot archive while active runs are still in progress ({summary}). End them before archiving."
                                             ),
                                             Tone::Attention,
                                         ))
@@ -761,7 +751,7 @@ pub fn delete_confirm_modal(ui: Ui) -> impl IntoElement {
                                                 "Open Terminals",
                                                 Variant::Secondary,
                                                 move |_| {
-                                                    ui.project_delete_confirm.set(None);
+                                                    ui.project_archive_confirm.set(None);
                                                     ui.navigate("terminals");
                                                 },
                                             )),
@@ -779,25 +769,179 @@ pub fn delete_confirm_modal(ui: Ui) -> impl IntoElement {
                                         .child(
                                             action(
                                                 move || {
-                                                    if ui.is_method_pending("project.delete") {
-                                                        "Deleting…"
+                                                    if ui.is_method_pending("project.archive") {
+                                                        "Archiving…"
                                                     } else {
-                                                        "Delete Project"
+                                                        "Archive Project"
                                                     }
                                                 },
-                                                Variant::Danger,
+                                                Variant::Primary,
                                                 move |_| {
-                                                    let target = pid_for_delete.clone();
+                                                    let target = pid_for_archive.clone();
                                                     dispatch(
                                                         ui,
-                                                        "project.delete",
+                                                        "project.archive",
                                                         json!({ "project_id": target }),
                                                     );
                                                 },
                                             )
                                             .disabled(move || {
                                                 blockers.get().total() > 0
-                                                    || ui.is_method_pending("project.delete")
+                                                    || ui.is_method_pending("project.archive")
+                                            }),
+                                        ),
+                                ),
+                        ),
+                )
+        },
+    )
+}
+
+pub fn restore_project_modal(ui: Ui) -> impl IntoElement {
+    when(
+        move || ui.project_restore_modal.get().is_some(),
+        move || {
+            let (target_host, item) = ui.project_restore_modal.get_untracked().unwrap_or_default();
+            let directory = signal(item.source_directory.clone());
+            let pause_github = signal(true);
+            let restore_error = signal(String::new());
+            let host_signal = signal(target_host.clone());
+            let host_label = crate::hosts::host_name(ui, &target_host);
+            let card_summary = if item.archived_cards > 0 {
+                format!(
+                    "{} active · {} archived Cards",
+                    item.active_cards, item.archived_cards
+                )
+            } else if item.total_cards == 1 {
+                "1 Card".to_owned()
+            } else {
+                format!("{} Cards", item.total_cards)
+            };
+            let meta_line = format!(
+                "{card_summary} · {} · archived {}",
+                crate::diagnostics::format_bytes(item.bytes),
+                crate::components::activity::age(item.archived_at),
+            );
+            let secret_keys = item.secret_keys.clone();
+            let source_dir = item.source_directory.clone();
+            let pid_for_restore = item.project_id.clone();
+            let host_for_restore = target_host.clone();
+            let name_for_title = item.name.clone();
+
+            let close_modal = move || {
+                ui.project_restore_modal.set(None);
+                ui.terminal_focus.update(|n| *n += 1);
+            };
+
+            nsh_base::dialog()
+                .animation(canban_ui_kit::motion::modal)
+                .close_on_escape(true)
+                .close_on_backdrop_press(true)
+                .on_cancel(close_modal)
+                .child(
+                    view()
+                        .flex_1()
+                        .items_center()
+                        .justify_center()
+                        .bg(rgba(0x00000055))
+                        .child(
+                            panel()
+                                .w(px(500.))
+                                .max_w(Percentage(0.95))
+                                .border_1()
+                                .border_color(BORDER)
+                                .gap_3()
+                                .child(
+                                    view()
+                                        .flex_row()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_2()
+                                        .child(
+                                            label(format!("Restore Project “{name_for_title}”"))
+                                                .font_weight(FontWeight::SEMIBOLD),
+                                        )
+                                        .child(badge(host_label)),
+                                )
+                                .child(label(meta_line).text_sm().text_color(MUTED))
+                                .child(settings_field(
+                                    "Directory",
+                                    "Target repository directory on this host. Keep the original path or choose a new location.",
+                                    directory_picker_for_host(ui, host_signal, directory),
+                                ))
+                                .child(checkbox(
+                                    "Pause GitHub sync on restore".into(),
+                                    pause_github,
+                                    move |v| pause_github.set(*v),
+                                ))
+                                .child(when(
+                                    {
+                                        let has_secrets = !secret_keys.is_empty();
+                                        move || has_secrets
+                                    },
+                                    move || {
+                                        notice(
+                                            format!(
+                                                "Project secret(s) omitted from archive bundle ({}); reconfigure them on this host after restore.",
+                                                secret_keys.join(", ")
+                                            ),
+                                            Tone::Info,
+                                        )
+                                    },
+                                ))
+                                .child(dynamic(move || {
+                                    let err = restore_error.get();
+                                    if err.is_empty() {
+                                        view().into_element()
+                                    } else {
+                                        notice(err, Tone::Danger).into_element()
+                                    }
+                                }))
+                                .child(
+                                    view()
+                                        .flex_row()
+                                        .justify_end()
+                                        .gap_2()
+                                        .child(action("Cancel", Variant::Quiet, move |_| {
+                                            close_modal()
+                                        }))
+                                        .child(
+                                            action(
+                                                move || {
+                                                    if ui.is_method_pending("project.restore") {
+                                                        "Restoring…"
+                                                    } else {
+                                                        "Restore Project"
+                                                    }
+                                                },
+                                                Variant::Primary,
+                                                move |_| {
+                                                    let trimmed =
+                                                        directory.get_untracked().trim().to_owned();
+                                                    let mut payload = json!({
+                                                        "host_id": host_for_restore,
+                                                        "project_id": pid_for_restore,
+                                                        "pause_github": pause_github.get_untracked(),
+                                                    });
+                                                    if trimmed != source_dir.trim() {
+                                                        payload["directory"] = json!(trimmed);
+                                                    }
+                                                    restore_error.set(String::new());
+                                                    dispatch_complete(
+                                                        ui,
+                                                        "project.restore",
+                                                        payload,
+                                                        move |res| {
+                                                            if let Err(err) = res {
+                                                                let _ = restore_error.try_set(err);
+                                                            }
+                                                        },
+                                                    );
+                                                },
+                                            )
+                                            .disabled(move || {
+                                                directory.get().trim().is_empty()
+                                                    || ui.is_method_pending("project.restore")
                                             }),
                                         ),
                                 ),
@@ -1428,9 +1572,9 @@ mod tests {
     }
 
     #[test]
-    fn project_location_renders_danger_zone() {
+    fn project_location_omits_delete_or_duplicate_archive_controls() {
         #[component]
-        fn ProjectLocationDangerProbe() -> impl IntoElement {
+        fn ProjectLocationProbe() -> impl IntoElement {
             canban_ui_kit::tokens::install_theme();
             let ui = Ui::new();
             ui.snapshot.update(|s| {
@@ -1451,7 +1595,7 @@ mod tests {
 
         let mut core = Core::new(ApproxTextEngine, size(px(900.), px(700.)));
         core.set_components(nsh_base::registry());
-        core.mount_root(&nsh_core::element::Root::of::<ProjectLocationDangerProbe>());
+        core.mount_root(&nsh_core::element::Root::of::<ProjectLocationProbe>());
         let batch = core.commit().expect("initial mount batch");
         let texts: Vec<String> = batch
             .items
@@ -1461,20 +1605,15 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(
-            texts.iter().any(|t| t == "Danger zone"),
-            "expected Danger zone heading, got {texts:?}"
-        );
-        assert!(
-            texts.iter().any(|t| t == "Delete Project…"),
-            "expected Delete Project… button, got {texts:?}"
-        );
+        assert!(!texts.iter().any(|t| t == "Danger zone"));
+        assert!(!texts.iter().any(|t| t.contains("Delete Project")));
+        assert!(!texts.iter().any(|t| t.contains("Archive Project")));
     }
 
     #[test]
-    fn delete_confirm_modal_shows_safety_notice_and_blocks_active_runs() {
+    fn archive_confirm_modal_shows_safety_notice_and_blocks_active_runs() {
         #[component]
-        fn DeleteModalProbe() -> impl IntoElement {
+        fn ArchiveModalProbe() -> impl IntoElement {
             canban_ui_kit::tokens::install_theme();
             let ui = Ui::new();
             ui.snapshot.update(|s| {
@@ -1511,13 +1650,13 @@ mod tests {
                     created_at: 1,
                 });
             });
-            ui.project_delete_confirm.set(Some("proj-1".into()));
-            delete_confirm_modal(ui)
+            ui.project_archive_confirm.set(Some("proj-1".into()));
+            archive_confirm_modal(ui)
         }
 
         let mut core = Core::new(ApproxTextEngine, size(px(900.), px(700.)));
         core.set_components(nsh_base::registry());
-        core.mount_root(&nsh_core::element::Root::of::<DeleteModalProbe>());
+        core.mount_root(&nsh_core::element::Root::of::<ArchiveModalProbe>());
         let batch = core.commit().expect("initial mount batch");
         let texts: Vec<String> = batch
             .items
@@ -1528,12 +1667,18 @@ mod tests {
             })
             .collect();
         assert!(
-            texts.iter().any(|t| t == "Delete Project “Demo”?"),
+            texts.iter().any(|t| t == "Archive Project “Demo”?"),
             "expected modal title, got {texts:?}"
         );
         assert!(
-            texts.iter().any(|t| t.contains("will NOT be deleted")),
+            texts
+                .iter()
+                .any(|t| t.contains("will NOT be modified or deleted")),
             "expected filesystem safety notice, got {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("Settings → Storage")),
+            "expected restore path notice, got {texts:?}"
         );
         assert!(
             texts.iter().any(|t| t.contains("1 live terminal")),
@@ -1546,9 +1691,55 @@ mod tests {
     }
 
     #[test]
-    fn after_delete_switches_to_remaining_project_and_prunes_history() {
+    fn restore_project_modal_renders_directory_and_pause_checkbox() {
         #[component]
-        fn AfterDeleteProbe() -> impl IntoElement {
+        fn RestoreModalProbe() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            ui.project_restore_modal.set(Some((
+                "local".into(),
+                ArchivedProjectSummary {
+                    project_id: "proj-1".into(),
+                    name: "Demo".into(),
+                    source_directory: "/Users/demo/Workspace/demo".into(),
+                    archived_at: 1_700_000_000_000,
+                    bytes: 4096,
+                    archive_path: "/Users/demo/.canban/project-archives/proj-1.canban.tar.zst"
+                        .into(),
+                    active_cards: 2,
+                    archived_cards: 1,
+                    total_cards: 3,
+                    files_count: 1,
+                    required_profiles: Vec::new(),
+                    secret_keys: vec!["API_TOKEN".into()],
+                },
+            )));
+            restore_project_modal(ui)
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(900.), px(700.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<RestoreModalProbe>());
+        let batch = core.commit().expect("restore modal mount");
+        let texts: Vec<String> = batch
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                MountItem::Text { text, .. } => Some(text.text.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t == "Restore Project “Demo”"));
+        assert!(texts.iter().any(|t| t == "Pause GitHub sync on restore"));
+        assert!(texts.iter().any(|t| t == "Restore Project"));
+        assert!(texts.iter().any(|t| t.contains("API_TOKEN")));
+        assert!(!texts.iter().any(|t| t.contains("Delete")));
+    }
+
+    #[test]
+    fn after_archive_switches_to_remaining_project_and_prunes_history() {
+        #[component]
+        fn AfterArchiveProbe() -> impl IntoElement {
             canban_ui_kit::tokens::install_theme();
             let ui = Ui::new();
             ui.snapshot.update(|s| {
@@ -1583,12 +1774,12 @@ mod tests {
                 h.visit(loc2);
             });
 
-            after_delete(ui, "p1");
+            after_archive(ui, "p1");
 
             assert_eq!(ui.project.get_untracked(), "p2");
             assert_eq!(ui.page.get_untracked(), "board");
             assert!(ui.card.get_untracked().is_empty());
-            assert!(ui.project_delete_confirm.get_untracked().is_none());
+            assert!(ui.project_archive_confirm.get_untracked().is_none());
             assert!(!ui.drafts.with(|d| d.contains_key("new-card:p1")));
             assert!(ui.drafts.with(|d| d.contains_key("new-card:p2")));
             assert!(
@@ -1599,17 +1790,17 @@ mod tests {
                     .all(|e| e.project != "p1")
             );
 
-            // Deleting the last remaining project clears ui.project.
+            // Archiving the last remaining project clears ui.project.
             ui.snapshot.update(|s| s.projects.retain(|p| p.id != "p1"));
-            after_delete(ui, "p2");
+            after_archive(ui, "p2");
             assert!(ui.project.get_untracked().is_empty());
             view()
         }
 
         let mut core = Core::new(ApproxTextEngine, size(px(900.), px(700.)));
         core.set_components(nsh_base::registry());
-        core.mount_root(&nsh_core::element::Root::of::<AfterDeleteProbe>());
-        core.commit().expect("after_delete probe mount");
+        core.mount_root(&nsh_core::element::Root::of::<AfterArchiveProbe>());
+        core.commit().expect("after_archive probe mount");
     }
 
     #[test]

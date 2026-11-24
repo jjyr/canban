@@ -2474,6 +2474,10 @@ pub fn Gallery() -> impl IntoElement {
         ui.page.set("settings".into());
         return canban_ui::frame::screen(ui).into_element();
     }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("settings-storage") {
+        ui.open_settings_section("storage");
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("acknowledgements") {
         ui.open_settings_section("acknowledgements");
         return canban_ui::frame::screen(ui).into_element();
@@ -3407,6 +3411,17 @@ pub fn Gallery() -> impl IntoElement {
                 .child(action("Settings · Agents", Variant::Quiet, move |_| {
                     scene.set("workspace".into());
                     ui.open_settings_section("agents");
+                }))
+                .child(action("Settings · Storage", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());
+                    ui.open_settings_section("storage");
+                }))
+                .child(action("Archive Project", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::workspace());
+                    ui.select_project("gallery-project".into());
+                    ui.page.set("board".into());
+                    ui.project_archive_confirm.set(Some("gallery-project".into()));
                 }))
                 .child(action("Env & Secrets", Variant::Quiet, move |_| {
                     scene.set("workspace".into());

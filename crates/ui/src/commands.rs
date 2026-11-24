@@ -347,11 +347,11 @@ pub const CATALOG: &[Command] = &[
     },
     Command {
         id: "go-archive",
-        title: "Open Project Archive",
+        title: "Open Archived Cards",
         key: "",
         display: "Project",
         context: "Navigation",
-        keywords: "archived closed",
+        keywords: "archived closed cards project archive",
     },
     Command {
         id: "go-settings",
@@ -410,12 +410,20 @@ pub const CATALOG: &[Command] = &[
         keywords: "choose project",
     },
     Command {
-        id: "delete-project",
-        title: "Delete Current Project…",
+        id: "archive-project",
+        title: "Archive Current Project…",
         key: "",
         display: "Project",
         context: "Project",
-        keywords: "remove delete project workspace",
+        keywords: "archive hide project workspace",
+    },
+    Command {
+        id: "go-archived-projects",
+        title: "Archived Projects",
+        key: "",
+        display: "Settings",
+        context: "Navigation",
+        keywords: "archived projects restore storage cold archive",
     },
     Command {
         id: "popout-card-terminal",
@@ -994,12 +1002,16 @@ pub fn execute(ui: Ui, id: &str) {
                 ui.navigate("new-project");
             }
         }
-        "delete-project" => {
+        "archive-project" => {
             if let Some(p) = ui.current_project() {
-                ui.project_delete_confirm.set(Some(p.id));
+                ui.project_archive_confirm.set(Some(p.id));
             } else {
                 ui.notify("Select a Project first");
             }
+        }
+        "go-archived-projects" => {
+            let target = ui.active_project_host();
+            crate::hosts::open_host_settings(ui, target, "storage");
         }
         "go-github-repo" => {
             if ui.current_project().is_some() {
@@ -1698,7 +1710,8 @@ pub fn bindings(ui: Ui) {
                         || ui.worktree_modal.get_untracked().is_some()
                         || ui.worktree_promote.get_untracked().is_some()
                         || ui.worktree_remove_confirm.get_untracked().is_some()
-                        || ui.project_delete_confirm.get_untracked().is_some())
+                        || ui.project_archive_confirm.get_untracked().is_some()
+                        || ui.project_restore_modal.get_untracked().is_some())
                 {
                     return;
                 }
@@ -1744,7 +1757,8 @@ pub fn bindings(ui: Ui) {
                 && ui.worktree_modal.get_untracked().is_none()
                 && ui.worktree_promote.get_untracked().is_none()
                 && ui.worktree_remove_confirm.get_untracked().is_none()
-                && ui.project_delete_confirm.get_untracked().is_none()
+                && ui.project_archive_confirm.get_untracked().is_none()
+                && ui.project_restore_modal.get_untracked().is_none()
             {
                 ui.project_picker.set(false);
                 ui.search_query.set(">".into());

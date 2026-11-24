@@ -675,6 +675,10 @@ impl AppServer {
             }
             "project.export" => self.export_project(p),
             "project.import" => self.import_project(p),
+            "project.archive" => self.archive_project(p),
+            "project.archived.list" => self.list_archived_projects(p),
+            "project.restore" => self.restore_project(p),
+            "project.archived.delete" => self.delete_archived_project(p),
             "project.delete" => {
                 ensure!(
                     p["execution"].is_null(),
@@ -685,87 +689,7 @@ impl AppServer {
                 let result = self.mutate(method, &p, |db| {
                     let pid = super::resolve_project_id(db, raw_pid)?;
                     let project: Project = db.get(&pid)?;
-                    let cards: Vec<Card> = db
-                        .list::<Card>()?
-                        .into_iter()
-                        .filter(|c| c.project_id == pid)
-                        .collect();
-                    let card_ids: std::collections::HashSet<&str> =
-                        cards.iter().map(|c| c.id.as_str()).collect();
-
-                    let live_terminals = db
-                        .list::<TerminalEntry>()?
-                        .into_iter()
-                        .filter(|t| {
-                            t.agent
-                                .as_ref()
-                                .is_some_and(|a| a.project_id == pid && !a.finished())
-                                || (t
-                                    .runtime
-                                    .as_ref()
-                                    .is_some_and(|r| r.state != "finished")
-                                    && (t.origin_project_id.as_deref() == Some(pid.as_str())
-                                        || t.id.starts_with(&format!("merge-queue:{pid}:"))
-                                        || t.id.starts_with(&format!("configuration:{pid}:"))
-                                        || t.id.starts_with(&format!("scheduled:{pid}:"))))
-                        })
-                        .count();
-                    let active_merges = db
-                        .list::<MergeBatch>()?
-                        .into_iter()
-                        .filter(|b| b.project_id == pid && b.active())
-                        .count()
-                        + self
-                            .merging_cards
-                            .lock()
-                            .unwrap()
-                            .iter()
-                            .filter(|cid| card_ids.contains(cid.as_str()))
-                            .count();
-                    let active_config = db
-                        .list::<ConfigurationSession>()?
-                        .into_iter()
-                        .filter(|s| {
-                            s.project_id == pid
-                                && !matches!(s.state.as_str(), "finished" | "cancelled")
-                        })
-                        .count();
-                    let active_schedules = db
-                        .list::<ScheduledRun>()?
-                        .into_iter()
-                        .filter(|r| r.project_id == pid && r.active())
-                        .count();
-
-                    let mut blockers = Vec::new();
-                    if live_terminals > 0 {
-                        blockers.push(format!(
-                            "{live_terminals} live terminal{}",
-                            if live_terminals == 1 { "" } else { "s" }
-                        ));
-                    }
-                    if active_merges > 0 {
-                        blockers.push(format!(
-                            "{active_merges} active merge{}",
-                            if active_merges == 1 { "" } else { "s" }
-                        ));
-                    }
-                    if active_config > 0 {
-                        blockers.push(format!(
-                            "{active_config} configuration session{}",
-                            if active_config == 1 { "" } else { "s" }
-                        ));
-                    }
-                    if active_schedules > 0 {
-                        blockers.push(format!(
-                            "{active_schedules} scheduled run{}",
-                            if active_schedules == 1 { "" } else { "s" }
-                        ));
-                    }
-                    ensure!(
-                        blockers.is_empty(),
-                        "Cannot delete Project while active runs are still in progress ({}). End them before deleting.",
-                        blockers.join(", ")
-                    );
+                    self.check_project_active_blockers(db, &pid, "delete", "deleting")?;
 
                     let deleted_cards = db.delete_project(&pid)?;
                     deleted_info = Some((pid.clone(), project.name.clone(), deleted_cards));
@@ -777,20 +701,7 @@ impl AppServer {
                     }))
                 })?;
                 if let Some((pid, _, _)) = deleted_info {
-                    // Remove only Canban's own metadata directory (`~/.canban/projects/<id>`).
-                    // Never delete the user's source repository or Git worktrees on disk.
-                    let project_meta_dir = self.home.join("projects").join(&pid);
-                    if project_meta_dir.exists() {
-                        let _ = std::fs::remove_dir_all(&project_meta_dir);
-                    }
-                    if self.utilities.clear_project(&self.home, &pid).unwrap_or(false) {
-                        self.emit("desktop", None);
-                        self.emit_utilities();
-                    }
-                    self.terminal_contexts
-                        .lock()
-                        .unwrap()
-                        .retain(|ctx| ctx.project_id.as_deref() != Some(pid.as_str()));
+                    self.cleanup_project_after_removal(&pid);
                 }
                 Ok(result)
             }

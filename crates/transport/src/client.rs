@@ -34,7 +34,9 @@ pub const PROJECT_BUNDLE_RPC_READ_TIMEOUT: Duration = Duration::from_secs(5 * 60
 pub fn rpc_read_timeout(method: &str) -> Duration {
     match method {
         "update.daemon" => DAEMON_UPDATE_RPC_READ_TIMEOUT,
-        "project.export" | "project.import" => PROJECT_BUNDLE_RPC_READ_TIMEOUT,
+        "project.export" | "project.import" | "project.archive" | "project.restore" => {
+            PROJECT_BUNDLE_RPC_READ_TIMEOUT
+        }
         _ => DEFAULT_RPC_READ_TIMEOUT,
     }
 }

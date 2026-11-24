@@ -157,7 +157,7 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
                                             ),
                                             MenuItem::new("Drafts…")
                                                 .on_select(move || ui.navigate("drafts")),
-                                            MenuItem::new("Archive")
+                                            MenuItem::new("Archived Cards")
                                                 .on_select(move || ui.navigate("archive")),
                                             MenuItem::new("Project Agents…")
                                                 .on_select(move || ui.navigate("project-agents")),
@@ -178,12 +178,14 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
                                             MenuItem::new("New Project…")
                                                 .on_select(move || ui.navigate("new-project")),
                                             MenuItem::separator(),
-                                            MenuItem::new("Delete Project…").on_select(move || {
-                                                let pid = ui.project.get_untracked();
-                                                if !pid.is_empty() {
-                                                    ui.project_delete_confirm.set(Some(pid));
-                                                }
-                                            }),
+                                            MenuItem::new("Archive Project…").on_select(
+                                                move || {
+                                                    let pid = ui.project.get_untracked();
+                                                    if !pid.is_empty() {
+                                                        ui.project_archive_confirm.set(Some(pid));
+                                                    }
+                                                },
+                                            ),
                                         ],
                                         point(
                                             bounds.page.x,

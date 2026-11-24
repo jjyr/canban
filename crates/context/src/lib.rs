@@ -2,8 +2,8 @@ pub mod project_bundle;
 pub use project_bundle::{
     CardBranchHint, LoadedProjectBundle, PROJECT_BUNDLE_FORMAT_VERSION, ProjectBundleFileMeta,
     ProjectBundleManifest, ProjectGitHints, WorktreeHint, cleanup_extracted_files,
-    extract_project_bundle_files, read_project_bundle, validate_relative_bundle_path,
-    write_project_bundle,
+    extract_project_bundle_files, read_project_bundle, read_project_bundle_manifest,
+    validate_relative_bundle_path, write_project_bundle,
 };
 
 use anyhow::{Result, ensure};

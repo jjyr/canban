@@ -2472,6 +2472,8 @@ impl HostRegistry {
                     | "diagnostics.logs"
                     | "directory.list"
                     | "project.detect_github"
+                    | "project.archived.list"
+                    | "project.export"
                     | "git.file_lines"
                     | "review.preview"
                     | "card.resolve.preview"
