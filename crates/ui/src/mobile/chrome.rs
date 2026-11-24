@@ -52,9 +52,9 @@ pub(crate) fn trigger_haptic(kind: Haptic) {
     }
 }
 
-/// Bottom scroll padding on root tabs (leaves room for iOS's floating Liquid Glass `UITabBar`).
+/// Bottom scroll padding on root tabs (leaves room for the floating native `TabBar` on iOS/Android).
 pub(crate) fn tab_scroll_bottom_pad() -> f32 {
-    if is_ios() { 112.0 } else { 28.0 }
+    if is_mobile_os() { 112.0 } else { 28.0 }
 }
 
 fn modal_scrim() -> AdaptiveColor {
@@ -505,9 +505,8 @@ fn offline_sync_banner_inner(
 }
 
 /// Platform-adaptive 4-tab bottom bar:
-/// - iOS: permanently mounted floating Liquid Glass `UITabBar` so `hides_bottom_bar_when_pushed`
-///   animates smoothly alongside swipe-back transitions
-/// - Android: Material 3 bottom `TabBar`
+/// - iOS / Android: permanently mounted native `TabBar` (`UITabBar` / Material 3 navigation bar)
+///   so `NavPage::hides_bottom_bar_when_pushed(true)` animates smoothly on push/pop transitions
 /// - Desktop Gallery: phone-frame styled tab bar.
 pub(crate) fn mobile_tab_bar(
     tab: Signal<super::MobileTab>,
@@ -515,20 +514,29 @@ pub(crate) fn mobile_tab_bar(
     hidden: impl Fn() -> bool + Copy + 'static,
     on_select: impl Fn(super::MobileTab) + Clone + 'static,
 ) -> View {
-    if is_ios() {
-        let on_select_ios = on_select;
+    if is_mobile_os() {
+        let (inbox_icon, board_icon, term_icon, settings_icon) = if is_ios() {
+            (
+                "tray.fill",
+                "rectangle.3.group.fill",
+                "terminal.fill",
+                "gearshape.fill",
+            )
+        } else {
+            ("tab_inbox", "tab_board", "tab_terminals", "tab_settings")
+        };
         let items = move || {
             let count = inbox_badge();
             let badge_val = (count > 0).then(|| count.to_string());
-            let mut needs = TabBarItem::new("Needs you").icon("tray.fill");
+            let mut needs = TabBarItem::new("Needs you").icon(inbox_icon);
             if let Some(b) = badge_val {
                 needs = needs.badge(b);
             }
             vec![
                 needs,
-                TabBarItem::new("Board").icon("rectangle.3.group.fill"),
-                TabBarItem::new("Terminals").icon("terminal.fill"),
-                TabBarItem::new("Settings").icon("gearshape.fill"),
+                TabBarItem::new("Board").icon(board_icon),
+                TabBarItem::new("Terminals").icon(term_icon),
+                TabBarItem::new("Settings").icon(settings_icon),
             ]
         };
         return view()
@@ -537,6 +545,7 @@ pub(crate) fn mobile_tab_bar(
             .left_0()
             .right_0()
             .bottom_0()
+            .pointer_events(PointerEvents::BoxNone)
             .child(
                 tab_bar()
                     .items(items)
@@ -544,46 +553,10 @@ pub(crate) fn mobile_tab_bar(
                     .on_change(move |idx: &u32| {
                         if let Some(next) = super::MobileTab::from_index(*idx) {
                             trigger_haptic(Haptic::Selection);
-                            on_select_ios(next);
+                            on_select(next);
                         }
                     }),
             );
-    }
-
-    if is_android() {
-        let on_select_android = on_select;
-        let items = move || {
-            let count = inbox_badge();
-            let badge_val = (count > 0).then(|| count.to_string());
-            let mut needs = TabBarItem::new("Needs you").icon("tab_inbox");
-            if let Some(b) = badge_val {
-                needs = needs.badge(b);
-            }
-            vec![
-                needs,
-                TabBarItem::new("Board").icon("tab_board"),
-                TabBarItem::new("Terminals").icon("tab_terminals"),
-                TabBarItem::new("Settings").icon("tab_settings"),
-            ]
-        };
-        return view().child(when(
-            move || !hidden(),
-            move || {
-                let on_sel = on_select_android.clone();
-                view().w_full().flex_shrink_0().child(
-                    tab_bar()
-                        .items(items)
-                        .selected_index(move || tab.get().index())
-                        .hidden(hidden)
-                        .on_change(move |idx: &u32| {
-                            if let Some(next) = super::MobileTab::from_index(*idx) {
-                                trigger_haptic(Haptic::Selection);
-                                on_sel(next);
-                            }
-                        }),
-                )
-            },
-        ));
     }
 
     view().child(when(

@@ -1200,7 +1200,7 @@ pub fn Bootstrap() -> impl IntoElement {
                     });
                 },
                 move || {
-                    set_clipboard(&cmd_for_copy);
+                    drop(set_clipboard(&cmd_for_copy));
                     copy_status.set("Copied".into());
                 },
             )

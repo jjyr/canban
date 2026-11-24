@@ -38,7 +38,7 @@ Share the `libghostty-vt` screen model, PTY session pool, view timing state, tra
 
 ### Design tradeoffs and code sharing
 
-- **Why keep Renderer A on macOS:** Retaining `NSView` + `apple_render` preserves Canban's verified macOS CJK `NSTextInputClient` IME behavior, Kitty graphics placement, and synchronized-output frame stability ([NSH integration notes §3](nsh-notes.md#3-native-terminal-ime-buffers-and-synchronized-output-060--5e3b0f78)).
+- **Why keep Renderer A on macOS:** Retaining `NSView` + `apple_render` preserves Canban's verified macOS CJK `NSTextInputClient` IME behavior, Kitty graphics placement, and synchronized-output frame stability ([NSH integration notes §3](nsh-notes.md#3-native-terminal-ime-buffers-and-synchronized-output-060--7620f014)).
 - **Why start iOS on Renderer B:** `nsh_base::Terminal` already runs on `nsh-platform-ios` and `nsh-platform-android` (lines of text rendered via the platform text engine), letting iOS and Android share one portable rendering integration (`portable.rs`) first, then optionally upgrade iOS to a thin `UIView` shell over `apple_render` without touching `session`, transports, or UI callers.
 - **Estimated reuse:** ~5,700 lines of core (`model` + `session` + `view_state` + portable input/selection), plus ~1,400 lines of `portable.rs` for Linux/Android/initial iOS, and ~2,150 lines of `apple_render` shared across macOS/iOS — roughly **65–70% shared code**.
 

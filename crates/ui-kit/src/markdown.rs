@@ -62,23 +62,8 @@ impl MarkdownInput {
             api.focus();
         }
     }
-    /// Focuses the editor once its host view lays out into a non-zero area and
-    /// `allowed` holds. `nsh_base::Editor`'s `auto_focus` prop runs during
-    /// construction before its underlying `input` sink is mounted.
-    pub fn focus_on_mount(self, view: View, allowed: impl Fn() -> bool + 'static) -> View {
-        let focused_once = stored(false);
-        view.on_layout(move |b: &Bounds<Points>| {
-            if b.size.width.0 > 0.0
-                && b.size.height.0 > 0.0
-                && allowed()
-                && !focused_once.replace(true)
-            {
-                self.focus();
-            }
-        })
-    }
     /// Restore a focused editor after a host overlay closes. NSH's editor sink
-    /// rejects pointer targeting, so native modal restoration can skip it.
+    /// rejects pointer targeting, so in-tree popover/overlay dismissal can skip it.
     /// Navigating away or selecting another document must never reclaim focus.
     pub fn restore_after(self, covered: Memo<bool>, current: Memo<bool>) {
         let was_covered = stored(false);
@@ -99,34 +84,31 @@ impl MarkdownInput {
             }
         });
     }
-    /// Bind after the native editor has installed its code-editing keys.
-    /// Every native focus acquisition (including returning from a system sheet)
-    /// reclaims Cmd+Enter for the host's single submit intent while preserving
-    /// NSH's Enter/Tab completion acceptance and Enter/Shift+Enter newlines.
-    /// The timer and binding belong to this effect and disappear on blur, hold or disposal.
+    /// Reclaims Cmd+Enter over the focused editor for the host's submit intent
+    /// while preserving NSH's Enter/Tab completion acceptance and Enter/Shift+Enter
+    /// newlines. The binding belongs to this effect and disappears on blur, hold,
+    /// or disposal.
     pub fn on_submit(self, allowed: impl Fn() -> bool + 'static, submit: impl Fn() + 'static) {
         let submit = std::rc::Rc::new(submit);
         effect(move || {
-            let _ = self.focus_epoch.get();
             if !self.active.get() || self.held.get() || !allowed() {
                 return;
             }
             let submit = submit.clone();
-            set_timeout(std::time::Duration::ZERO, move || {
-                on_key_with(
-                    "mod+enter",
-                    KeyOptions {
-                        when: nsh_core::keymap::When::Always,
-                        ..Default::default()
-                    },
-                    move |_| {
-                        if let Some(api) = self.editor.api::<EditorApi>() {
-                            api.hide_completions();
-                        }
-                        submit();
-                    },
-                );
-            });
+            on_key_with(
+                "mod+enter",
+                KeyOptions {
+                    when: nsh_core::keymap::When::Always,
+                    over_focused: true,
+                    ..Default::default()
+                },
+                move |_| {
+                    if let Some(api) = self.editor.api::<EditorApi>() {
+                        api.hide_completions();
+                    }
+                    submit();
+                },
+            );
         });
     }
     /// Answers retain NSH's caret filtering, Enter/Tab/click acceptance and stale-request checks.
@@ -491,110 +473,86 @@ impl MarkdownInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nsh_core::{ApproxTextEngine, Command, Core, MountItem, NodeId, geometry::size};
-    use std::collections::HashMap;
-
-    struct Drained {
-        labels: HashMap<NodeId, Option<String>>,
-        commands: Vec<(NodeId, Command)>,
-    }
-
-    fn drain_commands(core: &mut Core<ApproxTextEngine>) -> Drained {
-        let mut labels = HashMap::new();
-        let mut commands = Vec::new();
-        for _ in 0..8 {
-            let mut events = Vec::new();
-            core.take_events(&mut events);
-            for ev in events {
-                match ev {
-                    nsh_core::element::JsEvent::LayoutListener {
-                        host,
-                        id,
-                        listener,
-                        frame,
-                    } => core.component_layout(host, id, &listener, frame),
-                    nsh_core::element::JsEvent::Event(id, kind, payload) => {
-                        core.component_event(id, kind, &payload);
-                    }
-                    _ => {}
-                }
-            }
-            let Some(batch) = core.commit() else {
-                if !core.has_events() {
-                    break;
-                }
-                continue;
-            };
-            for item in batch.items {
-                match item {
-                    MountItem::ViewProps { id, props } => {
-                        labels.insert(id, props.accessibility.label.map(|s| s.to_string()));
-                    }
-                    MountItem::Command { id, command } => {
-                        commands.push((id, command));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Drained { labels, commands }
-    }
+    use nsh_core::{ApproxTextEngine, Core, MountItem, geometry::size};
 
     #[test]
-    fn focus_on_mount_focuses_visible_allowed_line_editor_once() {
+    fn auto_focus_binds_directly_on_editor_caret_sink() {
         #[component]
         fn Host() -> impl IntoElement {
             crate::tokens::install_theme();
             let auto_text = signal(String::new());
-            let hidden_text = signal(String::new());
-            let blocked_text = signal(String::new());
+            let idle_text = signal(String::new());
 
             let auto = MarkdownInput::new();
-            let hidden = MarkdownInput::new();
-            let blocked = MarkdownInput::new();
-
-            let auto_view = auto.focus_on_mount(
-                auto.render_line(
-                    auto.line_source(auto_text, "Auto", "Auto", || false),
-                    || false,
-                ),
-                || true,
-            );
-            let hidden_view = view().hidden().child(hidden.focus_on_mount(
-                hidden.render_line(
-                    hidden.line_source(hidden_text, "Hidden", "Hidden", || false),
-                    || false,
-                ),
-                || true,
-            ));
-            let blocked_view = blocked.focus_on_mount(
-                blocked.render_line(
-                    blocked.line_source(blocked_text, "Blocked", "Blocked", || false),
-                    || false,
-                ),
-                || false,
-            );
+            let idle = MarkdownInput::new();
 
             view()
                 .w(px(400.0))
                 .h(px(300.0))
-                .child(auto_view)
-                .child(hidden_view)
-                .child(blocked_view)
+                .child(
+                    auto.render_line(
+                        auto.line_source(auto_text, "Auto", "Auto", || false)
+                            .auto_focus(true),
+                        || false,
+                    ),
+                )
+                .child(
+                    idle.render_line(
+                        idle.line_source(idle_text, "Idle", "Idle", || false)
+                            .auto_focus(false),
+                        || false,
+                    ),
+                )
         }
 
         let mut core = Core::new(ApproxTextEngine, size(px(400.0), px(300.0)));
+        core.set_components(nsh_base::registry());
         core.mount_root(&nsh_core::element::Root::of::<Host>());
-        let Drained { labels, commands } = drain_commands(&mut core);
+        let batch = core.commit().expect("initial mount batch");
 
-        let focused_labels: Vec<_> = commands
+        let auto_focused_sinks = batch
+            .items
             .iter()
-            .filter_map(|(id, cmd)| {
-                matches!(cmd, Command::Focus)
-                    .then(|| labels.get(id).and_then(|l| l.as_deref()))
-                    .flatten()
-            })
-            .collect();
-        assert_eq!(focused_labels, vec!["Auto"]);
+            .filter(|item| matches!(item, MountItem::Input { config, .. } if config.auto_focus))
+            .count();
+        assert_eq!(auto_focused_sinks, 1);
+    }
+
+    #[test]
+    fn on_submit_binds_mod_enter_over_focused_synchronously() {
+        #[component]
+        fn Host() -> impl IntoElement {
+            crate::tokens::install_theme();
+            let value = signal(String::new());
+            let editor = MarkdownInput::new();
+            editor.active.set(true);
+            editor.on_submit(|| true, || {});
+            view().w(px(400.0)).h(px(200.0)).child(editor.render_line(
+                editor.line_source(value, "Title", "Title", || false),
+                || false,
+            ))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(400.0), px(200.0)));
+        core.set_environment(nsh_core::element::Environment {
+            os: nsh_core::platform::Os::MacOs,
+            idiom: nsh_core::platform::Idiom::Desktop,
+            ..Default::default()
+        });
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<Host>());
+        let batch = core.commit().expect("initial mount batch");
+
+        let expected =
+            nsh_core::keymap::Keystroke::parse("mod+enter", nsh_core::platform::Os::MacOs)
+                .expect("valid keystroke");
+        let has_over_focused_submit = batch.items.iter().any(|item| {
+            matches!(
+                item,
+                MountItem::Keymap(keymap)
+                    if keymap.bindings().iter().any(|b| b.over_focused && b.keystroke == expected)
+            )
+        });
+        assert!(has_over_focused_submit);
     }
 }

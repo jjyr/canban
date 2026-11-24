@@ -1271,7 +1271,7 @@ mod tests {
 
     #[test]
     fn opening_new_card_focuses_title_editor() {
-        use nsh_core::{ApproxTextEngine, Command, Core, MountItem, NodeId, geometry::size};
+        use nsh_core::{ApproxTextEngine, Core, MountItem, NodeId, geometry::size};
         use std::collections::HashMap;
 
         #[component]
@@ -1311,7 +1311,7 @@ mod tests {
             core: &mut Core<ApproxTextEngine>,
             labels: &mut HashMap<NodeId, Option<String>>,
             open_btn: &mut Option<NodeId>,
-            focus_commands: &mut Vec<NodeId>,
+            auto_focused_inputs: &mut Vec<NodeId>,
         ) {
             for _ in 0..10 {
                 let mut events = Vec::new();
@@ -1344,11 +1344,8 @@ mod tests {
                             }
                             labels.insert(id, props.accessibility.label.map(|s| s.to_string()));
                         }
-                        MountItem::Command {
-                            id,
-                            command: Command::Focus,
-                        } => {
-                            focus_commands.push(id);
+                        MountItem::Input { id, config } if config.auto_focus => {
+                            auto_focused_inputs.push(id);
                         }
                         _ => {}
                     }
@@ -1360,18 +1357,28 @@ mod tests {
         core.mount_root(&nsh_core::element::Root::of::<NewCardHost>());
         let mut labels = HashMap::new();
         let mut open_btn = None;
-        let mut focus_commands = Vec::new();
-        drain(&mut core, &mut labels, &mut open_btn, &mut focus_commands);
-        assert!(focus_commands.is_empty());
+        let mut auto_focused_inputs = Vec::new();
+        drain(
+            &mut core,
+            &mut labels,
+            &mut open_btn,
+            &mut auto_focused_inputs,
+        );
+        assert!(auto_focused_inputs.is_empty());
 
         core.component_event(
             open_btn.expect("open-new-card button"),
             nsh_core::EventKind::Press,
             &nsh_core::EventPayload::None,
         );
-        drain(&mut core, &mut labels, &mut open_btn, &mut focus_commands);
+        drain(
+            &mut core,
+            &mut labels,
+            &mut open_btn,
+            &mut auto_focused_inputs,
+        );
 
-        let focused_labels: Vec<_> = focus_commands
+        let focused_labels: Vec<_> = auto_focused_inputs
             .iter()
             .filter_map(|id| labels.get(id).and_then(|l| l.as_deref()))
             .collect();

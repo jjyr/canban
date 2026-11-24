@@ -565,7 +565,7 @@ fn launch(ui: Ui, fresh: bool) {
 fn copy_prompt(ui: Ui) {
     let state = ui.workflows;
     let prompt = state.prompt.get_untracked();
-    set_clipboard(&prompt);
+    drop(set_clipboard(&prompt));
     state.copy_status.set("Copied".into());
 }
 pub fn screen(ui: Ui) -> impl IntoElement {

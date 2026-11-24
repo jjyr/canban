@@ -30,9 +30,10 @@ pub fn body(
     project: Memo<String>,
     active: Memo<bool>,
     height: Signal<f32>,
+    auto_focus: bool,
     submit: impl Fn() + 'static,
 ) -> (MarkdownInput, impl IntoElement) {
-    body_with_mentions(ui, text, project, active, height, submit, None)
+    body_with_mentions_focused(ui, text, project, active, height, auto_focus, submit, None)
 }
 
 pub fn body_with_mentions(
@@ -41,6 +42,20 @@ pub fn body_with_mentions(
     project: Memo<String>,
     active: Memo<bool>,
     height: Signal<f32>,
+    submit: impl Fn() + 'static,
+    on_mention: Option<std::rc::Rc<dyn Fn(String)>>,
+) -> (MarkdownInput, impl IntoElement) {
+    body_with_mentions_focused(ui, text, project, active, height, false, submit, on_mention)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn body_with_mentions_focused(
+    ui: Ui,
+    text: Signal<String>,
+    project: Memo<String>,
+    active: Memo<bool>,
+    height: Signal<f32>,
+    auto_focus: bool,
     submit: impl Fn() + 'static,
     on_mention: Option<std::rc::Rc<dyn Fn(String)>>,
 ) -> (MarkdownInput, impl IntoElement) {
@@ -58,14 +73,21 @@ pub fn body_with_mentions(
             });
         }
     });
+    let should_auto_focus = auto_focus
+        && active.get_untracked()
+        && !ui.quick_open.get_untracked()
+        && ui.utility_popup.get_untracked().is_empty()
+        && !ui.native_modal.get_untracked();
     let (source, reference_error) = crate::references::attach(
         ui,
         editor,
-        editor.source(
-            text,
-            "Task description",
-            "Describe the task in Markdown… @Agent, #Card or #tag",
-        ),
+        editor
+            .source(
+                text,
+                "Task description",
+                "Describe the task in Markdown… @Agent, #Card or #tag",
+            )
+            .auto_focus(should_auto_focus),
         text,
         project,
         crate::references::ReferenceFormat::Markdown,
@@ -97,6 +119,12 @@ pub fn title(
     let disabled = std::rc::Rc::new(disabled);
     let editor = MarkdownInput::new();
     configure_editor(ui, editor, active, submit);
+    let should_auto_focus = auto_focus
+        && active.get_untracked()
+        && !disabled()
+        && !ui.quick_open.get_untracked()
+        && ui.utility_popup.get_untracked().is_empty()
+        && !ui.native_modal.get_untracked();
     let disabled_src = disabled.clone();
     let element = editor
         .line_source(
@@ -105,7 +133,7 @@ pub fn title(
             "Card title · @Agent, #Card or #tag",
             move || disabled_src(),
         )
-        .auto_focus(auto_focus);
+        .auto_focus(should_auto_focus);
     let (source, reference_error) = crate::references::attach(
         ui,
         editor,
@@ -115,20 +143,7 @@ pub fn title(
         crate::references::ReferenceFormat::PlainText,
         on_mention,
     );
-    let disabled_view = disabled.clone();
-    let field = editor.render_line(source, move || disabled_view());
-    let field = if auto_focus {
-        let disabled_focus = disabled;
-        editor.focus_on_mount(field, move || {
-            active.get_untracked()
-                && !disabled_focus()
-                && !ui.quick_open.get_untracked()
-                && ui.utility_popup.get_untracked().is_empty()
-                && !ui.native_modal.get_untracked()
-        })
-    } else {
-        field
-    };
+    let field = editor.render_line(source, move || disabled());
     (
         editor,
         view().gap_1().child(field).child(when(

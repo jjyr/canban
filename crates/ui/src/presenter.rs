@@ -2224,7 +2224,7 @@ pub fn open_resource(ui: Ui, card_id: String, path: String) {
 }
 
 pub fn copy_text(ui: Ui, value: String) {
-    set_clipboard(&value);
+    drop(set_clipboard(&value));
     ui.notify("Copied to clipboard");
 }
 struct ParsedTimelinePage {

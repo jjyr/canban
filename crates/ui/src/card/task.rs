@@ -94,6 +94,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     computed(move || draft.with(|d| d.project_id.clone())),
                     current,
                     height,
+                    true,
                     move || ui.task_submit.update(|n| *n += 1),
                 );
                 editor.on_paste_files({
@@ -109,14 +110,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         )
                     }
                 });
-                let focused_once = stored(false);
                 return view()
-                    .on_layout(move |_: &Bounds<Points>| {
-                        // The native sink must exist before taking focus.
-                        if !focused_once.replace(true) {
-                            editor.focus();
-                        }
-                    })
                     .gap_2()
                     .child(title_view)
                     .child(body_view)

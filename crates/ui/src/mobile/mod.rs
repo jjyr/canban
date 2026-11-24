@@ -809,8 +809,7 @@ fn ios_retained_tab_stack(
         MobileTab::Settings => "tab-settings",
     };
 
-    // Keep `header_large_title` constant per tab stack so UIKit never leaves stale Large Title bar
-    // heights or collapsed titles when switching between `Board` (inline) and Large Title tabs.
+    // Keep one retained `NavStack` per iOS tab so each tab preserves its scroll position and header chrome.
     let large_title = tab != MobileTab::Board;
     let root_page = nav_page()
         .key(key)
@@ -937,13 +936,22 @@ pub fn screen(ui: Ui, state: MobileState) -> impl IntoElement {
             move |route_sig, _| render_pushed_route(ui, state, route_sig.get_untracked()),
         ));
 
-        view()
-            .size_full()
-            .flex_col()
-            .min_h(px(0.))
-            .bg(BACKGROUND)
-            .child(stack.flex_1().min_h(px(0.)))
-            .child(tab_bar_el)
+        if chrome::is_android() {
+            view()
+                .size_full()
+                .relative()
+                .bg(BACKGROUND)
+                .child(stack.size_full())
+                .child(tab_bar_el)
+        } else {
+            view()
+                .size_full()
+                .flex_col()
+                .min_h(px(0.))
+                .bg(BACKGROUND)
+                .child(stack.flex_1().min_h(px(0.)))
+                .child(tab_bar_el)
+        }
     };
 
     view()

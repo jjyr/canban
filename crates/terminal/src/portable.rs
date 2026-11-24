@@ -85,7 +85,7 @@ impl GhosttyEmulator {
         }
         if let Some(clip) = self.model.take_clipboard() {
             if try_os().is_some() {
-                set_clipboard(clip.clone());
+                drop(set_clipboard(clip.clone()));
             }
             self.last_clipboard = Some(clip);
         }
@@ -502,7 +502,7 @@ impl TerminalEmulator for SharedSessionEmulator {
         if let Some(text) = clip
             && try_os().is_some()
         {
-            set_clipboard(text);
+            drop(set_clipboard(text));
         }
         slot.seen_rev = rev;
     }
@@ -714,7 +714,7 @@ fn mount_terminal_surface(
                 let next_theme = theme_memo.get();
                 let changed = slot_theme.borrow_mut().apply_theme(&next_theme);
                 if changed && let Some(api) = term_ref_theme.api::<TerminalApi>() {
-                    api.write(String::new());
+                    api.write_bytes(&[]);
                 }
             });
         }
@@ -752,11 +752,11 @@ fn mount_terminal_surface(
                         status_sig.set(next_pill);
                     }
                     if let Some(api) = term_ref_bind.api::<TerminalApi>() {
-                        api.write(String::new());
+                        api.write_bytes(&[]);
                     } else {
                         after_answer(move || {
                             if let Some(api) = term_ref_bind.api::<TerminalApi>() {
-                                api.write(String::new());
+                                api.write_bytes(&[]);
                             }
                         });
                     }
@@ -853,13 +853,13 @@ fn mount_terminal_surface(
                     if let Some(text) = clip
                         && try_os().is_some()
                     {
-                        set_clipboard(text);
+                        drop(set_clipboard(text));
                     }
                     if status_sig.get_untracked() != next_pill {
                         status_sig.set(next_pill);
                     }
                     if need_write && let Some(api) = term_ref_wake.api::<TerminalApi>() {
-                        api.write(String::new());
+                        api.write_bytes(&[]);
                     }
                 }
             });

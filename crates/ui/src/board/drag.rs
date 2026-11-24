@@ -1727,6 +1727,7 @@ mod tests {
             row_id,
             EventKind::PanStart,
             &EventPayload::Pan {
+                origin: point(px(0.), px(0.)),
                 translation: point(px(0.), px(7.)),
                 velocity_x: 0.,
                 velocity_y: 40.,
@@ -1739,6 +1740,7 @@ mod tests {
             row_id,
             EventKind::PanEnd,
             &EventPayload::Pan {
+                origin: point(px(0.), px(0.)),
                 translation: point(px(0.), px(12.)),
                 velocity_x: 0.,
                 velocity_y: 0.,
@@ -1793,6 +1795,7 @@ mod tests {
             row_id,
             EventKind::PanStart,
             &EventPayload::Pan {
+                origin: point(px(0.), px(0.)),
                 translation: point(px(0.), px(7.)),
                 velocity_x: 0.,
                 velocity_y: 40.,
@@ -1836,6 +1839,7 @@ mod tests {
             row_id,
             EventKind::PanEnd,
             &EventPayload::Pan {
+                origin: point(px(0.), px(0.)),
                 translation: point(px(0.), px(14.)),
                 velocity_x: 0.,
                 velocity_y: 0.,
@@ -2195,6 +2199,7 @@ mod tests {
             row_id,
             EventKind::PanStart,
             &EventPayload::Pan {
+                origin: point(px(0.), px(0.)),
                 translation: point(px(10.), px(0.)),
                 velocity_x: 120.,
                 velocity_y: 0.,
@@ -2208,6 +2213,7 @@ mod tests {
             row_id,
             EventKind::PanEnd,
             &EventPayload::Pan {
+                origin: point(px(0.), px(0.)),
                 translation: point(px(420.), px(24.)),
                 velocity_x: 80.,
                 velocity_y: -20.,
@@ -2301,6 +2307,7 @@ mod tests {
             row_id,
             EventKind::PanStart,
             &EventPayload::Pan {
+                origin: point(px(0.), px(0.)),
                 translation: point(px(10.), px(0.)),
                 velocity_x: 0.,
                 velocity_y: 0.,
@@ -2314,6 +2321,7 @@ mod tests {
             row_id,
             EventKind::PanEnd,
             &EventPayload::Pan {
+                origin: point(px(0.), px(0.)),
                 translation: point(px(420.), px(10.)),
                 velocity_x: 0.,
                 velocity_y: 0.,
@@ -2437,6 +2445,7 @@ mod tests {
             row_id,
             EventKind::PanStart,
             &EventPayload::Pan {
+                origin: point(px(0.), px(0.)),
                 translation: point(px(0.), px(slot2_y)),
                 velocity_x: 0.,
                 velocity_y: 0.,
@@ -2452,6 +2461,7 @@ mod tests {
             row_id,
             EventKind::PanEnd,
             &EventPayload::Pan {
+                origin: point(px(0.), px(0.)),
                 translation: point(px(0.), px(slot2_y)),
                 velocity_x: 0.,
                 velocity_y: 0.,
@@ -2498,6 +2508,7 @@ mod tests {
             row_id,
             EventKind::PanStart,
             &EventPayload::Pan {
+                origin: point(px(0.), px(0.)),
                 translation: point(px(260.), px(-40.)),
                 velocity_x: 0.,
                 velocity_y: 0.,
