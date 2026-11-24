@@ -118,17 +118,66 @@ fn connect_invite(ui: Ui, state: MobileState, invite: PairingInvite, name_overri
     });
 }
 
+const INVALID_PAIRING_INPUT_HINT: &str = "Enter a Tailscale address (host.ts.net or 100.x.y.z) or a `canban://<addr>?name=...#<secret>` pairing link.";
+
+fn parse_pairing_input(raw: &str) -> Option<PairingInvite> {
+    parse_pairing_invite(raw).or_else(|| parse_tailscale_host_input(raw))
+}
+
 /// Interactive single-address pairing flow & confirmation card shared between
 /// the first-run onboarding screen and `MobileSheet::Pairing`.
 pub(crate) fn pairing_panel(ui: Ui, state: MobileState) -> impl IntoElement {
     let custom_name = signal(String::new());
-    let show_manual = signal(false);
+    let initial_raw = state.pairing_uri_input.get_untracked();
+    let initial_needs_manual =
+        !initial_raw.trim().is_empty() && parse_pairing_input(&initial_raw).is_none();
+    let manual_draft = signal(initial_raw);
+    let manual_validation_error = signal(String::new());
+    let error_for_draft: Stored<Option<String>> = stored(None);
+    let show_manual = signal(initial_needs_manual);
     let parsed_invite = computed(move || {
         let raw = state.pairing_uri_input.get();
-        parse_pairing_invite(&raw).or_else(|| parse_tailscale_host_input(&raw))
+        parse_pairing_input(&raw)
+    });
+    let has_invite = computed(move || parsed_invite.with(Option::is_some));
+
+    // Sync external URI updates (QR deep links, Paste, or discovery `URI…` prefill) into the
+    // manual draft without ever remounting the input during manual typing.
+    effect(move || {
+        let raw = state.pairing_uri_input.get();
+        if raw.trim().is_empty() {
+            return;
+        }
+        if parse_pairing_input(&raw).is_some() {
+            if manual_draft.with_untracked(|cur| cur != &raw) {
+                manual_draft.set(raw);
+            }
+            error_for_draft.replace(None);
+            if !manual_validation_error.with_untracked(String::is_empty) {
+                manual_validation_error.set(String::new());
+            }
+        } else {
+            if manual_draft.with_untracked(|cur| cur != &raw) {
+                manual_draft.set(raw);
+            }
+            if !show_manual.get_untracked() {
+                show_manual.set(true);
+            }
+        }
     });
 
-    // Trigger automatic probe whenever parsed invite address changes.
+    // Clear stale validation feedback once the user edits the manual draft.
+    effect(move || {
+        let draft = manual_draft.get();
+        let matches_failed =
+            error_for_draft.with(|failed| failed.as_deref() == Some(draft.as_str()));
+        if !matches_failed && !manual_validation_error.with_untracked(String::is_empty) {
+            error_for_draft.replace(None);
+            manual_validation_error.set(String::new());
+        }
+    });
+
+    // Trigger automatic probe whenever a committed invite address changes.
     let last_probed_addr = stored(String::new());
     effect(move || {
         let next_addr = parsed_invite.get().map(|inv| inv.addr).unwrap_or_default();
@@ -149,9 +198,26 @@ pub(crate) fn pairing_panel(ui: Ui, state: MobileState) -> impl IntoElement {
         }
     });
 
-    let paste_btn = move |primary: bool| {
+    let submit_manual = move || {
+        let raw = manual_draft.get_untracked();
+        let trimmed = raw.trim().to_owned();
+        if trimmed.is_empty() || parse_pairing_input(&trimmed).is_none() {
+            error_for_draft.replace(Some(raw));
+            manual_validation_error.set(INVALID_PAIRING_INPUT_HINT.to_owned());
+            return;
+        }
+        trigger_haptic(Haptic::Selection);
+        batch(move || {
+            error_for_draft.replace(None);
+            manual_validation_error.set(String::new());
+            state.pairing_error.set(String::new());
+            state.pairing_uri_input.set(trimmed);
+        });
+    };
+
+    let paste_btn = move |label: &'static str, primary: bool| {
         mobile_button(
-            "Paste Pairing Link",
+            label,
             if primary {
                 Variant::Primary
             } else {
@@ -162,12 +228,23 @@ pub(crate) fn pairing_panel(ui: Ui, state: MobileState) -> impl IntoElement {
                     let clip = clipboard_string().await;
                     let trimmed = clip.trim().to_owned();
                     if trimmed.is_empty() {
-                        state.pairing_error.try_set(
+                        let _ = state.pairing_error.try_set(
                             "Clipboard is empty. Enter a Tailscale address (host.ts.net or 100.x.y.z) or copy a `canban://` link from Settings -> Remote Access.".into(),
                         );
+                    } else if parse_pairing_input(&trimmed).is_some() {
+                        error_for_draft.replace(None);
+                        let _ = manual_draft.try_set(trimmed.clone());
+                        let _ = manual_validation_error.try_set(String::new());
+                        let _ = state.pairing_error.try_set(String::new());
+                        let _ = state.pairing_uri_input.try_set(trimmed);
                     } else {
-                        state.pairing_uri_input.try_set(trimmed);
-                        state.pairing_error.try_set(String::new());
+                        error_for_draft.replace(Some(trimmed.clone()));
+                        let _ = manual_draft.try_set(trimmed);
+                        let _ =
+                            manual_validation_error.try_set(INVALID_PAIRING_INPUT_HINT.to_owned());
+                        let _ = show_manual.try_set(true);
+                        let _ = state.pairing_error.try_set(String::new());
+                        let _ = state.pairing_uri_input.try_set(String::new());
                     }
                 });
             },
@@ -177,14 +254,18 @@ pub(crate) fn pairing_panel(ui: Ui, state: MobileState) -> impl IntoElement {
     view()
         .w_full()
         .gap_4()
-        .child(dynamic(move || {
-            let invite_opt = parsed_invite.get();
-            if invite_opt.is_none() {
-                let raw_empty = state.pairing_uri_input.with(|s| s.trim().is_empty());
-                return view()
+        .child(
+            when(move || !has_invite.get(), move || {
+                view()
                     .w_full()
                     .gap_3()
-                    .child(paste_btn(true))
+                    .child(
+                        when(
+                            move || show_manual.get(),
+                            move || paste_btn("Paste Pairing Link", false),
+                        )
+                        .otherwise(move || paste_btn("Paste Pairing Link", true)),
+                    )
                     .child(
                         press_target()
                             .w_full()
@@ -210,220 +291,282 @@ pub(crate) fn pairing_panel(ui: Ui, state: MobileState) -> impl IntoElement {
                             }),
                     )
                     .child(when(
-                        move || show_manual.get() || !raw_empty,
+                        move || show_manual.get(),
                         move || {
                             view()
                                 .w_full()
-                                .gap_2()
-                                .child(mobile_field(
-                                    state.pairing_uri_input,
-                                    "host.ts.net, 100.x.y.z, or canban://...#code",
-                                ))
-                                .children((!raw_empty).then(|| {
-                                    notice(
-                                        "Enter a Tailscale address (host.ts.net or 100.x.y.z) or a `canban://<addr>?name=...#<secret>` pairing link.",
-                                        Tone::Attention,
+                                .gap_2p5()
+                                .child(
+                                    mobile_field(
+                                        manual_draft,
+                                        "host.ts.net, 100.x.y.z, or canban://...#code",
                                     )
-                                }))
+                                    .keyboard_type(KeyboardType::Url)
+                                    .auto_capitalize(AutoCapitalize::None)
+                                    .auto_correct(false)
+                                    .return_key_type(ReturnKeyType::Go)
+                                    .on_submit(move |_: &str| submit_manual()),
+                                )
+                                .child(when(
+                                    move || !manual_validation_error.with(String::is_empty),
+                                    move || {
+                                        notice(
+                                            move || manual_validation_error.get(),
+                                            Tone::Attention,
+                                        )
+                                    },
+                                ))
+                                .child(
+                                    mobile_button("Check Address", Variant::Primary, move |_| {
+                                        submit_manual();
+                                    })
+                                    .disabled(move || manual_draft.with(|s| s.trim().is_empty())),
+                                )
                         },
                     ))
-                    .into_element();
-            }
+            })
+            .otherwise(move || {
+                let summary_row = dynamic(move || {
+                    let Some(invite) = parsed_invite.get() else {
+                        return view().into_element();
+                    };
+                    let display_name = invite
+                        .host_name
+                        .clone()
+                        .unwrap_or_else(|| invite.addr.clone());
+                    view()
+                        .w_full()
+                        .px_4()
+                        .py_3p5()
+                        .gap_1p5()
+                        .child(
+                            view()
+                                .w_full()
+                                .flex_row()
+                                .flex_wrap()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    text(display_name)
+                                        .text_size(px(MOBILE_HEADLINE))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(TEXT),
+                                )
+                                .child(security_badge(invite.security)),
+                        )
+                        .child(
+                            text(invite.addr)
+                                .text_size(px(13.5))
+                                .font_family(MONO_FONT)
+                                .text_color(MUTED),
+                        )
+                        .child(mobile_footnote(if is_tailscale_auth(&invite.secret) {
+                            "Tailscale — automatic same-account sign-in (managed in Tailscale Admin)"
+                        } else {
+                            invite.security.hint()
+                        }))
+                        .into_element()
+                });
 
-            let invite = invite_opt.unwrap();
-            let display_name = invite
-                .host_name
-                .clone()
-                .unwrap_or_else(|| invite.addr.clone());
-            let probe = state.pairing_probe.get();
-            let probe_addr_retry = invite.addr.clone();
-            let connect_inv = invite.clone();
-            let is_tailscale = invite.security == TransportSecurity::Tailscale;
-
-            let probe_row: AnyElement = match probe {
-                ProbeState::Idle => view()
-                    .w_full()
-                    .px_4()
-                    .py_3()
-                    .child(mobile_footnote("Ready to verify connection…"))
-                    .into_element(),
-                ProbeState::Probing(ref addr) => view()
-                    .w_full()
-                    .px_4()
-                    .py_3()
-                    .flex_row()
-                    .items_center()
-                    .gap_2p5()
-                    .child(loading_spinner(15., ACCENT))
-                    .child(mobile_subhead(format!("Checking {addr}…")))
-                    .into_element(),
-                ProbeState::Result(ref res) if res.reachable => view()
-                    .w_full()
-                    .px_4()
-                    .py_2p5()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .child(status(
-                        format!("Reachable · {}ms", res.rtt_ms.unwrap_or(0)),
-                        Tone::Success,
-                    ))
-                    .child(
-                        press_target()
-                            .min_h(px(36.))
-                            .px_2p5()
+                let probe_row = dynamic(move || {
+                    let Some(invite) = parsed_invite.get() else {
+                        return view().into_element();
+                    };
+                    let probe = state.pairing_probe.get();
+                    let probe_addr_retry = invite.addr;
+                    let is_tailscale = invite.security == TransportSecurity::Tailscale;
+                    match probe {
+                        ProbeState::Idle => view()
+                            .w_full()
+                            .px_4()
+                            .py_3()
+                            .child(mobile_footnote("Ready to verify connection…"))
+                            .into_element(),
+                        ProbeState::Probing(ref addr) => view()
+                            .w_full()
+                            .px_4()
+                            .py_3()
+                            .flex_row()
                             .items_center()
-                            .justify_center()
+                            .gap_2p5()
+                            .child(loading_spinner(15., ACCENT))
+                            .child(mobile_subhead(format!("Checking {addr}…")))
+                            .into_element(),
+                        ProbeState::Result(ref res) if res.reachable => view()
+                            .w_full()
+                            .px_4()
+                            .py_2p5()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(status(
+                                format!("Reachable · {}ms", res.rtt_ms.unwrap_or(0)),
+                                Tone::Success,
+                            ))
                             .child(
-                                text("Recheck")
-                                    .text_size(px(13.5))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(ACCENT),
+                                press_target()
+                                    .min_h(px(36.))
+                                    .px_2p5()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        text("Recheck")
+                                            .text_size(px(13.5))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(ACCENT),
+                                    )
+                                    .on_press(move |_: &()| {
+                                        trigger_haptic(Haptic::Selection);
+                                        start_probe(ui, state, probe_addr_retry.clone());
+                                    }),
                             )
-                            .on_press(move |_: &()| {
-                                trigger_haptic(Haptic::Selection);
-                                start_probe(ui, state, probe_addr_retry.clone());
-                            }),
-                    )
-                    .into_element(),
-                ProbeState::Result(ref res) => view()
+                            .into_element(),
+                        ProbeState::Result(ref res) => view()
+                            .w_full()
+                            .p_3p5()
+                            .gap_2p5()
+                            .child(notice(
+                                format!(
+                                    "Cannot reach {} ({})",
+                                    res.addr,
+                                    res.error.as_deref().unwrap_or("unreachable")
+                                ),
+                                Tone::Attention,
+                            ))
+                            .child(
+                                view()
+                                    .w_full()
+                                    .flex_row()
+                                    .gap_2()
+                                    .child(
+                                        mobile_inline_button(
+                                            "Retry",
+                                            Variant::Secondary,
+                                            move |_| {
+                                                start_probe(ui, state, probe_addr_retry.clone());
+                                            },
+                                        )
+                                        .flex_1(),
+                                    )
+                                    .children(is_tailscale.then(|| {
+                                        mobile_inline_button(
+                                            "Open Tailscale",
+                                            Variant::Secondary,
+                                            move |_| {
+                                                ui.spawn(async {
+                                                    let _ = open_url("tailscale://").await;
+                                                });
+                                            },
+                                        )
+                                        .flex_1()
+                                    })),
+                            )
+                            .into_element(),
+                    }
+                });
+
+                let label_row = view()
                     .w_full()
-                    .p_3p5()
-                    .gap_2p5()
-                    .child(notice(
-                        format!(
-                            "Cannot reach {} ({})",
-                            res.addr,
-                            res.error.as_deref().unwrap_or("unreachable")
-                        ),
-                        Tone::Attention,
-                    ))
+                    .px_4()
+                    .py_3()
+                    .gap_1p5()
+                    .child(
+                        text("LABEL (OPTIONAL)")
+                            .text_size(px(MOBILE_CAPTION))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(MUTED),
+                    )
+                    .child(mobile_field(custom_name, "My Mac / Linux").placeholder(move || {
+                        parsed_invite.with(|inv| {
+                            inv.as_ref()
+                                .and_then(|i| i.host_name.clone())
+                                .unwrap_or_else(|| "My Mac / Linux".to_owned())
+                        })
+                    }))
+                    .into_element();
+
+                view()
+                    .w_full()
+                    .gap_4()
+                    .child(
+                        view()
+                            .w_full()
+                            .child(section_header("CONFIRM MACHINE", None))
+                            .child(grouped_card(vec![summary_row, probe_row, label_row])),
+                    )
+                    .child(
+                        mobile_button(
+                            move || {
+                                if state.pairing_busy.get() {
+                                    "Connecting…".to_owned()
+                                } else {
+                                    let display_name = parsed_invite.with(|inv| {
+                                        inv.as_ref()
+                                            .map(|i| {
+                                                i.host_name
+                                                    .clone()
+                                                    .unwrap_or_else(|| i.addr.clone())
+                                            })
+                                            .unwrap_or_default()
+                                    });
+                                    format!("Connect to {display_name}")
+                                }
+                            },
+                            Variant::Primary,
+                            move |_| {
+                                if let Some(invite) = parsed_invite.get_untracked() {
+                                    connect_invite(
+                                        ui,
+                                        state,
+                                        invite,
+                                        custom_name.get_untracked(),
+                                    );
+                                }
+                            },
+                        )
+                        .disabled(move || state.pairing_busy.get()),
+                    )
                     .child(
                         view()
                             .w_full()
                             .flex_row()
                             .gap_2()
                             .child(
-                                mobile_inline_button("Retry", Variant::Secondary, move |_| {
-                                    start_probe(ui, state, probe_addr_retry.clone());
+                                mobile_button("Edit", Variant::Secondary, move |_| {
+                                    let current = state.pairing_uri_input.get_untracked();
+                                    batch(move || {
+                                        if !current.is_empty() {
+                                            manual_draft.set(current);
+                                        }
+                                        error_for_draft.replace(None);
+                                        manual_validation_error.set(String::new());
+                                        show_manual.set(true);
+                                        state.pairing_uri_input.set(String::new());
+                                        state.pairing_probe.set(ProbeState::Idle);
+                                        state.pairing_error.set(String::new());
+                                    });
                                 })
                                 .flex_1(),
                             )
-                            .children(is_tailscale.then(|| {
-                                mobile_inline_button(
-                                    "Open Tailscale",
-                                    Variant::Secondary,
-                                    move |_| {
-                                        ui.spawn(async {
-                                            let _ = open_url("tailscale://").await;
-                                        });
-                                    },
-                                )
-                                .flex_1()
-                            })),
+                            .child(paste_btn("Paste", false).flex_1())
+                            .child(
+                                mobile_button("Clear", Variant::Quiet, move |_| {
+                                    batch(move || {
+                                        error_for_draft.replace(None);
+                                        manual_draft.set(String::new());
+                                        manual_validation_error.set(String::new());
+                                        state.pairing_uri_input.set(String::new());
+                                        state.pairing_probe.set(ProbeState::Idle);
+                                        state.pairing_error.set(String::new());
+                                    });
+                                })
+                                .flex_1(),
+                            ),
                     )
-                    .into_element(),
-            };
-
-            let summary_row = view()
-                .w_full()
-                .px_4()
-                .py_3p5()
-                .gap_1p5()
-                .child(
-                    view()
-                        .w_full()
-                        .flex_row()
-                        .flex_wrap()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .child(
-                            text(display_name.clone())
-                                .text_size(px(MOBILE_HEADLINE))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(TEXT),
-                        )
-                        .child(security_badge(invite.security)),
-                )
-                .child(
-                    text(invite.addr.clone())
-                        .text_size(px(13.5))
-                        .font_family(MONO_FONT)
-                        .text_color(MUTED),
-                )
-                .child(mobile_footnote(if is_tailscale_auth(&invite.secret) {
-                    "Tailscale — automatic same-account sign-in (managed in Tailscale Admin)"
-                } else {
-                    invite.security.hint()
-                }))
-                .into_element();
-
-            let label_row = view()
-                .w_full()
-                .px_4()
-                .py_3()
-                .gap_1p5()
-                .child(
-                    text("LABEL (OPTIONAL)")
-                        .text_size(px(MOBILE_CAPTION))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(MUTED),
-                )
-                .child(mobile_field(
-                    custom_name,
-                    invite.host_name.as_deref().unwrap_or("My Mac / Linux"),
-                ))
-                .into_element();
-
-            view()
-                .w_full()
-                .gap_4()
-                .child(
-                    view()
-                        .w_full()
-                        .child(section_header("CONFIRM MACHINE", None))
-                        .child(grouped_card(vec![summary_row, probe_row, label_row])),
-                )
-                .child(
-                    mobile_button(
-                        move || {
-                            if state.pairing_busy.get() {
-                                "Connecting…".to_owned()
-                            } else {
-                                format!("Connect to {display_name}")
-                            }
-                        },
-                        Variant::Primary,
-                        move |_| {
-                            connect_invite(
-                                ui,
-                                state,
-                                connect_inv.clone(),
-                                custom_name.get_untracked(),
-                            );
-                        },
-                    )
-                    .disabled(move || state.pairing_busy.get()),
-                )
-                .child(
-                    view()
-                        .w_full()
-                        .flex_row()
-                        .gap_2()
-                        .child(paste_btn(false).flex_1())
-                        .child(
-                            mobile_button("Clear", Variant::Quiet, move |_| {
-                                state.pairing_uri_input.set(String::new());
-                                state.pairing_probe.set(ProbeState::Idle);
-                                state.pairing_error.set(String::new());
-                            })
-                            .flex_1(),
-                        ),
-                )
-                .into_element()
-        }))
+            }),
+        )
         .child(when(
             move || !state.pairing_error.with(String::is_empty),
             move || notice(move || state.pairing_error.get(), Tone::Danger),
@@ -836,4 +979,255 @@ pub(crate) fn discover_hosts_sheet_body(ui: Ui, state: MobileState) -> impl Into
         )
         .into_element()
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nsh_core::{
+        ApproxTextEngine, Core, EventKind, EventPayload, MountBatch, MountItem, NodeId,
+        geometry::size,
+    };
+    use std::cell::RefCell;
+
+    fn mounted_input_ids(batch: &MountBatch) -> Vec<NodeId> {
+        batch
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                MountItem::Input { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn deletes_node(batch: &MountBatch, target: NodeId) -> bool {
+        batch
+            .items
+            .iter()
+            .any(|item| matches!(item, MountItem::Delete { id } if *id == target))
+    }
+
+    #[test]
+    fn manual_pairing_input_keeps_identity_while_typing_and_waits_for_submit() {
+        thread_local! {
+            static OBSERVED: RefCell<(String, ProbeState)> =
+                const { RefCell::new((String::new(), ProbeState::Idle)) };
+        }
+
+        #[component]
+        fn Host() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let state = MobileState::new();
+            // Prefill an incomplete URI (like discovery's `URI…` action) so manual entry opens immediately.
+            state.pairing_uri_input.set("canban://".into());
+            effect(move || {
+                let uri = state.pairing_uri_input.get();
+                let probe = state.pairing_probe.get();
+                OBSERVED.with(|slot| *slot.borrow_mut() = (uri, probe));
+            });
+            view()
+                .w(px(390.0))
+                .h(px(844.0))
+                .child(pairing_panel(ui, state))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(390.0), px(844.0)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<Host>());
+        let initial = core.commit().expect("initial mount batch");
+
+        let inputs = mounted_input_ids(&initial);
+        assert_eq!(inputs.len(), 1, "expected a single manual pairing input");
+        let input_id = inputs[0];
+
+        // Simulate typing a Tailscale IP + port character by character, including intermediate
+        // strings (`100.84.12.5`, `100.84.12.50`) that are already valid Tailscale IPs.
+        let steps = [
+            "1",
+            "10",
+            "100",
+            "100.",
+            "100.84",
+            "100.84.",
+            "100.84.12",
+            "100.84.12.",
+            "100.84.12.5",
+            "100.84.12.50",
+            "100.84.12.50:",
+            "100.84.12.50:7681",
+        ];
+        for (idx, text) in steps.iter().enumerate() {
+            let count = (idx + 1) as u32;
+            core.input_changed(input_id, text, count);
+            assert!(core.component_event(
+                input_id,
+                EventKind::ChangeText,
+                &EventPayload::Text {
+                    text: (*text).into(),
+                    count,
+                },
+            ));
+            if let Some(batch) = core.commit() {
+                assert!(
+                    !deletes_node(&batch, input_id),
+                    "typing `{text}` must not unmount the manual pairing input"
+                );
+                assert!(
+                    mounted_input_ids(&batch).is_empty(),
+                    "typing `{text}` must not recreate or swap the manual pairing input"
+                );
+            }
+            OBSERVED.with(|slot| {
+                let (uri, probe) = slot.borrow().clone();
+                assert_eq!(
+                    uri, "canban://",
+                    "typing `{text}` must not auto-commit before explicit submit"
+                );
+                assert_eq!(
+                    probe,
+                    ProbeState::Idle,
+                    "typing `{text}` must not auto-probe before explicit submit"
+                );
+            });
+        }
+
+        // Submitting an invalid value keeps the same input mounted so the user can keep editing.
+        let invalid_count = (steps.len() + 1) as u32;
+        core.input_changed(input_id, "not-a-valid-host", invalid_count);
+        assert!(core.component_event(
+            input_id,
+            EventKind::ChangeText,
+            &EventPayload::Text {
+                text: "not-a-valid-host".into(),
+                count: invalid_count,
+            },
+        ));
+        let _ = core.commit();
+        assert!(core.component_event(
+            input_id,
+            EventKind::SubmitEditing,
+            &EventPayload::Text {
+                text: "not-a-valid-host".into(),
+                count: invalid_count,
+            },
+        ));
+        if let Some(batch) = core.commit() {
+            assert!(
+                !deletes_node(&batch, input_id),
+                "invalid submit must not unmount the manual pairing input"
+            );
+            assert!(
+                mounted_input_ids(&batch).is_empty(),
+                "invalid submit must not recreate the manual pairing input"
+            );
+        }
+
+        // Submitting a complete Tailscale address commits it, starts probing, and moves to confirm.
+        let valid_count = invalid_count + 1;
+        core.input_changed(input_id, "100.84.12.50:7681", valid_count);
+        assert!(core.component_event(
+            input_id,
+            EventKind::ChangeText,
+            &EventPayload::Text {
+                text: "100.84.12.50:7681".into(),
+                count: valid_count,
+            },
+        ));
+        let _ = core.commit();
+        assert!(core.component_event(
+            input_id,
+            EventKind::SubmitEditing,
+            &EventPayload::Text {
+                text: "100.84.12.50:7681".into(),
+                count: valid_count,
+            },
+        ));
+        let confirm_batch = core.commit().expect("confirmation transition batch");
+        assert!(
+            deletes_node(&confirm_batch, input_id),
+            "valid submit should transition from manual entry to confirmation"
+        );
+        assert_eq!(
+            mounted_input_ids(&confirm_batch).len(),
+            1,
+            "confirmation screen should mount the optional label input"
+        );
+        OBSERVED.with(|slot| {
+            let (uri, probe) = slot.borrow().clone();
+            assert_eq!(uri, "100.84.12.50:7681");
+            assert_eq!(probe, ProbeState::Probing("100.84.12.50:7681".into()));
+        });
+    }
+
+    #[test]
+    fn confirmation_label_input_keeps_identity_across_probe_updates() {
+        #[component]
+        fn Host() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let state = MobileState::new();
+            let step = signal(0_u8);
+            state.pairing_uri_input.set("100.84.12.50:7680".into());
+            state.pairing_probe.set(ProbeState::Result(AddrProbeResult {
+                addr: "100.84.12.50:7680".into(),
+                security: TransportSecurity::Tailscale,
+                reachable: true,
+                rtt_ms: Some(12),
+                error: None,
+            }));
+            view()
+                .w(px(390.0))
+                .h(px(844.0))
+                .child(
+                    view()
+                        .test_id("advance-probe")
+                        .on_press(move |_: &PressEvent| {
+                            let next = step.get_untracked() + 1;
+                            step.set(next);
+                            match next {
+                                1 => state
+                                    .pairing_probe
+                                    .set(ProbeState::Probing("100.84.12.50:7680".into())),
+                                _ => state.pairing_probe.set(ProbeState::Result(AddrProbeResult {
+                                    addr: "100.84.12.50:7680".into(),
+                                    security: TransportSecurity::Tailscale,
+                                    reachable: false,
+                                    rtt_ms: None,
+                                    error: Some("Timed out".into()),
+                                })),
+                            }
+                        }),
+                )
+                .child(pairing_panel(ui, state))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(390.0), px(844.0)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<Host>());
+        let initial = core.commit().expect("initial mount batch");
+
+        let inputs = mounted_input_ids(&initial);
+        assert_eq!(inputs.len(), 1, "expected confirmation label input");
+        let label_input_id = inputs[0];
+        let trigger_id = initial
+            .items
+            .iter()
+            .find_map(|item| match item {
+                MountItem::Create { id, .. } if core.listens(*id, EventKind::Press) => Some(*id),
+                _ => None,
+            })
+            .expect("probe trigger node");
+
+        // Transition probe state (Result -> Probing -> Result(unreachable)) and ensure the
+        // optional label input is never unmounted or recreated.
+        for _ in 0..2 {
+            assert!(core.component_event(trigger_id, EventKind::Press, &EventPayload::None));
+            if let Some(batch) = core.commit() {
+                assert!(!deletes_node(&batch, label_input_id));
+                assert!(mounted_input_ids(&batch).is_empty());
+            }
+        }
+    }
 }
