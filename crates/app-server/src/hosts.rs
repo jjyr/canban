@@ -835,7 +835,9 @@ impl HostRegistry {
                 .with_context(|| format!("Unknown Canban host '{host_id}'"))?;
             slot.saved.enabled = enabled;
             if !enabled {
-                slot.client = None;
+                if slot.client.take().is_some() {
+                    slot.reconnect_count = slot.reconnect_count.saturating_add(1);
+                }
                 slot.tunnel = None;
                 slot.connection = HostConnectionState::Offline {
                     error: "Disabled".into(),
@@ -867,7 +869,9 @@ impl HostRegistry {
             for (id, slot) in guard.iter_mut() {
                 if host_id.is_none_or(|target| target == id) && slot.saved.enabled && !slot.updating
                 {
-                    slot.client = None;
+                    if slot.client.take().is_some() {
+                        slot.reconnect_count = slot.reconnect_count.saturating_add(1);
+                    }
                     slot.tunnel = None;
                     slot.consecutive_failures = 0;
                     slot.next_retry_at = std::time::Instant::now();
@@ -1022,7 +1026,9 @@ impl HostRegistry {
                 bail!("Cannot remote-update Local transport");
             }
             slot.updating = true;
-            slot.client = None;
+            if slot.client.take().is_some() {
+                slot.reconnect_count = slot.reconnect_count.saturating_add(1);
+            }
             slot.tunnel = None;
             slot.connection = HostConnectionState::Updating {
                 version: String::new(),
@@ -1514,7 +1520,9 @@ impl HostRegistry {
                 if let Some(tun) = &mut slot.tunnel
                     && !tun.is_alive()
                 {
-                    slot.client = None;
+                    if slot.client.take().is_some() {
+                        slot.reconnect_count = slot.reconnect_count.saturating_add(1);
+                    }
                     slot.tunnel = None;
                 }
                 (
@@ -2030,11 +2038,19 @@ impl HostRegistry {
             if let Some(client) = &slot.client {
                 return client.config();
             }
-            if let Some(cached) = &slot.cached {
-                return cached.config.clone();
-            }
+            let mut cfg = slot
+                .cached
+                .as_ref()
+                .map(|c| c.config.clone())
+                .unwrap_or_default();
+            cfg.relay_endpoint = Some(format!("mux://offline:{host_id}"));
+            cfg.relay_token = None;
+            return cfg;
         }
-        self.local.config()
+        let mut cfg = self.local.config();
+        cfg.relay_endpoint = Some(format!("mux://offline:{host_id}"));
+        cfg.relay_token = None;
+        cfg
     }
 
     pub fn home_for(&self, host_id: &str) -> PathBuf {
@@ -3497,7 +3513,9 @@ async fn remote_host_supervisor(
                 if let Some(tun) = &mut slot.tunnel
                     && !tun.is_alive()
                 {
-                    slot.client = None;
+                    if slot.client.take().is_some() {
+                        slot.reconnect_count = slot.reconnect_count.saturating_add(1);
+                    }
                     slot.tunnel = None;
                 }
                 if let Some(client) = &slot.client {

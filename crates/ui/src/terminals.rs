@@ -20,6 +20,14 @@ pub(crate) fn sidebar_for_test(ui: Ui) -> impl IntoElement {
     tree::sidebar(ui)
 }
 
+pub(crate) fn host_connect_epoch(ui: Ui, host_id: &str) -> u64 {
+    if host_id.is_empty() || host_id == "local" {
+        return 0;
+    }
+    ui.host_connect_epochs
+        .with(|m| m.get(host_id).copied().unwrap_or(0))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn estimate_terminal_size_for_layout(
     window_size: (f32, f32),

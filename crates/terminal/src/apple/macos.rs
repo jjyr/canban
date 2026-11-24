@@ -348,6 +348,8 @@ impl Host {
         self.binding = key;
         self.content = None;
 
+        let host_id = value["host_id"].as_str().unwrap_or("").to_owned();
+        let session_epoch = value["epoch"].as_u64().unwrap_or(0);
         let Ok(config) = serde_json::from_value::<Config>(value["config"].clone()) else {
             return self.reset_unbound(prev_cols, prev_rows, prev_focused, theme);
         };
@@ -359,6 +361,7 @@ impl Host {
         };
 
         let session = get_or_spawn_session(SessionInit {
+            host_id,
             config,
             core,
             terminal,
@@ -369,6 +372,7 @@ impl Host {
             focused: prev_focused,
             theme,
             transport: None,
+            session_epoch,
         });
         if !self.view_ptr.is_null() {
             attach_nsview_wake(&session.wake, self.view_ptr);

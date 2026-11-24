@@ -62,6 +62,13 @@ impl Transport {
             .as_mut()
             .is_some_and(|c| !matches!(c.try_wait(), Ok(None)))
     }
+
+    /// Shuts down an underlying relay socket non-blockingly to unblock stuck readers/writers.
+    pub fn shutdown(&self) {
+        if let Some(socket) = &self.socket {
+            socket.shutdown();
+        }
+    }
 }
 impl Drop for Transport {
     fn drop(&mut self) {
@@ -181,7 +188,7 @@ pub fn connect_view_fenced(
                 config.relay_token.as_deref(),
             )?;
             socket.set_read_timeout(None)?;
-            socket.set_write_timeout(None)?;
+            socket.set_write_timeout(Some(Duration::from_secs(10)))?;
             return Ok(Transport {
                 reader: Some(Box::new(socket.try_clone()?)),
                 writer: Some(Box::new(socket.try_clone()?)),
@@ -199,6 +206,7 @@ pub fn connect_view_fenced(
             config.relay_token.as_deref(),
         )?;
         socket.set_read_timeout(None)?;
+        let _ = socket.set_write_timeout(Some(Duration::from_secs(10)));
         return Ok(Transport {
             reader: Some(Box::new(socket.try_clone()?)),
             writer: Some(Box::new(socket.try_clone()?)),

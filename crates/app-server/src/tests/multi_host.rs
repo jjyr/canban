@@ -2819,4 +2819,42 @@ fn colliding_projects_remote_globals_and_call_all_hosts_skip_offline_work_end_to
     for (hid, res) in fanout {
         assert!(res.is_ok(), "connected host {hid} fanout failed: {res:?}");
     }
+
+    // Offline host must expose an explicit offline relay marker instead of falling back to local hc.
+    let offline_cfg = registry.config_for("offline-box");
+    assert_eq!(
+        offline_cfg.relay_endpoint.as_deref(),
+        Some("mux://offline:offline-box")
+    );
+
+    // Reconnecting a remote host must mint a fresh mux:// endpoint and advance reconnect_count.
+    let before_cfg = registry.config_for("devpc");
+    let before_relay = before_cfg.relay_endpoint.clone().unwrap();
+    assert!(before_relay.starts_with("mux://"));
+    registry.set_host_enabled("devpc", false).unwrap();
+    let disabled_cfg = registry.config_for("devpc");
+    assert_eq!(
+        disabled_cfg.relay_endpoint.as_deref(),
+        Some("mux://offline:devpc")
+    );
+    registry.set_host_enabled("devpc", true).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let after_summary = loop {
+        if let Some(s) = registry
+            .summaries()
+            .into_iter()
+            .find(|h| h.id == "devpc" && h.connection.is_connected())
+        {
+            break s;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "devpc failed to reconnect"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert!(after_summary.reconnect_count >= 1);
+    let after_cfg = registry.config_for("devpc");
+    let after_relay = after_cfg.relay_endpoint.clone().unwrap();
+    assert!(after_relay.starts_with("mux://") && after_relay != before_relay);
 }

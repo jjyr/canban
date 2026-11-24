@@ -164,6 +164,8 @@ pub trait PtyAttachment: Send {
         false
     }
 
+    fn abort(&mut self) {}
+
     fn detach(self: Box<Self>) {}
 }
 
@@ -281,6 +283,10 @@ impl PtyAttachment for HerdrAttachment {
 
     fn resized_on_attach(&self) -> bool {
         self.0.resized_on_attach
+    }
+
+    fn abort(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -461,8 +467,34 @@ pub enum Input {
     Facts(DisplayFacts),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TransportKey {
+    Custom(usize),
+    Config {
+        relay_endpoint: Option<String>,
+        relay_token: Option<String>,
+        hc: String,
+        hc_session: String,
+    },
+}
+
+fn transport_key(transport: &Option<Arc<dyn PtyTransport>>, config: &Config) -> TransportKey {
+    match transport {
+        Some(t) => TransportKey::Custom(Arc::as_ptr(t) as *const () as usize),
+        None => TransportKey::Config {
+            relay_endpoint: config.relay_endpoint.clone(),
+            relay_token: config.relay_token.clone(),
+            hc: config.hc.clone(),
+            hc_session: config.hc_session.clone(),
+        },
+    }
+}
+
 pub struct LiveSession {
     pub key: (String, String),
+    pub host_id: String,
+    transport_key: TransportKey,
+    epoch: u64,
     pub state: Arc<Mutex<State>>,
     pub size_cv: Arc<Condvar>,
     pub wake: Arc<WakeHub>,
@@ -478,6 +510,7 @@ impl Drop for LiveSession {
 }
 
 pub struct SessionInit {
+    pub host_id: String,
     pub config: Config,
     pub core: String,
     pub terminal: String,
@@ -488,6 +521,7 @@ pub struct SessionInit {
     pub focused: bool,
     pub theme: Option<Value>,
     pub transport: Option<Arc<dyn PtyTransport>>,
+    pub session_epoch: u64,
 }
 
 fn session_pool() -> &'static Mutex<VecDeque<Arc<LiveSession>>> {
@@ -504,6 +538,23 @@ pub fn evict_session(core_id: &str, terminal: &str) {
             s.size_cv.notify_all();
         }
         keep
+    });
+}
+
+/// Evicts any background (listener-free) cached sessions belonging to `host_id`
+/// so subsequent views re-attach using the host's updated transport.
+pub fn evict_idle_host_sessions(host_id: &str) {
+    if host_id.is_empty() {
+        return;
+    }
+    let mut pool = session_pool().lock().unwrap();
+    pool.retain(|s| {
+        let evict = s.host_id == host_id && !s.wake.has_listeners();
+        if evict {
+            s.stop.store(true, Ordering::SeqCst);
+            s.size_cv.notify_all();
+        }
+        !evict
     });
 }
 
@@ -790,6 +841,7 @@ fn spawn_session_with_timings(
     settle_timings: AttachSettleTimings,
 ) -> Arc<LiveSession> {
     let SessionInit {
+        host_id,
         config,
         core,
         terminal,
@@ -800,7 +852,9 @@ fn spawn_session_with_timings(
         focused,
         theme,
         transport,
+        session_epoch,
     } = init;
+    let t_key = transport_key(&transport, &config);
     let transport = transport.unwrap_or_else(|| default_transport(config));
     let cols = initial_cols.max(2);
     let rows = initial_rows.max(1);
@@ -858,6 +912,9 @@ fn spawn_session_with_timings(
 
     let session = Arc::new(LiveSession {
         key: (core.clone(), terminal.clone()),
+        host_id,
+        transport_key: t_key,
+        epoch: session_epoch,
         state: state.clone(),
         size_cv: size_cv.clone(),
         wake: wake.clone(),
@@ -1109,6 +1166,7 @@ fn spawn_session_with_timings(
                         }
                         wake.notify();
                         input_stop.store(true, Ordering::SeqCst);
+                        attach.abort();
                         let _ = input_worker.join();
                         transport.detach(attach);
                         evict_session(&core, &terminal);
@@ -1157,6 +1215,7 @@ fn spawn_session_with_timings(
                 }
             }
             input_stop.store(true, Ordering::SeqCst);
+            attach.abort();
             let _ = input_worker.join();
             reconnect |= failed.load(Ordering::SeqCst);
             {
@@ -1183,6 +1242,7 @@ fn spawn_session_with_timings(
 
 pub fn get_or_spawn_session(init: SessionInit) -> Arc<LiveSession> {
     let _span = canban_profiler::Span::new("terminal.attach");
+    let next_transport_key = transport_key(&init.transport, &init.config);
     let mut pool = session_pool().lock().unwrap();
     pool.retain(|s| !s.stop.load(Ordering::SeqCst) && !s.state.lock().unwrap().exited);
     if let Some(idx) = pool
@@ -1190,28 +1250,34 @@ pub fn get_or_spawn_session(init: SessionInit) -> Arc<LiveSession> {
         .position(|s| s.key.0 == init.core && s.key.1 == init.terminal)
     {
         let existing = pool.remove(idx).unwrap();
-        let mut facts_to_send = None;
-        {
-            let mut s = existing.state.lock().unwrap();
-            if let Some(ref t) = init.theme
-                && s.theme.as_ref() != Some(t)
+        if existing.transport_key == next_transport_key && existing.epoch == init.session_epoch {
+            let mut facts_to_send = None;
             {
-                s.model.theme(t);
-                s.theme = Some(t.clone());
-                if s.connected {
-                    facts_to_send = Some(display_facts_for_model(&s.model, s.theme.as_ref()));
+                let mut s = existing.state.lock().unwrap();
+                if let Some(ref t) = init.theme
+                    && s.theme.as_ref() != Some(t)
+                {
+                    s.model.theme(t);
+                    s.theme = Some(t.clone());
+                    if s.connected {
+                        facts_to_send = Some(display_facts_for_model(&s.model, s.theme.as_ref()));
+                    }
+                }
+                if init.size_ready && !s.size_ready {
+                    s.size_ready = true;
+                    existing.size_cv.notify_all();
                 }
             }
-            if init.size_ready && !s.size_ready {
-                s.size_ready = true;
-                existing.size_cv.notify_all();
+            if let Some(facts) = facts_to_send {
+                let _ = existing.input.send(Input::Facts(facts));
             }
+            pool.push_back(existing.clone());
+            return existing;
         }
-        if let Some(facts) = facts_to_send {
-            let _ = existing.input.send(Input::Facts(facts));
-        }
-        pool.push_back(existing.clone());
-        return existing;
+        // Transport, relay endpoint, or host epoch changed after disconnect/reconnect:
+        // stop the stale session so the freshly spawned one opens on the live transport.
+        existing.stop.store(true, Ordering::SeqCst);
+        existing.size_cv.notify_all();
     }
     let created = spawn_session(init);
     while pool.len() >= MAX_POOLED_SESSIONS {
@@ -1338,6 +1404,7 @@ mod tests {
         });
 
         let session = get_or_spawn_session(SessionInit {
+            host_id: String::new(),
             config: Config::default(),
             core: "mock-core".into(),
             terminal: "mock-tty".into(),
@@ -1348,6 +1415,7 @@ mod tests {
             focused: true,
             theme: None,
             transport: Some(transport),
+            session_epoch: 0,
         });
 
         // Wait for transport.attach() to connect.
@@ -1469,6 +1537,7 @@ mod tests {
         let wakes = Arc::new(AtomicUsize::new(0));
         let wakes_cb = wakes.clone();
         let session = spawn_session(SessionInit {
+            host_id: String::new(),
             config: Config::default(),
             core: "c-same".into(),
             terminal: "t-same".into(),
@@ -1479,6 +1548,7 @@ mod tests {
             focused: false,
             theme: None,
             transport: Some(transport),
+            session_epoch: 0,
         });
         session.wake.attach(
             99,
@@ -1722,6 +1792,7 @@ mod tests {
         let wakes_cb = wakes.clone();
         let session = spawn_session_with_timings(
             SessionInit {
+                host_id: String::new(),
                 config: Config::default(),
                 core: "c-sync".into(),
                 terminal: "t-sync".into(),
@@ -1732,6 +1803,7 @@ mod tests {
                 focused: false,
                 theme: None,
                 transport: Some(transport),
+                session_epoch: 0,
             },
             AttachSettleTimings {
                 coalesce: Duration::from_secs(10),
@@ -1843,6 +1915,7 @@ mod tests {
         let wakes_cb = wakes.clone();
         let session = spawn_session_with_timings(
             SessionInit {
+                host_id: String::new(),
                 config: Config::default(),
                 core: "c-plain".into(),
                 terminal: "t-plain".into(),
@@ -1853,6 +1926,7 @@ mod tests {
                 focused: false,
                 theme: None,
                 transport: Some(transport),
+                session_epoch: 0,
             },
             AttachSettleTimings {
                 coalesce: Duration::from_secs(10),
@@ -1939,6 +2013,7 @@ mod tests {
             resized_on_attach: false,
         });
         let session = spawn_session(SessionInit {
+            host_id: String::new(),
             config: Config::default(),
             core: "c-dup".into(),
             terminal: "t-dup".into(),
@@ -1949,6 +2024,7 @@ mod tests {
             focused: false,
             theme: None,
             transport: Some(transport),
+            session_epoch: 0,
         });
 
         for _ in 0..50 {
@@ -1971,5 +2047,164 @@ mod tests {
         }
         assert_eq!(written.lock().unwrap().as_slice(), &[b"hi".to_vec()]);
         assert_eq!(resizes.lock().unwrap().as_slice(), &[(110, 32)]);
+    }
+
+    #[test]
+    fn pool_reuses_same_transport_and_evicts_on_transport_relay_or_epoch_change() {
+        let make_transport = || {
+            let (_tx, rx) = mpsc::channel();
+            Arc::new(MockTransport {
+                written: Arc::new(Mutex::new(Vec::new())),
+                resizes: Arc::new(Mutex::new(Vec::new())),
+                detached: Arc::new(AtomicBool::new(false)),
+                events_rx: Mutex::new(Some(rx)),
+                resized_on_attach: false,
+            }) as Arc<dyn PtyTransport>
+        };
+
+        let core = "core-rebind-pool";
+        let tty = "tty-rebind-pool";
+        evict_session(core, tty);
+
+        let tr1 = make_transport();
+        let s1 = get_or_spawn_session(SessionInit {
+            host_id: "devpc".into(),
+            config: Config::default(),
+            core: core.into(),
+            terminal: tty.into(),
+            initial_cols: 80,
+            initial_rows: 24,
+            initial_cell: (8, 16),
+            size_ready: true,
+            focused: false,
+            theme: None,
+            transport: Some(tr1.clone()),
+            session_epoch: 0,
+        });
+
+        // Same transport pointer + same epoch -> reuses identical session.
+        let s1_again = get_or_spawn_session(SessionInit {
+            host_id: "devpc".into(),
+            config: Config::default(),
+            core: core.into(),
+            terminal: tty.into(),
+            initial_cols: 80,
+            initial_rows: 24,
+            initial_cell: (8, 16),
+            size_ready: true,
+            focused: false,
+            theme: None,
+            transport: Some(tr1),
+            session_epoch: 0,
+        });
+        assert!(Arc::ptr_eq(&s1, &s1_again));
+
+        // Different transport pointer (e.g. reconnected RemotePtyTransport) -> replaces + stops s1.
+        let tr2 = make_transport();
+        let s2 = get_or_spawn_session(SessionInit {
+            host_id: "devpc".into(),
+            config: Config::default(),
+            core: core.into(),
+            terminal: tty.into(),
+            initial_cols: 80,
+            initial_rows: 24,
+            initial_cell: (8, 16),
+            size_ready: true,
+            focused: false,
+            theme: None,
+            transport: Some(tr2.clone()),
+            session_epoch: 0,
+        });
+        assert!(!Arc::ptr_eq(&s1, &s2));
+        assert!(s1.stop.load(Ordering::SeqCst));
+
+        // Bumping session_epoch (e.g. SSH tunnel reconnect with same socket path) -> replaces s2.
+        let s3 = get_or_spawn_session(SessionInit {
+            host_id: "devpc".into(),
+            config: Config::default(),
+            core: core.into(),
+            terminal: tty.into(),
+            initial_cols: 80,
+            initial_rows: 24,
+            initial_cell: (8, 16),
+            size_ready: true,
+            focused: false,
+            theme: None,
+            transport: Some(tr2),
+            session_epoch: 1,
+        });
+        assert!(!Arc::ptr_eq(&s2, &s3));
+        assert!(s2.stop.load(Ordering::SeqCst));
+
+        // evict_idle_host_sessions skips sessions with an active listener and evicts idle ones.
+        s3.wake.attach(777, Arc::new(|| {}));
+        let idle_core = "core-idle-evict";
+        let idle_tty = "tty-idle-evict";
+        evict_session(idle_core, idle_tty);
+        let s_idle = get_or_spawn_session(SessionInit {
+            host_id: "devpc".into(),
+            config: Config::default(),
+            core: idle_core.into(),
+            terminal: idle_tty.into(),
+            initial_cols: 80,
+            initial_rows: 24,
+            initial_cell: (8, 16),
+            size_ready: true,
+            focused: false,
+            theme: None,
+            transport: Some(make_transport()),
+            session_epoch: 0,
+        });
+        evict_idle_host_sessions("devpc");
+        assert!(s_idle.stop.load(Ordering::SeqCst));
+        assert!(!s3.stop.load(Ordering::SeqCst));
+        s3.wake.detach(777);
+        evict_session(core, tty);
+
+        // Changing Config.relay_endpoint without custom transport also replaces stale session.
+        let relay_core = "core-relay-swap";
+        let relay_tty = "tty-relay-swap";
+        evict_session(relay_core, relay_tty);
+        let cfg1 = Config {
+            hc: "/usr/bin/false".into(),
+            relay_endpoint: Some("mux://old".into()),
+            ..Default::default()
+        };
+        let cfg2 = Config {
+            hc: "/usr/bin/false".into(),
+            relay_endpoint: Some("mux://new".into()),
+            ..Default::default()
+        };
+        let sr1 = get_or_spawn_session(SessionInit {
+            host_id: "devpc".into(),
+            config: cfg1,
+            core: relay_core.into(),
+            terminal: relay_tty.into(),
+            initial_cols: 80,
+            initial_rows: 24,
+            initial_cell: (8, 16),
+            size_ready: false,
+            focused: false,
+            theme: None,
+            transport: None,
+            session_epoch: 0,
+        });
+        let sr2 = get_or_spawn_session(SessionInit {
+            host_id: "devpc".into(),
+            config: cfg2,
+            core: relay_core.into(),
+            terminal: relay_tty.into(),
+            initial_cols: 80,
+            initial_rows: 24,
+            initial_cell: (8, 16),
+            size_ready: false,
+            focused: false,
+            theme: None,
+            transport: None,
+            session_epoch: 0,
+        });
+        assert!(!Arc::ptr_eq(&sr1, &sr2));
+        assert!(sr1.stop.load(Ordering::SeqCst));
+        evict_session(relay_core, relay_tty);
     }
 }

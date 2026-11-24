@@ -381,10 +381,12 @@ impl ControllerSlot {
         self.binding = next.clone();
 
         let Some(LiveBinding {
+            host_id,
             config,
             core_id,
             terminal,
             transport,
+            session_epoch,
         }) = next
         else {
             self.state = Arc::new(Mutex::new(State::new(prev_cols.max(2), prev_rows.max(1))));
@@ -394,6 +396,7 @@ impl ControllerSlot {
         };
 
         let session = get_or_spawn_session(SessionInit {
+            host_id,
             config,
             core: core_id,
             terminal,
@@ -404,6 +407,7 @@ impl ControllerSlot {
             focused: prev_focused,
             theme,
             transport,
+            session_epoch,
         });
 
         let wake_target = self.wake.clone();

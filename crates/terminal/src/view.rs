@@ -10,20 +10,25 @@ use std::{fmt, rc::Rc, sync::Arc};
 /// Live Herdr PTY target for a mounted terminal surface.
 #[derive(Clone)]
 pub struct LiveBinding {
+    pub host_id: String,
     pub config: Config,
     pub core_id: String,
     pub terminal: String,
     /// Optional explicit PTY transport (e.g. mobile `RemotePtyTransport` without local Herdr/SSH).
     pub transport: Option<Arc<dyn PtyTransport>>,
+    /// Monotonic connection epoch bumped when the owning remote host reconnects.
+    pub session_epoch: u64,
 }
 
 impl LiveBinding {
     pub fn new(config: Config, core_id: impl Into<String>, terminal: impl Into<String>) -> Self {
         Self {
+            host_id: String::new(),
             config,
             core_id: core_id.into(),
             terminal: terminal.into(),
             transport: None,
+            session_epoch: 0,
         }
     }
 
@@ -36,10 +41,12 @@ impl LiveBinding {
 impl fmt::Debug for LiveBinding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LiveBinding")
+            .field("host_id", &self.host_id)
             .field("config", &self.config)
             .field("core_id", &self.core_id)
             .field("terminal", &self.terminal)
             .field("has_transport", &self.transport.is_some())
+            .field("session_epoch", &self.session_epoch)
             .finish()
     }
 }
@@ -53,10 +60,12 @@ impl PartialEq for LiveBinding {
             }
             _ => false,
         };
-        self.config == other.config
+        self.host_id == other.host_id
+            && self.config == other.config
             && self.core_id == other.core_id
             && self.terminal == other.terminal
             && same_transport
+            && self.session_epoch == other.session_epoch
     }
 }
 
@@ -296,9 +305,11 @@ impl IntoElement for TerminalView {
                 TerminalSurface::Live(binding) => el
                     .prop("binding", move || match binding() {
                         Some(b) => json!({
+                            "host_id": b.host_id,
                             "config": b.config,
                             "terminal": b.terminal,
                             "core_id": b.core_id,
+                            "epoch": b.session_epoch,
                         }),
                         None => Value::Null,
                     })

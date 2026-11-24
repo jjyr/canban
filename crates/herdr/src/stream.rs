@@ -2,7 +2,11 @@
 use super::*;
 use std::{
     io::Read,
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::Duration,
 };
 pub enum Event {
@@ -17,6 +21,7 @@ pub struct Attachment {
     receiver: mpsc::Receiver<Event>,
     transport: super::transport::Transport,
     channel: u32,
+    aborted: AtomicBool,
     pub automatic_input: bool,
     pub prior_size: Option<(u16, u16)>,
     pub resized_on_attach: bool,
@@ -253,6 +258,7 @@ impl Client {
             receiver,
             transport,
             channel,
+            aborted: AtomicBool::new(false),
             automatic_input,
             prior_size,
             resized_on_attach,
@@ -317,10 +323,19 @@ impl Attachment {
         let data = serde_json::to_vec(&display.to_json())?;
         frame(&mut *self.writer.lock().unwrap(), self.channel, 5, &data)
     }
+    /// Marks the attachment aborted and shuts down the transport without locking `writer`.
+    pub fn abort(&self) {
+        self.aborted.store(true, Ordering::SeqCst);
+        self.transport.shutdown();
+    }
 }
 impl Drop for Attachment {
     fn drop(&mut self) {
-        let _ = frame(&mut *self.writer.lock().unwrap(), self.channel, 2, &[]);
+        if !self.aborted.load(Ordering::SeqCst)
+            && let Ok(mut w) = self.writer.try_lock()
+        {
+            let _ = frame(&mut *w, self.channel, 2, &[]);
+        }
         // Dropping the transport closes only this viewer/relay, never its PTY.
         let _ = &self.transport;
     }

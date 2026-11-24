@@ -197,7 +197,7 @@ fn infer_ssh_target_for_host(summary: &HostSummary) -> Option<String> {
 
 fn mark_host_connection(ui: Ui, host_id: &str, next: HostConnectionState) {
     let cur_list = untracked(|| effective_hosts(ui));
-    ui.hosts.set(
+    ui.apply_hosts(
         cur_list
             .into_iter()
             .map(|mut h| {
@@ -2757,7 +2757,7 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
                 local.project_count = existing.project_count;
                 local.last_synced_at = existing.last_synced_at;
             }
-            ui.hosts.set(sums);
+            ui.apply_hosts(sums);
         }
     };
     reload_saved();

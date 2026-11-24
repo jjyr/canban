@@ -40,6 +40,11 @@ pub fn evict_session(core_id: &str, terminal: &str) {
     session::evict_session(core_id, terminal);
 }
 
+/// Evicts any background cached PTY sessions belonging to `host_id`.
+pub fn evict_idle_host_sessions(host_id: &str) {
+    session::evict_idle_host_sessions(host_id);
+}
+
 /// Returns the most recently measured live terminal viewport `(cols, rows)`, if any.
 pub fn last_viewport_size() -> Option<(u16, u16)> {
     session::last_viewport_size()

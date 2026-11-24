@@ -237,6 +237,8 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                                 .snapshot
                                 .with_untracked(|s| s.terminal_host(entry_id).to_owned());
                             canban_terminal::LiveBinding {
+                                session_epoch: crate::terminals::host_connect_epoch(ui, &host_id),
+                                host_id: host_id.clone(),
                                 config: crate::config_for_host(&host_id),
                                 core_id: core_id.clone(),
                                 terminal: terminal.clone(),

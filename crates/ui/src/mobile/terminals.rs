@@ -445,6 +445,10 @@ pub(crate) fn pushed_page(ui: Ui, state: MobileState, terminal_id: String) -> im
                         move || {
                             (!core_id.is_empty() && !tty.is_empty()).then(|| {
                                 canban_terminal::LiveBinding {
+                                    session_epoch: crate::terminals::host_connect_epoch(
+                                        ui, &host_id,
+                                    ),
+                                    host_id: host_id.clone(),
                                     config: crate::config_for_host(&host_id),
                                     core_id: core_id.clone(),
                                     terminal: tty.clone(),

@@ -48,6 +48,9 @@ fn init_mux_relay_opener() {
                 let key = endpoint
                     .strip_prefix("mux://")
                     .context("Invalid mux relay endpoint")?;
+                if key.starts_with("offline:") {
+                    bail!("Remote host is offline");
+                }
                 let mut app_side = canban_transport::open_mux_bridge(key)?;
                 let _ = app_side.set_read_timeout(Some(Duration::from_secs(90)));
                 let _ = app_side.set_write_timeout(Some(Duration::from_secs(90)));
@@ -58,7 +61,7 @@ fn init_mux_relay_opener() {
                     None,
                 )?;
                 let _ = app_side.set_read_timeout(None);
-                let _ = app_side.set_write_timeout(None);
+                let _ = app_side.set_write_timeout(Some(Duration::from_secs(10)));
                 canban_herdr::transport::Transport::from_unix_stream(app_side)
             },
         ));

@@ -204,6 +204,7 @@ impl RemoteHostSlot {
     fn clear_connection(&mut self, next_state: HostConnectionState) {
         if let Some(client) = self.client.take() {
             client.close();
+            self.reconnect_count = self.reconnect_count.saturating_add(1);
         }
         self.terminal = None;
         self.connection = next_state;

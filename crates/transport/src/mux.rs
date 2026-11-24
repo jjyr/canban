@@ -126,13 +126,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> MuxDriver<T> {
         loop {
             if self.closing {
                 self.reject_pending("Multiplexed connection closed");
-                return match self.conn.poll_close(cx) {
-                    Poll::Ready(_) => {
-                        self.closed_flag.store(true, Ordering::Release);
-                        Poll::Ready(())
-                    }
-                    Poll::Pending => Poll::Pending,
-                };
+                return Poll::Ready(());
             }
 
             if self.pending_open.is_none() {
@@ -278,6 +272,14 @@ fn spawn_mux<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     };
     tokio::spawn(async move {
         poll_fn(|cx| driver.poll_drive(cx)).await;
+        if driver.closing {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                poll_fn(|cx| driver.conn.poll_close(cx)),
+            )
+            .await;
+            driver.closed_flag.store(true, Ordering::Release);
+        }
     });
 
     if matches!(mode, yamux::Mode::Client) {
@@ -429,5 +431,26 @@ mod tests {
 
         client.close();
         srv_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mux_close_on_stalled_peer_returns_promptly_and_fails_open_stream() {
+        let (client_io, _server_io_stalled) = tokio::io::duplex(64);
+        let client = connect_mux(client_io);
+
+        let close_started = std::time::Instant::now();
+        client.close();
+        assert!(client.is_closed());
+        for _ in 0..50 {
+            if client.open_stream().await.is_err() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            close_started.elapsed() < std::time::Duration::from_secs(2),
+            "closing a stalled mux must not block indefinitely"
+        );
+        assert!(client.open_stream().await.is_err());
     }
 }

@@ -246,6 +246,9 @@ pub struct Ui {
     pub archived_projects_reload: Signal<u64>,
     pub archived_projects_preview: Signal<Option<Vec<crate::projects::ArchivedProjectSummary>>>,
     pub hosts: Signal<Vec<HostSummary>>,
+    /// Per-remote-host reconnect epoch bumped whenever a remote host transitions back
+    /// to `Connected` or reports a new `reconnect_count`.
+    pub host_connect_epochs: Signal<BTreeMap<String, u64>>,
     pub paired_devices_preview: Signal<Option<PairedDevicesPreview>>,
     pub sync_preview: Signal<Vec<SyncItemView>>,
     pub settings_host: Signal<String>,
@@ -725,6 +728,7 @@ impl Ui {
             archived_projects_reload: signal(0),
             archived_projects_preview: signal(None),
             hosts: signal(crate::host_summaries()),
+            host_connect_epochs: signal(BTreeMap::new()),
             paired_devices_preview: signal(None),
             sync_preview: signal(Vec::new()),
             settings_host: signal("local".into()),
@@ -768,6 +772,36 @@ impl Ui {
                 String::new()
             },
         }
+    }
+    pub fn apply_hosts(self, summaries: Vec<HostSummary>) {
+        let prev = self.hosts.get_untracked();
+        if prev == summaries {
+            return;
+        }
+        let mut to_bump = Vec::new();
+        for h in &summaries {
+            if h.is_local || !h.connection.is_connected() {
+                continue;
+            }
+            let reconnected = prev.iter().find(|old| old.id == h.id).is_none_or(|old| {
+                !old.connection.is_connected() || old.reconnect_count != h.reconnect_count
+            });
+            if reconnected {
+                to_bump.push(h.id.clone());
+            }
+        }
+        if !to_bump.is_empty() {
+            self.host_connect_epochs.update(|epochs| {
+                for hid in &to_bump {
+                    let next = epochs.get(hid).copied().unwrap_or(0).saturating_add(1);
+                    epochs.insert(hid.clone(), next);
+                }
+            });
+            for hid in to_bump {
+                canban_terminal::evict_idle_host_sessions(&hid);
+            }
+        }
+        self.hosts.set(summaries);
     }
     pub fn open_terminal(self, conversation: String) {
         self.open_terminal_internal(conversation, true);
@@ -1490,8 +1524,8 @@ pub fn refresh(ui: Ui) {
                 }
                 let different = ui.snapshot.with_untracked(|old| old != &snapshot);
                 batch(move || {
-                    if !summaries.is_empty() && ui.hosts.with_untracked(|old| *old != summaries) {
-                        ui.hosts.set(summaries);
+                    if !summaries.is_empty() {
+                        ui.apply_hosts(summaries);
                     }
                     ui.apply_config(&config);
                     let cur_project = ui.project.get_untracked();
@@ -1749,7 +1783,7 @@ pub fn dispatch_complete(
                             .with(|writes| writes.reconcile(&mut snapshot));
                         let summaries = snapshot_summaries(&snapshot);
                         if !summaries.is_empty() {
-                            ui.hosts.set(summaries);
+                            ui.apply_hosts(summaries);
                         }
                         ui.apply_config(&config);
                         ui.snapshot.set(snapshot);
@@ -3325,5 +3359,64 @@ mod tests {
             "Found direct tracked ui.snapshot / ui.runtime_clock reads inside dynamic(...) blocks:\n{}",
             all_violations.join("\n")
         );
+    }
+
+    #[test]
+    fn apply_hosts_bumps_connect_epoch_only_on_remote_reconnect() {
+        let rt = nsh_core::element::Runtime::default();
+        let _entered = rt.enter();
+        let ui = Ui::new();
+        let mk_remote = |connected: bool, rtt_ms: u64, reconnect_count: u32| HostSummary {
+            id: "devpc".into(),
+            name: "devpc".into(),
+            is_local: false,
+            transport_label: "TCP".into(),
+            endpoint_label: "100.64.0.2:7680".into(),
+            ssh_target: None,
+            server_id: None,
+            connection: if connected {
+                HostConnectionState::Connected {
+                    rtt_ms,
+                    api_version: canban_updater::DESKTOP_API,
+                    version: "1".into(),
+                    platform: "linux".into(),
+                }
+            } else {
+                HostConnectionState::Offline {
+                    error: "network lost".into(),
+                    cached_at: None,
+                }
+            },
+            active_agents: 0,
+            max_agents: 4,
+            project_count: 1,
+            reconnect_count,
+            last_synced_at: None,
+            pending_mutations: 0,
+            sync_conflicts: 0,
+        };
+
+        // First Connected appearance bumps epoch to 1.
+        ui.apply_hosts(vec![mk_remote(true, 10, 0)]);
+        assert_eq!(crate::terminals::host_connect_epoch(ui, "devpc"), 1);
+
+        // Routine RTT / summary tick while staying Connected at same reconnect_count does not bump.
+        ui.apply_hosts(vec![mk_remote(true, 25, 0)]);
+        assert_eq!(crate::terminals::host_connect_epoch(ui, "devpc"), 1);
+
+        // Going Offline does not bump.
+        ui.apply_hosts(vec![mk_remote(false, 25, 1)]);
+        assert_eq!(crate::terminals::host_connect_epoch(ui, "devpc"), 1);
+
+        // Coming back Connected bumps epoch to 2.
+        ui.apply_hosts(vec![mk_remote(true, 12, 1)]);
+        assert_eq!(crate::terminals::host_connect_epoch(ui, "devpc"), 2);
+
+        // Reconnect completing within a single poll tick (reconnect_count 1 -> 2) bumps epoch to 3.
+        ui.apply_hosts(vec![mk_remote(true, 14, 2)]);
+        assert_eq!(crate::terminals::host_connect_epoch(ui, "devpc"), 3);
+
+        // Local host epoch always stays 0.
+        assert_eq!(crate::terminals::host_connect_epoch(ui, "local"), 0);
     }
 }

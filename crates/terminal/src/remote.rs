@@ -341,6 +341,11 @@ impl PtyAttachment for RemoteAttachment {
         self.resized_on_attach
     }
 
+    fn abort(&mut self) {
+        self.writer.send_detach();
+        self.reader_abort.abort();
+    }
+
     fn detach(self: Box<Self>) {
         // Explicit detach delegates to `Drop`, which sends the Herdr detach frame cleanly.
     }
@@ -970,6 +975,7 @@ mod tests {
 
         // End-to-end LiveSession integration using RemotePtyTransport.
         let session = get_or_spawn_session(SessionInit {
+            host_id: String::new(),
             config: Config::default(),
             core: "core-conc".into(),
             terminal: "tty-session".into(),
@@ -980,6 +986,7 @@ mod tests {
             focused: true,
             theme: None,
             transport: Some(remote),
+            session_epoch: 0,
         });
         for _ in 0..80 {
             if session
@@ -1060,5 +1067,128 @@ mod tests {
         let att_legacy = remote_legacy.attach(&params_90x30).unwrap();
         assert!(!att_legacy.resized_on_attach());
         drop(att_legacy);
+    }
+
+    #[test]
+    fn existing_remote_session_recovers_output_and_input_after_transport_reconnect() {
+        let daemon = start_mock_daemon("core-reconnect", true);
+        let client1 = Arc::new(
+            ClientTransport::connect_tcp(
+                daemon.addr.clone(),
+                daemon.token.clone(),
+                "reconnect-1".into(),
+            )
+            .unwrap(),
+        );
+        let remote1 = Arc::new(RemotePtyTransport::with_transport(client1.clone()).unwrap());
+        let session1 = get_or_spawn_session(SessionInit {
+            host_id: "devpc".into(),
+            config: Config::default(),
+            core: "core-reconnect".into(),
+            terminal: "tty-persist".into(),
+            initial_cols: 80,
+            initial_rows: 24,
+            initial_cell: (8, 16),
+            size_ready: true,
+            focused: true,
+            theme: None,
+            transport: Some(remote1),
+            session_epoch: 0,
+        });
+        for _ in 0..80 {
+            if session1
+                .state
+                .lock()
+                .unwrap()
+                .model
+                .viewport_text()
+                .contains("banner:tty-persist")
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(session1.state.lock().unwrap().connected);
+
+        // Simulate network drop tearing down transport #1.
+        client1.close();
+        for _ in 0..80 {
+            if !session1.state.lock().unwrap().connected {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        // Reconnect yields transport #2; rebinding the same (core, terminal) with epoch 1
+        // replaces the stalled session and restores output + keyboard echo.
+        let client2 = Arc::new(
+            ClientTransport::connect_tcp(
+                daemon.addr.clone(),
+                daemon.token.clone(),
+                "reconnect-2".into(),
+            )
+            .unwrap(),
+        );
+        let remote2 = Arc::new(RemotePtyTransport::with_transport(client2).unwrap());
+        let session2 = get_or_spawn_session(SessionInit {
+            host_id: "devpc".into(),
+            config: Config::default(),
+            core: "core-reconnect".into(),
+            terminal: "tty-persist".into(),
+            initial_cols: 80,
+            initial_rows: 24,
+            initial_cell: (8, 16),
+            size_ready: true,
+            focused: true,
+            theme: None,
+            transport: Some(remote2),
+            session_epoch: 1,
+        });
+        assert!(!Arc::ptr_eq(&session1, &session2));
+        assert!(session1.stop.load(Ordering::SeqCst));
+
+        for _ in 0..80 {
+            if session2.state.lock().unwrap().connected
+                && session2
+                    .state
+                    .lock()
+                    .unwrap()
+                    .model
+                    .viewport_text()
+                    .contains("banner:tty-persist")
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(session2.state.lock().unwrap().connected);
+
+        session2
+            .input
+            .send(crate::session::Input::Bytes(b"after-reconnect".to_vec()))
+            .unwrap();
+        for _ in 0..80 {
+            if session2
+                .state
+                .lock()
+                .unwrap()
+                .model
+                .viewport_text()
+                .contains("echo:tty-persist:after-reconnect")
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            session2
+                .state
+                .lock()
+                .unwrap()
+                .model
+                .viewport_text()
+                .contains("echo:tty-persist:after-reconnect")
+        );
+        evict_session("core-reconnect", "tty-persist");
     }
 }
