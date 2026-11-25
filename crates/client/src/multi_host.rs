@@ -376,6 +376,17 @@ fn is_auth_error(err: &anyhow::Error) -> bool {
         || msg.contains("-32001")
 }
 
+fn auth_failed_error(host_name: &str, error: &str) -> anyhow::Error {
+    let trimmed = error.trim();
+    if trimmed.to_ascii_lowercase().contains("auth_failed") {
+        anyhow!("Host '{host_name}': {trimmed}")
+    } else if trimmed.is_empty() {
+        anyhow!("auth_failed: Host '{host_name}' requires re-authentication")
+    } else {
+        anyhow!("auth_failed: Host '{host_name}': {trimmed}")
+    }
+}
+
 fn block_on_rt<F, T>(handle: &tokio::runtime::Handle, fut: F) -> T
 where
     F: std::future::Future<Output = T> + Send,
@@ -866,11 +877,24 @@ impl MultiHostClient {
         if let Some(client) = &slot.client {
             return Ok(Arc::clone(client));
         }
+        if let HostConnectionState::AuthFailed { error } = &slot.connection {
+            return Err(auth_failed_error(&slot.saved.name, error));
+        }
         bail!(
             "Host '{}' is currently unavailable ({})",
             slot.saved.name,
             slot.connection.short_status()
         )
+    }
+
+    fn slot_auth_failed_error(&self, host_id: &str) -> Option<anyhow::Error> {
+        let guard = self.hosts.read().unwrap();
+        guard.get(host_id).and_then(|slot| match &slot.connection {
+            HostConnectionState::AuthFailed { error } if slot.client.is_none() => {
+                Some(auth_failed_error(&slot.saved.name, error))
+            }
+            _ => None,
+        })
     }
 
     /// Returns `true` when `host_id` is currently waiting for a scheduled retry deadline
@@ -1030,6 +1054,15 @@ impl MultiHostClient {
                 if !slot.saved.enabled || slot.updating {
                     continue;
                 }
+                if matches!(slot.connection, HostConnectionState::AuthFailed { .. }) {
+                    let is_tailscale = matches!(
+                        &slot.saved.transport,
+                        HostTransport::Tcp { token, .. } if canban_types::is_tailscale_auth(token)
+                    );
+                    if !is_tailscale {
+                        continue;
+                    }
+                }
                 slot.next_retry_at = 0;
                 if slot.client.is_none() {
                     slot.connection = HostConnectionState::Connecting;
@@ -1082,26 +1115,28 @@ impl MultiHostClient {
         }
     }
 
-    /// Wakes supervisor(s) without tearing down healthy connections.
+    /// Wakes supervisor(s) without tearing down healthy connections or retrying `AuthFailed` hosts.
     pub fn wake_host(&self, host_id: &str) {
         if let Some(notify) = self
             .hosts
             .read()
             .unwrap()
             .get(host_id)
+            .filter(|s| !matches!(s.connection, HostConnectionState::AuthFailed { .. }))
             .map(|s| Arc::clone(&s.supervisor_notify))
         {
             notify.notify_one();
         }
     }
 
-    /// Wakes all remote host supervisors without tearing down healthy connections.
+    /// Wakes all remote host supervisors without tearing down healthy connections or retrying `AuthFailed` hosts.
     pub fn wake_all(&self) {
         let notifies: Vec<Arc<Notify>> = self
             .hosts
             .read()
             .unwrap()
             .values()
+            .filter(|s| !matches!(s.connection, HostConnectionState::AuthFailed { .. }))
             .map(|s| Arc::clone(&s.supervisor_notify))
             .collect();
         for n in notifies {
@@ -1127,6 +1162,7 @@ impl MultiHostClient {
                 .filter(|s| {
                     s.saved.enabled
                         && !s.updating
+                        && !matches!(s.connection, HostConnectionState::AuthFailed { .. })
                         && (s.client.is_some() || now_ms >= s.next_retry_at)
                 })
                 .map(|s| s.saved.id.clone())
@@ -1244,6 +1280,12 @@ impl MultiHostClient {
             !addr.is_empty(),
             "Pairing invite does not contain an address"
         );
+        let check_id = preferred_id.as_deref().unwrap_or("");
+        self.validate_remote_server_id(
+            check_id,
+            invite.server_id.as_deref(),
+            reject_duplicate_server_id,
+        )?;
 
         let tcp_transport = HostTransport::Tcp {
             addr: addr.clone(),
@@ -2232,6 +2274,9 @@ impl MultiHostClient {
             return local.call(method, params);
         }
         canban_types::strip_qualified_host_ids(&mut params, &host_id);
+        if let Some(auth_err) = self.slot_auth_failed_error(&host_id) {
+            return Err(auth_err);
+        }
 
         if method == "card.resolve.preview" {
             return self.handle_resolve_preview_async(&host_id, &params).await;
@@ -2265,6 +2310,15 @@ impl MultiHostClient {
                         }
                         self.qualify_remote_response(&host_id, &mut val);
                         return Ok(val);
+                    }
+                    Err(err) if is_auth_error(&err) => {
+                        self.mark_slot_disconnected(
+                            &host_id,
+                            Some(client_gen),
+                            err.to_string(),
+                            false,
+                        );
+                        return Err(err);
                     }
                     Err(err) if is_connection_error(&err) => {
                         self.mark_slot_disconnected(
@@ -2332,6 +2386,15 @@ impl MultiHostClient {
                         self.qualify_remote_response(&host_id, &mut val);
                         return Ok(val);
                     }
+                    Err(err) if is_auth_error(&err) => {
+                        self.mark_slot_disconnected(
+                            &host_id,
+                            Some(client_gen),
+                            err.to_string(),
+                            false,
+                        );
+                        return Err(err);
+                    }
                     Err(err) if is_connection_error(&err) => {
                         self.mark_slot_disconnected(
                             &host_id,
@@ -2394,6 +2457,15 @@ impl MultiHostClient {
                     )?;
                     match client.call_async(method, &params).await {
                         Ok(val) => val,
+                        Err(err) if is_auth_error(&err) => {
+                            self.mark_slot_disconnected(
+                                &host_id,
+                                Some(client_gen),
+                                err.to_string(),
+                                false,
+                            );
+                            return Err(err);
+                        }
                         Err(err) if is_connection_error(&err) => {
                             self.mark_slot_disconnected(
                                 &host_id,
@@ -2419,6 +2491,15 @@ impl MultiHostClient {
                 )?;
                 match client.call_async(method, &params).await {
                     Ok(val) => val,
+                    Err(err) if is_auth_error(&err) => {
+                        self.mark_slot_disconnected(
+                            &host_id,
+                            Some(client_gen),
+                            err.to_string(),
+                            false,
+                        );
+                        return Err(err);
+                    }
                     Err(err) if is_connection_error(&err) => {
                         self.mark_slot_disconnected(
                             &host_id,
@@ -2477,6 +2558,15 @@ impl MultiHostClient {
                         )?;
                         match client.call_async(method, &wire_params).await {
                             Ok(val) => (Some(val), false),
+                            Err(err) if is_auth_error(&err) => {
+                                self.mark_slot_disconnected(
+                                    &host_id,
+                                    Some(client_gen),
+                                    err.to_string(),
+                                    false,
+                                );
+                                return Err(err);
+                            }
                             Err(err) if is_connection_error(&err) => {
                                 self.mark_slot_disconnected(
                                     &host_id,
@@ -2745,6 +2835,10 @@ impl MultiHostClient {
         if let Some((client, client_gen)) = client_opt {
             match client.call_async("card.resolve.preview", params).await {
                 Ok(v) => return Ok(v),
+                Err(err) if is_auth_error(&err) => {
+                    self.mark_slot_disconnected(host_id, Some(client_gen), err.to_string(), false);
+                    return Err(err);
+                }
                 Err(err) if !is_connection_error(&err) => return Err(err),
                 Err(err) => {
                     self.mark_slot_disconnected(host_id, Some(client_gen), err.to_string(), true);
@@ -4044,7 +4138,10 @@ impl MultiHostClient {
                 let Some(slot) = guard.get(host_id) else {
                     break;
                 };
-                if !slot.saved.enabled || slot.updating {
+                if !slot.saved.enabled
+                    || slot.updating
+                    || matches!(slot.connection, HostConnectionState::AuthFailed { .. })
+                {
                     break;
                 }
                 let Some(client) = slot.client.clone() else {
@@ -4347,7 +4444,10 @@ impl MultiHostClient {
             let Some(slot) = guard.get(host_id) else {
                 return Ok(());
             };
-            if !slot.saved.enabled || slot.updating {
+            if !slot.saved.enabled
+                || slot.updating
+                || matches!(slot.connection, HostConnectionState::AuthFailed { .. })
+            {
                 return Ok(());
             }
             if slot.client.is_none() && now_ms < slot.next_retry_at {
@@ -4566,7 +4666,7 @@ async fn host_supervisor_task(
         if *shutdown_rx.borrow() || weak_client.strong_count() == 0 {
             return;
         }
-        let (enabled, epoch_matches, updating, next_retry_at, now_ms, token, existing) = {
+        let (enabled, epoch_matches, updating, auth_failed, next_retry_at, now_ms, token, existing) = {
             let Some(rc) = weak_client.upgrade() else {
                 return;
             };
@@ -4579,6 +4679,7 @@ async fn host_supervisor_task(
                 slot.saved.enabled,
                 slot.supervisor_epoch == epoch,
                 slot.updating,
+                matches!(slot.connection, HostConnectionState::AuthFailed { .. }),
                 slot.next_retry_at,
                 now_ms,
                 slot.tcp_token(),
@@ -4590,7 +4691,7 @@ async fn host_supervisor_task(
         if !enabled || !epoch_matches {
             return;
         }
-        if updating || token.as_deref().is_some_and(is_pairing_code) {
+        if updating || auth_failed || token.as_deref().is_some_and(is_pairing_code) {
             tokio::select! {
                 biased;
                 _ = shutdown_rx.changed() => { return; }
@@ -4834,7 +4935,7 @@ async fn host_supervisor_task(
                             .await
                     };
                     if let Err(err) = refresh_res
-                        && is_connection_error(&err)
+                        && (is_connection_error(&err) || is_auth_error(&err))
                     {
                         rc.mark_slot_disconnected(&host_id, Some(conn_gen), err.to_string(), false);
                         break;
@@ -7570,6 +7671,227 @@ mod tests {
         assert_eq!(
             count_active_agents(&snap, now_ms),
             canban_scheduler::active_count_at(&snap, now_ms)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn revoked_device_transitions_to_auth_failed_halts_retries_and_rejects_routed_rpcs() {
+        use crate::{
+            connector::{ConnectFuture, HostConnector, TcpConnector},
+            store::InlineHostsFileStore,
+        };
+        use canban_types::{HostsFile, PairedDevice, parse_pairing_uri};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingTcpConnector {
+            inner: TcpConnector,
+            attempts: Arc<AtomicUsize>,
+        }
+
+        impl HostConnector for CountingTcpConnector {
+            fn supports(&self, transport: &HostTransport) -> bool {
+                self.inner.supports(transport)
+            }
+
+            fn connect<'a>(
+                &'a self,
+                host_id: &'a str,
+                transport: &'a HostTransport,
+                device_name: &'a str,
+            ) -> ConnectFuture<'a> {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                self.inner.connect(host_id, transport, device_name)
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let server_home = dir.path().join("server-home");
+        let client_dir = dir.path().join("client-data");
+        let repo_dir = dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+
+        let (server, _running, server_addr) = start_tcp_server(server_home, 0).await;
+        let project = server
+            .call(
+                "project.create",
+                json!({ "name": "Revoke Test", "directory": repo_dir }),
+            )
+            .unwrap();
+        let project_id = project["id"].as_str().unwrap().to_owned();
+        let (code, _) = server.create_pairing_code(300).unwrap();
+        let uri = canban_types::format_pairing_uri(&server_addr, &code);
+        let (parsed_addr, parsed_code) = parse_pairing_uri(&uri).expect("valid pairing URI");
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let connector = Arc::new(CountingTcpConnector {
+            inner: TcpConnector,
+            attempts: Arc::clone(&attempts),
+        });
+        let hosts_file_path = client_dir.join("hosts.json");
+        let client = MultiHostClient::from_options_with_runtime(
+            MultiHostClientOptions {
+                config: RemoteClientConfig::new(client_dir.clone()),
+                host_store: Arc::new(InlineHostsFileStore::new(hosts_file_path.clone())),
+                connector,
+                capabilities: ClientCapabilities::mobile(),
+                local_host: None,
+                global_env_provider: None,
+                min_api_version: None,
+                clock: system_clock(),
+                fs_durability: FsDurability::NoSync,
+            },
+            tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+
+        let sum = client
+            .add_host_async(SavedHost {
+                id: "remote-revoke".into(),
+                name: "Revocable Host".into(),
+                transport: HostTransport::Tcp {
+                    addr: parsed_addr,
+                    token: parsed_code,
+                },
+                ssh_target: None,
+                server_id: None,
+                enabled: true,
+                added_at: now(),
+            })
+            .await
+            .expect("initial pairing succeeds");
+        assert!(sum.is_connected());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+        // Verify hosts.json persisted the upgraded dev_ token rather than the single-use invite.
+        let hosts_file: HostsFile =
+            serde_json::from_slice(&std::fs::read(&hosts_file_path).unwrap()).unwrap();
+        assert_eq!(hosts_file.hosts.len(), 1);
+        match &hosts_file.hosts[0].transport {
+            HostTransport::Tcp { token, .. } => assert!(is_device_token(token)),
+            other => panic!("unexpected transport: {other:?}"),
+        }
+
+        // Let the supervisor open `app.subscribe` before revoking the live device.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let devs_val = server.call("device.list", json!({})).unwrap();
+        let devs: Vec<PairedDevice> = serde_json::from_value(devs_val["devices"].clone()).unwrap();
+        let dev_id = devs
+            .iter()
+            .find(|d| d.name == "Canban Mobile")
+            .expect("paired device present")
+            .id
+            .clone();
+        let revoked = server
+            .call("device.revoke", json!({ "device_id": dev_id }))
+            .unwrap();
+        assert_eq!(revoked["revoked"].as_bool(), Some(true));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let summaries = client.host_summaries();
+            if summaries.iter().any(|s| {
+                s.id == "remote-revoke"
+                    && matches!(s.connection, HostConnectionState::AuthFailed { .. })
+            }) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "expected remote-revoke to transition to AuthFailed; summaries={summaries:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        // Once AuthFailed, background wakes, foregrounding, polls, and elapsed time must NOT re-dial.
+        let attempts_after_auth_failed = attempts.load(Ordering::SeqCst);
+        let reconnect_count_after = client
+            .host_summaries()
+            .into_iter()
+            .find(|s| s.id == "remote-revoke")
+            .unwrap()
+            .reconnect_count;
+
+        client.wake_host("remote-revoke");
+        client.wake_all();
+        client.on_foreground();
+        client.poll_remotes_once_async().await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            attempts_after_auth_failed,
+            "AuthFailed host must halt retry loops and ignore background wakes/polls"
+        );
+        let summary_after = client
+            .host_summaries()
+            .into_iter()
+            .find(|s| s.id == "remote-revoke")
+            .unwrap();
+        assert!(matches!(
+            summary_after.connection,
+            HostConnectionState::AuthFailed { .. }
+        ));
+        assert_eq!(summary_after.reconnect_count, reconnect_count_after);
+
+        // Routed RPCs (NotQueueable, Queue, RejectOffline) and transport_for_host must fail with auth_failed
+        // and NEVER silently enqueue orphaned outbox mutations.
+        let list_err = client
+            .call_routed_async("project.list", json!({ "host_id": "remote-revoke" }), None)
+            .await
+            .unwrap_err();
+        assert!(
+            is_auth_error(&list_err),
+            "project.list on AuthFailed host must fail with auth error, got: {list_err:#}"
+        );
+
+        let create_err = client
+            .call_routed_async(
+                "card.create",
+                json!({
+                    "project_id": project_id,
+                    "title": "Blocked by Revocation",
+                    "body": "must not queue offline",
+                }),
+                Some(&project_id),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            is_auth_error(&create_err),
+            "card.create on AuthFailed host must fail with auth error, got: {create_err:#}"
+        );
+        assert!(
+            client.sync_items().is_empty(),
+            "AuthFailed card.create must not enqueue offline outbox mutations: {:?}",
+            client.sync_items()
+        );
+
+        let env_err = client
+            .call_routed_async(
+                "env.save",
+                json!({
+                    "host_id": "remote-revoke",
+                    "scope": "project",
+                    "target_id": project_id,
+                    "entries": { "K": { "kind": "plain", "value": "v" } },
+                }),
+                Some(&project_id),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            is_auth_error(&env_err),
+            "env.save on AuthFailed host must fail with auth error, got: {env_err:#}"
+        );
+
+        let tr_err = client
+            .transport_for_host("remote-revoke")
+            .err()
+            .expect("transport_for_host on AuthFailed host must return Err");
+        assert!(
+            is_auth_error(&tr_err),
+            "transport_for_host on AuthFailed host must return auth error, got: {tr_err:#}"
         );
     }
 }
