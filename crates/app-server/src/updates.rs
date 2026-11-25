@@ -361,12 +361,13 @@ async fn update_checks_loop(
         last_active_payload = next_payload;
         next = next_at;
         tokio::select! {
-            _ = tokio::time::sleep(sleep_dur) => {}
+            biased;
             res = stop_rx.changed() => {
                 if res.is_err() || *stop_rx.borrow() {
                     break;
                 }
             }
+            _ = tokio::time::sleep(sleep_dur) => {}
         }
     }
 }

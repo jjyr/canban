@@ -714,10 +714,14 @@ impl AppServer {
         let output_file = scripts_dir.join(format!("{stem}.output"));
         let raw_log_file = scripts_dir.join(format!("{stem}.raw.log"));
 
-        canban_context::atomic(&script_file, command_body.as_bytes())?;
-        canban_context::atomic(&env_file, b"")?;
-        canban_context::atomic(&output_file, b"")?;
-        canban_context::atomic(&raw_log_file, b"")?;
+        canban_context::atomic_with_durability(
+            &script_file,
+            command_body.as_bytes(),
+            self.fs_durability,
+        )?;
+        canban_context::atomic_with_durability(&env_file, b"", self.fs_durability)?;
+        canban_context::atomic_with_durability(&output_file, b"", self.fs_durability)?;
+        canban_context::atomic_with_durability(&raw_log_file, b"", self.fs_durability)?;
 
         let protected = build_step_context_env(StepEnvContext {
             cli: &self.cli,
@@ -881,7 +885,11 @@ impl AppServer {
                 log_body.push_str(&format!("\n[canban] Failed to parse $CANBAN_OUTPUT: {e:#}\n"));
             }
             let log_body = crate::env::mask_secrets(&log_body, &resolved_secrets.secret_values);
-            canban_context::atomic(&local_log, log_body.as_bytes())?;
+            canban_context::atomic_with_durability(
+                &local_log,
+                log_body.as_bytes(),
+                self.fs_durability,
+            )?;
             let log_rel = canban_context::relative(&self.home, &local_log)?;
 
             let parse_error = parse_env_res
@@ -1283,7 +1291,11 @@ impl AppServer {
                     .join("scripts")
                     .join(format!("{slug}-v{visit}.log"))
             };
-            canban_context::atomic(&local_log, summary.as_bytes())?;
+            canban_context::atomic_with_durability(
+                &local_log,
+                summary.as_bytes(),
+                self.fs_durability,
+            )?;
             let log_rel = canban_context::relative(&self.home, &local_log)?;
             let output_val = collect_script_outputs(
                 &log_rel,

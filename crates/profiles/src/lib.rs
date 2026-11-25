@@ -23,9 +23,10 @@ use canban_types::{
     legacy_agy_orchestrator_preset,
 };
 use serde_json::{Value, json};
-#[cfg(feature = "local-exec")]
-use std::path::PathBuf;
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 pub fn presets(home: &Path) -> Result<BTreeMap<String, Profile>> {
     let mut presets = BTreeMap::new();
@@ -41,8 +42,13 @@ pub fn presets(home: &Path) -> Result<BTreeMap<String, Profile>> {
     }
     let dir = home.join("config/presets");
     if dir.is_dir() {
-        for entry in std::fs::read_dir(dir)? {
-            let path = entry?.path();
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)?
+            .collect::<std::io::Result<Vec<_>>>()?
+            .into_iter()
+            .map(|e| e.path())
+            .collect();
+        paths.sort();
+        for path in paths {
             if path.extension().and_then(|x| x.to_str()) != Some("json") {
                 continue;
             }
@@ -217,12 +223,28 @@ fn canonicalize_agy_orchestrator(profile: &mut Profile, clear_if_unset: bool) {
 }
 
 pub fn resolve(config: Config, home: &Path) -> Result<Config> {
-    let presets = presets(home)?;
-    let mut config = config;
     #[cfg(feature = "local-exec")]
     {
-        config.hc = executable_with_env(&config.hc, &config.hc_env);
+        resolve_with_runner(config, home, &canban_exec::SystemRunner)
     }
+    #[cfg(not(feature = "local-exec"))]
+    {
+        resolve_inner(config, home)
+    }
+}
+
+#[cfg(feature = "local-exec")]
+pub fn resolve_with_runner(
+    mut config: Config,
+    home: &Path,
+    runner: &dyn canban_exec::CommandRunner,
+) -> Result<Config> {
+    config.hc = executable_with_runner(&config.hc, &config.hc_env, runner);
+    resolve_inner(config, home)
+}
+
+fn resolve_inner(mut config: Config, home: &Path) -> Result<Config> {
+    let presets = presets(home)?;
     let mut snapshot_profiles = config.profiles.clone();
     for p in &mut snapshot_profiles {
         p.model = p
@@ -614,6 +636,32 @@ pub fn find_local_executable_with_env(
 }
 
 #[cfg(feature = "local-exec")]
+pub fn find_local_executable_with_runner(
+    program: &str,
+    env: &BTreeMap<String, String>,
+    runner: &dyn canban_exec::CommandRunner,
+) -> Option<PathBuf> {
+    if runner.is_system() {
+        return find_local_executable_with_env(program, env);
+    }
+    let program = program.trim();
+    if program.is_empty() {
+        return None;
+    }
+    let candidates: &[&str] = if program == "hc" {
+        &["hc", "herdr-core"]
+    } else {
+        std::slice::from_ref(&program)
+    };
+    for name in candidates {
+        if let Some(found) = runner.find_executable_with_env(name, env) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+#[cfg(feature = "local-exec")]
 pub fn executable(program: &str) -> String {
     executable_with_env(program, &BTreeMap::new())
 }
@@ -621,6 +669,17 @@ pub fn executable(program: &str) -> String {
 #[cfg(feature = "local-exec")]
 pub fn executable_with_env(program: &str, env: &BTreeMap<String, String>) -> String {
     find_local_executable_with_env(program, env)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| program.into())
+}
+
+#[cfg(feature = "local-exec")]
+pub fn executable_with_runner(
+    program: &str,
+    env: &BTreeMap<String, String>,
+    runner: &dyn canban_exec::CommandRunner,
+) -> String {
+    find_local_executable_with_runner(program, env, runner)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| program.into())
 }

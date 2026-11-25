@@ -344,11 +344,14 @@ impl AppServer {
             Some(&reviews),
         );
         seed_pr_activity_cache(&client, &next.repository, next.number, &activity_payload);
-        let current_login = self
-            .github
-            .status()
-            .login
-            .or_else(|| self.github_cli.login());
+        let current_login = if self.github_transport.is_some() {
+            self.github.status().login
+        } else {
+            self.github
+                .status()
+                .login
+                .or_else(|| self.github_cli.login())
+        };
         let pr_draft = remote["draft"].as_bool().unwrap_or(false);
         let mut newly_merged = false;
         let mut ci_event_emitted = false;
@@ -475,7 +478,12 @@ impl AppServer {
                 db.save(&current)?;
             }
             if ci_event_emitted || activity_emitted {
-                crate::events::pump_at(db, &self.config(), self.now_ms())?;
+                crate::events::pump_at_with_prune_state(
+                    db,
+                    &self.config(),
+                    self.now_ms(),
+                    Some(&self.last_cardless_prune_at),
+                )?;
             }
             Ok(())
         })?;
@@ -558,11 +566,14 @@ impl AppServer {
             source.number,
             &activity_payload,
         );
-        let current_login = self
-            .github
-            .status()
-            .login
-            .or_else(|| self.github_cli.login());
+        let current_login = if self.github_transport.is_some() {
+            self.github.status().login
+        } else {
+            self.github
+                .status()
+                .login
+                .or_else(|| self.github_cli.login())
+        };
         if pr_merged {
             let _ = self.reconcile_remote_pr_merge(&source.repository, source.number, &remote);
         }
@@ -606,7 +617,12 @@ impl AppServer {
                 db.save(&current)?;
             }
             if ci_event_emitted || activity_emitted {
-                crate::events::pump_at(db, &self.config(), self.now_ms())?;
+                crate::events::pump_at_with_prune_state(
+                    db,
+                    &self.config(),
+                    self.now_ms(),
+                    Some(&self.last_cardless_prune_at),
+                )?;
             }
             Ok(())
         })?;

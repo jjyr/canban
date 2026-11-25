@@ -506,7 +506,7 @@ impl AppServer {
             }
         };
         let path = dir.join(format!("output-{}.txt", id()));
-        canban_context::atomic(&path, text.as_bytes())?;
+        canban_context::atomic_with_durability(&path, text.as_bytes(), self.fs_durability)?;
         let relative = canban_context::relative(&self.home, &path)?;
         self.store.lock().unwrap().write(|db| {
             let mut current: TerminalEntry = db.get(&entry.id)?;

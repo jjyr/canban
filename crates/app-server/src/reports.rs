@@ -163,7 +163,7 @@ impl AppServer {
                     .join("reports")
                     .join(format!("{report_id}.md"))
             };
-            canban_context::atomic(&path, body.as_bytes())?;
+            canban_context::atomic_with_durability(&path, body.as_bytes(), self.fs_durability)?;
             Some(canban_context::relative(&self.home, &path)?)
         } else {
             None

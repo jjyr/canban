@@ -564,6 +564,56 @@ fn push_home_fallbacks(out: &mut Vec<PathBuf>, home: &Path) {
     push_unique_dir(out, home.join("bin"));
 }
 
+/// Build ordered, deduplicated search directories from an explicit [`ShellEnvSnapshot`]
+/// without consulting the process-global login-shell probe cache.
+pub fn search_paths_from_snapshot(
+    snapshot: &ShellEnvSnapshot,
+    env: &BTreeMap<String, String>,
+) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(override_paths) = env.get("CANBAN_HERDR_SEARCH_PATHS") {
+        push_split_paths(&mut out, OsString::from(override_paths).as_os_str());
+        return out;
+    }
+    if let Some(install_dir) = env.get("HC_INSTALL_DIR") {
+        push_unique_dir(&mut out, PathBuf::from(install_dir));
+    }
+    if let Some(explicit_path) = env.get("PATH").filter(|s| !s.is_empty()) {
+        push_split_paths(&mut out, OsString::from(explicit_path).as_os_str());
+    }
+    for dir in &snapshot.path_entries {
+        push_unique_dir(&mut out, dir.clone());
+    }
+    if let Some(snap_path) = snapshot.vars.get("PATH").filter(|s| !s.is_empty()) {
+        push_split_paths(&mut out, OsString::from(snap_path).as_os_str());
+    }
+    out
+}
+
+/// Build a merged `PATH` string purely from `hc_env` and an explicit [`ShellEnvSnapshot`]
+/// without probing the host shell or reading process-global state.
+pub fn merged_path_string_from_snapshot(
+    snapshot: &ShellEnvSnapshot,
+    hc_env: &BTreeMap<String, String>,
+) -> Option<String> {
+    if let Some(explicit) = hc_env.get("PATH").filter(|s| !s.is_empty()) {
+        return Some(explicit.clone());
+    }
+    let mut out = Vec::new();
+    for dir in &snapshot.path_entries {
+        push_unique_dir(&mut out, dir.clone());
+    }
+    if let Some(snap_path) = snapshot.vars.get("PATH").filter(|s| !s.is_empty()) {
+        push_split_paths(&mut out, OsString::from(snap_path).as_os_str());
+    }
+    if out.is_empty() {
+        return None;
+    }
+    std::env::join_paths(out)
+        .ok()
+        .map(|s| s.to_string_lossy().into_owned())
+}
+
 /// Build ordered, deduplicated search directories for local binary discovery.
 /// Honors `CANBAN_HERDR_SEARCH_PATHS` exclusively when present for test isolation.
 pub fn local_search_paths(env: &BTreeMap<String, String>) -> Vec<PathBuf> {

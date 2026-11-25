@@ -35,6 +35,7 @@ struct ReadCacheIndex {
 pub struct ReadCache {
     dir: PathBuf,
     budget_bytes: u64,
+    durability: canban_context::FsDurability,
     index: ReadCacheIndex,
 }
 
@@ -68,6 +69,14 @@ pub fn canonical_key(method: &str, params: &Value) -> String {
 
 impl ReadCache {
     pub fn open(dir: PathBuf, budget_bytes: u64) -> Self {
+        Self::open_with_durability(dir, budget_bytes, canban_context::FsDurability::Full)
+    }
+
+    pub fn open_with_durability(
+        dir: PathBuf,
+        budget_bytes: u64,
+        durability: canban_context::FsDurability,
+    ) -> Self {
         let index_path = dir.join("index.json");
         let index = std::fs::read(&index_path)
             .ok()
@@ -76,6 +85,7 @@ impl ReadCache {
         Self {
             dir,
             budget_bytes,
+            durability,
             index,
         }
     }
@@ -93,7 +103,11 @@ impl ReadCache {
     }
 
     fn save_index(&self) -> Result<()> {
-        canban_context::atomic(&self.index_path(), &serde_json::to_vec(&self.index)?)
+        canban_context::atomic_with_durability(
+            &self.index_path(),
+            &serde_json::to_vec(&self.index)?,
+            self.durability,
+        )
     }
 
     pub fn total_bytes(&self) -> u64 {
@@ -123,7 +137,11 @@ impl ReadCache {
         if size > self.budget_bytes {
             return Ok(());
         }
-        canban_context::atomic(&self.entry_path(&key), &bytes_vec)?;
+        canban_context::atomic_with_durability(
+            &self.entry_path(&key),
+            &bytes_vec,
+            self.durability,
+        )?;
         self.index.next_seq = self.index.next_seq.saturating_add(1);
         let seq = self.index.next_seq;
         self.index.entries.insert(

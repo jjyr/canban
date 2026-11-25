@@ -142,12 +142,15 @@ impl AppServer {
             let wt: ManagedWorktree = db.get(wt_id)?;
             let project: Project = db.get(&wt.project_id)?;
             let mut card = canban_kanban::create(db, &project, title, body, "user")?;
-            card.created_by = self
-                .github
-                .status()
-                .login
-                .or_else(|| self.github_cli.login())
-                .unwrap_or_else(|| "Local".into());
+            card.created_by = if self.github_transport.is_some() {
+                self.github.status().login
+            } else {
+                self.github
+                    .status()
+                    .login
+                    .or_else(|| self.github_cli.login())
+            }
+            .unwrap_or_else(|| "Local".into());
             card.branch = Some(wt.branch.clone());
             card.base_commit = wt.base_commit.clone();
             card.worktree = Some(wt.path.clone());

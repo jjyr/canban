@@ -9,11 +9,12 @@ use crate::{
     session::{ApiMismatchError, SingleHostSession},
     store::{
         CachedHostData, CredentialHostStore, CredentialStore, HostStore, load_cache,
-        load_global_env_sync_fingerprint, outbox_path, reads_dir, save_cache,
-        save_global_env_sync_fingerprint, seal_params_for_tcp,
+        load_global_env_sync_fingerprint, outbox_path, reads_dir, save_cache_with_durability,
+        save_global_env_sync_fingerprint_with_durability, seal_params_for_tcp,
     },
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
+use canban_context::FsDurability;
 use canban_sync::{
     Outbox, QueueDecision, ReadCache,
     outbox::{Mutation, MutationKind, MutationState, UpdateBase},
@@ -124,6 +125,7 @@ pub struct MultiHostClientOptions {
     pub global_env_provider: Option<Arc<dyn GlobalEnvSyncProvider>>,
     pub min_api_version: Option<u32>,
     pub clock: Arc<dyn Clock>,
+    pub fs_durability: FsDurability,
 }
 
 /// Real-time events emitted by [`RemoteClient`] across all connected hosts.
@@ -163,7 +165,12 @@ struct RemoteHostSlot {
 }
 
 impl RemoteHostSlot {
-    fn from_saved(saved: SavedHost, data_dir: &Path, read_cache_budget: u64) -> Self {
+    fn from_saved(
+        saved: SavedHost,
+        data_dir: &Path,
+        read_cache_budget: u64,
+        fs_durability: FsDurability,
+    ) -> Self {
         let mut cached = load_cache(data_dir, &saved.id).unwrap_or(CachedHostData {
             saved_at: 0,
             snapshot: Snapshot::default(),
@@ -181,8 +188,12 @@ impl RemoteHostSlot {
                 cached_at,
             }
         };
-        let outbox = Outbox::load(outbox_path(data_dir, &saved.id));
-        let reads = ReadCache::open(reads_dir(data_dir, &saved.id), read_cache_budget);
+        let outbox = Outbox::load_with_durability(outbox_path(data_dir, &saved.id), fs_durability);
+        let reads = ReadCache::open_with_durability(
+            reads_dir(data_dir, &saved.id),
+            read_cache_budget,
+            fs_durability,
+        );
         let global_env_synced_fingerprint = load_global_env_sync_fingerprint(data_dir, &saved.id);
         Self {
             saved,
@@ -280,6 +291,7 @@ pub struct MultiHostClient {
     global_env_provider: Option<Arc<dyn GlobalEnvSyncProvider>>,
     min_api_version: Option<u32>,
     clock: Arc<dyn Clock>,
+    fs_durability: FsDurability,
     hosts: RwLock<BTreeMap<String, RemoteHostSlot>>,
     entity_hosts: RwLock<BTreeMap<String, String>>,
     acknowledged_owners: Mutex<BTreeMap<String, String>>,
@@ -484,6 +496,7 @@ fn parse_refreshed_snapshot(state_val: &Value, host_id: &str) -> Option<Snapshot
     Some(snap)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_state_to_slot(
     slot: &mut RemoteHostSlot,
     data_dir: &Path,
@@ -492,6 +505,7 @@ fn apply_state_to_slot(
     probe_val: Option<&Value>,
     preferred_topic: Option<&'static str>,
     now_ms: u64,
+    fs_durability: FsDurability,
 ) -> Option<&'static str> {
     let changed = state_val["changed"] == true || state_val.get("snapshot").is_some();
     let prev_marker = slot.last_marker.clone();
@@ -522,7 +536,7 @@ fn apply_state_to_slot(
             slot.cached.config = cfg;
         }
         slot.cached.saved_at = now_ms;
-        save_cache(data_dir, &slot.saved.id, &slot.cached);
+        save_cache_with_durability(data_dir, &slot.saved.id, &slot.cached, fs_durability);
     }
 
     if let Some(probe) = probe_val {
@@ -635,6 +649,7 @@ impl MultiHostClient {
             global_env_provider: None,
             min_api_version: None,
             clock: system_clock(),
+            fs_durability: FsDurability::Full,
         })
     }
 
@@ -672,6 +687,7 @@ impl MultiHostClient {
                 global_env_provider: None,
                 min_api_version: None,
                 clock: system_clock(),
+                fs_durability: FsDurability::Full,
             },
             runtime_handle,
         )
@@ -714,6 +730,7 @@ impl MultiHostClient {
             global_env_provider,
             min_api_version,
             clock,
+            fs_durability,
         } = options;
         let saved = host_store.load_hosts();
         let mut slots = BTreeMap::new();
@@ -722,8 +739,12 @@ impl MultiHostClient {
             if !connector.supports(&host.transport) {
                 continue;
             }
-            let slot =
-                RemoteHostSlot::from_saved(host, &config.data_dir, config.read_cache_budget_bytes);
+            let slot = RemoteHostSlot::from_saved(
+                host,
+                &config.data_dir,
+                config.read_cache_budget_bytes,
+                fs_durability,
+            );
             if slot.cached.saved_at > 0 {
                 for (k, v) in &slot.cached.snapshot.entity_hosts {
                     initial_entity_hosts.insert(k.clone(), v.clone());
@@ -745,6 +766,7 @@ impl MultiHostClient {
             global_env_provider,
             min_api_version,
             clock,
+            fs_durability,
             hosts: RwLock::new(slots),
             entity_hosts: RwLock::new(initial_entity_hosts),
             acknowledged_owners: Mutex::new(BTreeMap::new()),
@@ -1252,6 +1274,7 @@ impl MultiHostClient {
                         saved,
                         &self.config.data_dir,
                         self.config.read_cache_budget_bytes,
+                        self.fs_durability,
                     );
                     slot.connection = HostConnectionState::ApiMismatch {
                         server_api: mismatch.server_api,
@@ -1362,6 +1385,7 @@ impl MultiHostClient {
                     Some(&ping_val),
                     None,
                     self.now_ms(),
+                    self.fs_durability,
                 );
                 let entities = slot.cached.snapshot.entity_hosts.clone();
                 let summary = slot.summary();
@@ -1385,6 +1409,7 @@ impl MultiHostClient {
                     saved,
                     &self.config.data_dir,
                     self.config.read_cache_budget_bytes,
+                    self.fs_durability,
                 );
                 slot.terminal = Some(Arc::new(RemotePtyTransport::new(
                     Arc::clone(&transport),
@@ -1400,6 +1425,7 @@ impl MultiHostClient {
                     Some(&ping_val),
                     None,
                     self.now_ms(),
+                    self.fs_durability,
                 );
                 let entities = slot.cached.snapshot.entity_hosts.clone();
                 let summary = slot.summary();
@@ -1537,6 +1563,7 @@ impl MultiHostClient {
                     host,
                     &self.config.data_dir,
                     self.config.read_cache_budget_bytes,
+                    self.fs_durability,
                 );
                 slot.terminal = Some(Arc::new(RemotePtyTransport::new(
                     Arc::clone(&transport),
@@ -1552,6 +1579,7 @@ impl MultiHostClient {
                     Some(&hs.ping),
                     None,
                     self.now_ms(),
+                    self.fs_durability,
                 );
                 let entities = slot.cached.snapshot.entity_hosts.clone();
                 let sum = slot.summary();
@@ -1580,6 +1608,7 @@ impl MultiHostClient {
                 host,
                 &self.config.data_dir,
                 self.config.read_cache_budget_bytes,
+                self.fs_durability,
             );
             let sum = slot.summary();
             guard.insert(hid.clone(), slot);
@@ -2896,11 +2925,6 @@ impl MultiHostClient {
                 .collect()
         };
         let mut set = tokio::task::JoinSet::new();
-        if let Some(local) = self.local_host.clone() {
-            let method = method.to_owned();
-            let p = params.clone();
-            set.spawn_blocking(move || ("local".to_owned(), local.call(&method, p)));
-        }
         for (host_id, client, token_opt) in targets {
             let method = method.to_owned();
             let mut p = params.clone();
@@ -2913,6 +2937,9 @@ impl MultiHostClient {
             });
         }
         let mut out = Vec::new();
+        if let Some(local) = self.local_host.clone() {
+            out.push(("local".to_owned(), local.call(method, params.clone())));
+        }
         while let Some(joined) = set.join_next().await {
             if let Ok(item) = joined {
                 out.push(item);
@@ -3526,6 +3553,7 @@ impl MultiHostClient {
                                 Some(&hs.ping),
                                 None,
                                 self.now_ms(),
+                                self.fs_durability,
                             );
                             let entities = slot.cached.snapshot.entity_hosts.clone();
                             if persist_needed {
@@ -3783,6 +3811,7 @@ impl MultiHostClient {
                 Some(&hs.ping),
                 None,
                 self.now_ms(),
+                self.fs_durability,
             );
             let conn_gen = slot.conn_gen;
             let entities = slot.cached.snapshot.entity_hosts.clone();
@@ -3853,6 +3882,7 @@ impl MultiHostClient {
                     None,
                     preferred_topic,
                     self.now_ms(),
+                    self.fs_durability,
                 );
                 let entities = topic
                     .is_some()
@@ -4026,10 +4056,11 @@ impl MultiHostClient {
             };
             let sync_succeeded = result.is_ok();
             if is_global_env_sync && sync_succeeded {
-                save_global_env_sync_fingerprint(
+                save_global_env_sync_fingerprint_with_durability(
                     &self.config.data_dir,
                     host_id,
                     sync_fingerprint.as_deref(),
+                    self.fs_durability,
                 );
             }
             let (is_conn_err, refreshed) = match &result {
@@ -4079,7 +4110,12 @@ impl MultiHostClient {
                 snap.register_host_entities(host_id);
                 slot.cached.snapshot = snap;
                 slot.cached.saved_at = self.now_ms();
-                save_cache(&self.config.data_dir, host_id, &slot.cached);
+                save_cache_with_durability(
+                    &self.config.data_dir,
+                    host_id,
+                    &slot.cached,
+                    self.fs_durability,
+                );
                 outcome
             };
             if is_global_env_sync {
@@ -4269,6 +4305,7 @@ async fn local_push_supervisor(
             Ok(v) => v,
             Err(_) => {
                 tokio::select! {
+                    biased;
                     _ = shutdown_rx.changed() => return,
                     _ = tokio::time::sleep(Duration::from_millis(500)) => continue,
                 }
@@ -4341,6 +4378,7 @@ async fn local_push_supervisor(
             }
         }
         tokio::select! {
+            biased;
             _ = shutdown_rx.changed() => return,
             _ = tokio::time::sleep(Duration::from_millis(250)) => {}
         }
@@ -4379,9 +4417,10 @@ async fn run_legacy_poll_loop(
     };
     while slot_active() {
         tokio::select! {
-            _ = tokio::time::sleep(LEGACY_POLL_INTERVAL) => {}
-            _ = notify.notified() => {}
+            biased;
             _ = shutdown_rx.changed() => { return true; }
+            _ = notify.notified() => {}
+            _ = tokio::time::sleep(LEGACY_POLL_INTERVAL) => {}
         }
         if !slot_active() {
             break;
@@ -4442,8 +4481,9 @@ async fn host_supervisor_task(
         }
         if updating || token.as_deref().is_some_and(is_pairing_code) {
             tokio::select! {
-                _ = notify.notified() => {}
+                biased;
                 _ = shutdown_rx.changed() => { return; }
+                _ = notify.notified() => {}
             }
             continue;
         }
@@ -4455,9 +4495,10 @@ async fn host_supervisor_task(
             if next_retry_at > now_i {
                 let wait = next_retry_at.saturating_duration_since(now_i);
                 tokio::select! {
-                    _ = tokio::time::sleep(wait) => {}
-                    _ = notify.notified() => {}
+                    biased;
                     _ = shutdown_rx.changed() => { return; }
+                    _ = notify.notified() => {}
+                    _ = tokio::time::sleep(wait) => {}
                 }
                 continue;
             }
@@ -4484,24 +4525,27 @@ async fn host_supervisor_task(
                 Err(err) => {
                     if err.downcast_ref::<ApiMismatchError>().is_some() {
                         tokio::select! {
-                            _ = tokio::time::sleep(API_MISMATCH_RETRY_DELAY) => {}
-                            _ = notify.notified() => { backoff = Duration::from_millis(250); }
+                            biased;
                             _ = shutdown_rx.changed() => { return; }
+                            _ = notify.notified() => { backoff = Duration::from_millis(250); }
+                            _ = tokio::time::sleep(API_MISMATCH_RETRY_DELAY) => {}
                         }
                     } else if is_auth_error(&err) {
                         tokio::select! {
-                            _ = notify.notified() => {}
+                            biased;
                             _ = shutdown_rx.changed() => { return; }
+                            _ = notify.notified() => {}
                         }
                     } else {
                         tokio::select! {
-                            _ = tokio::time::sleep(backoff) => {
-                                backoff = (backoff * 2).min(MAX_BACKOFF);
-                            }
+                            biased;
+                            _ = shutdown_rx.changed() => { return; }
                             _ = notify.notified() => {
                                 backoff = Duration::from_millis(250);
                             }
-                            _ = shutdown_rx.changed() => { return; }
+                            _ = tokio::time::sleep(backoff) => {
+                                backoff = (backoff * 2).min(MAX_BACKOFF);
+                            }
                         }
                     }
                     continue;
@@ -4555,16 +4599,18 @@ async fn host_supervisor_task(
                 }
                 if is_auth_error(&err) {
                     tokio::select! {
-                        _ = notify.notified() => { backoff = Duration::from_millis(250); }
+                        biased;
                         _ = shutdown_rx.changed() => { return; }
+                        _ = notify.notified() => { backoff = Duration::from_millis(250); }
                     }
                 } else {
                     tokio::select! {
+                        biased;
+                        _ = shutdown_rx.changed() => { return; }
+                        _ = notify.notified() => { backoff = Duration::from_millis(250); }
                         _ = tokio::time::sleep(backoff) => {
                             backoff = (backoff * 2).min(MAX_BACKOFF);
                         }
-                        _ = notify.notified() => { backoff = Duration::from_millis(250); }
-                        _ = shutdown_rx.changed() => { return; }
                     }
                 }
                 continue;
@@ -4603,6 +4649,7 @@ async fn host_supervisor_task(
             }
 
             tokio::select! {
+                biased;
                 _ = shutdown_rx.changed() => {
                     return;
                 }

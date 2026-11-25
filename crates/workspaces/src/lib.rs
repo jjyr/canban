@@ -31,6 +31,14 @@ impl Ops {
             host: canban_herdr::host::Host::local(),
         }
     }
+    pub fn with_host(host: canban_herdr::host::Host) -> Self {
+        Self { host }
+    }
+    pub fn local_with_runner(runner: std::sync::Arc<dyn canban_exec::CommandRunner>) -> Self {
+        Self {
+            host: canban_herdr::host::Host::local_with_runner(runner),
+        }
+    }
     fn git(&self, dir: &Path, args: &[&str]) -> Result<std::process::Output> {
         let mut argv = vec!["git", "-C", dir.to_str().context("Invalid path")?];
         argv.extend(args);

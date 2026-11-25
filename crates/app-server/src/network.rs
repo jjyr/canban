@@ -18,8 +18,16 @@ pub fn load_listen_config(home: &Path) -> ServerListenConfig {
 }
 
 pub fn save_listen_config(home: &Path, cfg: &ServerListenConfig) -> Result<()> {
+    save_listen_config_with_durability(home, cfg, canban_context::FsDurability::Full)
+}
+
+pub fn save_listen_config_with_durability(
+    home: &Path,
+    cfg: &ServerListenConfig,
+    durability: canban_context::FsDurability,
+) -> Result<()> {
     let path = listen_config_path(home);
-    canban_context::atomic(&path, &serde_json::to_vec_pretty(cfg)?)
+    canban_context::atomic_with_durability(&path, &serde_json::to_vec_pretty(cfg)?, durability)
 }
 
 /// DEPRECATED: legacy static `server.token` path; retained only to auto-upgrade older hosts.
@@ -934,14 +942,12 @@ fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+pub fn hostname_with(runner: &dyn canban_exec::CommandRunner) -> String {
+    runner.hostname()
+}
+
 pub fn hostname_string() -> String {
-    canban_exec::command("hostname")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "canban-host".into())
+    hostname_with(&canban_exec::SystemRunner)
 }
 
 pub fn service_status(home: &Path) -> Value {

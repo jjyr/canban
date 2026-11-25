@@ -854,7 +854,12 @@ impl AppServer {
                     }
                 }
             }
-            events::pump(db, &config)?;
+            events::pump_at_with_prune_state(
+                db,
+                &config,
+                self.now_ms(),
+                Some(&self.last_cardless_prune_at),
+            )?;
             Ok(())
         })?;
         if changed {

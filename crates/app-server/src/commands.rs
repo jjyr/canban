@@ -282,7 +282,7 @@ impl AppServer {
                 )
             }
             "app.ping" => Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"api_version":API_VERSION,"pid":std::process::id(),"home":self.home,"server_id":self.identity,"hostname":network::hostname_string(),"build":canban_updater::Build::current(),"updates_disabled":self.updates_disabled}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"api_version":API_VERSION,"pid":std::process::id(),"home":self.home,"server_id":self.identity,"hostname":network::hostname_with(self.exec_runner.as_ref()),"build":canban_updater::Build::current(),"updates_disabled":self.updates_disabled}),
             ),
             "device.list" => Ok(self.device_list_payload()),
             "device.remote_access.set" => {
@@ -317,7 +317,11 @@ impl AppServer {
                 if let Some(srv) = self.self_weak.get().and_then(|w| w.upgrade()) {
                     srv.reconfigure_tcp_listeners(&listen_cfg)?;
                 }
-                network::save_listen_config(&self.home, &listen_cfg)?;
+                network::save_listen_config_with_durability(
+                    &self.home,
+                    &listen_cfg,
+                    self.fs_durability,
+                )?;
                 Ok(self.device_list_payload())
             }
             "device.invite.create" => {
@@ -484,7 +488,11 @@ impl AppServer {
                 }
                 raw["scheduler"]["max_agents"] = json!(settings.max_agents);
                 raw["scheduler"]["idle_minutes"] = json!(settings.idle_minutes);
-                canban_context::atomic(&path, &serde_json::to_vec_pretty(&raw)?)?;
+                canban_context::atomic_with_durability(
+                    &path,
+                    &serde_json::to_vec_pretty(&raw)?,
+                    self.fs_durability,
+                )?;
                 active.scheduler = settings.clone();
                 drop(active);
                 self.emit("configuration", None);
@@ -492,10 +500,13 @@ impl AppServer {
             }
 
             "config.reload" => {
-                canban_herdr::invalidate_local_shell_path_cache();
-                let (c, migration) = Self::read_config(&self.home)?;
+                if self.exec_runner.is_system() {
+                    canban_herdr::invalidate_local_shell_path_cache();
+                }
+                let (c, migration) =
+                    Self::read_config_with_runner(&self.home, self.exec_runner.as_ref())?;
                 self.validate_references(&c)?;
-                Self::publish_migration(&self.home, migration)?;
+                Self::publish_migration_with_durability(&self.home, migration, self.fs_durability)?;
                 *self.config.write().unwrap() = c;
                 self.emit("configuration", None);
                 Ok(json!({"reloaded":true}))
@@ -792,12 +803,15 @@ impl AppServer {
                     "user",
                     explicit_id,
                 )?;
-                c.created_by = self
-                    .github
-                    .status()
-                    .login
-                    .or_else(|| self.github_cli.login())
-                    .unwrap_or_else(|| "Local".into());
+                c.created_by = if self.github_transport.is_some() {
+                    self.github.status().login
+                } else {
+                    self.github
+                        .status()
+                        .login
+                        .or_else(|| self.github_cli.login())
+                }
+                .unwrap_or_else(|| "Local".into());
                 db.save(&c)?;
                 if let Some(note_id) = p["source_note_id"].as_str() {
                     let note: Note = db.get(note_id)?;
@@ -1847,7 +1861,7 @@ impl AppServer {
                         canban_context::digest(path.as_bytes()),
                         suffix
                     ));
-                    canban_context::atomic(&cache, &bytes)?;
+                    canban_context::atomic_with_durability(&cache, &bytes, self.fs_durability)?;
                     Ok(json!({"path":cache}))
                 }
             }

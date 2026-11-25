@@ -17,18 +17,25 @@ use std::{
 
 /// Increment when desktop clients need operations unavailable in older services.
 pub const API_VERSION: u32 = canban_updater::DESKTOP_API;
+pub use canban_context::FsDurability;
+pub use canban_exec::{CommandRunner, CommandSpec, ExecOutput, SystemRunner};
 pub use canban_transport::auth;
 pub mod instance;
 mod updates;
 
 /// Injectable runtime environment for [`AppServer`] (defaults to real wall clock,
-/// real Herdr/GitHub backends, and `spawn_blocking` workers; customized in DST).
+/// real Herdr/GitHub backends, real OS subprocess/filesystem durability/watchers,
+/// and `spawn_blocking` workers; customized in DST).
 #[derive(Clone)]
 pub struct ServerRuntimeEnv {
     pub clock: Arc<dyn canban_types::Clock>,
     pub herdr_backend: Option<Arc<dyn canban_herdr::HerdrBackend>>,
     pub github_transport: Option<Arc<dyn canban_github::HttpTransport>>,
     pub inline_workers: bool,
+    pub exec_runner: Arc<dyn canban_exec::CommandRunner>,
+    pub fs_durability: canban_context::FsDurability,
+    pub sqlite_synchronous_off: bool,
+    pub disable_os_watchers: bool,
 }
 
 impl Default for ServerRuntimeEnv {
@@ -38,6 +45,10 @@ impl Default for ServerRuntimeEnv {
             herdr_backend: None,
             github_transport: None,
             inline_workers: false,
+            exec_runner: canban_exec::system_runner(),
+            fs_durability: canban_context::FsDurability::Full,
+            sqlite_synchronous_off: false,
+            disable_os_watchers: false,
         }
     }
 }
@@ -51,6 +62,11 @@ pub struct AppServer {
     herdr_backend: Option<Arc<dyn canban_herdr::HerdrBackend>>,
     github_transport: Option<Arc<dyn canban_github::HttpTransport>>,
     inline_workers: bool,
+    exec_runner: Arc<dyn canban_exec::CommandRunner>,
+    fs_durability: canban_context::FsDurability,
+    disable_os_watchers: bool,
+    last_cardless_prune_at: AtomicU64,
+    sim_abrupt_crash: Arc<AtomicBool>,
     utilities: utilities::Utilities,
     pub home: PathBuf,
     github: Arc<canban_github::auth::Service>,
@@ -149,6 +165,26 @@ impl Drop for Running {
 pub struct SimRunning {
     server: Arc<AppServer>,
     _lock: std::fs::File,
+    abrupt_crash: Arc<AtomicBool>,
+}
+impl SimRunning {
+    /// Controls whether dropping this guard simulates an abrupt crash (skipping
+    /// graceful `finish_agent_work()` teardown while still releasing runtime
+    /// handles and the local service lock so the host can restart cleanly).
+    pub fn set_abrupt_crash(&self, abrupt: bool) {
+        self.abrupt_crash.store(abrupt, Ordering::SeqCst);
+    }
+
+    /// Returns a shared flag controlling abrupt-crash behavior on drop.
+    pub fn abrupt_crash_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.abrupt_crash)
+    }
+
+    /// Marks this guard for abrupt crash and drops it immediately.
+    pub fn crash(self) {
+        self.set_abrupt_crash(true);
+        drop(self);
+    }
 }
 impl Drop for SimRunning {
     fn drop(&mut self) {
@@ -157,7 +193,9 @@ impl Drop for SimRunning {
         *self.server.runtime_wake.lock().unwrap() = None;
         *self.server.delivery_wake.lock().unwrap() = None;
         *self.server.script_wake.lock().unwrap() = None;
-        let _ = self.server.finish_agent_work();
+        if !self.abrupt_crash.load(Ordering::SeqCst) {
+            let _ = self.server.finish_agent_work();
+        }
         let _ = self.server._service_lock.unlock();
     }
 }
@@ -579,6 +617,10 @@ impl AppServer {
             herdr_backend,
             github_transport,
             inline_workers,
+            exec_runner,
+            fs_durability,
+            sqlite_synchronous_off,
+            disable_os_watchers,
         } = env;
         let development = instance::bundled()?;
         if let Some(instance) = &development {
@@ -586,7 +628,8 @@ impl AppServer {
         }
         let updates_disabled = development.is_some();
         let _startup = canban_updater::handoff::startup_guard(&home)?;
-        let startup_progress = startup_progress::StartupProgressWriter::new(&home);
+        let startup_progress =
+            startup_progress::StartupProgressWriter::new_with_durability(&home, fs_durability);
         startup_progress.set("lock", "LOCK", "Acquiring local service lock…");
         let service_lock = canban_updater::service_lock(&home)?;
         let _ = canban_updater::recover_stale_state(&home);
@@ -595,13 +638,17 @@ impl AppServer {
             "LOCK",
             format!("service.lock acquired (pid {})", std::process::id()),
         );
-        let mut store = Store::open_with_progress(&home, |phase, detail| {
-            let tag = match phase {
-                "migrate" => "MIGRATE",
-                _ => "STORAGE",
-            };
-            startup_progress.set(phase, tag, detail);
-        })?;
+        let store_options = canban_storage::StoreOptions {
+            synchronous_off: sqlite_synchronous_off,
+        };
+        let mut store =
+            Store::open_with_progress_and_options(&home, store_options, |phase, detail| {
+                let tag = match phase {
+                    "migrate" => "MIGRATE",
+                    _ => "STORAGE",
+                };
+                startup_progress.set(phase, tag, detail);
+            })?;
         let identity_path = home.join("server-id");
         let mut identity_file = std::fs::OpenOptions::new()
             .create(true)
@@ -612,7 +659,9 @@ impl AppServer {
         identity_file.lock()?;
         if identity_file.metadata()?.len() == 0 {
             identity_file.write_all(token_id().as_bytes())?;
-            identity_file.sync_all()?;
+            if fs_durability == canban_context::FsDurability::Full {
+                identity_file.sync_all()?;
+            }
         }
         let identity = std::fs::read_to_string(&identity_path)?;
         drop(identity_file);
@@ -652,15 +701,19 @@ impl AppServer {
         })?;
         let path = home.join("config/agents.json");
         if !path.exists() {
-            canban_context::atomic(&path, &serde_json::to_vec_pretty(&Config::default())?)?;
+            canban_context::atomic_with_durability(
+                &path,
+                &serde_json::to_vec_pretty(&Config::default())?,
+                fs_durability,
+            )?;
         }
         startup_progress.set(
             "config",
             "CONFIG",
             "Loading agent profiles and configuration…",
         );
-        canban_context::materialize_skill(&home)?;
-        let (config, migration) = Self::read_config(&home)?;
+        canban_context::materialize_skill_with_durability(&home, fs_durability)?;
+        let (config, migration) = Self::read_config_with_runner(&home, exec_runner.as_ref())?;
         startup_progress.set(
             "workflow",
             "WORKFLOW",
@@ -688,7 +741,7 @@ impl AppServer {
             }
             canban_workflow_engine::validate(&project.workflow)?;
         }
-        Self::publish_migration(&home, migration)?;
+        Self::publish_migration_with_durability(&home, migration, fs_durability)?;
         let mut project_count = 0usize;
         store.write(|db| {
             workflow::initialize(db, &config)?;
@@ -750,7 +803,8 @@ impl AppServer {
             });
         }
 
-        let utilities = utilities::Utilities::new(&home);
+        let utilities =
+            utilities::Utilities::new_with_options(&home, fs_durability, disable_os_watchers);
         let initial_terminal_size = utilities.default_terminal_size();
         {
             let usage_push_seq = push_seq.clone();
@@ -774,6 +828,11 @@ impl AppServer {
             herdr_backend,
             github_transport,
             inline_workers,
+            exec_runner,
+            fs_durability,
+            disable_os_watchers,
+            last_cardless_prune_at: AtomicU64::new(0),
+            sim_abrupt_crash: Arc::new(AtomicBool::new(false)),
             utilities,
             github_sync_due: AtomicBool::new(true),
             github_sync_notify: Arc::new(tokio::sync::Notify::new()),
@@ -841,12 +900,15 @@ impl AppServer {
         let _ = server.self_weak.set(Arc::downgrade(&server));
         Ok(server)
     }
-    fn read_config(home: &Path) -> Result<(Config, Option<Vec<u8>>)> {
+    fn read_config_with_runner(
+        home: &Path,
+        runner: &dyn canban_exec::CommandRunner,
+    ) -> Result<(Config, Option<Vec<u8>>)> {
         let bytes = std::fs::read(home.join("config/agents.json"))?;
         let mut value: Value = serde_json::from_slice(&bytes)?;
         let changed = canban_profiles::migrate(&mut value)?;
         let raw: Config = serde_json::from_value(value.clone())?;
-        let config = canban_profiles::resolve(raw, home)?;
+        let config = canban_profiles::resolve_with_runner(raw, home, runner)?;
         Self::validate_config(&config)?;
         Ok((
             config,
@@ -857,14 +919,18 @@ impl AppServer {
             },
         ))
     }
-    fn publish_migration(home: &Path, bytes: Option<Vec<u8>>) -> Result<()> {
+    fn publish_migration_with_durability(
+        home: &Path,
+        bytes: Option<Vec<u8>>,
+        durability: canban_context::FsDurability,
+    ) -> Result<()> {
         if let Some(bytes) = bytes {
             let path = home.join("config/agents.json");
             let backup = home
                 .join("config")
                 .join(format!("agents.legacy-{}.json", id()));
-            canban_context::atomic(&backup, &std::fs::read(&path)?)?;
-            canban_context::atomic(&path, &bytes)?;
+            canban_context::atomic_with_durability(&backup, &std::fs::read(&path)?, durability)?;
+            canban_context::atomic_with_durability(&path, &bytes, durability)?;
         }
         Ok(())
     }
@@ -930,6 +996,14 @@ impl AppServer {
     pub fn now_ms(&self) -> u64 {
         self.clock.now_ms()
     }
+    pub fn exec_runner(&self) -> &Arc<dyn canban_exec::CommandRunner> {
+        &self.exec_runner
+    }
+    /// Controls whether dropping the active [`SimRunning`] guard skips graceful
+    /// `finish_agent_work()` teardown to simulate an abrupt server crash in DST.
+    pub fn set_abrupt_crash(&self, abrupt: bool) {
+        self.sim_abrupt_crash.store(abrupt, Ordering::SeqCst);
+    }
     pub fn db_changes(&self) -> u64 {
         self.db_changes.load(Ordering::SeqCst)
     }
@@ -983,6 +1057,17 @@ impl AppServer {
         F: FnOnce() + Send + 'static,
     {
         let handle = self.runtime_handle.lock().unwrap().clone();
+        if self.inline_workers {
+            if let Some(handle) = handle {
+                handle.spawn(async move {
+                    task();
+                    tokio::task::yield_now().await;
+                });
+            } else {
+                task();
+            }
+            return;
+        }
         if let Some(handle) = handle {
             handle.spawn_blocking(task);
         } else {
@@ -1008,15 +1093,17 @@ impl AppServer {
         match timeout {
             Some(d) => {
                 tokio::select! {
+                    biased;
+                    res = stop.changed() => res.is_ok() && !*stop.borrow(),
                     _ = notify.notified() => !*stop.borrow(),
                     _ = tokio::time::sleep(d) => !*stop.borrow(),
-                    res = stop.changed() => res.is_ok() && !*stop.borrow(),
                 }
             }
             None => {
                 tokio::select! {
-                    _ = notify.notified() => !*stop.borrow(),
+                    biased;
                     res = stop.changed() => res.is_ok() && !*stop.borrow(),
+                    _ = notify.notified() => !*stop.borrow(),
                 }
             }
         }
@@ -1435,9 +1522,19 @@ impl AppServer {
             {
                 return Ok(cached);
             }
-            events::pump_at(db, &self.config(), self.now_ms())?;
+            events::pump_at_with_prune_state(
+                db,
+                &self.config(),
+                self.now_ms(),
+                Some(&self.last_cardless_prune_at),
+            )?;
             let result = f(db)?;
-            events::pump_at(db, &self.config(), self.now_ms())?;
+            events::pump_at_with_prune_state(
+                db,
+                &self.config(),
+                self.now_ms(),
+                Some(&self.last_cardless_prune_at),
+            )?;
             if let Some(key) = key {
                 db.conn.execute(
                     "INSERT INTO operations(id,fingerprint,result) VALUES(?1,?2,?3)",
@@ -1517,3 +1614,130 @@ mod git;
 mod review;
 
 mod utilities;
+
+#[cfg(test)]
+mod runtime_env_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    struct StaticHostRunner {
+        hostname: String,
+    }
+
+    impl CommandRunner for StaticHostRunner {
+        fn run(&self, spec: &CommandSpec) -> Result<ExecOutput> {
+            anyhow::bail!("unexpected command in StaticHostRunner: {}", spec.program)
+        }
+
+        fn find_executable(&self, _name: &str) -> Option<PathBuf> {
+            None
+        }
+
+        fn shell_env(&self) -> canban_exec::shell_env::ShellEnvSnapshot {
+            canban_exec::shell_env::ShellEnvSnapshot {
+                shell: "/bin/simsh".into(),
+                vars: BTreeMap::from([("SIM_ENV_KEY".into(), "sim-val".into())]),
+                full_env_captured: true,
+                ..Default::default()
+            }
+        }
+
+        fn hostname(&self) -> String {
+            self.hostname.clone()
+        }
+    }
+
+    #[test]
+    fn runtime_env_isolates_exec_runner_watchers_and_abrupt_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let env = ServerRuntimeEnv {
+            exec_runner: Arc::new(StaticHostRunner {
+                hostname: "dst-node-7".into(),
+            }),
+            fs_durability: FsDurability::NoSync,
+            sqlite_synchronous_off: true,
+            disable_os_watchers: true,
+            inline_workers: true,
+            ..Default::default()
+        };
+        let app = AppServer::open_with_env(home.clone(), PathBuf::from("/bin/echo"), env).unwrap();
+
+        // Ping and host env must come from the injected CommandRunner.
+        let ping = app.call("app.ping", json!({})).unwrap();
+        assert_eq!(ping["hostname"], "dst-node-7");
+        let host_env = app.call("host.env.keys", json!({})).unwrap();
+        assert_eq!(host_env["shell"], "/bin/simsh");
+        assert!(
+            host_env["keys"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|k| k["key"] == "SIM_ENV_KEY")
+        );
+
+        // With disable_os_watchers, power assertion stays in-memory and watcher stays None.
+        let awake = app
+            .call("utilities.awake", json!({"enabled": true}))
+            .unwrap();
+        assert_eq!(awake["awake"], true);
+
+        // Verify SimRunning::set_abrupt_crash skips finish_agent_work() on drop.
+        let project: Project = serde_json::from_value(
+            app.call(
+                "project.create",
+                json!({"name": "CrashProj", "directory": dir.path().join("repo")}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let card: Card = serde_json::from_value(
+            app.call(
+                "card.create",
+                json!({"view": "full", "project_id": project.id, "title": "Active"}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        app.call(
+            "card.move",
+            json!({"card_id": card.id, "revision": card.revision, "stage": "develop"}),
+        )
+        .unwrap();
+        let queued = app.snapshot().unwrap().terminals[0].clone();
+        app.store
+            .lock()
+            .unwrap()
+            .write(|db| {
+                let mut entry: TerminalEntry = db.get(&queued.id)?;
+                let run = entry.agent.as_mut().unwrap();
+                run.state = "running".into();
+                run.number = 1;
+                run.core_id = Some("sim-core".into());
+                run.terminal = Some("sim-term".into());
+                db.save(&entry)?;
+                Ok(())
+            })
+            .unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        {
+            let running = app.start_in_runtime(rt.handle().clone()).unwrap();
+            assert!(
+                !app.contexts.lock().unwrap().has_watcher(),
+                "OS file watcher must be disabled when disable_os_watchers is true"
+            );
+            running.set_abrupt_crash(true);
+            drop(running);
+        }
+        let after_crash = app.snapshot().unwrap().terminals[0].clone();
+        assert_eq!(
+            after_crash.agent.as_ref().unwrap().state,
+            "running",
+            "abrupt crash must skip finish_agent_work()"
+        );
+    }
+}

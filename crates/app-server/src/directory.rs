@@ -219,6 +219,10 @@ impl ContextQueue {
     pub fn pending_count(&self) -> usize {
         self.pending.len() + usize::from(self.running)
     }
+    #[cfg(test)]
+    pub(crate) fn has_watcher(&self) -> bool {
+        self.watcher.is_some()
+    }
     pub fn reset(&mut self) {
         self.generation += 1;
         self.targets.clear();
@@ -443,61 +447,65 @@ impl AppServer {
             .cloned()
     }
     pub(super) fn start_context_workers(self: &Arc<Self>) {
-        let weak = Arc::downgrade(self);
-        let watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-            let cls = match result {
-                Ok(e) if !e.kind.is_access() => classify_watcher_paths(&e.paths),
-                Ok(_) => return,
-                Err(_) => WatcherClassification {
-                    kind: Some(InvalidationKind::Structural),
-                    new_watches: Vec::new(),
-                },
-            };
-            if cls.kind.is_none() && cls.new_watches.is_empty() {
-                return;
-            }
-            if let Some(server) = weak.upgrade() {
-                let had_new_watches = !cls.new_watches.is_empty();
-                let mut wake_runtime_now = false;
-                let mut wake_worker = false;
-                {
-                    let mut q = server.contexts.lock().unwrap();
-                    q.pending_watches.extend(cls.new_watches);
-                    let now = Instant::now();
-                    match cls.kind {
-                        Some(InvalidationKind::Structural) => {
-                            q.cache = Default::default();
-                            q.results.clear();
-                            q.generation += 1;
-                            q.coalescer.record_immediate_flush(now);
-                            wake_runtime_now = true;
+        let watcher = if self.disable_os_watchers {
+            None
+        } else {
+            let weak = Arc::downgrade(self);
+            notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+                let cls = match result {
+                    Ok(e) if !e.kind.is_access() => classify_watcher_paths(&e.paths),
+                    Ok(_) => return,
+                    Err(_) => WatcherClassification {
+                        kind: Some(InvalidationKind::Structural),
+                        new_watches: Vec::new(),
+                    },
+                };
+                if cls.kind.is_none() && cls.new_watches.is_empty() {
+                    return;
+                }
+                if let Some(server) = weak.upgrade() {
+                    let had_new_watches = !cls.new_watches.is_empty();
+                    let mut wake_runtime_now = false;
+                    let mut wake_worker = false;
+                    {
+                        let mut q = server.contexts.lock().unwrap();
+                        q.pending_watches.extend(cls.new_watches);
+                        let now = Instant::now();
+                        match cls.kind {
+                            Some(InvalidationKind::Structural) => {
+                                q.cache = Default::default();
+                                q.results.clear();
+                                q.generation += 1;
+                                q.coalescer.record_immediate_flush(now);
+                                wake_runtime_now = true;
+                            }
+                            Some(InvalidationKind::Immediate) => {
+                                q.cache.lock().unwrap().invalidate_branches();
+                                q.results.clear();
+                                q.generation += 1;
+                                q.coalescer.record_immediate_flush(now);
+                                wake_runtime_now = true;
+                            }
+                            Some(InvalidationKind::Coalesced) => {
+                                q.coalescer.record(now);
+                                wake_worker = true;
+                            }
+                            None => {}
                         }
-                        Some(InvalidationKind::Immediate) => {
-                            q.cache.lock().unwrap().invalidate_branches();
-                            q.results.clear();
-                            q.generation += 1;
-                            q.coalescer.record_immediate_flush(now);
-                            wake_runtime_now = true;
-                        }
-                        Some(InvalidationKind::Coalesced) => {
-                            q.coalescer.record(now);
+                        if had_new_watches {
                             wake_worker = true;
                         }
-                        None => {}
                     }
-                    if had_new_watches {
-                        wake_worker = true;
+                    if wake_runtime_now {
+                        server.wake_runtime();
+                    }
+                    if wake_worker {
+                        server.context_notify.notify_one();
                     }
                 }
-                if wake_runtime_now {
-                    server.wake_runtime();
-                }
-                if wake_worker {
-                    server.context_notify.notify_one();
-                }
-            }
-        })
-        .ok();
+            })
+            .ok()
+        };
         self.contexts.lock().unwrap().watcher = watcher;
         let weak = Arc::downgrade(self);
         let notify = self.context_notify.clone();

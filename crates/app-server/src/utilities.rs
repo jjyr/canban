@@ -97,14 +97,15 @@ impl Default for Preferences {
     }
 }
 
+type PowerRequest = (bool, mpsc::SyncSender<std::result::Result<(), String>>);
+
 struct Power {
-    sender: mpsc::SyncSender<(bool, mpsc::SyncSender<std::result::Result<(), String>>)>,
+    sender: Option<mpsc::SyncSender<PowerRequest>>,
     active: Mutex<bool>,
 }
 impl Power {
     fn new() -> Self {
-        let (tx, rx) =
-            mpsc::sync_channel::<(bool, mpsc::SyncSender<std::result::Result<(), String>>)>(1);
+        let (tx, rx) = mpsc::sync_channel::<PowerRequest>(1);
         std::thread::spawn(move || {
             let mut hold = None;
             while let Ok((on, reply)) = rx.recv() {
@@ -128,19 +129,25 @@ impl Power {
             }
         });
         Self {
-            sender: tx,
+            sender: Some(tx),
+            active: Mutex::new(false),
+        }
+    }
+    fn disabled() -> Self {
+        Self {
+            sender: None,
             active: Mutex::new(false),
         }
     }
     fn set(&self, on: bool) -> Result<()> {
         let mut active = self.active.lock().unwrap();
-        let (tx, rx) = mpsc::sync_channel(1);
-        self.sender
-            .send((on, tx))
-            .context("Power worker unavailable")?;
-        rx.recv_timeout(Duration::from_secs(5))
-            .context("Power assertion timed out")?
-            .map_err(anyhow::Error::msg)?;
+        if let Some(sender) = &self.sender {
+            let (tx, rx) = mpsc::sync_channel(1);
+            sender.send((on, tx)).context("Power worker unavailable")?;
+            rx.recv_timeout(Duration::from_secs(5))
+                .context("Power assertion timed out")?
+                .map_err(anyhow::Error::msg)?;
+        }
         *active = on;
         Ok(())
     }
@@ -148,17 +155,31 @@ impl Power {
 pub(super) struct Utilities {
     preferences: Mutex<Preferences>,
     power: Power,
+    fs_durability: canban_context::FsDurability,
     pub(super) usage: canban_usage::Service,
 }
 impl Utilities {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(home: &Path) -> Self {
+        Self::new_with_options(home, canban_context::FsDurability::Full, false)
+    }
+    pub fn new_with_options(
+        home: &Path,
+        fs_durability: canban_context::FsDurability,
+        disable_os_watchers: bool,
+    ) -> Self {
         let prefs = std::fs::read(home.join("config/desktop.json"))
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
         Self {
             preferences: Mutex::new(prefs),
-            power: Power::new(),
+            power: if disable_os_watchers {
+                Power::disabled()
+            } else {
+                Power::new()
+            },
+            fs_durability,
             usage: Default::default(),
         }
     }
@@ -174,9 +195,10 @@ impl Utilities {
         });
         let changed = next != *prefs;
         if changed {
-            canban_context::atomic(
+            canban_context::atomic_with_durability(
                 &home.join("config/desktop.json"),
                 &serde_json::to_vec_pretty(&next)?,
+                self.fs_durability,
             )?;
             *prefs = next;
         }
@@ -200,9 +222,10 @@ impl Utilities {
         }
         let mut next = prefs.clone();
         next.terminal_size = Some(normalized);
-        canban_context::atomic(
+        canban_context::atomic_with_durability(
             &home.join("config/desktop.json"),
             &serde_json::to_vec_pretty(&next)?,
+            self.fs_durability,
         )?;
         *prefs = next;
         Ok(true)
@@ -330,9 +353,10 @@ impl AppServer {
                 }
                 let changed = next != *prefs;
                 if changed {
-                    canban_context::atomic(
+                    canban_context::atomic_with_durability(
                         &self.home.join("config/desktop.json"),
                         &serde_json::to_vec_pretty(&next)?,
+                        self.fs_durability,
                     )?;
                     *prefs = next;
                 }

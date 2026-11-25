@@ -629,7 +629,7 @@ impl AppServer {
         self.mutate("agent.reply", &p, |db| {
             let mut q: Question = db.get(&question.id)?;
             ensure!(q.state != "replied", "This question already has a reply");
-            canban_context::atomic(&file, body.as_bytes())?;
+            canban_context::atomic_with_durability(&file, body.as_bytes(), self.fs_durability)?;
             q.reply_path = Some(canban_context::relative(&self.home, &file)?);
             q.state = "replied".into();
             q.error = None;

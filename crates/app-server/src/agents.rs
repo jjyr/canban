@@ -530,7 +530,11 @@ impl AppServer {
     }
 
     fn save_raw_config(&self, mut raw: Config) -> Result<Config> {
-        let resolved = canban_profiles::resolve(raw.clone(), &self.home)?;
+        let resolved = canban_profiles::resolve_with_runner(
+            raw.clone(),
+            &self.home,
+            self.exec_runner.as_ref(),
+        )?;
         Self::validate_config(&resolved)?;
         self.validate_references(&resolved)?;
         // Persist concise `raw` JSON while publishing resolved in-memory `Config`.
@@ -545,7 +549,11 @@ impl AppServer {
             }
         }
         let path = self.home.join("config/agents.json");
-        canban_context::atomic(&path, &serde_json::to_vec_pretty(&raw)?)?;
+        canban_context::atomic_with_durability(
+            &path,
+            &serde_json::to_vec_pretty(&raw)?,
+            self.fs_durability,
+        )?;
         *self.config.write().unwrap() = resolved.clone();
         self.emit("configuration", None);
         Ok(resolved)

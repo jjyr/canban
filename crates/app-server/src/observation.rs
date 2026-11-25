@@ -424,15 +424,17 @@ impl AppServer {
     }
     pub(super) fn start_runtime(self: &Arc<Self>) {
         let runtime_notify = Arc::new(tokio::sync::Notify::new());
-        let activity_notify = Arc::downgrade(&runtime_notify);
-        canban_herdr::activity::subscribe_callback(move || {
-            if let Some(notify) = activity_notify.upgrade() {
-                notify.notify_one();
-                true
-            } else {
-                false
-            }
-        });
+        if self.herdr_backend.is_none() {
+            let activity_notify = Arc::downgrade(&runtime_notify);
+            canban_herdr::activity::subscribe_callback(move || {
+                if let Some(notify) = activity_notify.upgrade() {
+                    notify.notify_one();
+                    true
+                } else {
+                    false
+                }
+            });
+        }
         *self.runtime_wake.lock().unwrap() = Some(runtime_notify.clone());
         let delivery_notify = Arc::new(tokio::sync::Notify::new());
         *self.delivery_wake.lock().unwrap() = Some(delivery_notify.clone());
@@ -726,14 +728,15 @@ async fn observer_loop(
                 break;
             }
             tokio::select! {
-                _ = notify.notified() => {}
-                _ = tokio::time::sleep_until(deadline) => {
-                    break;
-                }
+                biased;
                 res = stop_rx.changed() => {
                     if res.is_err() || *stop_rx.borrow() {
                         return;
                     }
+                }
+                _ = notify.notified() => {}
+                _ = tokio::time::sleep_until(deadline) => {
+                    break;
                 }
             }
         }
@@ -758,6 +761,7 @@ async fn delivery_worker_loop(
             if canban_updater::handoff::active(&server.home) {
                 wait = Some(Duration::from_millis(250));
             } else {
+                let changes_before = server.db_changes();
                 if let Err(e) = server.pump_deliveries() {
                     eprintln!("Canban delivery: {e:#}");
                 }
@@ -769,11 +773,12 @@ async fn delivery_worker_loop(
                     .db()
                     .admission_snapshot()
                     .unwrap_or_default();
-                if s.terminals.iter().any(|t| {
-                    t.agent
-                        .as_ref()
-                        .is_some_and(|a| a.state == "queued" || a.pending.is_some())
-                }) || s.merge_batches.iter().any(|b| b.state == "queued")
+                if server.db_changes() != changes_before
+                    && (s.terminals.iter().any(|t| {
+                        t.agent
+                            .as_ref()
+                            .is_some_and(|a| a.state == "queued" || a.pending.is_some())
+                    }) || s.merge_batches.iter().any(|b| b.state == "queued"))
                 {
                     server.wake_runtime();
                 }

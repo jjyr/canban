@@ -238,6 +238,14 @@ impl Record for Event {
 
 type CommitHook = std::sync::Arc<dyn Fn(u64, &'static str) + Send + Sync>;
 
+/// Options controlling SQLite durability when opening [`Store`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StoreOptions {
+    /// When `true`, uses `PRAGMA synchronous = OFF` while keeping `PRAGMA journal_mode = WAL`.
+    /// Intended for ephemeral deterministic simulation testing (DST); production uses `false` (`FULL`).
+    pub synchronous_off: bool,
+}
+
 pub struct Store {
     conn: Connection,
     pub home: PathBuf,
@@ -251,8 +259,12 @@ impl Store {
     pub fn open(home: &Path) -> Result<Self> {
         Self::open_with_progress(home, |_, _| {})
     }
-    pub fn open_with_progress(
+    pub fn open_with_progress(home: &Path, on_progress: impl FnMut(&str, &str)) -> Result<Self> {
+        Self::open_with_progress_and_options(home, StoreOptions::default(), on_progress)
+    }
+    pub fn open_with_progress_and_options(
         home: &Path,
+        options: StoreOptions,
         mut on_progress: impl FnMut(&str, &str),
     ) -> Result<Self> {
         std::fs::create_dir_all(home)?;
@@ -264,9 +276,14 @@ impl Store {
         on_progress("storage", "Opening canban.sqlite (WAL mode)…");
         let mut conn = Connection::open(home.join("canban.sqlite"))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        conn.execute_batch(
-            "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
-        )?;
+        let sync_mode = if options.synchronous_off {
+            "OFF"
+        } else {
+            "FULL"
+        };
+        conn.execute_batch(&format!(
+            "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous={sync_mode};"
+        ))?;
         let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
         anyhow::ensure!(mode == "wal", "SQLite WAL could not be enabled");
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -1003,4 +1020,74 @@ fn decode_activity_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActivitySegm
         open: false,
         data,
     })
+}
+
+#[cfg(test)]
+mod store_options_tests {
+    use super::*;
+
+    #[test]
+    fn store_options_synchronous_off_keeps_wal_and_persists_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+
+        let mut store = Store::open_with_progress_and_options(
+            &home,
+            StoreOptions {
+                synchronous_off: true,
+            },
+            |_, _| {},
+        )
+        .unwrap();
+
+        let mode: String = store
+            .db()
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        let sync_level: i64 = store
+            .db()
+            .conn
+            .query_row("PRAGMA synchronous", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode.to_ascii_lowercase(), "wal");
+        assert_eq!(sync_level, 0, "PRAGMA synchronous should be OFF (0)");
+
+        let project = Project {
+            id: "proj-sync-off".into(),
+            name: "Sync Off".into(),
+            directory: "/tmp/sync-off".into(),
+            workflow: Workflow::default(),
+            github: None,
+            github_disconnected: false,
+            detected_github: None,
+            delivery_mode: DeliveryMode::default(),
+            agent_overrides: Default::default(),
+            tags: Vec::new(),
+            target_branch: None,
+            created_at: 1_000,
+        };
+        store.write(|db| db.save(&project)).unwrap();
+        drop(store);
+
+        // Reopen with production default options and confirm WAL + FULL + persisted row.
+        let reopened = Store::open(&home).unwrap();
+        let reopened_mode: String = reopened
+            .db()
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        let reopened_sync: i64 = reopened
+            .db()
+            .conn
+            .query_row("PRAGMA synchronous", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(reopened_mode.to_ascii_lowercase(), "wal");
+        assert_eq!(
+            reopened_sync, 2,
+            "default PRAGMA synchronous should be FULL (2)"
+        );
+        let loaded: Project = reopened.db().get("proj-sync-off").unwrap();
+        assert_eq!(loaded.name, "Sync Off");
+    }
 }

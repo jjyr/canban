@@ -79,9 +79,12 @@ impl AppServer {
         } else {
             configured_hc.as_str()
         };
-        let resolved_path =
-            canban_profiles::find_local_executable_with_env(lookup_name, &raw.hc_env)
-                .map(|path| path.to_string_lossy().into_owned());
+        let resolved_path = canban_profiles::find_local_executable_with_runner(
+            lookup_name,
+            &raw.hc_env,
+            self.exec_runner.as_ref(),
+        )
+        .map(|path| path.to_string_lossy().into_owned());
 
         let Some(resolved_hc) = resolved_path else {
             let error = if default_hc {
@@ -107,8 +110,11 @@ impl AppServer {
 
         // Refresh in-memory resolved config if `hc` newly resolved on disk so both
         // `Client::status()` and the background observer immediately use the binary.
-        if let Ok((next_config, migration)) = Self::read_config(&self.home) {
-            let _ = Self::publish_migration(&self.home, migration);
+        if let Ok((next_config, migration)) =
+            Self::read_config_with_runner(&self.home, self.exec_runner.as_ref())
+        {
+            let _ =
+                Self::publish_migration_with_durability(&self.home, migration, self.fs_durability);
             let changed = {
                 let mut active = self.config.write().unwrap();
                 let changed = active.hc != next_config.hc

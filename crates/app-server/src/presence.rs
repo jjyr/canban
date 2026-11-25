@@ -2,7 +2,7 @@
 //! Zero SQLite writes; bounded strictly to active clients and live terminals.
 
 use super::*;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Fallback expiration for a client presence lease when no heartbeat or clear arrives (~25s).
 pub(super) const PRESENCE_LEASE_TTL_MS: u64 = 25_000;
@@ -31,10 +31,10 @@ type ReclaimEmitKey = Vec<(String, bool, bool, bool, bool)>;
 
 #[derive(Default)]
 struct PresenceState {
-    leases: HashMap<String, ClientLease>,
-    last_viewed_card: HashMap<String, u64>,
-    last_viewed_terminal: HashMap<String, u64>,
-    scheduled_followups: HashMap<String, ScheduledReclaimTrack>,
+    leases: BTreeMap<String, ClientLease>,
+    last_viewed_card: BTreeMap<String, u64>,
+    last_viewed_terminal: BTreeMap<String, u64>,
+    scheduled_followups: BTreeMap<String, ScheduledReclaimTrack>,
     last_emitted_key: ReclaimEmitKey,
 }
 
@@ -50,7 +50,7 @@ fn non_empty_id(value: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn record_timestamp(map: &mut HashMap<String, u64>, key: &str, at: u64) {
+fn record_timestamp(map: &mut BTreeMap<String, u64>, key: &str, at: u64) {
     let slot = map.entry(key.to_owned()).or_insert(0);
     if at > *slot {
         *slot = at;
@@ -66,7 +66,7 @@ fn record_timestamp(map: &mut HashMap<String, u64>, key: &str, at: u64) {
 }
 
 fn active_sets(
-    leases: &HashMap<String, ClientLease>,
+    leases: &BTreeMap<String, ClientLease>,
     at: u64,
 ) -> (BTreeSet<String>, BTreeSet<String>) {
     let mut cards = BTreeSet::new();

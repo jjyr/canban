@@ -1086,7 +1086,11 @@ impl AppServer {
             .as_deref()
             .is_some_and(|s| s.starts_with("herdr:"));
         if !argv.is_empty() && !is_herdr_template {
-            argv[0] = canban_profiles::executable_with_env(&argv[0], &client.config.hc_env);
+            argv[0] = canban_profiles::executable_with_runner(
+                &argv[0],
+                &client.config.hc_env,
+                self.exec_runner.as_ref(),
+            );
         }
 
         let mut env = std::collections::BTreeMap::from([
@@ -1521,7 +1525,7 @@ impl AppServer {
                 .join(&batch.id)
                 .join("reports")
                 .join(format!("{report_id}.md"));
-            canban_context::atomic(&path, body.as_bytes())?;
+            canban_context::atomic_with_durability(&path, body.as_bytes(), self.fs_durability)?;
             Some(canban_context::relative(&self.home, &path)?)
         } else {
             None

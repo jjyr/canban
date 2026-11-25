@@ -388,6 +388,7 @@ pub fn desktop_multi_host_client(
         global_env_provider: Some(Arc::new(DesktopGlobalEnvProvider::new(local_home))),
         min_api_version: Some(API_VERSION),
         clock: canban_types::system_clock(),
+        fs_durability: canban_context::FsDurability::Full,
     })
 }
 

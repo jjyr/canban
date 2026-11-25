@@ -73,6 +73,14 @@ impl AppServer {
             }
             "github.reference.add" | "github.reference.remove" => self.github_reference(method, p),
             "github.cli.status" => {
+                if self.github_transport.is_some() {
+                    return Some(Ok(json!({
+                        "state": "missing",
+                        "installed": false,
+                        "last_login": Value::Null,
+                        "message": "GitHub CLI is disabled when a custom GitHub transport is configured",
+                    })));
+                }
                 let had_identity = self.github_cli.identity().is_some();
                 match self.github_cli.identify() {
                     Ok(u) => {
@@ -107,6 +115,10 @@ impl AppServer {
                 }
             }
             "github.cli.login" => (|| {
+                ensure!(
+                    self.github_transport.is_none(),
+                    "GitHub CLI login is disabled when a custom GitHub transport is configured"
+                );
                 ensure!(
                     canban_github::cli::Service::installed(),
                     "GitHub CLI (`gh`) is not installed. Install it first (e.g. `brew install gh`), then sign in."
@@ -147,7 +159,15 @@ impl AppServer {
         notification: bool,
     ) -> Result<Response> {
         let generation = self.github.generation();
-        let result = if notification {
+        let result = if self.github_transport.is_some() {
+            // Fail closed to the injected HttpTransport (e.g. DST fake GitHub) — never spawn `gh`.
+            let client = self.github_client()?;
+            if refresh {
+                client.refreshing().response(path)
+            } else {
+                client.response(path)
+            }
+        } else if notification {
             let value = self.github_cli.response(path, refresh)?;
             if let Some(login) = self.github.status().login {
                 ensure!(
@@ -193,13 +213,16 @@ impl AppServer {
             )
         } else {
             ensure!(matches!(kind, "issues" | "prs"), "Invalid GitHub list");
-            let login = self
-                .github
-                .status()
-                .login
-                .or_else(|| self.github_cli.login())
-                .or_else(|| self.github_cli.identify().ok().map(|u| u.login))
-                .context("Sign in on the GitHub page or run gh auth login")?;
+            let login = if self.github_transport.is_some() {
+                self.github.status().login.unwrap_or_else(|| "sim".into())
+            } else {
+                self.github
+                    .status()
+                    .login
+                    .or_else(|| self.github_cli.login())
+                    .or_else(|| self.github_cli.identify().ok().map(|u| u.login))
+                    .context("Sign in on the GitHub page or run gh auth login")?
+            };
             let mut query = format!("is:{}", if kind == "prs" { "pr" } else { "issue" });
             if let Some(repo) = p["repository"].as_str().filter(|s| !s.is_empty()) {
                 query.push_str(&format!(" repo:{}", canban_github::repository(repo)?));
@@ -308,7 +331,12 @@ impl AppServer {
             let cached = cache_client
                 .as_ref()
                 .and_then(|c| c.cached_response(&versioned))
-                .or_else(|| self.github_cli.cached(&versioned));
+                .or_else(|| {
+                    self.github_transport
+                        .is_none()
+                        .then(|| self.github_cli.cached(&versioned))
+                        .flatten()
+                });
             if !refresh && let Some(cached) = cached {
                 cached
             } else {
@@ -320,7 +348,7 @@ impl AppServer {
                 );
                 if let Some(c) = cache_client {
                     c.seed_response(&versioned, &value)
-                } else {
+                } else if self.github_transport.is_none() {
                     self.github_cli.seed(&versioned, &value)
                 }
                 value
@@ -431,12 +459,15 @@ impl AppServer {
         let client = self.github_client()?.refreshing();
         let generation = self.github.generation();
         let cards = self.store.lock().unwrap().db().list::<Card>()?;
-        let login = self
-            .github
-            .status()
-            .login
-            .or_else(|| self.github_cli.login())
-            .unwrap_or_default();
+        let login = if self.github_transport.is_some() {
+            self.github.status().login
+        } else {
+            self.github
+                .status()
+                .login
+                .or_else(|| self.github_cli.login())
+        }
+        .unwrap_or_default();
         let sync = integration::pull_requests::fetch(&client, project, &cards, &login)?;
         let changes = sync.changes;
         if !changes.is_empty() {
@@ -889,6 +920,10 @@ impl AppServer {
             !thread.is_empty() && thread.bytes().all(|b| b.is_ascii_digit()),
             "Invalid notification ID"
         );
+        ensure!(
+            self.github_transport.is_none(),
+            "GitHub notification CLI actions are disabled when a custom GitHub transport is configured"
+        );
         let user = self.github_cli.identify()?;
         ensure!(
             self.github
@@ -944,7 +979,11 @@ impl AppServer {
             }
         }
         let path = self.home.join("cache/github/queries.json");
-        let _ = canban_context::atomic(&path, &serde_json::to_vec(&*warm).unwrap_or_default());
+        let _ = canban_context::atomic_with_durability(
+            &path,
+            &serde_json::to_vec(&*warm).unwrap_or_default(),
+            self.fs_durability,
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -959,7 +998,10 @@ impl AppServer {
             .values()
             .cloned()
             .collect();
-        if queries.is_empty() && self.github_cli.login().is_some() {
+        if queries.is_empty()
+            && self.github_transport.is_none()
+            && self.github_cli.login().is_some()
+        {
             queries.push(json!({"kind":"notifications","state":"inbox","relation":"all","page":1}));
         }
         for mut p in queries {
@@ -972,5 +1014,108 @@ impl AppServer {
             }
         }
         self.emit("github", None);
+    }
+}
+
+#[cfg(test)]
+mod fail_closed_tests {
+    use super::*;
+    use canban_github::{HttpRequest, HttpResponse, HttpTransport};
+    use std::sync::{Arc, Mutex};
+
+    struct RecordingTransport {
+        seen: Mutex<Vec<(String, String)>>,
+    }
+
+    impl HttpTransport for RecordingTransport {
+        fn send(&self, req: HttpRequest) -> Result<HttpResponse> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((req.method.clone(), req.path.clone()));
+            if req.path.starts_with("/notifications") {
+                Ok(HttpResponse {
+                    status: 200,
+                    headers: vec![("content-type".into(), "application/json".into())],
+                    body: br#"[{"id":"n1","unread":true}]"#.to_vec(),
+                })
+            } else if req.path == "/repos/acme/app/issues/1" {
+                Ok(HttpResponse {
+                    status: 200,
+                    headers: vec![("content-type".into(), "application/json".into())],
+                    body: br#"{"number":1,"title":"Mock issue"}"#.to_vec(),
+                })
+            } else {
+                anyhow::bail!("simulated transport failure for {}", req.path)
+            }
+        }
+    }
+
+    #[test]
+    fn github_read_routes_through_injected_transport_and_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let transport = Arc::new(RecordingTransport {
+            seen: Mutex::new(Vec::new()),
+        });
+        let env = ServerRuntimeEnv {
+            github_transport: Some(transport.clone()),
+            fs_durability: FsDurability::NoSync,
+            sqlite_synchronous_off: true,
+            disable_os_watchers: true,
+            ..Default::default()
+        };
+        let app = AppServer::open_with_env(home, PathBuf::from("/bin/echo"), env).unwrap();
+
+        // Standard read with unauthenticated App state must route through github_transport, not `gh`.
+        let issue = app
+            .github_read("/repos/acme/app/issues/1", true, false)
+            .unwrap();
+        assert_eq!(issue.data["title"], "Mock issue");
+
+        // Notification read must also route through github_transport and never spawn `gh`.
+        let notifications = app
+            .github_read("/notifications?all=true", true, true)
+            .unwrap();
+        assert_eq!(notifications.data[0]["id"], "n1");
+
+        // Missing/failing route must fail closed rather than falling back to `gh`.
+        let err = app
+            .github_read("/repos/acme/app/issues/404", true, false)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("simulated transport failure"),
+            "unexpected error: {err:#}"
+        );
+
+        // `github.cli.status` must report disabled/missing without invoking `gh`.
+        let cli_status = app.call("github.cli.status", json!({})).unwrap();
+        assert_eq!(cli_status["installed"], false);
+        assert_eq!(cli_status["state"], "missing");
+
+        // `card.create` must not invoke `gh` for author login.
+        let project: Project = serde_json::from_value(
+            app.call(
+                "project.create",
+                json!({"name": "P", "directory": dir.path().join("repo")}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let card: Card = serde_json::from_value(
+            app.call(
+                "card.create",
+                json!({"view": "full", "project_id": project.id, "title": "T"}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(card.created_by, "Local");
+
+        let seen = transport.seen.lock().unwrap();
+        assert_eq!(seen.len(), 3);
+        assert_eq!(seen[0].1, "/repos/acme/app/issues/1");
+        assert_eq!(seen[1].1, "/notifications?all=true");
+        assert_eq!(seen[2].1, "/repos/acme/app/issues/404");
     }
 }

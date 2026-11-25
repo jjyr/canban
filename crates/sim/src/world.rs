@@ -304,6 +304,7 @@ impl SimWorld {
                         herdr_backend: Some(herdr),
                         github_transport: Some(github),
                         inline_workers: true,
+                        ..Default::default()
                     };
                     let server = AppServer::open_with_env(home, PathBuf::from("/bin/echo"), env)
                         .map_err(|e| format!("open_with_env({host_label}): {e:#}"))?;
@@ -452,6 +453,7 @@ impl SimWorld {
                         global_env_provider,
                         min_api_version: Some(canban_app_server::API_VERSION),
                         clock,
+                        fs_durability: canban_client::FsDurability::Full,
                     },
                     tokio::runtime::Handle::current(),
                 )

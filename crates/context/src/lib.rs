@@ -43,10 +43,24 @@ pub fn skill_path(home: &Path) -> PathBuf {
     home.join("skills").join("canban").join("SKILL.md")
 }
 
+/// Durability policy for atomic temp-file + rename persistence.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FsDurability {
+    /// Flush both temp file and parent directory via `sync_all()` (production default).
+    #[default]
+    Full,
+    /// Skip `sync_all()` disk barriers while preserving atomic temp-file + rename semantics (for DST).
+    NoSync,
+}
+
 pub fn materialize_skill(home: &Path) -> Result<PathBuf> {
+    materialize_skill_with_durability(home, FsDurability::Full)
+}
+
+pub fn materialize_skill_with_durability(home: &Path, durability: FsDurability) -> Result<PathBuf> {
     let path = skill_path(home);
     if std::fs::read_to_string(&path).ok().as_deref() != Some(SKILL_MD) {
-        atomic(&path, SKILL_MD.as_bytes())?;
+        atomic_with_durability(&path, SKILL_MD.as_bytes(), durability)?;
     }
     Ok(path)
 }
@@ -109,6 +123,10 @@ pub fn relative(home: &Path, path: &Path) -> Result<String> {
     Ok(path.strip_prefix(home)?.to_string_lossy().into_owned())
 }
 pub fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    atomic_with_durability(path, bytes, FsDurability::Full)
+}
+
+pub fn atomic_with_durability(path: &Path, bytes: &[u8], durability: FsDurability) -> Result<()> {
     std::fs::create_dir_all(path.parent().unwrap())?;
     let tmp = path.with_extension(format!("{}.tmp", id()));
     let mut f = std::fs::OpenOptions::new()
@@ -116,9 +134,14 @@ pub fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         .create_new(true)
         .open(&tmp)?;
     f.write_all(bytes)?;
-    f.sync_all()?;
+    if durability == FsDurability::Full {
+        f.sync_all()?;
+    }
+    drop(f);
     std::fs::rename(&tmp, path)?;
-    std::fs::File::open(path.parent().unwrap())?.sync_all()?;
+    if durability == FsDurability::Full {
+        std::fs::File::open(path.parent().unwrap())?.sync_all()?;
+    }
     Ok(())
 }
 pub fn card_dir(home: &Path, project: &str, card_number: u64) -> PathBuf {
@@ -638,5 +661,25 @@ mod tests {
                 "{name} ## Behavior section should not leak `adopt` CLI terminology"
             );
         }
+    }
+
+    #[test]
+    fn atomic_with_durability_nosync_creates_and_replaces_atomically() {
+        let dir = std::env::temp_dir().join(format!("canban-nosync-test-{}", id()));
+        let target = dir.join("nested/state.json");
+        atomic_with_durability(&target, br#"{"v":1}"#, FsDurability::NoSync).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), br#"{"v":1}"#);
+
+        atomic_with_durability(&target, br#"{"v":2}"#, FsDurability::NoSync).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), br#"{"v":2}"#);
+
+        // No stray temp files remain in the target directory.
+        let entries: Vec<_> = std::fs::read_dir(target.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec!["state.json".to_owned()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

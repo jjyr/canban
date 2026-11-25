@@ -1,13 +1,14 @@
 //! End-to-end server, runtime, toolchain, storage, and log diagnostics RPCs.
 use super::*;
-use std::process::Stdio;
 
 fn probe_tool(
     name: &str,
     version_arg: &str,
     env_map: &std::collections::BTreeMap<String, String>,
+    runner: &dyn canban_exec::CommandRunner,
 ) -> Value {
-    let Some(resolved) = canban_profiles::find_local_executable_with_env(name, env_map) else {
+    let Some(resolved) = canban_profiles::find_local_executable_with_runner(name, env_map, runner)
+    else {
         return json!({
             "available": false,
             "path": Value::Null,
@@ -15,12 +16,11 @@ fn probe_tool(
             "error": format!("{name} not found in ~/.local/bin, /opt/homebrew/bin, /usr/local/bin, or PATH"),
         });
     };
-    let mut cmd = canban_exec::command_with_env(&resolved, env_map);
-    cmd.arg(version_arg)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let version = cmd.output().ok().and_then(|out| {
+    let mut spec = canban_exec::CommandSpec::new(resolved.to_string_lossy()).arg(version_arg);
+    for (k, v) in env_map {
+        spec = spec.env(k, v);
+    }
+    let version = runner.run(&spec).ok().and_then(|out| {
         let text = if out.stdout.is_empty() {
             String::from_utf8_lossy(&out.stderr).into_owned()
         } else {
@@ -99,7 +99,9 @@ impl AppServer {
     }
 
     pub(super) fn diagnostics_status(&self) -> Result<Value> {
-        canban_herdr::refresh_local_shell_path_if_stale(std::time::Duration::from_secs(2));
+        if self.exec_runner.is_system() {
+            canban_herdr::refresh_local_shell_path_if_stale(std::time::Duration::from_secs(2));
+        }
         let config = self.config();
         let build = canban_updater::Build::current();
         let uptime_ms = now().saturating_sub(self.started_at);
@@ -161,8 +163,18 @@ impl AppServer {
             )
         };
 
-        let git = probe_tool("git", "--version", &config.hc_env);
-        let python3 = probe_tool("python3", "--version", &config.hc_env);
+        let git = probe_tool(
+            "git",
+            "--version",
+            &config.hc_env,
+            self.exec_runner.as_ref(),
+        );
+        let python3 = probe_tool(
+            "python3",
+            "--version",
+            &config.hc_env,
+            self.exec_runner.as_ref(),
+        );
         let tailscale_ip = network::detect_tailscale_ipv4().ok();
         let service_mgr = network::service_status(&self.home);
 
@@ -177,7 +189,11 @@ impl AppServer {
             let resolved = if cmd_name.is_empty() {
                 None
             } else {
-                canban_profiles::find_local_executable_with_env(&cmd_name, &config.hc_env)
+                canban_profiles::find_local_executable_with_runner(
+                    &cmd_name,
+                    &config.hc_env,
+                    self.exec_runner.as_ref(),
+                )
             };
             profile_checks.push(json!({
                 "id": prof.id,
@@ -194,7 +210,7 @@ impl AppServer {
             "checked_at": now(),
             "server": {
                 "server_id": self.identity,
-                "hostname": network::hostname_string(),
+                "hostname": network::hostname_with(self.exec_runner.as_ref()),
                 "pid": std::process::id(),
                 "uptime_ms": uptime_ms,
                 "home": self.home,
@@ -256,7 +272,7 @@ impl AppServer {
     pub(super) fn host_probe_payload(&self) -> Value {
         json!({
             "server_id": self.identity,
-            "hostname": network::hostname_string(),
+            "hostname": network::hostname_with(self.exec_runner.as_ref()),
             "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
             "version": env!("CARGO_PKG_VERSION"),
             "api_version": API_VERSION,

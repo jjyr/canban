@@ -258,7 +258,11 @@ impl AppServer {
                     .as_deref()
                     .is_some_and(|s| s.starts_with("herdr:"));
                 if !is_herdr_template {
-                    argv[0] = canban_profiles::executable_with_env(&argv[0], &client.config.hc_env);
+                    argv[0] = canban_profiles::executable_with_runner(
+                        &argv[0],
+                        &client.config.hc_env,
+                        self.exec_runner.as_ref(),
+                    );
                 }
                 let env = std::collections::BTreeMap::from([
                     (

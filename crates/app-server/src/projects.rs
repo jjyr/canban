@@ -4,14 +4,15 @@ use canban_herdr::host::Host;
 
 impl AppServer {
     pub(super) fn ops(&self) -> canban_workspaces::Ops {
-        canban_workspaces::Ops {
-            host: Host::new(self.config()),
-        }
+        canban_workspaces::Ops::with_host(Host::with_runner(
+            self.config(),
+            Arc::clone(&self.exec_runner),
+        ))
     }
 
     pub(super) fn resolve_project_directory(&self, p: &Value) -> Result<String> {
         let raw_dir = strp(p, "directory")?.trim();
-        let host = Host::new(self.config());
+        let host = Host::with_runner(self.config(), Arc::clone(&self.exec_runner));
         let expanded = if raw_dir == "~" {
             host.home()?
         } else if let Some(rest) = raw_dir.strip_prefix("~/") {

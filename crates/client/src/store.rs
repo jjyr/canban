@@ -31,6 +31,7 @@ pub trait CredentialStore: Send + Sync + 'static {
 /// Private file-backed credential store (`<data_dir>/credentials.json`, mode `0o600` on Unix).
 pub struct FileCredentialStore {
     path: PathBuf,
+    durability: canban_context::FsDurability,
     lock: Mutex<()>,
 }
 
@@ -42,8 +43,13 @@ struct CredentialsFile {
 
 impl FileCredentialStore {
     pub fn open(data_dir: &Path) -> Self {
+        Self::open_with_durability(data_dir, canban_context::FsDurability::Full)
+    }
+
+    pub fn open_with_durability(data_dir: &Path, durability: canban_context::FsDurability) -> Self {
         Self {
             path: data_dir.join("credentials.json"),
+            durability,
             lock: Mutex::new(()),
         }
     }
@@ -60,7 +66,11 @@ impl FileCredentialStore {
             std::fs::create_dir_all(parent)?;
             set_private_mode(parent, 0o700);
         }
-        canban_context::atomic(&self.path, &serde_json::to_vec_pretty(file)?)?;
+        canban_context::atomic_with_durability(
+            &self.path,
+            &serde_json::to_vec_pretty(file)?,
+            self.durability,
+        )?;
         set_private_mode(&self.path, 0o600);
         Ok(())
     }
@@ -157,11 +167,24 @@ pub trait HostStore: Send + Sync + 'static {
 pub struct CredentialHostStore {
     data_dir: PathBuf,
     creds: std::sync::Arc<dyn CredentialStore>,
+    durability: canban_context::FsDurability,
 }
 
 impl CredentialHostStore {
     pub fn new(data_dir: PathBuf, creds: std::sync::Arc<dyn CredentialStore>) -> Self {
-        Self { data_dir, creds }
+        Self::new_with_durability(data_dir, creds, canban_context::FsDurability::Full)
+    }
+
+    pub fn new_with_durability(
+        data_dir: PathBuf,
+        creds: std::sync::Arc<dyn CredentialStore>,
+        durability: canban_context::FsDurability,
+    ) -> Self {
+        Self {
+            data_dir,
+            creds,
+            durability,
+        }
     }
 }
 
@@ -171,7 +194,7 @@ impl HostStore for CredentialHostStore {
     }
 
     fn save_hosts(&self, hosts: &[SavedHost]) -> Result<()> {
-        save_hosts(&self.data_dir, hosts, self.creds.as_ref())
+        save_hosts_with_durability(&self.data_dir, hosts, self.creds.as_ref(), self.durability)
     }
 
     fn delete_credentials(&self, host_id: &str) {
@@ -183,11 +206,16 @@ impl HostStore for CredentialHostStore {
 /// `<home>/config/hosts.json`) with tokens stored inline.
 pub struct InlineHostsFileStore {
     path: PathBuf,
+    durability: canban_context::FsDurability,
 }
 
 impl InlineHostsFileStore {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self::new_with_durability(path, canban_context::FsDurability::Full)
+    }
+
+    pub fn new_with_durability(path: PathBuf, durability: canban_context::FsDurability) -> Self {
+        Self { path, durability }
     }
 
     pub fn path(&self) -> &Path {
@@ -208,7 +236,11 @@ impl HostStore for InlineHostsFileStore {
         let file = HostsFile {
             hosts: hosts.to_vec(),
         };
-        canban_context::atomic(&self.path, &serde_json::to_vec_pretty(&file)?)
+        canban_context::atomic_with_durability(
+            &self.path,
+            &serde_json::to_vec_pretty(&file)?,
+            self.durability,
+        )
     }
 }
 
@@ -235,11 +267,25 @@ pub fn load_global_env_sync_fingerprint(data_dir: &Path, host_id: &str) -> Optio
 }
 
 pub fn save_global_env_sync_fingerprint(data_dir: &Path, host_id: &str, fingerprint: Option<&str>) {
+    save_global_env_sync_fingerprint_with_durability(
+        data_dir,
+        host_id,
+        fingerprint,
+        canban_context::FsDurability::Full,
+    );
+}
+
+pub fn save_global_env_sync_fingerprint_with_durability(
+    data_dir: &Path,
+    host_id: &str,
+    fingerprint: Option<&str>,
+    durability: canban_context::FsDurability,
+) {
     let path = global_env_sync_state_path(data_dir, host_id);
     match fingerprint {
         Some(fp) => {
             if let Ok(bytes) = serde_json::to_vec(&serde_json::json!({ "fingerprint": fp })) {
-                let _ = canban_context::atomic(&path, &bytes);
+                let _ = canban_context::atomic_with_durability(&path, &bytes, durability);
             }
         }
         None => {
@@ -285,6 +331,16 @@ pub fn load_hosts(data_dir: &Path, creds: &dyn CredentialStore) -> Vec<SavedHost
 
 /// Persists `hosts` to `<data_dir>/hosts.json` with inline TCP tokens stripped into `creds`.
 pub fn save_hosts(data_dir: &Path, hosts: &[SavedHost], creds: &dyn CredentialStore) -> Result<()> {
+    save_hosts_with_durability(data_dir, hosts, creds, canban_context::FsDurability::Full)
+}
+
+/// Persists `hosts` to `<data_dir>/hosts.json` using the specified [`canban_context::FsDurability`].
+pub fn save_hosts_with_durability(
+    data_dir: &Path,
+    hosts: &[SavedHost],
+    creds: &dyn CredentialStore,
+    durability: canban_context::FsDurability,
+) -> Result<()> {
     let mut stripped = Vec::with_capacity(hosts.len());
     for host in hosts {
         let mut copy = host.clone();
@@ -302,9 +358,10 @@ pub fn save_hosts(data_dir: &Path, hosts: &[SavedHost], creds: &dyn CredentialSt
     }
     set_private_mode(data_dir, 0o700);
     let path = hosts_path(data_dir);
-    canban_context::atomic(
+    canban_context::atomic_with_durability(
         &path,
         &serde_json::to_vec_pretty(&HostsFile { hosts: stripped })?,
+        durability,
     )?;
     set_private_mode(&path, 0o600);
     Ok(())
@@ -317,8 +374,21 @@ pub fn load_cache(data_dir: &Path, host_id: &str) -> Option<CachedHostData> {
 }
 
 pub fn save_cache(data_dir: &Path, host_id: &str, data: &CachedHostData) {
+    save_cache_with_durability(data_dir, host_id, data, canban_context::FsDurability::Full);
+}
+
+pub fn save_cache_with_durability(
+    data_dir: &Path,
+    host_id: &str,
+    data: &CachedHostData,
+    durability: canban_context::FsDurability,
+) {
     if let Ok(bytes) = serde_json::to_vec(data) {
-        let _ = canban_context::atomic(&cache_path(data_dir, host_id), &bytes);
+        let _ = canban_context::atomic_with_durability(
+            &cache_path(data_dir, host_id),
+            &bytes,
+            durability,
+        );
     }
 }
 

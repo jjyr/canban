@@ -10,6 +10,7 @@ pub mod push;
 pub mod session;
 pub mod store;
 
+pub use canban_context::FsDurability;
 pub use capabilities::{
     ClientCapabilities, GlobalEnvSyncProvider, LocalDiscoveryProvider, LocalHostDriver,
     SshCapabilityProvider, TailscalePeerConnectResult,

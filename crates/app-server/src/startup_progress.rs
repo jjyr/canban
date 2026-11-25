@@ -28,13 +28,23 @@ fn now_ms() -> u64 {
 pub(crate) struct StartupProgressWriter {
     path: PathBuf,
     pid: u32,
+    durability: canban_context::FsDurability,
 }
 
 impl StartupProgressWriter {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(home: &Path) -> Self {
+        Self::new_with_durability(home, canban_context::FsDurability::Full)
+    }
+
+    pub(crate) fn new_with_durability(
+        home: &Path,
+        durability: canban_context::FsDurability,
+    ) -> Self {
         Self {
             path: home.join(PROGRESS_FILE),
             pid: std::process::id(),
+            durability,
         }
     }
 
@@ -47,7 +57,7 @@ impl StartupProgressWriter {
             detail: detail.into(),
         };
         if let Ok(bytes) = serde_json::to_vec(&payload) {
-            let _ = canban_context::atomic(&self.path, &bytes);
+            let _ = canban_context::atomic_with_durability(&self.path, &bytes, self.durability);
         }
     }
 }

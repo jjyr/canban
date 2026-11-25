@@ -345,6 +345,7 @@ fn build_preview_rows(
     resolved_config: &Config,
     profile: Option<&Profile>,
     project: Option<&Project>,
+    runner: &dyn canban_exec::CommandRunner,
 ) -> Result<Vec<EnvPreviewRow>> {
     struct RowAcc {
         display_value: String,
@@ -357,7 +358,7 @@ fn build_preview_rows(
 
     let mut tracked: BTreeMap<String, RowAcc> = BTreeMap::new();
     if resolved_config.terminal_env_mode.is_inherit() {
-        let snap = canban_exec::shell_env::local_shell_env_snapshot();
+        let snap = runner.shell_env();
         for (k, v) in &snap.vars {
             if canban_exec::shell_env::is_denied_shell_env_key(k) {
                 continue;
@@ -379,9 +380,12 @@ fn build_preview_rows(
                 },
             );
         }
-    } else if let Some(path_val) =
+    } else if let Some(path_val) = if runner.is_system() {
         canban_exec::shell_env::local_merged_path_string(&resolved_config.hc_env)
-            .filter(|s| !s.is_empty())
+    } else {
+        canban_exec::merged_path_string_from_snapshot(&runner.shell_env(), &resolved_config.hc_env)
+    }
+    .filter(|s| !s.is_empty())
     {
         tracked.insert(
             "PATH".into(),
@@ -646,12 +650,18 @@ impl AppServer {
                 .find(|prof| prof.id == pid)
                 .cloned()
         });
-        let rows = build_preview_rows(db, &resolved_config, profile.as_ref(), project.as_ref())?;
+        let rows = build_preview_rows(
+            db,
+            &resolved_config,
+            profile.as_ref(),
+            project.as_ref(),
+            self.exec_runner.as_ref(),
+        )?;
         Ok(json!({ "rows": rows }))
     }
 
     pub(super) fn host_env_keys(&self) -> Result<Value> {
-        let snap = canban_exec::shell_env::local_shell_env_snapshot();
+        let snap = self.exec_runner.shell_env();
         let keys: Vec<Value> = snap
             .vars
             .iter()

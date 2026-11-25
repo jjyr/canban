@@ -72,7 +72,7 @@ impl AppServer {
             response["snapshot"] = serde_json::to_value(snapshot)?;
             response["config"] = serde_json::to_value(self.config())?;
             response["home"] = json!(self.home);
-            response["hostname"] = json!(network::hostname_string());
+            response["hostname"] = json!(network::hostname_with(self.exec_runner.as_ref()));
         }
         Ok(response)
     }

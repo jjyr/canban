@@ -6,7 +6,6 @@ const CARDLESS_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 const ACTIVITY_RETENTION_MS: u64 = 400 * 24 * 60 * 60 * 1000;
 const CARDLESS_KEEP_RECENT: usize = 2_000;
 const PRUNE_INTERVAL_MS: u64 = 5 * 60 * 1000;
-static LAST_CARDLESS_PRUNE_AT: AtomicU64 = AtomicU64::new(0);
 
 pub(super) fn highwater(db: Db<'_>) -> Result<u64> {
     let max_offset: u64 = db.conn.query_row(
@@ -38,10 +37,16 @@ fn page(db: Db<'_>, after: u64, limit: usize) -> Result<Vec<JournalEvent>> {
     })
     .collect()
 }
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn pump(db: Db<'_>, config: &Config) -> Result<()> {
-    pump_at(db, config, now())
+    pump_at_with_prune_state(db, config, now(), None)
 }
-pub(super) fn pump_at(db: Db<'_>, config: &Config, now_ms: u64) -> Result<()> {
+pub(super) fn pump_at_with_prune_state(
+    db: Db<'_>,
+    config: &Config,
+    now_ms: u64,
+    last_prune_at: Option<&AtomicU64>,
+) -> Result<()> {
     super::workflow::reconcile(db)?;
     let top = highwater(db)?;
     let mut min_enabled_cursor: Option<u64> = None;
@@ -244,17 +249,19 @@ pub(super) fn pump_at(db: Db<'_>, config: &Config, now_ms: u64) -> Result<()> {
         }
         db.save(&d)?;
     }
-    let current_ts = now_ms;
-    let last_prune = LAST_CARDLESS_PRUNE_AT.load(Ordering::Relaxed);
-    if current_ts.saturating_sub(last_prune) >= PRUNE_INTERVAL_MS
-        && LAST_CARDLESS_PRUNE_AT
-            .compare_exchange(last_prune, current_ts, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-    {
-        let safe_offset = min_enabled_cursor.unwrap_or(top);
-        let _ =
-            db.prune_cardless_events(CARDLESS_RETENTION_MS, CARDLESS_KEEP_RECENT, safe_offset)?;
-        let _ = db.prune_activity_segments(ACTIVITY_RETENTION_MS)?;
+    if let Some(last_prune_at) = last_prune_at {
+        let current_ts = now_ms;
+        let last_prune = last_prune_at.load(Ordering::Relaxed);
+        if current_ts.saturating_sub(last_prune) >= PRUNE_INTERVAL_MS
+            && last_prune_at
+                .compare_exchange(last_prune, current_ts, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            let safe_offset = min_enabled_cursor.unwrap_or(top);
+            let _ =
+                db.prune_cardless_events(CARDLESS_RETENTION_MS, CARDLESS_KEEP_RECENT, safe_offset)?;
+            let _ = db.prune_activity_segments(ACTIVITY_RETENTION_MS)?;
+        }
     }
     Ok(())
 }

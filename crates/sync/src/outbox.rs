@@ -90,11 +90,16 @@ struct OutboxFile {
 #[derive(Debug)]
 pub struct Outbox {
     path: PathBuf,
+    durability: canban_context::FsDurability,
     pub ops: Vec<Mutation>,
 }
 
 impl Outbox {
     pub fn load(path: PathBuf) -> Self {
+        Self::load_with_durability(path, canban_context::FsDurability::Full)
+    }
+
+    pub fn load_with_durability(path: PathBuf, durability: canban_context::FsDurability) -> Self {
         let mut ops = std::fs::read(&path)
             .ok()
             .and_then(|b| serde_json::from_slice::<OutboxFile>(&b).ok())
@@ -109,7 +114,11 @@ impl Outbox {
                 }
             }
         }
-        Self { path, ops }
+        Self {
+            path,
+            durability,
+            ops,
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -120,7 +129,8 @@ impl Outbox {
         if self.ops.is_empty() {
             if self.path.exists() {
                 std::fs::remove_file(&self.path)?;
-                if let Some(parent) = self.path.parent()
+                if self.durability == canban_context::FsDurability::Full
+                    && let Some(parent) = self.path.parent()
                     && let Ok(dir) = std::fs::File::open(parent)
                 {
                     let _ = dir.sync_all();
@@ -131,7 +141,11 @@ impl Outbox {
         let file = OutboxFile {
             ops: self.ops.clone(),
         };
-        canban_context::atomic(&self.path, &serde_json::to_vec_pretty(&file)?)
+        canban_context::atomic_with_durability(
+            &self.path,
+            &serde_json::to_vec_pretty(&file)?,
+            self.durability,
+        )
     }
 
     pub fn is_empty(&self) -> bool {

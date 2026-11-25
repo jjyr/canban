@@ -118,9 +118,11 @@ impl AppServer {
         let github_notify = self.github_sync_notify.clone();
         let github_stop = self.stop_receiver();
         handle.spawn(github_sync_loop(weak, github_notify, github_stop));
+        self.sim_abrupt_crash.store(false, Ordering::SeqCst);
         Ok(SimRunning {
             server: self.clone(),
             _lock: lock,
+            abrupt_crash: Arc::clone(&self.sim_abrupt_crash),
         })
     }
 
@@ -945,20 +947,22 @@ async fn handle_herdr_connect(
     let mut to_herdr_done = false;
     let mut to_client_done = false;
     tokio::select! {
+        biased;
+        _ = stop_rx.changed() => {}
         _ = &mut to_herdr => {
             to_herdr_done = true;
             tokio::select! {
+                biased;
+                _ = stop_rx.changed() => {}
                 _ = tokio::time::timeout(Duration::from_millis(500), async {
                     let _ = (&mut to_client).await;
                     to_client_done = true;
                 }) => {}
-                _ = stop_rx.changed() => {}
             }
         }
         _ = &mut to_client => {
             to_client_done = true;
         }
-        _ = stop_rx.changed() => {}
     }
 
     if !to_herdr_done {
@@ -1024,12 +1028,19 @@ impl AppServer {
             return Ok(());
         }
 
-        self.store
-            .lock()
-            .unwrap()
-            .write(|db| events::pump_at(db, &self.config(), self.now_ms()))?;
-        self.request_deliveries();
-        self.request_scripts();
+        let changes_before = self.db_changes();
+        self.store.lock().unwrap().write(|db| {
+            events::pump_at_with_prune_state(
+                db,
+                &self.config(),
+                self.now_ms(),
+                Some(&self.last_cardless_prune_at),
+            )
+        })?;
+        if self.db_changes() != changes_before || self.delivery_wake.lock().unwrap().is_none() {
+            self.request_deliveries();
+            self.request_scripts();
+        }
         let _ = self.pump_cardless_agents();
         let _ = self.pump_resolved_archives();
         self.observe_terminals()?;
@@ -1864,7 +1875,11 @@ impl AppServer {
             .as_deref()
             .is_some_and(|s| s.starts_with("herdr:"));
         if !is_herdr_template {
-            argv[0] = canban_profiles::executable_with_env(&argv[0], &client.config.hc_env);
+            argv[0] = canban_profiles::executable_with_runner(
+                &argv[0],
+                &client.config.hc_env,
+                self.exec_runner.as_ref(),
+            );
         }
         let spec = canban_profiles::prepare_launch(canban_profiles::LaunchRequest {
             profile: Some(&att.profile),
@@ -2194,7 +2209,11 @@ impl AppServer {
                 .as_deref()
                 .is_some_and(|s| s.starts_with("herdr:"));
             if !is_herdr_template {
-                argv[0] = canban_profiles::executable_with_env(&argv[0], &config.hc_env);
+                argv[0] = canban_profiles::executable_with_runner(
+                    &argv[0],
+                    &config.hc_env,
+                    self.exec_runner.as_ref(),
+                );
             }
             let Ok(spec) = canban_profiles::prepare_launch(canban_profiles::LaunchRequest {
                 profile: Some(&profile),
