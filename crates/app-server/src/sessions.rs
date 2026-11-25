@@ -466,13 +466,14 @@ impl AppServer {
             run.lifecycle.interactive_followup = false;
         }
         let card_events = self.store.lock().unwrap().db().events_for_card(&card.id)?;
-        let input = canban_context::capture(
+        let input = canban_context::capture_with_durability(
             &self.home,
             project,
             card,
             &promoted_entry,
             snapshot,
             &card_events,
+            self.fs_durability,
         )?;
         promoted_entry.agent.as_mut().unwrap().input_path = input.clone();
         let _ = pending;

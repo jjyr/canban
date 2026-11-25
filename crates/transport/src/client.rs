@@ -17,7 +17,11 @@ use std::{
     net::{TcpStream, ToSocketAddrs},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock, mpsc},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     time::Duration,
 };
 
@@ -262,6 +266,12 @@ type MuxRelayMap = Mutex<HashMap<String, Arc<MuxClient>>>;
 fn mux_relay_registry() -> &'static MuxRelayMap {
     static REGISTRY: OnceLock<MuxRelayMap> = OnceLock::new();
     REGISTRY.get_or_init(Default::default)
+}
+
+fn next_mux_relay_key() -> String {
+    static NEXT_KEY: AtomicU64 = AtomicU64::new(1);
+    let seq = NEXT_KEY.fetch_add(1, Ordering::Relaxed);
+    format!("mux-{seq:016x}")
 }
 
 fn open_bridged_mux_unix(mux: &Arc<MuxClient>) -> Result<UnixStream> {
@@ -520,7 +530,7 @@ impl ClientTransport {
             .clone()
             .or_else(|| res.upgraded_token.clone())
             .unwrap_or(token);
-        let key = canban_types::id();
+        let key = next_mux_relay_key();
         mux_relay_registry()
             .lock()
             .unwrap()
@@ -551,7 +561,7 @@ impl ClientTransport {
                 .clone()
                 .or_else(|| res.upgraded_token.clone())
                 .unwrap_or(token);
-            let key = canban_types::id();
+            let key = next_mux_relay_key();
             mux_relay_registry()
                 .lock()
                 .unwrap()
@@ -612,7 +622,7 @@ impl ClientTransport {
                 .clone()
                 .or_else(|| res.upgraded_token.clone())
                 .unwrap_or(token);
-            let key = canban_types::id();
+            let key = next_mux_relay_key();
             mux_relay_registry()
                 .lock()
                 .unwrap()
@@ -937,5 +947,32 @@ mod tests {
             .downcast_ref::<io::Error>()
             .expect("truncated frame must surface as std::io::Error so pooling/respawn can retry");
         assert_eq!(io_err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn next_mux_relay_key_is_monotonic_and_collision_free_across_threads() {
+        use std::collections::BTreeSet;
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                std::thread::spawn(|| (0..64).map(|_| next_mux_relay_key()).collect::<Vec<_>>())
+            })
+            .collect();
+        let mut all = BTreeSet::new();
+        for h in handles {
+            let keys = h.join().unwrap();
+            for pair in keys.windows(2) {
+                assert!(
+                    pair[0] < pair[1],
+                    "keys within a thread must be strictly increasing: {:?}",
+                    pair
+                );
+            }
+            for k in keys {
+                assert!(k.starts_with("mux-"));
+                assert!(all.insert(k), "mux relay keys must never collide");
+            }
+        }
+        assert_eq!(all.len(), 256);
     }
 }

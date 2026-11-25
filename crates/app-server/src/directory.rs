@@ -419,6 +419,7 @@ impl AppServer {
             if !contexts.iter().any(|c| c == &context) {
                 contexts.retain(|c| c.terminal_id != id);
                 contexts.push(context);
+                contexts.sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
             }
         }
         if !fresh {
@@ -691,9 +692,7 @@ async fn context_worker_loop(
                     context.terminal_id = target.context.terminal_id;
                     context.core_id = target.context.core_id;
                     context.terminal = target.context.terminal;
-                    let mut contexts = server.terminal_contexts.lock().unwrap();
-                    contexts.retain(|c| c.terminal_id != context.terminal_id);
-                    contexts.push(context);
+                    server.upsert_terminal_context(context);
                 }
                 let watch_targets = cache.lock().unwrap().watch_targets();
                 for target in watch_targets {

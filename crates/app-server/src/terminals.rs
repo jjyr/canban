@@ -983,9 +983,7 @@ impl AppServer {
                     branch: ctx_branch,
                     ..Default::default()
                 };
-                let mut contexts = self.terminal_contexts.lock().unwrap();
-                contexts.retain(|c| c.terminal_id != item.id);
-                contexts.push(seeded.clone());
+                self.upsert_terminal_context(seeded.clone());
                 Some(seeded)
             } else {
                 None
@@ -1200,17 +1198,13 @@ impl AppServer {
                 && let Ok(context) = serde_json::from_value::<TerminalContext>(value)
                 && (context.cwd.is_some() || context.project_id.is_some())
             {
-                let mut contexts = self.terminal_contexts.lock().unwrap();
-                contexts.retain(|c| c.terminal_id != item.id);
-                contexts.push(context);
+                self.upsert_terminal_context(context);
             } else if let Some(mut seeded) = initial_context {
                 if let Some(rt) = &item.runtime {
                     seeded.core_id = rt.core_id.clone().unwrap_or_default();
                     seeded.terminal = rt.terminal.clone().unwrap_or_default();
                 }
-                let mut contexts = self.terminal_contexts.lock().unwrap();
-                contexts.retain(|c| c.terminal_id != item.id);
-                contexts.push(seeded);
+                self.upsert_terminal_context(seeded);
             }
         } else {
             let mut contexts = self.terminal_contexts.lock().unwrap();
@@ -1571,6 +1565,7 @@ impl AppServer {
             let mut q = self.contexts.lock().unwrap();
             q.retain_targets(&wanted);
         }
+        contexts.sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
         let changed = {
             let mut current = self.terminal_contexts.lock().unwrap();
             if *current == contexts {
@@ -2022,5 +2017,130 @@ mod tests {
             .unwrap();
         app.observe_terminals().unwrap();
         assert!(app.snapshot().unwrap().terminal_contexts.is_empty());
+    }
+
+    #[test]
+    fn terminal_contexts_stay_canonically_sorted_without_spurious_emit() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = AppServer::open_with_env(
+            dir.path().join("home"),
+            PathBuf::from("/usr/bin/false"),
+            ServerRuntimeEnv {
+                fs_durability: FsDurability::NoSync,
+                sqlite_synchronous_off: true,
+                disable_os_watchers: true,
+                ..ServerRuntimeEnv::default()
+            },
+        )
+        .unwrap();
+        app.observer_running.store(true, Ordering::SeqCst);
+
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let project: Project = serde_json::from_value(json!({
+            "id": "p-sort",
+            "name": "SortProj",
+            "directory": repo.to_string_lossy(),
+            "target_branch": "main",
+            "workflow": Workflow::default(),
+            "created_at": 1
+        }))
+        .unwrap();
+        let card: Card = serde_json::from_value(json!({
+            "id": "c-sort",
+            "project_id": "p-sort",
+            "number": 1,
+            "title": "SortCard",
+            "body": "",
+            "stage": "develop",
+            "revision": 1,
+            "created_at": 1
+        }))
+        .unwrap();
+
+        let make_term = |id: &str, num: u64, pty: &str, created_at: u64| TerminalEntry {
+            id: id.into(),
+            conversation_id: None,
+            number: num,
+            name: Some(id.into()),
+            origin_project_id: Some(project.id.clone()),
+            origin_card_id: Some(card.id.clone()),
+            agent_engine: None,
+            runtime: Some(TerminalRuntime {
+                core_id: Some("core-sort".into()),
+                terminal: Some(pty.into()),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+                observed_agent: None,
+                waiting: None,
+            }),
+            agent: None,
+            created_at,
+        };
+
+        // Create z-term earlier (created_at=100) and a-term later (created_at=200) so
+        // snapshot.terminals creation order differs from lexicographic terminal_id order.
+        let t_z = make_term("z-term", 1, "pty-z", 100);
+        let t_a = make_term("a-term", 2, "pty-a", 200);
+        app.store
+            .lock()
+            .unwrap()
+            .write(|db| {
+                db.save(&project)?;
+                db.save(&card)?;
+                db.save(&t_z)?;
+                db.save(&t_a)
+            })
+            .unwrap();
+        {
+            let mut inv = app.inventory.lock().unwrap();
+            inv.core = "core-sort".into();
+            inv.last_at = app.now_ms();
+            inv.records.insert(
+                "pty-z".into(),
+                json!({"address": "pty-z", "state": "live", "cwd": repo.to_string_lossy()}),
+            );
+            inv.records.insert(
+                "pty-a".into(),
+                json!({"address": "pty-a", "state": "live", "cwd": repo.to_string_lossy()}),
+            );
+        }
+
+        let ctx_z = TerminalContext {
+            terminal_id: "z-term".into(),
+            core_id: "core-sort".into(),
+            terminal: "pty-z".into(),
+            cwd: Some(repo.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let ctx_a = TerminalContext {
+            terminal_id: "a-term".into(),
+            core_id: "core-sort".into(),
+            terminal: "pty-a".into(),
+            cwd: Some(repo.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        app.upsert_terminal_context(ctx_z);
+        app.upsert_terminal_context(ctx_a);
+
+        let ids: Vec<String> = app
+            .terminal_contexts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|c| c.terminal_id.clone())
+            .collect();
+        assert_eq!(ids, vec!["a-term".to_owned(), "z-term".to_owned()]);
+
+        let rev_before = app.state_revision.load(Ordering::SeqCst);
+        app.observe_terminals().unwrap();
+        let rev_after = app.state_revision.load(Ordering::SeqCst);
+        assert_eq!(
+            rev_before, rev_after,
+            "observe_terminals must not emit spurious terminals event when contexts match"
+        );
     }
 }

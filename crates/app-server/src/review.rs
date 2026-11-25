@@ -1582,9 +1582,7 @@ impl AppServer {
                 ahead: 0,
                 behind: 0,
             };
-            let mut contexts = self.terminal_contexts.lock().unwrap();
-            contexts.retain(|c| c.terminal_id != item.id);
-            contexts.push(ctx.clone());
+            self.upsert_terminal_context(ctx.clone());
             Some(ctx)
         } else {
             None

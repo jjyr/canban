@@ -14,6 +14,7 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 use zeroize::Zeroizing;
 
@@ -69,6 +70,16 @@ fn encode_hex_key(bytes: &[u8; 32]) -> Zeroizing<String> {
 }
 
 pub fn load_or_create_master_key(home: &Path) -> Result<Zeroizing<[u8; 32]>> {
+    load_or_create_master_key_with_sync(home, true)
+}
+
+/// Loads `<home>/vault.key`, or atomically creates a new 256-bit master key.
+/// When `fs_sync` is `false` (DST `FsDurability::NoSync`), skips `sync_all()` barriers
+/// while preserving atomic `create_new` + `hard_link` race-free creation and `0o600` permissions.
+pub fn load_or_create_master_key_with_sync(
+    home: &Path,
+    fs_sync: bool,
+) -> Result<Zeroizing<[u8; 32]>> {
     if !home.exists() {
         fs::create_dir_all(home)?;
     }
@@ -87,19 +98,23 @@ pub fn load_or_create_master_key(home: &Path) -> Result<Zeroizing<[u8; 32]>> {
         return decode_hex_key(&raw);
     }
 
+    static NEXT_TMP_SEQ: AtomicU64 = AtomicU64::new(1);
     let key = Zeroizing::new(XChaCha20Poly1305::generate_key(&mut OsRng).into());
     let encoded = encode_hex_key(&key);
-    let tmp = home.join(format!(".vault-key-{}.tmp", canban_types::id()));
+    let tmp_seq = NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = home.join(format!(".vault-key-{}-{tmp_seq}.tmp", std::process::id()));
     let mut f = OpenOptions::new().create_new(true).write(true).open(&tmp)?;
     set_private_mode(&tmp, 0o600)?;
     f.write_all(encoded.as_bytes())?;
-    f.sync_all()?;
+    if fs_sync {
+        f.sync_all()?;
+    }
     drop(f);
 
     match fs::hard_link(&tmp, &path) {
         Ok(()) => {
             let _ = fs::remove_file(&tmp);
-            if let Ok(dir) = fs::File::open(home) {
+            if fs_sync && let Ok(dir) = fs::File::open(home) {
                 let _ = dir.sync_all();
             }
             Ok(key)
@@ -238,7 +253,23 @@ pub fn put(
     plaintext: &str,
     updated_at: u64,
 ) -> Result<String> {
-    let master = load_or_create_master_key(home)?;
+    put_with_sync(
+        conn, home, namespace, scope, key, plaintext, updated_at, true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn put_with_sync(
+    conn: &Connection,
+    home: &Path,
+    namespace: &str,
+    scope: &str,
+    key: &str,
+    plaintext: &str,
+    updated_at: u64,
+    fs_sync: bool,
+) -> Result<String> {
+    let master = load_or_create_master_key_with_sync(home, fs_sync)?;
     let aad = entry_aad(namespace, scope, key);
     let (nonce, ciphertext) = encrypt_with_key(&master, &aad, plaintext)?;
     let hint = secret_hint(plaintext);
@@ -463,5 +494,48 @@ mod tests {
         );
         assert!(open_transport("wrong-token-0123456789", "MY_SECRET", &sealed).is_err());
         assert!(open_transport(token, "OTHER_KEY", &sealed).is_err());
+    }
+
+    #[test]
+    fn load_or_create_master_key_with_sync_false_persists_private_key_and_round_trips() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(home.path()).unwrap();
+
+        let key1 = load_or_create_master_key_with_sync(home.path(), false).unwrap();
+        let key2 = load_or_create_master_key_with_sync(home.path(), false).unwrap();
+        assert_eq!(*key1, *key2);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(key_path(home.path()))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+
+        let hint = put_with_sync(
+            &store.conn,
+            home.path(),
+            "env",
+            "global",
+            "SIM_TOKEN",
+            "sim-secret-1234",
+            100,
+            false,
+        )
+        .unwrap();
+        assert_eq!(hint, "••••1234");
+        assert_eq!(
+            get(&store.conn, home.path(), "env", "global", "SIM_TOKEN")
+                .unwrap()
+                .as_deref()
+                .map(String::as_str),
+            Some("sim-secret-1234")
+        );
     }
 }

@@ -94,6 +94,17 @@ pub trait LocalHostDriver: Send + Sync + 'static {
     fn version(&self) -> String;
     fn platform(&self) -> String;
     fn transport(&self) -> Arc<ClientTransport>;
+    /// Obtains the transport for `local_push_supervisor` subscription attempts.
+    /// Defaults to [`Self::transport`]; simulation drivers may override to asynchronously
+    /// reconnect after a simulated local daemon restart.
+    fn connect_push_transport<'a>(
+        &'a self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Arc<ClientTransport>>> + Send + 'a>,
+    > {
+        let transport = self.transport();
+        Box::pin(async move { Ok(transport) })
+    }
     fn call(&self, method: &str, params: Value) -> Result<Value>;
     fn snapshot(&self) -> Result<Snapshot>;
     fn runtime_state(&self) -> Result<RuntimeState>;

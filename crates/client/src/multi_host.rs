@@ -10,7 +10,7 @@ use crate::{
     store::{
         CachedHostData, CredentialHostStore, CredentialStore, HostStore, load_cache,
         load_global_env_sync_fingerprint, outbox_path, reads_dir, save_cache_with_durability,
-        save_global_env_sync_fingerprint_with_durability, seal_params_for_tcp,
+        save_global_env_sync_fingerprint_with_durability, seal_params_for_tcp_with_id_gen,
     },
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -25,8 +25,9 @@ use canban_transport::ClientTransport;
 use canban_types::{
     AppEvent, Clock, Config, DiscoveredCanbanHost, EnvEntryMeta, GlobalEnvSyncHostFailure,
     GlobalEnvSyncStatus, GlobalEnvSyncSummary, HostConnectionState, HostSummary, HostTransport,
-    RuntimeState, SavedHost, SchedulerSettings, Snapshot, SyncAction, SyncItemState, SyncItemView,
-    TerminalEntry, is_device_token, is_pairing_code, normalize_daemon_addr, system_clock,
+    IdGen, RuntimeState, SavedHost, SchedulerSettings, Snapshot, SyncAction, SyncItemState,
+    SyncItemView, TerminalEntry, is_device_token, is_pairing_code, normalize_daemon_addr,
+    system_clock, system_id_gen,
 };
 use serde_json::{Value, json};
 use std::{
@@ -152,6 +153,7 @@ struct RemoteHostSlot {
     reconnect_count: u32,
     last_synced_at: Option<u64>,
     last_marker: Value,
+    last_runtime_marker: Value,
     next_retry_at: u64,
     conn_gen: u64,
     supervisor_epoch: u64,
@@ -209,6 +211,7 @@ impl RemoteHostSlot {
             reconnect_count: 0,
             last_synced_at: cached_at,
             last_marker: Value::Null,
+            last_runtime_marker: Value::Null,
             next_retry_at: 0,
             conn_gen: 0,
             supervisor_epoch: 0,
@@ -291,6 +294,7 @@ pub struct MultiHostClient {
     global_env_provider: Option<Arc<dyn GlobalEnvSyncProvider>>,
     min_api_version: Option<u32>,
     clock: Arc<dyn Clock>,
+    id_gen: Arc<dyn IdGen>,
     fs_durability: FsDurability,
     hosts: RwLock<BTreeMap<String, RemoteHostSlot>>,
     entity_hosts: RwLock<BTreeMap<String, String>>,
@@ -465,13 +469,13 @@ fn snapshot_contains_entity(snap: &Snapshot, id: &str) -> bool {
         || snap.merge_batches.iter().any(|b| b.id == id)
 }
 
-fn extract_card_id_for_mutation(params: &Value) -> String {
+fn extract_card_id_for_mutation(params: &Value, id_gen: &dyn IdGen) -> String {
     params["card_id"]
         .as_str()
         .or_else(|| params["id"].as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
-        .unwrap_or_else(canban_types::id)
+        .unwrap_or_else(|| id_gen.next_id())
 }
 
 fn build_update_base(params: &Value, snap: &Snapshot, card_id: &str) -> UpdateBase {
@@ -569,6 +573,7 @@ fn apply_state_to_slot(
     slot.last_synced_at = Some(now_ms);
     if !next_marker["revision"].is_null() {
         slot.last_marker = next_marker.clone();
+        slot.last_runtime_marker = next_marker.clone();
     }
 
     if !was_connected || preferred_topic == Some("resync") {
@@ -697,6 +702,15 @@ impl MultiHostClient {
     /// (used by Desktop to inject a local host driver, `config/hosts.json` store, SSH connector,
     /// global-env replication provider, and minimum API version).
     pub fn from_options(options: MultiHostClientOptions) -> Result<Arc<Self>> {
+        Self::from_options_with_id_gen(options, system_id_gen())
+    }
+
+    /// Creates a new [`MultiHostClient`] owning a multi-thread Tokio runtime from full options
+    /// with a custom [`IdGen`] for deterministic client-side IDs, request keys, and AEAD nonces.
+    pub fn from_options_with_id_gen(
+        options: MultiHostClientOptions,
+        id_gen: Arc<dyn IdGen>,
+    ) -> Result<Arc<Self>> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -704,7 +718,7 @@ impl MultiHostClient {
             .build()
             .context("Failed to build MultiHostClient Tokio runtime")?;
         let handle = runtime.handle().clone();
-        Self::build(options, handle, Some(runtime))
+        Self::build(options, handle, Some(runtime), id_gen)
     }
 
     /// Creates a new [`MultiHostClient`] bound to an existing Tokio runtime from full options.
@@ -712,13 +726,24 @@ impl MultiHostClient {
         options: MultiHostClientOptions,
         runtime_handle: tokio::runtime::Handle,
     ) -> Result<Arc<Self>> {
-        Self::build(options, runtime_handle, None)
+        Self::from_options_with_runtime_and_id_gen(options, runtime_handle, system_id_gen())
+    }
+
+    /// Creates a new [`MultiHostClient`] bound to an existing Tokio runtime from full options
+    /// with a custom [`IdGen`] (used in DST to inject `DeterministicIdGen`).
+    pub fn from_options_with_runtime_and_id_gen(
+        options: MultiHostClientOptions,
+        runtime_handle: tokio::runtime::Handle,
+        id_gen: Arc<dyn IdGen>,
+    ) -> Result<Arc<Self>> {
+        Self::build(options, runtime_handle, None, id_gen)
     }
 
     fn build(
         options: MultiHostClientOptions,
         runtime_handle: tokio::runtime::Handle,
         owned_runtime: Option<tokio::runtime::Runtime>,
+        id_gen: Arc<dyn IdGen>,
     ) -> Result<Arc<Self>> {
         let _rt_guard = runtime_handle.enter();
         let MultiHostClientOptions {
@@ -755,7 +780,6 @@ impl MultiHostClient {
 
         let (events, _) = broadcast::channel(512);
         let (shutdown_tx, _) = watch::channel(false);
-        let local_transport = local_host.as_ref().map(|l| l.transport());
         let client = Arc::new(Self {
             config,
             host_store,
@@ -766,6 +790,7 @@ impl MultiHostClient {
             global_env_provider,
             min_api_version,
             clock,
+            id_gen,
             fs_durability,
             hosts: RwLock::new(slots),
             entity_hosts: RwLock::new(initial_entity_hosts),
@@ -778,11 +803,11 @@ impl MultiHostClient {
         });
         let _ = client.self_weak.set(Arc::downgrade(&client));
 
-        if let Some(transport) = local_transport {
+        if let Some(local) = client.local_host.clone() {
             let weak = Arc::downgrade(&client);
             let shutdown_rx = client.shutdown_tx.subscribe();
             client.runtime_handle.spawn(async move {
-                local_push_supervisor(weak, transport, shutdown_rx).await;
+                local_push_supervisor(weak, local, shutdown_rx).await;
             });
         }
 
@@ -1247,7 +1272,7 @@ impl MultiHostClient {
                 if let Some(mismatch) = err.downcast_ref::<ApiMismatchError>() {
                     let hid = preferred_id
                         .filter(|s| !s.trim().is_empty())
-                        .unwrap_or_else(canban_types::id);
+                        .unwrap_or_else(|| self.id_gen.next_id());
                     let server_id = mismatch
                         .server_id
                         .clone()
@@ -1399,7 +1424,7 @@ impl MultiHostClient {
             } else {
                 let hid = preferred_id
                     .filter(|s| !s.trim().is_empty())
-                    .unwrap_or_else(canban_types::id);
+                    .unwrap_or_else(|| self.id_gen.next_id());
                 let saved = SavedHost {
                     id: hid.clone(),
                     name: host_name,
@@ -1513,7 +1538,7 @@ impl MultiHostClient {
             );
         }
         if host.id.trim().is_empty() {
-            host.id = canban_types::id();
+            host.id = self.id_gen.next_id();
         }
         if host.added_at == 0 {
             host.added_at = self.now_ms();
@@ -2341,7 +2366,7 @@ impl MultiHostClient {
                     .blocked_cards()
                     .contains("__global_env__"),
                 QueueDecision::Queue(kind) if kind != MutationKind::CreateCard => {
-                    let cid = extract_card_id_for_mutation(&params);
+                    let cid = extract_card_id_for_mutation(&params, self.id_gen.as_ref());
                     let ob = slot.outbox.lock().unwrap();
                     ob.blocked_cards().contains(&cid) || ob.ops.iter().any(|m| m.card_id == cid)
                 }
@@ -2362,7 +2387,12 @@ impl MultiHostClient {
         let mut res = match canban_sync::classify_remote_mutation(method, &params) {
             QueueDecision::RejectOffline(msg) => {
                 if let Some(client) = client_opt.as_ref() {
-                    seal_params_for_tcp(method, &mut params, token_opt.as_deref())?;
+                    seal_params_for_tcp_with_id_gen(
+                        method,
+                        &mut params,
+                        token_opt.as_deref(),
+                        self.id_gen.as_ref(),
+                    )?;
                     match client.call_async(method, &params).await {
                         Ok(val) => val,
                         Err(err) if is_connection_error(&err) => {
@@ -2382,7 +2412,12 @@ impl MultiHostClient {
             }
             QueueDecision::NotQueueable => {
                 let client = client_opt.as_ref().ok_or_else(unavailable_err)?;
-                seal_params_for_tcp(method, &mut params, token_opt.as_deref())?;
+                seal_params_for_tcp_with_id_gen(
+                    method,
+                    &mut params,
+                    token_opt.as_deref(),
+                    self.id_gen.as_ref(),
+                )?;
                 match client.call_async(method, &params).await {
                     Ok(val) => val,
                     Err(err) if is_connection_error(&err) => {
@@ -2403,7 +2438,7 @@ impl MultiHostClient {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned)
-                    .unwrap_or_else(canban_types::uuid_v4);
+                    .unwrap_or_else(|| self.id_gen.next_uuid().to_string());
                 if let Some(obj) = params.as_object_mut() {
                     obj.insert("request_key".into(), json!(request_key));
                     if matches!(kind, MutationKind::CreateCard | MutationKind::AddComment)
@@ -2413,7 +2448,7 @@ impl MultiHostClient {
                             .map(str::trim)
                             .is_none_or(str::is_empty)
                     {
-                        obj.insert("id".into(), json!(canban_types::id()));
+                        obj.insert("id".into(), json!(self.id_gen.next_id()));
                     }
                 }
                 {
@@ -2435,7 +2470,12 @@ impl MultiHostClient {
                 let (live_reply, sent_before_drop) =
                     if let (Some(client), false) = (client_opt.as_ref(), card_blocked) {
                         let mut wire_params = params.clone();
-                        seal_params_for_tcp(method, &mut wire_params, token_opt.as_deref())?;
+                        seal_params_for_tcp_with_id_gen(
+                            method,
+                            &mut wire_params,
+                            token_opt.as_deref(),
+                            self.id_gen.as_ref(),
+                        )?;
                         match client.call_async(method, &wire_params).await {
                             Ok(val) => (Some(val), false),
                             Err(err) if is_connection_error(&err) => {
@@ -2632,7 +2672,7 @@ impl MultiHostClient {
         let card_id = match kind {
             MutationKind::SyncGlobalEnv => String::new(),
             MutationKind::CreateCard => params["id"].as_str().unwrap_or_default().to_owned(),
-            _ => extract_card_id_for_mutation(&params),
+            _ => extract_card_id_for_mutation(&params, self.id_gen.as_ref()),
         };
         let receipt = {
             let guard = self.hosts.read().unwrap();
@@ -2931,12 +2971,18 @@ impl MultiHostClient {
         };
         let mut set = tokio::task::JoinSet::new();
         for (host_id, client, token_opt) in targets {
-            let method = method.to_owned();
+            let method_owned = method.to_owned();
             let mut p = params.clone();
+            let seal_res = seal_params_for_tcp_with_id_gen(
+                &method_owned,
+                &mut p,
+                token_opt.as_deref(),
+                self.id_gen.as_ref(),
+            );
             set.spawn(async move {
-                let res = match seal_params_for_tcp(&method, &mut p, token_opt.as_deref()) {
+                let res = match seal_res {
                     Err(e) => Err(e),
-                    Ok(()) => client.call_async(&method, &p).await,
+                    Ok(()) => client.call_async(&method_owned, &p).await,
                 };
                 (host_id, res)
             });
@@ -2945,11 +2991,14 @@ impl MultiHostClient {
         if let Some(local) = self.local_host.clone() {
             out.push(("local".to_owned(), local.call(method, params.clone())));
         }
+        let mut remote_out = Vec::new();
         while let Some(joined) = set.join_next().await {
             if let Ok(item) = joined {
-                out.push(item);
+                remote_out.push(item);
             }
         }
+        remote_out.sort_by(|a, b| a.0.cmp(&b.0));
+        out.extend(remote_out);
         out
     }
 
@@ -3177,7 +3226,7 @@ impl MultiHostClient {
         }
         for (hid, outbox_arc, _) in &targets {
             let mutation = Mutation {
-                id: canban_types::uuid_v4(),
+                id: self.id_gen.next_uuid().to_string(),
                 host_id: hid.clone(),
                 card_id: String::new(),
                 kind: MutationKind::SyncGlobalEnv,
@@ -3419,7 +3468,7 @@ impl MultiHostClient {
         );
         self.wake_host(host_id);
 
-        let params = json!({ "request_key": canban_types::id() });
+        let params = json!({ "request_key": self.id_gen.next_id() });
         let rpc_res = match self
             .connector
             .connect(
@@ -3960,7 +4009,7 @@ impl MultiHostClient {
                 *prev_rtt = rtt_ms;
             }
             if !latest_marker["revision"].is_null() {
-                slot.last_marker = latest_marker.clone();
+                slot.last_runtime_marker = latest_marker.clone();
             }
         }
         self.emit_host(host_id, AppEvent::Changed { topic, card_id });
@@ -4056,7 +4105,12 @@ impl MultiHostClient {
                     (Ok(sent_params), None)
                 }
             } else {
-                match seal_params_for_tcp(method, &mut sent_params, token.as_deref()) {
+                match seal_params_for_tcp_with_id_gen(
+                    method,
+                    &mut sent_params,
+                    token.as_deref(),
+                    self.id_gen.as_ref(),
+                ) {
                     Ok(()) => (Ok(sent_params), None),
                     Err(e) => (Err(e), None),
                 }
@@ -4300,7 +4354,7 @@ impl MultiHostClient {
 
 async fn local_push_supervisor(
     weak_client: Weak<MultiHostClient>,
-    transport: Arc<ClientTransport>,
+    local_host: Arc<dyn LocalHostDriver>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let mut last = Value::Null;
@@ -4308,6 +4362,21 @@ async fn local_push_supervisor(
         if *shutdown_rx.borrow() || weak_client.strong_count() == 0 {
             return;
         }
+        let transport_res = tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => return,
+            res = local_host.connect_push_transport() => res,
+        };
+        let transport = match transport_res {
+            Ok(t) => t,
+            Err(_) => {
+                tokio::select! {
+                    biased;
+                    _ = shutdown_rx.changed() => return,
+                    _ = tokio::time::sleep(Duration::from_millis(500)) => continue,
+                }
+            }
+        };
         let open_res = tokio::select! {
             biased;
             _ = shutdown_rx.changed() => return,
@@ -4711,7 +4780,9 @@ async fn host_supervisor_task(
                         let rev = &p.latest_marker["revision"];
                         let up_to_date = p.topic != "resync"
                             && !rev.is_null()
-                            && slot.last_marker["revision"] == *rev;
+                            && (slot.last_marker["revision"] == *rev
+                                || (is_runtime_topic(p.topic)
+                                    && slot.last_runtime_marker["revision"] == *rev));
                         let can_runtime = is_runtime_topic(p.topic) && slot.cached.saved_at > 0;
                         (active, up_to_date, can_runtime)
                     };
@@ -4759,7 +4830,9 @@ async fn host_supervisor_task(
                                 guard.get(&host_id).is_some_and(|s| {
                                     topic != "resync"
                                         && !rev.is_null()
-                                        && s.last_marker["revision"] == *rev
+                                        && (s.last_marker["revision"] == *rev
+                                            || (is_runtime_topic(topic)
+                                                && s.last_runtime_marker["revision"] == *rev))
                                 })
                             };
                             if same_marker {
@@ -6138,5 +6211,632 @@ mod tests {
             lease_dropped.load(Ordering::SeqCst),
             "disabling host must drop its ConnectionLease"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn from_options_with_runtime_and_id_gen_generates_deterministic_mutation_and_entity_ids()
+    {
+        use crate::store::InlineHostsFileStore;
+        use canban_types::{DeterministicIdGen, Workflow};
+
+        struct FixedClock(u64);
+        impl Clock for FixedClock {
+            fn now_ms(&self) -> u64 {
+                self.0
+            }
+        }
+
+        async fn run_offline_sequence(
+            seed: u64,
+        ) -> (String, String, Vec<(String, String)>, Vec<String>) {
+            let dir = tempfile::tempdir().unwrap();
+            let host_id = "remote-det".to_owned();
+            let mut snap = Snapshot::default();
+            snap.projects.push(
+                serde_json::from_value(json!({
+                    "id": "p-det",
+                    "name": "Det Project",
+                    "directory": "/srv/det",
+                    "workflow": Workflow::default(),
+                    "created_at": 1000,
+                }))
+                .unwrap(),
+            );
+            snap.register_host_entities(&host_id);
+            save_cache_with_durability(
+                dir.path(),
+                &host_id,
+                &CachedHostData {
+                    saved_at: 1000,
+                    snapshot: snap,
+                    config: Config::default(),
+                },
+                FsDurability::NoSync,
+            );
+            let host_store = Arc::new(InlineHostsFileStore::new_with_durability(
+                dir.path().join("hosts.json"),
+                FsDurability::NoSync,
+            ));
+            host_store
+                .save_hosts(&[SavedHost {
+                    id: host_id.clone(),
+                    name: "Det Remote".into(),
+                    transport: HostTransport::Tcp {
+                        addr: "127.0.0.1:1".into(),
+                        token: "dev_0123456789abcdef0123456789abcdef".into(),
+                    },
+                    ssh_target: None,
+                    server_id: Some("srv-det".into()),
+                    enabled: false,
+                    added_at: 1000,
+                }])
+                .unwrap();
+
+            let client = MultiHostClient::from_options_with_runtime_and_id_gen(
+                MultiHostClientOptions {
+                    config: RemoteClientConfig::new(dir.path().to_path_buf()),
+                    host_store,
+                    connector: Arc::new(TcpConnector),
+                    capabilities: ClientCapabilities::mobile(),
+                    local_host: None,
+                    global_env_provider: None,
+                    min_api_version: None,
+                    clock: Arc::new(FixedClock(1_700_000_000_000)),
+                    fs_durability: FsDurability::NoSync,
+                },
+                tokio::runtime::Handle::current(),
+                DeterministicIdGen::arc(seed),
+            )
+            .unwrap();
+
+            let created = client
+                .call_routed_async(
+                    "card.create",
+                    json!({
+                        "host_id": host_id,
+                        "project_id": "p-det",
+                        "title": "Offline Det Card",
+                    }),
+                    None,
+                )
+                .await
+                .unwrap();
+            let card_id = created["id"].as_str().unwrap().to_owned();
+            let comment = client
+                .call_routed_async(
+                    "comment.add",
+                    json!({
+                        "host_id": host_id,
+                        "card_id": card_id,
+                        "body": "Det comment",
+                    }),
+                    None,
+                )
+                .await
+                .unwrap();
+            let comment_id = comment["id"].as_str().unwrap().to_owned();
+            let sync_ids: Vec<(String, String)> = client
+                .sync_items()
+                .into_iter()
+                .map(|i| (i.mutation_id, i.card_id))
+                .collect();
+
+            // Enable host (still unreachable on port 1) and enqueue SyncGlobalEnv so its mutation ID
+            // is also generated through `self.id_gen`.
+            {
+                let mut guard = client.hosts.write().unwrap();
+                guard.get_mut(&host_id).unwrap().saved.enabled = true;
+            }
+            client.sync_global_env_now();
+            let env_ids: Vec<String> = {
+                let guard = client.hosts.read().unwrap();
+                let ob = guard.get(&host_id).unwrap().outbox.lock().unwrap();
+                ob.ops
+                    .iter()
+                    .filter(|m| m.kind == MutationKind::SyncGlobalEnv)
+                    .map(|m| m.id.clone())
+                    .collect()
+            };
+            (card_id, comment_id, sync_ids, env_ids)
+        }
+
+        let r1 = run_offline_sequence(777).await;
+        let r2 = run_offline_sequence(777).await;
+        let r3 = run_offline_sequence(778).await;
+        assert_eq!(r1, r2, "same IdGen seed must yield identical client IDs");
+        assert_ne!(r1.0, r3.0, "distinct IdGen seeds must diverge");
+        assert!(!r1.3.is_empty(), "expected SyncGlobalEnv mutation ID");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_push_supervisor_reconnects_via_fresh_transport_after_local_daemon_bounce() {
+        use crate::store::InlineHostsFileStore;
+        use canban_transport::{MAX_FRAME_BYTES, read_bounded_line, write_json_line_async};
+
+        struct SwappableLocalHost {
+            home: PathBuf,
+            transport: Arc<Mutex<Arc<ClientTransport>>>,
+        }
+
+        impl LocalHostDriver for SwappableLocalHost {
+            fn home(&self) -> &Path {
+                &self.home
+            }
+            fn endpoint_label(&self) -> String {
+                "unix://swappable".into()
+            }
+            fn server_id(&self) -> Option<String> {
+                Some("local-srv".into())
+            }
+            fn server_notice(&self) -> Option<String> {
+                None
+            }
+            fn api_version(&self) -> u32 {
+                90
+            }
+            fn version(&self) -> String {
+                "test".into()
+            }
+            fn platform(&self) -> String {
+                "test".into()
+            }
+            fn transport(&self) -> Arc<ClientTransport> {
+                Arc::clone(&self.transport.lock().unwrap())
+            }
+            fn call(&self, _method: &str, _params: Value) -> Result<Value> {
+                Ok(json!({}))
+            }
+            fn snapshot(&self) -> Result<Snapshot> {
+                Ok(Snapshot::default())
+            }
+            fn runtime_state(&self) -> Result<RuntimeState> {
+                Ok(RuntimeState::default())
+            }
+            fn config(&self) -> Config {
+                Config::default()
+            }
+        }
+
+        async fn spawn_fake_local_push_server(
+            sock: PathBuf,
+            instance: &'static str,
+            push_rx: broadcast::Receiver<(&'static str, u64)>,
+            mut stop_rx: watch::Receiver<bool>,
+        ) {
+            let _ = std::fs::remove_file(&sock);
+            let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+            tokio::spawn(async move {
+                loop {
+                    let accept_res = tokio::select! {
+                        biased;
+                        _ = stop_rx.changed() => return,
+                        res = listener.accept() => res,
+                    };
+                    let Ok((stream, _)) = accept_res else {
+                        return;
+                    };
+                    let mut prx = push_rx.resubscribe();
+                    let mut srx = stop_rx.clone();
+                    tokio::spawn(async move {
+                        let (r, mut w) = tokio::io::split(stream);
+                        let mut reader = tokio::io::BufReader::new(r);
+                        let Ok(Some(line)) = read_bounded_line(&mut reader, MAX_FRAME_BYTES).await
+                        else {
+                            return;
+                        };
+                        let req: Value = serde_json::from_str(&line).unwrap();
+                        if req["method"].as_str() != Some("app.subscribe") {
+                            return;
+                        }
+                        let _ = write_json_line_async(
+                            &mut w,
+                            &json!({
+                                "jsonrpc": "2.0",
+                                "id": req["id"],
+                                "result": {
+                                    "subscribed": true,
+                                    "server_id": "local-srv",
+                                    "api_version": 90,
+                                    "revision": ["local-srv", instance, 1, 1, 0],
+                                    "changed": true,
+                                    "github_revision": 0,
+                                    "heartbeat_ms": 5000,
+                                }
+                            }),
+                        )
+                        .await;
+                        loop {
+                            tokio::select! {
+                                biased;
+                                _ = srx.changed() => return,
+                                ev = prx.recv() => {
+                                    let Ok((topic, seq)) = ev else { return; };
+                                    let _ = write_json_line_async(
+                                        &mut w,
+                                        &json!({
+                                            "jsonrpc": "2.0",
+                                            "method": "event",
+                                            "params": {
+                                                "seq": seq,
+                                                "revision": ["local-srv", instance, seq, seq, 0],
+                                                "topic": topic,
+                                                "card_id": Value::Null,
+                                                "github_revision": 0,
+                                            }
+                                        }),
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock1 = dir.path().join("local-1.sock");
+        let sock2 = dir.path().join("local-2.sock");
+        let (push1_tx, push1_rx) = broadcast::channel(8);
+        let (stop1_tx, stop1_rx) = watch::channel(false);
+        spawn_fake_local_push_server(sock1.clone(), "inst-1", push1_rx, stop1_rx).await;
+
+        let shared_transport = Arc::new(Mutex::new(Arc::new(ClientTransport::unix(sock1))));
+        let local_driver: Arc<dyn LocalHostDriver> = Arc::new(SwappableLocalHost {
+            home: dir.path().to_path_buf(),
+            transport: Arc::clone(&shared_transport),
+        });
+        let client = MultiHostClient::from_options_with_runtime(
+            MultiHostClientOptions {
+                config: RemoteClientConfig::new(dir.path().join("client")),
+                host_store: Arc::new(InlineHostsFileStore::new_with_durability(
+                    dir.path().join("hosts.json"),
+                    FsDurability::NoSync,
+                )),
+                connector: Arc::new(TcpConnector),
+                capabilities: ClientCapabilities::desktop(),
+                local_host: Some(local_driver),
+                global_env_provider: None,
+                min_api_version: None,
+                clock: system_clock(),
+                fs_durability: FsDurability::NoSync,
+            },
+            tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+        let mut events = client.subscribe();
+
+        // Wait for initial local subscription event from server #1.
+        let deadline1 = Instant::now() + Duration::from_secs(3);
+        loop {
+            let rem = deadline1.saturating_duration_since(Instant::now());
+            assert!(!rem.is_zero(), "timed out waiting for initial local push");
+            if let Ok(Some(ClientEvent::Host { host_id, .. })) =
+                tokio::time::timeout(rem, events.recv()).await
+                && host_id == "local"
+            {
+                break;
+            }
+        }
+        drop(push1_tx);
+
+        // Crash server #1 and bounce server #2 on a brand new socket; swap LocalHostDriver transport.
+        let _ = stop1_tx.send(true);
+        let (push2_tx, push2_rx) = broadcast::channel(8);
+        let (stop2_tx, stop2_rx) = watch::channel(false);
+        spawn_fake_local_push_server(sock2.clone(), "inst-2", push2_rx, stop2_rx).await;
+        *shared_transport.lock().unwrap() = Arc::new(ClientTransport::unix(sock2));
+
+        // Supervisor must fetch the fresh transport and deliver events from server #2.
+        let deadline2 = Instant::now() + Duration::from_secs(4);
+        let mut saw_post_bounce = false;
+        while Instant::now() < deadline2 {
+            let _ = push2_tx.send(("schedules", 42));
+            if let Ok(Some(ClientEvent::Host {
+                host_id,
+                event: AppEvent::Changed { topic, .. },
+            })) = tokio::time::timeout(Duration::from_millis(150), events.recv()).await
+                && host_id == "local"
+                && topic == "schedules"
+            {
+                saw_post_bounce = true;
+                break;
+            }
+        }
+        let _ = stop2_tx.send(true);
+        assert!(
+            saw_post_bounce,
+            "local_push_supervisor must obtain fresh transport and resume pushes after local bounce"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runtime_push_marker_does_not_suppress_same_revision_application_push() {
+        use canban_transport::{
+            AcceptedStream, DeviceTokenStore, MAX_FRAME_BYTES, PairingCodeStore, RevocationBus,
+            ServerTransportConfig, TailscaleSessionRegistry, read_bounded_line, spawn_tcp_listener,
+            write_json_line_async,
+        };
+        use canban_types::Workflow;
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::BufReader;
+
+        let dir = tempfile::tempdir().unwrap();
+        let server_home = dir.path().join("server");
+        std::fs::create_dir_all(&server_home).unwrap();
+        let store = Arc::new(DeviceTokenStore::open(&server_home).with_fs_sync(false));
+        let (_dev, token) = store.issue_device("race-test").unwrap();
+        let pairing_codes = Arc::new(PairingCodeStore::open(&server_home).with_fs_sync(false));
+        let revocations = RevocationBus::new();
+        let active_tcp = Arc::new(AtomicUsize::new(0));
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let (push_tx, _) = broadcast::channel::<(String, Value)>(16);
+        let subscribed_notify = Arc::new(Notify::new());
+        let app_state_calls = Arc::new(AtomicUsize::new(0));
+
+        let mut snap_v1 = Snapshot::default();
+        snap_v1.projects.push(
+            serde_json::from_value(json!({
+                "id": "p-race",
+                "name": "Race Project",
+                "directory": "/srv/race",
+                "workflow": Workflow::default(),
+                "created_at": 1000,
+            }))
+            .unwrap(),
+        );
+        snap_v1.cards.push(
+            serde_json::from_value(json!({
+                "id": "c-race",
+                "project_id": "p-race",
+                "number": 1,
+                "title": "Before Title",
+                "body": "",
+                "stage": "todo",
+                "revision": 1,
+                "created_at": 1000,
+            }))
+            .unwrap(),
+        );
+        let current_snap = Arc::new(Mutex::new((
+            json!(["srv-race", "i1", 1, 1, 0]),
+            serde_json::to_value(&snap_v1).unwrap(),
+        )));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let cfg = Arc::new(ServerTransportConfig {
+            home: server_home,
+            server_id: "srv-race".into(),
+            api_version: 90,
+            device_store: store,
+            pairing_codes,
+            revocations,
+            active_tcp_connections: active_tcp,
+            tailscale_verifier: None,
+            tailscale_devices: Arc::new(TailscaleSessionRegistry::new()),
+        });
+
+        let handle = tokio::runtime::Handle::current();
+        let ptx = push_tx.clone();
+        let app_calls = app_state_calls.clone();
+        let sub_notify = subscribed_notify.clone();
+        let snap_ref = current_snap.clone();
+        spawn_tcp_listener(
+            &handle,
+            listener,
+            cfg,
+            stop_rx,
+            move |accepted: AcceptedStream| {
+                let mut prx = ptx.subscribe();
+                let app_calls = app_calls.clone();
+                let sub_notify = sub_notify.clone();
+                let snap_ref = snap_ref.clone();
+                async move {
+                    let (r, mut w) = tokio::io::split(accepted.stream);
+                    let mut reader = BufReader::new(r);
+                    let mut first_req = accepted.initial_request;
+                    loop {
+                        let req: Value = match first_req.take() {
+                            Some(v) => v,
+                            None => {
+                                let Ok(Some(line)) =
+                                    read_bounded_line(&mut reader, MAX_FRAME_BYTES).await
+                                else {
+                                    break;
+                                };
+                                serde_json::from_str(&line).unwrap()
+                            }
+                        };
+                        let id = req["id"].clone();
+                        match req["method"].as_str() {
+                            Some("app.ping") => {
+                                let _ = write_json_line_async(
+                                    &mut w,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "server_id": "srv-race",
+                                            "api_version": 90,
+                                            "version": "test",
+                                            "platform": "macos",
+                                        }
+                                    }),
+                                )
+                                .await;
+                            }
+                            Some("app.state") => {
+                                app_calls.fetch_add(1, Ordering::SeqCst);
+                                let (rev, snap_val) = snap_ref.lock().unwrap().clone();
+                                let changed = req["params"]["after"] != rev;
+                                let mut res = json!({
+                                    "changed": changed,
+                                    "revision": rev,
+                                    "github_revision": 0,
+                                    "server_id": "srv-race",
+                                });
+                                if changed {
+                                    res["snapshot"] = snap_val;
+                                    res["config"] =
+                                        serde_json::to_value(Config::default()).unwrap();
+                                    res["home"] = json!("/tmp/srv-race");
+                                }
+                                let _ = write_json_line_async(
+                                    &mut w,
+                                    &json!({"jsonrpc": "2.0", "id": id, "result": res}),
+                                )
+                                .await;
+                            }
+                            Some("runtime.state") => {
+                                let _ = write_json_line_async(
+                                    &mut w,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "server_id": "srv-race",
+                                            "runtime": RuntimeState::default(),
+                                        }
+                                    }),
+                                )
+                                .await;
+                            }
+                            Some("app.subscribe") => {
+                                let rev = snap_ref.lock().unwrap().0.clone();
+                                let _ = write_json_line_async(
+                                    &mut w,
+                                    &json!({
+                                        "jsonrpc": "2.0",
+                                        "id": id,
+                                        "result": {
+                                            "subscribed": true,
+                                            "server_id": "srv-race",
+                                            "api_version": 90,
+                                            "revision": rev,
+                                            "changed": false,
+                                            "github_revision": 0,
+                                            "heartbeat_ms": 5000,
+                                        }
+                                    }),
+                                )
+                                .await;
+                                sub_notify.notify_one();
+                                let mut seq = 1u64;
+                                while let Ok((topic, push_rev)) = prx.recv().await {
+                                    seq += 1;
+                                    if write_json_line_async(
+                                        &mut w,
+                                        &json!({
+                                            "jsonrpc": "2.0",
+                                            "method": "event",
+                                            "params": {
+                                                "seq": seq,
+                                                "revision": push_rev,
+                                                "topic": topic,
+                                                "card_id": Value::Null,
+                                                "github_revision": 0,
+                                            }
+                                        }),
+                                    )
+                                    .await
+                                    .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            },
+        );
+
+        let client = MultiHostClient::with_runtime(
+            RemoteClientConfig::new(dir.path().join("client")),
+            Arc::new(MemoryCredentialStore::new()),
+            tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+        let mut events = client.subscribe();
+        client
+            .add_host_async(SavedHost {
+                id: "host-race".into(),
+                name: "Race Host".into(),
+                transport: HostTransport::Tcp { addr, token },
+                ssh_target: None,
+                server_id: Some("srv-race".into()),
+                enabled: true,
+                added_at: 1000,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), subscribed_notify.notified())
+            .await
+            .expect("subscribed");
+
+        let calls_after_boot = app_state_calls.load(Ordering::SeqCst);
+        let shared_rev = json!(["srv-race", "i1", 2, 2, 0]);
+        {
+            let mut snap_v2 = snap_v1;
+            snap_v2.cards[0].title = "After Durable Commit".into();
+            snap_v2.cards[0].revision = 2;
+            *current_snap.lock().unwrap() =
+                (shared_rev.clone(), serde_json::to_value(&snap_v2).unwrap());
+        }
+
+        // 1. Push `terminals` carrying the already-advanced cursor `shared_rev`.
+        let _ = push_tx.send(("terminals".into(), shared_rev.clone()));
+        let deadline1 = Instant::now() + Duration::from_secs(3);
+        loop {
+            let rem = deadline1.saturating_duration_since(Instant::now());
+            assert!(!rem.is_zero(), "timed out waiting for terminals push");
+            if let Ok(Some(ClientEvent::Host {
+                host_id,
+                event: AppEvent::Changed { topic, .. },
+            })) = tokio::time::timeout(rem, events.recv()).await
+                && host_id == "host-race"
+                && topic == "terminals"
+            {
+                break;
+            }
+        }
+        assert_eq!(
+            app_state_calls.load(Ordering::SeqCst),
+            calls_after_boot,
+            "runtime-only push must not trigger full app.state"
+        );
+
+        // 2. Push `application` with the EXACT SAME cursor `shared_rev` (the production race when
+        //    `on_commit` increments `db_changes` before `handle_subscribe` reads the earlier
+        //    `terminals` push). Client MUST NOT drop it as `same_marker` and MUST fetch `app.state`.
+        let _ = push_tx.send(("application".into(), shared_rev));
+        let deadline2 = Instant::now() + Duration::from_secs(3);
+        loop {
+            let rem = deadline2.saturating_duration_since(Instant::now());
+            assert!(
+                !rem.is_zero(),
+                "application push with same revision as prior runtime push must not be dropped"
+            );
+            if let Ok(Some(ClientEvent::Host {
+                host_id,
+                event: AppEvent::Changed { topic, .. },
+            })) = tokio::time::timeout(rem, events.recv()).await
+                && host_id == "host-race"
+                && topic == "application"
+            {
+                break;
+            }
+        }
+        assert!(
+            app_state_calls.load(Ordering::SeqCst) > calls_after_boot,
+            "application push must fetch full app.state"
+        );
+        let snap = client.merged_snapshot().unwrap();
+        assert_eq!(snap.cards[0].title, "After Durable Commit");
+
+        let _ = stop_tx.send(true);
     }
 }

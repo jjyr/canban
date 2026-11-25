@@ -805,13 +805,16 @@ impl AppServer {
         let push_seq = Arc::new(AtomicU64::new(0));
         let (push_tx, _) = tokio::sync::broadcast::channel(256);
         let (stop_tx, _) = tokio::sync::watch::channel(false);
+        let fs_sync = fs_durability == canban_context::FsDurability::Full;
         let device_store = Arc::new(
             auth::DeviceTokenStore::open_with_clock(&home, clock.clone())
-                .with_id_gen(id_gen.clone()),
+                .with_id_gen(id_gen.clone())
+                .with_fs_sync(fs_sync),
         );
         let pairing_codes = Arc::new(
             auth::PairingCodeStore::open_with_clock(&home, clock.clone())
-                .with_id_gen(id_gen.clone()),
+                .with_id_gen(id_gen.clone())
+                .with_fs_sync(fs_sync),
         );
         let device_revocations = canban_transport::RevocationBus::new();
         let tailscale_devices = Arc::new(
@@ -1325,6 +1328,13 @@ impl AppServer {
             card_ids: card_ids.to_vec(),
         }
     }
+    pub(crate) fn upsert_terminal_context(&self, context: TerminalContext) {
+        let mut contexts = self.terminal_contexts.lock().unwrap();
+        contexts.retain(|c| c.terminal_id != context.terminal_id);
+        contexts.push(context);
+        contexts.sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
+    }
+
     fn populate_terminal_contexts(&self, snapshot: &mut Snapshot) {
         snapshot.terminal_contexts = self
             .terminal_contexts

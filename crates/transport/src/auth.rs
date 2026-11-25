@@ -14,7 +14,10 @@ use std::{
     marker::PhantomData,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -46,18 +49,20 @@ struct PairingCodesFile {
     codes: Vec<StoredPairingCode>,
 }
 
-fn write_private_atomic(path: &Path, content: &[u8]) -> Result<()> {
+fn write_private_atomic(path: &Path, content: &[u8], fs_sync: bool) -> Result<()> {
+    static NEXT_TMP_SEQ: AtomicU64 = AtomicU64::new(1);
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
+    let seq = NEXT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp_name = format!(
-        ".{}.tmp-{}",
+        ".{}.tmp-{}-{seq}",
         path.file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("secret"),
-        canban_types::id()
+        std::process::id(),
     );
     let tmp_path = parent.join(tmp_name);
     let write_res = (|| -> Result<()> {
@@ -70,7 +75,9 @@ fn write_private_atomic(path: &Path, content: &[u8]) -> Result<()> {
         }
         let mut file = opts.open(&tmp_path)?;
         file.write_all(content)?;
-        file.sync_all()?;
+        if fs_sync {
+            file.sync_all()?;
+        }
         Ok(())
     })();
     if let Err(e) = write_res {
@@ -109,7 +116,7 @@ pub fn ensure_legacy_server_token(home: &Path) -> Result<String> {
     }
     let secret = format!("{}{}", canban_types::token_id(), canban_types::token_id());
     let path = legacy_token_path(home);
-    write_private_atomic(&path, format!("{secret}\n").as_bytes())?;
+    write_private_atomic(&path, format!("{secret}\n").as_bytes(), true)?;
     Ok(secret)
 }
 
@@ -276,6 +283,7 @@ impl Default for RevocationBus {
 
 struct JsonSecretFile<T> {
     path: PathBuf,
+    fs_sync: bool,
     lock: Mutex<()>,
     _marker: PhantomData<fn() -> T>,
 }
@@ -284,6 +292,7 @@ impl<T: DeserializeOwned + Default> JsonSecretFile<T> {
     fn new(path: PathBuf) -> Self {
         Self {
             path,
+            fs_sync: true,
             lock: Mutex::new(()),
             _marker: PhantomData,
         }
@@ -308,7 +317,7 @@ impl<T: Serialize + DeserializeOwned + Default> JsonSecretFile<T> {
         let mut data = self.load_locked();
         let (dirty, out) = f(&mut data)?;
         if dirty {
-            write_private_atomic(&self.path, &serde_json::to_vec_pretty(&data)?)?;
+            write_private_atomic(&self.path, &serde_json::to_vec_pretty(&data)?, self.fs_sync)?;
         }
         Ok(out)
     }
@@ -345,6 +354,13 @@ impl DeviceTokenStore {
 
     pub fn with_id_gen(mut self, id_gen: Arc<dyn IdGen>) -> Self {
         self.id_gen = id_gen;
+        self
+    }
+
+    /// Controls whether atomic secret-file writes call `File::sync_all()`.
+    /// Production defaults to `true`; ephemeral DST harnesses may disable fsync (`false`).
+    pub fn with_fs_sync(mut self, fs_sync: bool) -> Self {
+        self.file.fs_sync = fs_sync;
         self
     }
 
@@ -457,6 +473,13 @@ impl PairingCodeStore {
 
     pub fn with_id_gen(mut self, id_gen: Arc<dyn IdGen>) -> Self {
         self.id_gen = id_gen;
+        self
+    }
+
+    /// Controls whether atomic secret-file writes call `File::sync_all()`.
+    /// Production defaults to `true`; ephemeral DST harnesses may disable fsync (`false`).
+    pub fn with_fs_sync(mut self, fs_sync: bool) -> Self {
+        self.file.fs_sync = fs_sync;
         self
     }
 
@@ -830,5 +853,22 @@ mod tests {
         assert_eq!(v2.last_seen_at, Some(T0 + 12_000));
         let v3 = devices.verify_at(&upgraded_tok, T0 + 42_000).unwrap();
         assert_eq!(v3.last_seen_at, Some(T0 + 42_000));
+    }
+
+    #[test]
+    fn with_fs_sync_false_persists_reloads_and_revokes_device_tokens_and_pairing_codes() {
+        let dir = tempfile::tempdir().unwrap();
+        let devices = DeviceTokenStore::open(dir.path()).with_fs_sync(false);
+        let codes = PairingCodeStore::open(dir.path()).with_fs_sync(false);
+
+        let (code, _) = codes.create_code(300).unwrap();
+        assert!(codes.consume_code(&code).unwrap());
+        assert!(!codes.consume_code(&code).unwrap());
+
+        let (dev, tok) = devices.issue_device("Sim Client").unwrap();
+        let reloaded = DeviceTokenStore::open(dir.path());
+        assert_eq!(reloaded.verify(&tok).map(|d| d.id), Some(dev.id.clone()));
+        assert!(devices.revoke(&dev.id).unwrap());
+        assert!(reloaded.verify(&tok).is_none());
     }
 }

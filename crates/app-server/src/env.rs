@@ -561,6 +561,13 @@ impl AppServer {
         let entries = decrypt_incoming_write_entries(&self.home, &p["entries"], transport_token)?;
         let now_ts = self.now_ms();
         let config = self.config();
+        let fs_sync = self.fs_durability == canban_context::FsDurability::Full;
+        if entries
+            .values()
+            .any(|e| matches!(e, EnvWriteEntry::Secret { value: Some(_), .. }))
+        {
+            let _ = vault::load_or_create_master_key_with_sync(&self.home, fs_sync)?;
+        }
         let (target_id, snapshot_key, meta) = self.store.lock().unwrap().write(|db| {
             let (tid, snap_key) = match scope {
                 env_store::SCOPE_GLOBAL => (String::new(), "global".to_owned()),
@@ -607,6 +614,10 @@ impl AppServer {
         let mut records = Vec::with_capacity(wire.len());
         for w in wire {
             records.push(env_store::GlobalEnvSyncRecord::from_wire(w, tok)?);
+        }
+        let fs_sync = self.fs_durability == canban_context::FsDurability::Full;
+        if records.iter().any(|r| !r.deleted && r.kind == "secret") {
+            let _ = vault::load_or_create_master_key_with_sync(&self.home, fs_sync)?;
         }
         let applied = self
             .store

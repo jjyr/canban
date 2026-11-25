@@ -179,6 +179,26 @@ pub fn capture(
     snapshot: &Snapshot,
     card_events: &[Event],
 ) -> Result<String> {
+    capture_with_durability(
+        home,
+        project,
+        card,
+        entry,
+        snapshot,
+        card_events,
+        FsDurability::Full,
+    )
+}
+
+pub fn capture_with_durability(
+    home: &Path,
+    project: &Project,
+    card: &Card,
+    entry: &TerminalEntry,
+    snapshot: &Snapshot,
+    card_events: &[Event],
+    durability: FsDurability,
+) -> Result<String> {
     let run = entry
         .agent
         .as_ref()
@@ -223,7 +243,11 @@ pub fn capture(
     // injecting saved legacy documents or changing already captured executions.
     let manifest = serde_json::json!({"schema_version":2,"github_source":github_source,"project":project,"card":card,"terminal_id":entry.id,"agent":run,"timeline":timeline,"notes":[],"reports":reports,"artifacts":artifacts,"questions":questions});
     let manifest_path = dir.join("context.json");
-    atomic(&manifest_path, &serde_json::to_vec_pretty(&manifest)?)?;
+    atomic_with_durability(
+        &manifest_path,
+        &serde_json::to_vec_pretty(&manifest)?,
+        durability,
+    )?;
 
     let mut prompt = format!("# Card #{}: {}\n", card.number, card.title);
     if !card.body.trim().is_empty() {
@@ -375,7 +399,7 @@ pub fn capture(
             ));
         }
     }
-    atomic(&dir.join("prompt.md"), prompt.as_bytes())?;
+    atomic_with_durability(&dir.join("prompt.md"), prompt.as_bytes(), durability)?;
     relative(home, &dir.join("prompt.md"))
 }
 pub fn shell_quote(s: &str) -> String {
@@ -398,12 +422,23 @@ pub fn attachment(
     media_type: &str,
     bytes: &[u8],
 ) -> Result<Artifact> {
+    attachment_with_durability(home, card, name, media_type, bytes, FsDurability::Full)
+}
+
+pub fn attachment_with_durability(
+    home: &Path,
+    card: &Card,
+    name: &str,
+    media_type: &str,
+    bytes: &[u8],
+    durability: FsDurability,
+) -> Result<Artifact> {
     ensure!(bytes.len() <= 32 * 1024 * 1024, "Attachment exceeds 32 MiB");
     let artifact_id = id();
     let path = card_dir(home, &card.project_id, card.number)
         .join("resources")
         .join(format!("{artifact_id}{}", suffix(name)));
-    atomic(&path, bytes)?;
+    atomic_with_durability(&path, bytes, durability)?;
     Ok(Artifact {
         id: artifact_id,
         project_id: card.project_id.clone(),
@@ -415,11 +450,31 @@ pub fn attachment(
         bytes: bytes.len() as u64,
     })
 }
-pub fn pack(
+
+pub fn pack_at(
     home: &Path,
     card: &Card,
     snapshot: &Snapshot,
     card_events: &[Event],
+    now_ms: u64,
+) -> Result<String> {
+    pack_at_with_durability(
+        home,
+        card,
+        snapshot,
+        card_events,
+        now_ms,
+        FsDurability::Full,
+    )
+}
+
+pub fn pack_at_with_durability(
+    home: &Path,
+    card: &Card,
+    snapshot: &Snapshot,
+    card_events: &[Event],
+    now_ms: u64,
+    durability: FsDurability,
 ) -> Result<String> {
     let dir = home
         .join("archives")
@@ -434,7 +489,7 @@ pub fn pack(
     let mut archive = tar::Builder::new(encoder);
     archive.follow_symlinks(false);
     let manifest = serde_json::to_vec_pretty(
-        &serde_json::json!({"format_version":1,"codec":"zstd","project_id":card.project_id,"card_id":card.id,"created_at":canban_types::now()}),
+        &serde_json::json!({"format_version":1,"codec":"zstd","project_id":card.project_id,"card_id":card.id,"created_at":now_ms}),
     )?;
     let mut manifest_header = tar::Header::new_gnu();
     manifest_header.set_size(manifest.len() as u64);
@@ -459,7 +514,9 @@ pub fn pack(
     }
     let encoder = archive.into_inner()?;
     let file = encoder.finish()?;
-    file.sync_all()?;
+    if durability == FsDurability::Full {
+        file.sync_all()?;
+    }
     // Read the entire compressed stream before publication to detect an incomplete frame.
     let decoder = zstd::Decoder::new(std::fs::File::open(&tmp)?)?;
     let mut verify = tar::Archive::new(decoder);
@@ -470,7 +527,9 @@ pub fn pack(
     let mut decoder = verify.into_inner();
     std::io::copy(&mut decoder, &mut std::io::sink())?;
     std::fs::rename(&tmp, &path)?;
-    std::fs::File::open(&dir)?.sync_all()?;
+    if durability == FsDurability::Full {
+        std::fs::File::open(&dir)?.sync_all()?;
+    }
     relative(home, &path)
 }
 pub fn read_archive(home: &Path, path: &str) -> Result<Snapshot> {
@@ -487,6 +546,15 @@ pub fn read_archive(home: &Path, path: &str) -> Result<Snapshot> {
     anyhow::bail!("Archive records.json is missing")
 }
 pub fn restore_files(home: &Path, card: &Card, path: &str) -> Result<()> {
+    restore_files_with_durability(home, card, path, FsDurability::Full)
+}
+
+pub fn restore_files_with_durability(
+    home: &Path,
+    card: &Card,
+    path: &str,
+    durability: FsDurability,
+) -> Result<()> {
     let decoder = zstd::Decoder::new(std::fs::File::open(home.join(path))?)?;
     let mut archive = tar::Archive::new(decoder);
     let dest = card_dir(home, &card.project_id, card.number);
@@ -504,7 +572,7 @@ pub fn restore_files(home: &Path, card: &Card, path: &str) -> Result<()> {
                 if !target.exists() {
                     let mut bytes = Vec::new();
                     entry.read_to_end(&mut bytes)?;
-                    atomic(&target, &bytes)?;
+                    atomic_with_durability(&target, &bytes, durability)?;
                 }
             }
         }
@@ -679,6 +747,61 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(entries, vec!["state.json".to_owned()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pack_at_with_durability_nosync_uses_injected_timestamp_and_round_trips() {
+        let dir = std::env::temp_dir().join(format!("canban-pack-nosync-test-{}", id()));
+        let card: Card = serde_json::from_value(serde_json::json!({
+            "id": "card-1",
+            "project_id": "proj-1",
+            "number": 7,
+            "title": "Archive me",
+            "body": "",
+            "stage": "done",
+            "revision": 1,
+            "created_at": 1000,
+        }))
+        .unwrap();
+        let mut snap = Snapshot::default();
+        snap.cards.push(card.clone());
+        let file_path = card_dir(&dir, "proj-1", 7).join("notes.txt");
+        atomic_with_durability(&file_path, b"hello archive", FsDurability::NoSync).unwrap();
+
+        let rel = pack_at_with_durability(
+            &dir,
+            &card,
+            &snap,
+            &[],
+            1_700_000_123_456,
+            FsDurability::NoSync,
+        )
+        .unwrap();
+
+        // Verify manifest.json recorded the injected timestamp rather than wall clock.
+        let decoder = zstd::Decoder::new(std::fs::File::open(dir.join(&rel)).unwrap()).unwrap();
+        let mut archive = tar::Archive::new(decoder);
+        let mut manifest_created_at = None;
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            if entry.path().unwrap().as_ref() == Path::new("manifest.json") {
+                let mut raw = Vec::new();
+                entry.read_to_end(&mut raw).unwrap();
+                let val: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+                manifest_created_at = val["created_at"].as_u64();
+            }
+        }
+        assert_eq!(manifest_created_at, Some(1_700_000_123_456));
+
+        let restored_snap = read_archive(&dir, &rel).unwrap();
+        assert_eq!(restored_snap.cards.len(), 1);
+        assert_eq!(restored_snap.cards[0].id, "card-1");
+
+        std::fs::remove_file(&file_path).unwrap();
+        restore_files_with_durability(&dir, &card, &rel, FsDurability::NoSync).unwrap();
+        assert_eq!(std::fs::read(&file_path).unwrap(), b"hello archive");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

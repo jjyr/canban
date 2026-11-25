@@ -2,10 +2,10 @@
 //! and TCP transport secret sealing (`enc:v1:`).
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use canban_types::{Config, HostTransport, HostsFile, SavedHost, Snapshot};
+use canban_types::{Config, HostTransport, HostsFile, IdGen, SavedHost, Snapshot, SystemIdGen};
 use chacha20poly1305::{
-    XChaCha20Poly1305,
-    aead::{Aead, AeadCore, KeyInit, OsRng, Payload},
+    XChaCha20Poly1305, XNonce,
+    aead::{Aead, KeyInit, Payload},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -414,14 +414,26 @@ fn transport_key(server_token: &str) -> Result<Zeroizing<[u8; 32]>> {
     Ok(key)
 }
 
-fn seal_transport_secret(server_token: &str, key_name: &str, plaintext: &str) -> Result<String> {
+fn seal_transport_secret_with_id_gen(
+    server_token: &str,
+    key_name: &str,
+    plaintext: &str,
+    id_gen: &dyn IdGen,
+) -> Result<String> {
     let key = transport_key(server_token)?;
     let cipher = XChaCha20Poly1305::new((&*key).into());
-    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    // Derive a 192-bit XChaCha20 nonce from two IdGen UUIDs (244 bits of OS CSPRNG entropy
+    // under SystemIdGen, and fully seed-deterministic under DeterministicIdGen).
+    let mut nonce_hasher = Sha256::new();
+    nonce_hasher.update(b"canban-vault-nonce-v1\0");
+    nonce_hasher.update(id_gen.next_uuid().as_bytes());
+    nonce_hasher.update(id_gen.next_uuid().as_bytes());
+    let nonce_digest = nonce_hasher.finalize();
+    let nonce = XNonce::from_slice(&nonce_digest[..24]);
     let aad = format!("canban-vault-rpc-v1\0{key_name}").into_bytes();
     let ciphertext = cipher
         .encrypt(
-            &nonce,
+            nonce,
             Payload {
                 msg: plaintext.as_bytes(),
                 aad: &aad,
@@ -429,7 +441,7 @@ fn seal_transport_secret(server_token: &str, key_name: &str, plaintext: &str) ->
         )
         .map_err(|_| anyhow::anyhow!("AEAD encryption failed"))?;
     let mut combined = Zeroizing::new(Vec::with_capacity(nonce.len() + ciphertext.len()));
-    combined.extend_from_slice(&nonce);
+    combined.extend_from_slice(nonce);
     combined.extend_from_slice(&ciphertext);
     Ok(format!(
         "{TRANSPORT_SEAL_PREFIX}{}",
@@ -444,6 +456,16 @@ pub fn seal_params_for_tcp(
     params: &mut Value,
     tcp_token: Option<&str>,
 ) -> Result<()> {
+    seal_params_for_tcp_with_id_gen(method, params, tcp_token, &SystemIdGen)
+}
+
+/// Deterministic/injected-`IdGen` variant of [`seal_params_for_tcp`].
+pub fn seal_params_for_tcp_with_id_gen(
+    method: &str,
+    params: &mut Value,
+    tcp_token: Option<&str>,
+    id_gen: &dyn IdGen,
+) -> Result<()> {
     let Some(token) = tcp_token else {
         return Ok(());
     };
@@ -455,7 +477,7 @@ pub fn seal_params_for_tcp(
                 && let Some(raw_val) = entry.get("value").and_then(Value::as_str)
                 && !raw_val.starts_with(TRANSPORT_SEAL_PREFIX)
             {
-                let sealed = seal_transport_secret(token, key, raw_val)
+                let sealed = seal_transport_secret_with_id_gen(token, key, raw_val, id_gen)
                     .context("Failed to seal secret entry for TCP transport")?;
                 entry["value"] = Value::String(sealed);
             }
@@ -540,5 +562,43 @@ mod tests {
         );
         let opened = canban_storage::vault::open_transport(token, "API_KEY", sealed).unwrap();
         assert_eq!(opened.as_str(), "super-secret-value");
+    }
+
+    #[test]
+    fn seal_params_for_tcp_with_id_gen_is_deterministic_and_unique_per_call() {
+        let token = "dev_0123456789abcdef0123456789abcdef";
+        let template = json!({
+            "scope": "project",
+            "entries": {
+                "API_KEY": { "kind": "secret", "value": "deterministic-secret" },
+            }
+        });
+        let g1 = canban_types::DeterministicIdGen::new(42);
+        let g2 = canban_types::DeterministicIdGen::new(42);
+
+        let mut p1a = template.clone();
+        let mut p1b = template.clone();
+        let mut p2a = template;
+        seal_params_for_tcp_with_id_gen("env.save", &mut p1a, Some(token), &g1).unwrap();
+        seal_params_for_tcp_with_id_gen("env.save", &mut p1b, Some(token), &g1).unwrap();
+        seal_params_for_tcp_with_id_gen("env.save", &mut p2a, Some(token), &g2).unwrap();
+
+        let s1a = p1a["entries"]["API_KEY"]["value"].as_str().unwrap();
+        let s1b = p1b["entries"]["API_KEY"]["value"].as_str().unwrap();
+        let s2a = p2a["entries"]["API_KEY"]["value"].as_str().unwrap();
+        assert_eq!(s1a, s2a, "same IdGen seed must seal identically");
+        assert_ne!(s1a, s1b, "consecutive calls must advance nonce");
+        assert_eq!(
+            canban_storage::vault::open_transport(token, "API_KEY", s1a)
+                .unwrap()
+                .as_str(),
+            "deterministic-secret"
+        );
+        assert_eq!(
+            canban_storage::vault::open_transport(token, "API_KEY", s1b)
+                .unwrap()
+                .as_str(),
+            "deterministic-secret"
+        );
     }
 }

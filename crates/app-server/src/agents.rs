@@ -314,6 +314,9 @@ impl AppServer {
         installed_path: Option<&str>,
         profile: Option<&Profile>,
     ) -> Vec<ModelOption> {
+        if !self.exec_runner.is_system() {
+            return entry.default_models.clone();
+        }
         let resolved_probe_env = self
             .resolve_runtime_env(profile, None, &BTreeMap::new(), None, None)
             .ok();
@@ -1516,5 +1519,56 @@ mod model_probe_tests {
         // Empty live cache still falls back to defaults.
         let fallback = parse_codex_cached_models_json(&json!({ "models": [] }), &codex_defaults);
         assert_eq!(fallback, codex_defaults);
+    }
+
+    #[test]
+    fn non_system_exec_runner_skips_host_model_probes_and_codex_cache() {
+        struct FakeRunner;
+        impl canban_exec::CommandRunner for FakeRunner {
+            fn run(&self, _spec: &canban_exec::CommandSpec) -> Result<canban_exec::ExecOutput> {
+                panic!("non-system runner must not be invoked to probe models");
+            }
+            fn find_executable(&self, _name: &str) -> Option<PathBuf> {
+                None
+            }
+            fn shell_env(&self) -> canban_exec::ShellEnvSnapshot {
+                canban_exec::ShellEnvSnapshot {
+                    shell: "/bin/sh".into(),
+                    vars: BTreeMap::new(),
+                    path_entries: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
+                    full_env_captured: false,
+                }
+            }
+            fn hostname(&self) -> String {
+                "sim-host".into()
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let app = AppServer::open_with_env(
+            dir.path().join("home"),
+            PathBuf::from("/usr/bin/false"),
+            ServerRuntimeEnv {
+                exec_runner: Arc::new(FakeRunner),
+                fs_durability: FsDurability::NoSync,
+                sqlite_synchronous_off: true,
+                disable_os_watchers: true,
+                ..ServerRuntimeEnv::default()
+            },
+        )
+        .unwrap();
+
+        let catalog = canban_profiles::builtin_catalog();
+        let codex = catalog.iter().find(|e| e.id == "codex").unwrap();
+        let agy = catalog.iter().find(|e| e.id == "agy").unwrap();
+
+        assert_eq!(
+            app.probe_models_for_profile(codex, Some("/fake/codex"), None),
+            codex.default_models
+        );
+        assert_eq!(
+            app.probe_models_for_profile(agy, Some("/fake/agy"), None),
+            agy.default_models
+        );
     }
 }

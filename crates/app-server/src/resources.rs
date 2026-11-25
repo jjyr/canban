@@ -44,7 +44,7 @@ impl AppServer {
                 })
                 .collect::<Result<Vec<_>>>()?
         };
-        let a = canban_context::attachment(
+        let a = canban_context::attachment_with_durability(
             &self.home,
             &c,
             strp(p, "name")?,
@@ -52,6 +52,7 @@ impl AppServer {
                 .as_str()
                 .unwrap_or("application/octet-stream"),
             &bytes,
+            self.fs_durability,
         )?;
         self.mutate("attachment.add", p, |db| {
             db.save(&a)?;
@@ -242,9 +243,21 @@ impl AppServer {
         let card_events = self.store.lock().unwrap().db().events_for_card(card_id)?;
         // Repack after restore first, so previously compressed bytes are not omitted.
         if let Some(old) = &card.archive {
-            canban_context::restore_files(&self.home, &card, old)?;
+            canban_context::restore_files_with_durability(
+                &self.home,
+                &card,
+                old,
+                self.fs_durability,
+            )?;
         }
-        let result = canban_context::pack(&self.home, &card, &filtered, &card_events);
+        let result = canban_context::pack_at_with_durability(
+            &self.home,
+            &card,
+            &filtered,
+            &card_events,
+            self.now_ms(),
+            self.fs_durability,
+        );
         match result {
             Ok(path) => {
                 self.store.lock().unwrap().write(|db| {
@@ -391,7 +404,12 @@ impl AppServer {
         let c: Card = self.store.lock().unwrap().db().get(id)?;
         revise(&c, p)?;
         if let Some(path) = &c.archive {
-            canban_context::restore_files(&self.home, &c, path)?;
+            canban_context::restore_files_with_durability(
+                &self.home,
+                &c,
+                path,
+                self.fs_durability,
+            )?;
         }
         self.mutate("card.restore", p, |db| {
             let mut c: Card = db.get(id)?;

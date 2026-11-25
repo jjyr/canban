@@ -1212,9 +1212,7 @@ impl AppServer {
         if let Ok(value) = self.terminal_context(json!({"terminal_id": entry.id}))
             && let Ok(context) = serde_json::from_value::<TerminalContext>(value)
         {
-            let mut contexts = self.terminal_contexts.lock().unwrap();
-            contexts.retain(|c| c.terminal_id != entry.id);
-            contexts.push(context);
+            self.upsert_terminal_context(context);
         }
         self.emit("terminals", None);
         self.emit("review", None);

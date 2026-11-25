@@ -1763,13 +1763,14 @@ impl AppServer {
             .unwrap()
             .db()
             .events_for_card(&prepared.id)?;
-        let input = canban_context::capture(
+        let input = canban_context::capture_with_durability(
             &self.home,
             &project,
             &prepared,
             entry,
             snapshot,
             &card_events,
+            self.fs_durability,
         )?;
         let (mut context, fresh) = self.store.lock().unwrap().write(|db| {
             let mut c = crate::sessions::conversation(db, card, &att.profile, self.now_ms())?;
