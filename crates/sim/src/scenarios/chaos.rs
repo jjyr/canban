@@ -8,6 +8,7 @@
 //!   tracking and convergence checks, and `oracle.check_step_invariants` after EVERY op!
 use crate::{
     github::SimIssue,
+    herdr::RunFault,
     oracle::InvariantOracle,
     scenarios::finalize_digest,
     world::{SimWorld, SimWorldConfig, run_with_world},
@@ -64,8 +65,9 @@ pub struct ChaosProfile {
     pub enable_workflows: bool,
     pub enable_reclaim_jumps: bool,
     pub enable_env_sync: bool,
+    pub enable_clock_faults: bool,
     pub colocate_workflow_and_github: bool,
-    pub weights: [u32; 23],
+    pub weights: [u32; 24],
 }
 
 impl ChaosProfile {
@@ -101,9 +103,10 @@ impl ChaosProfile {
         let enable_workflows = rng.random_bool(0.90);
         let enable_reclaim_jumps = rng.random_bool(0.75);
         let enable_env_sync = desktop_local && rng.random_bool(0.90);
+        let enable_clock_faults = rng.random_bool(0.85);
         let colocate_workflow_and_github = rng.random_bool(0.60);
 
-        let mut weights = [0u32; 23];
+        let mut weights = [0u32; 24];
         for w in &mut weights {
             *w = rng.random_range(1..=5);
         }
@@ -135,6 +138,9 @@ impl ChaosProfile {
         if !enable_client_bounce {
             weights[21] = 0;
         }
+        if !enable_clock_faults {
+            weights[23] = 0;
+        }
 
         Self {
             desktop_local,
@@ -152,6 +158,7 @@ impl ChaosProfile {
             enable_workflows,
             enable_reclaim_jumps,
             enable_env_sync,
+            enable_clock_faults,
             colocate_workflow_and_github,
             weights,
         }
@@ -252,6 +259,12 @@ pub enum ChaosOp {
     AdvanceTime {
         secs: u64,
     },
+    ClockFault {
+        host_idx: usize,
+        kind: u8,
+        delta_ms: i64,
+        drift_ppm: i64,
+    },
 }
 
 /// Result of deterministic shrinking for a failing Chaos seed.
@@ -348,11 +361,11 @@ pub fn generate_ops(seed: u64, max_ops: usize) -> (ChaosProfile, Vec<ChaosOp>) {
             17 => ChaosOp::GitHubUpsertAndSync {
                 issue_num: rng.random_range(1..=12),
                 is_pr: rng.random_bool(0.35),
-                fault_kind: rng.random_range(0..5),
+                fault_kind: rng.random_range(0..9),
             },
             18 => ChaosOp::HerdrFault {
                 host_idx: rng.random_range(0..16),
-                kind: rng.random_range(0..9),
+                kind: rng.random_range(0..16),
                 tag,
             },
             19 => ChaosOp::NetworkFault {
@@ -363,7 +376,7 @@ pub fn generate_ops(seed: u64, max_ops: usize) -> (ChaosProfile, Vec<ChaosOp>) {
                 host_idx: rng.random_range(0..16),
             },
             21 => ChaosOp::BounceClient,
-            _ => {
+            22 => {
                 let secs = if profile.enable_reclaim_jumps && rng.random_bool(0.35) {
                     rng.random_range(65..=95)
                 } else {
@@ -371,6 +384,12 @@ pub fn generate_ops(seed: u64, max_ops: usize) -> (ChaosProfile, Vec<ChaosOp>) {
                 };
                 ChaosOp::AdvanceTime { secs }
             }
+            _ => ChaosOp::ClockFault {
+                host_idx: rng.random_range(0..16),
+                kind: rng.random_range(0..2),
+                delta_ms: rng.random_range(-4_000..=6_000),
+                drift_ppm: rng.random_range(-5_000..=5_000),
+            },
         };
         ops.push(op);
     }
@@ -411,6 +430,7 @@ fn check_expected_chaos_err(op: &str, res: Result<Value>) -> Result<Option<Value
                 "restore the card before editing",
                 "restore the card before commenting",
                 "terminal has no core binding",
+                "terminal has no runtime binding",
                 "not found",
                 "unknown card",
                 "unknown terminal",
@@ -1023,16 +1043,13 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                     }
                 }
                 ChaosOp::ViewerPresence { card_pick, attach } => {
-                    if let Some((host, _pid, cid)) =
+                    if let Some((_host, pid, cid)) =
                         pick_active_card(&cards, &archived_cards, *card_pick)
                     {
-                        let raw_cid = canban_types::split_qualified_host_id(&cid)
-                            .map(|(_, r)| r.to_owned())
-                            .unwrap_or_else(|| cid.clone());
                         let payload = if *attach {
                             json!({
                                 "client_id": "chaos-viewer",
-                                "card_id": raw_cid,
+                                "card_id": cid,
                                 "terminal_id": null,
                             })
                         } else {
@@ -1042,14 +1059,11 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 "terminal_id": null,
                             })
                         };
-                        let srv_name = server_key(&host);
-                        if world.server(srv_name).is_some() {
-                            let _ = check_expected_chaos_err(
-                                "viewer.presence",
-                                world.server_call(srv_name, "viewer.presence", payload),
-                            )?;
-                            world.hit("chaos.viewer_presence");
-                        }
+                        let _ = check_expected_chaos_err(
+                            "viewer.presence",
+                            world.client_call("viewer.presence", payload, Some(&pid)),
+                        )?;
+                        world.hit("chaos.viewer_presence");
                     }
                 }
                 ChaosOp::NotificationsReadAll => {
@@ -1105,7 +1119,30 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 .github
                                 .inject_stale_response_once("/issues", json!([])),
                             3 => world.github.inject_secondary_rate_limit(429, 10),
-                            _ => {}
+                            5 => {
+                                world.github.set_read_after_write_lag(1);
+                                world.hit("chaos.github_raw_lag");
+                            }
+                            6 => {
+                                world.github.inject_io_error(
+                                    std::io::ErrorKind::ConnectionReset,
+                                    "simulated github io reset",
+                                );
+                                world.hit("chaos.github_io_error");
+                            }
+                            7 => {
+                                world.github.set_host_offline(&gh_host, true);
+                                world.hit("chaos.github_host_offline");
+                            }
+                            8 => {
+                                let reset_secs = (world.now_ms() / 1000).saturating_add(5);
+                                world.github.set_rate_limit_budget(Some(1), reset_secs);
+                                world.hit("chaos.github_rate_limit_budget");
+                            }
+                            _ => {
+                                // Ensure transient host-offline GitHub faults recover on clean ops.
+                                world.github.set_host_offline(&gh_host, false);
+                            }
                         }
                         let _ = check_expected_chaos_err(
                             "github.sync.request",
@@ -1157,9 +1194,64 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 herdr.set_offline(now_off);
                                 world.hit("chaos.herdr_offline_toggle");
                             }
-                            _ => {
+                            8 => {
                                 herdr.restart_core(format!("chaos-core-{host}-{seed}-{tag}"));
                                 world.hit("chaos.herdr_restart_core");
+                            }
+                            9 => {
+                                let fault = match tag % 3 {
+                                    0 => RunFault::FailBeforeCreate(
+                                        "simulated herdr run failure".into(),
+                                    ),
+                                    1 => RunFault::OrphanAfterCreate(
+                                        "simulated herdr orphan timeout".into(),
+                                    ),
+                                    _ => RunFault::FirstMessageUnsent,
+                                };
+                                herdr.inject_next_run_fault(fault);
+                                world.hit("chaos.herdr_run_fault");
+                            }
+                            10 => {
+                                herdr.drop_next_events(1);
+                                world.hit("chaos.herdr_drop_events");
+                            }
+                            11 => {
+                                herdr.duplicate_next_events(1);
+                                world.hit("chaos.herdr_dup_events");
+                            }
+                            12 => {
+                                herdr.buffer_next_events_for_reorder(2);
+                                if let Some(addr) = addrs.first() {
+                                    herdr.set_status(addr, "working", Some(u64::from(*tag)));
+                                    herdr.set_status(addr, "idle", Some(u64::from(*tag) + 1));
+                                } else {
+                                    herdr.flush_reordered_events();
+                                }
+                                world.hit("chaos.herdr_reorder_events");
+                            }
+                            13 => {
+                                if let Some(addr) = addrs.first() {
+                                    herdr.simulate_subscriber_overflow(addr);
+                                    world.hit("chaos.herdr_sub_overflow");
+                                }
+                            }
+                            14 => {
+                                if let Some(addr) = addrs.first() {
+                                    herdr.set_hang_kill(addr, true);
+                                    world.hit("chaos.herdr_hang_kill");
+                                }
+                            }
+                            _ => {
+                                // Only lose a live terminal when Herdr is online and event delivery
+                                // is clean so the observer immediately observes the `lost` event.
+                                if !offline_herdr_hosts.contains(host)
+                                    && let Some(addr) = addrs.first()
+                                {
+                                    herdr.clear_injected_faults();
+                                    herdr.lose_terminal(addr, "simulated_pty_lost");
+                                    world.advance(Duration::from_millis(200))?;
+                                    world.hit("chaos.herdr_lose_terminal");
+                                }
                             }
                         }
                     }
@@ -1233,6 +1325,24 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                         world.advance(Duration::from_secs(*secs))?;
                     }
                 }
+                ChaosOp::ClockFault {
+                    host_idx,
+                    kind,
+                    delta_ms,
+                    drift_ppm,
+                } => {
+                    let host = &all_hosts[*host_idx % all_hosts.len()];
+                    let srv_name = server_key(host);
+                    if let Some(handle) = world.servers.get(srv_name) {
+                        if *kind == 0 {
+                            handle.clock.jump_ms(*delta_ms);
+                            world.hit("chaos.clock_jump");
+                        } else {
+                            handle.clock.set_drift_ppm(*drift_ppm);
+                            world.hit("chaos.clock_drift");
+                        }
+                    }
+                }
             }
 
             // Advance a small virtual tick and check step invariants after EVERY SINGLE OP!
@@ -1240,6 +1350,10 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
             oracle.check_step_invariants(world)?;
         }
 
+        // Restore dynamic clock jumps/drift before healing & quiescence.
+        for handle in world.servers.values() {
+            handle.clock.reset_adjustments();
+        }
         // Heal all faults & quiesce.
         world.heal_and_quiesce(25_000)?;
 

@@ -34,11 +34,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run one complete deterministic simulation round (all 11 scripted scenarios + chaos),
+    /// Run one complete deterministic simulation round (all 14 scripted scenarios + chaos),
     /// or replay a specific `--seed` / `--scenario` or `--replay-file`.
     Run {
-        /// Optional scenario name (e.g. `remote_faults`, `github_sync`, `schedules_and_budget`, `chaos`).
-        /// Omit to run one complete round (all 11 scripted scenarios + chaos).
+        /// Optional scenario name (e.g. `remote_faults`, `transport_auth`, `workspaces_delivery`, `project_import_export`, `chaos`).
+        /// Omit to run one complete round (all 14 scripted scenarios + chaos).
         #[arg(long)]
         scenario: Option<String>,
         /// Deterministic seed (default: 2026). Pass a failing seed to replay it exactly.
@@ -87,7 +87,7 @@ enum Command {
         /// Stop immediately on the first failing seed instead of continuing until Ctrl-C.
         #[arg(long, short = 'x')]
         fail_fast: bool,
-        /// Target scenario: `chaos` (default), `all` (random mix of all 11 scripted + chaos), or a specific scenario name.
+        /// Target scenario: `chaos` (default), `all` (random mix of all 14 scripted + chaos), or a specific scenario name.
         #[arg(long, default_value = "chaos")]
         scenario: String,
         /// Optional cap on total seeds (omit to run continuously until Ctrl-C).
@@ -562,6 +562,20 @@ fn run_suite(
             "schedules_budget.herdr_offline_queued_no_livelock",
             "workflow_faults.condition_external_pr_gated",
             "multi_client.two_client_three_way_auto_merge",
+            "auth.invite_single_use",
+            "auth.revoke_kicks_live_stream",
+            "auth.tailscale_ephemeral_enc",
+            "auth.api_mismatch",
+            "workspaces.worktree_created",
+            "workflow.script_executed",
+            "workflow.admit_checked",
+            "delivery.merge_batch_passed",
+            "delivery.test_failure_rework",
+            "delivery.hold_auto_merge",
+            "bundle.exported",
+            "bundle.imported_multi_host",
+            "bundle.cross_host_ops_isolated",
+            "bundle.fault_recovery",
         ]
     } else {
         &[]

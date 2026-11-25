@@ -79,6 +79,31 @@ mod tests {
     }
 
     #[test]
+    fn scenario_12_transport_auth() {
+        scenarios::transport_auth::run(202_612).expect("transport_auth scenario failed");
+    }
+
+    #[test]
+    fn scenario_13_workspaces_delivery() {
+        scenarios::workspaces_delivery::run(202_613).expect("workspaces_delivery scenario failed");
+    }
+
+    #[test]
+    fn scenario_14_project_import_export() {
+        scenarios::project_import_export::run(202_614)
+            .expect("project_import_export scenario failed");
+    }
+
+    #[test]
+    fn chaos_outbox_regression_seed_6581024343186838594() {
+        let d1 = scenarios::chaos::run(6_581_024_343_186_838_594, 40)
+            .expect("outbox revision_conflict regression seed 6581024343186838594 failed");
+        let d2 = scenarios::chaos::run(6_581_024_343_186_838_594, 40)
+            .expect("outbox regression seed replay failed");
+        assert_eq!(d1, d2, "regression seed must replay deterministically");
+    }
+
+    #[test]
     fn chaos_curated_seeds() {
         for seed in [42_u64, 1337, 202_609] {
             scenarios::chaos::run(seed, 35)

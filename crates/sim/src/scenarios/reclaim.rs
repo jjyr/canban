@@ -128,12 +128,13 @@ pub fn run(seed: u64) -> Result<u64> {
         world.advance(Duration::from_millis(300))?;
         oracle.protect_terminal(world, "remote-a", &herdr_addr);
 
+        let q_tid = canban_types::qualify_host_id("remote-a", &tid);
         for _ in 0..8 {
             herdr.set_viewer_activity(&herdr_addr, 1, true);
-            let _ = world.server_call(
-                "remote-a",
+            let _ = world.client_call(
                 "viewer.presence",
-                json!({ "client_id": "ui-viewer-1", "card_id": raw_cid, "terminal_id": tid }),
+                json!({ "client_id": "ui-viewer-1", "card_id": cid, "terminal_id": q_tid }),
+                Some(&pid),
             )?;
             world.advance(Duration::from_secs(15))?;
             oracle.check_step_invariants(world)?;
@@ -144,10 +145,10 @@ pub fn run(seed: u64) -> Result<u64> {
         //          `closing`) -> `bounce_server` mid-`closing` -> Herdr exits cleanly!
         oracle.unprotect_terminal("remote-a", &herdr_addr);
         herdr.set_viewer_activity(&herdr_addr, 0, false);
-        let _ = world.server_call(
-            "remote-a",
+        let _ = world.client_call(
             "viewer.presence",
             json!({ "client_id": "ui-viewer-1", "card_id": null, "terminal_id": null }),
+            Some(&pid),
         )?;
         // Hold exit briefly so we observe `closing` and bounce `remote-a` mid-`closing`!
         herdr.set_hang_exit(&herdr_addr, true);

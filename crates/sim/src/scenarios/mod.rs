@@ -6,10 +6,13 @@ pub mod github_sync;
 pub mod herdr_lifecycle;
 pub mod multi_client_sync;
 pub mod notifications;
+pub mod project_import_export;
 pub mod reclaim;
 pub mod remote_faults;
 pub mod schedules_and_budget;
+pub mod transport_auth;
 pub mod workflow_faults;
+pub mod workspaces_delivery;
 
 use crate::world::SimWorld;
 use anyhow::{Result, bail};
@@ -36,6 +39,9 @@ pub enum Scenario {
     SchedulesAndBudget,
     WorkflowFaults,
     MultiClientSync,
+    TransportAuth,
+    WorkspacesDelivery,
+    ProjectImportExport,
     Chaos,
 }
 
@@ -52,6 +58,9 @@ impl Scenario {
         Scenario::SchedulesAndBudget,
         Scenario::WorkflowFaults,
         Scenario::MultiClientSync,
+        Scenario::TransportAuth,
+        Scenario::WorkspacesDelivery,
+        Scenario::ProjectImportExport,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -67,6 +76,9 @@ impl Scenario {
             Scenario::SchedulesAndBudget => "schedules_and_budget",
             Scenario::WorkflowFaults => "workflow_faults",
             Scenario::MultiClientSync => "multi_client_sync",
+            Scenario::TransportAuth => "transport_auth",
+            Scenario::WorkspacesDelivery => "workspaces_delivery",
+            Scenario::ProjectImportExport => "project_import_export",
             Scenario::Chaos => "chaos",
         }
     }
@@ -84,9 +96,14 @@ impl Scenario {
             "schedules_and_budget" | "schedules" | "budget" => Ok(Scenario::SchedulesAndBudget),
             "workflow_faults" | "wf_faults" => Ok(Scenario::WorkflowFaults),
             "multi_client_sync" | "multi_client" => Ok(Scenario::MultiClientSync),
+            "transport_auth" | "auth" | "transport" => Ok(Scenario::TransportAuth),
+            "workspaces_delivery" | "workspaces" | "delivery" => Ok(Scenario::WorkspacesDelivery),
+            "project_import_export" | "bundle" | "import_export" => {
+                Ok(Scenario::ProjectImportExport)
+            }
             "chaos" | "fuzz" => Ok(Scenario::Chaos),
             other => bail!(
-                "Unknown scenario '{other}'. Expected one of: card_automation, remote_faults, github_sync, client_pages, env_sync, herdr_lifecycle, reclaim, notifications, schedules_and_budget, workflow_faults, multi_client_sync, chaos"
+                "Unknown scenario '{other}'. Expected one of: card_automation, remote_faults, github_sync, client_pages, env_sync, herdr_lifecycle, reclaim, notifications, schedules_and_budget, workflow_faults, multi_client_sync, transport_auth, workspaces_delivery, project_import_export, chaos"
             ),
         }
     }
@@ -105,6 +122,9 @@ pub fn run_scenario(scenario: Scenario, seed: u64, ops: usize) -> Result<u64> {
         Scenario::SchedulesAndBudget => schedules_and_budget::run(seed),
         Scenario::WorkflowFaults => workflow_faults::run(seed),
         Scenario::MultiClientSync => multi_client_sync::run(seed),
+        Scenario::TransportAuth => transport_auth::run(seed),
+        Scenario::WorkspacesDelivery => workspaces_delivery::run(seed),
+        Scenario::ProjectImportExport => project_import_export::run(seed),
         Scenario::Chaos => chaos::run(seed, ops),
     }
 }

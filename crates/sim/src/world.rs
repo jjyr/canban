@@ -19,7 +19,7 @@ use canban_client::{
     ClientCapabilities, ClientEvent, InlineHostsFileStore, LocalHostDriver, MultiHostClient,
     MultiHostClientOptions, RemoteClientConfig,
 };
-use canban_transport::ClientTransport;
+use canban_transport::{ClientTransport, TailscalePeerIdentity, TailscalePeerVerifier};
 use canban_types::{
     Config, GlobalEnvSyncStatus, HostSummary, HostTransport, RuntimeState, SavedHost, Snapshot,
     SyncAction, SyncItemState, SyncItemView,
@@ -29,6 +29,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     future::Future,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
@@ -43,6 +44,96 @@ use tokio::sync::{mpsc, oneshot};
 pub const SIM_PORT: u16 = 7680;
 pub const PRIMARY_CLIENT: &str = "ui-client";
 const MAX_BUFFERED_CLIENT_EVENTS: usize = 2_048;
+
+/// Controllable deterministic [`TailscalePeerVerifier`] for DST (`transport_auth`).
+#[derive(Clone, Default)]
+pub struct SimTailscaleVerifier {
+    inner: Arc<Mutex<SimTailscaleVerifierState>>,
+}
+
+#[derive(Default)]
+struct SimTailscaleVerifierState {
+    enabled: bool,
+    default_identity: Option<TailscalePeerIdentity>,
+    peer_overrides: BTreeMap<IpAddr, Option<TailscalePeerIdentity>>,
+    attempts: Vec<(SocketAddr, bool)>,
+}
+
+impl std::fmt::Debug for SimTailscaleVerifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let st = self.inner.lock().unwrap();
+        f.debug_struct("SimTailscaleVerifier")
+            .field("enabled", &st.enabled)
+            .field("default_identity", &st.default_identity)
+            .field("overrides", &st.peer_overrides.len())
+            .field("attempts", &st.attempts.len())
+            .finish()
+    }
+}
+
+impl SimTailscaleVerifier {
+    pub fn accepting(
+        node_id: impl Into<String>,
+        device_name: impl Into<String>,
+        login_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(SimTailscaleVerifierState {
+                enabled: true,
+                default_identity: Some(TailscalePeerIdentity {
+                    node_id: node_id.into(),
+                    device_name: device_name.into(),
+                    login_name: login_name.into(),
+                }),
+                peer_overrides: BTreeMap::new(),
+                attempts: Vec::new(),
+            })),
+        }
+    }
+
+    pub fn rejecting() -> Self {
+        Self::default()
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.inner.lock().unwrap().enabled = enabled;
+    }
+
+    pub fn set_default_identity(&self, identity: Option<TailscalePeerIdentity>) {
+        self.inner.lock().unwrap().default_identity = identity;
+    }
+
+    pub fn set_peer_identity(&self, ip: IpAddr, identity: Option<TailscalePeerIdentity>) {
+        self.inner
+            .lock()
+            .unwrap()
+            .peer_overrides
+            .insert(ip, identity);
+    }
+
+    pub fn clear_peer_overrides(&self) {
+        self.inner.lock().unwrap().peer_overrides.clear();
+    }
+
+    pub fn attempts(&self) -> Vec<(SocketAddr, bool)> {
+        self.inner.lock().unwrap().attempts.clone()
+    }
+}
+
+impl TailscalePeerVerifier for SimTailscaleVerifier {
+    fn verify_peer(&self, peer_addr: SocketAddr) -> Option<TailscalePeerIdentity> {
+        let mut st = self.inner.lock().unwrap();
+        let res = if !st.enabled {
+            None
+        } else if let Some(ov) = st.peer_overrides.get(&peer_addr.ip()) {
+            ov.clone()
+        } else {
+            st.default_identity.clone()
+        };
+        st.attempts.push((peer_addr, res.is_some()));
+        res
+    }
+}
 
 /// Derives a deterministic, platform-independent 64-bit seed for a simulated host and boot
 /// generation (FNV-1a + SplitMix64 mixing; no randomized hasher).
@@ -93,6 +184,10 @@ pub struct SimWorldConfig {
     pub stream_fault_policy: Option<StreamFaultPolicy>,
     /// Optional secondary simulated client host names (e.g. `["ui-client-2"]`) for multi-client races.
     pub extra_clients: Vec<String>,
+    /// Optional per-host [`SimTailscaleVerifier`] injected into `ServerRuntimeEnv::tailscale_verifier`.
+    pub tailscale_verifiers: BTreeMap<String, SimTailscaleVerifier>,
+    /// Optional per-host API version override injected into `ServerRuntimeEnv::desktop_api_override`.
+    pub desktop_api_overrides: BTreeMap<String, u32>,
 }
 
 impl SimWorldConfig {
@@ -113,6 +208,8 @@ impl SimWorldConfig {
             enable_random_order: true,
             stream_fault_policy: None,
             extra_clients: Vec::new(),
+            tailscale_verifiers: BTreeMap::new(),
+            desktop_api_overrides: BTreeMap::new(),
         }
     }
 
@@ -133,6 +230,8 @@ impl SimWorldConfig {
             enable_random_order: true,
             stream_fault_policy: None,
             extra_clients: Vec::new(),
+            tailscale_verifiers: BTreeMap::new(),
+            desktop_api_overrides: BTreeMap::new(),
         }
     }
 }
@@ -302,13 +401,11 @@ impl LocalHostDriver for SimLocalHostDriver {
     }
 }
 
-type ClientTaskFn = Box<
-    dyn FnOnce(Arc<MultiHostClient>) -> Pin<Box<dyn Future<Output = Result<Value>> + Send>> + Send,
->;
+type ClientTaskFn =
+    Box<dyn FnOnce(Arc<MultiHostClient>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
 
 struct ClientCommand {
     run: ClientTaskFn,
-    reply: oneshot::Sender<Result<Value>>,
 }
 
 /// Handle to an in-flight non-blocking RPC spawned via [`SimWorld::client_spawn`].
@@ -341,6 +438,8 @@ pub struct SimServerHandle {
     pub github: Arc<SimGitHubHost>,
     pub exec: Arc<SimExec>,
     pub clock: Arc<TurmoilClock>,
+    pub tailscale_verifier: Arc<Mutex<Option<SimTailscaleVerifier>>>,
+    pub desktop_api_override: Arc<Mutex<Option<u32>>>,
     pub server_slot: Arc<Mutex<Option<Arc<AppServer>>>>,
     pub abrupt_crash: Arc<Mutex<Option<Arc<AtomicBool>>>>,
     pub token: Arc<Mutex<Option<String>>>,
@@ -485,6 +584,12 @@ impl SimWorld {
             let herdr = SimHerdr::new(format!("core-{host_name}"), clock.clone());
             let host_github = github.for_host(host_name.clone());
             let exec = SimExec::new(host_name.clone());
+            let tailscale_verifier_slot: Arc<Mutex<Option<SimTailscaleVerifier>>> = Arc::new(
+                Mutex::new(config.tailscale_verifiers.get(host_name).cloned()),
+            );
+            let desktop_api_override_slot: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(
+                config.desktop_api_overrides.get(host_name).copied(),
+            ));
             let server_slot: Arc<Mutex<Option<Arc<AppServer>>>> = Arc::new(Mutex::new(None));
             let abrupt_slot: Arc<Mutex<Option<Arc<AtomicBool>>>> = Arc::new(Mutex::new(None));
             let token_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -497,6 +602,8 @@ impl SimWorld {
             let h_herdr = herdr.clone();
             let h_github = host_github.clone();
             let h_exec = exec.clone();
+            let h_ts_verifier = Arc::clone(&tailscale_verifier_slot);
+            let h_api_override = Arc::clone(&desktop_api_override_slot);
             let h_slot = Arc::clone(&server_slot);
             let h_abrupt = Arc::clone(&abrupt_slot);
             let h_token = Arc::clone(&token_slot);
@@ -518,6 +625,8 @@ impl SimWorld {
                 let herdr = h_herdr.clone();
                 let host_github = h_github.clone();
                 let exec = h_exec.clone();
+                let ts_verifier_slot = Arc::clone(&h_ts_verifier);
+                let api_override_slot = Arc::clone(&h_api_override);
                 let slot = Arc::clone(&h_slot);
                 let abrupt_slot = Arc::clone(&h_abrupt);
                 let token_slot = Arc::clone(&h_token);
@@ -530,7 +639,13 @@ impl SimWorld {
                 ));
                 let stream_policy = h_stream_policy.clone();
                 async move {
-                    #[allow(clippy::needless_update)]
+                    let tailscale_verifier: Option<Arc<dyn TailscalePeerVerifier>> =
+                        ts_verifier_slot
+                            .lock()
+                            .unwrap()
+                            .clone()
+                            .map(|v| Arc::new(v) as Arc<dyn TailscalePeerVerifier>);
+                    let desktop_api_override = *api_override_slot.lock().unwrap();
                     let env = ServerRuntimeEnv {
                         clock,
                         id_gen,
@@ -541,7 +656,8 @@ impl SimWorld {
                         fs_durability: h_durability,
                         sqlite_synchronous_off: h_sqlite_sync_off,
                         disable_os_watchers: h_disable_watchers,
-                        ..Default::default()
+                        tailscale_verifier,
+                        desktop_api_override,
                     };
                     let server = AppServer::open_with_env(home, PathBuf::from("/bin/echo"), env)
                         .map_err(|e| format!("open_with_env({host_label}): {e:#}"))?;
@@ -586,6 +702,8 @@ impl SimWorld {
                     github: host_github,
                     exec,
                     clock,
+                    tailscale_verifier: tailscale_verifier_slot,
+                    desktop_api_override: desktop_api_override_slot,
                     server_slot,
                     abrupt_crash: abrupt_slot,
                     token: token_slot,
@@ -836,11 +954,8 @@ impl SimWorld {
 
                 while let Some(cmd) = rx.recv().await {
                     let c = Arc::clone(&client);
-                    let reply = cmd.reply;
                     let fut = (cmd.run)(c);
-                    tokio::spawn(async move {
-                        let _ = reply.send(fut.await);
-                    });
+                    tokio::spawn(fut);
                 }
                 *client_slot.lock().unwrap() = None;
                 *cmd_tx_holder.lock().unwrap() = None;
@@ -935,6 +1050,61 @@ impl SimWorld {
         let dir = self._tempdir.path().join("repos").join(name);
         std::fs::create_dir_all(&dir)?;
         Ok(dir.to_string_lossy().into_owned())
+    }
+
+    /// Returns an isolated absolute file path inside the simulation tempdir (creating parent dirs).
+    pub fn temp_file_path(&self, rel: &str) -> Result<PathBuf> {
+        let path = self._tempdir.path().join("scratch").join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        Ok(path)
+    }
+
+    /// Returns the configured [`SimTailscaleVerifier`] handle for `host`, if any.
+    pub fn tailscale_verifier(&self, host: &str) -> Option<SimTailscaleVerifier> {
+        self.servers
+            .get(host)
+            .and_then(|s| s.tailscale_verifier.lock().unwrap().clone())
+    }
+
+    /// Installs or clears a live [`SimTailscaleVerifier`] on `host` (persisting across bounces).
+    pub fn set_tailscale_verifier(
+        &mut self,
+        host: &str,
+        verifier: Option<SimTailscaleVerifier>,
+    ) -> Result<()> {
+        let handle = self
+            .servers
+            .get(host)
+            .with_context(|| format!("Unknown server host '{host}'"))?;
+        *handle.tailscale_verifier.lock().unwrap() = verifier.clone();
+        if let Some(srv) = handle.server() {
+            srv.set_tailscale_verifier(
+                verifier.map(|v| Arc::new(v) as Arc<dyn TailscalePeerVerifier>),
+            );
+        }
+        Ok(())
+    }
+
+    /// Overrides the advertised API version on `host` (for `ApiMismatch` testing; persists across bounces).
+    pub fn set_desktop_api_override(&mut self, host: &str, api: Option<u32>) -> Result<()> {
+        let handle = self
+            .servers
+            .get(host)
+            .with_context(|| format!("Unknown server host '{host}'"))?;
+        *handle.desktop_api_override.lock().unwrap() = api;
+        if let Some(srv) = handle.server() {
+            srv.set_desktop_api_override(api);
+        }
+        self.trace.record_actor(
+            self.step_count,
+            self.elapsed_ms(),
+            host,
+            "server.api",
+            format!("{api:?}"),
+        );
+        Ok(())
     }
 
     /// Controls whether `SimWorld` automatically emits virtual-time Herdr control-plane heartbeats
@@ -1063,17 +1233,13 @@ impl SimWorld {
         handle.events.lock().unwrap().drain(..).collect()
     }
 
-    /// Executes an async operation inside `client_id`'s Turmoil Tokio runtime, pumping
-    /// `sim.step()` deterministically until the future resolves (or `timeout_ms` virtual ms elapse).
-    pub fn client_exec_on<F, Fut>(
-        &mut self,
-        client_id: &str,
-        timeout_ms: u64,
-        f: F,
-    ) -> Result<Value>
+    /// Executes an arbitrary typed async operation inside `client_id`'s Turmoil Tokio runtime,
+    /// pumping `sim.step()` deterministically until the future resolves (or `timeout_ms` elapse).
+    pub fn client_run_on<T, F, Fut>(&mut self, client_id: &str, timeout_ms: u64, f: F) -> Result<T>
     where
+        T: Send + 'static,
         F: FnOnce(Arc<MultiHostClient>) -> Fut + Send + 'static,
-        Fut: Future<Output = Result<Value>> + Send + 'static,
+        Fut: Future<Output = Result<T>> + Send + 'static,
     {
         let tx_sender = self
             .clients
@@ -1082,11 +1248,14 @@ impl SimWorld {
             .with_context(|| {
                 format!("Simulated client '{client_id}' is crashed or uninitialized")
             })?;
-        let (tx, mut rx) = oneshot::channel();
+        let (tx, mut rx) = oneshot::channel::<Result<T>>();
         tx_sender
             .send(ClientCommand {
-                run: Box::new(move |c| Box::pin(f(c))),
-                reply: tx,
+                run: Box::new(move |c| {
+                    Box::pin(async move {
+                        let _ = tx.send(f(c).await);
+                    })
+                }),
             })
             .map_err(|_| anyhow!("'{client_id}' command channel closed"))?;
         let deadline = self
@@ -1102,7 +1271,7 @@ impl SimWorld {
                     "{}",
                     self.trace.format_failure_with_state(
                         &format!(
-                            "SimWorld::client_exec_on({client_id}) timed out after {timeout_ms}ms virtual time"
+                            "SimWorld::client_run_on({client_id}) timed out after {timeout_ms}ms virtual time"
                         ),
                         Some(&self.state_summary()),
                     )
@@ -1110,6 +1279,61 @@ impl SimWorld {
             }
             self.step_once()?;
         }
+    }
+
+    /// Executes an async `Result<Value>` operation inside `client_id`'s Turmoil Tokio runtime.
+    pub fn client_exec_on<F, Fut>(
+        &mut self,
+        client_id: &str,
+        timeout_ms: u64,
+        f: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce(Arc<MultiHostClient>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<Value>> + Send + 'static,
+    {
+        self.client_run_on(client_id, timeout_ms, f)
+    }
+
+    /// Opens a raw authenticated `yamux/1` [`ClientTransport`] over `turmoil::net::TcpStream`
+    /// from inside `client_id`'s Turmoil host (for `transport_auth` pairing, revocation, and
+    /// Tailscale WhoIs testing).
+    pub fn connect_raw_transport_on(
+        &mut self,
+        client_id: &str,
+        addr: &str,
+        token: &str,
+        device_name: &str,
+    ) -> Result<Arc<ClientTransport>> {
+        let addr_owned = canban_types::normalize_daemon_addr(addr);
+        let token_owned = token.to_owned();
+        let dev_owned = device_name.to_owned();
+        self.trace.record_actor(
+            self.step_count,
+            self.elapsed_ms(),
+            client_id,
+            "net.connect",
+            format!("{addr_owned} dev={dev_owned}"),
+        );
+        self.client_run_on(client_id, 30_000, move |_| async move {
+            let stream = turmoil::net::TcpStream::connect(addr_owned.as_str())
+                .await
+                .with_context(|| format!("turmoil connect {addr_owned}"))?;
+            let transport =
+                ClientTransport::connect_stream_async(stream, addr_owned, token_owned, dev_owned)
+                    .await?;
+            Ok(Arc::new(transport))
+        })
+    }
+
+    /// Opens a raw authenticated `yamux/1` [`ClientTransport`] from `"ui-client"`'s Turmoil host.
+    pub fn connect_raw_transport(
+        &mut self,
+        addr: &str,
+        token: &str,
+        device_name: &str,
+    ) -> Result<Arc<ClientTransport>> {
+        self.connect_raw_transport_on(PRIMARY_CLIENT, addr, token, device_name)
     }
 
     /// Executes an async operation inside `"ui-client"`'s Turmoil Tokio runtime.
@@ -1152,11 +1376,11 @@ impl SimWorld {
         tx_sender
             .send(ClientCommand {
                 run: Box::new(move |c| {
-                    Box::pin(
-                        async move { c.call_routed_async(&m_run, params, active.as_deref()).await },
-                    )
+                    Box::pin(async move {
+                        let res = c.call_routed_async(&m_run, params, active.as_deref()).await;
+                        let _ = tx.send(res);
+                    })
                 }),
-                reply: tx,
             })
             .map_err(|_| anyhow!("'{client_id}' command channel closed"))?;
         Ok(ClientCallHandle {

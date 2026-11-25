@@ -135,13 +135,14 @@ pub fn run(seed: u64) -> Result<u64> {
         })?;
         oracle.check_step_invariants(world)?;
 
-        // 2. Output capture via `terminal.read` / `execution.output`.
+        // 2. Output capture via `terminal.read` / `execution.output` routed through `MultiHostClient`.
         herdr.append_output(&herdr_addr, ["sim-log-line-1", "sim-log-line-2"]);
         herdr.set_screen(&herdr_addr, "screen-snapshot-ready");
-        let output_res = world.server_call(
-            "remote-a",
+        let q_tid = canban_types::qualify_host_id("remote-a", &tid);
+        let output_res = world.client_call(
             "execution.output",
-            json!({ "terminal_id": tid }),
+            json!({ "terminal_id": q_tid }),
+            Some(&pid),
         )?;
         let out_text = output_res.to_string();
         ensure!(
