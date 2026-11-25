@@ -182,6 +182,15 @@ mod tests {
     }
 
     #[test]
+    fn chaos_backward_clock_global_env_regression_seed_13580682392153143971() {
+        let d1 = scenarios::chaos::run(13_580_682_392_153_143_971, 50)
+            .expect("backward-clock global_env regression seed 13580682392153143971 failed");
+        let d2 = scenarios::chaos::run(13_580_682_392_153_143_971, 50)
+            .expect("backward-clock global_env regression seed replay failed");
+        assert_eq!(d1, d2, "regression seed must replay deterministically");
+    }
+
+    #[test]
     fn chaos_curated_seeds() {
         for seed in [42_u64, 1337, 202_609] {
             scenarios::chaos::run(seed, 35)

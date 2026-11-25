@@ -677,6 +677,7 @@ fn check_expected_chaos_err(op: &str, res: Result<Value>) -> Result<Option<Value
                 "not waiting",
                 "not active",
                 "workflow run is not",
+                "resolved cards do not start new workflows",
                 "batch is not",
                 "live terminal",
                 "unresolved",

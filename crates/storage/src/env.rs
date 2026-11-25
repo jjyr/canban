@@ -254,6 +254,36 @@ pub fn list_all_snapshot_env(conn: &Connection) -> Result<SnapshotEnvMaps> {
     Ok((global_env, scoped_env))
 }
 
+fn monotonic_updated_at(now: u64, prev_env_ts: Option<i64>, prev_vault_ts: Option<u64>) -> u64 {
+    let prev_env = prev_env_ts.map(|v| u64::try_from(v).unwrap_or(0));
+    let prev = match (prev_env, prev_vault_ts) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    };
+    match prev {
+        Some(prev_ts) => now.max(prev_ts.saturating_add(1)),
+        None => now,
+    }
+}
+
+fn next_monotonic_env_updated_at(
+    conn: &Connection,
+    scope: &str,
+    tid: &str,
+    key: &str,
+    prev_vault_ts: Option<u64>,
+    now: u64,
+) -> Result<u64> {
+    let prev_env_ts: Option<i64> = conn
+        .query_row(
+            "SELECT updated_at FROM env_entries WHERE scope=?1 AND target_id=?2 AND key=?3",
+            params![scope, tid, key],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?;
+    Ok(monotonic_updated_at(now, prev_env_ts, prev_vault_ts))
+}
+
 /// Apply writes uniformly across `SCOPE_GLOBAL`, `SCOPE_AGENT`, and `SCOPE_PROJECT`.
 /// Global deletions preserve tombstones (`deleted=1`) for offline/LWW host replication.
 pub fn apply_env_writes(
@@ -307,6 +337,7 @@ pub fn apply_env_writes_with_options(
             is_valid_env_key(key),
             "Invalid environment variable '{key}'"
         );
+        let prev_vault_ts = secret_meta.get(key).map(|(_, ts)| *ts);
         match write {
             EnvWriteEntry::Unset => {
                 ensure!(
@@ -314,12 +345,14 @@ pub fn apply_env_writes_with_options(
                     "Unset is not supported at Global scope (remove '{key}' instead)"
                 );
                 vault::delete(conn, NAMESPACE_ENV, &vscope, key)?;
+                let effective_ts =
+                    next_monotonic_env_updated_at(conn, scope, tid, key, prev_vault_ts, now)?;
                 conn.execute(
                     "INSERT INTO env_entries(scope, target_id, key, kind, value, updated_at, deleted) \
                      VALUES(?1, ?2, ?3, 'unset', NULL, ?4, 0) \
                      ON CONFLICT(scope, target_id, key) DO UPDATE SET \
                        kind='unset', value=NULL, updated_at=excluded.updated_at, deleted=0",
-                    params![scope, tid, key, now as i64],
+                    params![scope, tid, key, effective_ts as i64],
                 )?;
             }
             EnvWriteEntry::Plain { value } => {
@@ -328,21 +361,32 @@ pub fn apply_env_writes_with_options(
                     "Environment variable '{key}' cannot contain NUL bytes"
                 );
                 vault::delete(conn, NAMESPACE_ENV, &vscope, key)?;
-                let unchanged = conn
+                let existing = conn
                     .query_row(
-                        "SELECT kind, value, deleted FROM env_entries WHERE scope=?1 AND target_id=?2 AND key=?3",
+                        "SELECT kind, value, updated_at, deleted FROM env_entries WHERE scope=?1 AND target_id=?2 AND key=?3",
                         params![scope, tid, key],
-                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, i64>(2)?)),
+                        |r| {
+                            Ok((
+                                r.get::<_, String>(0)?,
+                                r.get::<_, Option<String>>(1)?,
+                                r.get::<_, i64>(2)?,
+                                r.get::<_, i64>(3)?,
+                            ))
+                        },
                     )
-                    .optional()?
-                    .is_some_and(|(k, v, del)| del == 0 && k == "plain" && v.as_deref() == Some(value.as_str()));
+                    .optional()?;
+                let unchanged = existing.as_ref().is_some_and(|(k, v, _, del)| {
+                    *del == 0 && k == "plain" && v.as_deref() == Some(value.as_str())
+                });
                 if !unchanged {
+                    let effective_ts =
+                        monotonic_updated_at(now, existing.map(|(_, _, ts, _)| ts), prev_vault_ts);
                     conn.execute(
                         "INSERT INTO env_entries(scope, target_id, key, kind, value, updated_at, deleted) \
                          VALUES(?1, ?2, ?3, 'plain', ?4, ?5, 0) \
                          ON CONFLICT(scope, target_id, key) DO UPDATE SET \
                            kind='plain', value=excluded.value, updated_at=excluded.updated_at, deleted=0",
-                        params![scope, tid, key, value, now as i64],
+                        params![scope, tid, key, value, effective_ts as i64],
                     )?;
                 }
             }
@@ -355,6 +399,8 @@ pub fn apply_env_writes_with_options(
                         !plaintext.contains('\0'),
                         "Secret '{key}' cannot contain NUL bytes"
                     );
+                    let effective_ts =
+                        next_monotonic_env_updated_at(conn, scope, tid, key, prev_vault_ts, now)?;
                     vault::put_with_sync_and_id_gen(
                         conn,
                         home,
@@ -362,7 +408,7 @@ pub fn apply_env_writes_with_options(
                         &vscope,
                         key,
                         plaintext,
-                        now,
+                        effective_ts,
                         fs_sync,
                         id_gen,
                     )?;
@@ -372,14 +418,31 @@ pub fn apply_env_writes_with_options(
                          VALUES(?1, ?2, ?3, 'secret', NULL, ?4, 0) \
                          ON CONFLICT(scope, target_id, key) DO UPDATE SET \
                            kind='secret', value=NULL, updated_at=excluded.updated_at, deleted=0",
-                        params![scope, tid, key, now as i64],
+                        params![scope, tid, key, effective_ts as i64],
                     )?;
                 } else if *keep_existing && secret_meta.contains_key(key) {
                     keep_secrets.insert(key.clone());
-                    conn.execute(
-                        "UPDATE env_entries SET deleted=0 WHERE scope=?1 AND target_id=?2 AND key=?3",
-                        params![scope, tid, key],
-                    )?;
+                    let existing: Option<(String, i64, i64)> = conn
+                        .query_row(
+                            "SELECT kind, updated_at, deleted FROM env_entries WHERE scope=?1 AND target_id=?2 AND key=?3",
+                            params![scope, tid, key],
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                        )
+                        .optional()?;
+                    let already_active_secret = existing
+                        .as_ref()
+                        .is_some_and(|(k, _, del)| *del == 0 && k == "secret");
+                    if !already_active_secret {
+                        let effective_ts =
+                            monotonic_updated_at(now, existing.map(|(_, ts, _)| ts), prev_vault_ts);
+                        conn.execute(
+                            "INSERT INTO env_entries(scope, target_id, key, kind, value, updated_at, deleted) \
+                             VALUES(?1, ?2, ?3, 'secret', NULL, ?4, 0) \
+                             ON CONFLICT(scope, target_id, key) DO UPDATE SET \
+                               kind='secret', value=NULL, updated_at=excluded.updated_at, deleted=0",
+                            params![scope, tid, key, effective_ts as i64],
+                        )?;
+                    }
                 } else {
                     bail!("Secret '{key}' requires a value");
                 }
@@ -391,10 +454,18 @@ pub fn apply_env_writes_with_options(
         if !entries.contains_key(&old_key) {
             vault::delete(conn, NAMESPACE_ENV, &vscope, &old_key)?;
             if scope == SCOPE_GLOBAL {
+                let effective_ts = next_monotonic_env_updated_at(
+                    conn,
+                    scope,
+                    tid,
+                    &old_key,
+                    secret_meta.get(&old_key).map(|(_, ts)| *ts),
+                    now,
+                )?;
                 conn.execute(
                     "UPDATE env_entries SET value=NULL, updated_at=?4, deleted=1 \
                      WHERE scope=?1 AND target_id=?2 AND key=?3",
-                    params![scope, tid, old_key, now as i64],
+                    params![scope, tid, old_key, effective_ts as i64],
                 )?;
             } else {
                 conn.execute(
@@ -875,5 +946,168 @@ mod tests {
         assert_ne!(fp2, fp3);
         assert_eq!(records.len(), 2);
         assert!(records.iter().all(|r| r.deleted));
+    }
+
+    #[test]
+    fn env_writes_and_tombstones_advance_monotonically_across_backward_clock_jump() {
+        let home_a = tempfile::tempdir().unwrap();
+        let home_b = tempfile::tempdir().unwrap();
+        let store_a = Store::open(home_a.path()).unwrap();
+        let store_b = Store::open(home_b.path()).unwrap();
+
+        // 1. Initial write at t=10_000 and replicate to remote host B.
+        apply_env_writes(
+            &store_a.conn,
+            home_a.path(),
+            SCOPE_GLOBAL,
+            "",
+            &BTreeMap::from([
+                (
+                    "CHAOS_PLAIN".into(),
+                    EnvWriteEntry::Plain { value: "v1".into() },
+                ),
+                (
+                    "CHAOS_SECRET".into(),
+                    EnvWriteEntry::Secret {
+                        value: Some("sec-v1".into()),
+                        keep_existing: false,
+                    },
+                ),
+            ]),
+            10_000,
+        )
+        .unwrap();
+        let sync_1 = list_global_env_for_sync(&store_a.conn, home_a.path()).unwrap();
+        assert_eq!(sync_1.len(), 2);
+        assert!(sync_1.iter().all(|r| r.updated_at == 10_000 && !r.deleted));
+        apply_synced_global_env(&store_b.conn, home_b.path(), &sync_1).unwrap();
+        assert_eq!(
+            list_env_meta(&store_b.conn, SCOPE_GLOBAL, "").unwrap(),
+            list_env_meta(&store_a.conn, SCOPE_GLOBAL, "").unwrap()
+        );
+
+        // 2. Clock jumps backward to t=6_000: mutate plain value AND delete secret (tombstone).
+        //    Both records must advance monotonically to >= 10_001 and overwrite remote host B.
+        apply_env_writes(
+            &store_a.conn,
+            home_a.path(),
+            SCOPE_GLOBAL,
+            "",
+            &BTreeMap::from([(
+                "CHAOS_PLAIN".into(),
+                EnvWriteEntry::Plain { value: "v2".into() },
+            )]),
+            6_000,
+        )
+        .unwrap();
+        let sync_2 = list_global_env_for_sync(&store_a.conn, home_a.path()).unwrap();
+        let plain_rec = sync_2.iter().find(|r| r.key == "CHAOS_PLAIN").unwrap();
+        let secret_tomb = sync_2.iter().find(|r| r.key == "CHAOS_SECRET").unwrap();
+        assert!(
+            plain_rec.updated_at >= 10_001,
+            "expected plain updated_at >= 10_001 after backward clock jump, got {}",
+            plain_rec.updated_at
+        );
+        assert_eq!(plain_rec.value.as_deref().map(String::as_str), Some("v2"));
+        assert!(secret_tomb.deleted);
+        assert!(
+            secret_tomb.updated_at >= 10_001,
+            "expected tombstone updated_at >= 10_001 after backward clock jump, got {}",
+            secret_tomb.updated_at
+        );
+
+        let applied = apply_synced_global_env(&store_b.conn, home_b.path(), &sync_2).unwrap();
+        assert_eq!(applied, 2);
+        let meta_b = list_env_meta(&store_b.conn, SCOPE_GLOBAL, "").unwrap();
+        assert_eq!(
+            meta_b,
+            list_env_meta(&store_a.conn, SCOPE_GLOBAL, "").unwrap()
+        );
+        assert_eq!(
+            meta_b.get("CHAOS_PLAIN"),
+            Some(&EnvEntryMeta::Plain { value: "v2".into() })
+        );
+        assert!(!meta_b.contains_key("CHAOS_SECRET"));
+
+        // 3. While clock is still behind at t=6_005, re-creating the tombstoned secret key must
+        //    strictly advance past the tombstone timestamp and converge on remote host B.
+        apply_env_writes(
+            &store_a.conn,
+            home_a.path(),
+            SCOPE_GLOBAL,
+            "",
+            &BTreeMap::from([
+                (
+                    "CHAOS_PLAIN".into(),
+                    EnvWriteEntry::Plain { value: "v2".into() },
+                ),
+                (
+                    "CHAOS_SECRET".into(),
+                    EnvWriteEntry::Secret {
+                        value: Some("sec-v2".into()),
+                        keep_existing: false,
+                    },
+                ),
+            ]),
+            6_005,
+        )
+        .unwrap();
+        let sync_3 = list_global_env_for_sync(&store_a.conn, home_a.path()).unwrap();
+        let revived_secret = sync_3.iter().find(|r| r.key == "CHAOS_SECRET").unwrap();
+        assert!(!revived_secret.deleted);
+        assert!(
+            revived_secret.updated_at > secret_tomb.updated_at,
+            "revived secret must outrank prior tombstone ({} vs {})",
+            revived_secret.updated_at,
+            secret_tomb.updated_at
+        );
+        apply_synced_global_env(&store_b.conn, home_b.path(), &sync_3).unwrap();
+        assert_eq!(
+            list_env_meta(&store_b.conn, SCOPE_GLOBAL, "").unwrap(),
+            list_env_meta(&store_a.conn, SCOPE_GLOBAL, "").unwrap()
+        );
+        let decrypted_b =
+            list_decrypted_scope(&store_b.conn, home_b.path(), SCOPE_GLOBAL, "").unwrap();
+        assert_eq!(
+            decrypted_b.get("CHAOS_SECRET").map(|(v, _)| v.as_str()),
+            Some("sec-v2")
+        );
+
+        // 4. Scoped Unset entry also advances monotonically across backward clock jump.
+        apply_env_writes(
+            &store_a.conn,
+            home_a.path(),
+            SCOPE_AGENT,
+            "codex",
+            &BTreeMap::from([(
+                "OVERRIDE_VAR".into(),
+                EnvWriteEntry::Plain {
+                    value: "enabled".into(),
+                },
+            )]),
+            10_000,
+        )
+        .unwrap();
+        apply_env_writes(
+            &store_a.conn,
+            home_a.path(),
+            SCOPE_AGENT,
+            "codex",
+            &BTreeMap::from([("OVERRIDE_VAR".into(), EnvWriteEntry::Unset)]),
+            6_000,
+        )
+        .unwrap();
+        let unset_ts: i64 = store_a
+            .conn
+            .query_row(
+                "SELECT updated_at FROM env_entries WHERE scope=?1 AND target_id=?2 AND key=?3",
+                params![SCOPE_AGENT, "codex", "OVERRIDE_VAR"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            unset_ts >= 10_001,
+            "expected scoped Unset updated_at >= 10_001 after backward clock jump, got {unset_ts}"
+        );
     }
 }
