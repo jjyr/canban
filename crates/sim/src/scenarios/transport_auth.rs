@@ -227,8 +227,24 @@ pub fn run(seed: u64) -> Result<u64> {
         // Exchange an `enc:v1:` sealed secret over the Tailscale session using deterministic sealing.
         let secret_plain = format!("sk-ts-sealed-{seed}");
         oracle.track_secret(secret_plain.clone());
-        let sealed =
-            canban_storage::vault::seal_transport(&sess_tok, "TS_SEALED_KEY", &secret_plain)?;
+        let seal_id_gen = canban_types::deterministic_id_gen(seed ^ 0x5EA1_7A11_5CA1_E001);
+        let mut save_params = json!({
+            "scope": "project",
+            "target_id": raw_pid,
+            "entries": {
+                "TS_SEALED_KEY": { "kind": "secret", "value": secret_plain },
+                "TS_PLAIN_KEY": { "kind": "plain", "value": "tailscale-ok" },
+            },
+        });
+        canban_client::store::seal_params_for_tcp_with_id_gen(
+            "env.save",
+            &mut save_params,
+            Some(&sess_tok),
+            seal_id_gen.as_ref(),
+        )?;
+        let sealed = save_params["entries"]["TS_SEALED_KEY"]["value"]
+            .as_str()
+            .expect("sealed secret value must be a string");
         ensure!(
             sealed.starts_with(canban_storage::vault::TRANSPORT_SEAL_PREFIX),
             "Expected enc:v1: sealed ciphertext, got {sealed}"
@@ -237,22 +253,11 @@ pub fn run(seed: u64) -> Result<u64> {
             !sealed.contains(&secret_plain),
             "Sealed ciphertext leaked plaintext secret"
         );
+        world.trace.mix_str(sealed);
 
         let ts_t = ts_transport.clone();
-        let raw_pid_save = raw_pid.clone();
         let save_res = world.client_exec(15_000, move |_| async move {
-            ts_t.call_async(
-                "env.save",
-                &json!({
-                    "scope": "project",
-                    "target_id": raw_pid_save,
-                    "entries": {
-                        "TS_SEALED_KEY": { "kind": "secret", "value": sealed },
-                        "TS_PLAIN_KEY": { "kind": "plain", "value": "tailscale-ok" },
-                    },
-                }),
-            )
-            .await
+            ts_t.call_async("env.save", &save_params).await
         })?;
         ensure!(
             save_res["env"]["TS_SEALED_KEY"]["kind"].as_str() == Some("secret")

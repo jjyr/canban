@@ -711,6 +711,7 @@ dependencies = [
  "anyhow",
  "canban-app-server",
  "canban-client",
+ "canban-context",
  "canban-exec",
  "canban-github",
  "canban-herdr",

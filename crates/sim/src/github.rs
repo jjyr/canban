@@ -1,6 +1,7 @@
 //! Deterministic in-memory GitHub REST API simulator implementing [`canban_github::HttpTransport`].
 use anyhow::{Result, anyhow};
 use canban_github::{HttpRequest, HttpResponse, HttpTransport};
+use canban_types::Clock;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -182,6 +183,7 @@ pub fn user_id_for_login(login: &str) -> u64 {
 /// Deterministic in-memory GitHub REST API with per-resource ETag/304, pagination,
 /// full write mutations, rate-limit/IO fault injection, and per-host isolation handles.
 pub struct SimGitHub {
+    clock: Option<Arc<dyn Clock>>,
     state: Mutex<State>,
 }
 
@@ -217,7 +219,18 @@ impl HttpTransport for SimGitHubHost {
 
 impl SimGitHub {
     pub fn new() -> Arc<Self> {
+        Self::new_inner(None)
+    }
+
+    /// Creates a [`SimGitHub`] bound to a virtual [`Clock`] so primary rate-limit budgets
+    /// automatically replenish once virtual `now_secs >= reset_epoch_secs`.
+    pub fn with_clock(clock: Arc<dyn Clock>) -> Arc<Self> {
+        Self::new_inner(Some(clock))
+    }
+
+    fn new_inner(clock: Option<Arc<dyn Clock>>) -> Arc<Self> {
         Arc::new(Self {
+            clock,
             state: Mutex::new(State {
                 login: "bot".into(),
                 repos: BTreeMap::new(),
@@ -901,6 +914,8 @@ impl SimGitHub {
             .entry(base_path.clone())
             .or_default() += 1;
 
+        let now_secs = self.clock.as_ref().map(|c| c.now_ms() / 1000);
+
         // 1. Per-host offline / fault / rate-limit budget checks.
         if let Some(hid) = host_id
             && let Some(hf) = st.host_faults.get_mut(hid)
@@ -917,7 +932,10 @@ impl SimGitHub {
                 return Self::apply_fault(&mut st.stats, fault);
             }
             if let Some(rem) = hf.rate_limit_remaining {
-                if rem == 0 {
+                if now_secs.is_some_and(|now| now >= hf.rate_limit_reset_secs) {
+                    hf.rate_limit_remaining = None;
+                    crate::trace::record_coverage_hit("github.rate_limit_budget_reset");
+                } else if rem == 0 {
                     let reset = hf.rate_limit_reset_secs;
                     return Self::apply_fault(
                         &mut st.stats,
@@ -925,8 +943,9 @@ impl SimGitHub {
                             reset_epoch_secs: reset,
                         },
                     );
+                } else {
+                    hf.rate_limit_remaining = Some(rem - 1);
                 }
-                hf.rate_limit_remaining = Some(rem - 1);
             }
         }
 
@@ -935,7 +954,10 @@ impl SimGitHub {
             return Self::apply_fault(&mut st.stats, fault);
         }
         if let Some(rem) = st.rate_limit_remaining {
-            if rem == 0 {
+            if now_secs.is_some_and(|now| now >= st.rate_limit_reset_secs) {
+                st.rate_limit_remaining = None;
+                crate::trace::record_coverage_hit("github.rate_limit_budget_reset");
+            } else if rem == 0 {
                 let reset = st.rate_limit_reset_secs;
                 return Self::apply_fault(
                     &mut st.stats,
@@ -943,8 +965,9 @@ impl SimGitHub {
                         reset_epoch_secs: reset,
                     },
                 );
+            } else {
+                st.rate_limit_remaining = Some(rem - 1);
             }
-            st.rate_limit_remaining = Some(rem - 1);
         }
 
         // 3. One-shot stale response overrides (GET only).
@@ -957,6 +980,7 @@ impl SimGitHub {
             && let Some(stale_val) = st.stale_overrides.remove(&key)
         {
             st.stats.responses_200 += 1;
+            crate::trace::record_coverage_hit("github.stale_response_served");
             return Ok(HttpResponse {
                 status: 200,
                 headers: vec![("etag".into(), "\"stale\"".into())],
@@ -1051,6 +1075,7 @@ impl SimGitHub {
                 st.pending_stale_reads.remove(&repo_name);
             }
             crate::trace::record_coverage_hit("github.read_after_write_lag");
+            crate::trace::record_coverage_hit("github.read_after_write_lag_served");
             snap
         } else {
             st.repos[&repo_name].clone()
@@ -2126,6 +2151,79 @@ mod tests {
         assert_eq!(host_b.send(req("GET", "/user", None)).unwrap().status, 200);
 
         gh.clear_injected_faults();
+        assert_eq!(host_a.send(req("GET", "/user", None)).unwrap().status, 200);
+    }
+
+    #[test]
+    fn rate_limit_budgets_auto_replenish_at_virtual_reset_and_raw_lag_hit_requires_write() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        struct FakeClock(AtomicU64);
+        impl Clock for FakeClock {
+            fn now_ms(&self) -> u64 {
+                self.0.load(Ordering::SeqCst)
+            }
+        }
+
+        let clock = Arc::new(FakeClock(AtomicU64::new(1_700_000_000_000)));
+        let gh = SimGitHub::with_clock(clock.clone());
+        gh.add_repo("acme/app", 1, "main");
+        gh.upsert_issue("acme/app", sample_issue(1, "alice", false));
+
+        // Setting read-after-write lag without a write must NOT hit `github.read_after_write_lag_served`.
+        crate::trace::reset_thread_coverage();
+        gh.set_read_after_write_lag(1);
+        assert_eq!(
+            gh.send(req("GET", "/repos/acme/app/issues/1", None))
+                .unwrap()
+                .status,
+            200
+        );
+        let cov_no_write = crate::trace::take_thread_coverage();
+        assert_eq!(cov_no_write.count("github.read_after_write_lag_served"), 0);
+
+        // After an actual write, the next GET serves the pre-write snapshot and records the hit.
+        gh.send(req(
+            "PATCH",
+            "/repos/acme/app/issues/1",
+            Some(json!({ "title": "After Write" })),
+        ))
+        .unwrap();
+        let stale: Value = serde_json::from_slice(
+            &gh.send(req("GET", "/repos/acme/app/issues/1", None))
+                .unwrap()
+                .body,
+        )
+        .unwrap();
+        assert_eq!(stale["title"], json!("Item #1"));
+        let cov_after_write = crate::trace::take_thread_coverage();
+        assert_eq!(
+            cov_after_write.count("github.read_after_write_lag_served"),
+            1
+        );
+
+        // Global rate-limit budget: 1 allowed, then 403 until virtual clock reaches reset_secs.
+        let reset_secs = 1_700_000_005;
+        gh.set_rate_limit_budget(Some(1), reset_secs);
+        assert_eq!(gh.send(req("GET", "/user", None)).unwrap().status, 200);
+        let limited = gh.send(req("GET", "/user", None)).unwrap();
+        assert_eq!(limited.status, 403);
+        assert_eq!(limited.header("x-ratelimit-remaining"), Some("0"));
+        assert_eq!(limited.header("x-ratelimit-reset"), Some("1700000005"));
+
+        // Advance virtual clock past reset_secs -> budget auto-clears and requests succeed again.
+        clock.0.store(reset_secs * 1000, Ordering::SeqCst);
+        assert_eq!(gh.send(req("GET", "/user", None)).unwrap().status, 200);
+        assert_eq!(gh.send(req("GET", "/user", None)).unwrap().status, 200);
+
+        // Per-host rate-limit budget also auto-replenishes once virtual clock >= reset_secs.
+        let host_a = gh.for_host("remote-a");
+        let host_reset = reset_secs + 10;
+        gh.set_host_rate_limit_budget("remote-a", Some(1), host_reset);
+        assert_eq!(host_a.send(req("GET", "/user", None)).unwrap().status, 200);
+        assert_eq!(host_a.send(req("GET", "/user", None)).unwrap().status, 403);
+        clock.0.store(host_reset * 1000, Ordering::SeqCst);
+        assert_eq!(host_a.send(req("GET", "/user", None)).unwrap().status, 200);
         assert_eq!(host_a.send(req("GET", "/user", None)).unwrap().status, 200);
     }
 }

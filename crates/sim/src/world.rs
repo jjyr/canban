@@ -545,7 +545,8 @@ impl SimWorld {
 
         let mut sim = builder.build();
         let shared_elapsed_ms = Arc::new(AtomicU64::new(0));
-        let github = SimGitHub::new();
+        let github_clock = Arc::new(TurmoilClock::new(Arc::clone(&shared_elapsed_ms)));
+        let github = SimGitHub::with_clock(github_clock);
         let stream_fault_policy = config.stream_fault_policy.clone().unwrap_or_default();
 
         let mut servers = BTreeMap::new();
@@ -2080,9 +2081,10 @@ impl SimWorld {
         Ok(())
     }
 
-    /// Heals all temporary network/GitHub/Herdr/stream faults and restarts any crashed servers or
-    /// clients, wakes client reconnect loops inside their Turmoil runtimes, and advances virtual
-    /// time until all enabled remote hosts reconnect, drain pending outbox items, and converge.
+    /// Heals all temporary network/GitHub/Herdr/stream/clock faults and restarts any crashed
+    /// servers or clients, wakes client reconnect loops inside their Turmoil runtimes, and
+    /// advances virtual time until all enabled remote hosts reconnect, drain pending outbox
+    /// items, and converge.
     ///
     /// Returns `Err(...)` with a full diagnostic dump if convergence does not complete in time.
     pub fn heal_and_quiesce(&mut self, max_virtual_ms: u64) -> Result<()> {
@@ -2106,6 +2108,7 @@ impl SimWorld {
             self.bounce_server(&name)?;
         }
         for h in self.servers.values() {
+            h.clock.reset_adjustments();
             h.herdr.clear_injected_faults();
             h.herdr.set_offline(false);
         }

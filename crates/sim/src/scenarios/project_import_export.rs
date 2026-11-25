@@ -18,7 +18,7 @@ use crate::{
     scenarios::finalize_digest,
     world::{SimWorldConfig, run_with_world},
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use canban_types::EnvEntryMeta;
 use serde_json::json;
 use std::time::Duration;
@@ -266,14 +266,74 @@ pub fn run(seed: u64) -> Result<u64> {
             "Expected PROJ_SECRET omitted & listed in secret_keys: {export_res}"
         );
         ensure!(bundle_path.exists(), "Exported bundle file missing on disk");
-        // Security invariant: raw bundle bytes must never contain project or global secret plaintext.
+        // Security invariant: neither raw compressed archive bytes NOR decompressed bundle
+        // contents (`manifest.json`, `records.json`, or any bundled managed files) may contain
+        // project or global secret plaintext.
         let bundle_raw = std::fs::read(&bundle_path)?;
+        let loaded_bundle = canban_context::project_bundle::read_project_bundle(&bundle_path)?;
         ensure!(
-            !bundle_raw
-                .windows(proj_secret.len())
-                .any(|w| w == proj_secret.as_bytes()),
-            "SECURITY VIOLATION: project secret plaintext leaked into exported bundle file!"
+            loaded_bundle.manifest.exported_cards == 2
+                && loaded_bundle.manifest.exported_archived_cards == 1
+                && loaded_bundle
+                    .manifest
+                    .secret_keys
+                    .iter()
+                    .any(|k| k == "PROJ_SECRET"),
+            "Unexpected decompressed bundle manifest: {:?}",
+            loaded_bundle.manifest
         );
+        let manifest_json = serde_json::to_string(&loaded_bundle.manifest)?;
+        let records_text = String::from_utf8(loaded_bundle.records_json.clone())
+            .context("decompressed bundle records.json must be valid UTF-8")?;
+        for (label, secret) in [
+            ("project secret", proj_secret.as_str()),
+            ("global secret", global_secret.as_str()),
+        ] {
+            ensure!(
+                !bundle_raw
+                    .windows(secret.len())
+                    .any(|w| w == secret.as_bytes()),
+                "SECURITY VIOLATION: {label} plaintext leaked into raw exported bundle bytes!"
+            );
+            ensure!(
+                !manifest_json.contains(secret),
+                "SECURITY VIOLATION: {label} plaintext leaked into decompressed bundle manifest.json!"
+            );
+            ensure!(
+                !records_text.contains(secret),
+                "SECURITY VIOLATION: {label} plaintext leaked into decompressed bundle records.json!"
+            );
+        }
+        if !loaded_bundle.manifest.files.is_empty() {
+            let inspect_dir = world.project_dir(&format!("bundle-inspect-{seed}"))?;
+            let inspect_root = std::path::PathBuf::from(&inspect_dir);
+            let allowed_prefixes: Vec<String> = loaded_bundle
+                .manifest
+                .files
+                .iter()
+                .map(|f| f.path.clone())
+                .collect();
+            let extracted =
+                canban_context::project_bundle::extract_project_bundle_files_with_durability(
+                    &bundle_path,
+                    &inspect_root,
+                    &allowed_prefixes,
+                    canban_context::FsDurability::NoSync,
+                )?;
+            for path in &extracted {
+                let bytes = std::fs::read(path)?;
+                for (label, secret) in [
+                    ("project secret", proj_secret.as_str()),
+                    ("global secret", global_secret.as_str()),
+                ] {
+                    ensure!(
+                        !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
+                        "SECURITY VIOLATION: {label} plaintext leaked into bundled file {}!",
+                        path.display()
+                    );
+                }
+            }
+        }
         world.hit("bundle.exported");
 
         // ---------------------------------------------------------------------
@@ -342,7 +402,7 @@ pub fn run(seed: u64) -> Result<u64> {
         oracle.check_step_invariants(world)?;
 
         // Resolve the exact client-visible (qualified where colliding!) project & card IDs per host.
-        let (pid_a, pid_b, cid1_a, cid1_b, cid2_a, cid2_b) = {
+        let (pid_a, pid_b, cid1_a, cid1_b, cid2_a, cid2_b, cid3_a) = {
             let merged = world.client_merged_snapshot_on("ui-client")?;
             let find_proj = |host: &str| -> String {
                 merged
@@ -381,9 +441,11 @@ pub fn run(seed: u64) -> Result<u64> {
                 find_card("remote-b", &cid1_local),
                 find_card("remote-a", &cid2_local),
                 find_card("remote-b", &cid2_local),
+                find_card("remote-a", &cid3_local),
             )
         };
-        // Also verify imported active workflow runs on remote-a/b were cleanly cancelled on import.
+        // Verify imported active workflow runs on remote-a/b were cleanly cancelled on import,
+        // and verify archived card `c3` was imported as archived on both target hosts.
         for host in ["remote-a", "remote-b"] {
             let srv_snap = world.server(host).unwrap().snapshot()?;
             ensure!(
@@ -394,7 +456,69 @@ pub fn run(seed: u64) -> Result<u64> {
                 "[{host}] imported active workflow run must be cancelled on import: {:?}",
                 srv_snap.workflow_runs
             );
+            let archived_c3 = srv_snap
+                .cards
+                .iter()
+                .find(|c| c.id == cid3_local)
+                .with_context(|| {
+                    format!("[{host}] missing imported archived card c3 ({cid3_local})")
+                })?;
+            ensure!(
+                archived_c3.archived_at.is_some() && !archived_c3.active(),
+                "[{host}] imported archived card c3 must remain archived: {archived_c3:?}"
+            );
         }
+
+        // Round-trip imported archived card `c3` through `card.restore` on `remote-a` only,
+        // verifying it becomes active on `remote-a` while remaining archived on `local-server` & `remote-b`.
+        let c3_a_rev = world
+            .server("remote-a")
+            .unwrap()
+            .snapshot()?
+            .cards
+            .iter()
+            .find(|c| c.id == cid3_local)
+            .unwrap()
+            .revision;
+        let restored_c3 = world.client_call(
+            "card.restore",
+            json!({ "card_id": cid3_a, "revision": c3_a_rev }),
+            Some(&pid_a),
+        )?;
+        let restored_c3_rev = restored_c3["revision"].as_u64().unwrap_or(0);
+        ensure!(
+            restored_c3["archived_at"].is_null() && restored_c3_rev > c3_a_rev,
+            "Unexpected card.restore receipt on remote-a: {restored_c3}"
+        );
+        oracle.record_committed_card("remote-a", &cid3_a, &pid_a, restored_c3_rev);
+        let restored_c3_get = world.client_call(
+            "card.get",
+            json!({ "card_id": cid3_a, "view": "full" }),
+            Some(&pid_a),
+        )?;
+        ensure!(
+            restored_c3_get["title"].as_str() == Some("Archived History Card")
+                && restored_c3_get["body"].as_str() == Some("will-be-archived")
+                && restored_c3_get["archived_at"].is_null(),
+            "Restored archived card c3 failed round-trip card.get: {restored_c3_get}"
+        );
+        for host in ["local-server", "remote-b"] {
+            let still_archived = world
+                .server(host)
+                .unwrap()
+                .snapshot()?
+                .cards
+                .into_iter()
+                .find(|c| c.id == cid3_local)
+                .with_context(|| {
+                    format!("[{host}] missing archived card c3 after remote-a restore")
+                })?;
+            ensure!(
+                still_archived.archived_at.is_some() && !still_archived.active(),
+                "[{host}] card.restore on remote-a unexpectedly affected sibling copy: {still_archived:?}"
+            );
+        }
+        world.hit("bundle.archived_card_restored");
         world.hit("bundle.imported_multi_host");
 
         // ---------------------------------------------------------------------

@@ -10,6 +10,7 @@ description = "Deterministic Simulation Testing (DST) harness over tokio-rs/turm
 anyhow.workspace = true
 canban-app-server.workspace = true
 canban-client.workspace = true
+canban-context.workspace = true
 canban-exec.workspace = true
 canban-github.workspace = true
 canban-herdr.workspace = true

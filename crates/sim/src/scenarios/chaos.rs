@@ -1119,10 +1119,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 .github
                                 .inject_stale_response_once("/issues", json!([])),
                             3 => world.github.inject_secondary_rate_limit(429, 10),
-                            5 => {
-                                world.github.set_read_after_write_lag(1);
-                                world.hit("chaos.github_raw_lag");
-                            }
+                            5 => world.github.inject_stale_response_once("/pulls", json!([])),
                             6 => {
                                 world.github.inject_io_error(
                                     std::io::ErrorKind::ConnectionReset,
@@ -1136,12 +1133,18 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                             }
                             8 => {
                                 let reset_secs = (world.now_ms() / 1000).saturating_add(5);
-                                world.github.set_rate_limit_budget(Some(1), reset_secs);
+                                world.github.set_host_rate_limit_budget(
+                                    &gh_host,
+                                    Some(1),
+                                    reset_secs,
+                                );
                                 world.hit("chaos.github_rate_limit_budget");
                             }
                             _ => {
-                                // Ensure transient host-offline GitHub faults recover on clean ops.
+                                // Ensure transient host-offline and rate-limit GitHub faults recover on clean ops.
                                 world.github.set_host_offline(&gh_host, false);
+                                world.github.set_host_rate_limit_budget(&gh_host, None, 0);
+                                world.github.set_rate_limit_budget(None, 0);
                             }
                         }
                         let _ = check_expected_chaos_err(
@@ -1220,14 +1223,13 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
                                 world.hit("chaos.herdr_dup_events");
                             }
                             12 => {
-                                herdr.buffer_next_events_for_reorder(2);
                                 if let Some(addr) = addrs.first() {
+                                    herdr.buffer_next_events_for_reorder(2);
                                     herdr.set_status(addr, "working", Some(u64::from(*tag)));
                                     herdr.set_status(addr, "idle", Some(u64::from(*tag) + 1));
-                                } else {
                                     herdr.flush_reordered_events();
+                                    world.hit("chaos.herdr_reorder_events");
                                 }
-                                world.hit("chaos.herdr_reorder_events");
                             }
                             13 => {
                                 if let Some(addr) = addrs.first() {
@@ -1350,11 +1352,7 @@ pub fn run_ops(seed: u64, profile: &ChaosProfile, ops: &[ChaosOp]) -> Result<u64
             oracle.check_step_invariants(world)?;
         }
 
-        // Restore dynamic clock jumps/drift before healing & quiescence.
-        for handle in world.servers.values() {
-            handle.clock.reset_adjustments();
-        }
-        // Heal all faults & quiesce.
+        // Heal all faults (including dynamic clock jumps/drift) & quiesce.
         world.heal_and_quiesce(25_000)?;
 
         // Resolve ONLY genuine `SyncItemState::Conflict` items (cycling through ALL SyncAction
