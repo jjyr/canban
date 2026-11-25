@@ -1285,13 +1285,19 @@ impl AppServer {
         };
 
         if let Err(e) = self.execute_cardless_scheduled_run(&mut run, project_opt.as_ref(), &rev) {
+            let receipt_uncertain = e.downcast_ref::<crate::LaunchReceiptUncertain>().is_some();
             let err_msg = format!("{e:#}");
             self.store.lock().unwrap().write(|db| {
                 let mut cur: ScheduledRun = db.get(&run.id)?;
                 if !matches!(cur.state.as_str(), "completed" | "failed" | "blocked") {
-                    cur.state = "failed".into();
-                    cur.error = Some(err_msg.clone());
-                    cur.completed_at = Some(self.now_ms());
+                    if receipt_uncertain {
+                        cur.state = "unknown".into();
+                        cur.error = Some(err_msg.clone());
+                    } else {
+                        cur.state = "failed".into();
+                        cur.error = Some(err_msg.clone());
+                        cur.completed_at = Some(self.now_ms());
+                    }
                     db.save(&cur)?;
                 }
                 if let Some(tid) = cur.terminal_id.as_deref()
@@ -1299,7 +1305,12 @@ impl AppServer {
                     && let Some(rt) = &mut entry.runtime
                     && rt.terminal.is_none()
                 {
-                    rt.state = "finished".into();
+                    if receipt_uncertain {
+                        rt.state = "unknown".into();
+                        rt.connection = "unavailable".into();
+                    } else {
+                        rt.state = "finished".into();
+                    }
                     rt.error = Some(err_msg);
                     db.save(&entry)?;
                 }

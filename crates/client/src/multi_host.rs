@@ -26,11 +26,11 @@ use canban_sync::{
 use canban_terminal::{RemotePtyTransport, session::PtyTransport};
 use canban_transport::ClientTransport;
 use canban_types::{
-    AppEvent, Clock, Config, DiscoveredCanbanHost, EnvEntryMeta, GlobalEnvSyncHostFailure,
-    GlobalEnvSyncStatus, GlobalEnvSyncSummary, HostConnectionState, HostSummary, HostTransport,
-    IdGen, RuntimeState, SavedHost, SchedulerSettings, Snapshot, SyncAction, SyncItemState,
-    SyncItemView, is_device_token, is_pairing_code, normalize_daemon_addr, system_clock,
-    system_id_gen,
+    AppEvent, Clock, Config, DiscoveredCanbanHost, EnvEntryMeta, Failpoints,
+    GlobalEnvSyncHostFailure, GlobalEnvSyncStatus, GlobalEnvSyncSummary, HostConnectionState,
+    HostSummary, HostTransport, IdGen, RuntimeState, SavedHost, SchedulerSettings, Snapshot,
+    SyncAction, SyncItemState, SyncItemView, is_device_token, is_pairing_code,
+    normalize_daemon_addr, system_clock, system_id_gen,
 };
 use serde_json::{Value, json};
 use std::{
@@ -161,6 +161,7 @@ impl RemoteHostSlot {
         data_dir: &Path,
         read_cache_budget: u64,
         fs_durability: FsDurability,
+        failpoints: Option<Arc<Failpoints>>,
     ) -> Self {
         let mut cached = load_cache(data_dir, &saved.id).unwrap_or(CachedHostData {
             saved_at: 0,
@@ -179,7 +180,11 @@ impl RemoteHostSlot {
                 cached_at,
             }
         };
-        let outbox = Outbox::load_with_durability(outbox_path(data_dir, &saved.id), fs_durability);
+        let outbox = Outbox::load_with_durability_and_failpoints(
+            outbox_path(data_dir, &saved.id),
+            fs_durability,
+            failpoints,
+        );
         let reads = ReadCache::open_with_durability(
             reads_dir(data_dir, &saved.id),
             read_cache_budget,
@@ -285,6 +290,7 @@ pub struct MultiHostClient {
     clock: Arc<dyn Clock>,
     id_gen: Arc<dyn IdGen>,
     fs_durability: FsDurability,
+    failpoints: RwLock<Option<Arc<Failpoints>>>,
     hosts: RwLock<BTreeMap<String, RemoteHostSlot>>,
     entity_hosts: RwLock<BTreeMap<String, String>>,
     acknowledged_owners: Mutex<BTreeMap<String, String>>,
@@ -718,7 +724,7 @@ impl MultiHostClient {
             .build()
             .context("Failed to build MultiHostClient Tokio runtime")?;
         let handle = runtime.handle().clone();
-        Self::build(options, handle, Some(runtime), id_gen)
+        Self::build(options, handle, Some(runtime), id_gen, None)
     }
 
     /// Creates a new [`MultiHostClient`] bound to an existing Tokio runtime from full options.
@@ -736,7 +742,37 @@ impl MultiHostClient {
         runtime_handle: tokio::runtime::Handle,
         id_gen: Arc<dyn IdGen>,
     ) -> Result<Arc<Self>> {
-        Self::build(options, runtime_handle, None, id_gen)
+        Self::build(options, runtime_handle, None, id_gen, None)
+    }
+
+    /// Creates a new [`MultiHostClient`] bound to an existing Tokio runtime from full options
+    /// with a custom [`IdGen`] and optional per-instance [`Failpoints`] registry (used in DST
+    /// for outbox mid-write truncation crash windows).
+    pub fn from_options_with_runtime_id_gen_and_failpoints(
+        options: MultiHostClientOptions,
+        runtime_handle: tokio::runtime::Handle,
+        id_gen: Arc<dyn IdGen>,
+        failpoints: Option<Arc<Failpoints>>,
+    ) -> Result<Arc<Self>> {
+        Self::build(options, runtime_handle, None, id_gen, failpoints)
+    }
+
+    /// Updates the optional per-instance [`Failpoints`] registry on this client and propagates
+    /// it to every active remote host outbox.
+    pub fn set_failpoints(&self, failpoints: Option<Arc<Failpoints>>) {
+        *self.failpoints.write().unwrap() = failpoints.clone();
+        let guard = self.hosts.read().unwrap();
+        for slot in guard.values() {
+            slot.outbox
+                .lock()
+                .unwrap()
+                .set_failpoints(failpoints.clone());
+        }
+    }
+
+    /// Returns the optional per-instance [`Failpoints`] registry attached to this client.
+    pub fn failpoints(&self) -> Option<Arc<Failpoints>> {
+        self.failpoints.read().unwrap().clone()
     }
 
     fn build(
@@ -744,6 +780,7 @@ impl MultiHostClient {
         runtime_handle: tokio::runtime::Handle,
         owned_runtime: Option<tokio::runtime::Runtime>,
         id_gen: Arc<dyn IdGen>,
+        failpoints: Option<Arc<Failpoints>>,
     ) -> Result<Arc<Self>> {
         let _rt_guard = runtime_handle.enter();
         let MultiHostClientOptions {
@@ -769,6 +806,7 @@ impl MultiHostClient {
                 &config.data_dir,
                 config.read_cache_budget_bytes,
                 fs_durability,
+                failpoints.clone(),
             );
             if slot.cached.saved_at > 0 {
                 for (k, v) in &slot.cached.snapshot.entity_hosts {
@@ -792,6 +830,7 @@ impl MultiHostClient {
             clock,
             id_gen,
             fs_durability,
+            failpoints: RwLock::new(failpoints),
             hosts: RwLock::new(slots),
             entity_hosts: RwLock::new(initial_entity_hosts),
             acknowledged_owners: Mutex::new(BTreeMap::new()),
@@ -1334,6 +1373,7 @@ impl MultiHostClient {
                         &self.config.data_dir,
                         self.config.read_cache_budget_bytes,
                         self.fs_durability,
+                        self.failpoints(),
                     );
                     slot.connection = HostConnectionState::ApiMismatch {
                         server_api: mismatch.server_api,
@@ -1474,6 +1514,7 @@ impl MultiHostClient {
                     &self.config.data_dir,
                     self.config.read_cache_budget_bytes,
                     self.fs_durability,
+                    self.failpoints(),
                 );
                 slot.terminal = Some(Arc::new(RemotePtyTransport::new(
                     Arc::clone(&transport),
@@ -1626,6 +1667,7 @@ impl MultiHostClient {
                     &self.config.data_dir,
                     self.config.read_cache_budget_bytes,
                     self.fs_durability,
+                    self.failpoints(),
                 );
                 slot.terminal = Some(Arc::new(RemotePtyTransport::new(
                     Arc::clone(&transport),
@@ -1672,6 +1714,7 @@ impl MultiHostClient {
                 &self.config.data_dir,
                 self.config.read_cache_budget_bytes,
                 self.fs_durability,
+                self.failpoints(),
             );
             let sum = slot.summary(self.now_ms());
             guard.insert(hid.clone(), slot);
@@ -8172,5 +8215,97 @@ mod tests {
             "host must stay Connected after poll; got {:?}",
             summary_final.connection
         );
+    }
+
+    #[tokio::test]
+    async fn multi_host_client_threads_failpoints_into_outbox_and_recovers_after_truncation() {
+        use canban_types::{FP_OUTBOX_MID_WRITE_TRUNCATE, FailpointAction};
+
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("client-data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let hosts_path = data_dir.join("hosts.json");
+        let fp = Failpoints::shared();
+
+        let make_client = |failpoints: Option<Arc<Failpoints>>| {
+            let mut cfg = RemoteClientConfig::new(data_dir.clone());
+            cfg.device_name = "fp-client".into();
+            let host_store = Arc::new(crate::InlineHostsFileStore::new_with_durability(
+                hosts_path.clone(),
+                FsDurability::NoSync,
+            ));
+            MultiHostClient::from_options_with_runtime_id_gen_and_failpoints(
+                MultiHostClientOptions {
+                    config: cfg,
+                    host_store,
+                    connector: Arc::new(TcpConnector),
+                    capabilities: ClientCapabilities::mobile(),
+                    local_host: None,
+                    global_env_provider: None,
+                    min_api_version: None,
+                    clock: system_clock(),
+                    fs_durability: FsDurability::NoSync,
+                },
+                tokio::runtime::Handle::current(),
+                canban_types::DeterministicIdGen::arc(77),
+                failpoints,
+            )
+            .unwrap()
+        };
+
+        let client = make_client(Some(Arc::clone(&fp)));
+        client
+            .add_host_async(SavedHost {
+                id: "remote-fp".into(),
+                name: "Remote FP".into(),
+                transport: HostTransport::Tcp {
+                    addr: "127.0.0.1:1".into(),
+                    token: "cbt_test_token_1234567890".into(),
+                },
+                ssh_target: None,
+                server_id: None,
+                enabled: false,
+                added_at: 100,
+            })
+            .await
+            .unwrap();
+
+        fp.arm(
+            FP_OUTBOX_MID_WRITE_TRUNCATE,
+            FailpointAction::FailOnce("torn client outbox write".into()),
+        );
+        let err = client
+            .call_routed_async(
+                "card.create",
+                json!({
+                    "host_id": "remote-fp",
+                    "project_id": "p1",
+                    "title": "Offline card",
+                    "body": "Should hit failpoint",
+                }),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains(FP_OUTBOX_MID_WRITE_TRUNCATE),
+            "expected outbox truncation failpoint error, got: {err:#}"
+        );
+        assert_eq!(fp.stats_for(FP_OUTBOX_MID_WRITE_TRUNCATE).fired, 1);
+
+        let opath = outbox_path(&data_dir, "remote-fp");
+        assert!(opath.exists(), "torn outbox file should exist on disk");
+        drop(client);
+
+        // Reloading a fresh MultiHostClient quarantines the torn outbox and recovers cleanly.
+        let reloaded = make_client(Some(Arc::clone(&fp)));
+        assert!(Outbox::quarantine_path(&opath).exists());
+        assert!(!opath.exists());
+        let sum = reloaded
+            .host_summaries()
+            .into_iter()
+            .find(|s| s.id == "remote-fp")
+            .expect("host reloaded");
+        assert_eq!(sum.pending_mutations, 0);
     }
 }

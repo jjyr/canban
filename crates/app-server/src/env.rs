@@ -545,6 +545,10 @@ impl AppServer {
                 &resolved.unset_keys,
                 Some(launch_size),
             )?;
+        if let Err(err) = self.check_failpoint(canban_types::FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB)
+        {
+            return Err(crate::LaunchReceiptUncertain(err).into());
+        }
         Ok(HerdrLaunchOutcome { receipt, resolved })
     }
 

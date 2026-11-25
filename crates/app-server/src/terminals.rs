@@ -1113,7 +1113,7 @@ impl AppServer {
                     env,
                     cwd: cwd.clone(),
                 })?;
-                client.launch_with_policy_unset_and_size(
+                let receipt = client.launch_with_policy_unset_and_size(
                     spec.argv,
                     &spec.cwd,
                     spec.env,
@@ -1121,7 +1121,9 @@ impl AppServer {
                     canban_exec::shell_env::LocalEnvPolicy::MinimalPathOnly,
                     &std::collections::BTreeSet::new(),
                     Some(self.resolve_launch_terminal_size(explicit_size)),
-                )?
+                )?;
+                self.check_failpoint(canban_types::FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB)?;
+                receipt
             } else {
                 let trust = card.as_ref().map(Card::trust_level);
                 self.launch_herdr_with_env(crate::env::HerdrLaunchRequest {

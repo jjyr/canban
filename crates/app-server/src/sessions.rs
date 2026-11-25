@@ -510,7 +510,10 @@ impl AppServer {
             .trim_end(),
             &[("card_number", &card_number), ("prompt", &prompt)],
         );
-        if let Err(e) = client.call("terminal.send", json!({"terminal":terminal,"text":text})) {
+        let send_res = client
+            .call("terminal.send", json!({"terminal":terminal,"text":text}))
+            .and_then(|_| self.check_failpoint(canban_types::FP_HERDR_AFTER_SEND_BEFORE_DB));
+        if let Err(e) = send_res {
             self.store.lock().unwrap().write(|db| {
                 let mut current: TerminalEntry = db.get(&entry.id)?;
                 if let Some(run) = &mut current.agent {

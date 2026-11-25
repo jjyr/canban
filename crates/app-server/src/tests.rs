@@ -4271,6 +4271,7 @@ mod memory;
 mod representations;
 
 mod clock_and_livelock;
+mod failpoints;
 
 #[test]
 fn pr_card_worktree_tracks_pr_branch_and_review_drafts_roundtrip_with_fallback() {

@@ -55,6 +55,7 @@ pub struct ServerRuntimeEnv {
     pub desktop_api_override: Option<u32>,
     pub script_execution_mode: ScriptExecutionMode,
     pub storage_faults: Option<Arc<canban_storage::StorageFaultInjector>>,
+    pub failpoints: Option<Arc<canban_types::Failpoints>>,
 }
 
 impl Default for ServerRuntimeEnv {
@@ -73,7 +74,27 @@ impl Default for ServerRuntimeEnv {
             desktop_api_override: None,
             script_execution_mode: ScriptExecutionMode::Auto,
             storage_faults: None,
+            failpoints: None,
         }
+    }
+}
+
+/// Marker error wrapping any failure that occurs after Herdr has already spawned a PTY
+/// (`terminal.run` succeeded) and before its launch receipt was committed to SQLite.
+/// Callers must transition the affected session/run to `"unknown"` rather than `"failed"`
+/// so no duplicate PTY is auto-launched and orphan cleanup remains reachable.
+#[derive(Debug)]
+pub(crate) struct LaunchReceiptUncertain(pub(crate) anyhow::Error);
+
+impl std::fmt::Display for LaunchReceiptUncertain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.0)
+    }
+}
+
+impl std::error::Error for LaunchReceiptUncertain {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
     }
 }
 
@@ -91,6 +112,7 @@ pub struct AppServer {
     fs_durability: canban_context::FsDurability,
     disable_os_watchers: bool,
     script_execution_mode: ScriptExecutionMode,
+    failpoints: Option<Arc<canban_types::Failpoints>>,
     last_cardless_prune_at: AtomicU64,
     sim_abrupt_crash: Arc<AtomicBool>,
     utilities: utilities::Utilities,
@@ -668,6 +690,7 @@ impl AppServer {
             desktop_api_override,
             script_execution_mode,
             storage_faults,
+            failpoints,
         } = env;
         let development = if exec_runner.is_system() {
             instance::bundled()?
@@ -901,6 +924,7 @@ impl AppServer {
             fs_durability,
             disable_os_watchers,
             script_execution_mode,
+            failpoints,
             last_cardless_prune_at: AtomicU64::new(0),
             sim_abrupt_crash: Arc::new(AtomicBool::new(false)),
             utilities,
@@ -1087,6 +1111,17 @@ impl AppServer {
     }
     pub fn exec_runner(&self) -> &Arc<dyn canban_exec::CommandRunner> {
         &self.exec_runner
+    }
+    /// Returns the per-instance failpoints registry injected via [`ServerRuntimeEnv::failpoints`],
+    /// or `None` in production.
+    pub fn failpoints(&self) -> Option<&Arc<canban_types::Failpoints>> {
+        self.failpoints.as_ref()
+    }
+    /// Evaluates failpoint `name` with zero lock overhead when `self.failpoints` is `None`.
+    #[inline]
+    pub(crate) fn check_failpoint(&self, name: &str) -> Result<()> {
+        canban_types::Failpoints::check_opt(self.failpoints.as_ref(), name)
+            .map_err(|msg| anyhow::anyhow!("failpoint[{name}]: {msg}"))
     }
     /// Returns the injected [`IdGen`] for deterministic vault key/nonce derivation under
     /// non-system runners (DST), and `None` in production so `OsRng` remains the default.

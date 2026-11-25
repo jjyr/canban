@@ -1,10 +1,12 @@
 //! Persistent FIFO mutation outbox per remote host with create+update coalescing.
 use anyhow::{Result, ensure};
+use canban_types::{FP_OUTBOX_MID_WRITE_TRUNCATE, Failpoints};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 pub const MAX_OUTBOX_OPS: usize = 500;
@@ -91,6 +93,7 @@ struct OutboxFile {
 pub struct Outbox {
     path: PathBuf,
     durability: canban_context::FsDurability,
+    failpoints: Option<Arc<Failpoints>>,
     pub ops: Vec<Mutation>,
 }
 
@@ -100,11 +103,27 @@ impl Outbox {
     }
 
     pub fn load_with_durability(path: PathBuf, durability: canban_context::FsDurability) -> Self {
-        let mut ops = std::fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<OutboxFile>(&b).ok())
-            .map(|f| f.ops)
-            .unwrap_or_default();
+        Self::load_with_durability_and_failpoints(path, durability, None)
+    }
+
+    pub fn load_with_durability_and_failpoints(
+        path: PathBuf,
+        durability: canban_context::FsDurability,
+        failpoints: Option<Arc<Failpoints>>,
+    ) -> Self {
+        let mut ops = match std::fs::read(&path) {
+            Ok(bytes) => match serde_json::from_slice::<OutboxFile>(&bytes) {
+                Ok(file) => file.ops,
+                Err(_) => {
+                    // Quarantine corrupt/truncated outbox JSON so reload recovers cleanly
+                    // without losing forensic bytes or blocking subsequent persistence.
+                    let quarantine = Self::quarantine_path(&path);
+                    let _ = std::fs::rename(&path, quarantine);
+                    Vec::new()
+                }
+            },
+            Err(_) => Vec::new(),
+        };
         // Recover from a crash mid-attempt: keep `sent_params` intact so retries remain idempotent.
         for op in &mut ops {
             if matches!(op.state, MutationState::InFlight) {
@@ -117,8 +136,27 @@ impl Outbox {
         Self {
             path,
             durability,
+            failpoints,
             ops,
         }
+    }
+
+    /// Attaches an optional per-instance [`Failpoints`] registry (builder style).
+    pub fn with_failpoints(mut self, failpoints: Option<Arc<Failpoints>>) -> Self {
+        self.failpoints = failpoints;
+        self
+    }
+
+    /// Replaces the optional per-instance [`Failpoints`] registry on this outbox.
+    pub fn set_failpoints(&mut self, failpoints: Option<Arc<Failpoints>>) {
+        self.failpoints = failpoints;
+    }
+
+    /// Returns the quarantine path used when a corrupt or torn outbox file is detected on load.
+    pub fn quarantine_path(path: &Path) -> PathBuf {
+        let mut raw = path.as_os_str().to_os_string();
+        raw.push(".corrupt");
+        PathBuf::from(raw)
     }
 
     pub fn path(&self) -> &Path {
@@ -141,11 +179,23 @@ impl Outbox {
         let file = OutboxFile {
             ops: self.ops.clone(),
         };
-        canban_context::atomic_with_durability(
-            &self.path,
-            &serde_json::to_vec_pretty(&file)?,
-            self.durability,
-        )
+        let bytes = serde_json::to_vec_pretty(&file)?;
+        if let Err(msg) =
+            Failpoints::check_opt(self.failpoints.as_ref(), FP_OUTBOX_MID_WRITE_TRUNCATE)
+        {
+            if let Some(parent) = self.path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            // Write a strict non-empty truncated prefix directly to the outbox path
+            // to simulate a torn partial write on crash, then return an io::Error.
+            let prefix_len = (bytes.len() / 2).max(1).min(bytes.len().saturating_sub(1));
+            std::fs::write(&self.path, &bytes[..prefix_len])?;
+            return Err(std::io::Error::other(format!(
+                "failpoint[{FP_OUTBOX_MID_WRITE_TRUNCATE}]: {msg}"
+            ))
+            .into());
+        }
+        canban_context::atomic_with_durability(&self.path, &bytes, self.durability)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -197,6 +247,14 @@ impl Outbox {
         if let Some(existing) = self.ops.iter().find(|m| m.id == mutation.id) {
             return Ok((existing.clone(), false));
         }
+        let prev_ops = self.ops.clone();
+        let save_or_rollback = |this: &mut Self| -> Result<()> {
+            if let Err(err) = this.save() {
+                this.ops = prev_ops;
+                return Err(err);
+            }
+            Ok(())
+        };
         if mutation.kind == MutationKind::SyncGlobalEnv {
             // Explicit sync retries clear prior failed/conflict SyncGlobalEnv entries so
             // `"__global_env__"` is unblocked before queuing/coalescing the next attempt.
@@ -215,7 +273,7 @@ impl Outbox {
                 existing.retry_same_params = false;
                 existing.attempts = 0;
                 let updated = existing.clone();
-                self.save()?;
+                save_or_rollback(self)?;
                 return Ok((updated, true));
             }
         }
@@ -240,12 +298,12 @@ impl Outbox {
                 }
             }
             let updated = create.clone();
-            self.save()?;
+            save_or_rollback(self)?;
             return Ok((updated, true));
         }
         ensure!(self.ops.len() < MAX_OUTBOX_OPS, "Offline queue is full");
         self.ops.push(mutation.clone());
-        self.save()?;
+        save_or_rollback(self)?;
         Ok((mutation, false))
     }
 
@@ -253,8 +311,12 @@ impl Outbox {
         let Some(pos) = self.ops.iter().position(|m| m.id == mutation_id) else {
             return Ok(None);
         };
+        let prev_ops = self.ops.clone();
         let removed = self.ops.remove(pos);
-        self.save()?;
+        if let Err(err) = self.save() {
+            self.ops = prev_ops;
+            return Err(err);
+        }
         Ok(Some(removed))
     }
 }
@@ -408,5 +470,92 @@ mod tests {
         let reloaded = Outbox::load(path);
         assert_eq!(reloaded.len(), 1);
         assert_eq!(reloaded.ops[0].id, "g-retry");
+    }
+
+    #[test]
+    fn mid_write_truncate_failpoint_writes_torn_json_and_recovers_via_quarantine_on_reload() {
+        use canban_types::FailpointAction;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("host.outbox.json");
+        let fp = Failpoints::shared();
+        let mut outbox = Outbox::load_with_durability_and_failpoints(
+            path.clone(),
+            canban_context::FsDurability::NoSync,
+            Some(Arc::clone(&fp)),
+        );
+
+        // First persist one valid op so an existing valid file is on disk.
+        outbox
+            .enqueue(mk_op(
+                "m-initial",
+                "c1",
+                MutationKind::AddComment,
+                json!({"card_id": "c1", "body": "ok"}),
+            ))
+            .unwrap();
+        assert_eq!(outbox.len(), 1);
+
+        // Arm crash window #5: next save writes a torn truncated prefix and returns an io::Error.
+        fp.arm(
+            FP_OUTBOX_MID_WRITE_TRUNCATE,
+            FailpointAction::FailOnce("simulated torn write crash".into()),
+        );
+        let err = outbox
+            .enqueue(mk_op(
+                "m-crash",
+                "c2",
+                MutationKind::MoveCard,
+                json!({"card_id": "c2", "stage": "develop"}),
+            ))
+            .unwrap_err();
+        assert!(
+            err.downcast_ref::<std::io::Error>().is_some(),
+            "expected io::Error, got: {err:#}"
+        );
+        // Failed enqueue rolled back in-memory mutation list cleanly.
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(outbox.ops[0].id, "m-initial");
+
+        // On disk, the outbox file is a non-empty truncated prefix that fails JSON parsing.
+        let torn = std::fs::read(&path).unwrap();
+        assert!(!torn.is_empty());
+        assert!(serde_json::from_slice::<OutboxFile>(&torn).is_err());
+
+        let stats = fp.stats_for(FP_OUTBOX_MID_WRITE_TRUNCATE);
+        assert_eq!(stats.armed, 1);
+        assert_eq!(stats.fired, 1);
+
+        // Reloading quarantines the corrupt file and recovers cleanly to an empty outbox.
+        let mut reloaded = Outbox::load_with_durability_and_failpoints(
+            path.clone(),
+            canban_context::FsDurability::NoSync,
+            Some(Arc::clone(&fp)),
+        );
+        assert!(reloaded.is_empty());
+        let quarantine = Outbox::quarantine_path(&path);
+        assert!(
+            quarantine.exists(),
+            "corrupt outbox should be quarantined at {}",
+            quarantine.display()
+        );
+        assert_eq!(std::fs::read(&quarantine).unwrap(), torn);
+        assert!(
+            !path.exists(),
+            "original corrupt outbox path must be moved aside during quarantine"
+        );
+
+        // Subsequent enqueue persists a fresh valid outbox cleanly.
+        reloaded
+            .enqueue(mk_op(
+                "m-after-recovery",
+                "c3",
+                MutationKind::AddComment,
+                json!({"card_id": "c3", "body": "recovered"}),
+            ))
+            .unwrap();
+        let verified = Outbox::load_with_durability(path, canban_context::FsDurability::NoSync);
+        assert_eq!(verified.len(), 1);
+        assert_eq!(verified.ops[0].id, "m-after-recovery");
     }
 }

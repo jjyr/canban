@@ -1157,15 +1157,20 @@ impl AppServer {
                 labels.insert("canban.card_id".into(), cid.clone());
             }
             let wrapped = wrapped_herdr_argv(&prep.raw_log_file, &prep.argv);
-            match client.launch_with_policy_unset_and_size(
-                wrapped,
-                &prep.cwd.to_string_lossy(),
-                prep.env.clone(),
-                labels,
-                prep.env_policy,
-                &prep.unset_keys,
-                Some(self.resolve_launch_terminal_size(None)),
-            ) {
+            match client
+                .launch_with_policy_unset_and_size(
+                    wrapped,
+                    &prep.cwd.to_string_lossy(),
+                    prep.env.clone(),
+                    labels,
+                    prep.env_policy,
+                    &prep.unset_keys,
+                    Some(self.resolve_launch_terminal_size(None)),
+                )
+                .and_then(|launched| {
+                    self.check_failpoint(canban_types::FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB)?;
+                    Ok(launched)
+                }) {
                 Ok(launched) => {
                     let addr = launched["address"].as_str().unwrap_or("").to_owned();
                     let _ = self.store.lock().unwrap().write(|db| {

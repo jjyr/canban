@@ -143,13 +143,15 @@ impl AppServer {
             let remote = if let Some(pr) = found.first() {
                 pr.clone()
             } else {
-                client.create_pr(
+                let created = client.create_pr(
                     &repository,
                     &head_branch,
                     &plan.target_branch,
                     &card.title,
                     &format!("Canban Card #{}\n\n{}", card.number, card.body),
-                )?
+                )?;
+                self.check_failpoint(canban_types::FP_GITHUB_AFTER_PR_WRITE_BEFORE_DB)?;
+                created
             };
             let pr = policy::project(&remote, &pending)?;
             client.seed(&format!("/repos/{repository}/pulls/{}", pr.number), remote);
@@ -378,6 +380,23 @@ impl AppServer {
                 binding.url = next.url.clone();
                 binding.state = "published".into();
                 current.pull_request = Some(binding);
+                if matches!(old.state.as_str(), "unknown" | "publishing") {
+                    current.attention = None;
+                    if current
+                        .human_gate
+                        .as_ref()
+                        .is_some_and(|g| g.terminal_id.is_none() && g.next_stage.is_none())
+                    {
+                        current.human_gate = None;
+                    }
+                }
+            }
+            if old.state == "merge_unknown"
+                && !next.merged
+                && matches!(next.state.as_str(), "open" | "closed")
+                && let Some(pr) = &mut current.pull_request
+            {
+                pr.state = next.state.clone();
             }
             if current.delivery_mode.is_none()
                 && let Some(pr) = &mut current.pull_request
@@ -418,19 +437,21 @@ impl AppServer {
                     });
                 }
                 current.attention = None;
-                if let Some(gate) = current.human_gate.clone()
-                    && let Some(id) = gate.terminal_id
-                {
-                    let att: TerminalEntry = db.get(&id)?;
-                    if att.agent.as_ref().is_some_and(|a| a.state == "completed") {
+                if let Some(gate) = current.human_gate.clone() {
+                    if let Some(id) = gate.terminal_id {
+                        let att: TerminalEntry = db.get(&id)?;
+                        if att.agent.as_ref().is_some_and(|a| a.state == "completed") {
+                            current.human_gate = None;
+                            crate::workflow::advance(
+                                db,
+                                &self.config(),
+                                &mut current,
+                                Some(&att),
+                                resolved_at,
+                            )?;
+                        }
+                    } else if gate.next_stage.is_none() {
                         current.human_gate = None;
-                        crate::workflow::advance(
-                            db,
-                            &self.config(),
-                            &mut current,
-                            Some(&att),
-                            resolved_at,
-                        )?;
                     }
                 }
                 log(
@@ -1136,7 +1157,11 @@ impl AppServer {
                 live.head == pr.head && live.state == "open" && !live.merged,
                 "PR changed; refresh and review before merging"
             );
-            client.merge_pr(&pr.repository, pr.number, &pr.head)
+            let merged = client.merge_pr(&pr.repository, pr.number, &pr.head)?;
+            if merged["merged"] == true {
+                self.check_failpoint(canban_types::FP_GITHUB_AFTER_PR_WRITE_BEFORE_DB)?;
+            }
+            Ok(merged)
         })();
         let value = match result {
             Ok(v) if v["merged"] == true => json!({"state":"merged","commit":v["sha"]}),

@@ -576,7 +576,18 @@ impl AppServer {
                         .join("terminals")
                         .join(&batch_id)
                         .join("batch-test.log");
-                    let test_outcome = ops.run_batch_tests(&worktree, cmd, &log_path)?;
+                    let test_outcome = match ops.run_batch_tests(&worktree, cmd, &log_path) {
+                        Ok(outcome) => outcome,
+                        Err(err) => {
+                            let _ = self
+                                .store
+                                .lock()
+                                .unwrap()
+                                .write(|db| delete_batch_row(db, &batch_id));
+                            self.emit("review", None);
+                            return Err(err);
+                        }
+                    };
                     if !test_outcome.passed {
                         batch.failure_kind = Some("test_failure".into());
                         batch.test_output = Some(test_outcome.tail);
@@ -646,7 +657,19 @@ impl AppServer {
                         None
                     }
                 };
-                self.finalize_clean_batch(
+                if matches!(&push_result, Some(Ok(Some(_))))
+                    && let Err(err) =
+                        self.check_failpoint(canban_types::FP_GIT_AFTER_PUSH_BEFORE_BATCH_FINALIZE)
+                {
+                    let _ = self
+                        .store
+                        .lock()
+                        .unwrap()
+                        .write(|db| delete_batch_row(db, &batch_id));
+                    self.emit("review", None);
+                    return Err(err);
+                }
+                if let Err(err) = self.finalize_clean_batch(
                     &project,
                     &mut batch,
                     &head_sha,
@@ -654,7 +677,15 @@ impl AppServer {
                     true,
                     "Auto-merged",
                     "system",
-                )?;
+                ) {
+                    let _ = self
+                        .store
+                        .lock()
+                        .unwrap()
+                        .write(|db| delete_batch_row(db, &batch_id));
+                    self.emit("review", None);
+                    return Err(err);
+                }
                 Ok((true, true))
             }
             BatchIntegrationOutcome::Conflict {
@@ -1707,18 +1738,32 @@ impl AppServer {
                     Some(&updated_batch.target_branch),
                 );
                 let _checkout_gate = self.lock_checkout(&project, holder);
-                ops.fast_forward_target(
+                let ff_res = ops.fast_forward_target(
                     &project,
                     &updated_batch.target_branch,
                     &updated_batch.target_head,
                     &resolved_head,
-                )?;
+                );
+                if let Err(err) = ff_res {
+                    let already_at_resolved_head = matches!(
+                        err.downcast_ref::<DeliveryError>(),
+                        Some(DeliveryError::TargetAdvanced)
+                    ) && ops
+                        .check_main_checkout_ready(&project, Some(&updated_batch.target_branch))
+                        .is_ok_and(|(_, cur_head)| cur_head == resolved_head);
+                    if !already_at_resolved_head {
+                        return Err(err);
+                    }
+                }
                 if updated_batch.sync_upstream {
                     Some(ops.push_target_branch(&project, &updated_batch.target_branch))
                 } else {
                     None
                 }
             };
+            if matches!(&push_result, Some(Ok(Some(_)))) {
+                self.check_failpoint(canban_types::FP_GIT_AFTER_PUSH_BEFORE_BATCH_FINALIZE)?;
+            }
             ops.cleanup_batch_refs(&project, updated_batch.short_id());
 
             let evict_reason = if message.is_empty() {

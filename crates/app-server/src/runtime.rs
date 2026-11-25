@@ -99,6 +99,15 @@ impl AppServer {
                 db.save(&card)?;
                 db.save(&q)?;
             }
+            // Interrupted transient batch integration/testing rows cannot be in progress
+            // across a restart; removing them lets the merge queue retry idempotently
+            // (including when git fast-forward/push already succeeded before the crash).
+            for batch in db.list::<canban_types::MergeBatch>()? {
+                if matches!(batch.state.as_str(), "integrating" | "testing") {
+                    db.conn
+                        .execute("DELETE FROM merge_batches WHERE id=?1", params![batch.id])?;
+                }
+            }
             Ok(())
         })?;
         Ok(())
@@ -177,6 +186,28 @@ impl AppServer {
             handler,
         )
         .await
+    }
+
+    /// Serves a single unauthenticated local framed JSON-RPC stream (matching the local Unix
+    /// socket dispatcher: request/response RPCs, `app.subscribe`, and `herdr.connect`) over any
+    /// generic async bidirectional stream (such as `tokio::io::DuplexStream` or a simulated
+    /// `turmoil::net::TcpStream`).
+    pub async fn serve_local_stream<S>(self: Arc<Self>, stream: S) -> Result<()>
+    where
+        S: canban_transport::AsyncIo + 'static,
+    {
+        if self.stopped() {
+            return Ok(());
+        }
+        let accepted = canban_transport::AcceptedStream {
+            stream: canban_transport::TransportStream::boxed(stream),
+            initial_request: None,
+            has_pipelined_bytes: false,
+            device_id: None,
+            auth_token: None,
+            stop_rx: self.stop_receiver(),
+        };
+        serve_stream(self, accepted).await
     }
 
     pub fn start_with_listen(
@@ -1459,7 +1490,9 @@ impl AppServer {
                 if let Err(e) = res
                     && !continue_in_place
                 {
-                    self.launch_failed(&entry, &format!("{e:#}"))?;
+                    let receipt_uncertain =
+                        e.downcast_ref::<crate::LaunchReceiptUncertain>().is_some();
+                    self.launch_failed(&entry, &format!("{e:#}"), receipt_uncertain)?;
                 }
             }
         }
@@ -1629,7 +1662,10 @@ impl AppServer {
                     Some(self.verified_core_id()?) == att.core_id,
                     "Original core identity changed"
                 );
-                client.call("terminal.send", json!({"terminal":terminal,"text":text}))
+                let sent =
+                    client.call("terminal.send", json!({"terminal":terminal,"text":text}))?;
+                self.check_failpoint(canban_types::FP_HERDR_AFTER_SEND_BEFORE_DB)?;
+                Ok(sent)
             })();
             self.store.lock().unwrap().write(|db|{
                 let mut q:Question=db.get(&question.id)?;
@@ -1929,70 +1965,82 @@ impl AppServer {
             &unset_keys,
             Some(self.resolve_launch_terminal_size(None)),
         )?;
-        let terminal_address = strp(&terminal, "address")?.to_owned();
-        run.core_id = Some(core_id.clone());
-        run.terminal = Some(terminal_address.clone());
-        let delivery_error=terminal.get("first_message").filter(|v|v["sent"]==false).map(|v|format!("Herdr did not deliver the initial task: {v}. Inspect this terminal before retrying."));
-        run.observed = Some(canban_herdr::observation(&terminal));
-        run.lifecycle.observed_at = Some(self.now_ms());
-        run.connection_state = "connected".into();
-        run.state = "running".into();
-        // Seed the in-memory inventory immediately so a runtime tick racing ahead
-        // of Herdr's async "created" subscription event does not transiently mark
-        // the freshly launched terminal missing/unavailable.
-        {
-            let mut inv = self.inventory.lock().unwrap();
-            if inv.core == core_id {
-                inv.records
-                    .entry(terminal_address.clone())
-                    .or_insert_with(|| {
-                        let mut seeded = terminal.clone();
-                        seeded["address"] = json!(terminal_address);
-                        if seeded["state"].is_null() {
-                            seeded["state"] = json!("live");
-                        }
-                        if seeded["cwd"].is_null() {
-                            seeded["cwd"] = json!(run.cwd);
-                        }
-                        seeded
-                    });
-            }
-        }
-        self.store.lock().unwrap().write(|db| {
-            let mut current_entry: TerminalEntry = db.get(&entry.id)?;
-            if let Some(current) = current_entry.agent.clone() {
-                if current.state != "starting" {
-                    run.state = current.state;
-                    run.completed_at = current.completed_at;
-                    run.completion_turn = current.completion_turn;
-                    run.close_state = current.close_state;
-                    run.turn_ended_at = current.turn_ended_at;
-                    run.error = current.error;
-                }
-                if current.provider_session_id.is_some() {
-                    run.provider_session_id = current.provider_session_id;
-                }
-                if current.response_path.is_some() {
-                    run.response_path = current.response_path;
-                }
-                if current.pending.is_some() {
-                    run.pending = current.pending;
+        let delivery_error = (|| -> Result<Option<String>> {
+            self.check_failpoint(canban_types::FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB)?;
+            let terminal_address = strp(&terminal, "address")?.to_owned();
+            run.core_id = Some(core_id.clone());
+            run.terminal = Some(terminal_address.clone());
+            let delivery_error = terminal
+                .get("first_message")
+                .filter(|v| v["sent"] == false)
+                .map(|v| {
+                    format!(
+                        "Herdr did not deliver the initial task: {v}. Inspect this terminal before retrying."
+                    )
+                });
+            run.observed = Some(canban_herdr::observation(&terminal));
+            run.lifecycle.observed_at = Some(self.now_ms());
+            run.connection_state = "connected".into();
+            run.state = "running".into();
+            // Seed the in-memory inventory immediately so a runtime tick racing ahead
+            // of Herdr's async "created" subscription event does not transiently mark
+            // the freshly launched terminal missing/unavailable.
+            {
+                let mut inv = self.inventory.lock().unwrap();
+                if inv.core == core_id {
+                    inv.records
+                        .entry(terminal_address.clone())
+                        .or_insert_with(|| {
+                            let mut seeded = terminal.clone();
+                            seeded["address"] = json!(terminal_address);
+                            if seeded["state"].is_null() {
+                                seeded["state"] = json!("live");
+                            }
+                            if seeded["cwd"].is_null() {
+                                seeded["cwd"] = json!(run.cwd);
+                            }
+                            seeded
+                        });
                 }
             }
-            current_entry.agent = Some(run.clone());
-            db.save(&current_entry)?;
-            let c: Card = db.get(&att.card_id)?;
-            log(
-                db,
-                &c,
-                "execution.started",
-                "system",
-                &format!("@{} started", att.profile.id),
-                Some(entry.id.clone()),
-                json!({"run_number":run.number,"terminal":run.terminal,"core_id":run.core_id,"directory":run.directory,"cwd":run.cwd}),
-                self.now_ms(),
-            )
-        })?;
+            self.store.lock().unwrap().write(|db| {
+                let mut current_entry: TerminalEntry = db.get(&entry.id)?;
+                if let Some(current) = current_entry.agent.clone() {
+                    if current.state != "starting" {
+                        run.state = current.state;
+                        run.completed_at = current.completed_at;
+                        run.completion_turn = current.completion_turn;
+                        run.close_state = current.close_state;
+                        run.turn_ended_at = current.turn_ended_at;
+                        run.error = current.error;
+                    }
+                    if current.provider_session_id.is_some() {
+                        run.provider_session_id = current.provider_session_id;
+                    }
+                    if current.response_path.is_some() {
+                        run.response_path = current.response_path;
+                    }
+                    if current.pending.is_some() {
+                        run.pending = current.pending;
+                    }
+                }
+                current_entry.agent = Some(run.clone());
+                db.save(&current_entry)?;
+                let c: Card = db.get(&att.card_id)?;
+                log(
+                    db,
+                    &c,
+                    "execution.started",
+                    "system",
+                    &format!("@{} started", att.profile.id),
+                    Some(entry.id.clone()),
+                    json!({"run_number":run.number,"terminal":run.terminal,"core_id":run.core_id,"directory":run.directory,"cwd":run.cwd}),
+                    self.now_ms(),
+                )
+            })?;
+            Ok(delivery_error)
+        })()
+        .map_err(|err| anyhow::Error::new(crate::LaunchReceiptUncertain(err)))?;
         self.store.lock().unwrap().write(|db| {
             for q in snapshot
                 .questions
@@ -2015,7 +2063,12 @@ impl AppServer {
         }
         Ok(())
     }
-    pub(super) fn launch_failed(&self, entry: &TerminalEntry, error: &str) -> Result<()> {
+    pub(super) fn launch_failed(
+        &self,
+        entry: &TerminalEntry,
+        error: &str,
+        receipt_uncertain: bool,
+    ) -> Result<()> {
         let Some(att) = &entry.agent else {
             return Ok(());
         };
@@ -2027,7 +2080,8 @@ impl AppServer {
             if let Some(a) = &mut current_entry.agent {
                 run_num = a.number;
                 if !matches!(a.state.as_str(), "completed" | "backlog") {
-                    a.state = if a.state == "unknown"
+                    a.state = if receipt_uncertain
+                        || a.state == "unknown"
                         || a.terminal.is_none() && error.contains("timed out")
                     {
                         "unknown"
@@ -2265,15 +2319,20 @@ impl AppServer {
                 ("canban.workflow_run".into(), run.id.clone()),
                 ("canban.workflow_step".into(), step_id.clone()),
             ]);
-            match client.launch_with_policy_unset_and_size(
-                spec.argv,
-                &spec.cwd,
-                spec.env,
-                labels,
-                env_policy,
-                &unset_keys,
-                Some(self.resolve_launch_terminal_size(None)),
-            ) {
+            match client
+                .launch_with_policy_unset_and_size(
+                    spec.argv,
+                    &spec.cwd,
+                    spec.env,
+                    labels,
+                    env_policy,
+                    &unset_keys,
+                    Some(self.resolve_launch_terminal_size(None)),
+                )
+                .and_then(|launched| {
+                    self.check_failpoint(canban_types::FP_HERDR_AFTER_TERMINAL_RUN_BEFORE_DB)?;
+                    Ok(launched)
+                }) {
                 Ok(launched) => {
                     let addr = launched["address"].as_str().unwrap_or("").to_owned();
                     let _ = self.store.lock().unwrap().write(|db| {
