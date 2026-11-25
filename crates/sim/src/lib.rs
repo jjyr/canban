@@ -5,6 +5,8 @@ pub mod github;
 pub mod herdr;
 pub mod net;
 pub mod oracle;
+#[path = "scenarios/review_and_events.rs"]
+pub mod review_and_events;
 pub mod scenarios;
 pub mod trace;
 pub mod world;
@@ -92,6 +94,65 @@ mod tests {
     fn scenario_14_project_import_export() {
         scenarios::project_import_export::run(202_614)
             .expect("project_import_export scenario failed");
+    }
+
+    #[test]
+    fn scenario_17_review_and_events() {
+        const REQUIRED_COVERAGE: &[&str] = &[
+            "review.preview_checked",
+            "review.agent_steered",
+            "review.merged_cleanly",
+            "github.pr_published",
+            "github.pr_refreshed",
+            "github.pr_merged",
+            "github.pr_remote_merge_reconciled",
+            "drafts.conflict_and_persistence",
+            "events.journal_listed",
+            "events.subscription_delivery_and_ack",
+            "events.subscription_crash_retry",
+        ];
+
+        crate::trace::reset_thread_coverage();
+        let d100_a = crate::review_and_events::run(100).expect("review_and_events seed 100 run 1");
+        let cov_100 = crate::trace::take_thread_coverage();
+        cov_100
+            .assert_required(REQUIRED_COVERAGE)
+            .expect("seed 100 missing required Scenario 17 coverage hits");
+
+        crate::trace::reset_thread_coverage();
+        let d100_b = crate::review_and_events::run(100).expect("review_and_events seed 100 run 2");
+        let _ = crate::trace::take_thread_coverage();
+        assert_eq!(
+            d100_a, d100_b,
+            "Determinism violation on seed 100: {d100_a:#018x} != {d100_b:#018x}"
+        );
+
+        crate::trace::reset_thread_coverage();
+        let d101_a = crate::review_and_events::run(101).expect("review_and_events seed 101 run 1");
+        let cov_101 = crate::trace::take_thread_coverage();
+        cov_101
+            .assert_required(REQUIRED_COVERAGE)
+            .expect("seed 101 missing required Scenario 17 coverage hits");
+
+        crate::trace::reset_thread_coverage();
+        let d101_b = crate::review_and_events::run(101).expect("review_and_events seed 101 run 2");
+        let _ = crate::trace::take_thread_coverage();
+        assert_eq!(
+            d101_a, d101_b,
+            "Determinism violation on seed 101: {d101_a:#018x} != {d101_b:#018x}"
+        );
+
+        assert_ne!(
+            d100_a, d101_a,
+            "Seed sensitivity violation: seed 100 and seed 101 produced identical digest {d100_a:#018x}"
+        );
+        println!(
+            "scenario_17_review_and_events digests: seed100={d100_a:#018x} (replay={d100_b:#018x}), seed101={d101_a:#018x} (replay={d101_b:#018x})"
+        );
+        println!("scenario_17_review_and_events coverage (seed=100):");
+        for key in REQUIRED_COVERAGE {
+            println!("  {key:<40} {}", cov_100.count(key));
+        }
     }
 
     #[test]

@@ -112,6 +112,7 @@ struct RepoState {
     pr_review_comments: BTreeMap<u64, Vec<SimComment>>,
     check_runs: BTreeMap<String, Vec<SimCheckRun>>,
     commit_statuses: BTreeMap<String, Value>,
+    branch_heads: BTreeMap<String, String>,
     next_comment_id: u64,
     next_review_id: u64,
     version: u64,
@@ -156,6 +157,8 @@ struct State {
     notifications: Vec<Value>,
     stats: GitHubStats,
     injected_faults: VecDeque<GitHubFault>,
+    /// One-shot faults matched by `(HTTP method, path substring)`.
+    targeted_faults: Vec<(String, String, GitHubFault)>,
     rate_limit_remaining: Option<u64>,
     rate_limit_reset_secs: u64,
     /// One-shot stale responses keyed by path substring.
@@ -237,6 +240,7 @@ impl SimGitHub {
                 notifications: Vec::new(),
                 stats: GitHubStats::default(),
                 injected_faults: VecDeque::new(),
+                targeted_faults: Vec::new(),
                 rate_limit_remaining: None,
                 rate_limit_reset_secs: 1_700_003_600,
                 stale_overrides: BTreeMap::new(),
@@ -287,6 +291,7 @@ impl SimGitHub {
                 pr_review_comments: BTreeMap::new(),
                 check_runs: BTreeMap::new(),
                 commit_statuses: BTreeMap::new(),
+                branch_heads: BTreeMap::new(),
                 next_comment_id: 1_000,
                 next_review_id: 5_000,
                 version: 1,
@@ -363,6 +368,51 @@ impl SimGitHub {
             r.commit_statuses.insert(sha, status);
             r.bump_resource(&[&key]);
         }
+    }
+
+    /// Records the pushed tip SHA for `branch` on `repo` so `POST /pulls` resolves `head.sha`
+    /// identically to real GitHub after a `git push`.
+    pub fn set_branch_head(&self, repo: &str, branch: impl Into<String>, sha: impl Into<String>) {
+        let mut st = self.state.lock().unwrap();
+        if let Some(r) = st.repos.get_mut(repo) {
+            r.branch_heads.insert(branch.into(), sha.into());
+        }
+    }
+
+    /// Merges an existing open PR directly on simulated GitHub (out-of-band / browser merge),
+    /// returning the generated merge commit SHA so callers can verify remote-merge reconciliation.
+    pub fn merge_pr_remote(&self, repo: &str, number: u64) -> Option<String> {
+        let mut st = self.state.lock().unwrap();
+        let r = st.repos.get_mut(repo)?;
+        let next_ver = r.version + 1;
+        let pr = r.issues.get_mut(&number).filter(|i| i.is_pr)?;
+        let merge_sha = format!("merge-{number}-{}", pr.head_sha);
+        pr.merged = true;
+        pr.state = "closed".into();
+        pr.updated_at = format!("2026-06-01T02:{:02}:00Z", next_ver % 60);
+        let merged_at = pr.updated_at.clone();
+        let meta = r.pr_meta.entry(number).or_default();
+        meta.merged_at = Some(merged_at);
+        meta.merge_commit_sha = Some(merge_sha.clone());
+        let pr_key = format!("pr:{number}");
+        let issue_key = format!("issue:{number}");
+        r.bump_resource(&["pulls", &pr_key, "issues", &issue_key]);
+        Some(merge_sha)
+    }
+
+    /// Injects a one-shot fault that triggers on the next request matching `method` and
+    /// `path_contains` without disturbing unrelated endpoints.
+    pub fn inject_fault_on(
+        &self,
+        method: impl Into<String>,
+        path_contains: impl Into<String>,
+        fault: GitHubFault,
+    ) {
+        self.state.lock().unwrap().targeted_faults.push((
+            method.into(),
+            path_contains.into(),
+            fault,
+        ));
     }
 
     pub fn add_issue_comment(
@@ -527,6 +577,7 @@ impl SimGitHub {
     pub fn clear_injected_faults(&self) {
         let mut st = self.state.lock().unwrap();
         st.injected_faults.clear();
+        st.targeted_faults.clear();
         st.rate_limit_remaining = None;
         st.stale_overrides.clear();
         st.read_after_write_lag = 0;
@@ -949,8 +1000,14 @@ impl SimGitHub {
             }
         }
 
-        // 2. Global injected faults and primary rate-limit budget.
+        // 2. Global injected faults, targeted method/path faults, and primary rate-limit budget.
         if let Some(fault) = st.injected_faults.pop_front() {
+            return Self::apply_fault(&mut st.stats, fault);
+        }
+        if let Some(pos) = st.targeted_faults.iter().position(|(m, pat, _)| {
+            m.eq_ignore_ascii_case(&req.method) && req.path.contains(pat.as_str())
+        }) {
+            let (_, _, fault) = st.targeted_faults.remove(pos);
             return Self::apply_fault(&mut st.stats, fault);
         }
         if let Some(rem) = st.rate_limit_remaining {
@@ -1380,6 +1437,7 @@ impl SimGitHub {
                 let head_sha = body["head_sha"]
                     .as_str()
                     .map(str::to_owned)
+                    .or_else(|| repo.branch_heads.get(&head_ref).cloned())
                     .unwrap_or_else(|| format!("sha-pr-{next_num}-v1"));
                 let issue = SimIssue {
                     number: next_num,
@@ -2225,5 +2283,70 @@ mod tests {
         clock.0.store(host_reset * 1000, Ordering::SeqCst);
         assert_eq!(host_a.send(req("GET", "/user", None)).unwrap().status, 200);
         assert_eq!(host_a.send(req("GET", "/user", None)).unwrap().status, 200);
+    }
+
+    #[test]
+    fn branch_head_remote_merge_and_targeted_fault_injection() {
+        let gh = SimGitHub::new();
+        gh.add_repo("acme/app", 77, "main");
+        let pushed_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        gh.set_branch_head("acme/app", "feat/pr-1", pushed_sha);
+
+        // POST /pulls without explicit head_sha resolves pushed branch head SHA.
+        let created = gh
+            .send(req(
+                "POST",
+                "/repos/acme/app/pulls",
+                Some(json!({
+                    "head": "acme:feat/pr-1",
+                    "base": "main",
+                    "title": "PR with pushed SHA",
+                    "body": "body",
+                })),
+            ))
+            .unwrap();
+        assert_eq!(created.status, 201);
+        let pr: Value = serde_json::from_slice(&created.body).unwrap();
+        assert_eq!(pr["head"]["sha"], json!(pushed_sha));
+        let num = pr["number"].as_u64().unwrap();
+
+        // Targeted fault triggers ONLY on matching method + path, leaving GETs untouched.
+        gh.inject_fault_on(
+            "PUT",
+            "/merge",
+            GitHubFault::Http {
+                status: 409,
+                headers: Vec::new(),
+                body: Some(r#"{"message":"conflict"}"#.into()),
+            },
+        );
+        assert_eq!(
+            gh.send(req("GET", &format!("/repos/acme/app/pulls/{num}"), None))
+                .unwrap()
+                .status,
+            200
+        );
+        assert_eq!(
+            gh.send(req(
+                "PUT",
+                &format!("/repos/acme/app/pulls/{num}/merge"),
+                Some(json!({ "sha": pushed_sha })),
+            ))
+            .unwrap()
+            .status,
+            409
+        );
+
+        // Out-of-band remote merge transitions PR to merged+closed with merge_commit_sha.
+        let merge_sha = gh.merge_pr_remote("acme/app", num).unwrap();
+        let after: Value = serde_json::from_slice(
+            &gh.send(req("GET", &format!("/repos/acme/app/pulls/{num}"), None))
+                .unwrap()
+                .body,
+        )
+        .unwrap();
+        assert_eq!(after["merged"], json!(true));
+        assert_eq!(after["state"], json!("closed"));
+        assert_eq!(after["merge_commit_sha"], json!(merge_sha));
     }
 }

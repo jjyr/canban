@@ -64,6 +64,7 @@ struct SimWorktree {
     head_sha: String,
     dirty: bool,
     staged: bool,
+    staged_tree: Option<String>,
     in_merge: bool,
     merge_head: Option<String>,
     in_cherry_pick: bool,
@@ -86,10 +87,15 @@ pub struct SimGitRepo {
     custom_refs: BTreeMap<String, String>,
     /// Commit graph (`sha -> parent SHAs`) supporting `merge-base`, `--is-ancestor`, and `rev-list`.
     commits: BTreeMap<String, Vec<String>>,
+    /// Deterministic touched file paths recorded per commit SHA for `git diff`.
+    commit_files: BTreeMap<String, Vec<String>>,
+    /// Optional explicit tree SHA per commit (preserves `write-tree` / `commit --amend` tree identity).
+    commit_trees: BTreeMap<String, String>,
     next_commit_seq: u64,
     next_worktree_seq: u64,
     worktrees: BTreeMap<PathBuf, SimWorktree>,
     staged: bool,
+    staged_tree: Option<String>,
     in_merge: bool,
     merge_head: Option<String>,
     in_cherry_pick: bool,
@@ -131,10 +137,13 @@ impl Default for SimGitRepo {
             remote_refs,
             custom_refs: BTreeMap::new(),
             commits,
+            commit_files: BTreeMap::new(),
+            commit_trees: BTreeMap::new(),
             next_commit_seq: 1,
             next_worktree_seq: 0,
             worktrees: BTreeMap::new(),
             staged: false,
+            staged_tree: None,
             in_merge: false,
             merge_head: None,
             in_cherry_pick: false,
@@ -211,7 +220,12 @@ impl SimGitRepo {
         };
 
         if raw.ends_with("^{tree}") {
-            Some(tree_sha_for_commit(&sha))
+            Some(
+                self.commit_trees
+                    .get(&sha)
+                    .cloned()
+                    .unwrap_or_else(|| tree_sha_for_commit(&sha)),
+            )
         } else {
             Some(sha)
         }
@@ -440,11 +454,15 @@ impl SimExec {
             .and_then(|p| repo.worktrees.get(p))
             .map(|w| w.head_sha.clone())
             .unwrap_or_else(|| repo.head_sha.clone());
+        let seq_label = repo.next_commit_seq;
         let new_sha = repo.alloc_commit(vec![parent]);
+        repo.commit_files
+            .insert(new_sha.clone(), vec![format!("src/change_{seq_label}.rs")]);
         repo.set_checkout_head(wt_key.as_deref(), new_sha.clone());
         if let Some(wt) = wt_key.as_deref().and_then(|p| repo.worktrees.get_mut(p)) {
             wt.dirty = false;
             wt.staged = false;
+            wt.staged_tree = None;
             wt.in_merge = false;
             wt.merge_head = None;
             wt.in_cherry_pick = false;
@@ -455,6 +473,7 @@ impl SimExec {
         } else {
             repo.dirty = false;
             repo.staged = false;
+            repo.staged_tree = None;
             repo.in_merge = false;
             repo.merge_head = None;
             repo.in_cherry_pick = false;
@@ -564,6 +583,14 @@ impl SimExec {
                 .map(|w| w.head_sha.clone())
                 .unwrap_or_else(|| repo.head_sha.clone()),
         )
+    }
+
+    /// Returns the recorded local branch HEAD SHA (`refs/heads/<branch>`).
+    pub fn branch_head_sha(&self, repo_dir: impl AsRef<Path>, branch: &str) -> Option<String> {
+        let st = self.state.lock().unwrap();
+        let (root, _) = Self::resolve_repo_and_worktree(&st, Some(repo_dir.as_ref()))?;
+        let repo = st.git_repos.get(&root)?;
+        repo.branch_heads.get(branch).cloned()
     }
 
     /// Returns the recorded remote tracking ref SHA (`refs/remotes/<remote>/<branch>`).
@@ -1297,6 +1324,29 @@ impl SimExec {
             }
             "diff" => {
                 let nul = sub_args.iter().any(|a| a == "-z");
+                let base_ref = sub_args[1..]
+                    .iter()
+                    .take_while(|a| a.as_str() != "--")
+                    .find(|a| !a.starts_with('-'))
+                    .map(String::as_str);
+                let mut range_files: Vec<String> = Vec::new();
+                if let Some(base) = base_ref
+                    && let Some(base_sha) = repo.resolve_ref(wt_key.as_deref(), base)
+                    && base_sha != cur_head
+                {
+                    let commits = repo.rev_list_range(&base_sha, &cur_head, false);
+                    for sha in &commits {
+                        if let Some(files) = repo.commit_files.get(sha) {
+                            range_files.extend(files.iter().cloned());
+                        }
+                    }
+                    if range_files.is_empty() {
+                        let tail = &cur_head[cur_head.len().saturating_sub(8)..];
+                        range_files.push(format!("src/commit_{tail}.rs"));
+                    }
+                    range_files.sort();
+                    range_files.dedup();
+                }
                 if sub_args.iter().any(|a| a == "--diff-filter=U") {
                     let mut out = String::new();
                     for f in &cur_conflicts {
@@ -1313,19 +1363,37 @@ impl SimExec {
                         ok_out("")
                     }
                 } else if sub_args.iter().any(|a| a == "--name-only") {
-                    let mut out = String::new();
+                    let mut files = Vec::new();
                     if !cur_conflicts.is_empty() {
-                        for f in &cur_conflicts {
-                            out.push_str(f);
-                            out.push(if nul { '\0' } else { '\n' });
+                        files.extend(cur_conflicts.iter().cloned());
+                    } else {
+                        files.extend(range_files);
+                        if cur_dirty || cur_staged {
+                            files.push("dirty.txt".into());
                         }
-                    } else if cur_dirty || cur_staged {
-                        out.push_str("dirty.txt");
+                    }
+                    files.sort();
+                    files.dedup();
+                    let mut out = String::new();
+                    for f in &files {
+                        out.push_str(f);
                         out.push(if nul { '\0' } else { '\n' });
                     }
                     ok_out(&out)
                 } else {
-                    ok_out("")
+                    let mut files = range_files;
+                    if cur_dirty || cur_staged {
+                        files.push("dirty.txt".into());
+                    }
+                    files.sort();
+                    files.dedup();
+                    let mut out = String::new();
+                    for f in &files {
+                        out.push_str(&format!(
+                            "diff --git a/{f} b/{f}\n--- a/{f}\n+++ b/{f}\n@@ -1 +1,2 @@\n+// sim diff head={cur_head}\n"
+                        ));
+                    }
+                    ok_out(&out)
                 }
             }
             "add" => {
@@ -1339,16 +1407,43 @@ impl SimExec {
                 ok_out("")
             }
             "commit" => {
-                let parents = if cur_in_merge && let Some(mh) = cur_merge_head {
-                    vec![cur_head, mh]
+                let is_amend = sub_args.iter().any(|a| a == "--amend");
+                let prev_tree = repo
+                    .commit_trees
+                    .get(&cur_head)
+                    .cloned()
+                    .unwrap_or_else(|| tree_sha_for_commit(&cur_head));
+                let staged_tree = wt_key
+                    .as_deref()
+                    .and_then(|p| repo.worktrees.get(p))
+                    .and_then(|w| w.staged_tree.clone())
+                    .or_else(|| repo.staged_tree.clone());
+                let parents = if is_amend {
+                    repo.commits.get(&cur_head).cloned().unwrap_or_default()
+                } else if cur_in_merge && let Some(mh) = cur_merge_head {
+                    vec![cur_head.clone(), mh]
                 } else {
-                    vec![cur_head]
+                    vec![cur_head.clone()]
                 };
+                let seq_label = repo.next_commit_seq;
                 let new_sha = repo.alloc_commit(parents);
+                if is_amend {
+                    repo.commit_trees.insert(new_sha.clone(), prev_tree);
+                    if let Some(files) = repo.commit_files.get(&cur_head).cloned() {
+                        repo.commit_files.insert(new_sha.clone(), files);
+                    }
+                } else {
+                    if let Some(tree) = staged_tree {
+                        repo.commit_trees.insert(new_sha.clone(), tree);
+                    }
+                    repo.commit_files
+                        .insert(new_sha.clone(), vec![format!("src/change_{seq_label}.rs")]);
+                }
                 repo.set_checkout_head(wt_key.as_deref(), new_sha);
                 if let Some(wt) = wt_key.as_deref().and_then(|p| repo.worktrees.get_mut(p)) {
                     wt.dirty = false;
                     wt.staged = false;
+                    wt.staged_tree = None;
                     wt.in_merge = false;
                     wt.merge_head = None;
                     wt.in_cherry_pick = false;
@@ -1356,6 +1451,7 @@ impl SimExec {
                 } else {
                     repo.dirty = false;
                     repo.staged = false;
+                    repo.staged_tree = None;
                     repo.in_merge = false;
                     repo.merge_head = None;
                     repo.in_cherry_pick = false;
@@ -1665,7 +1761,22 @@ impl SimExec {
                 }
                 ok_out("")
             }
-            "write-tree" => ok_out(&format!("{}\n", tree_sha_for_commit(&cur_head))),
+            "write-tree" => {
+                let tree = if cur_dirty || cur_staged {
+                    tree_sha_for_commit(&format!("staged:{cur_head}:{}", repo.next_commit_seq))
+                } else {
+                    repo.commit_trees
+                        .get(&cur_head)
+                        .cloned()
+                        .unwrap_or_else(|| tree_sha_for_commit(&cur_head))
+                };
+                if let Some(wt) = wt_key.as_deref().and_then(|p| repo.worktrees.get_mut(p)) {
+                    wt.staged_tree = Some(tree.clone());
+                } else {
+                    repo.staged_tree = Some(tree.clone());
+                }
+                ok_out(&format!("{tree}\n"))
+            }
             "commit-tree" => {
                 let mut parents = Vec::new();
                 let mut i = 1;
@@ -1850,6 +1961,7 @@ impl SimExec {
                         head_sha,
                         dirty: false,
                         staged: false,
+                        staged_tree: None,
                         in_merge: false,
                         merge_head: None,
                         in_cherry_pick: false,
@@ -2350,6 +2462,72 @@ mod tests {
             !wt1_sentinel.exists(),
             "rebase --abort must remove rebase-merge sentinel"
         );
+        assert!(exec.blocked_commands().is_empty());
+    }
+
+    #[test]
+    fn diff_range_write_tree_amend_and_branch_head_sha() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let wt = tmp.path().join("wt1");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let exec = SimExec::new("test-host");
+        exec.register_git_repo(&repo, SimGitRepo::default());
+        let base_head = exec.head_sha(&repo).unwrap();
+        assert_eq!(exec.branch_head_sha(&repo, "main"), Some(base_head.clone()));
+
+        git_ok(
+            &exec,
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat/diff",
+                wt.to_str().unwrap(),
+                &base_head,
+            ],
+        );
+
+        // Dirty worktree -> add + write-tree + commit must preserve tree SHA across HEAD^{tree}.
+        exec.set_worktree_dirty(&wt, true).unwrap();
+        git_ok(&exec, &wt, &["add", "-A", "--", "."]);
+        let written_tree = git_ok(&exec, &wt, &["write-tree"]);
+        git_ok(&exec, &wt, &["commit", "-m", "initial change"]);
+        assert_eq!(
+            git_ok(&exec, &wt, &["rev-parse", "HEAD^{tree}"]),
+            written_tree
+        );
+
+        // Amending preserves HEAD^{tree} and parent while advancing HEAD SHA.
+        let before_amend = git_ok(&exec, &wt, &["rev-parse", "HEAD"]);
+        git_ok(&exec, &wt, &["commit", "--amend", "-m", "amended change"]);
+        let after_amend = git_ok(&exec, &wt, &["rev-parse", "HEAD"]);
+        assert_ne!(after_amend, before_amend);
+        assert_eq!(
+            git_ok(&exec, &wt, &["rev-parse", "HEAD^{tree}"]),
+            written_tree
+        );
+        assert_eq!(
+            exec.commit_parents(&repo, &after_amend),
+            Some(vec![base_head.clone()])
+        );
+        assert_eq!(exec.branch_head_sha(&repo, "feat/diff"), Some(after_amend));
+
+        // Diff against base returns non-empty files and unified patch.
+        let names = git_ok(
+            &exec,
+            &wt,
+            &["diff", "--no-ext-diff", "--name-only", &base_head, "--"],
+        );
+        assert!(!names.is_empty());
+        let patch = git_ok(
+            &exec,
+            &wt,
+            &["diff", "--no-ext-diff", "--binary", &base_head, "--"],
+        );
+        assert!(patch.contains("diff --git"));
         assert!(exec.blocked_commands().is_empty());
     }
 }
