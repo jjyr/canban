@@ -232,14 +232,22 @@ fn production_sources_have_no_stray_wall_clock_calls() {
         .unwrap()
         .parent()
         .unwrap();
+    let scanned_dirs = [
+        "crates/app-server/src",
+        "crates/storage/src",
+        "crates/context/src",
+        "crates/client/src",
+        "crates/sync/src",
+    ];
     let mut files = Vec::new();
-    collect_rs_files(&workspace_root.join("crates/app-server/src"), &mut files);
-    collect_rs_files(&workspace_root.join("crates/storage/src"), &mut files);
-    collect_rs_files(&workspace_root.join("crates/context/src"), &mut files);
-    assert!(
-        !files.is_empty(),
-        "expected production source files under app-server, storage, and context"
-    );
+    for rel_dir in scanned_dirs {
+        let before = files.len();
+        collect_rs_files(&workspace_root.join(rel_dir), &mut files);
+        assert!(
+            files.len() > before,
+            "expected production source files under {rel_dir}"
+        );
+    }
 
     let mut violations = Vec::new();
     for file in files {

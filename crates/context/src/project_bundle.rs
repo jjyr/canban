@@ -1,6 +1,6 @@
 //! Verified `*.canban.tar.zst` project bundle container for cross-host migration and backup.
 
-use crate::{atomic, digest};
+use crate::{FsDurability, atomic_with_durability, digest};
 use anyhow::{Context, Result, bail, ensure};
 use canban_types::id;
 use serde::{Deserialize, Serialize};
@@ -157,6 +157,26 @@ pub fn write_project_bundle(
     records_json: &[u8],
     files: &[(String, PathBuf)],
 ) -> Result<u64> {
+    write_project_bundle_with_durability(
+        output_path,
+        overwrite,
+        manifest,
+        records_json,
+        files,
+        FsDurability::Full,
+    )
+}
+
+/// Writes and verifies a self-contained `*.canban.tar.zst` project bundle atomically,
+/// applying the requested [`FsDurability`] policy to disk barriers.
+pub fn write_project_bundle_with_durability(
+    output_path: &Path,
+    overwrite: bool,
+    manifest: &ProjectBundleManifest,
+    records_json: &[u8],
+    files: &[(String, PathBuf)],
+    durability: FsDurability,
+) -> Result<u64> {
     ensure!(
         output_path.is_absolute(),
         "Output path must be absolute: {}",
@@ -231,7 +251,9 @@ pub fn write_project_bundle(
 
         let encoder = archive.into_inner()?;
         let file = encoder.finish()?;
-        file.sync_all()?;
+        if durability == FsDurability::Full {
+            file.sync_all()?;
+        }
     }
 
     // Read the entire compressed stream before publication to verify frame integrity.
@@ -272,7 +294,9 @@ pub fn write_project_bundle(
             }
         }
     }
-    File::open(parent)?.sync_all()?;
+    if durability == FsDurability::Full {
+        File::open(parent)?.sync_all()?;
+    }
     Ok(fs::metadata(output_path)?.len())
 }
 
@@ -448,6 +472,23 @@ pub fn extract_project_bundle_files(
     dest_home: &Path,
     allowed_prefixes: &[String],
 ) -> Result<Vec<PathBuf>> {
+    extract_project_bundle_files_with_durability(
+        archive_path,
+        dest_home,
+        allowed_prefixes,
+        FsDurability::Full,
+    )
+}
+
+/// Extracts verified `files/<rel>` entries matching `allowed_prefixes` into `dest_home`,
+/// applying the requested [`FsDurability`] policy to extracted file writes.
+/// On error, removes any files created during this call before returning.
+pub fn extract_project_bundle_files_with_durability(
+    archive_path: &Path,
+    dest_home: &Path,
+    allowed_prefixes: &[String],
+    durability: FsDurability,
+) -> Result<Vec<PathBuf>> {
     let decoder = zstd::Decoder::new(File::open(archive_path)?)?;
     let mut archive = tar::Archive::new(decoder);
     let mut created: Vec<PathBuf> = Vec::new();
@@ -493,7 +534,7 @@ pub fn extract_project_bundle_files(
                 );
                 let mut bytes = Vec::new();
                 entry.read_to_end(&mut bytes)?;
-                atomic(&target, &bytes)?;
+                atomic_with_durability(&target, &bytes, durability)?;
                 created.push(target);
             } else {
                 io::copy(&mut entry, &mut io::sink())?;
@@ -673,6 +714,72 @@ mod tests {
             archive.into_inner().unwrap().finish().unwrap();
         }
         assert!(read_project_bundle(&symlink_tar).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_and_extract_bundle_with_nosync_durability_round_trips_cleanly() {
+        let dir = std::env::temp_dir().join(format!("canban-bundle-nosync-test-{}", id()));
+        let src_home = dir.join("src");
+        let dst_home = dir.join("dst");
+        let out_dir = dir.join("out");
+        fs::create_dir_all(src_home.join("projects/p1/cards/1/resources")).unwrap();
+        let file_rel = "projects/p1/cards/1/resources/note.txt".to_owned();
+        let abs_src = src_home.join(&file_rel);
+        let payload = b"hello nosync project bundle";
+        fs::write(&abs_src, payload).unwrap();
+
+        let bundle_path = out_dir.join("sample.canban.tar.zst");
+        let manifest = sample_manifest(
+            "p1",
+            vec![ProjectBundleFileMeta {
+                path: file_rel.clone(),
+                bytes: payload.len() as u64,
+                digest: digest(payload),
+            }],
+        );
+        let records = br#"{"mode":"nosync"}"#;
+        let written = write_project_bundle_with_durability(
+            &bundle_path,
+            false,
+            &manifest,
+            records,
+            &[(file_rel.clone(), abs_src.clone())],
+            FsDurability::NoSync,
+        )
+        .unwrap();
+        assert!(written > 0);
+
+        // Overwrite works and leaves no stray temporary files in parent directory.
+        write_project_bundle_with_durability(
+            &bundle_path,
+            true,
+            &manifest,
+            records,
+            &[(file_rel, abs_src)],
+            FsDurability::NoSync,
+        )
+        .unwrap();
+        let entries: Vec<_> = fs::read_dir(&out_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec!["sample.canban.tar.zst".to_owned()]);
+
+        let loaded = read_project_bundle(&bundle_path).unwrap();
+        assert_eq!(loaded.manifest, manifest);
+        assert_eq!(loaded.records_json, records);
+
+        let created = extract_project_bundle_files_with_durability(
+            &bundle_path,
+            &dst_home,
+            &["projects/p1/".into()],
+            FsDurability::NoSync,
+        )
+        .unwrap();
+        assert_eq!(created.len(), 1);
+        assert_eq!(fs::read(&created[0]).unwrap(), payload);
 
         let _ = fs::remove_dir_all(&dir);
     }

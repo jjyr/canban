@@ -3,8 +3,11 @@
 use super::*;
 use canban_context::{
     CardBranchHint, ProjectBundleFileMeta, ProjectBundleManifest, ProjectGitHints, WorktreeHint,
-    cleanup_extracted_files, digest, extract_project_bundle_files, read_project_bundle,
-    read_project_bundle_manifest, validate_relative_bundle_path, write_project_bundle,
+    cleanup_extracted_files, digest,
+    project_bundle::{
+        extract_project_bundle_files_with_durability, write_project_bundle_with_durability,
+    },
+    read_project_bundle, read_project_bundle_manifest, validate_relative_bundle_path,
 };
 use canban_herdr::host::Host;
 use canban_storage::env::{SCOPE_PROJECT, apply_env_writes};
@@ -879,12 +882,13 @@ impl AppServer {
         };
 
         let records_json = serde_json::to_vec_pretty(&data.records)?;
-        let bundle_bytes = write_project_bundle(
+        let bundle_bytes = write_project_bundle_with_durability(
             output_path,
             overwrite,
             &data.manifest,
             &records_json,
             &data.files,
+            self.fs_durability,
         )?;
 
         Ok(ExportOutcome {
@@ -1108,8 +1112,12 @@ impl AppServer {
         if loaded.manifest.include_archived {
             allowed_prefixes.push(format!("archives/{pid}/"));
         }
-        let created_files =
-            extract_project_bundle_files(archive_path, &self.home, &allowed_prefixes)?;
+        let created_files = extract_project_bundle_files_with_durability(
+            archive_path,
+            &self.home,
+            &allowed_prefixes,
+            self.fs_durability,
+        )?;
 
         let cleanup_roots = vec![
             self.home.join("projects").join(&pid),
