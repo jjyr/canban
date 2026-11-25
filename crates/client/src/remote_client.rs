@@ -2,14 +2,15 @@
 //! [`HostConnector`] adapters, Tokio async push streams, `canban-sync` outbox/read-cache replay,
 //! AEAD TCP secret sealing, and remote PTY transport.
 use crate::{
-    capabilities::ClientCapabilities,
+    capabilities::{ClientCapabilities, GlobalEnvSyncProvider, LocalHostDriver},
     connector::{ConnectionLease, HostConnector, TcpConnector},
     pairing::{PairingInvite, TransportSecurity},
     push::{PushFrame, change_topic, open_async_subscribe, state_marker},
-    session::SingleHostSession,
+    session::{ApiMismatchError, SingleHostSession},
     store::{
-        CachedHostData, CredentialStore, load_cache, load_hosts, outbox_path, reads_dir,
-        remove_host_files, save_cache, save_hosts, seal_params_for_tcp,
+        CachedHostData, CredentialHostStore, CredentialStore, HostStore, load_cache,
+        load_global_env_sync_fingerprint, outbox_path, reads_dir, save_cache,
+        save_global_env_sync_fingerprint, seal_params_for_tcp,
     },
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -21,15 +22,19 @@ use canban_sync::{
 use canban_terminal::{RemotePtyTransport, session::PtyTransport};
 use canban_transport::ClientTransport;
 use canban_types::{
-    AppEvent, Config, DiscoveredCanbanHost, GlobalEnvSyncSummary, HostConnectionState, HostSummary,
-    HostTransport, RuntimeState, SavedHost, Snapshot, SyncAction, SyncItemState, SyncItemView,
+    AppEvent, Config, DiscoveredCanbanHost, EnvEntryMeta, GlobalEnvSyncHostFailure,
+    GlobalEnvSyncStatus, GlobalEnvSyncSummary, HostConnectionState, HostSummary, HostTransport,
+    RuntimeState, SavedHost, SchedulerSettings, Snapshot, SyncAction, SyncItemState, SyncItemView,
     TerminalEntry, is_device_token, is_pairing_code, normalize_daemon_addr, now,
 };
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock, RwLock, Weak},
+    sync::{
+        Arc, Mutex, OnceLock, RwLock, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::{Notify, broadcast, mpsc, watch};
@@ -38,8 +43,17 @@ const DEFAULT_READ_CACHE_BUDGET: u64 = 20 * 1024 * 1024;
 const PUSH_DEBOUNCE: Duration = Duration::from_millis(30);
 const PUSH_MAX_DEBOUNCE: Duration = Duration::from_millis(100);
 const MAX_BACKOFF: Duration = Duration::from_secs(10);
+const API_MISMATCH_RETRY_DELAY: Duration = Duration::from_secs(30);
 const LEGACY_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const SUBSCRIBE_TOPICS: &[&str] = &["snapshot", "update", "utilities", "usage", "herdr"];
+
+struct AtomicFlagGuard(Arc<AtomicBool>);
+
+impl Drop for AtomicFlagGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
 
 fn is_unsupported_subscribe_error(err: &anyhow::Error) -> bool {
     let msg = format!("{err:#}");
@@ -95,6 +109,19 @@ impl RemoteClientConfig {
     }
 }
 
+/// Configuration options for constructing a [`MultiHostClient`] with custom storage, connectors,
+/// capabilities, optional built-in `"local"` host, optional global-env replication provider, and
+/// optional minimum remote API version.
+pub struct MultiHostClientOptions {
+    pub config: RemoteClientConfig,
+    pub host_store: Arc<dyn HostStore>,
+    pub connector: Arc<dyn HostConnector>,
+    pub capabilities: ClientCapabilities,
+    pub local_host: Option<Arc<dyn LocalHostDriver>>,
+    pub global_env_provider: Option<Arc<dyn GlobalEnvSyncProvider>>,
+    pub min_api_version: Option<u32>,
+}
+
 /// Real-time events emitted by [`RemoteClient`] across all connected hosts.
 #[derive(Clone, Debug)]
 pub enum ClientEvent {
@@ -111,27 +138,36 @@ struct RemoteHostSlot {
     lease: ConnectionLease,
     terminal: Option<Arc<RemotePtyTransport>>,
     connection: HostConnectionState,
+    updating: bool,
     cached: CachedHostData,
+    cache_gen: u64,
     home: String,
     notice: Option<String>,
     reconnect_count: u32,
     last_synced_at: Option<u64>,
     last_marker: Value,
+    next_retry_at: Instant,
     conn_gen: u64,
     supervisor_epoch: u64,
     supervisor_notify: Arc<Notify>,
     draining: Arc<tokio::sync::Mutex<()>>,
+    draining_active: Arc<AtomicBool>,
+    prefetching: Arc<AtomicBool>,
     outbox: Arc<Mutex<Outbox>>,
     reads: Arc<Mutex<ReadCache>>,
+    global_env_synced_fingerprint: Option<String>,
 }
 
 impl RemoteHostSlot {
     fn from_saved(saved: SavedHost, data_dir: &Path, read_cache_budget: u64) -> Self {
-        let cached = load_cache(data_dir, &saved.id).unwrap_or(CachedHostData {
+        let mut cached = load_cache(data_dir, &saved.id).unwrap_or(CachedHostData {
             saved_at: 0,
             snapshot: Snapshot::default(),
             config: Config::default(),
         });
+        if cached.saved_at > 0 {
+            cached.snapshot.register_host_entities(&saved.id);
+        }
         let cached_at = (cached.saved_at > 0).then_some(cached.saved_at);
         let initial_conn = if saved.enabled {
             HostConnectionState::Connecting
@@ -143,24 +179,31 @@ impl RemoteHostSlot {
         };
         let outbox = Outbox::load(outbox_path(data_dir, &saved.id));
         let reads = ReadCache::open(reads_dir(data_dir, &saved.id), read_cache_budget);
+        let global_env_synced_fingerprint = load_global_env_sync_fingerprint(data_dir, &saved.id);
         Self {
             saved,
             client: None,
             lease: ConnectionLease::none(),
             terminal: None,
             connection: initial_conn,
+            updating: false,
             cached,
+            cache_gen: 0,
             home: String::new(),
             notice: None,
             reconnect_count: 0,
-            last_synced_at: None,
+            last_synced_at: cached_at,
             last_marker: Value::Null,
+            next_retry_at: Instant::now(),
             conn_gen: 0,
             supervisor_epoch: 0,
             supervisor_notify: Arc::new(Notify::new()),
             draining: Arc::new(tokio::sync::Mutex::new(())),
+            draining_active: Arc::new(AtomicBool::new(false)),
+            prefetching: Arc::new(AtomicBool::new(false)),
             outbox: Arc::new(Mutex::new(outbox)),
             reads: Arc::new(Mutex::new(reads)),
+            global_env_synced_fingerprint,
         }
     }
 
@@ -174,14 +217,21 @@ impl RemoteHostSlot {
                 || self.saved.id == "local",
             transport_label: self.saved.transport.label().to_owned(),
             endpoint_label: self.saved.transport.endpoint_display(),
-            ssh_target: self.saved.ssh_target.clone(),
+            ssh_target: self
+                .saved
+                .ssh_target
+                .clone()
+                .or_else(|| match &self.saved.transport {
+                    HostTransport::Ssh { target, .. } => Some(target.clone()),
+                    _ => None,
+                }),
             server_id: self.saved.server_id.clone(),
             connection: self.connection.clone(),
             active_agents,
             max_agents: self.cached.config.scheduler.max_agents,
             project_count: self.cached.snapshot.projects.len(),
             reconnect_count: self.reconnect_count,
-            last_synced_at: self.last_synced_at,
+            last_synced_at: self.last_synced_at.or_else(|| self.cached_at()),
             pending_mutations: outbox.pending_count(),
             sync_conflicts: outbox.conflict_count(),
         }
@@ -213,14 +263,21 @@ impl RemoteHostSlot {
     }
 }
 
-/// Shared multi-host Canban client managing pluggable transport connections, Tokio push streams,
-/// offline read cache, and FIFO mutation replay across saved hosts.
+/// Shared multi-host Canban client managing pluggable transport connections, optional built-in
+/// `"local"` primary host, Tokio push streams, offline read cache, and FIFO mutation replay across
+/// saved hosts.
 pub struct MultiHostClient {
     config: RemoteClientConfig,
-    creds: Arc<dyn CredentialStore>,
+    host_store: Arc<dyn HostStore>,
     connector: Arc<dyn HostConnector>,
     capabilities: ClientCapabilities,
+    local_host: Option<Arc<dyn LocalHostDriver>>,
+    local_summary_counts: Mutex<Option<(usize, usize, u64)>>,
+    global_env_provider: Option<Arc<dyn GlobalEnvSyncProvider>>,
+    min_api_version: Option<u32>,
     hosts: RwLock<BTreeMap<String, RemoteHostSlot>>,
+    entity_hosts: RwLock<BTreeMap<String, String>>,
+    acknowledged_owners: Mutex<BTreeMap<String, String>>,
     events: broadcast::Sender<ClientEvent>,
     shutdown_tx: watch::Sender<bool>,
     runtime_handle: tokio::runtime::Handle,
@@ -253,15 +310,34 @@ impl Drop for MultiHostClient {
         drop(leases);
         if let Some(rt) = self.owned_runtime.take() {
             if tokio::runtime::Handle::try_current().is_ok() {
-                std::thread::spawn(move || drop(rt));
+                let _ = std::thread::spawn(move || {
+                    rt.shutdown_timeout(Duration::from_secs(2));
+                })
+                .join();
             } else {
-                drop(rt);
+                rt.shutdown_timeout(Duration::from_secs(2));
             }
         }
     }
 }
 
 fn is_connection_error(err: &anyhow::Error) -> bool {
+    if err.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::WouldBlock
+            )
+        })
+    }) {
+        return true;
+    }
     let msg = format!("{err:#}");
     let lower = msg.to_ascii_lowercase();
     lower.contains("connection refused")
@@ -306,24 +382,46 @@ where
 
 fn entity_id_candidates<'a>(method: &str, params: &'a Value) -> Vec<&'a str> {
     let keys: &[&str] = match method {
-        m if m.starts_with("terminal.") => &["terminal_id", "card_id", "project_id"],
+        m if m.starts_with("terminal.") => &[
+            "terminal_id",
+            "inherit_terminal_id",
+            "card_id",
+            "project_id",
+            "worktree_id",
+        ],
         m if m.starts_with("card.") || m.starts_with("timeline.") || m.starts_with("comment.") => {
-            &["card_id", "project_id", "id"]
+            &["card_id", "project_id", "comment_id", "id"]
         }
         m if m.starts_with("project.") => &["project_id", "id"],
-        m if m.starts_with("workflow.") => &["run_id", "source_id", "project_id", "card_id"],
-        m if m.starts_with("schedule.") => &["schedule_id", "project_id"],
+        m if m.starts_with("workflow.") => &[
+            "run_id",
+            "source_id",
+            "workflow_id",
+            "revision_id",
+            "project_id",
+            "card_id",
+        ],
+        m if m.starts_with("schedule.") => &["schedule_id", "schedule_run_id", "project_id"],
         m if m.starts_with("configuration.") => &["session_id", "project_id"],
         m if m.starts_with("merge_batch.") => &["batch_id", "project_id"],
         _ => &[
             "card_id",
-            "terminal_id",
             "project_id",
+            "schedule_id",
+            "schedule_run_id",
             "run_id",
             "source_id",
-            "schedule_id",
+            "workflow_id",
+            "revision_id",
+            "terminal_id",
+            "worktree_id",
+            "inherit_terminal_id",
             "session_id",
             "batch_id",
+            "execution_id",
+            "comment_id",
+            "notification_id",
+            "target_id",
             "id",
         ],
     };
@@ -332,6 +430,7 @@ fn entity_id_candidates<'a>(method: &str, params: &'a Value) -> Vec<&'a str> {
             params
                 .get(*k)
                 .and_then(Value::as_str)
+                .map(str::trim)
                 .filter(|s| !s.is_empty())
         })
         .collect()
@@ -520,21 +619,16 @@ impl MultiHostClient {
         connector: Arc<dyn HostConnector>,
         capabilities: ClientCapabilities,
     ) -> Result<Arc<Self>> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .thread_name("canban-client")
-            .build()
-            .context("Failed to build MultiHostClient Tokio runtime")?;
-        let handle = runtime.handle().clone();
-        Self::build(
+        let host_store = Arc::new(CredentialHostStore::new(config.data_dir.clone(), creds));
+        Self::from_options(MultiHostClientOptions {
             config,
-            creds,
+            host_store,
             connector,
             capabilities,
-            handle,
-            Some(runtime),
-        )
+            local_host: None,
+            global_env_provider: None,
+            min_api_version: None,
+        })
     }
 
     /// Creates a new [`MultiHostClient`] bound to an existing caller Tokio runtime handle.
@@ -560,37 +654,89 @@ impl MultiHostClient {
         capabilities: ClientCapabilities,
         runtime_handle: tokio::runtime::Handle,
     ) -> Result<Arc<Self>> {
-        Self::build(config, creds, connector, capabilities, runtime_handle, None)
+        let host_store = Arc::new(CredentialHostStore::new(config.data_dir.clone(), creds));
+        Self::from_options_with_runtime(
+            MultiHostClientOptions {
+                config,
+                host_store,
+                connector,
+                capabilities,
+                local_host: None,
+                global_env_provider: None,
+                min_api_version: None,
+            },
+            runtime_handle,
+        )
+    }
+
+    /// Creates a new [`MultiHostClient`] owning a multi-thread Tokio runtime from full options
+    /// (used by Desktop to inject a local host driver, `config/hosts.json` store, SSH connector,
+    /// global-env replication provider, and minimum API version).
+    pub fn from_options(options: MultiHostClientOptions) -> Result<Arc<Self>> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("canban-client")
+            .build()
+            .context("Failed to build MultiHostClient Tokio runtime")?;
+        let handle = runtime.handle().clone();
+        Self::build(options, handle, Some(runtime))
+    }
+
+    /// Creates a new [`MultiHostClient`] bound to an existing Tokio runtime from full options.
+    pub fn from_options_with_runtime(
+        options: MultiHostClientOptions,
+        runtime_handle: tokio::runtime::Handle,
+    ) -> Result<Arc<Self>> {
+        Self::build(options, runtime_handle, None)
     }
 
     fn build(
-        config: RemoteClientConfig,
-        creds: Arc<dyn CredentialStore>,
-        connector: Arc<dyn HostConnector>,
-        capabilities: ClientCapabilities,
+        options: MultiHostClientOptions,
         runtime_handle: tokio::runtime::Handle,
         owned_runtime: Option<tokio::runtime::Runtime>,
     ) -> Result<Arc<Self>> {
-        let saved = load_hosts(&config.data_dir, creds.as_ref());
+        let MultiHostClientOptions {
+            config,
+            host_store,
+            connector,
+            capabilities,
+            local_host,
+            global_env_provider,
+            min_api_version,
+        } = options;
+        let saved = host_store.load_hosts();
         let mut slots = BTreeMap::new();
+        let mut initial_entity_hosts = BTreeMap::new();
         for host in saved {
             if !connector.supports(&host.transport) {
                 continue;
             }
-            slots.insert(
-                host.id.clone(),
-                RemoteHostSlot::from_saved(host, &config.data_dir, config.read_cache_budget_bytes),
-            );
+            let slot =
+                RemoteHostSlot::from_saved(host, &config.data_dir, config.read_cache_budget_bytes);
+            if slot.cached.saved_at > 0 {
+                for (k, v) in &slot.cached.snapshot.entity_hosts {
+                    initial_entity_hosts.insert(k.clone(), v.clone());
+                }
+            }
+            slots.insert(slot.saved.id.clone(), slot);
         }
 
         let (events, _) = broadcast::channel(512);
         let (shutdown_tx, _) = watch::channel(false);
+        let local_transport = local_host.as_ref().map(|l| l.transport());
         let client = Arc::new(Self {
             config,
-            creds,
+            host_store,
             connector,
             capabilities,
+            local_host,
+            local_summary_counts: Mutex::new(None),
+            global_env_provider,
+            min_api_version,
             hosts: RwLock::new(slots),
+            entity_hosts: RwLock::new(initial_entity_hosts),
+            acknowledged_owners: Mutex::new(BTreeMap::new()),
             events,
             shutdown_tx,
             runtime_handle,
@@ -598,6 +744,14 @@ impl MultiHostClient {
             self_weak: OnceLock::new(),
         });
         let _ = client.self_weak.set(Arc::downgrade(&client));
+
+        if let Some(transport) = local_transport {
+            let weak = Arc::downgrade(&client);
+            let shutdown_rx = client.shutdown_tx.subscribe();
+            client.runtime_handle.spawn(async move {
+                local_push_supervisor(weak, transport, shutdown_rx).await;
+            });
+        }
 
         let enabled_ids: Vec<String> = {
             let guard = client.hosts.read().unwrap();
@@ -624,6 +778,116 @@ impl MultiHostClient {
         self.connector.supports(transport)
     }
 
+    /// Returns the local daemon home directory when backed by a built-in `"local"` host.
+    pub fn local_home(&self) -> Option<PathBuf> {
+        self.local_host.as_ref().map(|l| l.home().to_path_buf())
+    }
+
+    /// Returns `true` when this client manages a built-in `"local"` primary host.
+    pub fn has_local_host(&self) -> bool {
+        self.local_host.is_some()
+    }
+
+    /// Sends an RPC directly to the built-in `"local"` primary host (or falls back to
+    /// [`Self::call_routed`] when running pure-remote without a local daemon).
+    pub fn call_local(&self, method: &str, params: Value) -> Result<Value> {
+        if let Some(local) = &self.local_host {
+            local.call(method, params)
+        } else {
+            self.call_routed(method, params, None)
+        }
+    }
+
+    /// Returns the active underlying [`ClientTransport`] for `host_id` (including `"local"`).
+    pub fn transport_for_host(&self, host_id: &str) -> Result<Arc<ClientTransport>> {
+        if (host_id.is_empty() || host_id == "local")
+            && let Some(local) = &self.local_host
+        {
+            return Ok(local.transport());
+        }
+        let guard = self.hosts.read().unwrap();
+        let slot = guard
+            .get(host_id)
+            .with_context(|| format!("Unknown Canban host '{host_id}'"))?;
+        if let Some(client) = &slot.client {
+            return Ok(Arc::clone(client));
+        }
+        bail!(
+            "Host '{}' is currently unavailable ({})",
+            slot.saved.name,
+            slot.connection.short_status()
+        )
+    }
+
+    /// Returns `true` when `host_id` is currently waiting for a scheduled retry deadline
+    /// (for example, the 30-second backoff after an `ApiMismatch` probe).
+    pub fn is_retry_backed_off(&self, host_id: &str) -> bool {
+        self.hosts
+            .read()
+            .unwrap()
+            .get(host_id)
+            .is_some_and(|s| s.next_retry_at > Instant::now())
+    }
+
+    /// Clears any scheduled retry backoff for `host_id` so the next probe runs immediately.
+    pub fn clear_retry_backoff(&self, host_id: &str) {
+        if let Some(slot) = self.hosts.write().unwrap().get_mut(host_id) {
+            slot.next_retry_at = Instant::now();
+        }
+    }
+
+    fn local_summary(&self, local: &dyn LocalHostDriver) -> HostSummary {
+        let local_cfg = local.config();
+        let (local_active, local_projects, last_synced_at) = self
+            .local_summary_counts
+            .lock()
+            .unwrap()
+            .map(|(active, projects, synced_at)| (active, projects, Some(synced_at)))
+            .unwrap_or((0, 0, None));
+        HostSummary {
+            id: "local".into(),
+            name: "This Mac".into(),
+            is_local: true,
+            transport_label: "Local socket".into(),
+            endpoint_label: local.endpoint_label(),
+            ssh_target: None,
+            server_id: local.server_id(),
+            connection: HostConnectionState::Connected {
+                rtt_ms: 0,
+                api_version: local.api_version(),
+                version: local.version(),
+                platform: local.platform(),
+            },
+            active_agents: local_active,
+            max_agents: local_cfg.scheduler.max_agents,
+            project_count: local_projects,
+            reconnect_count: 0,
+            last_synced_at,
+            pending_mutations: 0,
+            sync_conflicts: 0,
+        }
+    }
+
+    fn replace_host_entity_owners(&self, host_id: &str, snap_entities: &BTreeMap<String, String>) {
+        let mut eh = self.entity_hosts.write().unwrap();
+        eh.retain(|k, v| v != host_id || snap_entities.contains_key(k));
+        for (k, v) in snap_entities {
+            match eh.get(k) {
+                Some(existing) if existing != v => {
+                    eh.insert(canban_types::qualify_host_id(host_id, k), v.clone());
+                }
+                _ => {
+                    eh.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+
+    fn qualify_remote_response(&self, host_id: &str, val: &mut Value) {
+        let eh = self.entity_hosts.read().unwrap();
+        canban_types::qualify_remote_value_ids(val, host_id, &eh);
+    }
+
     fn upgrade_self(&self) -> Option<Arc<Self>> {
         self.self_weak.get().and_then(Weak::upgrade)
     }
@@ -641,8 +905,7 @@ impl MultiHostClient {
 
     fn persist_locked(&self, hosts: &BTreeMap<String, RemoteHostSlot>) -> Result<()> {
         let saved: Vec<SavedHost> = hosts.values().map(|s| s.saved.clone()).collect();
-        save_hosts(&self.config.data_dir, &saved, self.creds.as_ref())?;
-        Ok(())
+        self.host_store.save_hosts(&saved)
     }
 
     fn spawn_supervisor(&self, host_id: &str) {
@@ -661,10 +924,11 @@ impl MultiHostClient {
             (slot.supervisor_epoch, prev_notify, next_notify)
         };
         old_notify.notify_waiters();
+        let weak = Arc::downgrade(&this);
         let hid = host_id.to_owned();
         let shutdown_rx = self.shutdown_tx.subscribe();
         self.runtime_handle.spawn(async move {
-            host_supervisor_task(Arc::downgrade(&this), hid, epoch, notify, shutdown_rx).await;
+            host_supervisor_task(weak, hid, epoch, notify, shutdown_rx).await;
         });
     }
 
@@ -704,21 +968,14 @@ impl MultiHostClient {
 
     /// Notifies supervisors when the host OS brings the client app back to the foreground.
     pub fn on_foreground(&self) {
-        self.reconnect(None);
-    }
-
-    /// Wakes reconnect/resync loops for `host_id` (or all enabled hosts when `None`).
-    pub fn reconnect(&self, host_id: Option<&str>) {
         let notifies: Vec<Arc<Notify>> = {
             let mut guard = self.hosts.write().unwrap();
             let mut list = Vec::new();
-            for (id, slot) in guard.iter_mut() {
-                if host_id.is_some_and(|target| target != id) {
+            for slot in guard.values_mut() {
+                if !slot.saved.enabled || slot.updating {
                     continue;
                 }
-                if !slot.saved.enabled {
-                    continue;
-                }
+                slot.next_retry_at = Instant::now();
                 if slot.client.is_none() {
                     slot.connection = HostConnectionState::Connecting;
                 }
@@ -728,6 +985,72 @@ impl MultiHostClient {
         };
         for notify in notifies {
             notify.notify_one();
+        }
+    }
+
+    /// Wakes reconnect/resync loops for `host_id` (or all enabled hosts when `None`).
+    pub fn reconnect(&self, host_id: Option<&str>) {
+        let (notifies, changed_ids): (Vec<Arc<Notify>>, Vec<String>) = {
+            let mut guard = self.hosts.write().unwrap();
+            let mut list = Vec::new();
+            let mut changed = Vec::new();
+            for (id, slot) in guard.iter_mut() {
+                if host_id.is_some_and(|target| target != id) {
+                    continue;
+                }
+                if !slot.saved.enabled || slot.updating {
+                    continue;
+                }
+                slot.next_retry_at = Instant::now();
+                if slot.client.is_some() {
+                    slot.clear_connection(HostConnectionState::Connecting);
+                    changed.push(id.clone());
+                } else if !matches!(slot.connection, HostConnectionState::Connecting) {
+                    slot.connection = HostConnectionState::Connecting;
+                    changed.push(id.clone());
+                }
+                list.push(Arc::clone(&slot.supervisor_notify));
+            }
+            (list, changed)
+        };
+        for id in changed_ids {
+            self.emit_host(
+                &id,
+                AppEvent::Changed {
+                    topic: "host",
+                    card_id: None,
+                },
+            );
+        }
+        for notify in notifies {
+            notify.notify_one();
+        }
+    }
+
+    /// Wakes supervisor(s) without tearing down healthy connections.
+    pub fn wake_host(&self, host_id: &str) {
+        if let Some(notify) = self
+            .hosts
+            .read()
+            .unwrap()
+            .get(host_id)
+            .map(|s| Arc::clone(&s.supervisor_notify))
+        {
+            notify.notify_one();
+        }
+    }
+
+    /// Wakes all remote host supervisors without tearing down healthy connections.
+    pub fn wake_all(&self) {
+        let notifies: Vec<Arc<Notify>> = self
+            .hosts
+            .read()
+            .unwrap()
+            .values()
+            .map(|s| Arc::clone(&s.supervisor_notify))
+            .collect();
+        for n in notifies {
+            n.notify_one();
         }
     }
 
@@ -745,7 +1068,11 @@ impl MultiHostClient {
             let guard = self.hosts.read().unwrap();
             guard
                 .values()
-                .filter(|s| s.saved.enabled)
+                .filter(|s| {
+                    s.saved.enabled
+                        && !s.updating
+                        && (s.client.is_some() || Instant::now() >= s.next_retry_at)
+                })
                 .map(|s| s.saved.id.clone())
                 .collect()
         };
@@ -765,7 +1092,8 @@ impl MultiHostClient {
         invite: &PairingInvite,
         display_name: Option<&str>,
     ) -> Result<HostSummary> {
-        self.pair_internal(None, invite, display_name).await
+        self.pair_internal(None, invite, display_name, None, false)
+            .await
     }
 
     /// Pairs directly with a same-account Tailscale Canban daemon without a pairing URI/code.
@@ -852,6 +1180,8 @@ impl MultiHostClient {
         preferred_id: Option<String>,
         invite: &PairingInvite,
         display_name: Option<&str>,
+        ssh_target: Option<String>,
+        reject_duplicate_server_id: bool,
     ) -> Result<HostSummary> {
         let addr = normalize_daemon_addr(&invite.addr);
         ensure!(
@@ -863,14 +1193,76 @@ impl MultiHostClient {
             addr: addr.clone(),
             token: invite.secret.clone(),
         };
-        let session = SingleHostSession::connect_async(
+        let session_res = SingleHostSession::connect_checked_async(
             self.connector.as_ref(),
             preferred_id.as_deref().unwrap_or("pairing"),
             &tcp_transport,
             &self.config.device_name,
             Value::Null,
+            self.min_api_version,
         )
-        .await?;
+        .await;
+        let session = match session_res {
+            Ok(session) => session,
+            Err(err) => {
+                if let Some(mismatch) = err.downcast_ref::<ApiMismatchError>() {
+                    let hid = preferred_id
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or_else(canban_types::id);
+                    let server_id = mismatch
+                        .server_id
+                        .clone()
+                        .or_else(|| invite.server_id.clone());
+                    self.validate_remote_server_id(
+                        &hid,
+                        server_id.as_deref(),
+                        reject_duplicate_server_id,
+                    )?;
+                    let host_name = display_name
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| invite.host_name.as_deref().filter(|s| !s.trim().is_empty()))
+                        .unwrap_or("Remote Host")
+                        .to_owned();
+                    let saved = SavedHost {
+                        id: hid.clone(),
+                        name: host_name,
+                        transport: tcp_transport,
+                        ssh_target,
+                        server_id,
+                        enabled: true,
+                        added_at: now(),
+                    };
+                    let mut slot = RemoteHostSlot::from_saved(
+                        saved,
+                        &self.config.data_dir,
+                        self.config.read_cache_budget_bytes,
+                    );
+                    slot.connection = HostConnectionState::ApiMismatch {
+                        server_api: mismatch.server_api,
+                        app_api: mismatch.app_api,
+                        version: mismatch.version.clone(),
+                    };
+                    slot.next_retry_at = Instant::now() + API_MISMATCH_RETRY_DELAY;
+                    let summary = slot.summary();
+                    {
+                        let mut guard = self.hosts.write().unwrap();
+                        guard.insert(hid.clone(), slot);
+                        self.persist_locked(&guard)?;
+                    }
+                    self.spawn_supervisor(&hid);
+                    self.emit_host(
+                        &hid,
+                        AppEvent::Changed {
+                            topic: "host",
+                            card_id: None,
+                        },
+                    );
+                    return Ok(summary);
+                }
+                return Err(err);
+            }
+        };
         let token = session
             .upgraded_token()
             .map(str::to_owned)
@@ -886,6 +1278,17 @@ impl MultiHostClient {
             .or_else(|| invite.server_id.clone())
             .filter(|s| !s.trim().is_empty());
 
+        let check_id = preferred_id.as_deref().unwrap_or("");
+        if let Err(err) = self.validate_remote_server_id(
+            check_id,
+            server_id.as_deref(),
+            reject_duplicate_server_id,
+        ) {
+            transport.close();
+            drop(lease);
+            return Err(err);
+        }
+
         let host_name = display_name
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -894,22 +1297,29 @@ impl MultiHostClient {
             .unwrap_or("Remote Host")
             .to_owned();
 
-        let (host_id, summary, need_supervisor, notify) = {
+        let (host_id, summary, need_supervisor, notify, updated_entities) = {
             let mut guard = self.hosts.write().unwrap();
-            let existing_id = server_id
-                .as_ref()
-                .and_then(|sid| {
-                    guard
-                        .values()
-                        .find(|s| s.saved.server_id.as_deref() == Some(sid.as_str()))
-                        .map(|s| s.saved.id.clone())
-                })
-                .or_else(|| {
-                    preferred_id
-                        .as_deref()
-                        .filter(|id| guard.contains_key(*id))
-                        .map(str::to_owned)
-                });
+            let existing_id = if reject_duplicate_server_id {
+                preferred_id
+                    .as_deref()
+                    .filter(|id| guard.contains_key(*id))
+                    .map(str::to_owned)
+            } else {
+                server_id
+                    .as_ref()
+                    .and_then(|sid| {
+                        guard
+                            .values()
+                            .find(|s| s.saved.server_id.as_deref() == Some(sid.as_str()))
+                            .map(|s| s.saved.id.clone())
+                    })
+                    .or_else(|| {
+                        preferred_id
+                            .as_deref()
+                            .filter(|id| guard.contains_key(*id))
+                            .map(str::to_owned)
+                    })
+            };
 
             if let Some(hid) = existing_id {
                 let slot = guard.get_mut(&hid).expect("existing host slot");
@@ -917,6 +1327,9 @@ impl MultiHostClient {
                 slot.clear_connection(HostConnectionState::Connecting);
                 slot.saved.enabled = true;
                 slot.saved.transport = HostTransport::Tcp { addr, token };
+                if let Some(target) = ssh_target {
+                    slot.saved.ssh_target = Some(target);
+                }
                 if let Some(name) = display_name.map(str::trim).filter(|s| !s.is_empty()) {
                     slot.saved.name = name.to_owned();
                 }
@@ -934,10 +1347,11 @@ impl MultiHostClient {
                     Some(&ping_val),
                     None,
                 );
+                let entities = slot.cached.snapshot.entity_hosts.clone();
                 let summary = slot.summary();
                 let notify = was_enabled.then(|| Arc::clone(&slot.supervisor_notify));
                 self.persist_locked(&guard)?;
-                (hid, summary, !was_enabled, notify)
+                (hid, summary, !was_enabled, notify, entities)
             } else {
                 let hid = preferred_id
                     .filter(|s| !s.trim().is_empty())
@@ -946,7 +1360,7 @@ impl MultiHostClient {
                     id: hid.clone(),
                     name: host_name,
                     transport: HostTransport::Tcp { addr, token },
-                    ssh_target: None,
+                    ssh_target,
                     server_id,
                     enabled: true,
                     added_at: now(),
@@ -970,13 +1384,17 @@ impl MultiHostClient {
                     Some(&ping_val),
                     None,
                 );
+                let entities = slot.cached.snapshot.entity_hosts.clone();
                 let summary = slot.summary();
                 guard.insert(hid.clone(), slot);
                 self.persist_locked(&guard)?;
-                (hid, summary, true, None)
+                (hid, summary, true, None, entities)
             }
         };
 
+        if !updated_entities.is_empty() {
+            self.replace_host_entity_owners(&host_id, &updated_entities);
+        }
         if need_supervisor {
             self.spawn_supervisor(&host_id);
         } else if let Some(n) = notify {
@@ -992,6 +1410,37 @@ impl MultiHostClient {
         Ok(summary)
     }
 
+    fn validate_remote_server_id(
+        &self,
+        host_id: &str,
+        server_id: Option<&str>,
+        reject_duplicate: bool,
+    ) -> Result<()> {
+        let Some(sid) = server_id.filter(|s| !s.trim().is_empty()) else {
+            return Ok(());
+        };
+        if let Some(local) = &self.local_host
+            && local.server_id().as_deref() == Some(sid)
+        {
+            bail!(
+                "That address points to This Mac's own Canban service ({sid}), which is already connected locally."
+            );
+        }
+        if reject_duplicate {
+            let guard = self.hosts.read().unwrap();
+            if let Some(dup) = guard
+                .values()
+                .find(|s| s.saved.id != host_id && s.saved.server_id.as_deref() == Some(sid))
+            {
+                bail!(
+                    "That Canban daemon is already connected under '{}'.",
+                    dup.saved.name
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Adds or updates a host synchronously and connects immediately when `host.enabled`.
     pub fn add_host(&self, host: SavedHost) -> Result<HostSummary> {
         block_on_rt(&self.runtime_handle, self.add_host_async(host))
@@ -999,6 +1448,9 @@ impl MultiHostClient {
 
     /// Adds or updates a host asynchronously and connects immediately when `host.enabled`.
     pub async fn add_host_async(&self, mut host: SavedHost) -> Result<HostSummary> {
+        if self.local_host.is_some() {
+            ensure!(host.id != "local", "Invalid remote host ID");
+        }
         ensure!(
             self.connector.supports(&host.transport),
             "Transport {} is not supported by this client",
@@ -1006,9 +1458,10 @@ impl MultiHostClient {
         );
         if let HostTransport::Tcp { addr, token } = &mut host.transport {
             *addr = normalize_daemon_addr(addr);
+            *token = token.trim().to_owned();
             ensure!(!addr.is_empty(), "Host address cannot be empty");
             ensure!(
-                !token.trim().is_empty(),
+                !token.is_empty(),
                 "TCP host requires a device token or pairing code"
             );
         }
@@ -1019,6 +1472,7 @@ impl MultiHostClient {
             host.added_at = now();
         }
 
+        let reject_dup = self.local_host.is_some();
         if host.enabled
             && let HostTransport::Tcp { addr, token } = &host.transport
         {
@@ -1030,27 +1484,37 @@ impl MultiHostClient {
                 secret: token.clone(),
             };
             let display = (!host.name.trim().is_empty()).then_some(host.name.as_str());
-            return self.pair_internal(Some(host.id), &invite, display).await;
+            return self
+                .pair_internal(Some(host.id), &invite, display, host.ssh_target, reject_dup)
+                .await;
         }
 
         if host.enabled {
-            let session = SingleHostSession::connect_async(
+            let session = SingleHostSession::connect_checked_async(
                 self.connector.as_ref(),
                 &host.id,
                 &host.transport,
                 &self.config.device_name,
                 Value::Null,
+                self.min_api_version,
             )
             .await?;
             let (transport, lease, hs) = session.into_parts();
             if host.server_id.is_none() {
                 host.server_id = hs.server_id;
             }
+            if let Err(err) =
+                self.validate_remote_server_id(&host.id, host.server_id.as_deref(), reject_dup)
+            {
+                transport.close();
+                drop(lease);
+                return Err(err);
+            }
             if host.name.trim().is_empty() {
                 host.name = hs.hostname.unwrap_or_else(|| host.id.clone());
             }
             let hid = host.id.clone();
-            let summary = {
+            let (summary, entities) = {
                 let mut guard = self.hosts.write().unwrap();
                 let mut slot = RemoteHostSlot::from_saved(
                     host,
@@ -1071,11 +1535,15 @@ impl MultiHostClient {
                     Some(&hs.ping),
                     None,
                 );
+                let entities = slot.cached.snapshot.entity_hosts.clone();
                 let sum = slot.summary();
                 guard.insert(hid.clone(), slot);
                 self.persist_locked(&guard)?;
-                sum
+                (sum, entities)
             };
+            if !entities.is_empty() {
+                self.replace_host_entity_owners(&hid, &entities);
+            }
             self.spawn_supervisor(&hid);
             self.emit_host(
                 &hid,
@@ -1112,6 +1580,9 @@ impl MultiHostClient {
 
     /// Removes a saved host and deletes its persisted token, cache, outbox, and read cache.
     pub fn remove_host(&self, host_id: &str) -> Result<()> {
+        if self.local_host.is_some() {
+            ensure!(host_id != "local", "Cannot remove This Mac");
+        }
         let removed = {
             let mut guard = self.hosts.write().unwrap();
             let mut slot = guard
@@ -1127,7 +1598,11 @@ impl MultiHostClient {
             slot
         };
         drop(removed);
-        remove_host_files(&self.config.data_dir, host_id, self.creds.as_ref());
+        self.host_store.delete_credentials(host_id);
+        let _ = std::fs::remove_file(crate::store::cache_path(&self.config.data_dir, host_id));
+        let _ = std::fs::remove_file(outbox_path(&self.config.data_dir, host_id));
+        let _ =
+            std::fs::remove_dir_all(crate::store::host_cache_dir(&self.config.data_dir, host_id));
         self.emit_host(
             host_id,
             AppEvent::Changed {
@@ -1140,6 +1615,9 @@ impl MultiHostClient {
 
     /// Renames a saved host and persists the updated host registry.
     pub fn rename_host(&self, host_id: &str, new_name: &str) -> Result<()> {
+        if self.local_host.is_some() {
+            ensure!(host_id != "local", "Cannot rename This Mac");
+        }
         let trimmed = new_name.trim();
         ensure!(!trimmed.is_empty(), "Host name cannot be empty");
         {
@@ -1162,6 +1640,9 @@ impl MultiHostClient {
 
     /// Enables or disables a saved host, disconnecting cleanly or spawning/waking its supervisor.
     pub fn set_host_enabled(&self, host_id: &str, enabled: bool) -> Result<()> {
+        if self.local_host.is_some() {
+            ensure!(host_id != "local", "Cannot disable This Mac");
+        }
         let (spawn_needed, notify) = {
             let mut guard = self.hosts.write().unwrap();
             let slot = guard
@@ -1170,8 +1651,11 @@ impl MultiHostClient {
             let was_enabled = slot.saved.enabled;
             slot.saved.enabled = enabled;
             let (spawn, n) = if enabled {
-                if !was_enabled && slot.client.is_none() {
-                    slot.connection = HostConnectionState::Connecting;
+                if !slot.updating {
+                    slot.next_retry_at = Instant::now();
+                    if !was_enabled && slot.client.is_none() {
+                        slot.connection = HostConnectionState::Connecting;
+                    }
                 }
                 (!was_enabled, Some(Arc::clone(&slot.supervisor_notify)))
             } else {
@@ -1207,27 +1691,66 @@ impl MultiHostClient {
     }
 
     pub fn host_summaries(&self) -> Vec<HostSummary> {
+        let mut out = Vec::new();
+        if let Some(local) = &self.local_host {
+            out.push(self.local_summary(local.as_ref()));
+        }
         let guard = self.hosts.read().unwrap();
-        guard.values().map(RemoteHostSlot::summary).collect()
+        out.extend(guard.values().map(RemoteHostSlot::summary));
+        out
     }
 
     pub fn config_for_host(&self, host_id: &str) -> Config {
+        if (host_id.is_empty() || host_id == "local")
+            && let Some(local) = &self.local_host
+        {
+            return local.config();
+        }
         let guard = self.hosts.read().unwrap();
-        guard
-            .get(host_id)
-            .map(|s| s.cached.config.clone())
-            .unwrap_or_default()
+        if let Some(slot) = guard.get(host_id) {
+            let mut cfg = slot.cached.config.clone();
+            if let Some(client) = &slot.client {
+                let (relay_endpoint, relay_token) = client.relay_endpoint_and_token();
+                cfg.relay_endpoint = Some(relay_endpoint);
+                cfg.relay_token = relay_token;
+            } else if self.local_host.is_some() {
+                cfg.relay_endpoint = Some(format!("mux://offline:{host_id}"));
+                cfg.relay_token = None;
+            }
+            return cfg;
+        }
+        if let Some(local) = &self.local_host {
+            let mut cfg = local.config();
+            cfg.relay_endpoint = Some(format!("mux://offline:{host_id}"));
+            cfg.relay_token = None;
+            return cfg;
+        }
+        Config::default()
     }
 
     pub fn home_for(&self, host_id: &str) -> String {
+        if (host_id.is_empty() || host_id == "local")
+            && let Some(local) = &self.local_host
+        {
+            return local.home().to_string_lossy().into_owned();
+        }
         let guard = self.hosts.read().unwrap();
-        guard
-            .get(host_id)
-            .map(|s| s.home.clone())
-            .unwrap_or_default()
+        if let Some(slot) = guard.get(host_id)
+            && !slot.home.is_empty()
+        {
+            return slot.home.clone();
+        }
+        if self.local_host.is_some() {
+            "~/.canban".into()
+        } else {
+            String::new()
+        }
     }
 
     pub fn server_notice(&self) -> Option<String> {
+        if let Some(notice) = self.local_host.as_ref().and_then(|l| l.server_notice()) {
+            return Some(notice);
+        }
         let guard = self.hosts.read().unwrap();
         guard.values().find_map(|s| s.notice.clone())
     }
@@ -1240,35 +1763,160 @@ impl MultiHostClient {
             .map(|t| Arc::clone(t) as Arc<dyn PtyTransport>)
     }
 
-    /// Merges all enabled (and offline-with-cache) hosts with optimistic `canban-sync` projections.
+    /// Merges the built-in `"local"` host (when present) and all enabled (plus mobile offline-cached)
+    /// remote hosts with optimistic `canban-sync` projections, refreshing the O(1) routing table.
     pub fn merged_snapshot(&self) -> Result<Snapshot> {
-        let guard = self.hosts.read().unwrap();
-        let mut merged = Snapshot::default();
-        for slot in guard.values() {
-            if !slot.saved.enabled && slot.cached.saved_at == 0 {
-                continue;
-            }
-            let summary = slot.summary();
-            merged
+        let mut merged = if let Some(local) = &self.local_host {
+            let mut combined = local.snapshot()?;
+            let local_active = count_active_agents(&combined);
+            let local_projects = combined.projects.len();
+            let synced_at = now();
+            *self.local_summary_counts.lock().unwrap() =
+                Some((local_active, local_projects, synced_at));
+            combined.register_host_entities("local");
+            combined
                 .host_summaries
-                .insert(slot.saved.id.clone(), summary.clone());
-            let outbox = slot.outbox.lock().unwrap();
-            let mut host_snap = slot.cached.snapshot.clone();
-            if !outbox.ops.is_empty() {
-                canban_sync::apply(&mut host_snap, &slot.saved.id, &outbox.ops);
-            }
-            host_snap.register_host_entities(&slot.saved.id);
-            if slot.saved.enabled || !host_snap.projects.is_empty() || !host_snap.cards.is_empty() {
-                merged.merge_remote_snapshot(host_snap, summary);
+                .insert("local".into(), self.local_summary(local.as_ref()));
+            combined
+        } else {
+            Snapshot::default()
+        };
+
+        let remote_snapshots: Vec<(Option<Snapshot>, HostSummary)> = {
+            let guard = self.hosts.read().unwrap();
+            guard
+                .values()
+                .filter(|slot| {
+                    if self.local_host.is_some() {
+                        slot.saved.enabled
+                    } else {
+                        slot.saved.enabled || slot.cached.saved_at > 0
+                    }
+                })
+                .map(|slot| {
+                    let ops = slot.outbox.lock().unwrap().ops.clone();
+                    let snap = if slot.cached.saved_at > 0
+                        || !slot.cached.snapshot.projects.is_empty()
+                        || !slot.cached.snapshot.cards.is_empty()
+                    {
+                        let mut s = slot.cached.snapshot.clone();
+                        if !ops.is_empty() {
+                            canban_sync::apply(&mut s, &slot.saved.id, &ops);
+                        }
+                        s.register_host_entities(&slot.saved.id);
+                        Some(s)
+                    } else if !ops.is_empty() {
+                        let mut s = Snapshot::default();
+                        canban_sync::apply(&mut s, &slot.saved.id, &ops);
+                        s.register_host_entities(&slot.saved.id);
+                        Some(s)
+                    } else {
+                        None
+                    };
+                    (snap, slot.summary())
+                })
+                .collect()
+        };
+
+        for (snap_opt, summary) in remote_snapshots {
+            if let Some(remote_snap) = snap_opt {
+                merged.merge_remote_snapshot(remote_snap, summary);
+            } else {
+                merged.host_summaries.insert(summary.id.clone(), summary);
             }
         }
+
+        self.acknowledged_owners.lock().unwrap().retain(|id, host| {
+            if merged.entity_hosts.contains_key(id) || !merged.host_summaries.contains_key(host) {
+                return false;
+            }
+            merged.entity_hosts.insert(id.clone(), host.clone());
+            true
+        });
+        *self.entity_hosts.write().unwrap() = merged.entity_hosts.clone();
         Ok(merged)
     }
 
     /// Merges the lightweight runtime state (`terminals`, `terminal_contexts`, `reclaim_status`,
-    /// `merging_cards`) across enabled and offline-cached hosts with optimistic outbox projections.
+    /// `merging_cards`) across `"local"` (when present) and enabled remote hosts.
     pub fn merged_runtime_state(&self) -> Result<RuntimeState> {
         use std::collections::HashSet;
+
+        if let Some(local) = &self.local_host {
+            let mut combined = local.runtime_state()?;
+            let local_active = combined
+                .host_active_agents
+                .get("local")
+                .copied()
+                .unwrap_or(0);
+            {
+                let mut counts = self.local_summary_counts.lock().unwrap();
+                let prev_projects = counts.map(|(_, p, _)| p).unwrap_or(0);
+                *counts = Some((local_active, prev_projects, now()));
+            }
+            combined.register_host("local");
+
+            let remote_states: Vec<(String, RuntimeState)> = {
+                let guard = self.hosts.read().unwrap();
+                guard
+                    .values()
+                    .filter(|slot| slot.saved.enabled)
+                    .filter_map(|slot| {
+                        let ops = slot.outbox.lock().unwrap().ops.clone();
+                        let snap = if slot.cached.saved_at > 0
+                            || !slot.cached.snapshot.projects.is_empty()
+                            || !slot.cached.snapshot.cards.is_empty()
+                        {
+                            let mut s = slot.cached.snapshot.clone();
+                            if !ops.is_empty() {
+                                canban_sync::apply(&mut s, &slot.saved.id, &ops);
+                            }
+                            Some(s)
+                        } else if !ops.is_empty() {
+                            let mut s = Snapshot::default();
+                            canban_sync::apply(&mut s, &slot.saved.id, &ops);
+                            Some(s)
+                        } else {
+                            None
+                        }?;
+                        let active_agents = count_active_agents(&snap);
+                        let rt = RuntimeState {
+                            terminals: snap.terminals,
+                            terminal_contexts: snap.terminal_contexts,
+                            reclaim_status: snap.reclaim_status,
+                            merging_cards: snap.merging_cards,
+                            terminal_hosts: BTreeMap::new(),
+                            host_active_agents: BTreeMap::from([(
+                                slot.saved.id.clone(),
+                                active_agents,
+                            )]),
+                        };
+                        Some((slot.saved.id.clone(), rt))
+                    })
+                    .collect()
+            };
+
+            let entity_owners = self.entity_hosts.read().unwrap().clone();
+            for (host_id, remote_rt) in remote_states {
+                combined.merge_remote_with_owners(remote_rt, &host_id, &entity_owners);
+            }
+
+            let acknowledged: Vec<(String, String)> = self
+                .acknowledged_owners
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            let mut routing = self.entity_hosts.write().unwrap();
+            for (tid, host) in &combined.terminal_hosts {
+                routing.insert(tid.clone(), host.clone());
+            }
+            for (id, host) in acknowledged {
+                routing.entry(id).or_insert(host);
+            }
+            return Ok(combined);
+        }
 
         let guard = self.hosts.read().unwrap();
         let mut combined = RuntimeState::default();
@@ -1316,16 +1964,73 @@ impl MultiHostClient {
         Ok(combined)
     }
 
-    /// Resolves which saved host owns the target entity or project for an RPC call.
+    /// Resolves which host (`"local"` or a saved remote host ID) owns the target entity/project.
     pub fn resolve_target_host(
         &self,
         method: &str,
         params: &Value,
         active_project_id: Option<&str>,
     ) -> String {
-        if let Some(explicit) = params["host_id"].as_str().filter(|s| !s.is_empty()) {
+        if let Some(explicit) = params["host_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             return explicit.to_owned();
         }
+        if self.local_host.is_some() {
+            if method == "env.save" {
+                return match params["scope"].as_str().unwrap_or("") {
+                    "global" => "local".into(),
+                    "project" => {
+                        let target_id = params["target_id"]
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty());
+                        if let Some(tid) = target_id
+                            && let Some((h, _)) = canban_types::split_qualified_host_id(tid)
+                        {
+                            return h.to_owned();
+                        }
+                        if let Some(pid) = active_project_id.filter(|s| !s.is_empty())
+                            && let Some((h, _)) = canban_types::split_qualified_host_id(pid)
+                            && target_id.is_none()
+                        {
+                            return h.to_owned();
+                        }
+                        let map = self.entity_hosts.read().unwrap();
+                        target_id
+                            .and_then(|id| map.get(id).cloned())
+                            .or_else(|| {
+                                active_project_id
+                                    .filter(|s| !s.is_empty())
+                                    .and_then(|pid| map.get(pid).cloned())
+                            })
+                            .unwrap_or_else(|| "local".into())
+                    }
+                    _ => "local".into(),
+                };
+            }
+            if method.starts_with("utilities.")
+                || method.starts_with("update.")
+                || method.starts_with("workflow.default.")
+                || method == "host.discover"
+                || method == "host.discover_canban"
+                || method == "activity.record"
+                || method.starts_with("github.auth.")
+                || matches!(
+                    method,
+                    "github.status"
+                        | "github.search"
+                        | "github.item"
+                        | "review.github_pr"
+                        | "review.github_pr_file"
+                )
+            {
+                return "local".into();
+            }
+        }
+
         let candidates = entity_id_candidates(method, params);
         for candidate in &candidates {
             if let Some((h, _)) = canban_types::split_qualified_host_id(candidate) {
@@ -1336,6 +2041,19 @@ impl MultiHostClient {
             && let Some((h, _)) = canban_types::split_qualified_host_id(pid)
         {
             return h.to_owned();
+        }
+        {
+            let map = self.entity_hosts.read().unwrap();
+            for candidate in &candidates {
+                if let Some(h) = map.get(*candidate) {
+                    return h.clone();
+                }
+            }
+            if let Some(pid) = active_project_id.filter(|s| !s.is_empty())
+                && let Some(h) = map.get(pid)
+            {
+                return h.clone();
+            }
         }
         let guard = self.hosts.read().unwrap();
         for candidate in candidates {
@@ -1355,6 +2073,9 @@ impl MultiHostClient {
                     return slot.saved.id.clone();
                 }
             }
+        }
+        if self.local_host.is_some() {
+            return "local".into();
         }
         guard
             .values()
@@ -1385,10 +2106,54 @@ impl MultiHostClient {
         mut params: Value,
         active_project_id: Option<&str>,
     ) -> Result<Value> {
+        if let Some(local) = &self.local_host {
+            if method == "env.save" && params["scope"].as_str() == Some("global") {
+                if let Some(obj) = params.as_object_mut() {
+                    obj.remove("host_id");
+                }
+                let res = local.call(method, params)?;
+                self.emit_host(
+                    "local",
+                    AppEvent::Changed {
+                        topic: "configuration",
+                        card_id: None,
+                    },
+                );
+                self.wake_all();
+                return Ok(res);
+            }
+            if method == "notifications.read_all"
+                && params["host_id"].is_null()
+                && params["project_id"]
+                    .as_str()
+                    .is_none_or(|s| s.trim().is_empty())
+            {
+                let local_res = local.call(method, params.clone())?;
+                let remote_clients: Vec<(String, Arc<ClientTransport>)> = {
+                    let guard = self.hosts.read().unwrap();
+                    guard
+                        .iter()
+                        .filter_map(|(id, slot)| Some((id.clone(), slot.client.clone()?)))
+                        .collect()
+                };
+                for (hid, client) in remote_clients {
+                    if client.call_async(method, &params).await.is_ok() {
+                        let _ = self.refresh_host_now_async(&hid, &client, None, None).await;
+                    }
+                }
+                return Ok(local_res);
+            }
+        }
+
         let host_id = self.resolve_target_host(method, &params, active_project_id);
         ensure!(!host_id.is_empty(), "No remote Canban host configured");
         if let Some(obj) = params.as_object_mut() {
             obj.remove("host_id");
+        }
+        if host_id == "local"
+            && let Some(local) = &self.local_host
+        {
+            return local.call(method, params);
         }
         canban_types::strip_qualified_host_ids(&mut params, &host_id);
 
@@ -1396,7 +2161,57 @@ impl MultiHostClient {
             return self.handle_resolve_preview_async(&host_id, &params).await;
         }
 
-        let (client_opt, client_gen, token_opt, card_blocked) = {
+        if canban_sync::is_read_cacheable_method(method) {
+            let (client_opt, client_gen) = {
+                let guard = self.hosts.read().unwrap();
+                let slot = guard
+                    .get(&host_id)
+                    .with_context(|| format!("Unknown host '{host_id}'"))?;
+                (slot.client.clone(), slot.conn_gen)
+            };
+            if let Some(client) = client_opt {
+                match client.call_async(method, &params).await {
+                    Ok(mut val) => {
+                        self.record_online_read_cache(&host_id, method, &params, &val);
+                        if method == "timeline.list"
+                            && let Some(cid) = params["card_id"].as_str().filter(|s| !s.is_empty())
+                        {
+                            let guard = self.hosts.read().unwrap();
+                            if let Some(slot) = guard.get(&host_id) {
+                                let outbox = slot.outbox.lock().unwrap();
+                                val = cache_and_augment_timeline(
+                                    val,
+                                    method,
+                                    &outbox,
+                                    &slot.cached.snapshot,
+                                    cid,
+                                );
+                            }
+                        }
+                        self.qualify_remote_response(&host_id, &mut val);
+                        return Ok(val);
+                    }
+                    Err(err) if is_connection_error(&err) => {
+                        self.mark_slot_disconnected(
+                            &host_id,
+                            Some(client_gen),
+                            err.to_string(),
+                            true,
+                        );
+                        let mut fallback = self.offline_fallback(&host_id, method, params, err)?;
+                        self.qualify_remote_response(&host_id, &mut fallback);
+                        return Ok(fallback);
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+            let mut fallback =
+                self.offline_fallback(&host_id, method, params, anyhow!("Remote host is offline"))?;
+            self.qualify_remote_response(&host_id, &mut fallback);
+            return Ok(fallback);
+        }
+
+        let (host_name, status_str, client_opt, client_gen, token_opt, card_blocked) = {
             let guard = self.hosts.read().unwrap();
             let slot = guard
                 .get(&host_id)
@@ -1410,37 +2225,358 @@ impl MultiHostClient {
                     .contains("__global_env__"),
                 QueueDecision::Queue(kind) if kind != MutationKind::CreateCard => {
                     let cid = extract_card_id_for_mutation(&params);
-                    slot.outbox.lock().unwrap().blocked_cards().contains(&cid)
+                    let ob = slot.outbox.lock().unwrap();
+                    ob.blocked_cards().contains(&cid) || ob.ops.iter().any(|m| m.card_id == cid)
                 }
                 _ => false,
             };
             (
+                slot.saved.name.clone(),
+                slot.connection.short_status(),
                 slot.client.clone(),
                 slot.conn_gen,
                 slot.tcp_token(),
                 blocked,
             )
         };
+        let unavailable_err =
+            || anyhow!("Host '{host_name}' is currently unavailable ({status_str})");
 
-        if let Some(client) = client_opt
-            && !card_blocked
-        {
-            let raw_params_for_cache = params.clone();
-            seal_params_for_tcp(method, &mut params, token_opt.as_deref())?;
-            match client.call_async(method, &params).await {
-                Ok(val) => {
-                    self.record_online_read_cache(&host_id, method, &raw_params_for_cache, &val);
-                    return Ok(val);
+        let mut res = match canban_sync::classify_remote_mutation(method, &params) {
+            QueueDecision::RejectOffline(msg) => {
+                if let Some(client) = client_opt.as_ref() {
+                    seal_params_for_tcp(method, &mut params, token_opt.as_deref())?;
+                    match client.call_async(method, &params).await {
+                        Ok(val) => val,
+                        Err(err) if is_connection_error(&err) => {
+                            self.mark_slot_disconnected(
+                                &host_id,
+                                Some(client_gen),
+                                err.to_string(),
+                                true,
+                            );
+                            bail!("{msg} ({host_name})");
+                        }
+                        Err(err) => return Err(err),
+                    }
+                } else {
+                    bail!("{msg} ({host_name})");
                 }
-                Err(err) if is_connection_error(&err) => {
-                    self.mark_slot_disconnected(&host_id, Some(client_gen), err.to_string(), true);
-                    return self.offline_fallback(&host_id, method, raw_params_for_cache, err);
+            }
+            QueueDecision::NotQueueable => {
+                let client = client_opt.as_ref().ok_or_else(unavailable_err)?;
+                seal_params_for_tcp(method, &mut params, token_opt.as_deref())?;
+                match client.call_async(method, &params).await {
+                    Ok(val) => val,
+                    Err(err) if is_connection_error(&err) => {
+                        self.mark_slot_disconnected(
+                            &host_id,
+                            Some(client_gen),
+                            err.to_string(),
+                            true,
+                        );
+                        return Err(err);
+                    }
+                    Err(err) => return Err(err),
                 }
-                Err(err) => return Err(err),
+            }
+            QueueDecision::Queue(kind) => {
+                let request_key = params["request_key"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(canban_types::uuid_v4);
+                if let Some(obj) = params.as_object_mut() {
+                    obj.insert("request_key".into(), json!(request_key));
+                    if matches!(kind, MutationKind::CreateCard | MutationKind::AddComment)
+                        && obj
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .is_none_or(str::is_empty)
+                    {
+                        obj.insert("id".into(), json!(canban_types::id()));
+                    }
+                }
+                {
+                    let guard = self.hosts.read().unwrap();
+                    if let Some(slot) = guard.get(&host_id) {
+                        let ob = slot.outbox.lock().unwrap();
+                        if let Some(existing) = ob.ops.iter().find(|m| m.id == request_key).cloned()
+                        {
+                            return canban_sync::synthetic_receipt(
+                                &existing,
+                                &slot.cached.snapshot,
+                                &ob.ops,
+                                &host_id,
+                            );
+                        }
+                    }
+                }
+
+                let (live_reply, sent_before_drop) =
+                    if let (Some(client), false) = (client_opt.as_ref(), card_blocked) {
+                        let mut wire_params = params.clone();
+                        seal_params_for_tcp(method, &mut wire_params, token_opt.as_deref())?;
+                        match client.call_async(method, &wire_params).await {
+                            Ok(val) => (Some(val), false),
+                            Err(err) if is_connection_error(&err) => {
+                                self.mark_slot_disconnected(
+                                    &host_id,
+                                    Some(client_gen),
+                                    err.to_string(),
+                                    true,
+                                );
+                                (None, true)
+                            }
+                            Err(err) => return Err(err),
+                        }
+                    } else {
+                        (None, false)
+                    };
+
+                if let Some(val) = live_reply {
+                    val
+                } else {
+                    return self.enqueue_offline_mutation(
+                        &host_id,
+                        kind,
+                        request_key,
+                        params,
+                        sent_before_drop,
+                        client_opt.is_some(),
+                    );
+                }
+            }
+        };
+
+        self.finalize_online_remote_call(&host_id, method, client_opt.as_ref(), &mut res)
+            .await;
+        Ok(res)
+    }
+
+    async fn finalize_online_remote_call(
+        &self,
+        host_id: &str,
+        method: &str,
+        client_opt: Option<&Arc<ClientTransport>>,
+        res: &mut Value,
+    ) {
+        let is_read_only = matches!(
+            method,
+            "app.ping"
+                | "app.state"
+                | "runtime.state"
+                | "app.snapshot"
+                | "agent.catalog"
+                | "diagnostics.status"
+                | "diagnostics.logs"
+                | "directory.list"
+                | "project.detect_github"
+                | "project.archived.list"
+                | "project.export"
+                | "git.compare"
+                | "git.refs"
+                | "git.log"
+                | "git.commit_detail"
+                | "git.file_lines"
+                | "review.preview"
+                | "card.resolve.preview"
+                | "execution.output"
+                | "resource.read"
+                | "timeline.list"
+                | "activity.record"
+                | "insights.events"
+                | "insights.activity"
+                | "insights.activity_buckets"
+                | "env.preview"
+                | "host.env.keys"
+                | "usage.status"
+                | "usage.refresh"
+                | "viewer.presence"
+        );
+        if is_read_only {
+            self.qualify_remote_response(host_id, res);
+            return;
+        }
+        if matches!(
+            method,
+            "config.agents.save" | "agent.setup" | "scheduler.configure" | "env.save"
+        ) {
+            {
+                let mut guard = self.hosts.write().unwrap();
+                if let Some(slot) = guard.get_mut(host_id) {
+                    slot.cache_gen = slot.cache_gen.wrapping_add(1);
+                    match method {
+                        "config.agents.save" | "agent.setup" => {
+                            if let Ok(cfg) = serde_json::from_value::<Config>(res.clone()) {
+                                slot.cached.config = cfg;
+                            }
+                        }
+                        "scheduler.configure" => {
+                            if let Ok(settings) =
+                                serde_json::from_value::<SchedulerSettings>(res.clone())
+                            {
+                                slot.cached.config.scheduler = settings;
+                            }
+                        }
+                        "env.save" => {
+                            if let (Some(snap_key), Ok(env_meta)) = (
+                                res["snapshot_key"].as_str(),
+                                serde_json::from_value::<BTreeMap<String, EnvEntryMeta>>(
+                                    res["env"].clone(),
+                                ),
+                            ) {
+                                if env_meta.is_empty() {
+                                    slot.cached.snapshot.scoped_env.remove(snap_key);
+                                } else {
+                                    slot.cached
+                                        .snapshot
+                                        .scoped_env
+                                        .insert(snap_key.to_owned(), env_meta);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            self.wake_host(host_id);
+        } else if matches!(
+            method,
+            "card.create"
+                | "card.move"
+                | "card.resolve"
+                | "card.reopen"
+                | "card.hold_auto_merge"
+                | "comment.add"
+                | "comment.update"
+                | "comment.delete"
+                | "notifications.read"
+                | "schedule.toggle"
+                | "github.issue.add"
+                | "github.item.add"
+                | "terminal.create"
+        ) {
+            self.qualify_remote_response(host_id, res);
+            if matches!(
+                method,
+                "card.create" | "github.issue.add" | "github.item.add" | "terminal.create"
+            ) && let Some(id) = res["id"].as_str()
+            {
+                let existing_other = {
+                    let eh = self.entity_hosts.read().unwrap();
+                    eh.get(id).is_some_and(|owner| owner != host_id)
+                };
+                let tracked_id = if existing_other {
+                    let q = canban_types::qualify_host_id(host_id, id);
+                    res["id"] = json!(q);
+                    q
+                } else {
+                    id.to_owned()
+                };
+                self.acknowledged_owners
+                    .lock()
+                    .unwrap()
+                    .insert(tracked_id.clone(), host_id.to_owned());
+                self.entity_hosts
+                    .write()
+                    .unwrap()
+                    .insert(tracked_id, host_id.to_owned());
+            }
+            self.wake_host(host_id);
+        } else {
+            self.qualify_remote_response(host_id, res);
+            if let Some(client) = client_opt {
+                let _ = self
+                    .refresh_host_now_async(host_id, client, None, None)
+                    .await;
             }
         }
+        self.emit_host(
+            host_id,
+            AppEvent::Changed {
+                topic: "application",
+                card_id: None,
+            },
+        );
+    }
 
-        self.offline_fallback(&host_id, method, params, anyhow!("Remote host is offline"))
+    fn enqueue_offline_mutation(
+        &self,
+        host_id: &str,
+        kind: MutationKind,
+        mutation_id: String,
+        params: Value,
+        sent_before_drop: bool,
+        should_drain: bool,
+    ) -> Result<Value> {
+        let card_id = match kind {
+            MutationKind::SyncGlobalEnv => String::new(),
+            MutationKind::CreateCard => params["id"].as_str().unwrap_or_default().to_owned(),
+            _ => extract_card_id_for_mutation(&params),
+        };
+        let receipt = {
+            let guard = self.hosts.read().unwrap();
+            let slot = guard
+                .get(host_id)
+                .with_context(|| format!("Unknown host '{host_id}'"))?;
+            let base = if kind == MutationKind::UpdateCard {
+                let mut projected = slot.cached.snapshot.clone();
+                let existing_ops = slot.outbox.lock().unwrap().ops.clone();
+                canban_sync::apply(&mut projected, host_id, &existing_ops);
+                build_update_base(&params, &projected, &card_id)
+            } else {
+                UpdateBase::default()
+            };
+            let mutation = Mutation {
+                id: mutation_id,
+                host_id: host_id.to_owned(),
+                card_id: card_id.clone(),
+                kind,
+                params: params.clone(),
+                base,
+                sent_params: if sent_before_drop {
+                    params
+                } else {
+                    Value::Null
+                },
+                retry_same_params: sent_before_drop,
+                state: MutationState::Queued,
+                created_at: now(),
+                attempts: u32::from(sent_before_drop),
+            };
+            let mut outbox = slot.outbox.lock().unwrap();
+            let (stored, _) = outbox.enqueue(mutation)?;
+            outbox.save()?;
+            canban_sync::synthetic_receipt(&stored, &slot.cached.snapshot, &outbox.ops, host_id)
+                .context("Failed to compute offline synthetic receipt")?
+        };
+        if kind == MutationKind::CreateCard && !card_id.is_empty() {
+            self.acknowledged_owners
+                .lock()
+                .unwrap()
+                .insert(card_id.clone(), host_id.to_owned());
+            self.entity_hosts
+                .write()
+                .unwrap()
+                .insert(card_id.clone(), host_id.to_owned());
+        }
+        self.emit_host(
+            host_id,
+            AppEvent::Changed {
+                topic: "application",
+                card_id: (!card_id.is_empty()).then_some(card_id),
+            },
+        );
+        if should_drain && let Some(this) = self.upgrade_self() {
+            let hid = host_id.to_owned();
+            self.runtime_handle.spawn(async move {
+                let _ = this.drain_outbox_async(&hid).await;
+            });
+        }
+        Ok(receipt)
     }
 
     async fn handle_resolve_preview_async(&self, host_id: &str, params: &Value) -> Result<Value> {
@@ -1466,7 +2602,12 @@ impl MultiHostClient {
         let card_id = params["card_id"]
             .as_str()
             .context("card.resolve.preview requires card_id")?;
-        canban_sync::offline_resolve_preview(&slot.cached.snapshot, card_id, &slot.saved.name)
+        let ops = slot.outbox.lock().unwrap().ops.clone();
+        let mut snap = slot.cached.snapshot.clone();
+        if !ops.is_empty() {
+            canban_sync::apply(&mut snap, host_id, &ops);
+        }
+        canban_sync::offline_resolve_preview(&snap, card_id, &slot.saved.name)
     }
 
     fn record_online_read_cache(&self, host_id: &str, method: &str, params: &Value, val: &Value) {
@@ -1494,7 +2635,7 @@ impl MultiHostClient {
         &self,
         host_id: &str,
         method: &str,
-        mut params: Value,
+        params: Value,
         conn_err: anyhow::Error,
     ) -> Result<Value> {
         if canban_sync::is_read_cacheable_method(method) {
@@ -1517,14 +2658,25 @@ impl MultiHostClient {
             }
             if method == "timeline.list" {
                 let card_id = params["card_id"].as_str().unwrap_or("");
+                let is_created_offline = outbox
+                    .ops
+                    .iter()
+                    .any(|m| m.card_id == card_id && m.kind == MutationKind::CreateCard);
                 let pending = canban_sync::pending_comment_events(
                     &outbox.ops,
                     card_id,
                     &slot.cached.snapshot,
                 );
-                if !pending.is_empty() {
+                if is_created_offline || !pending.is_empty() {
                     return Ok(cache_and_augment_timeline(
-                        json!({"events": []}),
+                        json!({
+                            "events": [],
+                            "next_cursor": Value::Null,
+                            "last_sequence": 0,
+                            "highwater": 0,
+                            "has_more_before": false,
+                            "oldest_sequence": Value::Null,
+                        }),
                         method,
                         &outbox,
                         &slot.cached.snapshot,
@@ -1534,84 +2686,7 @@ impl MultiHostClient {
             }
             return Err(conn_err);
         }
-
-        match canban_sync::classify_remote_mutation(method, &params) {
-            QueueDecision::Queue(kind) => {
-                let mutation_id = canban_types::id();
-                let card_id = match kind {
-                    MutationKind::SyncGlobalEnv => String::new(),
-                    MutationKind::CreateCard => {
-                        let cid = params["id"]
-                            .as_str()
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_owned)
-                            .unwrap_or_else(canban_types::id);
-                        if let Some(obj) = params.as_object_mut() {
-                            obj.entry("id".to_owned()).or_insert_with(|| json!(cid));
-                            obj.entry("request_key".to_owned())
-                                .or_insert_with(|| json!(mutation_id));
-                        }
-                        cid
-                    }
-                    MutationKind::AddComment => {
-                        let cid = extract_card_id_for_mutation(&params);
-                        if let Some(obj) = params.as_object_mut() {
-                            let ev_id = canban_types::id();
-                            obj.entry("id".to_owned()).or_insert_with(|| json!(ev_id));
-                            obj.entry("request_key".to_owned())
-                                .or_insert_with(|| json!(mutation_id));
-                        }
-                        cid
-                    }
-                    _ => extract_card_id_for_mutation(&params),
-                };
-
-                let receipt = {
-                    let guard = self.hosts.read().unwrap();
-                    let slot = guard
-                        .get(host_id)
-                        .with_context(|| format!("Unknown host '{host_id}'"))?;
-                    let base = if kind == MutationKind::UpdateCard {
-                        build_update_base(&params, &slot.cached.snapshot, &card_id)
-                    } else {
-                        UpdateBase::default()
-                    };
-                    let mutation = Mutation {
-                        id: mutation_id,
-                        host_id: host_id.to_owned(),
-                        card_id: card_id.clone(),
-                        kind,
-                        params,
-                        base,
-                        sent_params: Value::Null,
-                        retry_same_params: false,
-                        state: MutationState::Queued,
-                        created_at: now(),
-                        attempts: 0,
-                    };
-                    let mut outbox = slot.outbox.lock().unwrap();
-                    let (stored, _) = outbox.enqueue(mutation)?;
-                    outbox.save()?;
-                    canban_sync::synthetic_receipt(
-                        &stored,
-                        &slot.cached.snapshot,
-                        &outbox.ops,
-                        host_id,
-                    )
-                    .context("Failed to compute offline synthetic receipt")?
-                };
-                self.emit_host(
-                    host_id,
-                    AppEvent::Changed {
-                        topic: "application",
-                        card_id: (!card_id.is_empty()).then_some(card_id),
-                    },
-                );
-                Ok(receipt)
-            }
-            QueueDecision::RejectOffline(msg) => bail!("{msg}"),
-            QueueDecision::NotQueueable => Err(conn_err),
-        }
+        Err(conn_err)
     }
 
     fn mark_slot_disconnected(
@@ -1626,7 +2701,7 @@ impl MultiHostClient {
             let Some(slot) = guard.get_mut(host_id) else {
                 return;
             };
-            if expected_gen.is_some_and(|g| slot.conn_gen != g) {
+            if slot.updating || expected_gen.is_some_and(|g| slot.conn_gen != g) {
                 return;
             }
             let cached_at = slot.cached_at();
@@ -1655,14 +2730,14 @@ impl MultiHostClient {
             self.emit_host(
                 host_id,
                 AppEvent::Changed {
-                    topic: "resync",
+                    topic: "host",
                     card_id: None,
                 },
             );
         }
     }
 
-    /// Fans out `method` across all enabled hosts synchronously.
+    /// Fans out `method` across `"local"` (when present) and all connected remote hosts synchronously.
     pub fn call_all_hosts(&self, method: &str, params: Value) -> Vec<(String, Result<Value>)> {
         block_on_rt(
             &self.runtime_handle,
@@ -1670,7 +2745,8 @@ impl MultiHostClient {
         )
     }
 
-    /// Fans out `method` across all connected hosts concurrently (skipping offline/disabled hosts).
+    /// Fans out `method` across `"local"` (when present) and all connected remote hosts concurrently
+    /// (skipping offline/disabled hosts).
     pub async fn call_all_hosts_async(
         &self,
         method: &str,
@@ -1685,6 +2761,11 @@ impl MultiHostClient {
                 .collect()
         };
         let mut set = tokio::task::JoinSet::new();
+        if let Some(local) = self.local_host.clone() {
+            let method = method.to_owned();
+            let p = params.clone();
+            set.spawn_blocking(move || ("local".to_owned(), local.call(&method, p)));
+        }
         for (host_id, client, token_opt) in targets {
             let method = method.to_owned();
             let mut p = params.clone();
@@ -1705,13 +2786,17 @@ impl MultiHostClient {
         out
     }
 
-    /// Returns queued, in-flight, conflicted, and failed outbox items across all hosts.
+    /// Returns queued, in-flight, conflicted, and failed outbox items across all hosts
+    /// (excluding internal `SyncGlobalEnv` pointer entries).
     pub fn sync_items(&self) -> Vec<SyncItemView> {
         let guard = self.hosts.read().unwrap();
         let mut items = Vec::new();
         for slot in guard.values() {
             let outbox = slot.outbox.lock().unwrap();
             for op in &outbox.ops {
+                if op.kind == MutationKind::SyncGlobalEnv {
+                    continue;
+                }
                 let server_card = slot
                     .cached
                     .snapshot
@@ -1812,14 +2897,30 @@ impl MultiHostClient {
                         .find(|m| m.id == mutation_id)
                         .with_context(|| format!("Unknown mutation '{mutation_id}'"))?;
                     let srv = server_cards.iter().find(|c| c.id == op.card_id);
-                    if let Some(c) = srv {
-                        op.base.title = op.params.get("title").is_some().then(|| c.title.clone());
-                        op.base.body = op.params.get("body").is_some().then(|| c.body.clone());
-                        if let Some(obj) = op.params.as_object_mut()
+                    if let Some(obj) = op.params.as_object_mut() {
+                        if let Some(base_t) = op.base.title.as_deref()
+                            && obj
+                                .get("title")
+                                .and_then(Value::as_str)
+                                .is_some_and(|t| t.trim() == base_t.trim())
+                        {
+                            obj.remove("title");
+                        }
+                        if let Some(base_b) = op.base.body.as_deref()
+                            && obj.get("body").and_then(Value::as_str) == Some(base_b)
+                        {
+                            obj.remove("body");
+                        }
+                        if let Some(c) = srv
                             && obj.contains_key("revision")
                         {
                             obj.insert("revision".into(), json!(c.revision));
                         }
+                        obj.insert("force".into(), json!(true));
+                    }
+                    if let Some(c) = srv {
+                        op.base.title = op.params.get("title").is_some().then(|| c.title.clone());
+                        op.base.body = op.params.get("body").is_some().then(|| c.body.clone());
                     }
                     op.sent_params = Value::Null;
                     op.retry_same_params = false;
@@ -1836,6 +2937,21 @@ impl MultiHostClient {
                         .with_context(|| format!("Unknown mutation '{mutation_id}'"))?;
                     let srv = server_cards.iter().find(|c| c.id == op.card_id);
                     if let Some(obj) = op.params.as_object_mut() {
+                        if !fields.contains_key("title")
+                            && let Some(base_t) = op.base.title.as_deref()
+                            && obj
+                                .get("title")
+                                .and_then(Value::as_str)
+                                .is_some_and(|t| t.trim() == base_t.trim())
+                        {
+                            obj.remove("title");
+                        }
+                        if !fields.contains_key("body")
+                            && let Some(base_b) = op.base.body.as_deref()
+                            && obj.get("body").and_then(Value::as_str) == Some(base_b)
+                        {
+                            obj.remove("body");
+                        }
                         for (k, v) in &fields {
                             obj.insert(k.clone(), json!(v));
                         }
@@ -1844,6 +2960,7 @@ impl MultiHostClient {
                         {
                             obj.insert("revision".into(), json!(c.revision));
                         }
+                        obj.insert("force".into(), json!(true));
                     }
                     if let Some(c) = srv {
                         op.base.title = op.params.get("title").is_some().then(|| c.title.clone());
@@ -1875,7 +2992,153 @@ impl MultiHostClient {
         Ok(())
     }
 
+    /// Enqueues a pointer-only `SyncGlobalEnv` mutation into matching enabled remote hosts' outboxes
+    /// and immediately triggers drain on connected hosts. Zero secrets are persisted to `.outbox.json`.
+    pub fn enqueue_global_env_sync_for(&self, host_ids: Option<&[String]>) {
+        let targets: Vec<(String, Arc<Mutex<Outbox>>, bool)> = {
+            let guard = self.hosts.read().unwrap();
+            guard
+                .iter()
+                .filter(|(id, slot)| {
+                    slot.saved.enabled && host_ids.is_none_or(|list| list.iter().any(|x| x == *id))
+                })
+                .map(|(id, slot)| (id.clone(), slot.outbox.clone(), slot.client.is_some()))
+                .collect()
+        };
+        if targets.is_empty() {
+            return;
+        }
+        for (hid, outbox_arc, _) in &targets {
+            let mutation = Mutation {
+                id: canban_types::uuid_v4(),
+                host_id: hid.clone(),
+                card_id: String::new(),
+                kind: MutationKind::SyncGlobalEnv,
+                params: json!({}),
+                base: UpdateBase::default(),
+                sent_params: Value::Null,
+                retry_same_params: false,
+                state: MutationState::Queued,
+                created_at: now(),
+                attempts: 0,
+            };
+            if let Ok(mut ob) = outbox_arc.lock() {
+                let _ = ob.enqueue(mutation);
+                let _ = ob.save();
+            }
+        }
+        self.emit_host(
+            "local",
+            AppEvent::Changed {
+                topic: "global_env_sync",
+                card_id: None,
+            },
+        );
+        if let Some(this) = self.upgrade_self() {
+            for (hid, _, connected) in targets {
+                if connected {
+                    let c = Arc::clone(&this);
+                    self.runtime_handle.spawn(async move {
+                        let _ = c.drain_outbox_async(&hid).await;
+                    });
+                }
+            }
+        }
+    }
+
+    /// Manually triggers background replication of Global Environment & Secrets to all enabled remote hosts.
+    pub fn sync_global_env_now(&self) {
+        self.enqueue_global_env_sync_for(None);
+    }
+
+    pub fn global_env_sync_status(&self) -> GlobalEnvSyncStatus {
+        let local_fp = self
+            .global_env_provider
+            .as_ref()
+            .and_then(|p| p.current_fingerprint());
+        let guard = self.hosts.read().unwrap();
+        let mut status = GlobalEnvSyncStatus::default();
+        for slot in guard.values() {
+            if !slot.saved.enabled {
+                continue;
+            }
+            status.total_remote_hosts += 1;
+            let mut failed_message: Option<String> = None;
+            let mut has_in_flight = false;
+            let mut has_queued = false;
+            if let Ok(ob) = slot.outbox.lock() {
+                for m in &ob.ops {
+                    if m.kind != MutationKind::SyncGlobalEnv {
+                        continue;
+                    }
+                    match &m.state {
+                        MutationState::Failed { message } => {
+                            if failed_message.is_none() {
+                                failed_message = Some(message.clone());
+                            }
+                        }
+                        MutationState::Conflict { .. } => {
+                            if failed_message.is_none() {
+                                failed_message = Some("Sync conflict".into());
+                            }
+                        }
+                        MutationState::InFlight => has_in_flight = true,
+                        MutationState::Queued => has_queued = true,
+                    }
+                }
+            }
+            let host_name = slot.saved.name.clone();
+            if let Some(message) = failed_message {
+                status.failed_hosts.push(GlobalEnvSyncHostFailure {
+                    host_id: slot.saved.id.clone(),
+                    host_name,
+                    message,
+                });
+            } else if has_in_flight
+                || (has_queued
+                    && (slot.client.is_some() || slot.draining_active.load(Ordering::SeqCst)))
+            {
+                status.syncing_hosts.push(host_name);
+            } else if has_queued {
+                status.queued_hosts.push(host_name);
+            } else if local_fp
+                .as_deref()
+                .is_some_and(|fp| slot.global_env_synced_fingerprint.as_deref() != Some(fp))
+            {
+                status.unsynced_hosts.push(host_name);
+            } else {
+                status.synced_hosts.push(host_name);
+            }
+        }
+        status
+    }
+
     pub fn global_env_sync_summary(&self) -> GlobalEnvSyncSummary {
+        if self.global_env_provider.is_some() {
+            let status = self.global_env_sync_status();
+            let mut pending_hosts = Vec::with_capacity(
+                status.syncing_hosts.len()
+                    + status.queued_hosts.len()
+                    + status.unsynced_hosts.len()
+                    + status.failed_hosts.len(),
+            );
+            for name in status
+                .syncing_hosts
+                .iter()
+                .chain(status.queued_hosts.iter())
+                .chain(status.unsynced_hosts.iter())
+                .chain(status.failed_hosts.iter().map(|f| &f.host_name))
+            {
+                if !pending_hosts.contains(name) {
+                    pending_hosts.push(name.clone());
+                }
+            }
+            return GlobalEnvSyncSummary {
+                synced_hosts: status.synced_hosts.len(),
+                pending_hosts,
+                total_remote_hosts: status.total_remote_hosts,
+            };
+        }
         let guard = self.hosts.read().unwrap();
         let enabled: Vec<&RemoteHostSlot> = guard.values().filter(|s| s.saved.enabled).collect();
         let total_remote_hosts = enabled.len();
@@ -1900,6 +3163,307 @@ impl MultiHostClient {
         }
     }
 
+    /// Triggers `update.daemon` on a remote host (even when held in `ApiMismatch`), transitions
+    /// the host through `Updating`, and waits within a bounded window for the restarted daemon to
+    /// recover to `Connected`.
+    pub fn update_remote_daemon(&self, host_id: &str) -> Result<Value> {
+        block_on_rt(
+            &self.runtime_handle,
+            self.update_remote_daemon_async(host_id),
+        )
+    }
+
+    /// Async implementation of [`Self::update_remote_daemon`].
+    pub async fn update_remote_daemon_async(&self, host_id: &str) -> Result<Value> {
+        ensure!(
+            host_id != "local",
+            "Use Settings -> Updates to update This Mac"
+        );
+        let (saved, prior_server_id) = {
+            let mut guard = self.hosts.write().unwrap();
+            let slot = guard
+                .get_mut(host_id)
+                .with_context(|| format!("Unknown Canban host '{host_id}'"))?;
+            if slot.updating || slot.connection.is_updating() {
+                bail!(
+                    "Daemon update is already in progress on '{}'",
+                    slot.saved.name
+                );
+            }
+            if matches!(slot.saved.transport, HostTransport::Local) {
+                bail!("Cannot remote-update Local transport");
+            }
+            slot.updating = true;
+            slot.clear_connection(HostConnectionState::Updating {
+                version: String::new(),
+            });
+            (slot.saved.clone(), slot.saved.server_id.clone())
+        };
+
+        struct UpdatingGuard<'a> {
+            client: &'a MultiHostClient,
+            host_id: String,
+            active: bool,
+        }
+        impl Drop for UpdatingGuard<'_> {
+            fn drop(&mut self) {
+                if !self.active {
+                    return;
+                }
+                {
+                    let mut guard = self.client.hosts.write().unwrap();
+                    if let Some(slot) = guard.get_mut(&self.host_id) {
+                        slot.updating = false;
+                        slot.next_retry_at = Instant::now();
+                        if slot.connection.is_updating() {
+                            slot.connection = if slot.saved.enabled {
+                                HostConnectionState::Connecting
+                            } else {
+                                HostConnectionState::Offline {
+                                    error: "Disabled".into(),
+                                    cached_at: slot.cached_at(),
+                                }
+                            };
+                        }
+                    }
+                }
+                self.client.emit_host(
+                    &self.host_id,
+                    AppEvent::Changed {
+                        topic: "host",
+                        card_id: None,
+                    },
+                );
+                self.client.wake_host(&self.host_id);
+            }
+        }
+
+        let mut guard = UpdatingGuard {
+            client: self,
+            host_id: host_id.to_owned(),
+            active: true,
+        };
+        self.emit_host(
+            host_id,
+            AppEvent::Changed {
+                topic: "host",
+                card_id: None,
+            },
+        );
+        self.wake_host(host_id);
+
+        let params = json!({ "request_key": canban_types::id() });
+        let rpc_res = match self
+            .connector
+            .connect(
+                &format!("{host_id}-update"),
+                &saved.transport,
+                &self.config.device_name,
+            )
+            .await
+        {
+            Ok(connected) => {
+                let res = connected
+                    .transport
+                    .call_async("update.daemon", &params)
+                    .await;
+                connected.transport.close();
+                drop(connected.lease);
+                res
+            }
+            Err(err) => Err(err),
+        };
+
+        let res = match rpc_res {
+            Ok(val) => val,
+            Err(err) => {
+                guard.active = false;
+                self.clear_updating_and_reprobe(host_id).await;
+                self.emit_host(
+                    host_id,
+                    AppEvent::Changed {
+                        topic: "host",
+                        card_id: None,
+                    },
+                );
+                self.wake_host(host_id);
+                return Err(err);
+            }
+        };
+
+        if res["updated"] == true {
+            let target_ver = res["version"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .to_owned();
+            if !target_ver.is_empty() {
+                {
+                    let mut hguard = self.hosts.write().unwrap();
+                    if let Some(slot) = hguard.get_mut(host_id)
+                        && slot.updating
+                    {
+                        slot.connection = HostConnectionState::Updating {
+                            version: target_ver.clone(),
+                        };
+                    }
+                }
+                self.emit_host(
+                    host_id,
+                    AppEvent::Changed {
+                        topic: "host",
+                        card_id: None,
+                    },
+                );
+            }
+
+            let deadline = Instant::now() + Duration::from_secs(10);
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            let mut connected = false;
+            while Instant::now() < deadline {
+                let still_enabled = self
+                    .hosts
+                    .read()
+                    .unwrap()
+                    .get(host_id)
+                    .is_some_and(|s| s.saved.enabled);
+                if !still_enabled {
+                    break;
+                }
+                if let Ok(session) = SingleHostSession::connect_checked_async(
+                    self.connector.as_ref(),
+                    host_id,
+                    &saved.transport,
+                    &self.config.device_name,
+                    Value::Null,
+                    self.min_api_version,
+                )
+                .await
+                {
+                    let version = session.handshake().ping["build"]["version"]
+                        .as_str()
+                        .or_else(|| session.handshake().ping["version"].as_str())
+                        .unwrap_or("unknown");
+                    let new_sid = session.handshake().server_id.as_deref();
+                    let sid_changed = prior_server_id
+                        .as_deref()
+                        .zip(new_sid)
+                        .is_some_and(|(old, cur)| old != cur);
+                    if target_ver.is_empty() || version == target_ver || sid_changed {
+                        let upgraded = session
+                            .upgraded_token()
+                            .filter(|t| is_device_token(t))
+                            .map(str::to_owned);
+                        let (transport, lease, hs) = session.into_parts();
+                        guard.active = false;
+                        let entities = {
+                            let mut hguard = self.hosts.write().unwrap();
+                            let Some(slot) = hguard.get_mut(host_id) else {
+                                transport.close();
+                                drop(lease);
+                                break;
+                            };
+                            slot.updating = false;
+                            slot.next_retry_at = Instant::now();
+                            slot.clear_connection(HostConnectionState::Connecting);
+                            let mut persist_needed = false;
+                            if let HostTransport::Tcp { token: cur, .. } = &mut slot.saved.transport
+                                && let Some(new_tok) = upgraded
+                                && *cur != new_tok
+                            {
+                                *cur = new_tok;
+                                persist_needed = true;
+                            }
+                            if let Some(sid) = hs.server_id.clone() {
+                                slot.saved.server_id = Some(sid);
+                            }
+                            slot.terminal = Some(Arc::new(RemotePtyTransport::new(
+                                Arc::clone(&transport),
+                                self.runtime_handle.clone(),
+                            )));
+                            slot.lease = lease;
+                            slot.client = Some(Arc::clone(&transport));
+                            apply_state_to_slot(
+                                slot,
+                                &self.config.data_dir,
+                                &hs.state,
+                                Some(hs.rtt_ms),
+                                Some(&hs.ping),
+                                None,
+                            );
+                            let entities = slot.cached.snapshot.entity_hosts.clone();
+                            if persist_needed {
+                                let _ = self.persist_locked(&hguard);
+                            }
+                            entities
+                        };
+                        if !entities.is_empty() {
+                            self.replace_host_entity_owners(host_id, &entities);
+                        }
+                        if let Some(this) = self.upgrade_self() {
+                            let hid = host_id.to_owned();
+                            self.runtime_handle.spawn(async move {
+                                let _ = this.drain_outbox_async(&hid).await;
+                            });
+                        }
+                        connected = true;
+                        break;
+                    } else {
+                        let (transport, lease, _) = session.into_parts();
+                        transport.close();
+                        drop(lease);
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(400)).await;
+            }
+
+            if !connected {
+                guard.active = false;
+                self.clear_updating_and_reprobe(host_id).await;
+            }
+
+            self.emit_host(
+                host_id,
+                AppEvent::Changed {
+                    topic: if connected { "resync" } else { "host" },
+                    card_id: None,
+                },
+            );
+            self.wake_host(host_id);
+        } else {
+            guard.active = false;
+            self.clear_updating_and_reprobe(host_id).await;
+            self.emit_host(
+                host_id,
+                AppEvent::Changed {
+                    topic: "host",
+                    card_id: None,
+                },
+            );
+            self.wake_host(host_id);
+        }
+        Ok(res)
+    }
+
+    async fn clear_updating_and_reprobe(&self, host_id: &str) {
+        {
+            let mut guard = self.hosts.write().unwrap();
+            if let Some(slot) = guard.get_mut(host_id) {
+                slot.updating = false;
+                slot.next_retry_at = Instant::now();
+                slot.clear_connection(if slot.saved.enabled {
+                    HostConnectionState::Connecting
+                } else {
+                    HostConnectionState::Offline {
+                        error: "Disabled".into(),
+                        cached_at: slot.cached_at(),
+                    }
+                });
+            }
+        }
+        let _ = self.sync_one_host_once(host_id).await;
+    }
+
     async fn connect_slot_async(&self, host_id: &str) -> Result<(Arc<ClientTransport>, u64)> {
         let (transport_spec, server_id, cached_at, saved_at, last_marker) = {
             let guard = self.hosts.read().unwrap();
@@ -1907,6 +3471,7 @@ impl MultiHostClient {
                 .get(host_id)
                 .with_context(|| format!("Unknown host '{host_id}'"))?;
             ensure!(slot.saved.enabled, "Host '{host_id}' is disabled");
+            ensure!(!slot.updating, "Host '{host_id}' is updating");
             let spec = match &slot.saved.transport {
                 HostTransport::Tcp { addr, token } => {
                     let norm = normalize_daemon_addr(addr.as_str());
@@ -1936,22 +3501,65 @@ impl MultiHostClient {
         } else {
             last_marker["revision"].clone()
         };
-        let session = match SingleHostSession::connect_async(
+        let session = match SingleHostSession::connect_checked_async(
             self.connector.as_ref(),
             host_id,
             &transport_spec,
             &self.config.device_name,
             after,
+            self.min_api_version,
         )
         .await
         {
             Ok(session) => session,
             Err(err) => {
+                if let Some(mismatch) = err.downcast_ref::<ApiMismatchError>() {
+                    let next_state = HostConnectionState::ApiMismatch {
+                        server_api: mismatch.server_api,
+                        app_api: mismatch.app_api,
+                        version: mismatch.version.clone(),
+                    };
+                    let changed = {
+                        let mut guard = self.hosts.write().unwrap();
+                        if let Some(slot) = guard.get_mut(host_id)
+                            && !slot.updating
+                        {
+                            let prev = slot.connection.clone();
+                            if slot.saved.server_id.is_none()
+                                && let Some(sid) = &mismatch.server_id
+                            {
+                                slot.saved.server_id = Some(sid.clone());
+                            }
+                            slot.next_retry_at = Instant::now() + API_MISMATCH_RETRY_DELAY;
+                            if slot.client.is_some() {
+                                slot.clear_connection(next_state.clone());
+                            } else {
+                                slot.connection = next_state.clone();
+                            }
+                            prev != slot.connection
+                        } else {
+                            false
+                        }
+                    };
+                    if changed {
+                        self.emit_host(
+                            host_id,
+                            AppEvent::Changed {
+                                topic: "host",
+                                card_id: None,
+                            },
+                        );
+                    }
+                    return Err(err);
+                }
                 let err_str = err.to_string();
                 let auth = is_auth_error(&err);
-                {
+                let changed = {
                     let mut guard = self.hosts.write().unwrap();
-                    if let Some(slot) = guard.get_mut(host_id) {
+                    if let Some(slot) = guard.get_mut(host_id)
+                        && !slot.updating
+                    {
+                        let prev = slot.connection.clone();
                         slot.reconnect_count = slot.reconnect_count.saturating_add(1);
                         let next_state = if auth {
                             HostConnectionState::AuthFailed { error: err_str }
@@ -1962,15 +3570,20 @@ impl MultiHostClient {
                             }
                         };
                         slot.clear_connection(next_state);
+                        prev != slot.connection
+                    } else {
+                        false
                     }
+                };
+                if changed {
+                    self.emit_host(
+                        host_id,
+                        AppEvent::Changed {
+                            topic: "resync",
+                            card_id: None,
+                        },
+                    );
                 }
-                self.emit_host(
-                    host_id,
-                    AppEvent::Changed {
-                        topic: "resync",
-                        card_id: None,
-                    },
-                );
                 return Err(err);
             }
         };
@@ -1998,12 +3611,20 @@ impl MultiHostClient {
             bail!("{err_msg}");
         }
 
-        let conn_gen = {
+        let (conn_gen, entities) = {
             let mut guard = self.hosts.write().unwrap();
-            let slot = guard
-                .get_mut(host_id)
-                .with_context(|| format!("Host '{host_id}' was removed"))?;
+            let Some(slot) = guard.get_mut(host_id) else {
+                transport.close();
+                drop(lease);
+                bail!("Host '{host_id}' was removed");
+            };
+            if slot.updating || !slot.saved.enabled {
+                transport.close();
+                drop(lease);
+                bail!("Host '{host_id}' state changed during connect");
+            }
             slot.clear_connection(HostConnectionState::Connecting);
+            slot.next_retry_at = Instant::now();
             let mut persist_needed = false;
             if let HostTransport::Tcp { token: cur, .. } = &mut slot.saved.transport
                 && let Some(new_tok) = upgraded
@@ -2027,12 +3648,16 @@ impl MultiHostClient {
                 None,
             );
             let conn_gen = slot.conn_gen;
+            let entities = slot.cached.snapshot.entity_hosts.clone();
             if persist_needed {
                 let _ = self.persist_locked(&guard);
             }
-            conn_gen
+            (conn_gen, entities)
         };
 
+        if !entities.is_empty() {
+            self.replace_host_entity_owners(host_id, &entities);
+        }
         self.emit_host(
             host_id,
             AppEvent::Changed {
@@ -2050,12 +3675,16 @@ impl MultiHostClient {
         preferred_topic: Option<&'static str>,
         card_id: Option<String>,
     ) -> Result<()> {
-        let (after, saved_at) = {
+        let (after, saved_at, before_gen) = {
             let guard = self.hosts.read().unwrap();
             let slot = guard
                 .get(host_id)
                 .with_context(|| format!("Unknown host '{host_id}'"))?;
-            (slot.last_marker.clone(), slot.cached.saved_at)
+            (
+                slot.last_marker.clone(),
+                slot.cached.saved_at,
+                slot.cache_gen,
+            )
         };
         let req_after = if saved_at == 0 {
             Value::Null
@@ -2068,22 +3697,39 @@ impl MultiHostClient {
             .await?;
         let rtt_ms = start.elapsed().as_millis() as u64;
 
-        let emitted_topic = {
+        let (emitted_topic, updated_entities, stale_inflight) = {
             let mut guard = self.hosts.write().unwrap();
             let Some(slot) = guard.get_mut(host_id) else {
                 return Ok(());
             };
-            apply_state_to_slot(
-                slot,
-                &self.config.data_dir,
-                &state_val,
-                Some(rtt_ms),
-                None,
-                preferred_topic,
-            )
+            if slot.updating || !slot.saved.enabled {
+                return Ok(());
+            }
+            if state_val["changed"] == true && slot.cache_gen != before_gen {
+                (None, None, true)
+            } else {
+                let topic = apply_state_to_slot(
+                    slot,
+                    &self.config.data_dir,
+                    &state_val,
+                    Some(rtt_ms),
+                    None,
+                    preferred_topic,
+                );
+                let entities = topic
+                    .is_some()
+                    .then(|| slot.cached.snapshot.entity_hosts.clone());
+                (topic, entities, false)
+            }
         };
+        if let Some(entities) = updated_entities {
+            self.replace_host_entity_owners(host_id, &entities);
+        }
         if let Some(topic) = emitted_topic {
             self.emit_host(host_id, AppEvent::Changed { topic, card_id });
+        }
+        if stale_inflight {
+            self.wake_host(host_id);
         }
         Ok(())
     }
@@ -2143,14 +3789,19 @@ impl MultiHostClient {
     }
 
     async fn drain_outbox_async(&self, host_id: &str) -> Result<DrainReport> {
-        let draining_lock = {
+        let (draining_lock, draining_active) = {
             let guard = self.hosts.read().unwrap();
             let slot = guard
                 .get(host_id)
                 .with_context(|| format!("Unknown host '{host_id}'"))?;
-            Arc::clone(&slot.draining)
+            (
+                Arc::clone(&slot.draining),
+                Arc::clone(&slot.draining_active),
+            )
         };
         let _drain_guard = draining_lock.lock().await;
+        draining_active.store(true, Ordering::SeqCst);
+        let _active_guard = AtomicFlagGuard(draining_active);
 
         let mut report = DrainReport::default();
         let mut blocked = BTreeSet::new();
@@ -2163,7 +3814,7 @@ impl MultiHostClient {
                 let Some(slot) = guard.get(host_id) else {
                     break;
                 };
-                if !slot.saved.enabled {
+                if !slot.saved.enabled || slot.updating {
                     break;
                 }
                 let Some(client) = slot.client.clone() else {
@@ -2179,7 +3830,9 @@ impl MultiHostClient {
                     &mut blocked,
                     &mut report,
                 );
-                let _ = outbox.save();
+                if !matches!(action, StepAction::Idle) {
+                    let _ = outbox.save();
+                }
                 match action {
                     StepAction::Idle => None,
                     StepAction::Send {
@@ -2213,8 +3866,34 @@ impl MultiHostClient {
             };
 
             let allow_rebuild = !rebuilt_ids.contains(&mutation_id);
-            seal_params_for_tcp(method, &mut sent_params, token.as_deref())?;
-            let result = client.call_async(method, &sent_params).await;
+            let is_global_env_sync = method == "env.global.sync";
+            let (payload, sync_fingerprint) = if is_global_env_sync {
+                if let Some(provider) = &self.global_env_provider {
+                    match provider.build_sync_payload(token.as_deref()) {
+                        Ok((wire_params, fp)) => (Ok(wire_params), fp),
+                        Err(e) => (Err(e), None),
+                    }
+                } else {
+                    (Ok(sent_params), None)
+                }
+            } else {
+                match seal_params_for_tcp(method, &mut sent_params, token.as_deref()) {
+                    Ok(()) => (Ok(sent_params), None),
+                    Err(e) => (Err(e), None),
+                }
+            };
+            let result = match payload {
+                Ok(params_to_send) => client.call_async(method, &params_to_send).await,
+                Err(e) => Err(e),
+            };
+            let sync_succeeded = result.is_ok();
+            if is_global_env_sync && sync_succeeded {
+                save_global_env_sync_fingerprint(
+                    &self.config.data_dir,
+                    host_id,
+                    sync_fingerprint.as_deref(),
+                );
+            }
             let (is_conn_err, refreshed) = match &result {
                 Ok(_) => (false, None),
                 Err(err) => {
@@ -2258,12 +3937,24 @@ impl MultiHostClient {
                     &mut report,
                 );
                 let _ = outbox.save();
+                if is_global_env_sync && sync_succeeded {
+                    slot.global_env_synced_fingerprint = sync_fingerprint.clone();
+                }
                 snap.register_host_entities(host_id);
                 slot.cached.snapshot = snap;
                 slot.cached.saved_at = now();
                 save_cache(&self.config.data_dir, host_id, &slot.cached);
                 outcome
             };
+            if is_global_env_sync {
+                self.emit_host(
+                    host_id,
+                    AppEvent::Changed {
+                        topic: "global_env_sync",
+                        card_id: None,
+                    },
+                );
+            }
 
             match outcome {
                 FinishOutcome::Continue => {}
@@ -2296,7 +3987,88 @@ impl MultiHostClient {
                 },
             );
         }
+        self.spawn_prefetch_timelines(host_id);
         Ok(report)
+    }
+
+    fn spawn_prefetch_timelines(&self, host_id: &str) {
+        let Some(this) = self.upgrade_self() else {
+            return;
+        };
+        let (prefetching_flag, targets, reads_arc) = {
+            let guard = self.hosts.read().unwrap();
+            let Some(slot) = guard.get(host_id) else {
+                return;
+            };
+            if slot.client.is_none() || slot.updating || !slot.saved.enabled {
+                return;
+            }
+            let targets: Vec<(String, u64)> = slot
+                .cached
+                .snapshot
+                .cards
+                .iter()
+                .filter(|c| c.active())
+                .map(|c| (c.id.clone(), c.revision))
+                .collect();
+            (
+                Arc::clone(&slot.prefetching),
+                targets,
+                Arc::clone(&slot.reads),
+            )
+        };
+        if targets.is_empty()
+            || prefetching_flag
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+        {
+            return;
+        }
+        let weak = Arc::downgrade(&this);
+        let hid = host_id.to_owned();
+        self.runtime_handle.spawn(async move {
+            let _guard = AtomicFlagGuard(prefetching_flag);
+            for (card_id, rev) in targets {
+                let client = {
+                    let Some(this) = weak.upgrade() else {
+                        break;
+                    };
+                    let guard = this.hosts.read().unwrap();
+                    let Some(slot) = guard.get(&hid) else {
+                        break;
+                    };
+                    if !slot.saved.enabled
+                        || slot.updating
+                        || slot.draining_active.load(Ordering::SeqCst)
+                    {
+                        break;
+                    }
+                    slot.client.clone()
+                };
+                let Some(client) = client else {
+                    break;
+                };
+                if reads_arc.lock().unwrap().has_fresh_timeline(&card_id, rev) {
+                    continue;
+                }
+                let params =
+                    json!({"card_id": card_id, "tail": true, "limit": 200, "view": "full"});
+                match client.call_async("timeline.list", &params).await {
+                    Ok(val) => {
+                        let _ = reads_arc.lock().unwrap().put(
+                            "timeline.list",
+                            &params,
+                            &val,
+                            Some(&card_id),
+                            Some(rev),
+                            now(),
+                        );
+                    }
+                    Err(err) if is_connection_error(&err) => break,
+                    Err(_) => {}
+                }
+            }
+        });
     }
 
     async fn sync_one_host_once(&self, host_id: &str) -> Result<()> {
@@ -2305,7 +4077,10 @@ impl MultiHostClient {
             let Some(slot) = guard.get(host_id) else {
                 return Ok(());
             };
-            if !slot.saved.enabled {
+            if !slot.saved.enabled || slot.updating {
+                return Ok(());
+            }
+            if slot.client.is_none() && Instant::now() < slot.next_retry_at {
                 return Ok(());
             }
             slot.client.clone().map(|c| (c, slot.conn_gen))
@@ -2335,6 +4110,103 @@ impl MultiHostClient {
     }
 }
 
+async fn local_push_supervisor(
+    weak_client: Weak<MultiHostClient>,
+    transport: Arc<ClientTransport>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
+    let mut last = Value::Null;
+    loop {
+        if *shutdown_rx.borrow() || weak_client.strong_count() == 0 {
+            return;
+        }
+        let open_res = tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => return,
+            res = open_async_subscribe(&transport, &last["revision"], SUBSCRIBE_TOPICS, None) => res,
+        };
+        let (mut stream, handshake) = match open_res {
+            Ok(v) => v,
+            Err(_) => {
+                tokio::select! {
+                    _ = shutdown_rx.changed() => return,
+                    _ = tokio::time::sleep(Duration::from_millis(500)) => continue,
+                }
+            }
+        };
+        if handshake.changed {
+            let topic = change_topic(!last.is_null(), &last, &handshake.marker);
+            last = handshake.marker;
+            if let Some(rc) = weak_client.upgrade() {
+                rc.emit_host(
+                    "local",
+                    AppEvent::Changed {
+                        topic,
+                        card_id: None,
+                    },
+                );
+            } else {
+                return;
+            }
+        } else if last.is_null() && !handshake.marker["revision"].is_null() {
+            last = handshake.marker;
+        }
+
+        loop {
+            let next = tokio::select! {
+                biased;
+                _ = shutdown_rx.changed() => return,
+                res = stream.next_frame() => res,
+            };
+            let Some(rc) = weak_client.upgrade() else {
+                return;
+            };
+            match next {
+                Ok(Some(PushFrame::Heartbeat)) => {}
+                Ok(Some(PushFrame::StateChanged {
+                    topic,
+                    card_id,
+                    marker,
+                })) => {
+                    if !marker["revision"].is_null() {
+                        last = marker;
+                    }
+                    rc.emit_host("local", AppEvent::Changed { topic, card_id });
+                }
+                Ok(Some(PushFrame::UpdateChanged(state))) => {
+                    rc.emit(ClientEvent::UpdateChanged {
+                        host_id: "local".into(),
+                        state,
+                    });
+                }
+                Ok(Some(PushFrame::UtilitiesChanged(state))) => {
+                    rc.emit(ClientEvent::UtilitiesChanged {
+                        host_id: "local".into(),
+                        state,
+                    });
+                }
+                Ok(Some(PushFrame::UsageChanged(state))) => {
+                    rc.emit(ClientEvent::UsageChanged {
+                        host_id: "local".into(),
+                        state,
+                    });
+                }
+                Ok(Some(PushFrame::HerdrInstall(state))) => {
+                    rc.emit(ClientEvent::HerdrInstall {
+                        host_id: "local".into(),
+                        state,
+                    });
+                }
+                Ok(None) | Err(_) => break,
+            }
+        }
+        tokio::select! {
+            _ = shutdown_rx.changed() => return,
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+        }
+    }
+}
+
 struct PendingRefresh {
     topic: &'static str,
     card_id: Option<String>,
@@ -2344,7 +4216,7 @@ struct PendingRefresh {
 }
 
 async fn run_legacy_poll_loop(
-    rc: &Arc<RemoteClient>,
+    weak_client: &Weak<MultiHostClient>,
     host_id: &str,
     epoch: u64,
     conn_gen: u64,
@@ -2353,9 +4225,13 @@ async fn run_legacy_poll_loop(
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> bool {
     let slot_active = || {
+        let Some(rc) = weak_client.upgrade() else {
+            return false;
+        };
         let guard = rc.hosts.read().unwrap();
         guard.get(host_id).is_some_and(|s| {
             s.saved.enabled
+                && !s.updating
                 && s.supervisor_epoch == epoch
                 && s.conn_gen == conn_gen
                 && s.client.is_some()
@@ -2370,6 +4246,9 @@ async fn run_legacy_poll_loop(
         if !slot_active() {
             break;
         }
+        let Some(rc) = weak_client.upgrade() else {
+            return true;
+        };
         match rc
             .refresh_host_now_async(host_id, transport, None, None)
             .await
@@ -2388,7 +4267,7 @@ async fn run_legacy_poll_loop(
 }
 
 async fn host_supervisor_task(
-    weak_client: Weak<RemoteClient>,
+    weak_client: Weak<MultiHostClient>,
     host_id: String,
     epoch: u64,
     notify: Arc<Notify>,
@@ -2396,13 +4275,13 @@ async fn host_supervisor_task(
 ) {
     let mut backoff = Duration::from_millis(250);
     loop {
-        if *shutdown_rx.borrow() {
+        if *shutdown_rx.borrow() || weak_client.strong_count() == 0 {
             return;
         }
-        let Some(rc) = weak_client.upgrade() else {
-            return;
-        };
-        let (enabled, epoch_matches, token) = {
+        let (enabled, epoch_matches, updating, next_retry_at, token, existing) = {
+            let Some(rc) = weak_client.upgrade() else {
+                return;
+            };
             let guard = rc.hosts.read().unwrap();
             let Some(slot) = guard.get(&host_id) else {
                 return;
@@ -2410,13 +4289,18 @@ async fn host_supervisor_task(
             (
                 slot.saved.enabled,
                 slot.supervisor_epoch == epoch,
+                slot.updating,
+                slot.next_retry_at,
                 slot.tcp_token(),
+                slot.client
+                    .clone()
+                    .map(|c| (c, slot.conn_gen, slot.last_marker.clone())),
             )
         };
         if !enabled || !epoch_matches {
             return;
         }
-        if token.as_deref().is_some_and(is_pairing_code) {
+        if updating || token.as_deref().is_some_and(is_pairing_code) {
             tokio::select! {
                 _ = notify.notified() => {}
                 _ = shutdown_rx.changed() => { return; }
@@ -2424,18 +4308,23 @@ async fn host_supervisor_task(
             continue;
         }
 
-        let (transport, conn_gen, last_marker) = {
-            let existing = {
-                let guard = rc.hosts.read().unwrap();
-                guard.get(&host_id).and_then(|s| {
-                    s.client
-                        .clone()
-                        .map(|c| (c, s.conn_gen, s.last_marker.clone()))
-                })
-            };
-            if let Some(pair) = existing {
-                pair
-            } else {
+        let (transport, conn_gen, last_marker) = if let Some(pair) = existing {
+            pair
+        } else {
+            let now_i = Instant::now();
+            if next_retry_at > now_i {
+                let wait = next_retry_at.saturating_duration_since(now_i);
+                tokio::select! {
+                    _ = tokio::time::sleep(wait) => {}
+                    _ = notify.notified() => {}
+                    _ = shutdown_rx.changed() => { return; }
+                }
+                continue;
+            }
+            let connect_res = {
+                let Some(rc) = weak_client.upgrade() else {
+                    return;
+                };
                 match rc.connect_slot_async(&host_id).await {
                     Ok((c, conn_gen)) => {
                         let marker = rc
@@ -2445,40 +4334,57 @@ async fn host_supervisor_task(
                             .get(&host_id)
                             .map(|s| s.last_marker.clone())
                             .unwrap_or(Value::Null);
-                        (c, conn_gen, marker)
+                        Ok((c, conn_gen, marker))
                     }
-                    Err(err) => {
-                        if is_auth_error(&err) {
-                            tokio::select! {
-                                _ = notify.notified() => {}
-                                _ = shutdown_rx.changed() => { return; }
-                            }
-                        } else {
-                            tokio::select! {
-                                _ = tokio::time::sleep(backoff) => {
-                                    backoff = (backoff * 2).min(MAX_BACKOFF);
-                                }
-                                _ = notify.notified() => {
-                                    backoff = Duration::from_millis(250);
-                                }
-                                _ = shutdown_rx.changed() => { return; }
-                            }
+                    Err(err) => Err(err),
+                }
+            };
+            match connect_res {
+                Ok(triple) => triple,
+                Err(err) => {
+                    if err.downcast_ref::<ApiMismatchError>().is_some() {
+                        tokio::select! {
+                            _ = tokio::time::sleep(API_MISMATCH_RETRY_DELAY) => {}
+                            _ = notify.notified() => { backoff = Duration::from_millis(250); }
+                            _ = shutdown_rx.changed() => { return; }
                         }
-                        continue;
+                    } else if is_auth_error(&err) {
+                        tokio::select! {
+                            _ = notify.notified() => {}
+                            _ = shutdown_rx.changed() => { return; }
+                        }
+                    } else {
+                        tokio::select! {
+                            _ = tokio::time::sleep(backoff) => {
+                                backoff = (backoff * 2).min(MAX_BACKOFF);
+                            }
+                            _ = notify.notified() => {
+                                backoff = Duration::from_millis(250);
+                            }
+                            _ = shutdown_rx.changed() => { return; }
+                        }
                     }
+                    continue;
                 }
             }
         };
 
-        let _ = rc.drain_outbox_async(&host_id).await;
+        if let Some(rc) = weak_client.upgrade() {
+            let _ = rc.drain_outbox_async(&host_id).await;
+        } else {
+            return;
+        }
 
-        let sub_res = open_async_subscribe(
-            &transport,
-            &last_marker["revision"],
-            SUBSCRIBE_TOPICS,
-            Some(15_000),
-        )
-        .await;
+        let sub_res = tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => return,
+            res = open_async_subscribe(
+                &transport,
+                &last_marker["revision"],
+                SUBSCRIBE_TOPICS,
+                Some(15_000),
+            ) => res,
+        };
         let (mut stream, handshake) = match sub_res {
             Ok(res) => {
                 backoff = Duration::from_millis(250);
@@ -2487,7 +4393,7 @@ async fn host_supervisor_task(
             Err(err) if is_unsupported_subscribe_error(&err) => {
                 backoff = Duration::from_millis(250);
                 if run_legacy_poll_loop(
-                    &rc,
+                    &weak_client,
                     &host_id,
                     epoch,
                     conn_gen,
@@ -2502,7 +4408,11 @@ async fn host_supervisor_task(
                 continue;
             }
             Err(err) => {
-                rc.mark_slot_disconnected(&host_id, Some(conn_gen), err.to_string(), false);
+                if let Some(rc) = weak_client.upgrade() {
+                    rc.mark_slot_disconnected(&host_id, Some(conn_gen), err.to_string(), false);
+                } else {
+                    return;
+                }
                 if is_auth_error(&err) {
                     tokio::select! {
                         _ = notify.notified() => { backoff = Duration::from_millis(250); }
@@ -2522,19 +4432,27 @@ async fn host_supervisor_task(
         };
 
         if handshake.changed {
-            let _ = rc
-                .refresh_host_now_async(&host_id, &transport, None, None)
-                .await;
-            let _ = rc.drain_outbox_async(&host_id).await;
+            if let Some(rc) = weak_client.upgrade() {
+                let _ = rc
+                    .refresh_host_now_async(&host_id, &transport, None, None)
+                    .await;
+                let _ = rc.drain_outbox_async(&host_id).await;
+            } else {
+                return;
+            }
         }
 
         let mut pending: Option<PendingRefresh> = None;
 
         loop {
             {
+                let Some(rc) = weak_client.upgrade() else {
+                    return;
+                };
                 let guard = rc.hosts.read().unwrap();
                 let still_valid = guard.get(&host_id).is_some_and(|s| {
                     s.saved.enabled
+                        && !s.updating
                         && s.supervisor_epoch == epoch
                         && s.conn_gen == conn_gen
                         && s.client.is_some()
@@ -2549,6 +4467,22 @@ async fn host_supervisor_task(
                     return;
                 }
                 _ = notify.notified() => {
+                    let Some(rc) = weak_client.upgrade() else {
+                        return;
+                    };
+                    let still_valid = {
+                        let guard = rc.hosts.read().unwrap();
+                        guard.get(&host_id).is_some_and(|s| {
+                            s.saved.enabled
+                                && !s.updating
+                                && s.supervisor_epoch == epoch
+                                && s.conn_gen == conn_gen
+                                && s.client.is_some()
+                        })
+                    };
+                    if !still_valid {
+                        break;
+                    }
                     let _ = rc.refresh_host_now_async(&host_id, &transport, None, None).await;
                     let _ = rc.drain_outbox_async(&host_id).await;
                 }
@@ -2561,12 +4495,16 @@ async fn host_supervisor_task(
                     let Some(p) = pending.take() else {
                         continue;
                     };
+                    let Some(rc) = weak_client.upgrade() else {
+                        return;
+                    };
                     let (still_active, already_fetched, can_use_runtime) = {
                         let guard = rc.hosts.read().unwrap();
                         let Some(slot) = guard.get(&host_id) else {
                             break;
                         };
                         let active = slot.saved.enabled
+                            && !slot.updating
                             && slot.supervisor_epoch == epoch
                             && slot.conn_gen == conn_gen
                             && slot.client.is_some();
@@ -2604,6 +4542,9 @@ async fn host_supervisor_task(
                     }
                 }
                 frame_res = stream.next_frame() => {
+                    let Some(rc) = weak_client.upgrade() else {
+                        return;
+                    };
                     match frame_res {
                         Ok(Some(PushFrame::Heartbeat)) => {
                             let mut guard = rc.hosts.write().unwrap();

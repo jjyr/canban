@@ -1,11 +1,10 @@
 //! Transport-agnostic UI backend abstraction (`UiBackend` + `BackendEvent`).
 //!
 //! All RPC routing, merged snapshots, host summaries, host configs, event
-//! subscriptions, and draft persistence route through [`UiBackend`] instead of
-//! scattered `AppClient` / `HostRegistry` globals. The desktop [`LocalBackend`]
-//! sits behind the `local-host` Cargo feature so pure UI builds
-//! (`--no-default-features`) remain free of local server, SQLite, updater, and
-//! subprocess crates.
+//! subscriptions, and draft persistence route through [`UiBackend`] backed by
+//! the single unified [`ClientBackend`] wrapping [`canban_client::MultiHostClient`]
+//! for both Desktop (with local host driver + SSH/discovery providers) and Mobile
+//! (pure-remote TCP + Tailscale `ts_auto`).
 
 use anyhow::Result;
 use canban_types::{
@@ -514,326 +513,47 @@ pub(crate) fn active_agent_count(snapshot: &Snapshot) -> usize {
     }
 }
 
-#[cfg(feature = "local-host")]
-pub struct LocalBackend {
-    app: Arc<canban_app_server::AppClient>,
-    hosts: Option<Arc<canban_app_server::hosts::HostRegistry>>,
+/// Unified [`UiBackend`] backed by [`canban_client::MultiHostClient`] for both Desktop
+/// (with a built-in `"local"` host driver and optional SSH/discovery capability providers)
+/// and Mobile (pure-remote TCP + Tailscale `ts_auto`, zero local server/SQLite/subprocess deps).
+pub struct ClientBackend {
+    client: Arc<canban_client::MultiHostClient>,
+    discovery_provider: Option<Arc<dyn canban_client::LocalDiscoveryProvider>>,
+    ssh_provider: Option<Arc<dyn canban_client::SshCapabilityProvider>>,
 }
 
-#[cfg(feature = "local-host")]
-impl LocalBackend {
-    pub fn with_hosts(
-        app: Arc<canban_app_server::AppClient>,
-        hosts: Arc<canban_app_server::hosts::HostRegistry>,
+/// Backward-compatible alias for mobile callers (`canban-ios`, `canban-android`).
+pub type RemoteBackend = ClientBackend;
+
+impl ClientBackend {
+    /// Constructs a pure-remote [`ClientBackend`] without desktop local-discovery or SSH providers.
+    pub fn new(client: Arc<canban_client::MultiHostClient>) -> Self {
+        Self {
+            client,
+            discovery_provider: None,
+            ssh_provider: None,
+        }
+    }
+
+    /// Constructs a [`ClientBackend`] with optional desktop platform capability providers.
+    pub fn with_providers(
+        client: Arc<canban_client::MultiHostClient>,
+        discovery_provider: Option<Arc<dyn canban_client::LocalDiscoveryProvider>>,
+        ssh_provider: Option<Arc<dyn canban_client::SshCapabilityProvider>>,
     ) -> Self {
         Self {
-            app,
-            hosts: Some(hosts),
+            client,
+            discovery_provider,
+            ssh_provider,
         }
     }
 
-    pub fn from_client(app: Arc<canban_app_server::AppClient>) -> Self {
-        Self { app, hosts: None }
-    }
-}
-
-#[cfg(feature = "local-host")]
-impl UiBackend for LocalBackend {
-    fn call_routed(
-        &self,
-        method: &str,
-        params: Value,
-        active_project_id: Option<&str>,
-    ) -> Result<Value> {
-        if let Some(hosts) = &self.hosts {
-            hosts.call_routed(method, params, active_project_id)
-        } else {
-            self.app.call(method, params)
-        }
-    }
-
-    fn call_local(&self, method: &str, params: Value) -> Result<Value> {
-        self.app.call(method, params)
-    }
-
-    fn call_all_hosts(&self, method: &str, params: Value) -> Vec<(String, Result<Value>)> {
-        if let Some(hosts) = &self.hosts {
-            hosts.call_all_hosts(method, params)
-        } else {
-            vec![("local".to_string(), self.app.call(method, params))]
-        }
-    }
-
-    fn merged_snapshot(&self) -> Result<Snapshot> {
-        if let Some(hosts) = &self.hosts {
-            hosts.merged_snapshot()
-        } else {
-            self.app.snapshot()
-        }
-    }
-
-    fn merged_runtime_state(&self) -> Result<Option<RuntimeState>> {
-        if let Some(hosts) = &self.hosts {
-            Ok(Some(hosts.merged_runtime_state()?))
-        } else {
-            Ok(Some(self.app.runtime_state()?))
-        }
-    }
-
-    fn host_summaries(&self) -> Vec<HostSummary> {
-        self.hosts
-            .as_ref()
-            .map(|h| h.summaries())
-            .unwrap_or_default()
-    }
-
-    fn config_for_host(&self, host_id: &str) -> Config {
-        if let Some(hosts) = &self.hosts {
-            hosts.config_for(host_id)
-        } else {
-            self.app.config()
-        }
-    }
-
-    fn resolve_target_host(
-        &self,
-        method: &str,
-        params: &Value,
-        active_project_id: Option<&str>,
-    ) -> String {
-        if let Some(hosts) = &self.hosts {
-            hosts.resolve_target_host(method, params, active_project_id)
-        } else {
-            "local".into()
-        }
-    }
-
-    fn server_notice(&self) -> Option<String> {
-        self.app.server_notice().map(str::to_owned)
-    }
-
-    fn subscribe(&self) -> tokio::sync::mpsc::UnboundedReceiver<BackendEvent> {
-        if let Some(hosts) = &self.hosts {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            let mut upstream = hosts.subscribe_push();
-            drop(hosts.runtime_handle().spawn(async move {
-                loop {
-                    let mapped = match upstream.recv().await {
-                        Ok(canban_app_server::hosts::HostPushEvent::State(ev)) => {
-                            BackendEvent::Host {
-                                host_id: ev.host_id,
-                                event: ev.event,
-                            }
-                        }
-                        Ok(canban_app_server::hosts::HostPushEvent::UpdateChanged {
-                            host_id,
-                            state,
-                        }) => BackendEvent::UpdateChanged { host_id, state },
-                        Ok(canban_app_server::hosts::HostPushEvent::UtilitiesChanged {
-                            host_id,
-                            state,
-                        }) => BackendEvent::UtilitiesChanged { host_id, state },
-                        Ok(canban_app_server::hosts::HostPushEvent::UsageChanged {
-                            host_id,
-                            state,
-                        }) => BackendEvent::UsageChanged { host_id, state },
-                        Ok(canban_app_server::hosts::HostPushEvent::HerdrInstall {
-                            host_id,
-                            state,
-                        }) => BackendEvent::HerdrInstall { host_id, state },
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            BackendEvent::local(AppEvent::Changed {
-                                topic: "resync",
-                                card_id: None,
-                            })
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    };
-                    if tx.send(mapped).is_err() {
-                        break;
-                    }
-                }
-            }));
-            rx
-        } else {
-            self.app.subscribe_mapped(
-                &["snapshot", "update", "utilities", "usage", "herdr"],
-                |ev| match ev {
-                    canban_app_server::ClientPushEvent::State(app_ev) => {
-                        BackendEvent::local(app_ev)
-                    }
-                    canban_app_server::ClientPushEvent::UpdateChanged(state) => {
-                        BackendEvent::UpdateChanged {
-                            host_id: "local".into(),
-                            state,
-                        }
-                    }
-                    canban_app_server::ClientPushEvent::UtilitiesChanged(state) => {
-                        BackendEvent::UtilitiesChanged {
-                            host_id: "local".into(),
-                            state,
-                        }
-                    }
-                    canban_app_server::ClientPushEvent::UsageChanged(state) => {
-                        BackendEvent::UsageChanged {
-                            host_id: "local".into(),
-                            state,
-                        }
-                    }
-                    canban_app_server::ClientPushEvent::HerdrInstall(state) => {
-                        BackendEvent::HerdrInstall {
-                            host_id: "local".into(),
-                            state,
-                        }
-                    }
-                },
-            )
-        }
-    }
-
-    fn home_for(&self, host_id: &str) -> String {
-        if let Some(hosts) = &self.hosts {
-            hosts.home_for(host_id).to_string_lossy().into_owned()
-        } else {
-            self.app.home.to_string_lossy().into_owned()
-        }
-    }
-
-    fn local_home(&self) -> Option<PathBuf> {
-        Some(self.app.home.clone())
-    }
-
-    fn has_host_registry(&self) -> bool {
-        self.hosts.is_some()
-    }
-
-    fn saved_hosts(&self) -> Vec<SavedHost> {
-        self.hosts
-            .as_ref()
-            .map(|h| h.saved_hosts())
-            .unwrap_or_default()
-    }
-
-    fn add_host(&self, host: SavedHost) -> Result<HostSummary> {
-        let hosts = self
-            .hosts
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Host registry unavailable"))?;
-        hosts.add_host(host)
-    }
-
-    fn remove_host(&self, host_id: &str) -> Result<()> {
-        let hosts = self
-            .hosts
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Host registry unavailable"))?;
-        hosts.remove_host(host_id)
-    }
-
-    fn rename_host(&self, host_id: &str, new_name: &str) -> Result<()> {
-        let hosts = self
-            .hosts
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Host registry unavailable"))?;
-        hosts.rename_host(host_id, new_name)
-    }
-
-    fn set_host_enabled(&self, host_id: &str, enabled: bool) -> Result<()> {
-        let hosts = self
-            .hosts
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Host registry unavailable"))?;
-        hosts.set_host_enabled(host_id, enabled)
-    }
-
-    fn reconnect_host(&self, host_id: Option<&str>) {
-        if let Some(hosts) = &self.hosts {
-            hosts.reconnect(host_id);
-        }
-    }
-
-    fn poll_remotes_once(&self) {
-        if let Some(hosts) = &self.hosts {
-            hosts.poll_remotes_once();
-        }
-    }
-
-    fn update_remote_daemon(&self, host_id: &str) -> Result<Value> {
-        let hosts = self
-            .hosts
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Host registry unavailable"))?;
-        hosts.update_remote_daemon(host_id)
-    }
-
-    fn sync_items(&self) -> Vec<SyncItemView> {
-        self.hosts
-            .as_ref()
-            .map(|h| h.sync_items())
-            .unwrap_or_default()
-    }
-
-    fn sync_action(&self, host_id: &str, mutation_id: &str, action: SyncAction) -> Result<()> {
-        let hosts = self
-            .hosts
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Host registry unavailable"))?;
-        hosts.sync_action(host_id, mutation_id, action)
-    }
-
-    fn global_env_sync_summary(&self) -> canban_types::GlobalEnvSyncSummary {
-        self.hosts
-            .as_ref()
-            .map(|h| h.global_env_sync_summary())
-            .unwrap_or_default()
-    }
-
-    fn global_env_sync_status(&self) -> canban_types::GlobalEnvSyncStatus {
-        self.hosts
-            .as_ref()
-            .map(|h| h.global_env_sync_status())
-            .unwrap_or_default()
-    }
-
-    fn trigger_global_env_sync(&self) -> Result<()> {
-        let hosts = self
-            .hosts
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Host registry unavailable"))?;
-        hosts.sync_global_env_now();
-        Ok(())
-    }
-
-    fn capabilities(&self) -> canban_client::ClientCapabilities {
-        canban_client::ClientCapabilities::desktop()
-    }
-
-    fn discovery_provider(&self) -> Option<Arc<dyn canban_client::LocalDiscoveryProvider>> {
-        Some(Arc::new(canban_app_server::hosts::DesktopDiscoveryProvider))
-    }
-
-    fn ssh_provider(&self) -> Option<Arc<dyn canban_client::SshCapabilityProvider>> {
-        Some(Arc::new(canban_app_server::hosts::DesktopSshProvider))
-    }
-}
-
-/// Pure-remote [`UiBackend`] backed by [`canban_client::RemoteClient`] (works without
-/// `local-host`, SQLite, `AppServer`, or SSH subprocesses).
-pub struct RemoteBackend {
-    client: Arc<canban_client::RemoteClient>,
-}
-
-impl RemoteBackend {
-    pub fn new(client: Arc<canban_client::RemoteClient>) -> Self {
-        Self { client }
-    }
-
-    pub fn client(&self) -> &Arc<canban_client::RemoteClient> {
+    pub fn client(&self) -> &Arc<canban_client::MultiHostClient> {
         &self.client
     }
 }
 
-impl UiBackend for RemoteBackend {
+impl UiBackend for ClientBackend {
     fn call_routed(
         &self,
         method: &str,
@@ -841,6 +561,10 @@ impl UiBackend for RemoteBackend {
         active_project_id: Option<&str>,
     ) -> Result<Value> {
         self.client.call_routed(method, params, active_project_id)
+    }
+
+    fn call_local(&self, method: &str, params: Value) -> Result<Value> {
+        self.client.call_local(method, params)
     }
 
     fn call_all_hosts(&self, method: &str, params: Value) -> Vec<(String, Result<Value>)> {
@@ -908,6 +632,10 @@ impl UiBackend for RemoteBackend {
         self.client.home_for(host_id)
     }
 
+    fn local_home(&self) -> Option<PathBuf> {
+        self.client.local_home()
+    }
+
     fn has_host_registry(&self) -> bool {
         true
     }
@@ -940,6 +668,10 @@ impl UiBackend for RemoteBackend {
         self.client.poll_remotes_once();
     }
 
+    fn update_remote_daemon(&self, host_id: &str) -> Result<Value> {
+        self.client.update_remote_daemon(host_id)
+    }
+
     fn sync_items(&self) -> Vec<SyncItemView> {
         self.client.sync_items()
     }
@@ -948,8 +680,29 @@ impl UiBackend for RemoteBackend {
         self.client.sync_action(host_id, mutation_id, action)
     }
 
+    fn global_env_sync_summary(&self) -> canban_types::GlobalEnvSyncSummary {
+        self.client.global_env_sync_summary()
+    }
+
+    fn global_env_sync_status(&self) -> canban_types::GlobalEnvSyncStatus {
+        self.client.global_env_sync_status()
+    }
+
+    fn trigger_global_env_sync(&self) -> Result<()> {
+        self.client.sync_global_env_now();
+        Ok(())
+    }
+
     fn capabilities(&self) -> canban_client::ClientCapabilities {
         self.client.capabilities()
+    }
+
+    fn discovery_provider(&self) -> Option<Arc<dyn canban_client::LocalDiscoveryProvider>> {
+        self.discovery_provider.clone()
+    }
+
+    fn ssh_provider(&self) -> Option<Arc<dyn canban_client::SshCapabilityProvider>> {
+        self.ssh_provider.clone()
     }
 
     fn on_foreground(&self) {
@@ -957,7 +710,7 @@ impl UiBackend for RemoteBackend {
     }
 
     fn remote_client(&self) -> Option<Arc<canban_client::RemoteClient>> {
-        Some(self.client.clone())
+        (!self.client.has_local_host()).then(|| self.client.clone())
     }
 }
 

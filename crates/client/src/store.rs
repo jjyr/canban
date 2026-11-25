@@ -142,8 +142,110 @@ pub struct CachedHostData {
     pub config: Config,
 }
 
+/// Persistence adapter for saved host definitions (`hosts.json` + optional credential vault).
+///
+/// Mobile clients use [`CredentialHostStore`] (`<data_dir>/hosts.json` with inline TCP tokens
+/// stripped into a [`CredentialStore`]), while desktop clients use [`InlineHostsFileStore`]
+/// (`<home>/config/hosts.json`) for backward compatibility with existing desktop configs.
+pub trait HostStore: Send + Sync + 'static {
+    fn load_hosts(&self) -> Vec<SavedHost>;
+    fn save_hosts(&self, hosts: &[SavedHost]) -> Result<()>;
+    fn delete_credentials(&self, _host_id: &str) {}
+}
+
+/// Default mobile [`HostStore`] backed by `<data_dir>/hosts.json` and a [`CredentialStore`].
+pub struct CredentialHostStore {
+    data_dir: PathBuf,
+    creds: std::sync::Arc<dyn CredentialStore>,
+}
+
+impl CredentialHostStore {
+    pub fn new(data_dir: PathBuf, creds: std::sync::Arc<dyn CredentialStore>) -> Self {
+        Self { data_dir, creds }
+    }
+}
+
+impl HostStore for CredentialHostStore {
+    fn load_hosts(&self) -> Vec<SavedHost> {
+        load_hosts(&self.data_dir, self.creds.as_ref())
+    }
+
+    fn save_hosts(&self, hosts: &[SavedHost]) -> Result<()> {
+        save_hosts(&self.data_dir, hosts, self.creds.as_ref())
+    }
+
+    fn delete_credentials(&self, host_id: &str) {
+        let _ = self.creds.delete_token(host_id);
+    }
+}
+
+/// Desktop [`HostStore`] reading and writing an explicit `hosts.json` path (e.g.
+/// `<home>/config/hosts.json`) with tokens stored inline.
+pub struct InlineHostsFileStore {
+    path: PathBuf,
+}
+
+impl InlineHostsFileStore {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl HostStore for InlineHostsFileStore {
+    fn load_hosts(&self) -> Vec<SavedHost> {
+        std::fs::read(&self.path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<HostsFile>(&b).ok())
+            .map(|f| f.hosts)
+            .unwrap_or_default()
+    }
+
+    fn save_hosts(&self, hosts: &[SavedHost]) -> Result<()> {
+        let file = HostsFile {
+            hosts: hosts.to_vec(),
+        };
+        canban_context::atomic(&self.path, &serde_json::to_vec_pretty(&file)?)
+    }
+}
+
 pub fn hosts_path(data_dir: &Path) -> PathBuf {
     data_dir.join("hosts.json")
+}
+
+pub fn global_env_sync_state_path(data_dir: &Path, host_id: &str) -> PathBuf {
+    data_dir
+        .join("cache/hosts")
+        .join(host_id)
+        .join("global-env-sync.json")
+}
+
+pub fn load_global_env_sync_fingerprint(data_dir: &Path, host_id: &str) -> Option<String> {
+    std::fs::read(global_env_sync_state_path(data_dir, host_id))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| {
+            v.get("fingerprint")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+}
+
+pub fn save_global_env_sync_fingerprint(data_dir: &Path, host_id: &str, fingerprint: Option<&str>) {
+    let path = global_env_sync_state_path(data_dir, host_id);
+    match fingerprint {
+        Some(fp) => {
+            if let Ok(bytes) = serde_json::to_vec(&serde_json::json!({ "fingerprint": fp })) {
+                let _ = canban_context::atomic(&path, &bytes);
+            }
+        }
+        None => {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 pub fn cache_path(data_dir: &Path, host_id: &str) -> PathBuf {

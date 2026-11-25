@@ -1,17 +1,8 @@
 //! UI-side access to authoritative Canban services over local Unix sockets,
 //! authenticated Tailscale/TCP sockets, or SSH-forwarded Unix sockets.
 use super::*;
-pub(crate) use canban_client::push::{PushFrame, change_topic, open_async_subscribe};
+use canban_client::push::change_topic;
 pub use canban_transport::ClientEndpoint;
-
-pub(crate) fn rpc_endpoint(
-    endpoint: &ClientEndpoint,
-    method: &str,
-    params: Value,
-) -> Result<Value> {
-    let _rpc = canban_profiler::Span::new("rpc.request");
-    canban_transport::rpc_once(endpoint, method, &params)
-}
 
 #[cfg(test)]
 pub(crate) fn rpc_tcp(
@@ -35,7 +26,7 @@ pub struct AppClient {
     server_notice: Option<String>,
 }
 
-fn init_mux_relay_opener() {
+pub(crate) fn init_mux_relay_opener() {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
         canban_herdr::transport::register_relay_opener(Arc::new(
@@ -469,6 +460,7 @@ impl AppClient {
         &self.transport
     }
 
+    #[cfg(test)]
     pub(crate) fn upgraded_token(&self) -> Option<&str> {
         self.transport.upgraded_token()
     }

@@ -11,7 +11,8 @@ pub mod session;
 pub mod store;
 
 pub use capabilities::{
-    ClientCapabilities, LocalDiscoveryProvider, SshCapabilityProvider, TailscalePeerConnectResult,
+    ClientCapabilities, GlobalEnvSyncProvider, LocalDiscoveryProvider, LocalHostDriver,
+    SshCapabilityProvider, TailscalePeerConnectResult,
 };
 pub use connector::{
     CompositeConnector, ConnectFuture, ConnectedTransport, ConnectionLease, HostConnector,
@@ -21,6 +22,13 @@ pub use pairing::{
     AddrProbeResult, PairingInvite, TransportSecurity, format_pairing_uri, is_tailscale_ip,
     parse_pairing_invite, parse_tailscale_host_input, probe_addr, probe_addr_blocking,
 };
-pub use remote_client::{ClientEvent, MultiHostClient, RemoteClient, RemoteClientConfig};
-pub use session::{HandshakeInfo, SingleHostSession, parse_endpoint, rpc_once, rpc_tcp_once};
-pub use store::{CredentialStore, FileCredentialStore, MemoryCredentialStore};
+pub use remote_client::{
+    ClientEvent, MultiHostClient, MultiHostClientOptions, RemoteClient, RemoteClientConfig,
+};
+pub use session::{
+    ApiMismatchError, HandshakeInfo, SingleHostSession, parse_endpoint, rpc_once, rpc_tcp_once,
+};
+pub use store::{
+    CredentialHostStore, CredentialStore, FileCredentialStore, HostStore, InlineHostsFileStore,
+    MemoryCredentialStore,
+};

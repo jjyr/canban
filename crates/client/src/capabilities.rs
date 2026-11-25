@@ -5,8 +5,10 @@
 //! binaries, while UI and orchestration layers query [`ClientCapabilities`] at runtime instead
 //! of scattering `#[cfg(...)]` checks across presentation code.
 use anyhow::Result;
-use canban_types::DiscoveryCatalog;
+use canban_transport::ClientTransport;
+use canban_types::{Config, DiscoveryCatalog, RuntimeState, Snapshot};
 use serde_json::Value;
+use std::{path::Path, sync::Arc};
 
 /// Runtime feature matrix advertised by an active client backend.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -79,6 +81,34 @@ pub trait SshCapabilityProvider: Send + Sync + 'static {
         prefer_tailscale: bool,
         port: u16,
     ) -> String;
+}
+
+/// Optional built-in `"local"` primary host adapter (used by Desktop UI to expose `This Mac`
+/// directly inside [`crate::MultiHostClient`] without adding `canban-app-server` to `canban-client`).
+pub trait LocalHostDriver: Send + Sync + 'static {
+    fn home(&self) -> &Path;
+    fn endpoint_label(&self) -> String;
+    fn server_id(&self) -> Option<String>;
+    fn server_notice(&self) -> Option<String>;
+    fn api_version(&self) -> u32;
+    fn version(&self) -> String;
+    fn platform(&self) -> String;
+    fn transport(&self) -> Arc<ClientTransport>;
+    fn call(&self, method: &str, params: Value) -> Result<Value>;
+    fn snapshot(&self) -> Result<Snapshot>;
+    fn runtime_state(&self) -> Result<RuntimeState>;
+    fn config(&self) -> Config;
+}
+
+/// Optional desktop provider for replicating Global Environment & Secrets to remote hosts via the
+/// outbox (`MutationKind::SyncGlobalEnv`) without adding `canban-storage` to `canban-client`.
+pub trait GlobalEnvSyncProvider: Send + Sync + 'static {
+    /// Returns the current local global-env state fingerprint (or `None` when no records exist).
+    fn current_fingerprint(&self) -> Option<String>;
+
+    /// Builds the wire payload (`{ "records": [...] }`, sealing secrets with `tcp_token` when
+    /// sending over TCP) alongside its state fingerprint.
+    fn build_sync_payload(&self, tcp_token: Option<&str>) -> Result<(Value, Option<String>)>;
 }
 
 #[cfg(test)]

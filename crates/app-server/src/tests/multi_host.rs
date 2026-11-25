@@ -1,5 +1,5 @@
 use super::*;
-use crate::hosts::HostRegistry;
+use crate::hosts::{desktop_multi_host_client, hosts_path};
 
 #[test]
 fn tcp_listener_probe_token_auth_and_diagnostics_work_end_to_end() {
@@ -169,9 +169,9 @@ fn host_registry_merges_multi_host_routes_mutations_caches_offline_and_recovers(
     )
     .unwrap();
 
-    // Connect HostRegistry to local Unix socket.
+    // Connect unified desktop MultiHostClient to local Unix socket.
     let local_client = AppClient::connect_home(local_home.clone(), Path::new("/bin/echo")).unwrap();
-    let registry = HostRegistry::new(local_client);
+    let registry = desktop_multi_host_client(local_client).unwrap();
 
     // 1. Loopback guard rejects adding This Mac's own TCP listener as a remote host.
     let loopback_err = registry
@@ -467,7 +467,7 @@ fn host_registry_merges_multi_host_routes_mutations_caches_offline_and_recovers(
             .resolved()
     );
     let hl_sum = registry
-        .summaries()
+        .host_summaries()
         .into_iter()
         .find(|s| s.id == "home-linux")
         .unwrap();
@@ -503,7 +503,7 @@ fn host_registry_merges_multi_host_routes_mutations_caches_offline_and_recovers(
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         let sum = registry
-            .summaries()
+            .host_summaries()
             .into_iter()
             .find(|s| s.id == "home-linux")
             .unwrap();
@@ -623,7 +623,7 @@ fn host_registry_detects_same_field_conflict_and_resolves_via_use_mine() {
     .unwrap();
 
     let local_client = AppClient::connect_home(local_home, Path::new("/bin/echo")).unwrap();
-    let registry = HostRegistry::new(local_client);
+    let registry = desktop_multi_host_client(local_client).unwrap();
     registry
         .add_host(SavedHost {
             id: "home-linux".into(),
@@ -764,8 +764,8 @@ fn remote_host_push_updates_merged_snapshot_without_polling_and_detects_disconne
     .unwrap();
 
     let local_client = AppClient::connect_home(local_home, Path::new("/bin/echo")).unwrap();
-    let registry = HostRegistry::new(local_client);
-    let events_rx = registry.subscribe();
+    let registry = desktop_multi_host_client(local_client).unwrap();
+    let mut events_rx = registry.subscribe();
 
     registry
         .add_host(SavedHost {
@@ -809,8 +809,8 @@ fn remote_host_push_updates_merged_snapshot_without_polling_and_detects_disconne
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     let mut saw_remote_event = false;
     loop {
-        if let Ok(ev) = events_rx.recv_timeout(Duration::from_millis(50))
-            && ev.host_id == "home-linux"
+        if let Ok(canban_client::ClientEvent::Host { host_id, .. }) = events_rx.try_recv()
+            && host_id == "home-linux"
         {
             saw_remote_event = true;
             if registry
@@ -827,6 +827,7 @@ fn remote_host_push_updates_merged_snapshot_without_polling_and_detects_disconne
             std::time::Instant::now() < deadline,
             "Expected remote push update without polling (saw_remote_event={saw_remote_event})"
         );
+        std::thread::sleep(Duration::from_millis(10));
     }
 
     // Drop remote server without calling poll_remotes_once() -> EOF disconnect detected immediately.
@@ -836,9 +837,9 @@ fn remote_host_push_updates_merged_snapshot_without_polling_and_detects_disconne
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
-        if let Ok(ev) = events_rx.recv_timeout(Duration::from_millis(50))
-            && ev.host_id == "home-linux"
-            && matches!(ev.event, AppEvent::Changed { topic: "host", .. })
+        if let Ok(canban_client::ClientEvent::Host { host_id, event }) = events_rx.try_recv()
+            && host_id == "home-linux"
+            && matches!(event, AppEvent::Changed { topic: "host", .. })
             && registry
                 .merged_snapshot()
                 .unwrap()
@@ -850,6 +851,7 @@ fn remote_host_push_updates_merged_snapshot_without_polling_and_detects_disconne
             std::time::Instant::now() < deadline,
             "Expected immediate offline detection via app.subscribe EOF"
         );
+        std::thread::sleep(Duration::from_millis(10));
     }
 
     drop(registry);
@@ -901,7 +903,7 @@ fn stalled_remote_host_does_not_block_healthy_remote_host_push_updates() {
         }],
     };
     canban_context::atomic(
-        &HostRegistry::hosts_path(&local_home),
+        &hosts_path(&local_home),
         &serde_json::to_vec_pretty(&hosts_file).unwrap(),
     )
     .unwrap();
@@ -929,7 +931,7 @@ fn stalled_remote_host_does_not_block_healthy_remote_host_push_updates() {
     .unwrap();
 
     let local_client = AppClient::connect_home(local_home, Path::new("/bin/echo")).unwrap();
-    let registry = HostRegistry::new(local_client);
+    let registry = desktop_multi_host_client(local_client).unwrap();
 
     // Wait briefly until stalled-host has attempted at least one hung TCP connection.
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -1025,15 +1027,15 @@ fn host_registry_lifecycle_closes_remote_push_connections_and_forwards_local_sid
     let remote_addr = remote_app.bound_tcp_addrs()[0].clone();
 
     let local_client = AppClient::connect_home(local_home, Path::new("/bin/echo")).unwrap();
-    let registry = HostRegistry::new(local_client);
-    let events_rx = registry.subscribe();
-    let mut push_rx = registry.subscribe_push();
+    let registry = desktop_multi_host_client(local_client).unwrap();
+    let mut events_rx = registry.subscribe();
+    let mut push_rx = registry.subscribe();
 
     // Wait for local push supervisor initial handshake ("local" resync).
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
-        if let Ok(ev) = events_rx.recv_timeout(Duration::from_millis(50))
-            && ev.host_id == "local"
+        if let Ok(canban_client::ClientEvent::Host { host_id, .. }) = events_rx.try_recv()
+            && host_id == "local"
         {
             break;
         }
@@ -1041,22 +1043,23 @@ fn host_registry_lifecycle_closes_remote_push_connections_and_forwards_local_sid
             std::time::Instant::now() < deadline,
             "Timed out waiting for local push supervisor handshake"
         );
+        std::thread::sleep(Duration::from_millis(10));
     }
 
-    // Side-channel push from local AppServer flows through local_push_supervisor -> HostPushEvent.
+    // Side-channel push from local AppServer flows through local_push_supervisor -> ClientEvent.
     local_app.emit_utilities();
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
         match push_rx.try_recv() {
-            Ok(crate::hosts::HostPushEvent::UtilitiesChanged { host_id, state }) => {
+            Ok(canban_client::ClientEvent::UtilitiesChanged { host_id, state }) => {
                 assert_eq!(host_id, "local");
                 assert!(state.is_object());
                 break;
             }
-            Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+            Ok(_) | Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "Expected HostPushEvent::UtilitiesChanged from local push stream"
+                    "Expected ClientEvent::UtilitiesChanged from local push stream"
                 );
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -1294,7 +1297,7 @@ fn idle_remote_host_receives_heartbeats_without_polling_app_state() {
     });
 
     let local_client = AppClient::connect_home(local_home, Path::new("/bin/echo")).unwrap();
-    let registry = HostRegistry::new(local_client);
+    let registry = desktop_multi_host_client(local_client).unwrap();
 
     registry
         .add_host(SavedHost {
@@ -1503,8 +1506,8 @@ fn remote_host_supervisor_forwards_usage_changed_side_channel() {
     });
 
     let local_client = AppClient::connect_home(local_home, Path::new("/bin/echo")).unwrap();
-    let registry = HostRegistry::new(local_client);
-    let mut push_rx = registry.subscribe_push();
+    let registry = desktop_multi_host_client(local_client).unwrap();
+    let mut push_rx = registry.subscribe();
 
     registry
         .add_host(SavedHost {
@@ -1528,17 +1531,17 @@ fn remote_host_supervisor_forwards_usage_changed_side_channel() {
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     loop {
         match push_rx.try_recv() {
-            Ok(crate::hosts::HostPushEvent::UsageChanged { host_id, state })
+            Ok(canban_client::ClientEvent::UsageChanged { host_id, state })
                 if host_id == "remote-usage" =>
             {
                 assert_eq!(state["readings"][0]["provider"], "codex");
                 assert_eq!(state["readings"][0]["used"], 42);
                 break;
             }
-            Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+            Ok(_) | Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "Expected HostPushEvent::UsageChanged for remote-usage"
+                    "Expected ClientEvent::UsageChanged for remote-usage"
                 );
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -1639,7 +1642,7 @@ fn single_tcp_yamux_multiplexes_rpc_subscribe_and_multiple_herdr_relays() {
     .unwrap();
 
     let local_client = AppClient::connect_home(local_home, Path::new("/bin/echo")).unwrap();
-    let registry = HostRegistry::new(local_client);
+    let registry = desktop_multi_host_client(local_client).unwrap();
     registry
         .add_host(SavedHost {
             id: "home-linux".into(),
@@ -1662,8 +1665,8 @@ fn single_tcp_yamux_multiplexes_rpc_subscribe_and_multiple_herdr_relays() {
     }
     assert_eq!(remote_app.active_tcp_count(), 1);
 
-    let remote_client = registry.client_for("home-linux").unwrap();
-    let relay_cfg = remote_client.config();
+    let remote_transport = registry.transport_for_host("home-linux").unwrap();
+    let relay_cfg = registry.config_for_host("home-linux");
     assert!(
         relay_cfg
             .relay_endpoint
@@ -1691,14 +1694,14 @@ fn single_tcp_yamux_multiplexes_rpc_subscribe_and_multiple_herdr_relays() {
     // Perform concurrent RPCs while both terminal streams and app.subscribe are active.
     let mut rpc_handles = Vec::new();
     for i in 0..4 {
-        let rc = remote_client.clone();
+        let rc = remote_transport.clone();
         let pid = remote_proj.id.clone();
         rpc_handles.push(std::thread::spawn(move || {
-            let ping = rc.call("app.ping", json!({})).unwrap();
+            let ping = rc.call("app.ping", &json!({})).unwrap();
             assert!(!ping["server_id"].as_str().unwrap().is_empty());
             rc.call(
                 "card.create",
-                json!({
+                &json!({
                     "project_id": pid,
                     "title": format!("Mux card {i}"),
                     "body": "Over yamux"
@@ -1751,7 +1754,7 @@ fn single_tcp_yamux_multiplexes_rpc_subscribe_and_multiple_herdr_relays() {
     assert_eq!(canban_herdr::activity::get(&core_id, &term_2).viewers, 0);
     assert_eq!(remote_app.active_tcp_count(), 1);
 
-    drop(remote_client);
+    drop(remote_transport);
     registry.set_host_enabled("home-linux", false).unwrap();
     let dl2 = std::time::Instant::now() + Duration::from_secs(3);
     while std::time::Instant::now() < dl2 && remote_app.active_tcp_count() > 0 {
@@ -1862,7 +1865,7 @@ fn pairing_code_and_legacy_server_token_upgrade_persist_in_hosts_json_and_remove
     let (pairing_code, _) = invite_app.create_pairing_code(300).unwrap();
 
     let local_client = AppClient::connect_home(local_home.clone(), Path::new("/bin/echo")).unwrap();
-    let registry = HostRegistry::new(local_client);
+    let registry = desktop_multi_host_client(local_client).unwrap();
 
     registry
         .add_host(SavedHost {
@@ -1896,8 +1899,7 @@ fn pairing_code_and_legacy_server_token_upgrade_persist_in_hosts_json_and_remove
 
     // Verify hosts.json stores revocable dev_... tokens (never legacy token or raw pair_ code).
     let persisted: HostsFile =
-        serde_json::from_slice(&std::fs::read(HostRegistry::hosts_path(&local_home)).unwrap())
-            .unwrap();
+        serde_json::from_slice(&std::fs::read(hosts_path(&local_home)).unwrap()).unwrap();
     for h in &persisted.hosts {
         let HostTransport::Tcp { token, .. } = &h.transport else {
             panic!("expected TCP transport for {}", h.id);
@@ -1918,7 +1920,7 @@ fn pairing_code_and_legacy_server_token_upgrade_persist_in_hosts_json_and_remove
 
     registry.reconnect(None);
     registry.poll_remotes_once();
-    for s in registry.summaries() {
+    for s in registry.host_summaries() {
         assert!(
             s.is_connected(),
             "expected {} to reconnect using upgraded dev_... token, got {:?}",
@@ -1963,7 +1965,7 @@ fn global_env_replicates_via_outbox_with_coalescing_tombstones_lww_and_zero_plai
     let remote_port: u16 = remote_addr.rsplit(':').next().unwrap().parse().unwrap();
 
     let local_client = AppClient::connect_home(local_home.clone(), Path::new("/bin/echo")).unwrap();
-    let registry = HostRegistry::new(local_client);
+    let registry = desktop_multi_host_client(local_client).unwrap();
     registry
         .add_host(SavedHost {
             id: "home-linux".into(),
@@ -2287,7 +2289,7 @@ fn global_env_replicates_via_outbox_with_coalescing_tombstones_lww_and_zero_plai
     drop(registry);
     let local_client2 =
         AppClient::connect_home(local_home.clone(), Path::new("/bin/echo")).unwrap();
-    let registry2 = HostRegistry::new(local_client2);
+    let registry2 = desktop_multi_host_client(local_client2).unwrap();
     let restored_status = registry2.global_env_sync_status();
     assert_eq!(restored_status.synced_hosts, vec!["Home Linux"]);
     assert!(restored_status.unsynced_hosts.is_empty());
@@ -2314,7 +2316,7 @@ fn global_env_replicates_via_outbox_with_coalescing_tombstones_lww_and_zero_plai
     drop(registry2);
 
     let local_client3 = AppClient::connect_home(local_home, Path::new("/bin/echo")).unwrap();
-    let registry3 = HostRegistry::new(local_client3);
+    let registry3 = desktop_multi_host_client(local_client3).unwrap();
     registry3.poll_remotes_once();
     let failed_status = registry3.global_env_sync_status();
     assert_eq!(failed_status.failed_hosts.len(), 1);
@@ -2390,7 +2392,7 @@ fn remote_agent_and_project_env_save_seal_over_tcp_and_isolate_across_hosts() {
     .unwrap();
 
     let local_client = AppClient::connect_home(local_home, Path::new("/bin/echo")).unwrap();
-    let registry = HostRegistry::new(local_client);
+    let registry = desktop_multi_host_client(local_client).unwrap();
     registry
         .add_host(SavedHost {
             id: "home-linux".into(),
@@ -2716,13 +2718,13 @@ fn colliding_projects_remote_globals_and_call_all_hosts_skip_offline_work_end_to
         }],
     };
     canban_context::atomic(
-        &HostRegistry::hosts_path(&local_home),
+        &hosts_path(&local_home),
         &serde_json::to_vec_pretty(&hosts_file).unwrap(),
     )
     .unwrap();
 
     let local_client = AppClient::connect_home(local_home, Path::new("/bin/echo")).unwrap();
-    let registry = HostRegistry::new(local_client);
+    let registry = desktop_multi_host_client(local_client).unwrap();
     registry
         .add_host(SavedHost {
             id: "devpc".into(),
@@ -2821,18 +2823,18 @@ fn colliding_projects_remote_globals_and_call_all_hosts_skip_offline_work_end_to
     }
 
     // Offline host must expose an explicit offline relay marker instead of falling back to local hc.
-    let offline_cfg = registry.config_for("offline-box");
+    let offline_cfg = registry.config_for_host("offline-box");
     assert_eq!(
         offline_cfg.relay_endpoint.as_deref(),
         Some("mux://offline:offline-box")
     );
 
     // Reconnecting a remote host must mint a fresh mux:// endpoint and advance reconnect_count.
-    let before_cfg = registry.config_for("devpc");
+    let before_cfg = registry.config_for_host("devpc");
     let before_relay = before_cfg.relay_endpoint.clone().unwrap();
     assert!(before_relay.starts_with("mux://"));
     registry.set_host_enabled("devpc", false).unwrap();
-    let disabled_cfg = registry.config_for("devpc");
+    let disabled_cfg = registry.config_for_host("devpc");
     assert_eq!(
         disabled_cfg.relay_endpoint.as_deref(),
         Some("mux://offline:devpc")
@@ -2841,7 +2843,7 @@ fn colliding_projects_remote_globals_and_call_all_hosts_skip_offline_work_end_to
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let after_summary = loop {
         if let Some(s) = registry
-            .summaries()
+            .host_summaries()
             .into_iter()
             .find(|h| h.id == "devpc" && h.connection.is_connected())
         {
@@ -2854,7 +2856,7 @@ fn colliding_projects_remote_globals_and_call_all_hosts_skip_offline_work_end_to
         std::thread::sleep(Duration::from_millis(25));
     };
     assert!(after_summary.reconnect_count >= 1);
-    let after_cfg = registry.config_for("devpc");
+    let after_cfg = registry.config_for_host("devpc");
     let after_relay = after_cfg.relay_endpoint.clone().unwrap();
     assert!(after_relay.starts_with("mux://") && after_relay != before_relay);
 }

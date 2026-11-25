@@ -65,6 +65,29 @@ pub fn rpc_tcp_once(addr: &str, token: Option<&str>, method: &str, params: Value
     canban_transport::rpc_once(&endpoint, method, &params)
 }
 
+/// Error returned when a remote daemon's `api_version` is older than the caller's required
+/// minimum API version.
+#[derive(Clone, Debug)]
+pub struct ApiMismatchError {
+    pub server_api: u32,
+    pub app_api: u32,
+    pub version: String,
+    pub server_id: Option<String>,
+    pub ping: Value,
+}
+
+impl std::fmt::Display for ApiMismatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "The remote backend is older than this App (backend API {}, App API {}).",
+            self.server_api, self.app_api
+        )
+    }
+}
+
+impl std::error::Error for ApiMismatchError {}
+
 /// Verified server identity and initial workspace state returned by the canonical handshake.
 #[derive(Clone, Debug)]
 pub struct HandshakeInfo {
@@ -93,9 +116,23 @@ impl SingleHostSession {
         device_name: &str,
         after: Value,
     ) -> Result<Self> {
+        Self::connect_checked_async(connector, host_id, transport, device_name, after, None).await
+    }
+
+    /// Connects to `transport` through `connector`, enforces `min_api_version` (returning
+    /// [`ApiMismatchError`] before issuing `app.state` when the remote daemon is too old), and
+    /// completes the canonical `app.ping` + `app.state` handshake.
+    pub async fn connect_checked_async(
+        connector: &dyn HostConnector,
+        host_id: &str,
+        transport: &HostTransport,
+        device_name: &str,
+        after: Value,
+        min_api_version: Option<u32>,
+    ) -> Result<Self> {
         let started = Instant::now();
         let connected = connector.connect(host_id, transport, device_name).await?;
-        Self::handshake_async(connected, after, started).await
+        Self::handshake_checked_async(connected, after, started, min_api_version).await
     }
 
     /// Runs the canonical `app.ping` + `app.state` handshake over an already-connected transport.
@@ -104,14 +141,54 @@ impl SingleHostSession {
         after: Value,
         started: Instant,
     ) -> Result<Self> {
+        Self::handshake_checked_async(connected, after, started, None).await
+    }
+
+    /// Runs the canonical `app.ping` + `app.state` handshake with optional minimum API version
+    /// enforcement.
+    pub async fn handshake_checked_async(
+        connected: ConnectedTransport,
+        after: Value,
+        started: Instant,
+        min_api_version: Option<u32>,
+    ) -> Result<Self> {
         let transport = connected.transport;
-        let ping_res = transport.call_async("app.ping", &json!({})).await;
-        let state_res = transport
+        let ping = match transport.call_async("app.ping", &json!({})).await {
+            Ok(p) => p,
+            Err(e) => {
+                transport.close();
+                return Err(e);
+            }
+        };
+        if let Some(app_api) = min_api_version {
+            let server_api = ping["api_version"].as_u64().unwrap_or(0) as u32;
+            if server_api < app_api {
+                transport.close();
+                let version = ping["build"]["version"]
+                    .as_str()
+                    .or_else(|| ping["version"].as_str())
+                    .unwrap_or("unknown")
+                    .to_owned();
+                let server_id = ping["server_id"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                return Err(ApiMismatchError {
+                    server_api,
+                    app_api,
+                    version,
+                    server_id,
+                    ping,
+                }
+                .into());
+            }
+        }
+        let state = match transport
             .call_async("app.state", &json!({ "after": after }))
-            .await;
-        let (ping, state) = match (ping_res, state_res) {
-            (Ok(p), Ok(s)) => (p, s),
-            (Err(e), _) | (_, Err(e)) => {
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
                 transport.close();
                 return Err(e);
             }

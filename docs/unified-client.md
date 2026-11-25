@@ -1,6 +1,6 @@
 # Unified client architecture (`canban-client`)
 
-Status: **Implemented (2026-11-25) across `canban-client`, `canban-app-server`, `canban-cli`, and `canban-ui`.**
+Status: **Implemented (2026-11-25) — Desktop UI, Mobile UI (`canban-ios`, `canban-android`), and CLI all run on the single `canban-client` layer; the legacy `HostRegistry` multi-host engine in `canban-app-server` and duplicate `LocalBackend` in `canban-ui` have been removed.**
 
 ## Problem
 
